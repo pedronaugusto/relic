@@ -55,13 +55,6 @@ const View = struct {
         owned.* = null;
     }
 };
-/// Whether `name` is one git keeps as a file whatever the ref format:
-/// `FETCH_HEAD`, which holds more than a ref can, and `MERGE_HEAD`, which
-/// may hold several.
-pub fn isSpecial(name: []const u8) bool {
-    return std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD");
-}
-
 /// `Store.read` over reftable. The returned target of a symbolic ref is
 /// the caller's.
 pub fn read(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError!?refs.Ref {
@@ -301,7 +294,6 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     const gpa = tx.gpa;
     var needs_worktree = false;
     for (tx.edits.items) |edit| {
-        if (isSpecial(edit.name)) continue;
         if (isLinked(store) and isPerWorktree(store, edit.name)) needs_worktree = true;
     }
 
@@ -323,13 +315,7 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     for (tx.edits.items) |*edit| {
         // A ref only logged through is neither read nor checked.
         if (edit.via != null) continue;
-        if (isSpecial(edit.name)) {
-            try lockSpecial(io, tx, edit);
-        }
-        const current = if (isSpecial(edit.name))
-            try store.read(gpa, io, edit.name)
-        else
-            try readIn(gpa, &stacks, store, edit.name);
+        const current = try readIn(gpa, &stacks, store, edit.name);
         var current_oid: ?Oid = null;
         if (current) |value| switch (value) {
             .direct => |oid| current_oid = oid,
@@ -356,39 +342,6 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     tx.reftable = pending;
 }
 
-/// Take the file lock a special ref is written through, as the files
-/// backend takes a loose ref's.
-fn lockSpecial(io: Io, tx: anytype, edit: *refs.Edit) refs.TransactionError!void {
-    const buffer = try tx.gpa.alloc(u8, 4096);
-    edit.lock_buffer = buffer;
-    edit.lock = try fs.LockFile.open(tx.gpa, io, tx.store.dirFor(edit.name), edit.name, buffer, .{});
-}
-
-/// Write each special ref's new value into its file, or remove the file.
-fn commitSpecial(io: Io, tx: anytype) refs.TransactionError!void {
-    var hex: [hash.max_hex_len]u8 = undefined;
-    for (tx.edits.items) |*edit| {
-        if (!isSpecial(edit.name) or edit.via != null) continue;
-        const lock = &edit.lock.?;
-        if (edit.new) |new| {
-            switch (new) {
-                .direct => |oid| lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed,
-                .symbolic => |target| lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed,
-            }
-            try lock.commit(io);
-        } else {
-            // Removed while the lock is held, so a writer that takes the
-            // lock next never has its file removed after it.
-            tx.store.dirFor(edit.name).deleteFile(io, edit.name) catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => |e| return e,
-            };
-            lock.deinit(io);
-            edit.lock = null;
-        }
-    }
-}
-
 /// A name and a directory of names cannot both exist: `refs/heads/a` and
 /// `refs/heads/a/b`. git checks that against the refs already there, and
 /// so does this, leaving out the ones the transaction deletes.
@@ -398,7 +351,7 @@ fn checkNames(tx: anytype, stacks: *const Stacks) refs.TransactionError!void {
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     for (tx.edits.items) |edit| {
-        if (edit.new == null or edit.via != null or isSpecial(edit.name)) continue;
+        if (edit.new == null or edit.via != null) continue;
         const stack = cache.internal.forName(stacks, tx.store, edit.name);
         // A ref where a directory of this one would be.
         var end = edit.name.len;
@@ -432,7 +385,6 @@ pub fn commit(io: Io, tx: anytype, log: ?refs.LogMessage) refs.TransactionError!
     const store = tx.store;
     try addTable(io, tx, pending, &pending.main, &pending.stacks.main, false, log);
     if (pending.worktree) |*w| try addTable(io, tx, pending, w, &pending.stacks.worktree.?, true, log);
-    try commitSpecial(io, tx);
 
     const options = store.reftableOptions();
     const compact_worktree = pending.worktree != null;
@@ -544,7 +496,6 @@ fn addTable(
         break :blk try logMessage(arena, normal, store.reftableOptions().write.block_size);
     } else null;
     for (tx.edits.items) |edit| {
-        if (isSpecial(edit.name)) continue;
         if (isLinked(store) and isPerWorktree(store, edit.name) != worktree_stack) continue;
         // A ref an update went through, or `HEAD` when the branch it names
         // moved, keeps its value and gains the log line: git's
@@ -915,8 +866,6 @@ pub const test_access = if (builtin.is_test) struct {
     pub const lessThanNamed = Self.lessThanNamed;
     pub const put = Self.put;
     pub const lockStack = Self.lockStack;
-    pub const lockSpecial = Self.lockSpecial;
-    pub const commitSpecial = Self.commitSpecial;
     pub const checkNames = Self.checkNames;
     pub const deletedHere = Self.deletedHere;
     pub const install = Self.install;

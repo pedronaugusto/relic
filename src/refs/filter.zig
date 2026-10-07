@@ -27,6 +27,7 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
 const refs_mod = @import("../refs.zig");
+const ref_names = @import("../names/ref.zig");
 const repo_mod = @import("../repo.zig");
 const config_mod = @import("../config.zig");
 const revwalk = @import("../revwalk.zig");
@@ -130,8 +131,8 @@ pub const Kind = enum {
         if (std.mem.startsWith(u8, name, "refs/heads/")) return .branch;
         if (std.mem.startsWith(u8, name, "refs/remotes/")) return .remote;
         if (std.mem.startsWith(u8, name, "refs/tags/")) return .tag;
-        if (std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD")) return .pseudo_ref;
-        if (isRootRef(name)) return .root_ref;
+        if (ref_names.isSpecial(name)) return .pseudo_ref;
+        if (ref_names.isRootRef(name)) return .root_ref;
         return .other;
     }
 
@@ -147,19 +148,6 @@ pub const Kind = enum {
         };
     }
 };
-
-/// git's `is_root_ref`: `HEAD`, a name in capitals ending `_HEAD`, and a
-/// few others, never `FETCH_HEAD` or `MERGE_HEAD`.
-pub fn isRootRef(name: []const u8) bool {
-    if (name.len == 0) return false;
-    for (name) |c| if (!std.ascii.isUpper(c) and c != '-' and c != '_') return false;
-    if (std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD")) return false;
-    if (std.mem.endsWith(u8, name, "_HEAD")) return true;
-    for ([_][]const u8{ "HEAD", "AUTO_MERGE", "BISECT_EXPECTED_REV", "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "MERGE_AUTOSTASH" }) |irregular| {
-        if (std.mem.eql(u8, name, irregular)) return true;
-    }
-    return false;
-}
 
 /// Which refs a listing takes: git's `struct ref_filter`.
 pub const Filter = struct {
@@ -768,14 +756,14 @@ pub const Listing = struct {
         var it = l.repo.git_dir.iterate();
         while (it.next(io) catch null) |entry| {
             if (entry.kind != .file) continue;
-            if (!isRootRef(entry.name)) continue;
+            if (!ref_names.isRootRef(entry.name)) continue;
             try names.append(gpa, try l.a().dupe(u8, entry.name));
         }
         if (l.repo.refStore().refFormat() == .reftable) {
             var stack_listing = try l.repo.refStore().list(gpa, io, "");
             defer stack_listing.deinit();
             for (stack_listing.entries) |entry| {
-                if (std.mem.findScalar(u8, entry.name, '/') != null or !isRootRef(entry.name)) continue;
+                if (std.mem.findScalar(u8, entry.name, '/') != null or !ref_names.isRootRef(entry.name)) continue;
                 for (names.items) |known| {
                     if (std.mem.eql(u8, known, entry.name)) break;
                 } else try names.append(gpa, try l.a().dupe(u8, entry.name));

@@ -1171,7 +1171,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     const remote: ?Oid = revparse.resolve(gpa, io, repo, remote_ref) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => blk: {
-            if (!safepath.isValidRefName(remote_ref)) return error.BadRemoteRef;
+            if (!ref_names.checkFormat(remote_ref, .{})) return error.BadRemoteRef;
             break :blk null;
         },
     };
@@ -1435,7 +1435,7 @@ pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
 }
 
 const testgit = @import("../testing/git.zig");
-const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 
 const fixture_when: i64 = 1_700_000_000;
 const fixture_who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = fixture_when, .offset_minutes = 0 };

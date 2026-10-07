@@ -54,9 +54,8 @@ const config_mod = @import("../config.zig");
 const fsck = @import("../object/fsck.zig");
 const promisors = @import("promisors.zig");
 const odb_mod = @import("../odb.zig");
-const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 const config_state = @import("../config/state.zig");
-const refspec = @import("refspec.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -544,7 +543,7 @@ const Chosen = struct {
             if (!std.mem.startsWith(u8, ref.name, "refs/tags/") or std.mem.endsWith(u8, ref.name, "^{}")) continue;
             if (single_tag != null and std.mem.eql(u8, ref.name, single_tag.?)) continue;
             if (!try repo.odb.exists(io, ref.oid)) continue;
-            if (!safepath.isValidRefName(ref.name)) continue;
+            if (!ref_names.checkFormat(ref.name, .{})) continue;
             try c.packed_entries.append(arena, .{ .name = try arena.dupe(u8, ref.name), .oid = ref.oid, .peeled = ref.peeled });
         }
     }
@@ -572,7 +571,7 @@ fn chooseRefs(arena: Allocator, remote_refs: []const protocol.RemoteRef, head: H
             try arena.print("refs/remotes/{s}/{s}", .{ options.origin, ref.name["refs/heads/".len..] })
         else
             try arena.dupe(u8, ref.name);
-        if (!safepath.isValidRefName(local_name)) continue;
+        if (!ref_names.checkFormat(local_name, .{})) continue;
         try c.packed_entries.append(arena, .{ .name = local_name, .oid = ref.oid, .peeled = ref.peeled });
         try c.packed_sources.append(arena, ref.name);
     }
@@ -736,7 +735,7 @@ fn refspecNameOk(name: []const u8) bool {
     if (name.len == 0) return false;
     var buf: [512]u8 = undefined;
     const probe = std.mem.print(&buf, "refs/remotes/{s}/x", .{name}) catch return false;
-    return refspec.checkRefFormat(probe, .{});
+    return ref_names.checkFormat(probe, .{});
 }
 
 fn containsOid(list: []const Oid, oid: Oid) bool {

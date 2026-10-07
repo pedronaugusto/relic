@@ -43,7 +43,7 @@ const head_mod = @import("../commit/head.zig");
 const threeway = @import("../merge/threeway.zig");
 const hooks = @import("../repo/hooks.zig");
 const program = @import("../repo/program.zig");
-const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 const pathspec = @import("../pathspec.zig");
 
 const Oid = hash.Oid;
@@ -292,7 +292,7 @@ fn oneOf(term: []const u8, words: []const []const u8) bool {
 /// `check_term_format`.
 fn checkTerm(c: *Ctx, term: []const u8, orig: []const u8) Error!void {
     const ref = try std.mem.concat(c.a, u8, &.{ "refs/bisect/", term });
-    if (!safepath.isValidRefName(ref)) return error.InvalidTerm;
+    if (!ref_names.checkFormat(ref, .{})) return error.InvalidTerm;
     if (isBuiltin(term)) return error.InvalidTerm;
     if ((!std.mem.eql(u8, orig, "bad") and oneOf(term, &.{ "bad", "new" })) or
         (!std.mem.eql(u8, orig, "good") and oneOf(term, &.{ "good", "old" }))) return error.InvalidTerm;
@@ -951,7 +951,7 @@ fn switchTo(c: *Ctx, target: Oid, branch: ?[]const u8, given: []const u8) Error!
 /// checked out, anything else is detached at.
 fn checkoutName(c: *Ctx, name: []const u8) Error!void {
     const ref = try std.mem.concat(c.a, u8, &.{ "refs/heads/", name });
-    if (safepath.isValidRefName(ref)) {
+    if (ref_names.checkFormat(ref, .{})) {
         if (try c.readRef(ref)) |oid| return switchTo(c, oid, ref, name);
     }
     return switchTo(c, try c.commitOf(name), null, name);

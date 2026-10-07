@@ -19,7 +19,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
-const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 const ReadError = @import("value.zig").ReadError;
 
 const Oid = hash.Oid;
@@ -105,7 +105,7 @@ pub fn parse(gpa: Allocator, kind: Kind, bytes: []u8) ReadError!Listing {
         const oid = Oid.parse(kind, line[0..hex_len]) catch return error.MalformedPackedRefs;
         if (line[hex_len] != ' ') return error.MalformedPackedRefs;
         const name = line[hex_len + 1 ..];
-        if (!safepath.isValidRefName(name)) return error.InvalidRefName;
+        if (!ref_names.checkFormat(name, .{ .allow_onelevel = true })) return error.InvalidRefName;
         if (entries.items.len != 0 and std.mem.order(u8, entries.items[entries.items.len - 1].name, name) != .lt) sorted = false;
         try entries.append(gpa, .{ .name = name, .oid = oid, .peeled = null });
     }

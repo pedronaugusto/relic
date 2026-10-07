@@ -42,6 +42,7 @@ const filter = @import("../worktree/filter.zig");
 const strategy = @import("../merge/strategy.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
+const ref_names = @import("../names/ref.zig");
 const message = @import("message.zig");
 const trailer = @import("trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
@@ -1076,7 +1077,7 @@ fn removeState(r: *Run) Error!void {
             // Only the labels a rebase writes, `refs/rewritten/<label>`,
             // and deleted as refs: a line is not a path to unlink, and a
             // reftable repository keeps them in its tables.
-            if (!std.mem.startsWith(u8, name, "refs/rewritten/") or !worktree.safepath.isValidRefName(name)) continue;
+            if (!std.mem.startsWith(u8, name, "refs/rewritten/") or !ref_names.checkFormat(name, .{})) continue;
             try head_mod.deleteRef(r.io, r.repo, name);
         }
     }

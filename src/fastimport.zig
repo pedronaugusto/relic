@@ -38,6 +38,7 @@ const cquote = @import("cquote.zig");
 const gitdate = @import("object/gitdate.zig");
 const signing = @import("commit/signing.zig");
 const safepath = @import("worktree/safepath.zig");
+const ref_names = @import("names/ref.zig");
 const fs = @import("repo/fs.zig");
 
 const Oid = hash.Oid;
@@ -903,7 +904,7 @@ const Importer = struct {
     }
 
     fn newBranch(imp: *Importer, name: []const u8) Error!*Branch {
-        if (!safepath.isValidRefName(name)) return error.InvalidRefName;
+        if (!ref_names.checkFormat(name, .{ .allow_onelevel = true })) return error.InvalidRefName;
         const b = try imp.arena().create(Branch);
         const owned = try imp.arena().dupe(u8, name);
         b.* = .{ .name = owned, .root = try imp.newNode(null) };

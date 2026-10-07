@@ -42,7 +42,7 @@ const fs = @import("../repo/fs.zig");
 const ignore = @import("../worktree/ignore.zig");
 const progress_mod = @import("progress.zig");
 const revindex = @import("../odb/revindex.zig");
-const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -672,7 +672,7 @@ fn dwimRef(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateErro
     var count: usize = 0;
     for (rules) |rule| {
         const full = try std.mem.concat(a, u8, &.{ rule[0], name, rule[1] });
-        if (!safepath.isValidRefName(full) and !std.mem.eql(u8, full, "HEAD")) continue;
+        if (!ref_names.checkFormat(full, .{ .allow_onelevel = true }) and !std.mem.eql(u8, full, "HEAD")) continue;
         const resolved = (store.resolve(a, io, full) catch continue) orelse continue;
         count += 1;
         if (found == null) found = resolved.name;

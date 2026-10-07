@@ -35,6 +35,7 @@ const refs_mod = @import("../refs.zig");
 const repo_mod = @import("../repo.zig");
 const revwalk = @import("../revwalk.zig");
 const refspec_mod = @import("refspec.zig");
+const ref_names = @import("../names/ref.zig");
 const remote_mod = @import("remote.zig");
 const program = @import("../repo/program.zig");
 const protocol = @import("protocol.zig");
@@ -653,7 +654,7 @@ fn matchRefs(
                 else => return error.DestinationNotFullRefname,
             }
         };
-        if (!refspec_mod.checkRefFormat(dst, .{})) return error.DestinationNotFullRefname;
+        if (!ref_names.checkFormat(dst, .{})) return error.DestinationNotFullRefname;
         try out.append(arena, .{ .local_ref = src.name, .new = src.oid, .remote_ref = dst, .force = spec.force });
     }
 
@@ -1170,6 +1171,37 @@ test "a repository on this machine refuses its checked-out branch as receive-pac
 
     try testgit.fixtureHook(gpa, io, target.dir, ".git/hooks/pre-receive", "status", "0");
     try testing.expectError(error.RemoteHooksNotRun, push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{"main:refs/heads/third"} }));
+}
+
+test "a repository on this machine refuses a ref of one level under refs/ as receive-pack does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var target = try testremote.historyRepo(gpa, io, 2);
+    defer target.deinit();
+    try target.exec(io, &.{ "config", "receive.denyCurrentBranch", "ignore" });
+    const target_path = try testremote.absolutePath(gpa, io, target.dir);
+    defer gpa.free(target_path);
+
+    var here = try testgit.Repo.init(gpa, io, &.{});
+    defer here.deinit();
+    try here.exec(io, &.{ "remote", "add", "origin", target_path });
+    try here.exec(io, &.{ "fetch", "-q", "origin" });
+    try here.exec(io, &.{ "checkout", "-q", "-b", "main", "origin/main" });
+
+    var repo = try Repository.open(gpa, io, here.dir, .{});
+    defer repo.deinit(io);
+    var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{ "main:refs/funny", "main:refs/heads/fine" } });
+    defer outcome.deinit();
+    // receive-pack checks the name after `refs/` as a full ref name, which
+    // `funny` alone is not.
+    try testing.expectEqual(RefResult.Status.rejected_by_remote, outcome.refs[0].status);
+    try testing.expectEqualStrings("funny refname", outcome.refs[0].message.?);
+    try testing.expectEqual(RefResult.Status.ok, outcome.refs[1].status);
+    target.report_failures = false;
+    try testing.expectError(error.GitFailed, target.exec(io, &.{ "rev-parse", "--verify", "-q", "refs/funny" }));
+    // git refuses the same.
+    here.report_failures = false;
+    try testing.expectError(error.GitFailed, here.exec(io, &.{ "push", "-q", "origin", "main:refs/funny2" }));
 }
 
 test "a remote with two push URLs is pushed to both, as git pushes to both" {

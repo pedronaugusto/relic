@@ -16,6 +16,8 @@ pub const reftablestack = @import("refs/reftablestack.zig");
 pub const reflog = @import("refs/reflog.zig");
 pub const reftable = @import("refs/reftable.zig");
 pub const filter = @import("refs/filter.zig");
+/// What a ref may be named, and the names git treats apart.
+pub const names = @import("names/ref.zig");
 const stack_engine = @import("refs/reftablestack/transaction.zig");
 
 const std = @import("std");
@@ -26,7 +28,6 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const fs = @import("repo/fs.zig");
-const safepath = @import("worktree/safepath.zig");
 const hooks = @import("repo/hooks.zig");
 const testgit = @import("testing/git.zig");
 
@@ -204,13 +205,7 @@ pub const Store = struct {
     /// `ORIG_HEAD`, `AUTO_MERGE`, `REBASE_HEAD` -- is a pseudo-ref, and
     /// every pseudo-ref belongs to one working tree, which is git's rule.
     pub fn dirFor(store: *const Store, name: []const u8) Io.Dir {
-        if (isPseudoRef(name) or
-            std.mem.startsWith(u8, name, "refs/bisect/") or
-            std.mem.startsWith(u8, name, "refs/worktree/") or
-            std.mem.startsWith(u8, name, "refs/rewritten/"))
-        {
-            return store.gitDir();
-        }
+        if (names.isRootRefSyntax(name) or names.isPerWorktree(name)) return store.gitDir();
         return store.commonDir();
     }
 
@@ -220,9 +215,9 @@ pub const Store = struct {
     /// `resolve` for the object. The returned name, when symbolic, is the
     /// caller's.
     pub fn read(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
-        if (!isReadableName(name)) return error.InvalidRefName;
+        if (!isRefName(name)) return error.InvalidRefName;
         if (store.refFormat() == .reftable) {
-            if (stack_engine.isSpecial(name)) return store.readLoose(gpa, io, name);
+            if (names.isSpecial(name)) return store.readLoose(gpa, io, name);
             return stack_engine.read(gpa, io, store, name);
         }
         if (try store.readLoose(gpa, io, name)) |found| return found;
@@ -440,7 +435,7 @@ pub const Store = struct {
             }
             if (!std.mem.startsWith(u8, child_path, prefix) and !std.mem.startsWith(u8, prefix, child_path)) continue;
             if (!std.mem.startsWith(u8, child_path, prefix)) continue;
-            if (!safepath.isValidRefName(child_path)) continue;
+            if (!isRefName(child_path)) continue;
             const target = (store.readLoose(arena, io, child_path) catch |err| switch (err) {
                 error.MalformedRef => continue,
                 else => |e| return e,
@@ -551,7 +546,7 @@ pub const Store = struct {
         who: object.Signature,
         message: []const u8,
     ) TransactionError!void {
-        if (!safepath.isValidRefName(name)) return error.InvalidRefName;
+        if (!isRefName(name)) return error.InvalidRefName;
         if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, name, old, new, who, message);
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, message);
@@ -570,16 +565,6 @@ pub const Store = struct {
 /// The longest loose ref file read whole: a symbolic one, `ref: <name>`.
 const max_loose_ref = 4096;
 
-/// Capitals, dashes and underscores and nothing else: git's syntax for a
-/// pseudo-ref.
-fn isPseudoRef(name: []const u8) bool {
-    if (name.len == 0) return false;
-    for (name) |c| {
-        if (!std.ascii.isUpper(c) and c != '-' and c != '_') return false;
-    }
-    return true;
-}
-
 /// Whether a transaction may write `name`: git's
 /// `transaction_refname_valid`, which refuses the pseudo-refs `FETCH_HEAD`
 /// and `MERGE_HEAD` a transaction does not own, and beyond git a name of
@@ -587,17 +572,15 @@ fn isPseudoRef(name: []const u8) bool {
 /// `config` or `shallow` as a ref when a stream names it, over the files of
 /// those names.
 fn isUpdatableName(name: []const u8) bool {
-    if (!safepath.isValidRefName(name)) return false;
+    if (!names.checkFormat(name, .{ .allow_onelevel = true })) return false;
     if (std.mem.findScalar(u8, name, '/') != null) return true;
-    if (std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD")) return false;
-    return isPseudoRef(name);
+    return names.isRootRefSyntax(name) and !names.isSpecial(name);
 }
 
-fn isReadableName(name: []const u8) bool {
-    // A pseudo-ref such as `HEAD` or `ORIG_HEAD` is upper case with no
-    // slash, which `checkRefName` would otherwise allow through anyway; the
-    // check that matters is the `.lock` suffix and the traversal rules.
-    return safepath.isValidRefName(name);
+/// A name a ref can be read or written under: git's
+/// `check_refname_format` with `REFNAME_ALLOW_ONELEVEL`.
+fn isRefName(name: []const u8) bool {
+    return names.checkFormat(name, .{ .allow_onelevel = true });
 }
 
 /// What a log entry a transaction writes says.
@@ -718,7 +701,7 @@ pub const Transaction = struct {
             // `HEAD` names a ref under `refs/`: a repository whose `HEAD`
             // does not is one git no longer recognises.
             const target = value.symbolic;
-            if (!safepath.isValidRefName(target)) return error.InvalidRefName;
+            if (!isRefName(target)) return error.InvalidRefName;
             if (std.mem.eql(u8, name, "HEAD") and !std.mem.startsWith(u8, target, "refs/")) return error.InvalidRefName;
         };
         var stored_new: ?Ref = null;
@@ -963,7 +946,7 @@ pub const Transaction = struct {
                     .direct => break,
                     .symbolic => |target| {
                         errdefer tx.gpa.free(target);
-                        if (!safepath.isValidRefName(target)) return error.InvalidRefName;
+                        if (!isRefName(target)) return error.InvalidRefName;
                         for (chain.items) |seen| {
                             if (std.mem.eql(u8, seen, target)) return error.SymbolicRefLoop;
                         }

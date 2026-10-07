@@ -39,6 +39,7 @@ const revindex = @import("../odb/revindex.zig");
 const partial = @import("partial.zig");
 const config_mod = @import("../config.zig");
 const refspec_mod = @import("refspec.zig");
+const ref_names = @import("../names/ref.zig");
 const remote_mod = @import("remote.zig");
 const url_mod = @import("url.zig");
 const program = @import("../repo/program.zig");
@@ -1135,7 +1136,7 @@ fn localRef(arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
 }
 
 fn validLocal(name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "refs/") and refspec_mod.checkRefFormat(name, .{});
+    return std.mem.startsWith(u8, name, "refs/") and ref_names.checkFormat(name, .{});
 }
 
 /// git's `find_non_local_tags`: remote tags this repository does not have

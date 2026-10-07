@@ -24,7 +24,7 @@ const url_mod = @import("url.zig");
 const object = @import("../object.zig");
 const revwalk = @import("../revwalk.zig");
 const shallow_mod = @import("../revwalk/shallow.zig");
-const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 const sendpack = @import("sendpack.zig");
 const hidden_refs = @import("hidden.zig");
 const builtin = @import("builtin");
@@ -318,7 +318,7 @@ pub const Remote = struct {
             var reason: ?[]const u8 = null;
             if (r.isHidden(name)) {
                 reason = try r.hiddenPushReason(io, command);
-            } else if (!std.mem.startsWith(u8, name, "refs/") or !safepath.isValidRefName(name)) {
+            } else if (!std.mem.startsWith(u8, name, "refs/") or !ref_names.checkFormat(name["refs/".len..], .{})) {
                 reason = "funny refname";
             } else if (command.new.isZero()) {
                 if (deny_deletes) reason = "deletion prohibited";

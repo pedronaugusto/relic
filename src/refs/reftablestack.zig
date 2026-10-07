@@ -21,8 +21,8 @@
 //! by a table, while what every ref and log says does not.
 //!
 //! `FETCH_HEAD` and `MERGE_HEAD` stay files in a reftable repository, as git
-//! keeps them: a transaction writes them under their own `.lock` beside
-//! the stack, and no log. Every other pseudoref -- `ORIG_HEAD`,
+//! keeps them, and no transaction writes them (`Store.special`). Every
+//! other root ref -- `ORIG_HEAD`,
 //! `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `AUTO_MERGE` -- is a ref in the stack,
 //! which is where git since 2.45 keeps them.
 const std = @import("std");
@@ -57,12 +57,6 @@ pub const Stack = @import("reftablestack/cache.zig").Stack;
 /// cache is behind a mutex, since a daemon reads from many tasks; a
 /// transaction reads its own stacks under its lock and does not touch it.
 pub const Cache = @import("reftablestack/cache.zig").Cache;
-/// Whether `name` is one git keeps as a file whatever the ref format:
-/// `FETCH_HEAD`, which holds more than a ref can, and `MERGE_HEAD`, which
-/// may hold several.
-pub fn isSpecial(name: []const u8) bool {
-    return engine.isSpecial(name);
-}
 /// `Store.read` over reftable. The returned target of a symbolic ref is
 /// the caller's.
 pub fn read(gpa: Allocator, io: Io, store: *const refs.Store, name: []const u8) refs.ReadError!?refs.Ref {

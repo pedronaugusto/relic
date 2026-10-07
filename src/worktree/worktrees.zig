@@ -23,6 +23,7 @@ const Io = std.Io;
 const hash = @import("../hash.zig");
 const fs = @import("../repo/fs.zig");
 const safepath = @import("safepath.zig");
+const ref_names = @import("../names/ref.zig");
 const refs_mod = @import("../refs.zig");
 const reftablestack = @import("../refs/reftablestack.zig");
 const config_mod = @import("../config.zig");
@@ -284,7 +285,7 @@ pub fn add(
         if (options.branch) |branch| {
             var ref_buf: [512]u8 = undefined;
             const ref = std.mem.print(&ref_buf, "refs/heads/{s}", .{branch}) catch return error.InvalidBranchName;
-            if (!safepath.isValidRefName(ref)) return error.InvalidBranchName;
+            if (!ref_names.checkFormat(ref, .{})) return error.InvalidBranchName;
         }
     }
 

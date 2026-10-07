@@ -1,4 +1,4 @@
-//! What a path from a tree, an index or a ref name is allowed to be.
+//! What a path from a tree or an index is allowed to be.
 //!
 //! A tree entry's name is written by whoever wrote the tree and becomes a
 //! filesystem path on checkout. Three published advisories against one widely
@@ -50,8 +50,6 @@ pub const Reason = enum {
     /// `?`, `*`, or a colon, which names an alternate data stream of the
     /// file in front of it.
     reserved_character,
-    /// A name a git ref may not carry.
-    invalid_ref_name,
     /// A symbolic link named `.gitmodules`, in any spelling HFS+ or NTFS
     /// opens as it: git reads that file, and a link would have it read
     /// whatever the link points at.
@@ -402,41 +400,6 @@ fn strncasecmp(a: []const u8, b: []const u8, n: usize) bool {
     return true;
 }
 
-/// Whether a ref name is one git will accept.
-///
-/// git's own rules, plus the one the field has learned the hard way: a name
-/// ending in `.lock` is refused, because `refs/heads/main.lock` is the file
-/// that blocks every update to `main` and a loose-ref walk that skips
-/// `.lock` names will never show it.
-pub fn checkRefName(name: []const u8) ?Reason {
-    if (name.len == 0) return .empty;
-    if (std.mem.endsWith(u8, name, ".lock")) return .invalid_ref_name;
-    if (std.mem.endsWith(u8, name, "/") or std.mem.startsWith(u8, name, "/")) return .invalid_ref_name;
-    if (std.mem.endsWith(u8, name, ".")) return .invalid_ref_name;
-    if (std.mem.find(u8, name, "..") != null) return .invalid_ref_name;
-    if (std.mem.find(u8, name, "//") != null) return .invalid_ref_name;
-    if (std.mem.find(u8, name, "@{") != null) return .invalid_ref_name;
-    if (std.mem.eql(u8, name, "@")) return .invalid_ref_name;
-    for (name) |c| {
-        switch (c) {
-            0...0x20, 0x7f, '~', '^', ':', '?', '*', '[', '\\' => return .invalid_ref_name,
-            else => {},
-        }
-    }
-    var it = std.mem.splitScalar(u8, name, '/');
-    while (it.next()) |component| {
-        if (component.len == 0) return .invalid_ref_name;
-        if (component[0] == '.') return .invalid_ref_name;
-        if (std.mem.endsWith(u8, component, ".lock")) return .invalid_ref_name;
-    }
-    return null;
-}
-
-/// Whether a ref name is one git will accept.
-pub fn isValidRefName(name: []const u8) bool {
-    return checkRefName(name) == null;
-}
-
 test "the git directory is refused in every spelling" {
     for ([_][]const u8{
         ".git",       ".GIT",  ".Git",  "git~1", "GIT~1",
@@ -513,20 +476,6 @@ test "a symbolic link may not be .gitmodules in any spelling, and a file may" {
     }
 }
 
-test "ref names follow git's rules and refuse a .lock suffix" {
-    try std.testing.expect(isValidRefName("refs/heads/main"));
-    try std.testing.expect(isValidRefName("HEAD"));
-    try std.testing.expect(!isValidRefName("refs/heads/main.lock"));
-    try std.testing.expect(!isValidRefName("refs/heads/.hidden"));
-    try std.testing.expect(!isValidRefName("refs/heads/a..b"));
-    try std.testing.expect(!isValidRefName("refs/heads/a b"));
-    try std.testing.expect(!isValidRefName("refs/heads/a~1"));
-    try std.testing.expect(!isValidRefName("refs/heads/a:b"));
-    try std.testing.expect(!isValidRefName("refs/heads/"));
-    try std.testing.expect(!isValidRefName("@"));
-    try std.testing.expect(!isValidRefName("refs/heads/x@{1}"));
-}
-
 test "fuzz: any bytes answer without a crash" {
     try std.testing.fuzz({}, fuzzOne, .{});
 }
@@ -536,5 +485,4 @@ fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
     const input = scratch[0..smith.slice(&scratch)];
     _ = check(input, .worktree);
     _ = check(input, .stored);
-    _ = checkRefName(input);
 }
