@@ -206,13 +206,13 @@ test "includeIf hasconfig:remote.*.url: holds for the URLs of every file, as it 
 fn gitWithHome(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, home: []const u8, args: []const []const u8) !?[]u8 {
     var environ: std.process.Environ.Map = .init(gpa);
     defer environ.deinit();
-    const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    const path = try testgit.searchPath(gpa);
     defer gpa.free(path);
     try environ.put("PATH", path);
     try testgit.isolate(&environ, home);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false" });
+    try argv.appendSlice(gpa, &.{ testgit.program(), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false" });
     try argv.appendSlice(gpa, args);
     const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = cwd }, .environ_map = &environ });
     defer gpa.free(result.stderr);

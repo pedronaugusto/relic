@@ -780,7 +780,7 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
 fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(repo.gpa);
-    try argv.append(repo.gpa, "git");
+    try argv.append(repo.gpa, testgit.program());
     try argv.appendSlice(repo.gpa, repo.defaults);
     try argv.appendSlice(repo.gpa, args);
     var child = try std.process.spawn(io, .{

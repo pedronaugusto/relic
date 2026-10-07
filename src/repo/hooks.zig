@@ -1216,7 +1216,7 @@ test "a hook that fails where it cannot stop anything is reported, not raised" {
 fn gitStderr(gpa: Allocator, io: Io, repo: *testgit.Repo, args: []const []const u8) ![]u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, "git");
+    try argv.append(gpa, testgit.program());
     try argv.appendSlice(gpa, repo.defaults);
     try argv.appendSlice(gpa, args);
     const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = repo.dir }, .environ_map = repo.environMap() });

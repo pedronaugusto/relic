@@ -116,7 +116,7 @@ pub const Repo = struct {
     pub fn run(r: *Repo, io: Io, args: []const []const u8) ![]u8 {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(r.gpa);
-        try argv.append(r.gpa, "git");
+        try argv.append(r.gpa, program());
         try argv.appendSlice(r.gpa, r.defaults);
         try argv.appendSlice(r.gpa, args);
 
@@ -160,7 +160,7 @@ pub const Repo = struct {
     pub fn runInput(r: *Repo, io: Io, args: []const []const u8, input: []const u8) ![]u8 {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(r.gpa);
-        try argv.append(r.gpa, "git");
+        try argv.append(r.gpa, program());
         try argv.appendSlice(r.gpa, r.defaults);
         try argv.appendSlice(r.gpa, args);
         var own: ?Environ.Map = null;
@@ -199,7 +199,7 @@ pub const Repo = struct {
     pub fn capture(r: *Repo, io: Io, args: []const []const u8) !Captured {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(r.gpa);
-        try argv.append(r.gpa, "git");
+        try argv.append(r.gpa, program());
         try argv.appendSlice(r.gpa, r.defaults);
         try argv.appendSlice(r.gpa, args);
         var own: ?Environ.Map = null;
@@ -391,12 +391,139 @@ pub fn noRepositoryAbove(map: *Environ.Map, dir: []const u8) !void {
     try map.put("GIT_CEILING_DIRECTORIES", std.Io.Dir.path.dirname(dir) orelse dir);
 }
 
-/// The test process's environment, isolated: see `isolate`.
+/// The test process's environment, isolated: see `isolate`, with `PATH`
+/// as `searchPath` makes it.
 pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
     var map = try std.testing.environ.createMap(gpa);
     errdefer map.deinit();
+    const path = try searchPath(gpa);
+    defer gpa.free(path);
+    try map.put("PATH", path);
     try isolate(&map, home);
     return map;
+}
+
+//=====================================================================
+// The tools on a hosted runner. preflight's setup (`zig build ci-setup`)
+// installs the git and git-lfs the suite compares against under
+// `$RUNNER_TEMP/preflight-tools`; on Windows the native git is Git for
+// Windows' own `mingw64`, whose `bin` launcher would start another process.
+// The suite finds them here, while it runs: a variable the build set on the
+// test run would be baked into Zig's cached configuration, carried to a
+// later run whose tools, shard or seed differ.
+//=====================================================================
+
+/// Which git a hosted job compares against, from `RELIC_GIT`: the oldest
+/// supported one the job installed itself, git's development branch, or
+/// the release setup builds.
+const HostedGit = enum { old, master, release };
+
+/// `null` off a hosted runner.
+fn hostedGit() ?HostedGit {
+    if (!(std.testing.environ.contains(std.testing.allocator, "RUNNER_TEMP") catch false)) return null;
+    const value = std.testing.environ.getAlloc(std.testing.allocator, "RELIC_GIT") catch return .release;
+    defer std.testing.allocator.free(value);
+    return std.meta.stringToEnum(HostedGit, value) orelse .release;
+}
+
+/// The directories, most preferred first, that hold the tools a hosted job
+/// installed for `git`; none off a hosted runner, or for the oldest git,
+/// which is the machine's own.
+fn hostedDirs(a: Allocator, git: ?HostedGit) ![]const []const u8 {
+    const which = git orelse return &.{};
+    if (which == .old) return &.{};
+    const temp = try std.testing.environ.getAlloc(a, "RUNNER_TEMP");
+    const lfs = try std.Io.Dir.path.join(a, &.{ temp, "preflight-tools", "lfs", "bin" });
+    if (builtin.target.os.tag == .windows) {
+        const programs = std.testing.environ.getAlloc(a, "ProgramFiles") catch "C:\\Program Files";
+        const dirs = try a.alloc([]const u8, 3);
+        dirs[0] = try std.Io.Dir.path.join(a, &.{ programs, "Git", "mingw64", "bin" });
+        dirs[1] = lfs;
+        dirs[2] = try std.Io.Dir.path.join(a, &.{ programs, "Git", "usr", "bin" });
+        return dirs;
+    }
+    const dirs = try a.alloc([]const u8, 2);
+    dirs[0] = try std.Io.Dir.path.join(a, &.{ temp, "preflight-tools", if (which == .master) "master" else "git", "bin" });
+    dirs[1] = lfs;
+    return dirs;
+}
+
+/// The `PATH` every program the suite starts sees: the hosted tools'
+/// directories, then the test process's own `PATH`. The caller frees it.
+/// `error.SkipZigTest` where there is no `PATH`.
+pub fn searchPath(gpa: Allocator) ![]u8 {
+    const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    defer gpa.free(path);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const dirs = try hostedDirs(arena.allocator(), hostedGit());
+    return joinSearchPath(gpa, dirs, path);
+}
+
+fn joinSearchPath(gpa: Allocator, dirs: []const []const u8, rest: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (dirs) |dir| {
+        try out.appendSlice(gpa, dir);
+        try out.append(gpa, std.Io.Dir.path.delimiter);
+    }
+    try out.appendSlice(gpa, rest);
+    return out.toOwnedSlice(gpa);
+}
+
+/// Whether the signing comparisons must find their programs on this
+/// machine rather than skip: a Linux hosted job installs them for every git
+/// but the oldest, whose job runs without them.
+pub fn hostedSigners() bool {
+    const git = hostedGit() orelse return false;
+    return builtin.target.os.tag == .linux and git != .old;
+}
+
+/// The git a test starts itself, with `std.process`: Zig looks a bare name
+/// up in this process's own `PATH`, never in the child's, so on a hosted
+/// runner the installed git is named by its path. Elsewhere it is `git`,
+/// found as `searchPath` would find it.
+pub fn program() []const u8 {
+    if (program_state.load(.acquire) != 2) {
+        if (program_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
+            program_name = resolveProgram(&program_buffer);
+            program_state.store(2, .release);
+        } else while (program_state.load(.acquire) != 2) std.atomic.spinLoopHint();
+    }
+    return program_name;
+}
+
+var program_state: std.atomic.Value(u8) = .init(0);
+var program_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+var program_name: []const u8 = "git";
+
+fn resolveProgram(buffer: []u8) []const u8 {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dirs = hostedDirs(a, hostedGit()) catch return "git";
+    const name = if (builtin.target.os.tag == .windows) "git.exe" else "git";
+    for (dirs) |dir| {
+        const candidate = std.Io.Dir.path.join(a, &.{ dir, name }) catch return "git";
+        Io.Dir.cwd().access(std.testing.io, candidate, .{}) catch continue;
+        if (candidate.len > buffer.len) return "git";
+        @memcpy(buffer[0..candidate.len], candidate);
+        return buffer[0..candidate.len];
+    }
+    return "git";
+}
+
+test "a hosted job's tools come before the machine's own, in order" {
+    const gpa = std.testing.allocator;
+    const sep = [1]u8{std.Io.Dir.path.delimiter};
+    const joined = try joinSearchPath(gpa, &.{ "tools/git/bin", "tools/lfs/bin" }, "rest");
+    defer gpa.free(joined);
+    try std.testing.expectEqualStrings("tools/git/bin" ++ sep ++ "tools/lfs/bin" ++ sep ++ "rest", joined);
+    const alone = try joinSearchPath(gpa, &.{}, "rest");
+    defer gpa.free(alone);
+    try std.testing.expectEqualStrings("rest", alone);
+    try std.testing.expectEqual(@as(usize, 0), (try hostedDirs(gpa, null)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try hostedDirs(gpa, .old)).len);
 }
 
 /// The environment a program the library starts runs in during a test: the
@@ -406,7 +533,7 @@ pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
 pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
     var map: std.process.Environ.Map = .init(gpa);
     errdefer map.deinit();
-    const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    const path = try searchPath(gpa);
     defer gpa.free(path);
     try map.put("PATH", path);
     try keepSystemVariables(gpa, &map);
@@ -490,7 +617,7 @@ pub fn requireGit(gpa: Allocator, io: Io) !void {
         git_checked = true;
         var env = try isolatedEnviron(gpa, no_home);
         defer env.deinit();
-        const result = std.process.run(gpa, io, .{ .argv = &.{ "git", "--version" }, .environ_map = &env }) catch {
+        const result = std.process.run(gpa, io, .{ .argv = &.{ program(), "--version" }, .environ_map = &env }) catch {
             git_present = false;
             return error.SkipZigTest;
         };

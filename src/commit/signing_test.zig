@@ -71,7 +71,7 @@ const Keyed = struct {
         // `GNUPGHOME` out.
         k.environ = .init(gpa);
         errdefer k.environ.deinit();
-        const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+        const path = try testgit.searchPath(gpa);
         defer gpa.free(path);
         try k.environ.put("PATH", path);
         try testgit.keepSystemVariables(gpa, &k.environ);
@@ -269,10 +269,12 @@ fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
 }
 
 /// Whether a missing gpg, gpgconf or ssh-keygen fails the run rather than
-/// skipping the test: `RELIC_REQUIRE_SIGNERS` set, as zig build ci-linux -- sets it
-/// in an image that installs them, so a signing test cannot pass there by
-/// never running.
+/// skipping the test: on a hosted Linux job, which installs them
+/// (`testgit.hostedSigners`), or with `RELIC_REQUIRE_SIGNERS` set on a
+/// machine that has them, so a signing test cannot pass there by never
+/// running.
 fn signersRequired() bool {
+    if (testgit.hostedSigners()) return true;
     const value = testing.environ.getAlloc(testing.allocator, "RELIC_REQUIRE_SIGNERS") catch return false;
     defer testing.allocator.free(value);
     return value.len > 0 and !std.mem.eql(u8, value, "0");

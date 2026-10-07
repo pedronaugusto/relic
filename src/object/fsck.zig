@@ -1315,7 +1315,7 @@ test "git refuses the same objects and names the same problem" {
         try repo.writeFile(io, "object", case.bytes);
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
-        try argv.append(gpa, "git");
+        try argv.append(gpa, testgit.program());
         try argv.appendSlice(gpa, repo.defaults);
         try argv.appendSlice(gpa, &.{ "hash-object", "-t", case.t.name(), "object" });
         const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = repo.dir }, .environ_map = repo.environMap() });

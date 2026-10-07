@@ -16,7 +16,7 @@ const repo_mod = @import("../repo.zig");
 /// How many files the generated tree holds.
 ///
 /// Debug and optimized builds exercise their existing fixture sizes.
-const file_count: usize = switch (builtin.mode) {
+const file_count: usize = switch (builtin.optimize) {
     .Debug => 300,
     else => 3000,
 };
@@ -286,7 +286,7 @@ test "hardware and checked hashes process the same bytes as software" {
     const gpa = std.testing.allocator;
 
     // A fixed seeded corpus exercises many compression blocks.
-    const bytes: usize = switch (builtin.mode) {
+    const bytes: usize = switch (builtin.optimize) {
         .Debug => 4 * 1024 * 1024,
         else => 64 * 1024 * 1024,
     };
@@ -404,7 +404,7 @@ test "loose and packed staging count object writes and deltas reduce pack bytes"
     // worth of history, which is where the delta window earns its keep.
     var repo_git = try testgit.Repo.init(gpa, io, &.{});
     defer repo_git.deinit();
-    const rounds: usize = switch (builtin.mode) {
+    const rounds: usize = switch (builtin.optimize) {
         .Debug => 3,
         else => 6,
     };

@@ -46,7 +46,7 @@ fn gitUses(gpa: Allocator, io: Io, home: *const Home, dir: Io.Dir, assume_differ
     if (assume_different) try env.put("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1");
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, "git");
+    try argv.append(gpa, testgit.program());
     try argv.appendSlice(gpa, args);
     try argv.appendSlice(gpa, &.{ "rev-parse", "--git-dir" });
     const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = dir }, .environ_map = &env });

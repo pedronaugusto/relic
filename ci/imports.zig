@@ -35,15 +35,16 @@ pub fn main(init: std.process.Init) !void {
     const a = arena.allocator();
     var paths = try gantry.walk(a, init.io, .cwd(), {}, keep);
     defer paths.deinit();
-    const reader: gantry.DirReader = .{ .io = init.io, .dir = .cwd() };
-    var diagnostic = gantry.ScanDiagnostic.init(a);
+    const reader: gantry.DirReader = .{ .dir = .cwd() };
+    var diagnostic = gantry.Diagnostics.init(a);
     defer diagnostic.deinit();
-    var graph = gantry.scanWithDiagnostic(a, paths.items(), reader, gantry.DirReader.read, .{
+    var graph = gantry.scan(a, init.io, paths.items(), reader, gantry.DirReader.read, .{
         .manifests = false,
         .strict_imports = true,
         .named_modules = declared.modules,
         .tokens = declared.owned,
-    }, &diagnostic) catch |err| {
+        .diagnostics = &diagnostic,
+    }) catch |err| {
         if (diagnostic.failure) |failure| try report("imports: {s}: {s}: {s}\n", init.io, .{ failure.path orelse "<scan>", @tagName(failure.phase), @errorName(failure.cause) });
         return err;
     };

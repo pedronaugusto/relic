@@ -1,7 +1,22 @@
 //! Native CI tool setup, cached outside the checkout and retried by preflight.
 const std = @import("std");
 const builtin = @import("builtin");
-const pins = @import("git_checks.zig");
+
+/// The Git release the Linux jobs build, its published SHA-256, and the LFS
+/// release every job installs.
+const git_version = "2.55.0";
+const git_sha256 = "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357";
+const lfs_version = "3.8.0";
+const make_flags = [_][]const u8{ "NO_TCLTK=1", "NO_GETTEXT=1", "NO_RUST=1" };
+
+/// The suite's fixtures need Git 2.47 or later.
+fn recent(text: []const u8) bool {
+    if (!std.mem.startsWith(u8, text, "git version ")) return false;
+    var parts = std.mem.splitScalar(u8, text[12..], '.');
+    const major = std.fmt.parseInt(u32, parts.next() orelse return false, 10) catch return false;
+    const minor = std.fmt.parseInt(u32, parts.next() orelse return false, 10) catch return false;
+    return major > 2 or (major == 2 and minor >= 47);
+}
 const Context = struct {
     a: std.mem.Allocator,
     io: std.Io,
@@ -58,13 +73,13 @@ fn buildGit(c: Context, root: []const u8, master: bool) !void {
         } else try c.command(&.{ "git", "clone", "--depth", "1", "https://github.com/git/git.git", source });
     } else {
         const archive = try std.Io.Dir.path.join(c.a, &.{ root, "git.tar.xz" });
-        try c.fetch(try c.a.print("https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{pins.git_version}), archive, pins.git_sha256);
+        try c.fetch(try c.a.print("https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{git_version}), archive, git_sha256);
         try std.Io.Dir.cwd().createDirPath(c.io, source);
         try c.command(&.{ "tar", "-xJf", archive, "-C", source, "--strip-components=1" });
     }
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(c.a, &.{ "make", "-C", source, try c.a.print("-j{d}", .{try std.Thread.getCpuCount()}) });
-    try args.appendSlice(c.a, if (master) &.{ "NO_TCLTK=1", "NO_GETTEXT=1" } else &pins.make_flags);
+    try args.appendSlice(c.a, if (master) &.{ "NO_TCLTK=1", "NO_GETTEXT=1" } else &make_flags);
     try args.append(c.a, try c.a.print("prefix={s}", .{prefix}));
     try args.append(c.a, "all");
     try c.command(args.items);
@@ -83,7 +98,7 @@ fn lfs(c: Context, root: []const u8) !void {
         else => return error.UnsupportedHost,
     };
     const archive = try std.Io.Dir.path.join(c.a, &.{ root, asset });
-    try c.fetch(try c.a.print("https://github.com/git-lfs/git-lfs/releases/download/v{s}/{s}", .{ pins.lfs_version, asset }), archive, digest);
+    try c.fetch(try c.a.print("https://github.com/git-lfs/git-lfs/releases/download/v{s}/{s}", .{ lfs_version, asset }), archive, digest);
     const unpacked = try std.Io.Dir.path.join(c.a, &.{ root, "lfs-unpacked" });
     try std.Io.Dir.cwd().createDirPath(c.io, unpacked);
     if (builtin.target.os.tag == .linux) try c.command(&.{ "tar", "-xzf", archive, "-C", unpacked }) else try c.command(&.{ "tar", "-xf", archive, "-C", unpacked });
@@ -132,7 +147,7 @@ fn selectLfs(c: Context, root: []const u8, git: []const u8) !void {
     try env.put("PATH", try c.a.print("{s}{s}{s}", .{ bin, separator, c.env.get("PATH") orelse "" }));
     const selected: Context = .{ .a = c.a, .io = c.io, .env = &env };
     const version = try selected.capture(&.{ git, "lfs", "version" });
-    if (!std.mem.startsWith(u8, version, "git-lfs/" ++ pins.lfs_version ++ " ")) return error.WrongLfsVersion;
+    if (!std.mem.startsWith(u8, version, "git-lfs/" ++ lfs_version ++ " ")) return error.WrongLfsVersion;
     try report("{s}", c.io, .{version});
 }
 
@@ -157,10 +172,10 @@ pub fn main(init: std.process.Init) !void {
     switch (builtin.target.os.tag) {
         .linux => try buildGit(c, root, master),
         .macos => {
-            if (!pins.recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "brew", "upgrade", "git" });
+            if (!recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "brew", "upgrade", "git" });
         },
         .windows => {
-            if (!pins.recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "choco", "upgrade", "git", "-y", "--no-progress" });
+            if (!recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "choco", "upgrade", "git", "-y", "--no-progress" });
         },
         else => return error.UnsupportedHost,
     }
@@ -168,6 +183,13 @@ pub fn main(init: std.process.Init) !void {
     const git = if (builtin.target.os.tag == .linux) try std.Io.Dir.path.join(a, &.{ root, if (master) "master" else "git", "bin", "git" }) else "git";
     if (!master) try selectLfs(c, root, git);
     const version = try c.capture(&.{ git, "--version" });
-    if (!pins.recent(version)) return error.GitTooOld;
+    if (!recent(version)) return error.GitTooOld;
     try report("{s}", c.io, .{version});
+}
+
+test "Git fixtures require 2.47 including Windows version suffixes" {
+    try std.testing.expect(!recent("git version 2.46.3"));
+    try std.testing.expect(recent("git version 2.47.0.windows.1"));
+    try std.testing.expect(recent("git version 3.0.0"));
+    try std.testing.expect(!recent("unexpected version"));
 }

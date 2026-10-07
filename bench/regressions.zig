@@ -22,7 +22,7 @@ const dirscan = relic.worktree.dirscan;
 /// A Debug build runs the same code with every safety check on and is two
 /// orders of magnitude slower at hashing, so it measures a smaller tree; the
 /// ratios it checks are the same ones.
-const file_count: usize = if (smoke) 30 else switch (builtin.mode) {
+const file_count: usize = if (smoke) 30 else switch (builtin.optimize) {
     .Debug => 300,
     else => 3000,
 };
@@ -130,7 +130,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         \\    objects written {d: >5}      fan-out directories made {d: >4}
         \\
     , .{
-        @tagName(builtin.mode),
+        @tagName(builtin.optimize),
         file_count,
         directory_count,
         dirscan.armFor(gpa, io, repo.work_dir.?),
@@ -170,7 +170,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     // most of its time in safety checks rather than in hashing, so the
     // margin there is smaller and the count above is what carries the
     // property.
-    const ratio: f64 = switch (builtin.mode) {
+    const ratio: f64 = switch (builtin.optimize) {
         .Debug => 1.2,
         else => 2.0,
     };
@@ -178,7 +178,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
 
     // Loose ceilings, so a busy runner does not fail the build but a real
     // regression does.
-    const budget_ms: f64 = switch (builtin.mode) {
+    const budget_ms: f64 = switch (builtin.optimize) {
         .Debug => 60_000,
         else => 20_000,
     };
@@ -195,7 +195,7 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
     defer repo_git.deinit();
 
     // A file that grows one line per commit gives the packer a deep chain.
-    const rounds: usize = if (smoke) 3 else switch (builtin.mode) {
+    const rounds: usize = if (smoke) 3 else switch (builtin.optimize) {
         .Debug => 40,
         else => 120,
     };
@@ -244,10 +244,10 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
         \\  relic benchmark ({s}, {d} packed objects, {d} bytes)
         \\    read all     cold {d: >8.1} ms   warm {d: >8.1} ms
         \\
-    , .{ @tagName(builtin.mode), read_count, bytes, ms, warm_ms });
+    , .{ @tagName(builtin.optimize), read_count, bytes, ms, warm_ms });
 
     try std.testing.expect(read_count > rounds);
-    const budget_ms: f64 = switch (builtin.mode) {
+    const budget_ms: f64 = switch (builtin.optimize) {
         .Debug => 60_000,
         else => 20_000,
     };
@@ -260,7 +260,7 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
 
     // Enough bytes that the measurement is the compression function and not
     // the call around it, and few enough that a Debug build still finishes.
-    const bytes: usize = if (smoke) 1024 else switch (builtin.mode) {
+    const bytes: usize = if (smoke) 1024 else switch (builtin.optimize) {
         .Debug => 4 * 1024 * 1024,
         else => 64 * 1024 * 1024,
     };
@@ -332,7 +332,7 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
         \\    SHA-256      {d: >6.2} GiB/s
         \\
     , .{
-        @tagName(builtin.mode),
+        @tagName(builtin.optimize),
         bytes / (1024 * 1024),
         @tagName(hash.Hasher.sha1Backend()),
         gib / (mine_ms / 1000.0),
@@ -412,7 +412,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
     // worth of history, which is where the delta window earns its keep.
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
-    const rounds: usize = if (smoke) 3 else switch (builtin.mode) {
+    const rounds: usize = if (smoke) 3 else switch (builtin.optimize) {
         .Debug => 3,
         else => 6,
     };
@@ -466,7 +466,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
         \\    deltas       {d} of {d}, {d} bytes against {d} undeltified
         \\
     , .{
-        @tagName(builtin.mode),
+        @tagName(builtin.optimize),
         file_count,
         deltified.objects,
         ms[0],
@@ -492,7 +492,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
     // the name. A ratio, because a busy runner moves both.
     if (!smoke) std.debug.print("speed condition ms[1] < ms[0] * 1.5 + 5.0: {s}\n", .{if (ms[1] < ms[0] * 1.5 + 5.0) "within" else "over"});
 
-    const budget_ms: f64 = switch (builtin.mode) {
+    const budget_ms: f64 = switch (builtin.optimize) {
         .Debug => 120_000,
         else => 40_000,
     };

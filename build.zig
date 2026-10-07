@@ -39,7 +39,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_lock_helper = b.addInstallArtifact(lock_helper, .{});
 
     // A long-running filter process has to be a program for the same
     // reason: relic and git are each handed it as `filter.<driver>.process`
@@ -52,7 +51,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_filter_helper = b.addInstallArtifact(filter_helper, .{});
 
     // git-lfs does not ship a `git-lfs-transfer` server, so the suite
     // brings one: relic and git-lfs are each pointed at it over the same
@@ -65,7 +63,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_lfs_transfer_helper = b.addInstallArtifact(lfs_transfer_helper, .{});
 
     // relic's own upload-pack, as a program real git can be pointed at with
     // `--upload-pack`, so what git makes of relic's server is compared with
@@ -78,7 +75,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_upload_pack_helper = b.addInstallArtifact(upload_pack_helper, .{});
 
     // Hook fixtures use a native program on every target. Each copy reads
     // its own sidecar description, so git and relic run the same behaviour.
@@ -90,7 +86,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_hook_fixture = b.addInstallArtifact(hook_fixture, .{});
 
     const fake_ssh = b.addExecutable(.{
         .name = "relic-fake-ssh",
@@ -100,7 +95,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_fake_ssh = b.addInstallArtifact(fake_ssh, .{});
 
     const lfs_tool = b.addExecutable(.{
         .name = "relic-lfs-test-tool",
@@ -110,7 +104,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_lfs_tool = b.addInstallArtifact(lfs_tool, .{});
 
     // A remote helper, for git and relic to be pointed at alike: git's
     // own `git-remote-testgit`, and one with `fetch` and `push`.
@@ -122,7 +115,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_remote_helper = b.addInstallArtifact(remote_helper, .{});
 
     // A custom LFS transfer agent, handed to git-lfs and to relic alike.
     const lfs_agent = b.addExecutable(.{
@@ -133,7 +125,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_lfs_agent = b.addInstallArtifact(lfs_agent, .{});
 
     const process_fixture = b.addExecutable(.{
         .name = "relic-process-fixture",
@@ -143,7 +134,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const install_process_fixture = b.addInstallArtifact(process_fixture, .{});
 
     const build_options = b.addOptions();
     const gnupg_fixture_root = b.option(
@@ -155,9 +145,9 @@ pub fn build(b: *std.Build) void {
         b.graph.cwdRelativePath(gnupg_fixture_root)
     else
         b.path(gnupg_fixture_root));
-    build_options.addOptionPathUntracked("lock_helper_path", b.graph.path(.install_bin, lock_helper.out_filename));
-    build_options.addOptionPathUntracked("filter_helper_path", b.graph.path(.install_bin, filter_helper.out_filename));
-    build_options.addOptionPathUntracked("lfs_transfer_helper_path", b.graph.path(.install_bin, lfs_transfer_helper.out_filename));
+    build_options.addOptionPath("lock_helper_path", lock_helper.getEmittedBin());
+    build_options.addOptionPath("filter_helper_path", filter_helper.getEmittedBin());
+    build_options.addOptionPath("lfs_transfer_helper_path", lfs_transfer_helper.getEmittedBin());
     // A real `git-lfs-transfer` server — Scutiger's is the one git-lfs's
     // own suite uses — for the tests that prove relic's client against one
     // rather than against the suite's own; they skip without it.
@@ -166,13 +156,13 @@ pub fn build(b: *std.Build) void {
         "lfs-transfer-server",
         "A git-lfs-transfer server program to prove the pure-ssh client against",
     ) orelse "");
-    build_options.addOptionPathUntracked("upload_pack_helper_path", b.graph.path(.install_bin, upload_pack_helper.out_filename));
-    build_options.addOptionPathUntracked("hook_fixture_path", b.graph.path(.install_bin, hook_fixture.out_filename));
-    build_options.addOptionPathUntracked("fake_ssh_helper_path", b.graph.path(.install_bin, fake_ssh.out_filename));
-    build_options.addOptionPathUntracked("lfs_test_tool_path", b.graph.path(.install_bin, lfs_tool.out_filename));
-    build_options.addOptionPathUntracked("process_fixture_path", b.graph.path(.install_bin, process_fixture.out_filename));
-    build_options.addOptionPathUntracked("remote_helper_path", b.graph.path(.install_bin, remote_helper.out_filename));
-    build_options.addOptionPathUntracked("lfs_agent_path", b.graph.path(.install_bin, lfs_agent.out_filename));
+    build_options.addOptionPath("upload_pack_helper_path", upload_pack_helper.getEmittedBin());
+    build_options.addOptionPath("hook_fixture_path", hook_fixture.getEmittedBin());
+    build_options.addOptionPath("fake_ssh_helper_path", fake_ssh.getEmittedBin());
+    build_options.addOptionPath("lfs_test_tool_path", lfs_tool.getEmittedBin());
+    build_options.addOptionPath("process_fixture_path", process_fixture.getEmittedBin());
+    build_options.addOptionPath("remote_helper_path", remote_helper.getEmittedBin());
+    build_options.addOptionPath("lfs_agent_path", lfs_agent.getEmittedBin());
     // The standard library's TLS client, which `src/transport/tls/Client.zig` is a copy
     // of with client authentication added: `src/testing/tls_fork.zig` holds the
     // copy to it, and fails when the compiler building this ships another.
@@ -219,39 +209,6 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_tests = b.addRunArtifact(tests);
-    if (b.graph.environ_map.get("RUNNER_TEMP")) |temp| {
-        const old_git = std.mem.eql(u8, b.graph.environ_map.get("RELIC_GIT") orelse "", "old");
-        const master_git = std.mem.eql(u8, b.graph.environ_map.get("RELIC_GIT") orelse "", "master");
-        if (!old_git) {
-            const root = b.pathJoin(&.{ temp, "preflight-tools" });
-            const separator = if (b.graph.host.result.os.tag == .windows) ";" else ":";
-            // Git's bin launcher starts another process. Use the native
-            // executable and its Unix tools on the hosted Windows runner.
-            const git_root = b.graph.environ_map.get("ProgramFiles") orelse "C:\\Program Files";
-            const git_bin = if (b.graph.host.result.os.tag == .windows)
-                b.pathJoin(&.{ git_root, "Git", "mingw64", "bin" })
-            else
-                b.pathJoin(&.{ root, if (master_git) "master" else "git", "bin" });
-            const lfs_bin = b.pathJoin(&.{ root, "lfs", "bin" });
-            const original_path = b.graph.environ_map.get("PATH") orelse "";
-            const remaining_path = if (b.graph.host.result.os.tag == .windows)
-                b.fmt("{s};{s}", .{ b.pathJoin(&.{ git_root, "Git", "usr", "bin" }), original_path })
-            else
-                original_path;
-            run_tests.setEnvironmentVariable("PATH", b.fmt("{s}{s}{s}{s}{s}", .{ git_bin, separator, lfs_bin, separator, remaining_path }));
-        }
-        if (b.graph.host.result.os.tag == .linux and !old_git) run_tests.setEnvironmentVariable("RELIC_REQUIRE_SIGNERS", "1");
-    }
-    run_tests.step.dependOn(&install_lock_helper.step);
-    run_tests.step.dependOn(&install_filter_helper.step);
-    run_tests.step.dependOn(&install_lfs_transfer_helper.step);
-    run_tests.step.dependOn(&install_upload_pack_helper.step);
-    run_tests.step.dependOn(&install_hook_fixture.step);
-    run_tests.step.dependOn(&install_fake_ssh.step);
-    run_tests.step.dependOn(&install_lfs_tool.step);
-    run_tests.step.dependOn(&install_process_fixture.step);
-    run_tests.step.dependOn(&install_remote_helper.step);
-    run_tests.step.dependOn(&install_lfs_agent.step);
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
@@ -349,11 +306,13 @@ pub fn build(b: *std.Build) void {
         if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{ .tests = test_step });
     }
     namespaceImportChecker(b);
-    _ = ciCheck(b, "check-git-flags", "ci/git_checks.zig");
     const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = b.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
     const prepare = b.addRunArtifact(setup);
     prepare.addPassthruArgs();
     b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
+    // The installer runs only on a hosted runner; its version reading is
+    // proved everywhere.
+    b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module })).step);
     // Keep the package root at src so the moved check can embed its TLS sibling.
     const tls_test = b.addTest(.{ .root_module = test_module, .filters = &.{"the TLS client is std's, with the recorded diff and nothing else"} });
     b.step("check-tls-fork", "Verify the TLS fork against std and its recorded patch").dependOn(&b.addRunArtifact(tls_test).step);
@@ -370,26 +329,19 @@ const example_sources = [_][]const u8{
     "examples/usage.zig",
 };
 
-// Build-only tooling belongs to a root invocation, never a consumer's dependency graph.
-fn ciCheck(b: *std.Build, name: []const u8, source: []const u8) *std.Build.Step.Compile {
-    const module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = .debug });
-    const executable = b.addExecutable(.{ .name = name, .root_module = module });
-    const tests = b.addTest(.{ .root_module = module });
-    const run = b.addRunArtifact(executable);
-    run.setCwd(b.path("."));
-    const step = b.step(name, "Run repository CI checks and their regressions");
-    step.dependOn(&b.addRunArtifact(tests).step);
-    step.dependOn(&run.step);
-    return executable;
-}
-
-// Main keeps namespace reexports outside implementation layer and cycle checks.
-// Both shared structure invocations use this same compile step, so retain
-// main's checker while the pinned preflight provides the rest of the gate.
+// Main keeps namespace reexports outside implementation layer and cycle
+// checks, which preflight's structure check has no declaration for yet. Both
+// of preflight's structure runs (check-imports and lint) share one compile
+// step, so relic's checker replaces that step's source.
 fn namespaceImportChecker(b: *std.Build) void {
     if (b.pkg_hash.len != 0) return;
     const structure = b.top_level_steps.get("check-imports") orelse return;
-    const runner = structure.step.dependencies.items[0].cast(std.Build.Step.Run) orelse @panic("expected import-check run");
-    const checker = runner.producer orelse @panic("expected import-check compiler");
-    checker.root_module.root_source_file = b.path("ci/imports.zig");
+    for (structure.step.dependencies.items) |dependency| {
+        const run = dependency.cast(std.Build.Step.Run) orelse continue;
+        const checker = run.producer orelse continue;
+        if (!std.mem.eql(u8, checker.name, "preflight-structure")) continue;
+        checker.root_module.root_source_file = b.path("ci/imports.zig");
+        return;
+    }
+    @panic("check-imports: preflight's structure checker not found");
 }

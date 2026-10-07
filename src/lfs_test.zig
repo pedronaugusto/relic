@@ -27,7 +27,7 @@ fn requireGitLfs(gpa: std.mem.Allocator, io: Io) !void {
         lfs_checked = true;
         var environ = try testgit.isolatedEnviron(gpa, testgit.no_home);
         defer environ.deinit();
-        const result = std.process.run(gpa, io, .{ .argv = &.{ "git", "lfs", "version" }, .environ_map = &environ }) catch return error.SkipZigTest;
+        const result = std.process.run(gpa, io, .{ .argv = &.{ testgit.program(), "lfs", "version" }, .environ_map = &environ }) catch return error.SkipZigTest;
         defer gpa.free(result.stdout);
         defer gpa.free(result.stderr);
         lfs_present = switch (result.term) {

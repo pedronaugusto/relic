@@ -41,7 +41,7 @@
     [
       "zig",
       "build",
-      "check-git-flags"
+      "check-ci-setup"
     ],
     [
       "zig",

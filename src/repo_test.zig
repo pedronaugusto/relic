@@ -629,7 +629,7 @@ test "an includeIf gitdir:./ starts from the including file's directory, and -c 
     const cmd_inc = try gpa.print("include.path={s}/cmd.inc", .{home_path});
     defer gpa.free(cmd_inc);
     const said = try std.process.run(gpa, io, .{
-        .argv = &.{ "git", "-c", cmd_inc, "config", "--get-regexp", "^probe\\." },
+        .argv = &.{ testgit.program(), "-c", cmd_inc, "config", "--get-regexp", "^probe\\." },
         .cwd = .{ .dir = work },
         .environ_map = &environ,
     });

@@ -34,7 +34,7 @@ const testremote = @import("remote.zig");
 pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
     var map: Environ.Map = .init(gpa);
     errdefer map.deinit();
-    const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    const path = try testgit.searchPath(gpa);
     defer gpa.free(path);
     try map.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &map);

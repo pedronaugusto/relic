@@ -3,16 +3,10 @@
     .version = "0.3.0",
     .dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#260ed79cf626e7ab8fb05039db476bb680b4a653",
-            .hash = "preflight-0.1.0-LX1ZwjvuBADAj7ukyFSK8YT0EXBlwN8CZkprUGIpFE2u",
+            .url = "git+https://github.com/pedronaugusto/preflight#f6a5191c42d8de76ab758465bf897e7acee931d9",
+            .hash = "preflight-0.1.0-LX1Zwv2WBQABkEzFUf5-MzYCtr0SSYHZrV097Vir7DYQ",
             .lazy = true,
         },
-        .gantry = .{
-            .url = "git+https://github.com/pedronaugusto/gantry#15bf11b9b25e8df7c5542fffeef8b7cd1c9e1b7b",
-            .hash = "gantry-0.1.0-1iNrkR8jDQAJTyJyKeMgSwzkGKDsKqCocG1PrLG10vip",
-            .lazy = true,
-        },
-
         .conduit = .{
             .url = "git+https://github.com/pedronaugusto/conduit#43751a5cf7bd9359e1016508dbce8120483853b0",
             .hash = "conduit-0.5.1-4rIA71luEwDzl3f1NGpLRpmpSvwEBuUaw6b7FmnLySCQ",

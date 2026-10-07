@@ -296,7 +296,7 @@ test "the files are the ones git names, found from the person's environment" {
 
     var env: Environ.Map = .init(gpa);
     defer env.deinit();
-    const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    const path = try testgit.searchPath(gpa);
     defer gpa.free(path);
     try env.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &env);
@@ -390,7 +390,7 @@ test "GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are read as git reads them, bot
     defer gpa.free(home_path);
     var env: Environ.Map = .init(gpa);
     defer env.deinit();
-    const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    const path = try testgit.searchPath(gpa);
     defer gpa.free(path);
     try env.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &env);
@@ -453,7 +453,7 @@ test "the XDG file and ~/.gitconfig are both read, the second winning, as git re
     try home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[x]\n\ta = home\n" });
     var env: Environ.Map = .init(gpa);
     defer env.deinit();
-    const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    const path = try testgit.searchPath(gpa);
     defer gpa.free(path);
     try env.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &env);
