@@ -195,7 +195,7 @@ fn hasAarch64Sha1() bool {
             return value != 0;
         },
         .linux => {
-            const hwcap = std.os.linux.getauxval(std.elf.AT_HWCAP);
+            const hwcap = std.os.linux.getauxval(std.elf.AT.HWCAP);
             // HWCAP_SHA1 is bit 5 of AT_HWCAP on aarch64.
             return hwcap & (1 << 5) != 0;
         },
