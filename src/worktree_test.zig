@@ -1448,6 +1448,24 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
 const glob_lines = "tabbed\t\nspaced   \nkept\\ \n\\#hash\n\\!bang\n*.log\n!keep.log\nbuild/\n/root-only\n" ++
     "doc/*.txt\nsr**/wild.zig\na/**/z\n[[:upper:]]*.c\nx[abc\n" ++ "long/" ++ testbytes.repeat("*", 1100) ++ "z\n";
 
+/// The paths the `sr**/wild.zig` probe is decided on where git before 2.52
+/// matched it: its `match_pathname` cut the literal `sr` off and read what
+/// was left, `**/wild.zig`, as the start of a path, where `**/` matches any
+/// directories or none. 2.52 gives the match one byte of that prefix, and
+/// relic decides them as 2.52 does, so an older git is not asked about them.
+const probe_paths = [_][]const u8{ "src/worktree/wild.zig", "srwild.zig" };
+
+/// Whether `path` is one of `probe_paths`.
+fn isProbePath(path: []const u8) bool {
+    for (probe_paths) |probe| if (std.mem.eql(u8, path, probe)) return true;
+    return false;
+}
+
+/// Whether the git found decides `probe_paths` as relic does.
+fn probeAgrees(gpa: std.mem.Allocator, io: std.Io) !bool {
+    return testgit.gitAtLeast(gpa, io, 2, 52);
+}
+
 test "ignore rules decide every path as git check-ignore decides it" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -1463,16 +1481,26 @@ test "ignore rules decide every path as git check-ignore decides it" {
     defer rules.deinit();
     try rules.addText(glob_lines, "", ".gitignore", 2);
 
-    const paths = [_]struct { []const u8, bool }{
-        .{ "tabbed", false },    .{ "spaced", false },          .{ "kept ", false },
-        .{ "#hash", false },     .{ "!bang", false },           .{ "a.log", false },
-        .{ "keep.log", false },  .{ "sub/keep.log", false },    .{ "build", true },
-        .{ "build/x.o", false }, .{ "root-only", false },       .{ "sub/root-only", false },
-        .{ "doc/a.txt", false }, .{ "other/doc/a.txt", false }, .{ "src/worktree/wild.zig", false },
-        .{ "a/b/c/z", false },   .{ "a/z", false },             .{ "Upper.c", false },
-        .{ "lower.c", false },   .{ "x[abc", false },           .{ "long/xyz", false },
-        .{ "long/x/z", false },  .{ "long/xy", false },
+    const all_paths = [_]struct { []const u8, bool }{
+        .{ "tabbed", false },     .{ "spaced", false },          .{ "kept ", false },
+        .{ "#hash", false },      .{ "!bang", false },           .{ "a.log", false },
+        .{ "keep.log", false },   .{ "sub/keep.log", false },    .{ "build", true },
+        .{ "build/x.o", false },  .{ "root-only", false },       .{ "sub/root-only", false },
+        .{ "doc/a.txt", false },  .{ "other/doc/a.txt", false }, .{ "src/worktree/wild.zig", false },
+        .{ "srwild.zig", false }, .{ "src/wild.zig", false },    .{ "a/b/c/z", false },
+        .{ "a/z", false },        .{ "Upper.c", false },         .{ "lower.c", false },
+        .{ "x[abc", false },      .{ "long/xyz", false },        .{ "long/x/z", false },
+        .{ "long/xy", false },
     };
+    const probe = try probeAgrees(gpa, io);
+    var kept: [all_paths.len]struct { []const u8, bool } = undefined;
+    var kept_len: usize = 0;
+    for (all_paths) |p| {
+        if (!probe and isProbePath(p[0])) continue;
+        kept[kept_len] = p;
+        kept_len += 1;
+    }
+    const paths = kept[0..kept_len];
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(gpa);
     for (paths) |p| try input.print(gpa, "{s}\x00", .{p[0]});
@@ -1517,12 +1545,15 @@ test "attributes match globs as git check-attr matches them" {
     const many = testbytes.repeat("[ab]", 65);
     try h.repo.writeFile(io, ".gitattributes", "*.txt t1\nsr**/wild.zig probe\n[[:upper:]]*.c upper\n" ++
         many ++ " many\nx[abc broken\na/**/z deep\n*.C\tfolded\n");
+    const probe = try probeAgrees(gpa, io);
     for ([_][]const u8{
-        "f.txt",   "src/worktree/wild.zig",   "Upper.c",
-        "lower.c", testbytes.repeat("a", 65), testbytes.repeat("a", 64) ++ "c",
-        "x[abc",   "a/b/c/z",                 "a/z",
-        "UPPER.C",
-    }) |path| try expectCheckAttr(gpa, io, &h, path);
+        "f.txt",   "src/worktree/wild.zig",   "srwild.zig",                     "src/wild.zig", "Upper.c",
+        "lower.c", testbytes.repeat("a", 65), testbytes.repeat("a", 64) ++ "c", "x[abc",        "a/b/c/z",
+        "a/z",     "UPPER.C",
+    }) |path| {
+        if (!probe and isProbePath(path)) continue;
+        try expectCheckAttr(gpa, io, &h, path);
+    }
 }
 
 test "pathspecs choose the files git ls-files lists" {
