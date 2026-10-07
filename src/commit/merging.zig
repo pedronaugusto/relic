@@ -715,7 +715,7 @@ fn configuredFastForward(repo: *Repository) FastForward {
 /// `merge.conflictStyle`, or the plain style.
 pub fn configuredStyle(repo: *Repository) merge.ConflictStyle {
     const text = repo.configuration().get("merge.conflictstyle") orelse return .merge;
-    return merge.ConflictStyle.parse(text) orelse .merge;
+    return merge.parseConflictStyle(text) orelse .merge;
 }
 
 /// The cleanup `git merge` uses: `commit.cleanup`, or whitespace alone when

@@ -201,7 +201,8 @@ exe.root_module.addImport("relic", relic_dep.module("relic"));
 ```
 
 One module, with [conduit](https://github.com/pedronaugusto/conduit) for
-running programs and [sweep](https://github.com/pedronaugusto/sweep) for git's globs. Conduit carries its libc linkage on POSIX; Windows needs
+running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's globs and
+[parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges. Conduit carries its libc linkage on POSIX; Windows needs
 no C runtime. SHA-256 and the TLS primitives come from `std.crypto`; SHA-1,
 inflate and the TLS client are in the package. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
@@ -267,7 +268,6 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `worktree.dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`. |
-| `diff.textdiff` | `diffLines`, `hunks`, `stat`, `sameLine`, `Algorithm` (`myers`, `histogram`, `patience`), and git's `--minimal`. |
 | `diff.rename`, `diff.similarity` | Rename and copy detection with git's score and diffcore's order: `-M`, `-C`, `--find-copies-harder`. |
 | `diff.patchid` | Patch ids: a name for what a commit changes. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
@@ -278,7 +278,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `revwalk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found`, terms and pathspecs. |
 | `revwalk.shortlog` | `Shortlog.init`, `add`, `addCommit`, `write`, `configured`: `git shortlog` by author, committer, trailer or format, with `-s`, `-n`, `-e` and `-w`. |
 | `revwalk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
-| `merge`, `merge.blobmerge` | Content merging as xdiff does it, and the stage-only tree merge. |
+| `merge` | `blobs`, git's `ll_merge` on parallax's three-way merge, and the stage-only tree merge. |
 | `merge.ort` | `mergeTrees`, `mergeCommits` — git's merge-ort: renames, directory renames, directory/file and type conflicts, submodules, virtual merge bases, git's messages. |
 | `merge.octopus` | `mergeCommits` — git's octopus: several heads merged one after another, `read-tree --aggressive` then `merge-one-file`. |
 | `merge.strategy`, `merge.subtreeshift` | Every `-X` word git's merge takes, and git's match-trees for `subtree`. |
@@ -831,7 +831,7 @@ a reader's feet and every one of them still reads back.
 
 git's published security fixes are a regression suite: each of the 49 that apply to relic is a test in `src/testing/security/`, one file per kind of hole, named for its CVE and the git test it mirrors.
 
-Seventy-eight fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Seventy-six fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and

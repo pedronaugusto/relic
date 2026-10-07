@@ -22,13 +22,13 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
 const diff = @import("../diff.zig");
-const textdiff = @import("textdiff.zig");
+const parallax = @import("../dependencies.zig").parallax;
 const attributes = @import("../worktree/attributes.zig");
 
 const Oid = hash.Oid;
 
 /// Errors from computing a patch id.
-pub const Error = diff.Error || object.ParseError || attributes.Error || error{NotACommit};
+pub const Error = diff.Error || diff.TextError || object.ParseError || attributes.Error || error{NotACommit};
 
 /// The patch id of `commit` against its parent, or against nothing for a
 /// root commit. `null` for a merge, which has none. `binary` says which
@@ -171,41 +171,31 @@ fn hashChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, h: *hash.Hasher, change:
         addPath(h, path);
     }
 
-    const old_lines = try textdiff.splitLines(gpa, old_bytes);
-    defer gpa.free(old_lines);
-    const new_lines = try textdiff.splitLines(gpa, new_bytes);
-    defer gpa.free(new_lines);
     // No indentation heuristic: the patch id is taken with xdiff's plain
     // settings.
-    const options: textdiff.Options = .{ .indent_heuristic = false };
-    const script = try textdiff.diffLines(gpa, old_lines, new_lines, options);
-    defer gpa.free(script);
-    const groups = try textdiff.hunks(gpa, script, old_lines.len, new_lines.len, options);
-    defer gpa.free(groups);
+    var script = try parallax.diffLines(gpa, old_bytes, new_bytes, .{ .indent_heuristic = false });
+    defer script.deinit();
+    const d = script.diff;
 
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(gpa);
-    for (groups) |hunk| {
+    var hunks = d.hunks(.{});
+    while (hunks.next()) |hunk| {
         var old_at = hunk.old_start;
         var new_at = hunk.new_start;
         for (hunk.changes) |c| {
             while (old_at < c.old_start) : ({
                 old_at += 1;
                 new_at += 1;
-            }) try addLine(gpa, h, &scratch, "", old_lines[old_at]);
-            for (0..c.old_count) |_| {
-                try addLine(gpa, h, &scratch, "-", old_lines[old_at]);
-                old_at += 1;
-            }
-            for (0..c.new_count) |_| {
-                try addLine(gpa, h, &scratch, "+", new_lines[new_at]);
-                new_at += 1;
-            }
+            }) try addLine(gpa, h, &scratch, "", d.new.get(new_at));
+            for (c.old_start..c.old_start + c.old_len) |i| try addLine(gpa, h, &scratch, "-", d.old.get(@intCast(i)));
+            for (c.new_start..c.new_start + c.new_len) |i| try addLine(gpa, h, &scratch, "+", d.new.get(@intCast(i)));
+            old_at = c.old_start + c.old_len;
+            new_at = c.new_start + c.new_len;
         }
-        while (old_at < hunk.old_start + hunk.old_count) : ({
-            old_at += 1;
-            new_at += 1;
-        }) try addLine(gpa, h, &scratch, "", old_lines[old_at]);
+        while (new_at < hunk.new_start + hunk.new_len) : (new_at += 1) {
+            try addLine(gpa, h, &scratch, "", d.new.get(new_at));
+        }
     }
 }
 

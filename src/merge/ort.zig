@@ -43,7 +43,7 @@ const attributes = @import("../worktree/attributes.zig");
 const revwalk = @import("../revwalk.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const convert = @import("../worktree/convert.zig");
-const textdiff = @import("../diff/textdiff.zig");
+const parallax = @import("../dependencies.zig").parallax;
 const message = @import("../commit/message.zig");
 
 const Oid = hash.Oid;
@@ -104,6 +104,24 @@ pub const Submodules = struct {
     openFn: *const fn (context: *anyopaque, path: []const u8) ?SubmoduleHistory,
 };
 
+/// Where a refusal writes the path that caused it, so a caller can say which
+/// file stood in the way without anything being allocated.
+pub const Blocked = struct {
+    buffer: [4096]u8 = undefined,
+    len: usize = 0,
+
+    /// The path. Empty when nothing was refused.
+    pub fn path(b: *const Blocked) []const u8 {
+        return b.buffer[0..b.len];
+    }
+
+    /// Record `text` as the path that caused a refusal.
+    pub fn set(b: *Blocked, text: []const u8) void {
+        b.len = @min(text.len, b.buffer.len);
+        @memcpy(b.buffer[0..b.len], text[0..b.len]);
+    }
+};
+
 /// How a merge is made.
 pub const Options = struct {
     /// The names on the markers and in the messages, and the suffix a
@@ -113,16 +131,16 @@ pub const Options = struct {
     labels: merge.Labels = .{ .ours = "HEAD", .base = "base", .theirs = "theirs" },
     conflict_style: merge.ConflictStyle = .merge,
     /// `-X ours` or `-X theirs`.
-    favor: merge.Favor = .none,
+    resolve: merge.Resolve = .markers,
     /// The line diff; git's merge machinery uses histogram unless
     /// `diff.algorithm` says otherwise.
-    algorithm: textdiff.Algorithm = .histogram,
+    algorithm: parallax.Algorithm = .histogram,
     /// Prove the Myers diffs minimal: `diff-algorithm=minimal`.
     minimal: bool = false,
     /// The whitespace differences the content merges overlook: the
     /// strategy options `ignore-all-space`, `ignore-space-change`,
     /// `ignore-space-at-eol` and `ignore-cr-at-eol`.
-    whitespace: textdiff.Whitespace = .{},
+    whitespace: parallax.Whitespace = .{},
     /// `-X subtree` and `-X subtree=<path>`: before each merge the base and
     /// the second side are shifted to line up with the first side's tree,
     /// `subtreeshift.shift` with this as its path. `null` shifts nothing.
@@ -152,7 +170,7 @@ pub const Options = struct {
     /// `core.abbrev`.
     abbrev_len: usize = abbrev.fallback,
     /// Where a refusal writes the path that caused it.
-    blocked: ?*merge.Blocked = null,
+    blocked: ?*Blocked = null,
     /// Keep the messages of the inner merges a merge of several bases
     /// makes, each after `  From inner merge:` and two spaces a level, and
     /// ahead of the outer merge's own for the same path. git keeps them at
@@ -1034,19 +1052,19 @@ const Merge = struct {
         const found = try m.driverFor(path);
         const marker_size = found.marker_size + extra_marker_size;
         const virtual_ancestor = m.call_depth > 0;
-        var favor: merge.Favor = if (virtual_ancestor) .none else m.options.favor;
+        var resolve: merge.Resolve = if (virtual_ancestor) .markers else m.options.resolve;
 
         var status: LlStatus = .ok;
         var bytes: []const u8 = undefined;
         const binary = found.driver == .binary or
-            textdiff.isBinary(orig) or
-            textdiff.isBinary(src1) or
-            textdiff.isBinary(src2);
+            !merge.mergesAsText(orig) or
+            !merge.mergesAsText(src1) or
+            !merge.mergesAsText(src2);
         if (binary) {
             // `ll_binary_merge`.
             if (virtual_ancestor) {
                 bytes = orig;
-            } else switch (favor) {
+            } else switch (resolve) {
                 .ours => bytes = src1,
                 .theirs => bytes = src2,
                 else => {
@@ -1055,12 +1073,12 @@ const Merge = struct {
                 },
             }
         } else {
-            if (found.driver == .union_) favor = .union_;
+            if (found.driver == .union_) resolve = .both;
             var result = merge.blobs(m.arena, orig, src1, src2, .{
                 .conflict_style = m.options.conflict_style,
                 .labels = .{ .ours = name1, .base = base_label, .theirs = name2 },
                 .marker_size = marker_size,
-                .favor = favor,
+                .resolve = resolve,
                 .algorithm = m.options.algorithm,
                 .minimal = m.options.minimal,
                 .whitespace = m.options.whitespace,
@@ -1120,7 +1138,7 @@ const Merge = struct {
                 clean = false;
                 result.mode = o.mode;
                 result.oid = o.oid;
-            } else switch (m.options.favor) {
+            } else switch (m.options.resolve) {
                 .ours => result.oid = a.oid,
                 .theirs => result.oid = b.oid,
                 else => {

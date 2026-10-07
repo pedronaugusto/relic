@@ -115,7 +115,7 @@ fn expectSameMerges(
         var result = try ort.mergeCommits(gpa, io, &db, ours, theirs, null, .{
             .labels = .{ .ours = c.ours, .theirs = c.theirs },
             .conflict_style = style,
-            .favor = settings.favor,
+            .resolve = settings.resolve,
             .algorithm = settings.algorithm,
             .minimal = settings.minimal,
             .whitespace = settings.whitespace,

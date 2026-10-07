@@ -28,12 +28,12 @@ const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
 const diff = @import("../diff.zig");
 const rename = @import("rename.zig");
-const textdiff = @import("textdiff.zig");
+const parallax = @import("../dependencies.zig").parallax;
 
 const Oid = hash.Oid;
 
 /// Errors from a blame.
-pub const Error = diff.Error || object.ParseError || error{
+pub const Error = diff.Error || diff.TextError || object.ParseError || error{
     /// A commit named is not a commit.
     NotACommit,
     /// The path is not a file in the commit blamed.
@@ -82,14 +82,17 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit: Oid, path: []const
     var work: std.heap.ArenaAllocator = .init(gpa);
     defer work.deinit();
 
-    var s: Scoreboard = .{ .gpa = gpa, .arena = work.allocator(), .io = io, .db = db, .options = options };
+    // One workspace for every diff the walk takes: after the first, a diff
+    // allocates only where it needs more room than any before it.
+    var s: Scoreboard = .{ .gpa = gpa, .arena = work.allocator(), .io = io, .db = db, .options = options, .differ = .init(gpa) };
+    defer s.differ.deinit();
     const start = try s.node(commit);
     const found = (try s.entryAt(start.tree, path)) orelse return error.PathNotFound;
     if (!found.mode.isBlob()) return error.PathNotFound;
     const origin = try s.origin(start, path, found.oid);
-    const lines = try s.linesOf(found.oid);
-    try origin.suspects.ensureTotalCapacity(s.arena, lines.len);
-    for (0..lines.len) |i| origin.suspects.appendAssumeCapacity(.{ .final = @intCast(i), .at = @intCast(i) });
+    const line_count = try lineCount(try s.textOf(found.oid));
+    try origin.suspects.ensureTotalCapacity(s.arena, line_count);
+    for (0..line_count) |i| origin.suspects.appendAssumeCapacity(.{ .final = @intCast(i), .at = @intCast(i) });
     try s.enqueue(start);
 
     while (s.queue.pop()) |n| {
@@ -126,14 +129,24 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit: Oid, path: []const
     }
     // What `Blame` promises: every line blamed once, the hunks running from
     // the first line to the last without a gap or an overlap.
-    assert(s.guilty.items.len == lines.len);
+    assert(s.guilty.items.len == line_count);
     var next_line: usize = 1;
     for (hunks.items) |h| {
         assert(h.final_start == next_line);
         next_line += h.count;
     }
-    assert(next_line == lines.len + 1);
+    assert(next_line == line_count + 1);
     return .{ .gpa = gpa, .arena = out_arena.state, .hunks = hunks.items };
+}
+
+/// How many lines `text` holds, a last one without a newline counted: a
+/// `u32` numbers them, as a diff does, so a text of 4 GiB or more is
+/// `error.InputTooLarge`.
+fn lineCount(text: []const u8) error{InputTooLarge}!u32 {
+    if (text.len > std.math.maxInt(u32)) return error.InputTooLarge;
+    const newlines = std.mem.count(u8, text, "\n");
+    const unterminated = text.len != 0 and text[text.len - 1] != '\n';
+    return @intCast(newlines + @intFromBool(unterminated));
 }
 
 /// A line under suspicion: where it is in the file blamed, and where it is
@@ -180,7 +193,10 @@ const Scoreboard = struct {
     db: *odb_mod.Odb,
     options: Options,
     nodes: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, *Node) = .empty,
-    lines: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, []const textdiff.Line) = .empty,
+    /// Each blob's bytes, read once.
+    texts: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, []const u8) = .empty,
+    /// The workspace every diff of the walk is taken in.
+    differ: parallax.Differ,
     queue: std.PriorityQueue(*Node, void, newerFirst) = .empty,
     guilty: std.ArrayList(Guilty) = .empty,
 
@@ -219,17 +235,14 @@ const Scoreboard = struct {
         return o;
     }
 
-    /// A blob's lines, read once.
-    fn linesOf(s: *Scoreboard, blob: Oid) Error![]const textdiff.Line {
-        if (s.lines.get(blob.bytes)) |l| return l;
+    /// A blob's bytes, read once.
+    fn textOf(s: *Scoreboard, blob: Oid) Error![]const u8 {
+        if (s.texts.get(blob.bytes)) |t| return t;
         const found = try s.db.read(s.io, blob);
         defer s.db.allocator().free(found.bytes);
         const bytes = try s.arena.dupe(u8, found.bytes);
-        const l = try textdiff.splitLines(s.arena, bytes);
-        // A line is numbered with a `u32`, as a diff names it.
-        if (l.len > textdiff.max_lines) return error.OutOfMemory;
-        try s.lines.put(s.arena, blob.bytes, l);
-        return l;
+        try s.texts.put(s.arena, blob.bytes, bytes);
+        return bytes;
     }
 
     /// The entry at `path` under `tree`, or `null`.
@@ -338,17 +351,16 @@ const Scoreboard = struct {
     /// git's `pass_blame_to_parent`: every suspect on a line the diff from
     /// the parent's copy leaves alone goes to the parent, at its line there.
     fn passToParent(s: *Scoreboard, target: *Origin, parent: *Origin) Error!void {
-        const old = try s.linesOf(parent.blob);
-        const new = try s.linesOf(target.blob);
-        const changes = try textdiff.diffLines(s.gpa, old, new, .{});
-        defer s.gpa.free(changes);
+        const old = try s.textOf(parent.blob);
+        const new = try s.textOf(target.blob);
+        const changes = (try s.differ.lines(old, new, .{})).changes;
         std.mem.sort(Suspect, target.suspects.items, {}, byAt);
         var kept: usize = 0;
         var c: usize = 0;
         var offset: i64 = 0;
         for (target.suspects.items) |l| {
-            while (c < changes.len and changes[c].new_start + changes[c].new_count <= l.at) : (c += 1) {
-                offset = @as(i64, @intCast(changes[c].old_start + changes[c].old_count)) - @as(i64, @intCast(changes[c].new_start + changes[c].new_count));
+            while (c < changes.len and changes[c].new_start + changes[c].new_len <= l.at) : (c += 1) {
+                offset = @as(i64, changes[c].old_start + changes[c].old_len) - @as(i64, changes[c].new_start + changes[c].new_len);
             }
             if (c < changes.len and changes[c].new_start <= l.at) {
                 // Inside a change: the target's own line.

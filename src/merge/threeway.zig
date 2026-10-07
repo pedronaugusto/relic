@@ -226,7 +226,7 @@ fn run(
     var ort_options: ort.Options = .{
         .labels = options.blob.labels,
         .conflict_style = options.blob.conflict_style,
-        .favor = settings.favor,
+        .resolve = settings.resolve,
         .algorithm = settings.algorithm,
         .minimal = settings.minimal,
         .renames = settings.renames,
@@ -654,7 +654,7 @@ const SubmoduleOpener = struct {
 /// configuration and `parse_merge_opt` have it.
 fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settings {
     var settings: strategy.Settings = .{
-        .favor = options.blob.favor,
+        .resolve = options.blob.resolve,
         .algorithm = options.blob.algorithm,
         .minimal = options.blob.minimal,
         .whitespace = options.blob.whitespace,

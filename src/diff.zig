@@ -1,8 +1,8 @@
 //! Differences: tree against tree, blob against blob, and the unified text
 //! git prints.
 //!
-//! The algorithms are in `textdiff`; this is what turns them into the shapes
-//! a caller wants — a name-status list, added and removed line counts, and a
+//! The line diff is parallax's; this is what turns it into the shapes a
+//! caller wants — a name-status list, added and removed line counts, and a
 //! patch with git's own headers.
 
 const Self = @This();
@@ -10,7 +10,6 @@ const Self = @This();
 pub const blame = @import("diff/blame.zig");
 pub const patchid = @import("diff/patchid.zig");
 // The modules relic's API puts under this one, as `relic.diff.<name>`.
-pub const textdiff = @import("diff/textdiff.zig");
 pub const rename = @import("diff/rename.zig");
 pub const similarity = @import("diff/similarity.zig");
 
@@ -18,6 +17,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const parallax = @import("dependencies.zig").parallax;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
@@ -26,8 +26,15 @@ const config_mod = @import("config.zig");
 
 const Oid = hash.Oid;
 
-/// Which algorithm produces the edit script.
-pub const Algorithm = textdiff.Algorithm;
+/// Which algorithm produces the edit script: parallax's.
+pub const Algorithm = parallax.Algorithm;
+
+/// Errors from diffing two texts.
+pub const TextError = Allocator.Error || error{
+    /// A side holds 4 GiB or more, or the two hold 2^32 lines or more
+    /// between them: more than a line diff numbers.
+    InputTooLarge,
+};
 
 /// Errors from a diff.
 pub const Error = error{
@@ -412,7 +419,7 @@ pub const NumStat = struct {
 pub const Options = struct {
     algorithm: Algorithm = .myers,
     /// Lines of context on each side of a hunk.
-    context: usize = 3,
+    context: u32 = 3,
     /// Whether to slide an ambiguous change group to the position with the
     /// best indentation. On by default, as it is in git since 2.14.
     indent_heuristic: bool = true,
@@ -435,7 +442,7 @@ pub const Options = struct {
     function_line: ?FunctionLine = null,
     /// A cap on the algorithm's work before it falls back to a coarser but
     /// correct script.
-    max_work: usize = 0,
+    max_work: u32 = 0,
     /// Old-side lines beginning with one of these stay as context where
     /// they can, which is `git diff --anchored`. Read by the patience
     /// algorithm only, as in git, where `--anchored` also selects it.
@@ -482,15 +489,17 @@ pub fn configured(config: *const config_mod.Config, options: Options) ConfigErro
     return out;
 }
 
-fn toTextOptions(options: Options) textdiff.Options {
+/// The line diff `options` asks for.
+fn lineOptions(options: Options) parallax.Options {
     return .{
         .algorithm = options.algorithm,
-        .context = options.context,
-        .indent_heuristic = options.indent_heuristic,
         .minimal = options.minimal,
-        .ignore_all_whitespace = options.ignore_all_whitespace,
-        .ignore_whitespace_change = options.ignore_whitespace_change,
-        .ignore_trailing_whitespace = options.ignore_trailing_whitespace,
+        .indent_heuristic = options.indent_heuristic,
+        .compare = .{ .whitespace = .{
+            .all = options.ignore_all_whitespace,
+            .change = options.ignore_whitespace_change,
+            .at_eol = options.ignore_trailing_whitespace,
+        } },
         .max_work = options.max_work,
         .anchors = options.anchors,
     };
@@ -553,16 +562,17 @@ fn gitlinkText(buf: *[gitlink_text_max]u8, oid: Oid) []const u8 {
 }
 
 /// The added and removed line counts between two blobs.
-pub fn blobNumStat(gpa: Allocator, old: []const u8, new: []const u8, options: Options) Allocator.Error!NumStat {
+pub fn blobNumStat(gpa: Allocator, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
+    var differ: parallax.Differ = .init(gpa);
+    defer differ.deinit();
+    return countLines(&differ, old, new, options);
+}
+
+/// `blobNumStat` in a workspace a caller keeps for many blobs.
+fn countLines(differ: *parallax.Differ, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
     if (isBinary(old) or isBinary(new)) return .{ .plus = 0, .minus = 0, .binary = true };
-    const old_lines = try textdiff.splitLines(gpa, old);
-    defer gpa.free(old_lines);
-    const new_lines = try textdiff.splitLines(gpa, new);
-    defer gpa.free(new_lines);
-    const script = try textdiff.diffLines(gpa, old_lines, new_lines, toTextOptions(options));
-    defer gpa.free(script);
-    const counts = textdiff.stat(script);
-    return .{ .plus = counts.plus, .minus = counts.minus, .binary = false };
+    const counts = (try differ.lines(old, new, lineOptions(options))).stat();
+    return .{ .plus = counts.added, .minus = counts.removed, .binary = false };
 }
 
 /// The counts for every change in a tree comparison, in the same order.
@@ -574,9 +584,13 @@ pub fn numstat(
     db: *odb_mod.Odb,
     changes: []const Change,
     options: Options,
-) Self.Error![]NumStat {
+) (Self.Error || Self.TextError)![]NumStat {
     var out = try gpa.alloc(NumStat, changes.len);
     errdefer gpa.free(out);
+    // One workspace for every pair: after the first, a diff allocates
+    // nothing it does not need more room for.
+    var differ: parallax.Differ = .init(gpa);
+    defer differ.deinit();
     for (changes, 0..) |change, i| {
         // A gitlink has no content in this repository; git counts it as one
         // line changed either way, which is what a commit name is.
@@ -596,7 +610,7 @@ pub fn numstat(
             new_read = (try db.read(io, entry.oid)).bytes;
             break :blk new_read.?;
         } else "";
-        out[i] = try blobNumStat(gpa, old_bytes, new_bytes, options);
+        out[i] = try countLines(&differ, old_bytes, new_bytes, options);
     }
     return out;
 }
@@ -609,7 +623,7 @@ pub fn unified(
     db: *odb_mod.Odb,
     change: Change,
     options: Options,
-) (Error || Io.Writer.Error)!void {
+) (Self.Error || Self.TextError || Io.Writer.Error)!void {
     const old_path = if (change.old) |e| e.path else change.new.?.path;
     const new_path = if (change.new) |e| e.path else change.old.?.path;
 
@@ -706,133 +720,35 @@ pub fn unified(
 /// Append the `@@` hunks for two blobs, with no `diff --git` header.
 ///
 /// This is what a caller that wants only the body asks for, and what
-/// `unified` uses.
+/// `unified` uses. Context lines are the new side's, as git prints them,
+/// which shows where a whitespace option lets the two differ.
 pub fn unifiedBody(
     gpa: Allocator,
     w: *Io.Writer,
     old: []const u8,
     new: []const u8,
     options: Options,
-) (Allocator.Error || Io.Writer.Error)!void {
-    const old_lines = try textdiff.splitLines(gpa, old);
-    defer gpa.free(old_lines);
-    const new_lines = try textdiff.splitLines(gpa, new);
-    defer gpa.free(new_lines);
-    const text_options = toTextOptions(options);
-    const script = try textdiff.diffLines(gpa, old_lines, new_lines, text_options);
-    defer gpa.free(script);
-    const groups = try textdiff.hunks(gpa, script, old_lines.len, new_lines.len, text_options);
-    defer gpa.free(groups);
-
-    // git looks backwards from each hunk for the enclosing line, stopping
-    // where the previous hunk's search began. When it finds none it keeps
-    // the one it found last, which is why a second hunk inside the same
-    // function still carries that function's name.
-    var previous_start: isize = -1;
-    var last_found: ?[]const u8 = null;
-    for (groups) |hunk| {
-        try w.writeAll("@@ -");
-        try writeRange(w, hunk.old_start, hunk.old_count);
-        try w.writeAll(" +");
-        try writeRange(w, hunk.new_start, hunk.new_count);
-        try w.writeAll(" @@");
-        if (options.function_context_names) {
-            const from: isize = @as(isize, @intCast(hunk.old_start)) - 1;
-            if (functionLine(old_lines, from, previous_start, options.function_line)) |text| last_found = text;
-            previous_start = from;
-            if (last_found) |text| {
-                if (text.len != 0) {
-                    try w.writeByte(' ');
-                    try w.writeAll(text);
-                }
-            }
-        }
-        try w.writeByte('\n');
-
-        var old_at = hunk.old_start;
-        var new_at = hunk.new_start;
-        for (hunk.changes) |change| {
-            while (old_at < change.old_start) {
-                try writeLine(w, ' ', old_lines[old_at]);
-                old_at += 1;
-                new_at += 1;
-            }
-            var i: usize = 0;
-            while (i < change.old_count) : (i += 1) {
-                try writeLine(w, '-', old_lines[old_at]);
-                old_at += 1;
-            }
-            i = 0;
-            while (i < change.new_count) : (i += 1) {
-                try writeLine(w, '+', new_lines[new_at]);
-                new_at += 1;
-            }
-        }
-        while (old_at < hunk.old_start + hunk.old_count) {
-            try writeLine(w, ' ', old_lines[old_at]);
-            old_at += 1;
-            new_at += 1;
-        }
-    }
+) (Self.TextError || Io.Writer.Error)!void {
+    var differ: parallax.Differ = .init(gpa);
+    defer differ.deinit();
+    const diff = try differ.lines(old, new, lineOptions(options));
+    // The rule lives in `options` for as long as the writer reads it.
+    const heading: ?parallax.Heading = if (!options.function_context_names)
+        null
+    else if (options.function_line) |*rule|
+        .{ .context = rule, .find = findByRule }
+    else
+        .c_function;
+    try parallax.writeUnified(w, diff, .{ .hunks = .{ .context = options.context }, .heading = heading });
 }
 
-fn writeRange(w: *Io.Writer, start: usize, count: usize) Io.Writer.Error!void {
-    // An empty range is printed at the line before it, and with no count
-    // when the count is one, which is what every unified diff does.
-    if (count == 0) {
-        try w.print("{d},0", .{start});
-        return;
-    }
-    if (count == 1) {
-        try w.print("{d}", .{start + 1});
-        return;
-    }
-    try w.print("{d},{d}", .{ start + 1, count });
+/// A caller's `FunctionLine` asked of a line, as git's `ff_regexp` asks a
+/// driver's pattern: without the line's ending, carriage return included.
+fn findByRule(context: ?*const anyopaque, line: []const u8) ?[]const u8 {
+    const rule: *const FunctionLine = @ptrCast(@alignCast(context.?)); // safe: unifiedBody hands its own *const FunctionLine as the context
+    const bare = if (std.mem.endsWith(u8, line, "\r")) line[0 .. line.len - 1] else line;
+    return rule.find(rule.context, bare);
 }
-
-fn writeLine(w: *Io.Writer, prefix: u8, line: []const u8) Io.Writer.Error!void {
-    try w.writeByte(prefix);
-    if (line.len != 0 and line[line.len - 1] == '\n') {
-        try w.writeAll(line);
-        return;
-    }
-    try w.writeAll(line);
-    try w.writeAll("\n\\ No newline at end of file\n");
-}
-
-/// The text git puts after the second `@@`.
-///
-/// It is the nearest line at or before `from` that starts a function, cut
-/// at eighty bytes with its trailing whitespace removed. By git's own
-/// default, which has no language in it at all, that is a line beginning
-/// with a letter, an underscore or a dollar sign; `rule` is a caller's.
-fn functionLine(lines: []const textdiff.Line, from: isize, limit: isize, rule: ?FunctionLine) ?[]const u8 {
-    var at = from;
-    while (at > limit and at >= 0 and at < @as(isize, @intCast(lines.len))) : (at -= 1) {
-        var line = lines[@intCast(at)];
-        if (rule) |r| {
-            var bare = line;
-            if (std.mem.endsWith(u8, bare, "\n")) {
-                bare = bare[0 .. bare.len - 1];
-                if (std.mem.endsWith(u8, bare, "\r")) bare = bare[0 .. bare.len - 1];
-            }
-            line = r.find(r.context, bare) orelse continue;
-        } else {
-            if (line.len == 0) continue;
-            const first = line[0];
-            if (!std.ascii.isAlphabetic(first) and first != '_' and first != '$') continue;
-        }
-        if (line.len > function_context_max) line = line[0..function_context_max];
-        var end = line.len;
-        while (end > 0 and std.ascii.isWhitespace(line[end - 1])) end -= 1;
-        return line[0..end];
-    }
-    return null;
-}
-
-/// How much of the enclosing line git puts on the `@@` line: the size of
-/// xdiff's buffer for it.
-pub const function_context_max: usize = 80;
 
 test "a unified body matches the shape git prints" {
     const gpa = std.testing.allocator;

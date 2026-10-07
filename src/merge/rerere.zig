@@ -64,7 +64,7 @@ pub const Error = error{
     /// `diff` could not read a conflict's preimage or the file it is
     /// compared with, where git stops with "unable to generate diff".
     UnreadableForDiff,
-} || Allocator.Error || head_mod.Error || odb_errors || worktree.Error || repo_mod.Error || index_mod.WriteError || index_mod.ReadError;
+} || diff_mod.TextError || head_mod.Error || odb_errors || worktree.Error || repo_mod.Error || index_mod.WriteError || index_mod.ReadError;
 
 const odb_errors = @import("../odb.zig").Error;
 
@@ -583,20 +583,20 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
             .unspecified => {},
         };
     }
-    var favor: blobmerge.Favor = .none;
+    var resolve: blobmerge.Resolve = .markers;
     if (name) |driver| {
         if (r.repo.configuration().get(try r.arena.print("merge.{s}.driver", .{driver})) != null) {
             return error.UnsupportedMergeDriver;
         } else if (std.mem.eql(u8, driver, "binary")) {
             return .{ .bytes = ours, .clean = false };
-        } else if (std.mem.eql(u8, driver, "union")) favor = .union_;
+        } else if (std.mem.eql(u8, driver, "union")) resolve = .both;
     }
     const style_text = r.repo.configuration().get("merge.conflictstyle");
-    const style = if (style_text) |text| blobmerge.ConflictStyle.parse(text) orelse .merge else .merge;
+    const style = if (style_text) |text| blobmerge.parseConflictStyle(text) orelse .merge else .merge;
     var merged = blobmerge.blobs(r.arena, base, ours, theirs, .{
         .labels = labels,
         .marker_size = size,
-        .favor = favor,
+        .resolve = resolve,
         .conflict_style = style,
     }) catch |err| switch (err) {
         // `ll_xdl_merge` hands a binary file to the binary driver.
@@ -791,7 +791,10 @@ pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
         diff_mod.unifiedBody(arena, &out.writer, minus, plus, .{
             .indent_heuristic = false,
             .function_context_names = false,
-        }) catch return error.OutOfMemory;
+        }) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
     }
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }

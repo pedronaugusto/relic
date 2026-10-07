@@ -15,7 +15,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const blobmerge = @import("blobmerge.zig");
-const textdiff = @import("../diff/textdiff.zig");
+const parallax = @import("../dependencies.zig").parallax;
 const similarity = @import("../diff/similarity.zig");
 
 /// Errors from reading strategy options.
@@ -27,7 +27,7 @@ pub const Error = error{
 /// A line diff as `diff.algorithm` and `-X diff-algorithm` name it: an
 /// algorithm, and for Myers whether to prove the script minimal.
 pub const LineDiff = struct {
-    algorithm: textdiff.Algorithm,
+    algorithm: parallax.Algorithm,
     minimal: bool = false,
 
     /// git's `parse_algorithm_value`: `myers` or `default`, `minimal`,
@@ -45,10 +45,10 @@ pub const LineDiff = struct {
 /// and the strategy options have had their say.
 pub const Settings = struct {
     /// `-X ours`, `-X theirs`.
-    favor: blobmerge.Favor = .none,
+    resolve: blobmerge.Resolve = .markers,
     /// The line diff the content merges take: histogram unless
     /// `diff.algorithm` or a strategy option says otherwise.
-    algorithm: textdiff.Algorithm = .histogram,
+    algorithm: parallax.Algorithm = .histogram,
     /// Prove Myers' scripts minimal, including those patience and
     /// histogram fall back to.
     minimal: bool = false,
@@ -63,7 +63,7 @@ pub const Settings = struct {
     /// The whitespace differences the content merges overlook:
     /// `ignore-all-space`, `ignore-space-change`, `ignore-space-at-eol`,
     /// `ignore-cr-at-eol`. Each word adds to what the others set.
-    whitespace: textdiff.Whitespace = .{},
+    whitespace: parallax.Whitespace = .{},
     /// `subtree` and `subtree=<path>`: the other side and the base shifted
     /// to line up with our tree before the merge. Empty to have the shift
     /// worked out from the trees, a path to shift by exactly that; `null`
@@ -83,9 +83,9 @@ pub const Settings = struct {
     pub fn apply(s: *Settings, word: []const u8) Error!void {
         if (word.len == 0) return error.UnknownStrategyOption;
         if (std.mem.eql(u8, word, "ours")) {
-            s.favor = .ours;
+            s.resolve = .ours;
         } else if (std.mem.eql(u8, word, "theirs")) {
-            s.favor = .theirs;
+            s.resolve = .theirs;
         } else if (std.mem.eql(u8, word, "patience")) {
             s.algorithm = .patience;
         } else if (std.mem.eql(u8, word, "histogram")) {
@@ -225,16 +225,16 @@ test "strategy options set what git's parse_merge_opt sets, the later word winni
     var s: Settings = .{};
     try s.apply("theirs");
     try s.apply("diff-algorithm=minimal");
-    try std.testing.expectEqual(blobmerge.Favor.theirs, s.favor);
-    try std.testing.expectEqual(textdiff.Algorithm.myers, s.algorithm);
+    try std.testing.expectEqual(blobmerge.Resolve.theirs, s.resolve);
+    try std.testing.expectEqual(parallax.Algorithm.myers, s.algorithm);
     try std.testing.expect(s.minimal);
     // `patience` keeps `minimal`; `diff-algorithm=` clears it.
     try s.apply("patience");
-    try std.testing.expectEqual(textdiff.Algorithm.patience, s.algorithm);
+    try std.testing.expectEqual(parallax.Algorithm.patience, s.algorithm);
     try std.testing.expect(s.minimal);
     try s.apply("diff-algorithm=Histogram");
     try std.testing.expect(!s.minimal);
-    try std.testing.expectEqual(textdiff.Algorithm.histogram, s.algorithm);
+    try std.testing.expectEqual(parallax.Algorithm.histogram, s.algorithm);
     try s.apply("no-renames");
     try std.testing.expect(!s.renames);
     try s.apply("find-renames=40%");
@@ -248,7 +248,7 @@ test "strategy options set what git's parse_merge_opt sets, the later word winni
     // The whitespace words add up; none takes another back.
     try s.apply("ignore-space-change");
     try s.apply("ignore-cr-at-eol");
-    try std.testing.expectEqual(textdiff.Whitespace{ .change = true, .cr_at_eol = true }, s.whitespace);
+    try std.testing.expectEqual(parallax.Whitespace{ .change = true, .cr_at_eol = true }, s.whitespace);
     try std.testing.expectEqual(@as(?[]const u8, null), s.subtree_shift);
     try s.apply("subtree=lib/vendored");
     try std.testing.expectEqualStrings("lib/vendored", s.subtree_shift.?);

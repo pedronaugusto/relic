@@ -67,8 +67,9 @@ pub const Error = error{
     BareRepository,
     /// `reject` and `three_way` together, which git refuses.
     RejectWithThreeWay,
-    /// A favour for conflicts without `three_way`.
-    FavorWithoutThreeWay,
+    /// A resolution for conflicts (`--ours`, `--theirs`, `--union`)
+    /// without `three_way`.
+    ResolveWithoutThreeWay,
     /// `core.whitespace` or a `whitespace` attribute names both
     /// `tab-in-indent` and `indent-with-non-tab`.
     ConflictingWhitespaceRules,
@@ -138,7 +139,7 @@ pub const Options = struct {
     three_way: bool = false,
     /// `--ours`, `--theirs`, `--union` for the three-way merge's
     /// conflicts.
-    favor: blobmerge.Favor = .none,
+    resolve: blobmerge.Resolve = .markers,
     /// `--whitespace`; `null` reads `apply.whitespace` and falls back to
     /// `.warn` (`.nowarn` under `check`).
     whitespace: ?Whitespace = null,
@@ -510,7 +511,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     if (text.len >= max_patch_size) return error.PatchTooLarge;
     if (options.diagnostic) |d| d.reset();
     if (options.reject and options.three_way) return error.RejectWithThreeWay;
-    if (options.favor != .none and !options.three_way) return error.FavorWithoutThreeWay;
+    if (options.resolve != .markers and !options.three_way) return error.ResolveWithoutThreeWay;
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
@@ -1451,18 +1452,18 @@ fn threeWayMerge(st: *State, img: *Image, path: []const u8, base: Oid, ours: Oid
     defer db.allocator().free(o.bytes);
     const t = try db.read(st.io, theirs);
     defer db.allocator().free(t.bytes);
-    const style = if (st.repo.configuration().get("merge.conflictstyle")) |v| blobmerge.ConflictStyle.parse(v) orelse .merge else .merge;
+    const style = if (st.repo.configuration().get("merge.conflictstyle")) |v| blobmerge.parseConflictStyle(v) orelse .merge else .merge;
     _ = path;
     var result = blobmerge.blobs(st.gpa, b.bytes, o.bytes, t.bytes, .{
         .conflict_style = style,
-        .favor = st.options.favor,
+        .resolve = st.options.resolve,
     }) catch |err| switch (err) {
         error.BinaryBlob => {
             // ll_merge's binary driver: ours, or the favoured side, with a
             // conflict unless a side was favoured
-            const chosen = if (st.options.favor == .theirs) t.bytes else o.bytes;
+            const chosen = if (st.options.resolve == .theirs) t.bytes else o.bytes;
             try img.prepare(st.gpa, chosen, false);
-            return st.options.favor == .none or st.options.favor == .union_;
+            return st.options.resolve == .markers or st.options.resolve == .both;
         },
         else => |e| return e,
     };

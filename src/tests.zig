@@ -135,7 +135,6 @@ test {
     _ = @import("text/glob_test.zig");
     _ = @import("diff/patchid.zig");
     _ = @import("diff/similarity.zig");
-    _ = @import("diff/textdiff.zig");
     _ = @import("lfs/netrc.zig");
     _ = @import("lfs/ssh.zig");
     _ = @import("merge/strategy.zig");

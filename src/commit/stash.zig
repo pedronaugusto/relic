@@ -47,7 +47,7 @@ const ignore = @import("../worktree/ignore.zig");
 const attributes = @import("../worktree/attributes.zig");
 const glob_mod = @import("../text/glob.zig");
 const odb_mod = @import("../odb.zig");
-const textdiff = @import("../diff/textdiff.zig");
+const parallax = @import("../dependencies.zig").parallax;
 const convert = @import("../worktree/convert.zig");
 const filter = @import("../worktree/filter.zig");
 const program = @import("../repo/program.zig");
@@ -88,7 +88,7 @@ pub const Error = error{
     /// An untracked directory holding a repository of its own, which a stash
     /// would record as a submodule. `Refusal` names it.
     NestedRepository,
-} || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error ||
+} || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
     diff.Error || hooks.Error || reflog.ReadError || fs.LockError || fs.CommitError ||
     ignore.Error || attributes.Error || convert.Error || error{NameTooLong};
 
@@ -983,20 +983,20 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
         defer gpa.free(new_blob.bytes);
         const now_blob = try db.read(io, now.oid);
         defer gpa.free(now_blob.bytes);
-        if (textdiff.isBinary(old_blob.bytes) or textdiff.isBinary(new_blob.bytes) or textdiff.isBinary(now_blob.bytes)) return false;
+        if (attributes.isBinaryForDiff(old_blob.bytes) or attributes.isBinaryForDiff(new_blob.bytes) or attributes.isBinaryForDiff(now_blob.bytes)) return false;
 
-        const old_lines = try textdiff.splitLines(arena, old_blob.bytes);
-        const new_lines = try textdiff.splitLines(arena, new_blob.bytes);
-        const now_lines = try textdiff.splitLines(arena, now_blob.bytes);
-        const patch = try textdiff.diffLines(arena, old_lines, new_lines, .{});
-        const hunks = try textdiff.hunks(arena, patch, old_lines.len, new_lines.len, .{});
-        const moved = try textdiff.diffLines(arena, old_lines, now_lines, .{});
-        for (hunks) |h| {
+        var patch = try parallax.diffLines(arena, old_blob.bytes, new_blob.bytes, .{});
+        defer patch.deinit();
+        var moved = try parallax.diffLines(arena, old_blob.bytes, now_blob.bytes, .{});
+        defer moved.deinit();
+        const old_len = patch.diff.old.len();
+        var hunks = patch.diff.hunks(.{});
+        while (hunks.next()) |h| {
             const start = h.old_start;
-            const end = h.old_start + h.old_count;
-            for (moved) |m| {
-                if (m.old_count > 0) {
-                    if (m.old_start < end and m.old_start + m.old_count > start) return false;
+            const end = h.old_start + h.old_len;
+            for (moved.diff.changes) |m| {
+                if (m.old_len > 0) {
+                    if (m.old_start < end and m.old_start + m.old_len > start) return false;
                     continue;
                 }
                 // An insertion breaks the run of lines the hunk needs when it
@@ -1005,7 +1005,7 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
                 const at = m.old_start;
                 if (at > start and at < end) return false;
                 if (at == start and start == 0) return false;
-                if (at == end and end == old_lines.len) return false;
+                if (at == end and end == old_len) return false;
             }
         }
     }

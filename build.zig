@@ -8,11 +8,12 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
     // The module. Conduit runs programs and carries its platform linkage;
     // command preparation and the permission to run remain here. sweep
-    // matches git's globs.
+    // matches git's globs, and parallax diffs and merges lines.
     //=====================================================================
 
     const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
+    const parallax = b.dependency("parallax", .{ .target = target, .optimize = optimize }).module("parallax");
 
     const module = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
@@ -22,6 +23,7 @@ pub fn build(b: *std.Build) void {
 
     module.addImport("conduit", conduit);
     module.addImport("sweep", sweep);
+    module.addImport("parallax", parallax);
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -197,6 +199,7 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addImport("conduit", conduit);
     test_module.addImport("sweep", sweep);
+    test_module.addImport("parallax", parallax);
     test_module.addImport("std_tls_client", std_client_module);
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);

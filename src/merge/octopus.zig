@@ -228,7 +228,7 @@ const Octopus = struct {
         if (blobmerge.blobs(o.gpa, ancestor_text, our_text, their_text, .{
             .conflict_style = o.options.conflict_style,
             .labels = .{ .ours = try o.tempName(), .base = try o.tempName(), .theirs = try o.tempName() },
-            .join_without_alnum = true,
+            .level = .zealous_alnum,
         })) |result| {
             var r = result;
             defer r.deinit();

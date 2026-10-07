@@ -733,6 +733,127 @@ test "benchmark: for-each-ref chooses among many refs by pattern" {
     , .{ @tagName(builtin.optimize), ref_count, list_ms });
 }
 
+/// A source file of `lines` lines, with every `stride`-th line changed by
+/// `round`: the shape of a file a history edits a little at a time.
+fn editedText(gpa: std.mem.Allocator, lines: usize, stride: usize, round: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (0..lines) |i| {
+        if (i % 40 == 0) try out.print(gpa, "fn section_{d}() void {{\n", .{i / 40});
+        if (stride != 0 and (i + round) % stride == 0) {
+            try out.print(gpa, "    value_{d} = compute({d}, {d});\n", .{ i, i, round });
+        } else {
+            try out.print(gpa, "    value_{d} = compute({d});\n", .{ i, i });
+        }
+        if (i % 40 == 39) try out.appendSlice(gpa, "}\n");
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "benchmark: unified bodies, line counts and content merges of many files" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    const files: usize = if (smoke) 4 else switch (builtin.optimize) {
+        .Debug => 40,
+        else => 400,
+    };
+    const Pair = struct { old: []u8, new: []u8, theirs: []u8 };
+    const pairs = try gpa.alloc(Pair, files);
+    defer {
+        for (pairs) |p| {
+            gpa.free(p.old);
+            gpa.free(p.new);
+            gpa.free(p.theirs);
+        }
+        gpa.free(pairs);
+    }
+    for (pairs, 0..) |*p, i| p.* = .{
+        .old = try editedText(gpa, 300 + i % 200, 0, 0),
+        .new = try editedText(gpa, 300 + i % 200, 17 + i % 5, 1),
+        .theirs = try editedText(gpa, 300 + i % 200, 23 + i % 7, 2),
+    };
+
+    const Work = struct {
+        pairs: []const Pair,
+        fn bodies(w: @This()) void {
+            var out: std.Io.Writer.Allocating = .init(std.heap.smp_allocator);
+            defer out.deinit();
+            for (w.pairs) |p| {
+                relic.diff.unifiedBody(std.heap.smp_allocator, &out.writer, p.old, p.new, .{}) catch unreachable;
+                out.clearRetainingCapacity();
+            }
+        }
+        fn counts(w: @This()) void {
+            var lines: usize = 0;
+            for (w.pairs) |p| {
+                const n = relic.diff.blobNumStat(std.heap.smp_allocator, p.old, p.new, .{}) catch unreachable;
+                lines += n.plus + n.minus;
+            }
+            std.mem.doNotOptimizeAway(lines);
+        }
+        fn merges(w: @This()) void {
+            var conflicts: usize = 0;
+            for (w.pairs) |p| {
+                var r = relic.merge.blobs(std.heap.smp_allocator, p.old, p.new, p.theirs, .{ .algorithm = .histogram }) catch unreachable;
+                if (!r.isClean()) conflicts += 1;
+                r.deinit();
+            }
+            std.mem.doNotOptimizeAway(conflicts);
+        }
+    };
+    const work: Work = .{ .pairs = pairs };
+    const passes: usize = if (smoke) 1 else 7;
+    const bodies_ms = bestMs(io, passes, work, Work.bodies);
+    const counts_ms = bestMs(io, passes, work, Work.counts);
+    const merges_ms = bestMs(io, passes, work, Work.merges);
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, {d} files of 300 to 500 lines, a few lines changed on each side)
+        \\    unified      {d: >8.2} ms
+        \\    numstat      {d: >8.2} ms
+        \\    merge        {d: >8.2} ms
+        \\
+    , .{ @tagName(builtin.optimize), files, bodies_ms, counts_ms, merges_ms });
+}
+
+test "benchmark: blame follows a file through a long history" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    var repo_git = try testgit.Repo.init(gpa, io);
+    defer repo_git.deinit();
+    const rounds: usize = if (smoke) 3 else switch (builtin.optimize) {
+        .Debug => 40,
+        else => 200,
+    };
+    for (0..rounds) |round| {
+        const text = try editedText(gpa, 2000, 97, round);
+        defer gpa.free(text);
+        try repo_git.writeFile(io, "file.zig", text);
+        try repo_git.exec(io, &.{ "add", "file.zig" });
+        var msg: [32]u8 = undefined;
+        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "r{d}", .{round}) });
+    }
+    var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
+    defer repo.deinit(io);
+    const head = (try repo.head(io)).?;
+    defer gpa.free(head.name);
+    const Pass = struct {
+        repo: *repo_mod.Repository,
+        commit: hash.Oid,
+        fn blame(p: @This()) void {
+            var b = relic.diff.blame.file(std.heap.smp_allocator, std.testing.io, &p.repo.odb, p.commit, "file.zig", .{}) catch unreachable;
+            std.mem.doNotOptimizeAway(b.hunks.len);
+            b.deinit();
+        }
+    };
+    const blame_ms = bestMs(io, if (smoke) 1 else 5, Pass{ .repo = &repo, .commit = head.oid }, Pass.blame);
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, blame of a 2,000-line file through {d} commits)
+        \\    blame        {d: >8.2} ms
+        \\
+    , .{ @tagName(builtin.optimize), rounds, blame_ms });
+}
+
 // Smoke exercises correctness without sampling a benchmark clock.
 var smoke_ticks = std.atomic.Value(i64).init(0);
 fn benchmarkNow(io: std.Io) std.Io.Timestamp {

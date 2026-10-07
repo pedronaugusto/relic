@@ -1160,7 +1160,10 @@ fn writePair(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change, old: ?Side, new
         return;
     }
     var body: Io.Writer.Allocating = .init(a);
-    diff.unifiedBody(ctx.gpa, &body.writer, one, two, ctx.diff_options) catch return error.OutOfMemory;
+    diff.unifiedBody(ctx.gpa, &body.writer, one, two, ctx.diff_options) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
     if (body.written().len == 0) return;
     // a name with a space gets a tab after it, for GNU patch
     try out.print(a, "--- {s}{s}\n+++ {s}{s}\n", .{
