@@ -21,6 +21,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
+const ref_names = @import("../names/ref.zig");
 const object = @import("../object.zig");
 const program = @import("../repo/program.zig");
 const config_mod = @import("../config.zig");
@@ -267,7 +268,7 @@ test "submodules cloned and fetched from a remote are what git submodule update 
         defer sub.close(io);
         if (std.mem.eql(u8, below, "inner")) {
             try gitIn(gpa, io, sub, &.{ "fetch", "-q", "origin", "refs/keep/aside" });
-            try gitIn(gpa, io, sub, &.{ "checkout", "-q", "FETCH_HEAD" });
+            try gitIn(gpa, io, sub, &.{ "checkout", "-q", ref_names.Special.fetch_head.name() });
         } else {
             try gitIn(gpa, io, sub, &.{ "pull", "-q", "origin", "main" });
         }

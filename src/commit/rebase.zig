@@ -42,6 +42,7 @@ const filter = @import("../worktree/filter.zig");
 const strategy = @import("../merge/strategy.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
+const ref_names = @import("../names/ref.zig");
 const message = @import("message.zig");
 const trailer = @import("trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
@@ -831,8 +832,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
             try checkoutTip(&r, tip, name);
         }
         // `finish_rebase`, with nothing to finish.
-        try head_mod.deleteRef(io, repo, "REBASE_HEAD");
-        try head_mod.deleteRef(io, repo, "AUTO_MERGE");
+        try repo.refStore().root().delete(repo.gpa, io, .rebase_head);
+        try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
         return finishOutcome(&r, .up_to_date, null, null);
     }
 
@@ -1042,7 +1043,7 @@ fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error
     var outcome = try threeway.apply(r.gpa, r.io, r.repo, &index, from_tree, from_tree, try r.repo.commitTree(r.io, base), .{ .blocked = r.options.blocked });
     outcome.deinit();
     try index.write(r.io, r.repo.git_dir, "index", .{});
-    try head_mod.writeRef(r.io, r.repo, "ORIG_HEAD", orig_head);
+    try r.repo.refStore().root().write(r.repo.gpa, r.io, .orig_head, orig_head);
     const log = try r.reflogMessage("start", try r.arena.print("checkout {s}", .{onto_name}));
     try head_mod.detach(r.io, r.repo, h.oid, base, .{ .who = r.options.who, .message = log });
     if (r.options.hooks) |runner| _ = try runner.postCheckout(r.io, h.oid orelse Oid.zero(r.repo.objectFormat()), base, .branch);
@@ -1071,14 +1072,16 @@ fn checkoutTip(r: *Run, tip: Tip, name: []const u8) Error!void {
 fn removeState(r: *Run) Error!void {
     // The labels a rebase made go with it.
     if (try r.readState("refs-to-delete")) |text| {
+        var labels: std.ArrayList([]const u8) = .empty;
         var lines = std.mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |name| {
             // Only the labels a rebase writes, `refs/rewritten/<label>`,
             // and deleted as refs: a line is not a path to unlink, and a
             // reftable repository keeps them in its tables.
-            if (!std.mem.startsWith(u8, name, "refs/rewritten/") or !worktree.safepath.isValidRefName(name)) continue;
-            try head_mod.deleteRef(r.io, r.repo, name);
+            if (!std.mem.startsWith(u8, name, "refs/rewritten/") or !ref_names.isSafe(name)) continue;
+            try labels.append(r.arena, name);
         }
+        try r.repo.refStore().deleteRefs(r.repo.gpa, r.io, labels.items, null);
     }
     try r.repo.git_dir.deleteTree(r.io, state_dir);
 }
@@ -1126,9 +1129,9 @@ fn runLoop(r: *Run) Error!Outcome {
             try r.state("msgnum", try r.arena.print("{d}\n", .{r.done_nr}));
         }
         try r.removeState("author-script");
-        try head_mod.removeState(r.io, r.repo.git_dir, "MERGE_HEAD");
-        try head_mod.deleteRef(r.io, r.repo, "AUTO_MERGE");
-        try head_mod.deleteRef(r.io, r.repo, "REBASE_HEAD");
+        try r.repo.refStore().special().delete(r.io, .merge_head);
+        try r.repo.refStore().root().delete(r.repo.gpa, r.io, .auto_merge);
+        try r.repo.refStore().root().delete(r.repo.gpa, r.io, .rebase_head);
         r.msg.clearRetainingCapacity();
         r.have_message = false;
 
@@ -1165,7 +1168,7 @@ fn runLoop(r: *Run) Error!Outcome {
 /// git, and `REBASE_HEAD` names its commit.
 fn reschedule(r: *Run, item: todo.Item, err: Error) Error {
     try saveTodo(r, 0);
-    if (item.commit) |commit| try head_mod.writeRef(r.io, r.repo, "REBASE_HEAD", commit);
+    if (item.commit) |commit| try r.repo.refStore().root().write(r.repo.gpa, r.io, .rebase_head, commit);
     return err;
 }
 
@@ -1311,7 +1314,7 @@ fn pickOne(r: *Run) Error!?Outcome {
 fn errorWithPatch(r: *Run, commit: Oid, to_amend: bool) Error!void {
     if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
     try r.state("stopped-sha", try r.arena.print("{s}\n", .{try r.hex(commit)}));
-    try head_mod.writeRef(r.io, r.repo, "REBASE_HEAD", commit);
+    try r.repo.refStore().root().write(r.repo.gpa, r.io, .rebase_head, commit);
     try writePatch(r, commit);
     if (!r.hasState("message")) {
         const found = try r.repo.odb.read(r.io, commit);
@@ -1460,7 +1463,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     });
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
-    try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
+    try repo.refStore().root().write(repo.gpa, io, .auto_merge, outcome.auto_merge);
     if (!outcome.isClean()) try noteConflicts(r, outcome.conflicts);
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", r.msg.items);
     // A rebase takes care of the commit itself, so a conflict leaves no
@@ -1470,7 +1473,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         return .conflict;
     }
     if (command == .pick or command == .reword or command == .edit) {
-        try head_mod.writeRef(io, repo, "CHERRY_PICK_HEAD", source.oid);
+        try repo.refStore().root().write(repo.gpa, io, .cherry_pick_head, source.oid);
     }
 
     // Empty now, or empty from the start.
@@ -1482,9 +1485,9 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         } else switch (r.empty) {
             .keep => allow_empty = true,
             .drop => {
-                try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+                try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
                 try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
-                try head_mod.deleteRef(io, repo, "AUTO_MERGE");
+                try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
                 return .ok;
             },
             .stop => {},
@@ -1552,7 +1555,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
             try head_mod.writeState(io, repo.git_dir, "SQUASH_MSG", proposed);
             // git points `REBASE_HEAD` at the commit before it runs `git
             // commit` for the message.
-            try head_mod.writeRef(io, repo, "REBASE_HEAD", item.commit.?);
+            try repo.refStore().root().write(repo.gpa, io, .rebase_head, item.commit.?);
             var shown = proposed;
             if (commit_hooks.runner) |runner| {
                 try head_mod.writeState(io, repo.git_dir, "COMMIT_EDITMSG", proposed);
@@ -1593,7 +1596,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     if (msg_source == .squash_edit) {
         // `git commit` takes the message's files away before its last hooks.
-        try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+        try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
         try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
     }
     if (commit_hooks.runner) |runner| {
@@ -1604,14 +1607,14 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         // does, with its author when it is `git commit`'s.
         if (amending) _ = try runner.postRewriteBy(io, .amend, &.{.{ .old = head_oid, .new = made }}, if (msg_source == .squash_edit) author else null);
     }
-    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
     try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
     if (msg_source == .squash_edit) {
         // An edited message is committed with `git commit`, which takes
         // `AUTO_MERGE` away as it finishes; git points `REBASE_HEAD` at the
         // commit first, and it stays there until the next instruction.
         try head_mod.removeState(io, repo.git_dir, "SQUASH_MSG");
-        try head_mod.deleteRef(io, repo, "AUTO_MERGE");
+        try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
     }
     if (command == .reword) try reword(r, reflog_action);
     if (final_fixup) {
@@ -1716,7 +1719,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     const log = try r.arena.print("{s}: {s}", .{ reflog_action, firstLine(text) });
     try head_mod.advance(r.io, r.repo, head, made, .{ .who = r.options.who, .message = log });
     // The amend is `git commit --amend`, which takes `AUTO_MERGE` away.
-    try head_mod.deleteRef(r.io, r.repo, "AUTO_MERGE");
+    try r.repo.refStore().root().delete(r.repo.gpa, r.io, .auto_merge);
     if (commit_hooks.runner) |runner| {
         _ = try runner.postCommit(r.io, e);
         _ = try runner.postRewriteBy(r.io, .amend, &.{.{ .old = head.oid.?, .new = made }}, current.commit.author);
@@ -2147,27 +2150,33 @@ fn checkedOutBranches(r: *Run) Error!std.StringHashMapUnmanaged([]const u8) {
         const len = repo.common_dir.realPath(io, &buf) catch break :main;
         const common = buf[0..len];
         const main_path = if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common;
-        try addWorktreeBranches(r, &map, repo.common_dir, try r.arena.dupe(u8, main_path));
+        try addWorktreeBranches(r, &map, repo.common_dir, "main-worktree/HEAD", try r.arena.dupe(u8, main_path));
     }
-    var listing = try worktrees.list(r.gpa, io, repo.common_dir, repo.objectFormat());
+    var listing = try worktrees.list(r.gpa, io, repo.refStore());
     defer listing.deinit();
     for (listing.entries) |entry| {
         const sub = try r.arena.print("worktrees/{s}", .{entry.name});
         var admin = repo.common_dir.openDir(io, sub, .{}) catch continue;
         defer admin.close(io);
-        try addWorktreeBranches(r, &map, admin, try r.arena.dupe(u8, entry.path));
+        try addWorktreeBranches(r, &map, admin, try r.arena.print("{s}/HEAD", .{sub}), try r.arena.dupe(u8, entry.path));
     }
     return map;
 }
 
-fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), dir: Io.Dir, where: []const u8) Error!void {
+/// The branches the worktree whose `HEAD` is `head` holds: that `HEAD`,
+/// read through the ref store, which a reftable repository keeps in its
+/// tables, and what the operation in progress in `dir` is on.
+fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), dir: Io.Dir, head: []const u8, where: []const u8) Error!void {
     const arena = r.arena;
-    if (try head_mod.readState(arena, r.io, dir, "HEAD")) |text| {
-        const line = std.mem.trim(u8, text, " \t\r\n");
-        if (std.mem.startsWith(u8, line, "ref:")) {
-            try map.put(arena, std.mem.trim(u8, line[4..], " \t"), where);
-        }
-    }
+    const head_value = r.repo.refStore().read(arena, r.io, head) catch |err| switch (err) {
+        // git's `get_worktrees` reads a `HEAD` it cannot take as nothing.
+        error.MalformedRef => null,
+        else => |e| return e,
+    };
+    if (head_value) |value| switch (value) {
+        .symbolic => |target| try map.put(arena, target, where),
+        .direct => {},
+    };
     for ([_][]const u8{ "rebase-apply/head-name", "rebase-merge/head-name" }) |sub| {
         const text = (try head_mod.readState(arena, r.io, dir, sub)) orelse continue;
         const name = std.mem.trim(u8, text, " \t\r\n");
@@ -2246,7 +2255,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     // does the rest its own way.
     if (r.options.strategy_options.len != 0) return mergeAsGitMerge(r, item, &.{merge_head}, author);
 
-    try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", try r.hex(merge_head));
+    try repo.refStore().special().write(repo.gpa, io, .merge_head, try r.hex(merge_head));
     try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", "no-ff");
 
     var index = try repo.openIndex(io);
@@ -2269,7 +2278,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     });
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
-    try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
+    try repo.refStore().root().write(repo.gpa, io, .auto_merge, outcome.auto_merge);
     if (!outcome.isClean()) {
         const copied = try r.arena.dupe(threeway.Conflict, outcome.conflicts);
         for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
@@ -2336,7 +2345,7 @@ fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_heads: []const Oid, author: o
     const gpa = r.gpa;
     const io = r.io;
     const repo = r.repo;
-    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
     const targets = try r.arena.alloc(merging.Target, merge_heads.len);
     for (merge_heads, targets) |oid, *target| target.* = .{ .oid = oid, .name = try r.hex(oid), .kind = .commit };
     var outcome = try merging.startHeads(gpa, io, repo, targets, .{
@@ -2519,7 +2528,7 @@ fn commitStagedChanges(r: *Run) Error!void {
         if (entry.unstaged != .unmodified) return error.DirtyWorktree;
         if (entry.staged != .unmodified) staged = true;
     }
-    const merge_head_text = try head_mod.readState(r.arena, io, repo.git_dir, "MERGE_HEAD");
+    const merge_head_text = try repo.refStore().special().readAll(r.arena, io, .merge_head);
     const is_clean = !staged and merge_head_text == null;
     if (!is_clean and !r.hasState("message")) return error.StagedWithoutMessage;
 
@@ -2530,7 +2539,7 @@ fn commitStagedChanges(r: *Run) Error!void {
         amend = true;
     }
     if (is_clean) {
-        try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+        try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
         try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
         return;
     }
@@ -2579,7 +2588,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     }, r.options.diagnostic);
     const log = try r.arena.print("rebase (continue): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
-    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
     try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
     try r.removeState("amend");
     // The commit is `git commit`'s, which records resolutions as it ends.
@@ -2602,8 +2611,8 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         defer index.deinit();
         try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, current), .hard, options.blocked);
         try repo.writeIndex(io, &index);
-        try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
-        try head_mod.deleteRef(io, repo, "REVERT_HEAD");
+        try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
+        try repo.refStore().root().delete(repo.gpa, io, .revert_head);
         try merging.removeMergeState(io, repo);
     }
     return proceed(gpa, io, repo, options);
@@ -2629,10 +2638,10 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     } else {
         try head_mod.advance(io, repo, h, tip.orig_head, .{ .who = who, .message = log });
     }
-    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
-    try head_mod.deleteRef(io, repo, "REVERT_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
+    try repo.refStore().root().delete(repo.gpa, io, .revert_head);
     try merging.removeMergeState(io, repo);
-    try head_mod.deleteRef(io, repo, "REBASE_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .rebase_head);
     try removeState(&r);
 }
 

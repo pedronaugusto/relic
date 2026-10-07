@@ -15,6 +15,7 @@ const cache = @import("cache.zig");
 pub const Options = @import("policy.zig").Options;
 pub const Error = @import("policy.zig").Error;
 const state_mod = @import("../state.zig");
+const ref_names = @import("../../names/ref.zig");
 const builtin = @import("builtin");
 const Stack = cache.Stack;
 const Cache = cache.Cache;
@@ -55,13 +56,6 @@ const View = struct {
         owned.* = null;
     }
 };
-/// Whether `name` is one git keeps as a file whatever the ref format:
-/// `FETCH_HEAD`, which holds more than a ref can, and `MERGE_HEAD`, which
-/// may hold several.
-pub fn isSpecial(name: []const u8) bool {
-    return std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD");
-}
-
 /// `Store.read` over reftable. The returned target of a symbolic ref is
 /// the caller's.
 pub fn read(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError!?refs.Ref {
@@ -72,13 +66,71 @@ pub fn read(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadE
 }
 
 fn readIn(gpa: Allocator, stacks: *const Stacks, store: anytype, name: []const u8) refs.ReadError!?refs.Ref {
-    const record = (try cache.internal.forName(stacks, store, name).lookup(gpa, gpa, name)) orelse return null;
+    return refFrom(gpa, cache.internal.forName(stacks, store, name), name);
+}
+
+/// `name`'s value in one stack, or `null`.
+fn refFrom(gpa: Allocator, stack: *const Stack, name: []const u8) refs.ReadError!?refs.Ref {
+    const record = (try stack.lookup(gpa, gpa, name)) orelse return null;
     return switch (record.value) {
         .deletion => null,
         .direct => |oid| .{ .direct = oid },
         .peeled => |p| .{ .direct = p.value },
         .symbolic => |target| .{ .symbolic = target },
     };
+}
+
+/// A ref another worktree keeps for itself, reached as
+/// `main-worktree/<name>` or `worktrees/<id>/<name>`: the main worktree's
+/// in the shared stack, a linked worktree's in its own, which is read for
+/// this call. The returned target of a symbolic ref is the caller's.
+pub fn readOtherWorktree(gpa: Allocator, io: Io, store: anytype, where: ref_names.WorktreeRef) refs.ReadError!?refs.Ref {
+    switch (where.owner) {
+        .main => {
+            var owned: ?Stacks = null;
+            var view = try View.acquire(gpa, io, store, &owned);
+            defer view.release(io, &owned);
+            return refFrom(gpa, &view.stacks.main, where.bare);
+        },
+        .other => {
+            var stack = (try loadWorktree(gpa, io, store, where.id)) orelse return null;
+            defer stack.deinit();
+            return refFrom(gpa, &stack, where.bare);
+        },
+        // unreachable: the store reads the names of its own worktree, and the shared ones, itself
+        .current, .shared => unreachable,
+    }
+}
+
+/// The stack of the linked worktree `id`, read now, or `null` when there
+/// is no such worktree.
+fn loadWorktree(gpa: Allocator, io: Io, store: anytype, id: []const u8) refs.ReadError!?Stack {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = std.mem.print(&path_buffer, "worktrees/{s}", .{id}) catch return null;
+    var admin = store.commonDir().openDir(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.NameTooLong => return null,
+        else => |e| return e,
+    };
+    defer admin.close(io);
+    const stack = try loadIn(gpa, io, admin, store.objectFormat());
+    return stack;
+}
+
+/// The log records of `name`, newest first, wherever its worktree keeps
+/// them: this worktree's stack, the shared one, or another worktree's.
+fn logRecords(gpa: Allocator, arena: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError![]reftable.LogRecord {
+    const where = ref_names.parseWorktreeRef(name);
+    if (where.owner == .other) {
+        if (where.bare.len == 0) return &.{};
+        var stack = (try loadWorktree(gpa, io, store, where.id)) orelse return &.{};
+        defer stack.deinit();
+        return stack.logsFor(gpa, arena, where.bare);
+    }
+    var owned: ?Stacks = null;
+    var view = try View.acquire(gpa, io, store, &owned);
+    defer view.release(io, &owned);
+    if (where.owner == .main) return view.stacks.main.logsFor(gpa, arena, where.bare);
+    return cache.internal.forName(view.stacks, store, name).logsFor(gpa, arena, name);
 }
 
 /// Follow symbolic refs through the stacks until an object name, with the
@@ -133,6 +185,7 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var entries: std.ArrayList(refs.Named) = .empty;
+    var broken: std.ArrayList(refs.Broken) = .empty;
 
     const sources = [_]?*const Stack{ &stacks.main, if (stacks.worktree) |*w| w else null };
     for (sources, 0..) |maybe, which| {
@@ -143,6 +196,12 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
             // the main worktree's, and the worktree's own stack holds only
             // per-worktree refs.
             if (stacks.worktree != null and isPerWorktree(store, record.name) != (which == 1)) continue;
+            // A name no ref may have is listed apart, as git's reftable
+            // backend marks it broken.
+            if (!ref_names.checkFormat(record.name, .{ .allow_onelevel = true })) {
+                try broken.append(arena, .{ .name = record.name, .why = if (ref_names.isSafe(record.name)) .bad_name else .unsafe_name });
+                continue;
+            }
             try entries.append(arena, .{
                 .name = record.name,
                 .target = switch (record.value) {
@@ -157,10 +216,15 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
         }
     }
     std.mem.sort(refs.Named, entries.items, {}, lessThanNamed);
-    return .{ .gpa = gpa, .arena = arena_instance.state, .entries = entries.items };
+    std.mem.sort(refs.Broken, broken.items, {}, lessThanBroken);
+    return .{ .gpa = gpa, .arena = arena_instance.state, .entries = entries.items, .broken = broken.items };
 }
 
 fn lessThanNamed(_: void, a: refs.Named, b: refs.Named) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+fn lessThanBroken(_: void, a: refs.Broken, b: refs.Broken) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
@@ -168,12 +232,9 @@ fn lessThanNamed(_: void, a: refs.Named, b: refs.Named) bool {
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
 pub fn readLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
-    var owned: ?Stacks = null;
-    var view = try View.acquire(gpa, io, store, &owned);
-    defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    const records = try cache.internal.forName(view.stacks, store, name).logsFor(gpa, arena_instance.allocator(), name);
+    const records = try logRecords(gpa, arena_instance.allocator(), io, store, name);
 
     var total: usize = 0;
     var count: usize = 0;
@@ -225,13 +286,9 @@ fn put(bytes: []u8, at: *usize, text: []const u8) []const u8 {
 /// Whether a log for `name` exists: any entry at all, the existence marker
 /// included.
 pub fn logExists(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError!bool {
-    var owned: ?Stacks = null;
-    var view = try View.acquire(gpa, io, store, &owned);
-    defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    const records = try cache.internal.forName(view.stacks, store, name).logsFor(gpa, arena_instance.allocator(), name);
-    return records.len != 0;
+    return (try logRecords(gpa, arena_instance.allocator(), io, store, name)).len != 0;
 }
 
 /// git's zone number -- `+0130` read as 130 -- as minutes east of UTC.
@@ -301,7 +358,6 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     const gpa = tx.gpa;
     var needs_worktree = false;
     for (tx.edits.items) |edit| {
-        if (isSpecial(edit.name)) continue;
         if (isLinked(store) and isPerWorktree(store, edit.name)) needs_worktree = true;
     }
 
@@ -323,13 +379,7 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     for (tx.edits.items) |*edit| {
         // A ref only logged through is neither read nor checked.
         if (edit.via != null) continue;
-        if (isSpecial(edit.name)) {
-            try lockSpecial(io, tx, edit);
-        }
-        const current = if (isSpecial(edit.name))
-            try store.read(gpa, io, edit.name)
-        else
-            try readIn(gpa, &stacks, store, edit.name);
+        const current = try readIn(gpa, &stacks, store, edit.name);
         var current_oid: ?Oid = null;
         if (current) |value| switch (value) {
             .direct => |oid| current_oid = oid,
@@ -356,39 +406,6 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     tx.reftable = pending;
 }
 
-/// Take the file lock a special ref is written through, as the files
-/// backend takes a loose ref's.
-fn lockSpecial(io: Io, tx: anytype, edit: *refs.Edit) refs.TransactionError!void {
-    const buffer = try tx.gpa.alloc(u8, 4096);
-    edit.lock_buffer = buffer;
-    edit.lock = try fs.LockFile.open(tx.gpa, io, tx.store.dirFor(edit.name), edit.name, buffer, .{});
-}
-
-/// Write each special ref's new value into its file, or remove the file.
-fn commitSpecial(io: Io, tx: anytype) refs.TransactionError!void {
-    var hex: [hash.max_hex_len]u8 = undefined;
-    for (tx.edits.items) |*edit| {
-        if (!isSpecial(edit.name) or edit.via != null) continue;
-        const lock = &edit.lock.?;
-        if (edit.new) |new| {
-            switch (new) {
-                .direct => |oid| lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed,
-                .symbolic => |target| lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed,
-            }
-            try lock.commit(io);
-        } else {
-            // Removed while the lock is held, so a writer that takes the
-            // lock next never has its file removed after it.
-            tx.store.dirFor(edit.name).deleteFile(io, edit.name) catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => |e| return e,
-            };
-            lock.deinit(io);
-            edit.lock = null;
-        }
-    }
-}
-
 /// A name and a directory of names cannot both exist: `refs/heads/a` and
 /// `refs/heads/a/b`. git checks that against the refs already there, and
 /// so does this, leaving out the ones the transaction deletes.
@@ -398,7 +415,7 @@ fn checkNames(tx: anytype, stacks: *const Stacks) refs.TransactionError!void {
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     for (tx.edits.items) |edit| {
-        if (edit.new == null or edit.via != null or isSpecial(edit.name)) continue;
+        if (edit.new == null or edit.via != null) continue;
         const stack = cache.internal.forName(stacks, tx.store, edit.name);
         // A ref where a directory of this one would be.
         var end = edit.name.len;
@@ -432,7 +449,6 @@ pub fn commit(io: Io, tx: anytype, log: ?refs.LogMessage) refs.TransactionError!
     const store = tx.store;
     try addTable(io, tx, pending, &pending.main, &pending.stacks.main, false, log);
     if (pending.worktree) |*w| try addTable(io, tx, pending, w, &pending.stacks.worktree.?, true, log);
-    try commitSpecial(io, tx);
 
     const options = store.reftableOptions();
     const compact_worktree = pending.worktree != null;
@@ -544,7 +560,6 @@ fn addTable(
         break :blk try logMessage(arena, normal, store.reftableOptions().write.block_size);
     } else null;
     for (tx.edits.items) |edit| {
-        if (isSpecial(edit.name)) continue;
         if (isLinked(store) and isPerWorktree(store, edit.name) != worktree_stack) continue;
         // A ref an update went through, or `HEAD` when the branch it names
         // moved, keeps its value and gains the log line: git's
@@ -833,75 +848,38 @@ fn suggest(sizes: []const u64, factor_in: u8) ?Segment {
 // A new repository
 //=========================================================================
 
-/// Lay down what `git init --ref-format=reftable` lays down in `git_dir`:
-/// a stack whose one table holds `HEAD` -- a symbolic ref to the unborn
-/// branch in a new repository, or whatever a new linked worktree starts
-/// on -- a `HEAD` file naming a branch no one can create, so that a reader
-/// of the files format stops rather than misreads, and `refs/heads` as a
-/// file saying why. `orig_head`, when given, is written beside `HEAD`.
-pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: refs.Ref, orig_head: ?Oid, options: Options) refs.TransactionError!void {
-    git_dir.createDirPath(io, "reftable") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| return e,
-    };
-    var dir = try git_dir.openDir(io, "reftable", .{});
-    defer dir.close(io);
-    var records: [2]reftable.RefRecord = undefined;
-    records[0] = .{ .name = "HEAD", .update_index = 1, .value = switch (head) {
-        .direct => |oid| .{ .direct = oid },
-        .symbolic => |target| .{ .symbolic = target },
-    } };
-    var n: usize = 1;
-    if (orig_head) |oid| {
-        records[1] = .{ .name = "ORIG_HEAD", .update_index = 1, .value = .{ .direct = oid } };
-        n = 2;
+/// `Store.writeInitial` over reftable: `refs`, sorted, none of them in the
+/// shared stack yet, written as one table under its lock, with no logs.
+pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) refs.TransactionError!void {
+    var locked = try lockStack(gpa, io, store.commonDir(), store.reftableOptions());
+    defer {
+        if (!locked.written) locked.lock.deinit(io);
+        gpa.free(locked.buffer);
+        locked.dir.close(io);
     }
-    const bytes = try reftable.write(gpa, kind, options.write, 1, 1, records[0..n], &.{});
-    defer gpa.free(bytes);
-    var name_buf: [64]u8 = undefined;
-    const name = tableName(io, &name_buf, 1, 1);
-    try writeTable(gpa, io, dir, name, bytes, options.shared);
-    var list_buf: [96]u8 = undefined;
-    // unreachable: a table name is at most 46 bytes
-    const list_text = std.mem.print(&list_buf, "{s}\n", .{name}) catch unreachable;
-    try dir.writeFile(io, .{ .sub_path = "tables.list", .data = list_text });
-
-    try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/.invalid\n" });
-    git_dir.createDirPath(io, "refs") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| return e,
-    };
-    try git_dir.writeFile(io, .{ .sub_path = "refs/heads", .data = "this repository uses the reftable format\n" });
-}
-
-/// What `HEAD` holds in the stack under `git_dir`, or `null` when there is
-/// no stack there -- the files format -- or no `HEAD` in it. A symbolic
-/// target is in `arena`.
-pub fn headIn(gpa: Allocator, arena: Allocator, io: Io, git_dir: Io.Dir, kind: Kind) Error!?refs.Ref {
-    var dir = git_dir.openDir(io, "reftable", .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return null,
-        else => |e| return e,
-    };
-    defer dir.close(io);
-    var stack = try Stack.load(gpa, io, dir, kind);
+    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
     defer stack.deinit();
-    const record = (try stack.lookup(gpa, arena, "HEAD")) orelse return null;
-    return switch (record.value) {
-        .deletion => null,
-        .direct => |oid| .{ .direct = oid },
-        .peeled => |p| .{ .direct = p.value },
-        .symbolic => |target| .{ .symbolic = target },
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const update_index = stack.maxUpdateIndex() + 1;
+    const records = try arena.alloc(reftable.RefRecord, refs_in.len);
+    for (refs_in, records) |ref, *record| {
+        if (try stack.lookup(gpa, arena, ref.name)) |found| if (found.value != .deletion) return error.RefAlreadyExists;
+        record.* = .{ .name = ref.name, .update_index = update_index, .value = if (ref.peeled) |target|
+            .{ .peeled = .{ .value = ref.oid, .target = target } }
+        else
+            .{ .direct = ref.oid } };
+    }
+    if (records.len == 0) return;
+    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, records, &.{});
+    defer gpa.free(bytes);
+    try install(gpa, io, &locked, &stack, bytes, update_index);
+    if (!store.reftableOptions().auto_compact) return;
+    compactIn(gpa, io, store.commonDir(), store.objectFormat(), store.reftableOptions(), .auto) catch |err| switch (err) {
+        error.LockHeld => {},
+        else => |e| return e,
     };
-}
-
-/// Whether the repository whose shared directory is `common_dir` keeps its
-/// refs in a reftable stack.
-pub fn isReftableRepository(io: Io, common_dir: Io.Dir) Io.Dir.AccessError!bool {
-    common_dir.access(io, "reftable/tables.list", .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    return true;
 }
 
 //=========================================================================
@@ -915,8 +893,6 @@ pub const test_access = if (builtin.is_test) struct {
     pub const lessThanNamed = Self.lessThanNamed;
     pub const put = Self.put;
     pub const lockStack = Self.lockStack;
-    pub const lockSpecial = Self.lockSpecial;
-    pub const commitSpecial = Self.commitSpecial;
     pub const checkNames = Self.checkNames;
     pub const deletedHere = Self.deletedHere;
     pub const install = Self.install;

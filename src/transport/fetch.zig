@@ -39,6 +39,7 @@ const revindex = @import("../odb/revindex.zig");
 const partial = @import("partial.zig");
 const config_mod = @import("../config.zig");
 const refspec_mod = @import("refspec.zig");
+const ref_names = @import("../names/ref.zig");
 const remote_mod = @import("remote.zig");
 const url_mod = @import("url.zig");
 const program = @import("../repo/program.zig");
@@ -1135,7 +1136,7 @@ fn localRef(arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
 }
 
 fn validLocal(name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "refs/") and refspec_mod.checkRefFormat(name, .{});
+    return std.mem.startsWith(u8, name, "refs/") and ref_names.checkFormat(name, .{});
 }
 
 /// git's `find_non_local_tags`: remote tags this repository does not have
@@ -1334,14 +1335,12 @@ fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const
 /// The names are `arena`'s.
 fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository) Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    // The main working tree's `HEAD` is the shared directory's, whichever
-    // worktree this repository was opened from.
+    // The main working tree's `HEAD`, whichever worktree this repository
+    // was opened from.
     if (!repo.isBare() or repo.common_is_separate) {
-        var main_store = try refs_mod.Store.initWithOptions(gpa, repo.objectFormat(), repo.common_dir, repo.common_dir, .{ .format = repo.refStore().refFormat() });
-        defer main_store.deinit();
         const bare = repo.configuration().getBool("core.bare", false) catch false;
         if (!bare) {
-            if (try main_store.read(gpa, io, "HEAD")) |head| switch (head) {
+            if (try repo.refStore().read(gpa, io, "main-worktree/HEAD")) |head| switch (head) {
                 .symbolic => |target| {
                     defer gpa.free(target);
                     try out.append(arena, try arena.dupe(u8, target));
@@ -1470,12 +1469,6 @@ fn describe(arena: Allocator, name: []const u8, url: []const u8) Allocator.Error
 fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const FetchHeadEntry, append: bool) Error!void {
     var text: std.Io.Writer.Allocating = .init(gpa);
     defer text.deinit();
-    if (append) {
-        if (try fs.readFileAlloc(gpa, io, repo.git_dir, "FETCH_HEAD", 1 << 26)) |existing| {
-            defer gpa.free(existing);
-            text.writer.writeAll(existing) catch return error.OutOfMemory;
-        }
-    }
     for (entries) |entry| {
         text.writer.print("{f}\t{s}\t{s}\n", .{
             entry.oid,
@@ -1483,7 +1476,9 @@ fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const Fe
             entry.description,
         }) catch return error.OutOfMemory;
     }
-    try fs.atomicWrite(io, repo.git_dir, "FETCH_HEAD", text.written(), "FETCH_HEAD.tmp_", .none);
+    const fetch_head = repo.refStore().special();
+    if (append) return fetch_head.append(gpa, io, .fetch_head, text.written());
+    try fetch_head.write(gpa, io, .fetch_head, text.written());
 }
 
 /// Remove a deleted ref's log, as git does when it deletes a ref.

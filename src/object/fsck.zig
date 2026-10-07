@@ -32,6 +32,7 @@ const object = @import("../object.zig");
 const config_mod = @import("../config.zig");
 const gitmodules = @import("../submodule/gitmodules.zig");
 const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 const warning = @import("../repo/warning.zig");
 
 const Oid = hash.Oid;
@@ -888,7 +889,7 @@ fn checkTag(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool {
     const tag_name = bytes[at..tag_end];
     var ref_buf: [4096]u8 = undefined;
     const ref_name = std.mem.print(&ref_buf, "refs/tags/{s}", .{tag_name}) catch "";
-    if (ref_name.len == 0 or safepath.checkRefName(ref_name) != null) {
+    if (ref_name.len == 0 or !ref_names.checkFormat(ref_name, .{})) {
         if (try r.report(.bad_tag_name, tag_name)) return true;
     }
     at = tag_end + 1;

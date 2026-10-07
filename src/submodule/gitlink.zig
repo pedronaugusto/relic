@@ -19,7 +19,7 @@ const Io = std.Io;
 const hash = @import("../hash.zig");
 const fs = @import("../repo/fs.zig");
 const refs_mod = @import("../refs.zig");
-const reftablestack = @import("../refs/reftablestack.zig");
+const repository_format = @import("../discover/format.zig");
 
 const Oid = hash.Oid;
 
@@ -47,13 +47,13 @@ pub const GitDir = struct {
         g.* = undefined;
     }
 
-    /// A ref store over the two directories, which it borrows.
-    /// A store over its refs, in whichever format they are kept: a stack
-    /// under `reftable/`, or loose files and `packed-refs`.
-    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io, kind: hash.Kind) (Allocator.Error || Io.Dir.AccessError)!refs_mod.Store {
-        return refs_mod.Store.initWithOptions(gpa, kind, g.git_dir, g.common_dir, .{
-            .format = if (try reftablestack.isReftableRepository(io, g.common_dir)) .reftable else .files,
-        });
+    /// A store over its refs, which borrows the two directories, in the
+    /// format the repository's own configuration names: the hash its
+    /// objects are named with, and loose files and `packed-refs` or a
+    /// stack under `reftable/`. What is on the disk has no say.
+    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io) repository_format.ReadError!refs_mod.Store {
+        const format = try repository_format.read(gpa, io, g.common_dir, null);
+        return refs_mod.Store.initWithOptions(gpa, format.kind, g.git_dir, g.common_dir, .{ .format = format.ref_storage });
     }
 };
 
@@ -141,12 +141,29 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.E
 }
 
 /// The commit `HEAD` resolves to in the repository whose working tree is
-/// `path`, or `null` when there is no repository there or its `HEAD` does not
-/// name a commit.
-pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8, kind: hash.Kind) Self.Error!?Oid {
+/// `path`, or `null` when there is no repository there, its format is one
+/// this release does not read, or its `HEAD` does not name a commit.
+pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Oid {
     var found = (try open(gpa, io, wt, path)) orelse return null;
     defer found.close(io);
-    var store = try found.refStore(gpa, io, kind);
+    var store = found.refStore(gpa, io) catch |err| switch (err) {
+        // A configuration that names no format this release reads, which
+        // git's `resolve_gitlink_ref` cannot resolve either.
+        error.UnsupportedRepositoryVersion,
+        error.UnsupportedExtension,
+        error.UnknownObjectFormat,
+        error.UnsupportedRefStorage,
+        error.NotABoolean,
+        error.NotAnInteger,
+        error.MalformedSectionHeader,
+        error.InvalidVariableName,
+        error.MalformedValue,
+        error.IncludeTooDeep,
+        error.RemoteUrlInConditionalInclude,
+        error.InvalidKey,
+        => return null,
+        else => |e| return e,
+    };
     defer store.deinit();
     const resolved = (store.head(gpa, io) catch |err| switch (err) {
         error.MalformedRef, error.MalformedPackedRefs, error.SymbolicRefLoop, error.InvalidRefName => return null,
@@ -175,32 +192,51 @@ pub fn isGitDirectory(io: Io, dir: Io.Dir) bool {
     return true;
 }
 
-test "ref backend probes preserve filesystem refusals" {
+const testgit = @import("../testing/git.zig");
+
+test "a gitlink's refs are read in the format its own configuration names, whatever else its directory holds" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for (try testgit.refFormats(gpa, io)) |format| {
+        var r = try testgit.Repo.init(gpa, io, format.initArgs());
+        defer r.deinit();
+        try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+        // A stack a files repository never reads, which a reader probing
+        // the disk would take for its refs.
+        if (format == .files) try r.writeFile(io, ".git/reftable/tables.list", "");
+        const text = try r.line(io, &.{ "rev-parse", "HEAD" });
+        defer gpa.free(text);
+        const ours = (try head(gpa, io, r.dir, "")) orelse return error.TestExpectedHead;
+        try std.testing.expect(ours.eql(try Oid.parse(.sha1, text)));
+    }
+}
+
+test "a gitlink's format refusals are no commit, and its filesystem refusals are errors" {
     const Probe = struct {
-        var failure: Io.Dir.AccessError = error.AccessDenied;
-        fn access(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
+        var failure: Io.File.OpenError = error.AccessDenied;
+        fn openFile(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
             return failure;
         }
-        fn stack(io: Io, dir: Io.Dir) !bool {
-            return reftablestack.isReftableRepository(io, dir);
-        }
         fn store(g: *const GitDir, io: Io) !void {
-            var refs = try g.refStore(std.testing.allocator, io, .sha1);
+            var refs = try g.refStore(std.testing.allocator, io);
             defer refs.deinit();
         }
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var vtable = Io.failing.vtable.*;
-    vtable.dirAccess = Probe.access;
+    vtable.dirOpenFile = Probe.openFile;
     const io: Io = .{ .userdata = null, .vtable = &vtable };
     const g: GitDir = .{ .git_dir = tmp.dir, .common_dir = tmp.dir, .common_is_separate = false, .via_file = false };
-    for ([_]Io.Dir.AccessError{ error.AccessDenied, error.InputOutput, error.Canceled }) |err| {
+    for ([_]Io.File.OpenError{ error.AccessDenied, error.Canceled }) |err| {
         Probe.failure = err;
-        try std.testing.expectError(err, Probe.stack(io, tmp.dir));
         try std.testing.expectError(err, Probe.store(&g, io));
     }
+    // No configuration is a version 0 repository's.
     Probe.failure = error.FileNotFound;
-    try std.testing.expect(!try Probe.stack(io, tmp.dir));
     try Probe.store(&g, io);
+
+    const real = std.testing.io;
+    try tmp.dir.writeFile(real, .{ .sub_path = "config", .data = "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tunknown = yes\n" });
+    try std.testing.expectError(error.UnsupportedExtension, Probe.store(&g, real));
 }

@@ -50,8 +50,15 @@ pub const TransactionError = error{
     /// A ref name and a directory of refs cannot both exist:
     /// `refs/heads/a` and `refs/heads/a/b` are the same path.
     RefNameConflict,
+    /// A name that reaches another worktree's own refs,
+    /// `main-worktree/<name>` or `worktrees/<id>/<name>`: they are read
+    /// from any worktree, and written by a store opened in that one.
+    OtherWorktreeRef,
 } || ReadError || fs.CommitError || fs.LockError || reflog.AppendError ||
     Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError || hooks.Error || Io.Dir.WriteFileError;
+
+/// Errors from laying down a new ref store's directories.
+pub const CreateError = Io.Dir.CreateDirPathError || Io.Dir.WriteFileError;
 
 /// Where a repository's refs are kept.
 pub const Format = enum {
@@ -60,6 +67,22 @@ pub const Format = enum {
     /// A reftable stack under `reftable/`, which `extensions.refStorage`
     /// names.
     reftable,
+
+    /// The format's name in `extensions.refStorage`.
+    pub fn name(format: Format) []const u8 {
+        return switch (format) {
+            .files => "files",
+            .reftable => "reftable",
+        };
+    }
+
+    /// The format `extensions.refStorage` names, in any case, or `null`.
+    pub fn parse(text: []const u8) ?Format {
+        inline for (comptime std.enums.values(Format)) |format| {
+            if (std.ascii.eqlIgnoreCase(text, format.name())) return format;
+        }
+        return null;
+    }
 };
 
 /// Peels an object name for a ref about to be written, so that a reftable
@@ -122,11 +145,34 @@ pub const LogMessage = struct {
     policy: reflog.Policy = .standard,
 };
 
+/// A ref a listing found and could not take as one: git's
+/// `REF_ISBROKEN`. It is not in `entries`, and no read gives it a value;
+/// one whose name is still safe can be deleted by that name.
+pub const Broken = struct {
+    /// Owned by the listing.
+    name: []const u8,
+    why: Why,
+
+    pub const Why = enum {
+        /// A name `names.checkFormat` refuses and `names.isSafe` takes:
+        /// listed, never read, and deletable.
+        bad_name,
+        /// A name that reaches out of the ref directories, on which git
+        /// dies: listed, and neither read nor deleted.
+        unsafe_name,
+        /// A file whose content is no ref, which shadows anything packed
+        /// under its name.
+        bad_content,
+    };
+};
+
 /// A list of refs, loose entries shadowing packed ones.
 pub const Listing = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     entries: []Named,
+    /// What was found and is not a ref git would read, sorted by name.
+    broken: []Broken = &.{},
 
     /// Release the listing and everything in it.
     pub fn deinit(listing: *Listing) void {

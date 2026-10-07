@@ -51,6 +51,9 @@ test {
         // the plumbing the API keeps to itself: reached by no public name,
         // so named here for its tests to run
         _ = @import("varint.zig");
+        _ = @import("names/ref.zig");
+        _ = @import("refs_test.zig");
+        _ = @import("discover/format.zig");
         _ = @import("crc32.zig");
         _ = @import("ewah.zig");
         _ = @import("ere.zig");

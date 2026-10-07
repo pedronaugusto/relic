@@ -17,7 +17,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const hash = @import("../hash.zig");
-const safepath = @import("../worktree/safepath.zig");
+const ref_names = @import("../names/ref.zig");
 
 const Oid = hash.Oid;
 
@@ -209,7 +209,7 @@ fn fail(options: ParseOptions, line: usize, reason: Diagnostic.Reason) ParseErro
 /// which a `merge` line uses to separate its parents from its subject.
 pub fn isValidLabel(text: []const u8) bool {
     if (std.mem.eql(u8, text, "#")) return false;
-    return safepath.isValidRefName(text);
+    return ref_names.checkFormat(text, .{ .allow_onelevel = true });
 }
 
 /// Parse one line, which has had its newline and a carriage return before
@@ -248,7 +248,7 @@ fn parseLine(line_in: []const u8, number: usize, resolver: Resolver, options: Pa
         },
         .update_ref => {
             // A full ref name: more than one level.
-            if (!safepath.isValidRefName(rest) or std.mem.findScalar(u8, rest, '/') == null) {
+            if (!ref_names.checkFormat(rest, .{})) {
                 return fail(options, number, .invalid_ref);
             }
             return .{ .command = cmd, .arg = rest };

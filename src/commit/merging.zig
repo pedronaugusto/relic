@@ -264,7 +264,7 @@ pub const Outcome = struct {
 
 /// Whether a merge is waiting to be concluded: `MERGE_HEAD` is there.
 pub fn inProgress(io: Io, repo: *Repository) bool {
-    return head_mod.stateExists(io, repo.git_dir, "MERGE_HEAD");
+    return repo.refStore().special().exists(io, .merge_head);
 }
 
 /// Merge `target` into the current branch.
@@ -285,8 +285,8 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
 
     if (targets.len == 0) return error.NoMergeTarget;
     if (inProgress(io, repo)) return error.MergeInProgress;
-    if (head_mod.refExists(io, repo, "CHERRY_PICK_HEAD") or
-        head_mod.refExists(io, repo, "REVERT_HEAD")) return error.SequencerInProgress;
+    if (repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head) or
+        repo.refStore().root().exists(repo.gpa, io, .revert_head)) return error.SequencerInProgress;
     if (repo.configuration().getBool("merge.log", false) catch true) return error.UnsupportedMergeMessage;
     if (repo.configuration().getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
 
@@ -317,7 +317,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const reflog_action = action.items;
     if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &index, head, reduced, reflog_action, fast_forward, options);
 
-    try head_mod.writeRef(io, repo, "ORIG_HEAD", ours);
+    try repo.refStore().root().write(repo.gpa, io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     const target = reduced.heads[0];
     const bases = try revwalk.mergeBases(gpa, io, &repo.odb, ours, target.oid);
@@ -361,7 +361,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     });
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
-    try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
+    try repo.refStore().root().write(repo.gpa, io, .auto_merge, outcome.auto_merge);
     return commitOrStop(gpa, io, repo, &arena_instance, &index, &outcome, .{
         .head = head,
         .parents = &.{ ours, target.oid },
@@ -436,7 +436,7 @@ fn octopus(
     const ours = head.oid.?;
     const heads = try arena.alloc(Oid, reduced.heads.len);
     for (reduced.heads, heads) |target, *oid| oid.* = target.oid;
-    try head_mod.writeRef(io, repo, "ORIG_HEAD", ours);
+    try repo.refStore().root().write(repo.gpa, io, .orig_head, ours);
     if (!options.allow_unrelated_histories and !try shareHistory(gpa, arena, io, repo, ours, heads)) return error.UnrelatedHistories;
     // Up to date when `HEAD` reaches every head.
     for (heads) |one| {
@@ -539,7 +539,7 @@ fn commitOrStop(
                 .{ .name = "GIT_INDEX_FILE", .value = e.index_path },
                 .{ .name = "GIT_EDITOR", .value = ":" },
             } });
-            try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", merge_heads.items);
+            try repo.refStore().special().write(repo.gpa, io, .merge_head, merge_heads.items);
             try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", text);
             const message_path = try h.path(arena, "MERGE_MSG");
             _ = try runner.prepareCommitMsg(io, e, message_path, .merge, null);
@@ -565,7 +565,7 @@ fn commitOrStop(
     }
 
     // Stopped: with conflicts, or before committing as asked.
-    try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", merge_heads.items);
+    try repo.refStore().special().write(repo.gpa, io, .merge_head, merge_heads.items);
     // `MERGE_MSG` ends the message with a newline whatever it ended with.
     try msg.append(arena, '\n');
     if (!outcome.isClean()) {
@@ -626,7 +626,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    const heads_text = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_HEAD")) orelse return error.NoMergeInProgress;
+    const heads_text = (try repo.refStore().special().readAll(arena, io, .merge_head)) orelse return error.NoMergeInProgress;
     var parents: std.ArrayList(Oid) = .empty;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -692,17 +692,18 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     try removeMergeState(io, repo);
     // `git reset` records where it moved from and logs the move, even to
     // where it already was.
-    try head_mod.writeRef(io, repo, "ORIG_HEAD", current);
+    try repo.refStore().root().write(repo.gpa, io, .orig_head, current);
     try head_mod.advance(io, repo, head, current, .{ .who = who, .message = "reset: moving to HEAD" });
 }
 
 /// Remove what a merge in progress leaves: `MERGE_HEAD`, `MERGE_MSG`,
 /// `MERGE_MODE`, `MERGE_RR` and `AUTO_MERGE`.
 pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
-    for ([_][]const u8{ "MERGE_HEAD", "MERGE_RR", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
+    try repo.refStore().special().delete(io, .merge_head);
+    for ([_][]const u8{ "MERGE_RR", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
         try head_mod.removeState(io, repo.git_dir, name);
     }
-    try head_mod.deleteRef(io, repo, "AUTO_MERGE");
+    try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
 }
 
 fn configuredFastForward(repo: *Repository) FastForward {

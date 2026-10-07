@@ -661,10 +661,11 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
 /// `AUTO_MERGE` go, and rerere records how each conflict it took down was
 /// resolved.
 pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
-    for ([_][]const u8{ "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
+    try repo.refStore().special().delete(io, .merge_head);
+    for ([_][]const u8{ "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
         try head_mod.removeState(io, repo.git_dir, name);
     }
-    try head_mod.deleteRef(io, repo, "AUTO_MERGE");
+    try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
     var index = try repo.openIndex(io);
     defer index.deinit();
     var outcome = try run(gpa, io, repo, &index, .{ .autoupdate = false });

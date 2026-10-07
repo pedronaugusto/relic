@@ -16,6 +16,8 @@ pub const reftablestack = @import("refs/reftablestack.zig");
 pub const reflog = @import("refs/reflog.zig");
 pub const reftable = @import("refs/reftable.zig");
 pub const filter = @import("refs/filter.zig");
+/// What a ref may be named, and the names git treats apart.
+pub const names = @import("names/ref.zig");
 const stack_engine = @import("refs/reftablestack/transaction.zig");
 
 const std = @import("std");
@@ -26,7 +28,6 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const fs = @import("repo/fs.zig");
-const safepath = @import("worktree/safepath.zig");
 const hooks = @import("repo/hooks.zig");
 const testgit = @import("testing/git.zig");
 
@@ -62,6 +63,9 @@ pub const Ref = @import("refs/value.zig").Ref;
 
 /// A ref with its name, as `list` hands them back.
 pub const Named = @import("refs/value.zig").Named;
+
+/// What a listing found that is not a ref git would read.
+pub const Broken = @import("refs/value.zig").Broken;
 
 /// A fully resolved ref: the name it ended at and the object it points to.
 pub const Resolved = @import("refs/value.zig").Resolved;
@@ -204,13 +208,7 @@ pub const Store = struct {
     /// `ORIG_HEAD`, `AUTO_MERGE`, `REBASE_HEAD` -- is a pseudo-ref, and
     /// every pseudo-ref belongs to one working tree, which is git's rule.
     pub fn dirFor(store: *const Store, name: []const u8) Io.Dir {
-        if (isPseudoRef(name) or
-            std.mem.startsWith(u8, name, "refs/bisect/") or
-            std.mem.startsWith(u8, name, "refs/worktree/") or
-            std.mem.startsWith(u8, name, "refs/rewritten/"))
-        {
-            return store.gitDir();
-        }
+        if (names.isRootRefSyntax(name) or names.isPerWorktree(name)) return store.gitDir();
         return store.commonDir();
     }
 
@@ -220,31 +218,29 @@ pub const Store = struct {
     /// `resolve` for the object. The returned name, when symbolic, is the
     /// caller's.
     pub fn read(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
-        if (!isReadableName(name)) return error.InvalidRefName;
-        if (store.refFormat() == .reftable) {
-            if (stack_engine.isSpecial(name)) return store.readLoose(gpa, io, name);
-            return stack_engine.read(gpa, io, store, name);
-        }
-        if (try store.readLoose(gpa, io, name)) |found| return found;
-        if (try store.readPackedOne(io, name)) |oid| return .{ .direct = oid };
-        return null;
+        if (!isRefName(name)) return error.InvalidRefName;
+        return store.readUnchecked(gpa, io, name);
     }
 
     /// A ref's own value, symbolic or not, where a symbolic one can be:
     /// the loose file, or the reftable stack.
     fn readOwnValue(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
-        if (store.refFormat() == .reftable) return store.read(gpa, io, name);
+        if (store.refFormat() == .reftable) return store.readUnchecked(gpa, io, name);
         return store.readLoose(gpa, io, name);
     }
 
     fn readLoose(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
-        const dir = store.dirFor(name);
+        return store.readLooseAt(gpa, io, store.dirFor(name), name);
+    }
+
+    /// The loose ref at `path` under `dir`, or `null`.
+    fn readLooseAt(store: *const Store, gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) ReadError!?Ref {
         // A ref is an object name or `ref: <name>`, and git reads no more of
         // the file than that: `FETCH_HEAD` and a merge's `MERGE_HEAD` carry
         // further lines, of any length, after the first object name. One
         // byte past the limit says whether a symbolic ref was cut short.
         var buffer: [max_loose_ref + 1]u8 = undefined;
-        const bytes = dir.readFile(io, name, &buffer) catch |err| switch (err) {
+        const bytes = dir.readFile(io, path, &buffer) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => return null,
             else => |e| return e,
         };
@@ -296,6 +292,14 @@ pub const Store = struct {
         }
     }
 
+    /// The object `name` resolves to, or `null` when the chain ends at a
+    /// name that is not there: git's `refs_read_ref`.
+    pub fn readOid(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Oid {
+        const resolved = (try store.resolve(gpa, io, name)) orelse return null;
+        gpa.free(resolved.name);
+        return resolved.oid;
+    }
+
     /// What `HEAD` points at, resolved.
     pub fn head(store: *const Store, gpa: Allocator, io: Io) ReadError!?Resolved {
         return store.resolve(gpa, io, "HEAD");
@@ -325,7 +329,10 @@ pub const Store = struct {
     ///
     /// A loose ref shadows a packed one of the same name, which is what git
     /// does and what makes a `pack-refs` that has not yet removed the loose
-    /// file harmless.
+    /// file harmless. What is found and is no ref git would read -- a name
+    /// no ref may have, a file that holds no ref -- is in `broken`, as git's
+    /// listing marks it `REF_ISBROKEN`, and shadows a packed ref of its
+    /// name just the same.
     pub fn list(store: *const Store, gpa: Allocator, io: Io, prefix: []const u8) ReadError!Listing {
         if (store.refFormat() == .reftable) return stack_engine.list(gpa, io, store, prefix);
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -333,6 +340,7 @@ pub const Store = struct {
         const arena = arena_instance.allocator();
 
         var entries: std.ArrayList(Named) = .empty;
+        var broken: std.ArrayList(Broken) = .empty;
 
         {
             const packed_listing = try store.acquirePacked(io);
@@ -341,6 +349,10 @@ pub const Store = struct {
             const from = std.sort.lowerBound(PackedEntry, packed_listing.entries, prefix, orderPrefix);
             for (packed_listing.entries[from..]) |entry| {
                 if (!std.mem.startsWith(u8, entry.name, prefix)) break;
+                if (!isRefName(entry.name)) {
+                    try broken.append(arena, .{ .name = try arena.dupe(u8, entry.name), .why = badName(entry.name) });
+                    continue;
+                }
                 try entries.append(arena, .{
                     .name = try arena.dupe(u8, entry.name),
                     .target = .{ .direct = entry.oid },
@@ -350,12 +362,17 @@ pub const Store = struct {
             }
         }
 
-        try store.walkLoose(arena, io, &entries, prefix);
+        try store.walkLoose(arena, io, &entries, &broken, prefix);
 
         std.mem.sort(Named, entries.items, {}, lessThanNamed);
-        // A loose entry shadows the packed one beside it.
+        std.mem.sort(Broken, broken.items, {}, lessThanBroken);
+        // A loose entry shadows the packed one beside it, and a broken one
+        // shadows either.
         var deduped: std.ArrayList(Named) = .empty;
+        var at_broken: usize = 0;
         for (entries.items) |entry| {
+            while (at_broken < broken.items.len and std.mem.order(u8, broken.items[at_broken].name, entry.name) == .lt) at_broken += 1;
+            if (at_broken < broken.items.len and std.mem.eql(u8, broken.items[at_broken].name, entry.name)) continue;
             if (deduped.items.len != 0) {
                 const last = &deduped.items[deduped.items.len - 1];
                 if (std.mem.eql(u8, last.name, entry.name)) {
@@ -365,11 +382,20 @@ pub const Store = struct {
             }
             try deduped.append(arena, entry);
         }
+        // A packed entry under a bad name and a loose file of that name are
+        // one broken ref.
+        var kept: usize = 0;
+        for (broken.items) |item| {
+            if (kept != 0 and std.mem.eql(u8, broken.items[kept - 1].name, item.name)) continue;
+            broken.items[kept] = item;
+            kept += 1;
+        }
 
         return .{
             .gpa = gpa,
             .arena = arena_instance.state,
             .entries = deduped.items,
+            .broken = broken.items[0..kept],
         };
     }
 
@@ -385,30 +411,56 @@ pub const Store = struct {
         return !a.loose and b.loose;
     }
 
+    /// The loose refs under `refs/`. In a linked worktree that is the
+    /// shared directory's, less the per-worktree refs there, which are the
+    /// main worktree's, and this worktree's own per-worktree refs from its
+    /// directory: where git's files backend finds each.
     fn walkLoose(
         store: *const Store,
         arena: Allocator,
         io: Io,
         out: *std.ArrayList(Named),
+        broken: *std.ArrayList(Broken),
         prefix: []const u8,
     ) ReadError!void {
-        // `refs/` in both directories: the per-worktree one carries only
-        // `refs/bisect`, `refs/worktree` and `refs/rewritten`, and the
-        // shared one carries the rest.
-        const dirs = [_]Io.Dir{ store.commonDir(), store.gitDir() };
-        var seen_same = false;
-        for (dirs) |dir| {
-            if (seen_same) break;
-            if (dir.handle == store.commonDir().handle and store.gitDir().handle == store.commonDir().handle) {
-                seen_same = true;
-            }
-            var refs_dir = dir.openDir(io, "refs", .{ .iterate = true }) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir => continue,
-                else => |e| return e,
-            };
-            defer refs_dir.close(io);
-            try store.walkLooseDir(arena, io, refs_dir, "refs", out, prefix, 0);
+        const linked = store.gitDir().handle != store.commonDir().handle;
+        try store.walkLooseIn(arena, io, store.commonDir(), "refs", out, broken, prefix, linked);
+        if (!linked) return;
+        for (per_worktree_folders) |folder| {
+            try store.walkLooseIn(arena, io, store.gitDir(), folder, out, broken, prefix, false);
         }
+    }
+
+    /// The folders under `refs/` each worktree keeps for itself.
+    const per_worktree_folders = [_][]const u8{ "refs/bisect", "refs/worktree", "refs/rewritten" };
+
+    fn walkLooseIn(
+        store: *const Store,
+        arena: Allocator,
+        io: Io,
+        dir: Io.Dir,
+        folder: []const u8,
+        out: *std.ArrayList(Named),
+        broken: *std.ArrayList(Broken),
+        prefix: []const u8,
+        skip_per_worktree: bool,
+    ) ReadError!void {
+        if (!overlaps(folder, prefix)) return;
+        var sub = dir.openDir(io, folder, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return,
+            else => |e| return e,
+        };
+        defer sub.close(io);
+        try store.walkLooseDir(arena, io, sub, folder, out, broken, prefix, skip_per_worktree, 0);
+    }
+
+    /// Whether the refs under `folder` can begin with `prefix`: one of the
+    /// two leads to the other.
+    fn overlaps(folder: []const u8, prefix: []const u8) bool {
+        if (std.mem.startsWith(u8, prefix, folder)) {
+            return prefix.len == folder.len or prefix[folder.len] == '/';
+        }
+        return std.mem.startsWith(u8, folder, prefix);
     }
 
     fn walkLooseDir(
@@ -418,7 +470,9 @@ pub const Store = struct {
         dir: Io.Dir,
         path: []const u8,
         out: *std.ArrayList(Named),
+        broken: *std.ArrayList(Broken),
         prefix: []const u8,
+        skip_per_worktree: bool,
         depth: u8,
     ) ReadError!void {
         if (depth > 32) return;
@@ -430,23 +484,43 @@ pub const Store = struct {
             if (std.mem.endsWith(u8, entry.name, ".lock")) continue;
             const child_path = try arena.print("{s}/{s}", .{ path, entry.name });
             if (entry.kind == .directory) {
+                if (skip_per_worktree and depth == 0 and isPerWorktreeFolder(child_path)) continue;
+                if (!overlaps(child_path, prefix)) continue;
                 var sub = dir.openDir(io, entry.name, .{ .iterate = true }) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir => continue,
                     else => |e| return e,
                 };
                 defer sub.close(io);
-                try store.walkLooseDir(arena, io, sub, child_path, out, prefix, depth + 1);
+                try store.walkLooseDir(arena, io, sub, child_path, out, broken, prefix, false, depth + 1);
                 continue;
             }
-            if (!std.mem.startsWith(u8, child_path, prefix) and !std.mem.startsWith(u8, prefix, child_path)) continue;
             if (!std.mem.startsWith(u8, child_path, prefix)) continue;
-            if (!safepath.isValidRefName(child_path)) continue;
-            const target = (store.readLoose(arena, io, child_path) catch |err| switch (err) {
-                error.MalformedRef => continue,
+            if (!isRefName(child_path)) {
+                try broken.append(arena, .{ .name = child_path, .why = badName(child_path) });
+                continue;
+            }
+            const target = (store.readLooseAt(arena, io, dir, entry.name) catch |err| switch (err) {
+                error.MalformedRef => {
+                    try broken.append(arena, .{ .name = child_path, .why = .bad_content });
+                    continue;
+                },
                 else => |e| return e,
             }) orelse continue;
+            // An object name of zeros is no object, which git takes for a
+            // damaged ref.
+            if (target == .direct and target.direct.isZero()) {
+                try broken.append(arena, .{ .name = child_path, .why = .bad_content });
+                continue;
+            }
             try out.append(arena, .{ .name = child_path, .target = target, .loose = true });
         }
+    }
+
+    fn isPerWorktreeFolder(path: []const u8) bool {
+        for (per_worktree_folders) |folder| {
+            if (std.mem.eql(u8, path, folder)) return true;
+        }
+        return false;
     }
 
     /// One line of `packed-refs`.
@@ -534,7 +608,28 @@ pub const Store = struct {
     /// Whether `name` has a log, in whichever format the refs are kept.
     pub fn logExists(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!bool {
         if (store.refFormat() == .reftable) return stack_engine.logExists(gpa, io, store, name);
-        return reflog.exists(gpa, io, store.dirFor(name), name);
+        const where = names.parseWorktreeRef(name);
+        if (where.owner == .other) {
+            var admin = (try store.openWorktree(io, name, where)) orelse return false;
+            defer admin.close(io);
+            return reflog.exists(gpa, io, admin, where.bare);
+        }
+        return reflog.exists(gpa, io, store.logDir(name, where), where.bare);
+    }
+
+    /// The directory whose `logs/` holds the log of `name`, a ref of this
+    /// worktree's, a shared one or the main worktree's.
+    fn logDir(store: *const Store, name: []const u8, where: names.WorktreeRef) Io.Dir {
+        return if (where.owner == .main) store.commonDir() else store.dirFor(name);
+    }
+
+    /// The administrative directory of the linked worktree `name` reaches,
+    /// `worktrees/<id>`, opened, or `null` when there is no such worktree.
+    fn openWorktree(store: *const Store, io: Io, name: []const u8, where: names.WorktreeRef) Io.Dir.OpenError!?Io.Dir {
+        return store.commonDir().openDir(io, name[0 .. name.len - where.bare.len], .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => null,
+            else => |e| e,
+        };
     }
 
     /// Append one entry to a ref's log without moving the ref: a line of
@@ -551,7 +646,7 @@ pub const Store = struct {
         who: object.Signature,
         message: []const u8,
     ) TransactionError!void {
-        if (!safepath.isValidRefName(name)) return error.InvalidRefName;
+        if (!isRefName(name)) return error.InvalidRefName;
         if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, name, old, new, who, message);
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, message);
@@ -563,41 +658,367 @@ pub const Store = struct {
     /// stack as the format says. An absent log is an empty one.
     pub fn readLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) (ReadError || reflog.ReadError)!reflog.Log {
         if (store.refFormat() == .reftable) return stack_engine.readLog(gpa, io, store, name);
-        return reflog.read(gpa, io, store.dirFor(name), name, store.objectFormat());
+        const where = names.parseWorktreeRef(name);
+        if (where.owner == .other) {
+            // A worktree that is not there has no log, which is an empty one.
+            var admin = (try store.openWorktree(io, name, where)) orelse
+                return .{ .gpa = gpa, .bytes = try gpa.alloc(u8, 0), .entries = try gpa.alloc(reflog.Entry, 0) };
+            defer admin.close(io);
+            return reflog.read(gpa, io, admin, where.bare, store.objectFormat());
+        }
+        return reflog.read(gpa, io, store.logDir(name, where), where.bare, store.objectFormat());
+    }
+
+    /// The root refs of the worktree this store was opened in:
+    /// `ORIG_HEAD`, `CHERRY_PICK_HEAD` and the rest of `names.Root`.
+    pub fn root(store: *Store) RootRefs {
+        return .{ .store = store };
+    }
+
+    /// `FETCH_HEAD` and `MERGE_HEAD`: files in the worktree's git
+    /// directory whatever the ref format.
+    pub fn special(store: *Store) SpecialRefs {
+        return .{ .store = store };
+    }
+
+    /// Delete every ref `refs` names in one transaction, as git's
+    /// `refs_delete_refs` does: each name need only be one `names.isSafe`
+    /// takes, which is how a ref listed with a bad name goes, and a name
+    /// that is not refuses the whole transaction before anything moves.
+    /// Each ref goes itself, not a ref it names. A ref that is not there
+    /// is no error.
+    pub fn deleteRefs(store: *Store, gpa: Allocator, io: Io, refs: []const []const u8, log: ?LogMessage) TransactionError!void {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        for (refs) |name| try tx.change(name, null, .any, .{ .no_deref = true });
+        try tx.commit(io, log);
+    }
+
+    /// One of a new repository's first refs: a full name under `refs/`,
+    /// the object, and what it peels to when it is an annotated tag.
+    pub const Initial = struct {
+        name: []const u8,
+        oid: Oid,
+        peeled: ?Oid = null,
+    };
+
+    /// Write `refs`, none of which the store has yet, in one step and with
+    /// no logs: git's initial ref transaction, which a clone makes of the
+    /// refs it fetched. The files format writes them into `packed-refs`
+    /// under its lock, as git does, beside any packed ref already there;
+    /// a reftable writes them as one table. A name the store already has,
+    /// loose or packed or in a table, is `RefAlreadyExists`, and a name
+    /// twice `DuplicateEdit`; either way nothing is written. Every name is
+    /// one the worktrees share.
+    pub fn writeInitial(store: *Store, gpa: Allocator, io: Io, refs: []const Initial) TransactionError!void {
+        if (refs.len == 0) return;
+        for (refs) |ref| {
+            if (!names.checkFormat(ref.name, .{}) or names.parseWorktreeRef(ref.name).owner != .shared) return error.InvalidRefName;
+        }
+        const sorted = try gpa.dupe(Initial, refs);
+        defer gpa.free(sorted);
+        std.mem.sort(Initial, sorted, {}, lessThanInitial);
+        for (1..sorted.len) |i| {
+            if (std.mem.eql(u8, sorted[i - 1].name, sorted[i].name)) return error.DuplicateEdit;
+        }
+        if (store.refFormat() == .reftable) return stack_engine.writeInitial(gpa, io, store, sorted);
+
+        var buffer: [64 * 1024]u8 = undefined;
+        var lock = try store.lockPacked(io, &buffer);
+        defer lock.deinit(io);
+        var existing = try store.readPacked(gpa, io);
+        defer existing.deinit();
+        for (sorted) |ref| {
+            if (existing.find(ref.name) != null) return error.RefAlreadyExists;
+            const loose = (try store.readLoose(gpa, io, ref.name)) orelse continue;
+            if (loose == .symbolic) gpa.free(loose.symbolic);
+            return error.RefAlreadyExists;
+        }
+        // Both sorted: one merge.
+        const merged = try gpa.alloc(PackedEntry, existing.entries.len + sorted.len);
+        defer gpa.free(merged);
+        var i: usize = 0;
+        var j: usize = 0;
+        for (merged) |*slot| {
+            const take_new = j < sorted.len and (i == existing.entries.len or std.mem.order(u8, sorted[j].name, existing.entries[i].name) == .lt);
+            if (take_new) {
+                slot.* = .{ .name = sorted[j].name, .oid = sorted[j].oid, .peeled = sorted[j].peeled };
+                j += 1;
+            } else {
+                slot.* = existing.entries[i];
+                i += 1;
+            }
+        }
+        try store.writePackedLocked(io, &lock, merged);
+    }
+
+    fn lessThanInitial(_: void, a: Initial, b: Initial) bool {
+        return std.mem.order(u8, a.name, b.name) == .lt;
+    }
+
+    /// A ref's own value, with no check of its name: what a transaction
+    /// reads of a ref it deletes, whose name need only be safe.
+    fn readUnchecked(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
+        const where = names.parseWorktreeRef(name);
+        switch (where.owner) {
+            .current, .shared => {},
+            // What another worktree keeps for itself, which the files
+            // format never packs: its `HEAD` and root refs, its
+            // per-worktree refs.
+            .main, .other => {
+                if (where.bare.len == 0) return null;
+                if (store.refFormat() == .reftable) return stack_engine.readOtherWorktree(gpa, io, store, where);
+                // `worktrees/<id>/<name>` is that worktree's file under the
+                // shared directory, path for path.
+                const path = if (where.owner == .main) where.bare else name;
+                return store.readLooseAt(gpa, io, store.commonDir(), path);
+            },
+        }
+        if (store.refFormat() == .reftable) {
+            if (names.isSpecial(name)) return store.readLoose(gpa, io, name);
+            return stack_engine.read(gpa, io, store, name);
+        }
+        if (try store.readLoose(gpa, io, name)) |found| return found;
+        if (try store.readPackedOne(io, name)) |oid| return .{ .direct = oid };
+        return null;
     }
 };
+
+/// The root refs of one worktree, as git's commands keep them: each
+/// written, read and removed as itself, never through a symbolic ref it
+/// might be (git's `REF_NO_DEREF`), and with no log. Through the store,
+/// so a reftable repository keeps them in its tables.
+pub const RootRefs = struct {
+    store: *Store,
+    /// The hooks to tell of each change, as a transaction's `hooks`, or
+    /// `null` to tell none.
+    hooks: ?*hooks.Runner = null,
+
+    /// The object `ref` points at, or `null` when it is not there.
+    pub fn read(r: RootRefs, gpa: Allocator, io: Io, ref: names.Root) ReadError!?Oid {
+        return r.store.readOid(gpa, io, ref.name());
+    }
+
+    /// Whether `ref` is there, as git's `ref_exists` asks: one that
+    /// cannot be read is not.
+    pub fn exists(r: RootRefs, gpa: Allocator, io: Io, ref: names.Root) bool {
+        return (r.read(gpa, io, ref) catch return false) != null;
+    }
+
+    /// Point `ref` at `oid`, whatever it was.
+    pub fn write(r: RootRefs, gpa: Allocator, io: Io, ref: names.Root, oid: Oid) TransactionError!void {
+        var tx = r.store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = r.hooks;
+        try tx.change(ref.name(), .{ .direct = oid }, .any, .{ .no_deref = true });
+        try tx.commit(io, null);
+    }
+
+    /// Remove `ref`, which need not be there.
+    pub fn delete(r: RootRefs, gpa: Allocator, io: Io, ref: names.Root) TransactionError!void {
+        var tx = r.store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = r.hooks;
+        try tx.change(ref.name(), null, .any, .{ .no_deref = true });
+        try tx.commit(io, null);
+    }
+
+    /// Every root ref of the worktree, `HEAD` among them, sorted by name:
+    /// what git's `--include-root-refs` adds to a listing. The files
+    /// format finds them as files in the git directory, and reftable in
+    /// the worktree's stack. One that cannot be read is in `broken`.
+    pub fn list(r: RootRefs, gpa: Allocator, io: Io) ReadError!Store.Listing {
+        const store = r.store;
+        if (store.refFormat() == .reftable) {
+            var all = try stack_engine.list(gpa, io, store, "");
+            errdefer all.deinit();
+            var kept: usize = 0;
+            for (all.entries) |entry| {
+                if (!names.isRootRef(entry.name)) continue;
+                all.entries[kept] = entry;
+                kept += 1;
+            }
+            all.entries = all.entries[0..kept];
+            // Every name a root ref has is one a ref may have.
+            all.broken = all.broken[0..0];
+            return all;
+        }
+        var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena_instance.deinit();
+        const arena = arena_instance.allocator();
+        var entries: std.ArrayList(Named) = .empty;
+        var broken: std.ArrayList(Broken) = .empty;
+        var it = store.gitDir().iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind != .file or !names.isRootRef(entry.name)) continue;
+            const name = try arena.dupe(u8, entry.name);
+            const target = (store.readLoose(arena, io, name) catch |err| switch (err) {
+                error.MalformedRef => {
+                    try broken.append(arena, .{ .name = name, .why = .bad_content });
+                    continue;
+                },
+                else => |e| return e,
+            }) orelse continue;
+            try entries.append(arena, .{ .name = name, .target = target, .loose = true });
+        }
+        std.mem.sort(Named, entries.items, {}, Store.lessThanNamed);
+        std.mem.sort(Broken, broken.items, {}, lessThanBroken);
+        return .{ .gpa = gpa, .arena = arena_instance.state, .entries = entries.items, .broken = broken.items };
+    }
+};
+
+/// The special refs of one worktree, `FETCH_HEAD` and `MERGE_HEAD`: files
+/// in its git directory in either ref format, which hold a line for each
+/// object they name and which no transaction writes (git's
+/// `is_special_ref`).
+pub const SpecialRefs = struct {
+    store: *Store,
+
+    /// The largest special ref read whole.
+    pub const max_bytes = 1 << 26;
+
+    /// The first object `ref` names, which is what reading it as a ref
+    /// gives (git's `refs_read_special_head`), or `null`.
+    pub fn read(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special) ReadError!?Oid {
+        return s.store.readOid(gpa, io, ref.name());
+    }
+
+    /// Everything `ref` holds, every line, or `null` when it is not
+    /// there. The bytes are the caller's.
+    pub fn readAll(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special) Io.Dir.ReadFileAllocError!?[]u8 {
+        return fs.readFileAlloc(gpa, io, s.store.gitDir(), ref.name(), max_bytes);
+    }
+
+    /// Whether `ref` is there, as git's `file_exists` asks.
+    pub fn exists(s: SpecialRefs, io: Io, ref: names.Special) bool {
+        s.store.gitDir().access(io, ref.name(), .{}) catch return false;
+        return true;
+    }
+
+    /// Replace `ref` with `bytes` whole, through `<ref>.lock`, so a reader
+    /// sees the old file or the new one; with the permissions
+    /// `core.sharedRepository` asks for, and no sync, as git writes it.
+    pub fn write(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, bytes: []const u8) TransactionError!void {
+        var buffer: [4096]u8 = undefined;
+        var lock = try s.takeLock(gpa, io, ref, &buffer);
+        defer lock.deinit(io);
+        lock.writer().writeAll(bytes) catch return error.WriteFailed;
+        try lock.commit(io);
+    }
+
+    /// Add `bytes` after what `ref` holds, read under the same lock the
+    /// whole is then replaced through, so two writers appending at once
+    /// each keep the other's lines: `git fetch --append`.
+    pub fn append(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, bytes: []const u8) TransactionError!void {
+        var buffer: [4096]u8 = undefined;
+        var lock = try s.takeLock(gpa, io, ref, &buffer);
+        defer lock.deinit(io);
+        if (try s.readAll(gpa, io, ref)) |existing| {
+            defer gpa.free(existing);
+            lock.writer().writeAll(existing) catch return error.WriteFailed;
+        }
+        lock.writer().writeAll(bytes) catch return error.WriteFailed;
+        try lock.commit(io);
+    }
+
+    /// `<ref>.lock`, waiting as long as git waits on a ref's lock.
+    fn takeLock(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, buffer: []u8) TransactionError!fs.LockFile {
+        return fs.LockFile.open(gpa, io, s.store.gitDir(), ref.name(), buffer, .{
+            .on_contention = .{ .wait_ms = 100 },
+            .sync = .none,
+            .shared = s.store.sharedPermissions(),
+        });
+    }
+
+    /// Remove `ref`, which need not be there.
+    pub fn delete(s: SpecialRefs, io: Io, ref: names.Special) Io.Dir.DeleteFileError!void {
+        s.store.gitDir().deleteFile(io, ref.name()) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {},
+            else => |e| return e,
+        };
+    }
+};
+
+fn lessThanBroken(_: void, a: Broken, b: Broken) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
 
 /// The longest loose ref file read whole: a symbolic one, `ref: <name>`.
 const max_loose_ref = 4096;
 
-/// Capitals, dashes and underscores and nothing else: git's syntax for a
-/// pseudo-ref.
-fn isPseudoRef(name: []const u8) bool {
-    if (name.len == 0) return false;
-    for (name) |c| {
-        if (!std.ascii.isUpper(c) and c != '-' and c != '_') return false;
+/// What `create` lays down.
+pub const CreateOptions = struct {
+    /// The directory is a linked worktree's, whose shared refs are the
+    /// repository's: it gets no `refs/heads` or `refs/tags` of its own.
+    worktree: bool = false,
+    /// What `core.sharedRepository` asks of the permissions of what is
+    /// made.
+    shared: fs.Shared = .umask,
+};
+
+/// Errors from `create`.
+pub const CreateError = @import("refs/value.zig").CreateError;
+
+/// Lay down what a ref store in `format` needs in a new git directory
+/// before its first ref, as git's `ref_store_create_on_disk` does. The
+/// files format makes `refs/`, and outside a linked worktree `refs/heads`
+/// and `refs/tags`. A reftable makes its `reftable/` directory and, so
+/// that a reader of the files format stops rather than misreads, a `HEAD`
+/// naming a branch no one can create and a file `refs/heads` saying why.
+/// The first ref, `HEAD`, is then a transaction's to write, through a
+/// store opened over the directory.
+pub fn create(io: Io, git_dir: Io.Dir, format: Format, options: CreateOptions) CreateError!void {
+    switch (format) {
+        .files => {
+            try makeDir(io, git_dir, "refs", options.shared);
+            if (options.worktree) return;
+            try makeDir(io, git_dir, "refs/heads", options.shared);
+            try makeDir(io, git_dir, "refs/tags", options.shared);
+        },
+        .reftable => {
+            try makeDir(io, git_dir, "reftable", options.shared);
+            try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/.invalid\n" });
+            fs.adjustShared(io, git_dir, "HEAD", options.shared);
+            try makeDir(io, git_dir, "refs", options.shared);
+            try git_dir.writeFile(io, .{ .sub_path = "refs/heads", .data = "this repository uses the reftable format\n" });
+            fs.adjustShared(io, git_dir, "refs/heads", options.shared);
+        },
     }
-    return true;
 }
 
-/// Whether a transaction may write `name`: git's
-/// `transaction_refname_valid`, which refuses the pseudo-refs `FETCH_HEAD`
-/// and `MERGE_HEAD` a transaction does not own, and beyond git a name of
-/// one level that is not spelled as a root ref is: git writes `index`,
-/// `config` or `shallow` as a ref when a stream names it, over the files of
-/// those names.
-fn isUpdatableName(name: []const u8) bool {
-    if (!safepath.isValidRefName(name)) return false;
-    if (std.mem.findScalar(u8, name, '/') != null) return true;
-    if (std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD")) return false;
-    return isPseudoRef(name);
+fn makeDir(io: Io, dir: Io.Dir, sub_path: []const u8, shared: fs.Shared) Io.Dir.CreateDirPathError!void {
+    fs.makeDirs(io, dir, sub_path, shared) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => |e| return e,
+    };
 }
 
-fn isReadableName(name: []const u8) bool {
-    // A pseudo-ref such as `HEAD` or `ORIG_HEAD` is upper case with no
-    // slash, which `checkRefName` would otherwise allow through anyway; the
-    // check that matters is the `.lock` suffix and the traversal rules.
-    return safepath.isValidRefName(name);
+/// Whether a transaction may change `name`: git's
+/// `transaction_refname_valid`. Never a special ref, which is a file no
+/// transaction owns. A new value only under a name `names.checkFormat`
+/// takes, and beyond git a name of one level only when it is spelled as a
+/// root ref: git writes `index`, `config` or `shallow` as a ref when a
+/// stream names it, over the files of those names. A deletion under any
+/// name `names.isSafe` takes, which is how a ref listed with a bad name is
+/// removed.
+fn isChangeableName(name: []const u8, deleting: bool) bool {
+    if (names.isSpecial(name)) return false;
+    if (deleting) return names.isSafe(name);
+    if (!names.checkFormat(name, .{ .allow_onelevel = true })) return false;
+    return std.mem.findScalar(u8, name, '/') != null or names.isRootRefSyntax(name);
+}
+
+/// Why a name found on the disk is no ref's: one git's
+/// `refname_is_safe` still takes, or one that reaches out of the ref
+/// directories.
+fn badName(name: []const u8) Broken.Why {
+    return if (names.isSafe(name)) .bad_name else .unsafe_name;
+}
+
+/// A name a ref can be read or written under: git's
+/// `check_refname_format` with `REFNAME_ALLOW_ONELEVEL`.
+fn isRefName(name: []const u8) bool {
+    return names.checkFormat(name, .{ .allow_onelevel = true });
 }
 
 /// What a log entry a transaction writes says.
@@ -707,7 +1128,11 @@ pub const Transaction = struct {
     }
 
     fn add(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected) TransactionError!void {
-        if (!isUpdatableName(name)) return error.InvalidRefName;
+        if (!isChangeableName(name, new == null)) return error.InvalidRefName;
+        switch (names.parseWorktreeRef(name).owner) {
+            .current, .shared => {},
+            .main, .other => return error.OtherWorktreeRef,
+        }
         for (tx.edits.items) |edit| {
             if (std.mem.eql(u8, edit.name, name)) return error.DuplicateEdit;
         }
@@ -718,7 +1143,7 @@ pub const Transaction = struct {
             // `HEAD` names a ref under `refs/`: a repository whose `HEAD`
             // does not is one git no longer recognises.
             const target = value.symbolic;
-            if (!safepath.isValidRefName(target)) return error.InvalidRefName;
+            if (!isRefName(target)) return error.InvalidRefName;
             if (std.mem.eql(u8, name, "HEAD") and !std.mem.startsWith(u8, target, "refs/")) return error.InvalidRefName;
         };
         var stored_new: ?Ref = null;
@@ -728,6 +1153,7 @@ pub const Transaction = struct {
                 .symbolic => |target| .{ .symbolic = try tx.gpa.dupe(u8, target) },
             };
         }
+        errdefer if (stored_new) |value| if (value == .symbolic) tx.gpa.free(value.symbolic);
         try tx.edits.append(tx.gpa, .{ .name = owned, .new = stored_new, .expected = expected });
     }
 
@@ -790,17 +1216,19 @@ pub const Transaction = struct {
             // A ref only logged through is held, not checked.
             if (edit.via != null) continue;
 
-            const current = try tx.store.read(tx.gpa, io, edit.name);
+            // Read without a check of the name, which a deletion need only
+            // have safe.
+            const current = try tx.store.readUnchecked(tx.gpa, io, edit.name);
             var current_oid: ?Oid = null;
             if (current) |value| {
                 switch (value) {
                     .direct => |oid| current_oid = oid,
                     .symbolic => |target| {
-                        tx.gpa.free(target);
+                        defer tx.gpa.free(target);
                         // A symbolic ref's own value is not an object name;
                         // an expected-value check on it is a check on what
                         // it resolves to.
-                        if (try tx.store.resolve(tx.gpa, io, edit.name)) |resolved| {
+                        if (try tx.store.resolve(tx.gpa, io, target)) |resolved| {
                             tx.gpa.free(resolved.name);
                             current_oid = resolved.oid;
                         }
@@ -963,7 +1391,7 @@ pub const Transaction = struct {
                     .direct => break,
                     .symbolic => |target| {
                         errdefer tx.gpa.free(target);
-                        if (!safepath.isValidRefName(target)) return error.InvalidRefName;
+                        if (!isRefName(target)) return error.InvalidRefName;
                         for (chain.items) |seen| {
                             if (std.mem.eql(u8, seen, target)) return error.SymbolicRefLoop;
                         }
@@ -1665,16 +2093,19 @@ test "FETCH_HEAD and a merge's MERGE_HEAD read as their first object name, as gi
     defer git_dir.close(io);
     var store: Store = try .init(gpa, .sha1, git_dir, git_dir);
     defer store.deinit();
-    for ([_][]const u8{ "FETCH_HEAD", "MERGE_HEAD" }) |name| {
-        const theirs = try repo.run(io, &.{ "rev-parse", name });
+    inline for (comptime std.enums.values(names.Special)) |special| {
+        const theirs = try repo.run(io, &.{ "rev-parse", special.name() });
         defer gpa.free(theirs);
-        const ours = (try store.read(gpa, io, name)).?;
         var hex: [hash.max_hex_len]u8 = undefined;
+        // as a ref, and as the special ref it is
+        const ours = (try store.read(gpa, io, special.name())).?;
         try std.testing.expectEqualStrings(std.mem.trim(u8, theirs, "\r\n"), ours.direct.hex(&hex));
+        const first = (try store.special().read(gpa, io, special)).?;
+        try std.testing.expectEqualStrings(std.mem.trim(u8, theirs, "\r\n"), first.hex(&hex));
     }
     // An object name run into more text is not one.
     try repo.writeFile(io, ".git/ORIG_HEAD", @as([41]u8, @splat('1')) ++ "\n");
-    try std.testing.expectError(error.MalformedRef, store.read(gpa, io, "ORIG_HEAD"));
+    try std.testing.expectError(error.MalformedRef, store.read(gpa, io, names.Root.orig_head.name()));
 }
 
 test "a symbolic ref's target is checked as git checks it" {
@@ -1688,8 +2119,8 @@ test "a symbolic ref's target is checked as git checks it" {
     defer tx.deinit(io);
     try std.testing.expectError(error.InvalidRefName, tx.update("HEAD", .{ .symbolic = "../x\nfoo" }, .any));
     try std.testing.expectError(error.InvalidRefName, tx.update("refs/heads/s", .{ .symbolic = "refs/heads/a..b" }, .any));
-    try std.testing.expectError(error.InvalidRefName, tx.update("HEAD", .{ .symbolic = "ORIG_HEAD" }, .any));
-    try tx.update("refs/heads/s", .{ .symbolic = "ORIG_HEAD" }, .any);
+    try std.testing.expectError(error.InvalidRefName, tx.update("HEAD", .{ .symbolic = names.Root.orig_head.name() }, .any));
+    try tx.update("refs/heads/s", .{ .symbolic = names.Root.orig_head.name() }, .any);
     try tx.update("HEAD", .{ .symbolic = "refs/heads/main" }, .any);
 }
 

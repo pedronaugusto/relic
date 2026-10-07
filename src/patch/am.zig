@@ -425,7 +425,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     const format: Format = if (options.mboxrd) .mboxrd else if (mailboxes.len == 0) .mbox else try detectFormat(mailboxes[0]);
 
     try repo.git_dir.createDirPath(io, state_dir);
-    try head_mod.deleteRef(io, repo, "REBASE_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .rebase_head);
 
     // the mails, cut as `git mailsplit -d4 -b` cuts them
     const keep_cr = options.keep_cr orelse (config.getBool("am.keepcr", false) catch false);
@@ -481,10 +481,10 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     if (head.oid) |oid| {
         var hex: [hash.max_hex_len]u8 = undefined;
         try s.writeText("abort-safety", oid.hex(&hex));
-        try head_mod.writeRef(io, repo, "ORIG_HEAD", oid);
+        try repo.refStore().root().write(repo.gpa, io, .orig_head, oid);
     } else {
         try s.writeText("abort-safety", "");
-        try head_mod.deleteRef(io, repo, "ORIG_HEAD");
+        try repo.refStore().root().delete(repo.gpa, io, .orig_head);
     }
     try s.writeText("next", try a.print("{d}", .{s.cur}));
     try s.writeText("last", try a.print("{d}", .{s.last}));
@@ -828,7 +828,7 @@ fn next(s: *Session) Error!void {
     try s.remove("author-script");
     try s.remove("final-commit");
     try s.remove("original-commit");
-    try head_mod.deleteRef(s.io, s.repo, "REBASE_HEAD");
+    try s.repo.refStore().root().delete(s.repo.gpa, s.io, .rebase_head);
     var head = try head_mod.read(s.gpa, s.io, s.repo);
     defer head.deinit(s.gpa);
     if (head.oid) |oid| {
@@ -983,7 +983,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     }
     if (!safe) return destroy(io, repo);
     try rerere.clear(gpa, io, repo);
-    const orig = try head_mod.readRef(gpa, io, repo, "ORIG_HEAD");
+    const orig = try repo.refStore().root().read(gpa, io, .orig_head);
     const target_tree = if (orig) |o| try repo.commitTree(io, o) else try emptyTree(&s);
     var index = try repo.openIndex(io);
     defer index.deinit();

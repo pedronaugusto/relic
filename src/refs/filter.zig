@@ -27,6 +27,7 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
 const refs_mod = @import("../refs.zig");
+const ref_names = @import("../names/ref.zig");
 const repo_mod = @import("../repo.zig");
 const config_mod = @import("../config.zig");
 const revwalk = @import("../revwalk.zig");
@@ -130,8 +131,8 @@ pub const Kind = enum {
         if (std.mem.startsWith(u8, name, "refs/heads/")) return .branch;
         if (std.mem.startsWith(u8, name, "refs/remotes/")) return .remote;
         if (std.mem.startsWith(u8, name, "refs/tags/")) return .tag;
-        if (std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD")) return .pseudo_ref;
-        if (isRootRef(name)) return .root_ref;
+        if (ref_names.isSpecial(name)) return .pseudo_ref;
+        if (ref_names.isRootRef(name)) return .root_ref;
         return .other;
     }
 
@@ -147,19 +148,6 @@ pub const Kind = enum {
         };
     }
 };
-
-/// git's `is_root_ref`: `HEAD`, a name in capitals ending `_HEAD`, and a
-/// few others, never `FETCH_HEAD` or `MERGE_HEAD`.
-pub fn isRootRef(name: []const u8) bool {
-    if (name.len == 0) return false;
-    for (name) |c| if (!std.ascii.isUpper(c) and c != '-' and c != '_') return false;
-    if (std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD")) return false;
-    if (std.mem.endsWith(u8, name, "_HEAD")) return true;
-    for ([_][]const u8{ "HEAD", "AUTO_MERGE", "BISECT_EXPECTED_REV", "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "MERGE_AUTOSTASH" }) |irregular| {
-        if (std.mem.eql(u8, name, irregular)) return true;
-    }
-    return false;
-}
 
 /// Which refs a listing takes: git's `struct ref_filter`.
 pub const Filter = struct {
@@ -720,15 +708,19 @@ pub const Listing = struct {
             else => unreachable,
         } else "refs/");
         defer listing.deinit();
-        var roots: std.ArrayList(refs_mod.Named) = .empty;
-        defer roots.deinit(gpa);
-        if (filter.kinds.root_refs) try l.rootRefs(&roots);
+        // `HEAD` and the root refs, from the ref store, which knows where
+        // its format keeps them.
+        var roots: refs_mod.Store.Listing = if (filter.kinds.root_refs)
+            try store.root().list(gpa, io)
+        else
+            .{ .gpa = gpa, .arena = .{}, .entries = &.{} };
+        defer roots.deinit();
         // the root refs sort among the others, by name
         var i: usize = 0;
         var j: usize = 0;
-        while (i < listing.entries.len or j < roots.items.len) {
-            if (j < roots.items.len and (i == listing.entries.len or std.mem.order(u8, roots.items[j].name, listing.entries[i].name) == .lt)) {
-                try candidates.append(gpa, roots.items[j]);
+        while (i < listing.entries.len or j < roots.entries.len) {
+            if (j < roots.entries.len and (i == listing.entries.len or std.mem.order(u8, roots.entries[j].name, listing.entries[i].name) == .lt)) {
+                try candidates.append(gpa, roots.entries[j]);
                 j += 1;
             } else {
                 try candidates.append(gpa, listing.entries[i]);
@@ -757,42 +749,6 @@ pub const Listing = struct {
         }
         try l.reachFilter(filter.merged, true);
         try l.reachFilter(filter.no_merged, false);
-    }
-
-    /// The root refs a files repository keeps beside `HEAD`.
-    fn rootRefs(l: *Listing, out: *std.ArrayList(refs_mod.Named)) Error!void {
-        const gpa = l.gpa;
-        const io = l.io;
-        var names: std.ArrayList([]const u8) = .empty;
-        defer names.deinit(gpa);
-        var it = l.repo.git_dir.iterate();
-        while (it.next(io) catch null) |entry| {
-            if (entry.kind != .file) continue;
-            if (!isRootRef(entry.name)) continue;
-            try names.append(gpa, try l.a().dupe(u8, entry.name));
-        }
-        if (l.repo.refStore().refFormat() == .reftable) {
-            var stack_listing = try l.repo.refStore().list(gpa, io, "");
-            defer stack_listing.deinit();
-            for (stack_listing.entries) |entry| {
-                if (std.mem.findScalar(u8, entry.name, '/') != null or !isRootRef(entry.name)) continue;
-                for (names.items) |known| {
-                    if (std.mem.eql(u8, known, entry.name)) break;
-                } else try names.append(gpa, try l.a().dupe(u8, entry.name));
-            }
-        }
-        std.mem.sort([]const u8, names.items, {}, lessString);
-        for (names.items) |name| {
-            const value = (l.repo.refStore().read(gpa, io, name) catch continue) orelse continue;
-            const target: refs_mod.Ref = switch (value) {
-                .direct => |oid| .{ .direct = oid },
-                .symbolic => |t| blk: {
-                    defer gpa.free(t);
-                    break :blk .{ .symbolic = try l.a().dupe(u8, t) };
-                },
-            };
-            try out.append(gpa, .{ .name = name, .target = target, .loose = true });
-        }
     }
 
     /// git's `apply_ref_filter` for one ref.
@@ -1912,7 +1868,7 @@ pub const Listing = struct {
             var map: std.StringHashMapUnmanaged([]const u8) = .empty;
             // the main worktree
             if (try l.mainHeadRef()) |head| try map.put(l.a(), head, try l.mainWorktreePath());
-            var listing = try worktrees.list(l.gpa, l.io, l.repo.common_dir, l.repo.objectFormat());
+            var listing = try worktrees.list(l.gpa, l.io, l.repo.refStore());
             defer listing.deinit();
             for (listing.entries) |entry| {
                 const branch = entry.branch orelse continue;
@@ -1928,16 +1884,14 @@ pub const Listing = struct {
     /// symbolic refs whether or not it exists, or `null` when detached.
     fn mainHeadRef(l: *Listing) Error!?[]const u8 {
         const store = l.repo.refStore();
-        var current: []const u8 = "HEAD";
+        // The main worktree's own `HEAD` from any worktree, through the
+        // store: a reftable keeps it in the shared stack, behind a `HEAD`
+        // file that is a placeholder.
+        var current: []const u8 = "main-worktree/HEAD";
         var depth: u8 = 0;
         var symbolic = false;
         while (depth <= refs_mod.max_symbolic_depth) : (depth += 1) {
-            const value: ?refs_mod.Ref = if (depth == 0 and l.repo.common_is_separate) blk: {
-                const bytes = l.repo.common_dir.readFileAlloc(l.io, "HEAD", l.a(), .limited(4096)) catch break :blk null;
-                const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-                if (std.mem.startsWith(u8, trimmed, "ref:")) break :blk .{ .symbolic = std.mem.trim(u8, trimmed[4..], " \t") };
-                break :blk null;
-            } else store.read(l.a(), l.io, current) catch null;
+            const value = store.read(l.a(), l.io, current) catch null;
             switch (value orelse return if (symbolic) current else null) {
                 .direct => return if (symbolic) current else null,
                 .symbolic => |target| {

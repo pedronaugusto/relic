@@ -452,7 +452,7 @@ const Walker = struct {
         if (w.index.find(path)) |entry| {
             if (entry.mode == .gitlink) {
                 try w.markSeen(path);
-                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.objectFormat())) orelse {
+                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path)) orelse {
                     w.outcome.unchanged += 1;
                     return;
                 };
@@ -490,7 +490,7 @@ const Walker = struct {
             w.outcome.unsafe_paths += 1;
             return;
         }
-        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.objectFormat())) orelse {
+        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path)) orelse {
             if (w.options.refusal) |r| r.set(null, path);
             return error.NoCommitCheckedOut;
         };
@@ -1467,7 +1467,7 @@ const StatusScan = struct {
         const state: SubmoduleState = if (s.options.submodules) |probe|
             try probe.inspect(s.io, path, entry.oid)
         else blk: {
-            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path, s.db.objectFormat());
+            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path);
             break :blk .{ .new_commits = checked_out != null and !checked_out.?.eql(entry.oid) };
         };
         if (state.isClean()) return;

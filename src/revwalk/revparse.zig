@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
+const ref_names = @import("../names/ref.zig");
 const object = @import("../object.zig");
 const repo_mod = @import("../repo.zig");
 const revwalk = @import("../revwalk.zig");
@@ -207,11 +208,10 @@ const Resolver = struct {
     }
 
     fn refMaybe(r: *Resolver, full: []const u8) Error!?Oid {
-        // Only names a ref can have: `HEAD` and its kind at the top, and
-        // everything under `refs/`.
-        if (!std.mem.startsWith(u8, full, "refs/")) {
-            for (full) |c| if (!(std.ascii.isUpper(c) or c == '_')) return null;
-        }
+        // Only names a ref can have: `HEAD` and its kind at the top,
+        // everything under `refs/`, and another worktree's,
+        // `main-worktree/HEAD` and `worktrees/<id>/HEAD`.
+        if (!std.mem.startsWith(u8, full, "refs/") and ref_names.parseWorktreeRef(full).owner == .shared) return null;
         const resolved = r.repo.refStore().resolve(r.gpa, r.io, full) catch |err| {
             const mapped = revisionError(err);
             if (mapped == error.BadRevision) return null;

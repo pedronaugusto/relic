@@ -18,6 +18,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const hash = @import("../hash.zig");
+const ref_names = @import("../names/ref.zig");
 
 /// Which operation a refspec is read for. The two read the same syntax with
 /// different rules: a fetch may leave the destination out, a push may leave
@@ -94,11 +95,11 @@ pub const Refspec = struct {
         spec.pattern = glob;
         spec.src = if (std.mem.eql(u8, src, "@")) "HEAD" else src;
 
-        const format: Format = .{ .allow_onelevel = true, .pattern = glob };
+        const format: ref_names.Flags = .{ .allow_onelevel = true, .pattern = glob };
         if (spec.negative) {
             if (spec.src.len == 0) return error.InvalidRefspec;
             if (isFullHex(spec.src)) return error.InvalidRefspec;
-            if (!checkRefFormat(spec.src, format)) return error.InvalidRefspec;
+            if (!ref_names.checkFormat(spec.src, format)) return error.InvalidRefspec;
             return spec;
         }
 
@@ -108,24 +109,24 @@ pub const Refspec = struct {
                     // Empty means `HEAD`.
                 } else if (isFullHex(spec.src)) {
                     spec.exact_oid = true;
-                } else if (!checkRefFormat(spec.src, format)) {
+                } else if (!ref_names.checkFormat(spec.src, format)) {
                     return error.InvalidRefspec;
                 }
                 if (spec.dst) |dst| {
-                    if (dst.len != 0 and !checkRefFormat(dst, format)) return error.InvalidRefspec;
+                    if (dst.len != 0 and !ref_names.checkFormat(dst, format)) return error.InvalidRefspec;
                 }
             },
             .push => {
                 // Any source goes that is not a pattern: it may be an object
                 // name or an expression, which only the pushing repository
                 // can resolve.
-                if (spec.src.len != 0 and glob and !checkRefFormat(spec.src, format)) {
+                if (spec.src.len != 0 and glob and !ref_names.checkFormat(spec.src, format)) {
                     return error.InvalidRefspec;
                 }
                 if (spec.dst) |dst| {
                     if (dst.len == 0) return error.InvalidRefspec;
-                    if (!checkRefFormat(dst, format)) return error.InvalidRefspec;
-                } else if (!checkRefFormat(spec.src, format)) {
+                    if (!ref_names.checkFormat(dst, format)) return error.InvalidRefspec;
+                } else if (!ref_names.checkFormat(spec.src, format)) {
                     return error.InvalidRefspec;
                 }
             },
@@ -216,53 +217,7 @@ fn isFullHex(text: []const u8) bool {
     return true;
 }
 
-/// What `checkRefFormat` allows beyond a full ref name.
-pub const Format = struct {
-    /// A name with no `/`, such as `HEAD` or `main`.
-    allow_onelevel: bool = false,
-    /// One `*`, anywhere, for a refspec pattern.
-    pattern: bool = false,
-};
-
-/// git's `check_refname_format`: whether `name` is a name a ref may carry.
-///
-/// No component may begin with `.` or end with `.lock`, be empty, or hold
-/// `..`, `@{`, a control character, a space, `~`, `^`, `:`, `?`, `[`, `\`
-/// or — outside one pattern star — `*`. The whole may not be `@`, end with
-/// `.` or `/`, or (unless `allow_onelevel`) be a single component.
-pub fn checkRefFormat(name: []const u8, format: Format) bool {
-    if (name.len == 0) return false;
-    if (std.mem.eql(u8, name, "@")) return false;
-    var stars_left: u8 = if (format.pattern) 1 else 0;
-    var components: usize = 0;
-    var it = std.mem.splitScalar(u8, name, '/');
-    while (it.next()) |component| {
-        if (component.len == 0) return false;
-        if (component[0] == '.') return false;
-        if (std.mem.endsWith(u8, component, ".lock")) return false;
-        var previous: u8 = 0;
-        for (component) |c| {
-            switch (c) {
-                0...0x20, 0x7f, '~', '^', ':', '?', '[', '\\' => return false,
-                '*' => {
-                    if (stars_left == 0) return false;
-                    stars_left -= 1;
-                },
-                '.' => if (previous == '.') return false,
-                '{' => if (previous == '@') return false,
-                else => {},
-            }
-            previous = c;
-        }
-        components += 1;
-    }
-    if (name[name.len - 1] == '.') return false;
-    if (!format.allow_onelevel and components < 2) return false;
-    return true;
-}
-
 const testing = std.testing;
-const testgit = @import("../testing/git.zig");
 
 test "a fetch refspec reads as git reads it, force and pattern and all" {
     const spec = try Refspec.parse("+refs/heads/*:refs/remotes/origin/*", .fetch);
@@ -345,49 +300,6 @@ test "what git refuses is refused by name" {
         "HEAD~1", // an expression with nowhere named to go
     }) |text| {
         try testing.expectError(error.InvalidRefspec, Refspec.parse(text, .push));
-    }
-}
-
-test "ref name format follows check_refname_format" {
-    try testing.expect(checkRefFormat("refs/heads/main", .{}));
-    try testing.expect(!checkRefFormat("main", .{}));
-    try testing.expect(checkRefFormat("main", .{ .allow_onelevel = true }));
-    try testing.expect(checkRefFormat("refs/heads/*", .{ .pattern = true }));
-    try testing.expect(checkRefFormat("refs/heads/a*b", .{ .pattern = true }));
-    try testing.expect(!checkRefFormat("refs/*/a*b", .{ .pattern = true }));
-    try testing.expect(!checkRefFormat("refs/heads/*", .{}));
-    for ([_][]const u8{
-        "refs/heads/.x", "refs/heads/x.",  "refs/heads/x.lock", "refs//heads",
-        "refs/heads/",   "/refs/heads",    "refs/heads/a@{b",   "refs/heads/a b",
-        "refs/heads/a~", "refs/heads/a^b", "refs/heads/a:b",    "refs/heads/a?",
-        "refs/heads/a[", "refs/heads/a\\", "@",                 "refs/heads/a..b",
-    }) |name| {
-        try testing.expect(!checkRefFormat(name, .{ .allow_onelevel = true }));
-    }
-}
-
-test "ref name format agrees with git check-ref-format" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var repo = try testgit.Repo.init(gpa, io, &.{});
-    defer repo.deinit();
-    repo.report_failures = false;
-    for ([_][]const u8{
-        "refs/heads/main",   "refs/heads/a.b",   "refs/heads/a..b", "refs/heads/.a",
-        "refs/heads/a.lock", "refs/heads/a@b",   "refs/heads/a@{b", "refs/tags/v1.0",
-        "refs/heads/-dash",  "refs/heads/a/b/c", "refs/heads/a//b", "refs/heads/trailing.",
-        "refs/x",
-        "refs/heads/emoji-é",
-        "refs/heads/q?",     "refs/heads/@",
-    }) |name| {
-        const ours = checkRefFormat(name, .{});
-        const theirs = if (repo.exec(io, &.{ "check-ref-format", name })) true else |_| false;
-        try testing.expectEqual(theirs, ours);
-    }
-    for ([_][]const u8{ "refs/heads/*", "refs/heads/a*", "refs/*/x", "refs/heads/**" }) |name| {
-        const ours = checkRefFormat(name, .{ .pattern = true });
-        const theirs = if (repo.exec(io, &.{ "check-ref-format", "--refspec-pattern", name })) true else |_| false;
-        try testing.expectEqual(theirs, ours);
     }
 }
 

@@ -2347,7 +2347,7 @@ pub const Server = struct {
             s.remote = try gpa.dupe(u8, chosen);
         }
         errdefer gpa.free(s.remote);
-        s.fetch_head = try fs.readFileAlloc(gpa, io, repo.git_dir, "FETCH_HEAD", 1 << 20);
+        s.fetch_head = try repo.refStore().special().readAll(gpa, io, .fetch_head);
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
