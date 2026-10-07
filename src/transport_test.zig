@@ -1412,3 +1412,50 @@ test "a stalled SOCKS negotiation is bounded by connect and handshake timeouts" 
         try testing.expectError(error.TimedOut, client.connect(.{ .tls = false, .host = "remote.invalid", .port = 80 }, null));
     }
 }
+
+/// Whether git finds a log for `name` in `r`.
+fn gitHasLog(io: Io, r: *testgit.Repo, name: []const u8) !bool {
+    var captured = try r.capture(io, &.{ "reflog", "exists", name });
+    defer captured.deinit(r.gpa);
+    return captured.code == 0;
+}
+
+test "a fetch that prunes and a push that deletes leave no log of the gone remote-tracking ref, in files and reftable" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // A reftable repository is git 2.45's to make.
+    const formats: []const []const []const u8 = if (try testgit.gitAtLeast(gpa, io, 2, 45))
+        &.{ &.{}, &.{"--ref-format=reftable"} }
+    else
+        &.{&.{}};
+    for (formats) |args| {
+        var remote = try testgit.Repo.init(gpa, io, &.{"--bare"});
+        defer remote.deinit();
+        const remote_path = try testremote.absolutePath(gpa, io, remote.dir);
+        defer gpa.free(remote_path);
+        var work = try testgit.Repo.init(gpa, io, args);
+        defer work.deinit();
+        try work.writeFile(io, "f", "f\n");
+        try work.exec(io, &.{ "add", "f" });
+        try work.exec(io, &.{ "commit", "-q", "-m", "one" });
+        try work.exec(io, &.{ "remote", "add", "origin", remote_path });
+        try work.exec(io, &.{ "push", "-q", "origin", "main", "main:refs/heads/gone", "main:refs/heads/feature" });
+        try work.exec(io, &.{ "fetch", "-q", "origin" });
+        try testing.expect(try gitHasLog(io, &work, "refs/remotes/origin/gone"));
+        try testing.expect(try gitHasLog(io, &work, "refs/remotes/origin/feature"));
+        try remote.exec(io, &.{ "branch", "-D", "gone" });
+
+        var repo = try repo_mod.Repository.open(gpa, io, work.dir, .{});
+        defer repo.deinit(io);
+        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .prune = true });
+        defer fetched.deinit();
+        try testing.expectEqual(@as(usize, 1), fetched.pruned.len);
+        try testing.expect(!try gitHasLog(io, &work, "refs/remotes/origin/gone"));
+
+        var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{":refs/heads/feature"} });
+        defer pushed.deinit();
+        try testing.expectEqual(push_mod.RefResult.Status.ok, pushed.refs[0].status);
+        try testing.expect(!try gitHasLog(io, &work, "refs/remotes/origin/feature"));
+        try testing.expect(try gitHasLog(io, &work, "refs/remotes/origin/main"));
+    }
+}

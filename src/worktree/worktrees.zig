@@ -325,12 +325,7 @@ pub fn add(
     if (try reftablestack.isReftableRepository(io, common_dir)) {
         // `HEAD` goes into a stack of the worktree's own, which is what git
         // reads there, and the file beside it is the placeholder.
-        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = common_dir, .sub_path = "config" }, .local, .{});
-        defer config.deinit();
-        const kind: hash.Kind = if (config.get("extensions.objectformat")) |text|
-            hash.Kind.parse(text) catch return error.CorruptWorktree
-        else
-            .sha1;
+        const kind = try objectFormatOf(gpa, io, common_dir);
         var target_buf: [512]u8 = undefined;
         if (options.detach_at) |oid| {
             try reftablestack.initialize(gpa, io, admin, kind, .{ .direct = oid }, oid, .{});
@@ -354,16 +349,12 @@ pub fn add(
         return error.CorruptWorktree;
     }
 
-    // git creates the log directory and an empty `logs/HEAD` so the first
-    // ref update in the new worktree has somewhere to go. A reftable stack
-    // keeps its logs in its tables.
+    // An empty `logs/HEAD`, so the first ref update in the new worktree
+    // has somewhere to go. A reftable stack keeps its logs in its tables.
     if (!try reftablestack.isReftableRepository(io, common_dir)) {
-        admin.createDirPath(io, "logs") catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
-        const log_file = try admin.createFile(io, "logs/HEAD", .{ .truncate = false });
-        log_file.close(io);
+        var store = try refs_mod.Store.init(gpa, try objectFormatOf(gpa, io, common_dir), admin, common_dir);
+        defer store.deinit();
+        try store.createLog(gpa, io, "HEAD");
     }
 
     // And the `.git` file in the destination, which is what makes the
@@ -376,6 +367,15 @@ pub fn add(
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 
     return .{ .name = owned_name, .admin_dir = admin, .work_dir = opened_work_dir };
+}
+
+/// The hash the repository whose shared directory is `common_dir` names
+/// its objects with, from its own configuration file.
+fn objectFormatOf(gpa: Allocator, io: Io, common_dir: Io.Dir) Error!hash.Kind {
+    var config = try config_mod.Config.openFile(gpa, io, .{ .dir = common_dir, .sub_path = "config" }, .local, .{});
+    defer config.deinit();
+    const text = config.get("extensions.objectformat") orelse return .sha1;
+    return hash.Kind.parse(text) catch error.CorruptWorktree;
 }
 
 fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void {

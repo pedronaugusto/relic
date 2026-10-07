@@ -1,9 +1,15 @@
-//! The per-ref log git writes beside every ref it moves.
+//! The per-ref log git writes beside every ref it moves, as the files
+//! backend keeps it: `logs/<ref>` under the ref's directory.
 //!
 //! A commit that writes no reflog leaves a repository whose users will find
 //! `git reflog` empty and whose `git gc` cannot see the objects a reset left
 //! behind. The line is
 //! `old SP new SP Name <email> SP secs SP ±hhmm [TAB msg] LF`.
+//!
+//! Private to `refs`: everything else reads and writes a log through
+//! `refs.Store`, which knows whether the refs are files or a reftable stack,
+//! so no caller can read the files of a repository whose logs are in its
+//! tables.
 
 const Self = @This();
 
@@ -22,29 +28,14 @@ pub const AppendError = errors: {
     break :errors Io.File.OpenError || Io.Writer.Error ||
         Io.File.WritePositionalError || Io.File.StatError ||
         Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Allocator.Error ||
-        error{
-            InvalidSignature,
-            /// The directory is a reftable repository's, whose logs are in
-            /// its tables: a `logs/` file there is one git never reads.
-            /// `refs.Store.appendLog` writes to either format.
-            ReftableRepository,
-        };
+        error{InvalidSignature};
 };
 
 /// Errors from reading a log.
 pub const ReadError = error{
     /// A line that is not `old new ident` with the right shapes.
     MalformedReflogEntry,
-    /// The directory is a reftable repository's; `refs.Store.readLog`
-    /// reads either format.
-    ReftableRepository,
 } || Allocator.Error || Io.Dir.ReadFileAllocError || object.Signature.ParseError;
-
-/// Whether `git_dir` keeps its refs, and so its logs, in a reftable stack.
-fn isReftable(io: Io, git_dir: Io.Dir) bool {
-    git_dir.access(io, "reftable/tables.list", .{}) catch return false;
-    return true;
-}
 
 /// One line of a log.
 pub const Entry = struct {
@@ -126,28 +117,14 @@ pub fn exists(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) Allocato
     return true;
 }
 
-/// Append one line to `logs/<ref>`, making the directories it needs.
+/// Append one line to `logs/<ref>`, making the directories it needs, which
+/// with a log it starts are given the permissions `core.sharedRepository`
+/// asks for, as git gives them.
 ///
 /// The log is opened for appending rather than replaced: several processes
 /// appending a line each interleave lines, never halves of one, because a
-/// line is written in a single call. In a reftable repository this is
-/// `error.ReftableRepository`, and `refs.Store.appendLog` is the call.
+/// line is written in a single call.
 pub fn append(
-    gpa: Allocator,
-    io: Io,
-    git_dir: Io.Dir,
-    ref: []const u8,
-    old: Oid,
-    new: Oid,
-    who: object.Signature,
-    message: []const u8,
-) AppendError!void {
-    return appendShared(gpa, io, git_dir, ref, old, new, who, message, .umask);
-}
-
-/// `append`, the directories it makes and a log it starts given the
-/// permissions `core.sharedRepository` asks for, as git gives them.
-pub fn appendShared(
     gpa: Allocator,
     io: Io,
     git_dir: Io.Dir,
@@ -158,7 +135,6 @@ pub fn appendShared(
     message: []const u8,
     shared: fs.Shared,
 ) AppendError!void {
-    if (isReftable(io, git_dir)) return error.ReftableRepository;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     if (std.Io.Dir.path.dirnamePosix(path)) |parent| {
@@ -241,11 +217,8 @@ pub const Log = struct {
 
 /// Read `logs/<ref>`. An absent log is an empty one. A line that is not an
 /// entry is left out, as git's `show_one_reflog_ent` leaves it out, so one
-/// damaged line does not take the rest of the log with it. In a reftable
-/// repository this is `error.ReftableRepository` rather than an empty log
-/// that is not the truth; `refs.Store.readLog` reads either format.
+/// damaged line does not take the rest of the log with it.
 pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash.Kind) Self.ReadError!Log {
-    if (isReftable(io, git_dir)) return error.ReftableRepository;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     const bytes = (try fs.readFileAlloc(gpa, io, git_dir, path, 1 << 28)) orelse
@@ -263,6 +236,109 @@ pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash
         try entries.append(gpa, entry);
     }
     return .{ .gpa = gpa, .bytes = bytes, .entries = try entries.toOwnedSlice(gpa) };
+}
+
+/// Errors from expiring a log.
+pub const ExpireError = errors: {
+    break :errors ReadError || fs.LockError || fs.CommitError;
+};
+
+/// git's `files_reflog_expire` over `logs/<ref>`: keep the entries
+/// `keeper.keep(entry, nth)` says to, through `logs/<ref>.lock`, `nth`
+/// being how far back the entry is, `0` the newest, which is what
+/// `<ref>@{n}` counts.
+/// With `rewrite` each kept entry's old value becomes the new value of the
+/// one kept before it, the null name for the first, so the log still reads
+/// as a chain. A line that is not an entry goes, as git's rewrite drops it,
+/// and a log every entry of which goes is left empty, as git leaves it.
+///
+/// Returns the newest kept entry's new value, or `null` when none was kept
+/// or there is no log, which is left as it is. The caller holds the ref's
+/// own lock, as git holds it, so the log and the ref move together.
+pub fn expire(
+    gpa: Allocator,
+    io: Io,
+    git_dir: Io.Dir,
+    ref: []const u8,
+    kind: hash.Kind,
+    shared: fs.Shared,
+    rewrite: bool,
+    keeper: anytype,
+) ExpireError!?Oid {
+    const path = try pathFor(gpa, ref);
+    defer gpa.free(path);
+    if (!try exists(gpa, io, git_dir, ref)) return null;
+    var buffer: [4096]u8 = undefined;
+    var lock = try fs.LockFile.open(gpa, io, git_dir, path, &buffer, .{ .shared = shared });
+    defer lock.deinit(io);
+    // Read under the lock: an append that took it first is in the file.
+    const bytes = (try fs.readFileAlloc(gpa, io, git_dir, path, 1 << 28)) orelse try gpa.alloc(u8, 0);
+    defer gpa.free(bytes);
+
+    var count: usize = 0;
+    var counting = std.mem.splitScalar(u8, bytes, '\n');
+    while (counting.next()) |line| {
+        if (line.len == 0) continue;
+        // ziglint-ignore: Z026 a line git cannot parse is no entry and is not counted
+        _ = parseLine(line, kind) catch continue;
+        count += 1;
+    }
+
+    const hex_len = kind.hexLen();
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var last_kept: ?Oid = null;
+    var seen: usize = 0;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        // ziglint-ignore: Z026 a line git cannot parse is one its rewrite drops
+        const entry = parseLine(line, kind) catch continue;
+        seen += 1;
+        if (!keeper.keep(entry, count - seen)) continue;
+        const w = lock.writer();
+        if (rewrite) {
+            const old = last_kept orelse Oid.zero(kind);
+            w.writeAll(old.hex(&hex)) catch return error.WriteFailed;
+            w.writeAll(line[hex_len..]) catch return error.WriteFailed;
+        } else {
+            w.writeAll(line) catch return error.WriteFailed;
+        }
+        w.writeByte('\n') catch return error.WriteFailed;
+        last_kept = entry.new;
+    }
+    try lock.commit(io);
+    return last_kept;
+}
+
+/// Make an empty `logs/<ref>` where there is none, as git's
+/// `files_create_reflog` does: the directories it needs, and the file,
+/// given the permissions `core.sharedRepository` asks for.
+pub fn create(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, shared: fs.Shared) (Allocator.Error || Io.File.OpenError || Io.Dir.CreateDirError || Io.Dir.CreateDirPathError)!void {
+    const path = try pathFor(gpa, ref);
+    defer gpa.free(path);
+    if (std.Io.Dir.path.dirnamePosix(path)) |parent| {
+        fs.makeDirs(io, git_dir, parent, shared) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        };
+    }
+    const file = git_dir.createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return,
+        else => |e| return e,
+    };
+    file.close(io);
+    fs.adjustShared(io, git_dir, path, shared);
+}
+
+/// Remove `logs/<ref>`, as git's `files_delete_reflog` does. A log that is
+/// not there is no error.
+pub fn delete(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) (Allocator.Error || Io.Dir.DeleteFileError)!void {
+    const path = try pathFor(gpa, ref);
+    defer gpa.free(path);
+    git_dir.deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {},
+        else => |e| return e,
+    };
 }
 
 fn parseLine(line: []const u8, kind: hash.Kind) ReadError!Entry {
@@ -299,8 +375,8 @@ test "an appended entry reads back" {
         .when_secs = 1_700_000_000,
         .offset_minutes = 0,
     };
-    try append(gpa, io, tmp.dir, "refs/heads/main", zero, one, who, "commit (initial): first");
-    try append(gpa, io, tmp.dir, "refs/heads/main", one, two, who, "commit: second");
+    try append(gpa, io, tmp.dir, "refs/heads/main", zero, one, who, "commit (initial): first", .umask);
+    try append(gpa, io, tmp.dir, "refs/heads/main", one, two, who, "commit: second", .umask);
 
     var raw: [512]u8 = undefined;
     const text = try tmp.dir.readFile(io, "logs/refs/heads/main", &raw);

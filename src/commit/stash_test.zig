@@ -26,24 +26,85 @@ const who: object.Signature = .{
     .offset_minutes = 0,
 };
 
+/// Where the twins keep their refs: every test runs in both formats, the
+/// reftable one where the git on the path makes it (2.45).
+const Format = enum {
+    files,
+    reftable,
+
+    fn all(gpa: Allocator, io: Io) ![]const Format {
+        if (try testgit.gitAtLeast(gpa, io, 2, 45)) return &.{ .files, .reftable };
+        return &.{.files};
+    }
+
+    fn initArgs(f: Format) []const []const u8 {
+        return switch (f) {
+            .files => &.{},
+            .reftable => &.{"--ref-format=reftable"},
+        };
+    }
+};
+
 const Twin = struct {
     git: testgit.Repo,
     relic: testgit.Repo,
     environ: std.process.Environ.Map,
+    format: Format,
 
-    fn create(gpa: Allocator, io: Io) !*Twin {
+    fn create(gpa: Allocator, io: Io, format: Format) !*Twin {
         const t = try gpa.create(Twin);
         errdefer gpa.destroy(t);
+        t.format = format;
         t.environ = try testgit.programEnviron(gpa);
         errdefer t.environ.deinit();
         try t.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
         try t.environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
-        t.git = try testgit.Repo.init(gpa, io, &.{});
+        t.git = try testgit.Repo.init(gpa, io, format.initArgs());
         errdefer t.git.deinit();
-        t.relic = try testgit.Repo.init(gpa, io, &.{});
+        t.relic = try testgit.Repo.init(gpa, io, format.initArgs());
         t.git.environ = &t.environ;
         t.relic.environ = &t.environ;
         return t;
+    }
+
+    /// The list of stashes the same in both: byte for byte in the files
+    /// format, and in a reftable stack every entry's old and new value,
+    /// who and message, as relic reads them, and what git shows.
+    fn expectSameList(t: *Twin, gpa: Allocator, io: Io) !void {
+        try t.expectSame(io, &.{ "stash", "list" });
+        switch (t.format) {
+            .files => try t.expectSameFile(io, ".git/logs/refs/stash"),
+            .reftable => {
+                var a = try Repository.open(gpa, io, t.git.dir, .{});
+                defer a.deinit(io);
+                var b = try Repository.open(gpa, io, t.relic.dir, .{});
+                defer b.deinit(io);
+                var by_git = try a.readLog(io, stash.ref_name);
+                defer by_git.deinit();
+                var by_relic = try b.readLog(io, stash.ref_name);
+                defer by_relic.deinit();
+                try testing.expectEqual(by_git.entries.len, by_relic.entries.len);
+                for (by_git.entries, by_relic.entries) |x, y| {
+                    try testing.expect(x.old.eql(y.old));
+                    try testing.expect(x.new.eql(y.new));
+                    try testing.expectEqualStrings(x.who.name, y.who.name);
+                    try testing.expectEqualStrings(x.who.email, y.who.email);
+                    try testing.expectEqual(x.who.when_secs, y.who.when_secs);
+                    try testing.expectEqualStrings(x.message, y.message);
+                }
+            },
+        }
+    }
+
+    /// No stash in the relic twin: no `refs/stash`, and no log of one.
+    fn expectNoStash(t: *Twin, io: Io) !void {
+        t.relic.report_failures = false;
+        defer t.relic.report_failures = true;
+        try testing.expectError(error.GitFailed, t.relic.exec(io, &.{ "rev-parse", "-q", "--verify", "refs/stash" }));
+        var captured = try t.relic.capture(io, &.{ "reflog", "exists", "refs/stash" });
+        defer captured.deinit(t.relic.gpa);
+        try testing.expect(captured.code != 0);
+        try testing.expectError(error.FileNotFound, t.relic.readFile(io, ".git/logs/refs/stash"));
     }
 
     fn destroy(t: *Twin, gpa: Allocator) void {
@@ -135,318 +196,374 @@ const files = [_][]const u8{ "a.txt", "b.txt", "dir/c.txt", "new.txt", "loose.tx
 test "a stash pushed here is the stash git pushes, and git lists, shows and applies it" {
     const gpa = testing.allocator;
     const io = testing.io;
+    for (try Format.all(gpa, io)) |format| {
+        const Case = struct { args: []const []const u8, options: stash.PushOptions };
+        const cases = [_]Case{
+            .{ .args = &.{ "stash", "push", "-q" }, .options = .{ .who = who } },
+            .{ .args = &.{ "stash", "push", "-q", "-u" }, .options = .{ .who = who, .untracked = .include } },
+            .{ .args = &.{ "stash", "push", "-q", "-a" }, .options = .{ .who = who, .untracked = .all } },
+            .{ .args = &.{ "stash", "push", "-q", "--keep-index", "-m", "kept" }, .options = .{ .who = who, .keep_index = true, .message = "kept" } },
+            .{ .args = &.{ "stash", "push", "-q", "--", "b.txt", "dir" }, .options = .{ .who = who, .paths = &.{ "b.txt", "dir" } } },
+            .{ .args = &.{ "stash", "push", "-q", "-u", "--", "a.txt", "loose.txt" }, .options = .{ .who = who, .untracked = .include, .paths = &.{ "a.txt", "loose.txt" } } },
+            .{ .args = &.{ "stash", "push", "-q", "--keep-index", "--", "a.txt", "b.txt", "new.txt" }, .options = .{ .who = who, .keep_index = true, .paths = &.{ "a.txt", "b.txt", "new.txt" } } },
+        };
+        for (cases) |case| {
+            var twin = try Twin.create(gpa, io, format);
+            defer twin.destroy(gpa);
+            try twin.setUp(io);
 
-    const Case = struct { args: []const []const u8, options: stash.PushOptions };
-    const cases = [_]Case{
-        .{ .args = &.{ "stash", "push", "-q" }, .options = .{ .who = who } },
-        .{ .args = &.{ "stash", "push", "-q", "-u" }, .options = .{ .who = who, .untracked = .include } },
-        .{ .args = &.{ "stash", "push", "-q", "-a" }, .options = .{ .who = who, .untracked = .all } },
-        .{ .args = &.{ "stash", "push", "-q", "--keep-index", "-m", "kept" }, .options = .{ .who = who, .keep_index = true, .message = "kept" } },
-        .{ .args = &.{ "stash", "push", "-q", "--", "b.txt", "dir" }, .options = .{ .who = who, .paths = &.{ "b.txt", "dir" } } },
-        .{ .args = &.{ "stash", "push", "-q", "-u", "--", "a.txt", "loose.txt" }, .options = .{ .who = who, .untracked = .include, .paths = &.{ "a.txt", "loose.txt" } } },
-        .{ .args = &.{ "stash", "push", "-q", "--keep-index", "--", "a.txt", "b.txt", "new.txt" }, .options = .{ .who = who, .keep_index = true, .paths = &.{ "a.txt", "b.txt", "new.txt" } } },
-    };
-    for (cases) |case| {
-        var twin = try Twin.create(gpa, io);
-        defer twin.destroy(gpa);
-        try twin.setUp(io);
+            try twin.git.exec(io, case.args);
+            {
+                var repo = try twin.open(gpa, io);
+                defer repo.deinit(io);
+                const made = try stash.push(io, &repo, case.options);
+                try testing.expect(made != null);
+            }
 
-        try twin.git.exec(io, case.args);
-        {
-            var repo = try twin.open(gpa, io);
-            defer repo.deinit(io);
-            const made = try stash.push(io, &repo, case.options);
-            try testing.expect(made != null);
+            // The same commits, so the same bytes, and the same list.
+            try twin.expectSame(io, &.{ "rev-parse", "stash", "stash^1", "stash^2" });
+            try twin.expectSame(io, &.{ "log", "-g", "--format=%H %gs", "refs/stash" });
+            try twin.expectSame(io, &.{ "stash", "list" });
+            try twin.expectSame(io, &.{ "stash", "show", "-p", "--include-untracked" });
+            try twin.expectSameList(gpa, io);
+            // And the working tree and index left behind.
+            try twin.expectSameState(io, &files);
+
+            // git brings back what was stashed here.
+            try twin.both(io, &.{ "reset", "-q", "--hard" });
+            try twin.both(io, &.{ "clean", "-q", "-fdx" });
+            try twin.both(io, &.{ "stash", "pop", "-q", "--index" });
+            try twin.expectSameState(io, &files);
         }
-
-        // The same commits, so the same bytes, and the same list.
-        try twin.expectSame(io, &.{ "rev-parse", "stash", "stash^1", "stash^2" });
-        try twin.expectSame(io, &.{ "log", "-g", "--format=%H %gs", "refs/stash" });
-        try twin.expectSame(io, &.{ "stash", "list" });
-        try twin.expectSame(io, &.{ "stash", "show", "-p", "--include-untracked" });
-        try twin.expectSameFile(io, ".git/logs/refs/stash");
-        // And the working tree and index left behind.
-        try twin.expectSameState(io, &files);
-
-        // git brings back what was stashed here.
-        try twin.both(io, &.{ "reset", "-q", "--hard" });
-        try twin.both(io, &.{ "clean", "-q", "-fdx" });
-        try twin.both(io, &.{ "stash", "pop", "-q", "--index" });
-        try twin.expectSameState(io, &files);
     }
 }
 
 test "nothing to stash is no stash" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var fixture = try testgit.Repo.init(gpa, io, &.{});
-    defer fixture.deinit();
-    try fixture.writeFile(io, "a.txt", "a\n");
-    try fixture.exec(io, &.{ "add", "." });
-    try fixture.exec(io, &.{ "commit", "-q", "-m", "a" });
-    try fixture.writeFile(io, "loose.txt", "untracked\n");
-    var repo = try Repository.open(gpa, io, fixture.dir, .{});
-    defer repo.deinit(io);
-    try testing.expect((try stash.push(io, &repo, .{ .who = who })) == null);
-    var refusal: stash.Refusal = .{};
-    try testing.expectError(error.PathspecMatchesNothing, stash.push(io, &repo, .{ .who = who, .paths = &.{"missing"}, .refusal = &refusal }));
-    try testing.expectEqualStrings("missing", refusal.path());
+    for (try Format.all(gpa, io)) |format| {
+        var fixture = try testgit.Repo.init(gpa, io, format.initArgs());
+        defer fixture.deinit();
+        try fixture.writeFile(io, "a.txt", "a\n");
+        try fixture.exec(io, &.{ "add", "." });
+        try fixture.exec(io, &.{ "commit", "-q", "-m", "a" });
+        try fixture.writeFile(io, "loose.txt", "untracked\n");
+        var repo = try Repository.open(gpa, io, fixture.dir, .{});
+        defer repo.deinit(io);
+        try testing.expect((try stash.push(io, &repo, .{ .who = who })) == null);
+        var refusal: stash.Refusal = .{};
+        try testing.expectError(error.PathspecMatchesNothing, stash.push(io, &repo, .{ .who = who, .paths = &.{"missing"}, .refusal = &refusal }));
+        try testing.expectEqualStrings("missing", refusal.path());
+    }
 }
 
 test "git's stash is applied and popped here as git applies and pops it" {
     const gpa = testing.allocator;
     const io = testing.io;
+    for (try Format.all(gpa, io)) |format| {
+        for ([_]bool{ false, true }) |with_index| {
+            var twin = try Twin.create(gpa, io, format);
+            defer twin.destroy(gpa);
+            try twin.setUp(io);
+            try twin.both(io, &.{ "stash", "push", "-q", "-u" });
+            // Something moves on meanwhile: a new commit touching another line,
+            // and an unrelated file with changes of its own.
+            try twin.write(io, "a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10, committed\n");
+            try twin.both(io, &.{ "commit", "-q", "-am", "moved on" });
+            try twin.write(io, ".gitignore", "*.log\nout/\n# edited\n");
 
-    for ([_]bool{ false, true }) |with_index| {
-        var twin = try Twin.create(gpa, io);
-        defer twin.destroy(gpa);
-        try twin.setUp(io);
-        try twin.both(io, &.{ "stash", "push", "-q", "-u" });
-        // Something moves on meanwhile: a new commit touching another line,
-        // and an unrelated file with changes of its own.
-        try twin.write(io, "a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10, committed\n");
-        try twin.both(io, &.{ "commit", "-q", "-am", "moved on" });
-        try twin.write(io, ".gitignore", "*.log\nout/\n# edited\n");
+            if (with_index)
+                try twin.git.exec(io, &.{ "stash", "apply", "-q", "--index" })
+            else
+                try twin.git.exec(io, &.{ "stash", "apply", "-q" });
+            {
+                var repo = try twin.open(gpa, io);
+                defer repo.deinit(io);
+                var applied = try stash.apply(io, &repo, 0, .{ .index = with_index });
+                defer applied.deinit();
+                try testing.expect(applied.isClean());
+                try testing.expectEqual(with_index, applied.index_restored);
+            }
+            try twin.expectSameState(io, &(files ++ [_][]const u8{".gitignore"}));
+            try twin.expectSame(io, &.{"diff"});
+            try twin.expectSame(io, &.{ "diff", "--cached" });
+            try twin.expectSame(io, &.{ "stash", "list" });
 
-        if (with_index)
-            try twin.git.exec(io, &.{ "stash", "apply", "-q", "--index" })
-        else
-            try twin.git.exec(io, &.{ "stash", "apply", "-q" });
-        {
-            var repo = try twin.open(gpa, io);
-            defer repo.deinit(io);
-            var applied = try stash.apply(io, &repo, 0, .{ .index = with_index });
-            defer applied.deinit();
-            try testing.expect(applied.isClean());
-            try testing.expectEqual(with_index, applied.index_restored);
+            // Pop drops it, on a clean tree.
+            try twin.both(io, &.{ "reset", "-q", "--hard" });
+            try twin.both(io, &.{ "clean", "-q", "-fdx" });
+            try twin.git.exec(io, &.{ "stash", "pop", "-q" });
+            {
+                var repo = try twin.open(gpa, io);
+                defer repo.deinit(io);
+                var popped = try stash.pop(io, &repo, 0, .{});
+                defer popped.deinit();
+                try testing.expect(popped.dropped);
+            }
+            try twin.expectSameState(io, &files);
+            try twin.expectSame(io, &.{ "stash", "list" });
+            try twin.expectNoStash(io);
         }
-        try twin.expectSameState(io, &(files ++ [_][]const u8{".gitignore"}));
-        try twin.expectSame(io, &.{"diff"});
-        try twin.expectSame(io, &.{ "diff", "--cached" });
-        try twin.expectSame(io, &.{ "stash", "list" });
-
-        // Pop drops it, on a clean tree.
-        try twin.both(io, &.{ "reset", "-q", "--hard" });
-        try twin.both(io, &.{ "clean", "-q", "-fdx" });
-        try twin.git.exec(io, &.{ "stash", "pop", "-q" });
-        {
-            var repo = try twin.open(gpa, io);
-            defer repo.deinit(io);
-            var popped = try stash.pop(io, &repo, 0, .{});
-            defer popped.deinit();
-            try testing.expect(popped.dropped);
-        }
-        try twin.expectSameState(io, &files);
-        try twin.expectSame(io, &.{ "stash", "list" });
-        try testing.expectError(error.FileNotFound, twin.relic.readFile(io, ".git/refs/stash"));
     }
 }
 
 test "an index git cannot restore as a patch is not restored here either" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.create(gpa, io);
-    defer twin.destroy(gpa);
-    try twin.setUp(io);
-    try twin.both(io, &.{ "stash", "push", "-q" });
-    // Line five is context for the staged change to line two: the tree
-    // merge would take both, the patch git applies cannot.
-    try twin.write(io, "a.txt", "1\n2\n3\n4\n5, committed\n6\n7\n8\n9\n10\n");
-    try twin.both(io, &.{ "commit", "-q", "-am", "near" });
+    for (try Format.all(gpa, io)) |format| {
+        var twin = try Twin.create(gpa, io, format);
+        defer twin.destroy(gpa);
+        try twin.setUp(io);
+        try twin.both(io, &.{ "stash", "push", "-q" });
+        // Line five is context for the staged change to line two: the tree
+        // merge would take both, the patch git applies cannot.
+        try twin.write(io, "a.txt", "1\n2\n3\n4\n5, committed\n6\n7\n8\n9\n10\n");
+        try twin.both(io, &.{ "commit", "-q", "-am", "near" });
 
-    twin.git.report_failures = false;
-    try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "apply", "-q", "--index" }));
-    var repo = try twin.open(gpa, io);
-    defer repo.deinit(io);
-    try testing.expectError(error.IndexConflict, stash.apply(io, &repo, 0, .{ .index = true }));
-    try twin.expectSameState(io, &files);
+        twin.git.report_failures = false;
+        try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "apply", "-q", "--index" }));
+        var repo = try twin.open(gpa, io);
+        defer repo.deinit(io);
+        try testing.expectError(error.IndexConflict, stash.apply(io, &repo, 0, .{ .index = true }));
+        try twin.expectSameState(io, &files);
 
-    // Without the index, both merge it.
-    try twin.git.exec(io, &.{ "stash", "apply", "-q" });
-    var applied = try stash.apply(io, &repo, 0, .{});
-    defer applied.deinit();
-    try twin.expectSameState(io, &files);
+        // Without the index, both merge it.
+        try twin.git.exec(io, &.{ "stash", "apply", "-q" });
+        var applied = try stash.apply(io, &repo, 0, .{});
+        defer applied.deinit();
+        try twin.expectSameState(io, &files);
+    }
 }
 
 test "a conflicting stash leaves git's stages and markers, and pop keeps it" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.create(gpa, io);
-    defer twin.destroy(gpa);
-    try twin.setUp(io);
-    try twin.both(io, &.{ "stash", "push", "-q" });
-    try twin.write(io, "a.txt", "1\n2, committed\n3\n4\n5\n6\n7\n8\n9\n10\n");
-    try twin.write(io, "b.txt", "bee, committed\n");
-    try twin.both(io, &.{ "commit", "-q", "-am", "the same lines" });
+    for (try Format.all(gpa, io)) |format| {
+        var twin = try Twin.create(gpa, io, format);
+        defer twin.destroy(gpa);
+        try twin.setUp(io);
+        try twin.both(io, &.{ "stash", "push", "-q" });
+        try twin.write(io, "a.txt", "1\n2, committed\n3\n4\n5\n6\n7\n8\n9\n10\n");
+        try twin.write(io, "b.txt", "bee, committed\n");
+        try twin.both(io, &.{ "commit", "-q", "-am", "the same lines" });
 
-    twin.git.report_failures = false;
-    try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "pop", "-q" }));
-    {
-        var repo = try twin.open(gpa, io);
-        defer repo.deinit(io);
-        var popped = try stash.pop(io, &repo, 0, .{});
-        defer popped.deinit();
-        try testing.expect(!popped.dropped);
-        try testing.expectEqual(@as(usize, 2), popped.conflicts.len);
-        try testing.expectEqualStrings("a.txt", popped.conflicts[0]);
+        twin.git.report_failures = false;
+        try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "pop", "-q" }));
+        {
+            var repo = try twin.open(gpa, io);
+            defer repo.deinit(io);
+            var popped = try stash.pop(io, &repo, 0, .{});
+            defer popped.deinit();
+            try testing.expect(!popped.dropped);
+            try testing.expectEqual(@as(usize, 2), popped.conflicts.len);
+            try testing.expectEqualStrings("a.txt", popped.conflicts[0]);
+        }
+        try twin.expectSameState(io, &files);
+        try twin.expectSame(io, &.{ "stash", "list" });
     }
-    try twin.expectSameState(io, &files);
-    try twin.expectSame(io, &.{ "stash", "list" });
 }
 
 test "a stash whose directory rename splits stays, unclean with nothing conflicted, as git's does" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.create(gpa, io);
-    defer twin.destroy(gpa);
-    try twin.write(io, "dir/a", "a\n");
-    try twin.write(io, "dir/b", "b\n");
-    try twin.both(io, &.{ "add", "." });
-    try twin.both(io, &.{ "commit", "-q", "-m", "base" });
-    try twin.remove(io, "dir/a");
-    try twin.remove(io, "dir/b");
-    try twin.write(io, "x/a", "a\n");
-    try twin.write(io, "y/b", "b\n");
-    try twin.both(io, &.{ "add", "-A" });
-    try twin.both(io, &.{ "stash", "push", "-q" });
-    try twin.write(io, "dir/c", "c\n");
-    try twin.both(io, &.{ "add", "." });
-    try twin.both(io, &.{ "commit", "-q", "-m", "adds" });
+    for (try Format.all(gpa, io)) |format| {
+        var twin = try Twin.create(gpa, io, format);
+        defer twin.destroy(gpa);
+        try twin.write(io, "dir/a", "a\n");
+        try twin.write(io, "dir/b", "b\n");
+        try twin.both(io, &.{ "add", "." });
+        try twin.both(io, &.{ "commit", "-q", "-m", "base" });
+        try twin.remove(io, "dir/a");
+        try twin.remove(io, "dir/b");
+        try twin.write(io, "x/a", "a\n");
+        try twin.write(io, "y/b", "b\n");
+        try twin.both(io, &.{ "add", "-A" });
+        try twin.both(io, &.{ "stash", "push", "-q" });
+        try twin.write(io, "dir/c", "c\n");
+        try twin.both(io, &.{ "add", "." });
+        try twin.both(io, &.{ "commit", "-q", "-m", "adds" });
 
-    twin.git.report_failures = false;
-    try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "pop", "-q" }));
-    {
-        var repo = try twin.open(gpa, io);
-        defer repo.deinit(io);
-        var popped = try stash.pop(io, &repo, 0, .{});
-        defer popped.deinit();
-        try testing.expect(!popped.dropped);
-        try testing.expect(!popped.isClean());
-        try testing.expectEqual(@as(usize, 0), popped.conflicts.len);
+        twin.git.report_failures = false;
+        try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "pop", "-q" }));
+        {
+            var repo = try twin.open(gpa, io);
+            defer repo.deinit(io);
+            var popped = try stash.pop(io, &repo, 0, .{});
+            defer popped.deinit();
+            try testing.expect(!popped.dropped);
+            try testing.expect(!popped.isClean());
+            try testing.expectEqual(@as(usize, 0), popped.conflicts.len);
+        }
+        try twin.expectSameState(io, &.{ "dir/a", "dir/b", "dir/c", "x/a", "y/b" });
+        try twin.expectSame(io, &.{ "stash", "list" });
     }
-    try twin.expectSameState(io, &.{ "dir/a", "dir/b", "dir/c", "x/a", "y/b" });
-    try twin.expectSame(io, &.{ "stash", "list" });
 }
 
 test "a stash that would overwrite local changes or untracked files is refused and nothing moves" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.create(gpa, io);
-    defer twin.destroy(gpa);
-    try twin.setUp(io);
-    // Without the untracked files: git puts those back even when its merge
-    // refuses, and here a refusal touches nothing.
-    try twin.both(io, &.{ "stash", "push", "-q" });
+    for (try Format.all(gpa, io)) |format| {
+        var twin = try Twin.create(gpa, io, format);
+        defer twin.destroy(gpa);
+        try twin.setUp(io);
+        // Without the untracked files: git puts those back even when its merge
+        // refuses, and here a refusal touches nothing.
+        try twin.both(io, &.{ "stash", "push", "-q" });
 
-    twin.git.report_failures = false;
-    try twin.write(io, "b.txt", "bee, local\n");
-    try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "apply", "-q" }));
-    var repo = try twin.open(gpa, io);
-    defer repo.deinit(io);
-    var refusal: stash.Refusal = .{};
-    try testing.expectError(error.LocalChangesWouldBeOverwritten, stash.apply(io, &repo, 0, .{ .refusal = &refusal }));
-    try testing.expectEqualStrings("b.txt", refusal.path());
-    try twin.expectSameState(io, &files);
+        twin.git.report_failures = false;
+        try twin.write(io, "b.txt", "bee, local\n");
+        try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "apply", "-q" }));
+        var repo = try twin.open(gpa, io);
+        defer repo.deinit(io);
+        var refusal: stash.Refusal = .{};
+        try testing.expectError(error.LocalChangesWouldBeOverwritten, stash.apply(io, &repo, 0, .{ .refusal = &refusal }));
+        try testing.expectEqualStrings("b.txt", refusal.path());
+        try twin.expectSameState(io, &files);
 
-    try twin.both(io, &.{ "checkout", "b.txt" });
-    try twin.write(io, "new.txt", "in the way\n");
-    try testing.expectError(error.UntrackedWouldBeOverwritten, stash.apply(io, &repo, 0, .{ .refusal = &refusal }));
-    try testing.expectEqualStrings("new.txt", refusal.path());
-    const kept = try twin.relic.readFile(io, "new.txt");
-    defer gpa.free(kept);
-    try testing.expectEqualStrings("in the way\n", kept);
+        try twin.both(io, &.{ "checkout", "b.txt" });
+        try twin.write(io, "new.txt", "in the way\n");
+        try testing.expectError(error.UntrackedWouldBeOverwritten, stash.apply(io, &repo, 0, .{ .refusal = &refusal }));
+        try testing.expectEqualStrings("new.txt", refusal.path());
+        const kept = try twin.relic.readFile(io, "new.txt");
+        defer gpa.free(kept);
+        try testing.expectEqualStrings("in the way\n", kept);
+    }
 }
 
 test "dropping and clearing leave git's list" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.create(gpa, io);
-    defer twin.destroy(gpa);
-    try twin.setUp(io);
-    try twin.both(io, &.{ "stash", "push", "-q", "-m", "first" });
-    try twin.write(io, "b.txt", "second\n");
-    try twin.both(io, &.{ "stash", "push", "-q", "-m", "second" });
-    try twin.write(io, "b.txt", "third\n");
-    try twin.both(io, &.{ "stash", "push", "-q", "-m", "third" });
+    for (try Format.all(gpa, io)) |format| {
+        var twin = try Twin.create(gpa, io, format);
+        defer twin.destroy(gpa);
+        try twin.setUp(io);
+        try twin.both(io, &.{ "stash", "push", "-q", "-m", "first" });
+        try twin.write(io, "b.txt", "second\n");
+        try twin.both(io, &.{ "stash", "push", "-q", "-m", "second" });
+        try twin.write(io, "b.txt", "third\n");
+        try twin.both(io, &.{ "stash", "push", "-q", "-m", "third" });
 
-    var repo = try twin.open(gpa, io);
-    defer repo.deinit(io);
-    {
+        var repo = try twin.open(gpa, io);
+        defer repo.deinit(io);
+        {
+            var l = try stash.list(io, &repo);
+            defer l.deinit();
+            try testing.expectEqual(@as(usize, 3), l.entries.len);
+            try testing.expectEqualStrings("On main: third", l.entries[0].message);
+        }
+
+        {
+            var changes = try stash.show(io, &repo, 1, .{});
+            defer changes.deinit();
+            var names: std.ArrayList(u8) = .empty;
+            defer names.deinit(gpa);
+            for (changes.items) |c| {
+                try names.append(gpa, c.letter());
+                try names.append(gpa, '\t');
+                try names.appendSlice(gpa, c.path());
+                try names.append(gpa, '\n');
+            }
+            const shown = try twin.git.run(io, &.{ "stash", "show", "--name-status", "stash@{1}" });
+            defer gpa.free(shown);
+            try testing.expectEqualStrings(shown, names.items);
+        }
+
+        try twin.git.exec(io, &.{ "stash", "drop", "-q", "stash@{1}" });
+        _ = try stash.drop(io, &repo, 1, .{});
+        try twin.expectSameList(gpa, io);
+        try twin.expectSame(io, &.{ "stash", "list" });
+        try twin.expectSame(io, &.{ "rev-parse", "stash" });
+
+        try twin.git.exec(io, &.{ "stash", "drop", "-q" });
+        _ = try stash.drop(io, &repo, 0, .{});
+        try twin.expectSameList(gpa, io);
+        try twin.expectSame(io, &.{ "rev-parse", "stash" });
+
+        try twin.git.exec(io, &.{ "stash", "clear" });
+        try stash.clear(io, &repo, .{});
+        try twin.expectSame(io, &.{ "stash", "list" });
+        try twin.expectNoStash(io);
+        try testing.expectError(error.NoSuchStash, stash.drop(io, &repo, 0, .{}));
+    }
+}
+
+test "stashes pushed and dropped here are git's list: two pushes keep both, the oldest, the newest and the last dropped" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    for (try Format.all(gpa, io)) |format| {
+        var twin = try Twin.create(gpa, io, format);
+        defer twin.destroy(gpa);
+        try twin.setUp(io);
+        var repo = try twin.open(gpa, io);
+        defer repo.deinit(io);
+        for ([_][]const u8{ "first", "second", "third" }, 0..) |message, i| {
+            if (i != 0) try twin.write(io, "b.txt", message);
+            try twin.git.exec(io, &.{ "stash", "push", "-q", "-m", message });
+            _ = (try stash.push(io, &repo, .{ .who = who, .message = message })).?;
+        }
+        try twin.expectSame(io, &.{ "rev-parse", "stash@{0}", "stash@{1}", "stash@{2}" });
+        try twin.expectSameList(gpa, io);
+
+        // The oldest: the one after it takes the place of the first.
+        try twin.git.exec(io, &.{ "stash", "drop", "-q", "stash@{2}" });
+        _ = try stash.drop(io, &repo, 2, .{});
+        try twin.expectSameList(gpa, io);
+        try twin.expectSame(io, &.{ "rev-parse", "stash" });
+
+        // The newest: `refs/stash` moves back to the one before.
+        try twin.git.exec(io, &.{ "stash", "drop", "-q" });
+        _ = try stash.drop(io, &repo, 0, .{});
+        try twin.expectSameList(gpa, io);
+        try twin.expectSame(io, &.{ "rev-parse", "stash" });
+
+        // The last takes the ref and its log with it.
+        try twin.git.exec(io, &.{ "stash", "drop", "-q" });
+        _ = try stash.drop(io, &repo, 0, .{});
+        try twin.expectSame(io, &.{ "stash", "list" });
+        try twin.expectNoStash(io);
         var l = try stash.list(io, &repo);
         defer l.deinit();
-        try testing.expectEqual(@as(usize, 3), l.entries.len);
-        try testing.expectEqualStrings("On main: third", l.entries[0].message);
+        try testing.expectEqual(@as(usize, 0), l.entries.len);
     }
-
-    {
-        var changes = try stash.show(io, &repo, 1, .{});
-        defer changes.deinit();
-        var names: std.ArrayList(u8) = .empty;
-        defer names.deinit(gpa);
-        for (changes.items) |c| {
-            try names.append(gpa, c.letter());
-            try names.append(gpa, '\t');
-            try names.appendSlice(gpa, c.path());
-            try names.append(gpa, '\n');
-        }
-        const shown = try twin.git.run(io, &.{ "stash", "show", "--name-status", "stash@{1}" });
-        defer gpa.free(shown);
-        try testing.expectEqualStrings(shown, names.items);
-    }
-
-    try twin.git.exec(io, &.{ "stash", "drop", "-q", "stash@{1}" });
-    _ = try stash.drop(io, &repo, 1, .{});
-    try twin.expectSameFile(io, ".git/logs/refs/stash");
-    try twin.expectSame(io, &.{ "stash", "list" });
-    try twin.expectSame(io, &.{ "rev-parse", "stash" });
-
-    try twin.git.exec(io, &.{ "stash", "drop", "-q" });
-    _ = try stash.drop(io, &repo, 0, .{});
-    try twin.expectSameFile(io, ".git/logs/refs/stash");
-    try twin.expectSame(io, &.{ "rev-parse", "stash" });
-
-    try twin.git.exec(io, &.{ "stash", "clear" });
-    try stash.clear(io, &repo, .{});
-    try twin.expectSame(io, &.{ "stash", "list" });
-    try testing.expectError(error.FileNotFound, twin.relic.readFile(io, ".git/logs/refs/stash"));
-    try testing.expectError(error.NoSuchStash, stash.drop(io, &repo, 0, .{}));
 }
 
 test "a stash goes through the clean and smudge filters as git's does" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const clean = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "upper");
-    defer gpa.free(clean);
-    const smudge = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "lower");
-    defer gpa.free(smudge);
-    var twin = try Twin.create(gpa, io);
-    defer twin.destroy(gpa);
-    inline for (.{ &twin.git, &twin.relic }) |r| {
-        try r.exec(io, &.{ "config", "filter.up.clean", clean });
-        try r.exec(io, &.{ "config", "filter.up.smudge", smudge });
-        try r.exec(io, &.{ "config", "filter.up.required", "true" });
+    for (try Format.all(gpa, io)) |format| {
+        const clean = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "upper");
+        defer gpa.free(clean);
+        const smudge = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "lower");
+        defer gpa.free(smudge);
+        var twin = try Twin.create(gpa, io, format);
+        defer twin.destroy(gpa);
+        inline for (.{ &twin.git, &twin.relic }) |r| {
+            try r.exec(io, &.{ "config", "filter.up.clean", clean });
+            try r.exec(io, &.{ "config", "filter.up.smudge", smudge });
+            try r.exec(io, &.{ "config", "filter.up.required", "true" });
+        }
+        try twin.write(io, ".gitattributes", "*.up filter=up\n");
+        try twin.write(io, "a.up", "hello\n");
+        try twin.both(io, &.{ "add", "." });
+        try twin.both(io, &.{ "commit", "-q", "-m", "filtered" });
+        try twin.write(io, "a.up", "hello, changed\n");
+        try twin.write(io, "b.up", "new and untracked\n");
+
+        try twin.git.exec(io, &.{ "stash", "push", "-q", "-u" });
+        var repo = try twin.open(gpa, io);
+        defer repo.deinit(io);
+        var drivers = try repo.loadFilters(io, .{});
+        defer drivers.deinit();
+        const programs: program.Programs = .{ .environ = &twin.environ };
+        // Without the permission to run the required filter, nothing is stashed.
+        try testing.expectError(error.UnsupportedAttribute, stash.push(io, &repo, .{ .who = who, .untracked = .include }));
+        _ = try stash.push(io, &repo, .{ .who = who, .untracked = .include, .filters = &drivers, .programs = programs });
+        try twin.expectSame(io, &.{ "rev-parse", "stash", "stash^2", "stash^3" });
+        try twin.expectSameState(io, &.{ "a.up", "b.up" });
+
+        try twin.git.exec(io, &.{ "stash", "pop", "-q" });
+        var popped = try stash.pop(io, &repo, 0, .{ .filters = &drivers, .programs = programs });
+        defer popped.deinit();
+        try twin.expectSameState(io, &.{ "a.up", "b.up" });
     }
-    try twin.write(io, ".gitattributes", "*.up filter=up\n");
-    try twin.write(io, "a.up", "hello\n");
-    try twin.both(io, &.{ "add", "." });
-    try twin.both(io, &.{ "commit", "-q", "-m", "filtered" });
-    try twin.write(io, "a.up", "hello, changed\n");
-    try twin.write(io, "b.up", "new and untracked\n");
-
-    try twin.git.exec(io, &.{ "stash", "push", "-q", "-u" });
-    var repo = try twin.open(gpa, io);
-    defer repo.deinit(io);
-    var drivers = try repo.loadFilters(io, .{});
-    defer drivers.deinit();
-    const programs: program.Programs = .{ .environ = &twin.environ };
-    // Without the permission to run the required filter, nothing is stashed.
-    try testing.expectError(error.UnsupportedAttribute, stash.push(io, &repo, .{ .who = who, .untracked = .include }));
-    _ = try stash.push(io, &repo, .{ .who = who, .untracked = .include, .filters = &drivers, .programs = programs });
-    try twin.expectSame(io, &.{ "rev-parse", "stash", "stash^2", "stash^3" });
-    try twin.expectSameState(io, &.{ "a.up", "b.up" });
-
-    try twin.git.exec(io, &.{ "stash", "pop", "-q" });
-    var popped = try stash.pop(io, &repo, 0, .{ .filters = &drivers, .programs = programs });
-    defer popped.deinit();
-    try twin.expectSameState(io, &.{ "a.up", "b.up" });
 }

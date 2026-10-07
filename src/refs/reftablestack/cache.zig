@@ -37,6 +37,7 @@ const object = @import("../../object.zig");
 const fs = @import("../../repo/fs.zig");
 const reftable = @import("../reftable.zig");
 const reflog = @import("../reflog.zig");
+const value = @import("../value.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -450,9 +451,9 @@ const Stacks = struct {
         s.* = undefined;
     }
 
-    fn forName(s: *const Stacks, store: anytype, name: []const u8) *const Stack {
+    fn forName(s: *const Stacks, name: []const u8) *const Stack {
         if (s.worktree) |*w| {
-            if (isPerWorktree(store, name)) return w;
+            if (value.isPerWorktree(name)) return w;
         }
         return &s.main;
     }
@@ -478,10 +479,6 @@ fn isLinked(store: anytype) bool {
     return store.gitDir().handle != store.commonDir().handle;
 }
 
-fn isPerWorktree(store: anytype, name: []const u8) bool {
-    return store.dirFor(name).handle == store.gitDir().handle;
-}
-
 pub const internal = struct {
     pub const hash = Self.hash;
     pub const object = Self.object;
@@ -502,7 +499,6 @@ pub const internal = struct {
     pub const loadIn = Self.loadIn;
     pub const reloadIn = Self.reloadIn;
     pub const isLinked = Self.isLinked;
-    pub const isPerWorktree = Self.isPerWorktree;
     pub const refresh = Cache.refresh;
     pub const open = Self.Stacks.open;
     pub const deinit = Self.Stacks.deinit;

@@ -25,7 +25,6 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const refs_mod = @import("refs.zig");
-const reflog = @import("refs/reflog.zig");
 const config_mod = @import("config.zig");
 const commit_cache = @import("commit/cache.zig");
 const shallow = @import("revwalk/shallow.zig");
@@ -1555,8 +1554,8 @@ pub const Repository = struct {
     /// A repository with a working tree defaults to writing logs for
     /// branches; a bare one defaults to writing them only where one already
     /// exists, which is git's rule.
-    pub fn reflogPolicy(repo: *const Repository) reflog.Policy {
-        if (repo.configuration().get("core.logallrefupdates")) |text| return reflog.Policy.parse(text);
+    pub fn reflogPolicy(repo: *const Repository) refs_mod.LogPolicy {
+        if (repo.configuration().get("core.logallrefupdates")) |text| return refs_mod.LogPolicy.parse(text);
         return if (repo.isBare()) .existing_only else .standard;
     }
 
@@ -1579,7 +1578,7 @@ pub const Repository = struct {
     }
 
     /// A ref's log, oldest first, whichever format the refs are kept in.
-    pub fn readLog(repo: *Repository, io: Io, name: []const u8) (refs_mod.ReadError || reflog.ReadError)!reflog.Log {
+    pub fn readLog(repo: *Repository, io: Io, name: []const u8) (refs_mod.ReadError || refs_mod.LogReadError)!refs_mod.Log {
         return repo.refStore().readLog(repo.gpa, io, name);
     }
 

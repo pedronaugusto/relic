@@ -6,6 +6,8 @@ const declared = @import("layers.zig");
 pub const rules: gantry.rules.Rules = .{
     .required = &.{.{ .name = "named sources", .paths = &declared.required }},
     .nothing_imports = &entry_rules,
+    .forbidden = declared.private,
+    .allowed = declared.private_owners,
     .references = declared.references,
     .tokens = declared.owned,
 };

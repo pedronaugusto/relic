@@ -98,7 +98,31 @@ pub const Resolved = struct {
     /// The last name in the chain. Owned by the caller.
     name: []const u8,
     oid: Oid,
+    /// Whether that last name was read from `packed-refs`, git's
+    /// `REF_ISPACKED`. Never set in a reftable repository.
+    from_packed: bool,
 };
+
+/// Whether `name` belongs to one working tree rather than being shared by
+/// them all: a pseudo-ref -- capitals, dashes and underscores alone, such
+/// as `HEAD`, `ORIG_HEAD` or `AUTO_MERGE` -- or a ref under `refs/bisect/`,
+/// `refs/worktree/` or `refs/rewritten/`. The fixed list git uses.
+pub fn isPerWorktree(name: []const u8) bool {
+    return isPseudoRef(name) or
+        std.mem.startsWith(u8, name, "refs/bisect/") or
+        std.mem.startsWith(u8, name, "refs/worktree/") or
+        std.mem.startsWith(u8, name, "refs/rewritten/");
+}
+
+/// Capitals, dashes and underscores and nothing else: git's syntax for a
+/// pseudo-ref.
+pub fn isPseudoRef(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (!std.ascii.isUpper(c) and c != '-' and c != '_') return false;
+    }
+    return true;
+}
 
 /// What an edit requires the ref's current value to be.
 pub const Expected = union(enum) {

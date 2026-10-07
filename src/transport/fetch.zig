@@ -29,7 +29,6 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const fs = @import("../repo/fs.zig");
 const refs_mod = @import("../refs.zig");
-const reflog = @import("../refs/reflog.zig");
 const repo_mod = @import("../repo.zig");
 const pack = @import("../odb/pack.zig");
 const revwalk = @import("../revwalk.zig");
@@ -793,8 +792,8 @@ fn pruneStale(
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         try tx.delete(entry.name, .{ .matches = entry.target.direct });
+        // Deleting the ref deletes its log, in either format.
         try tx.commit(io, null);
-        try deleteLog(gpa, io, repo, entry.name);
         try pruned.append(arena, try arena.dupe(u8, entry.name));
     }
     return pruned.items;
@@ -1484,16 +1483,6 @@ fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const Fe
         }) catch return error.OutOfMemory;
     }
     try fs.atomicWrite(io, repo.git_dir, "FETCH_HEAD", text.written(), "FETCH_HEAD.tmp_", .none);
-}
-
-/// Remove a deleted ref's log, as git does when it deletes a ref.
-fn deleteLog(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Error!void {
-    const path = try reflog.pathFor(gpa, name);
-    defer gpa.free(path);
-    repo.refStore().dirFor(name).deleteFile(io, path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => {},
-    };
 }
 
 /// `refs/remotes/<name>/HEAD`, when it is missing and the remote says

@@ -385,12 +385,33 @@ pub const required = blk: {
     break :blk paths;
 };
 
+/// Test code, which may spell any file's name to compare it with git's.
+const tests = [_][]const u8{ "src/testing/**", "src/**/*_test.zig" };
+
 /// Tokens only their owners may spell: starting and waiting on processes is
-/// conduit's, and this package's Windows declarations live in one file.
+/// conduit's, and this package's Windows declarations live in one file. A
+/// ref's log is the ref store's to find, in `logs/` or in a reftable stack,
+/// and `refs/stash` is the stash's.
 pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "process owner", .tokens = &.{ "waitpid", "wait4", "execve", "posix_spawn", "setsid", "CreateProcessW" } },
     // the ssh stand-in is another program, holding its handles as ssh does
     .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/repo/fs.zig", "src/testing/fake_ssh.zig" } },
+    .{ .name = "reflog files owner", .kind = .string, .tokens = &.{ "logs", "logs/*" }, .owners = &[_][]const u8{ "src/refs.zig", "src/refs/**" } ++ tests },
+    .{ .name = "stash ref owner", .kind = .string, .tokens = &.{"refs/stash"}, .owners = &[_][]const u8{"src/commit/stash.zig"} ++ tests },
+};
+
+/// Modules private to the namespace that owns them: no file outside it
+/// imports one in production, so nothing can go around the owner. The
+/// files backend's logs and `packed-refs` are reached through `refs.Store`.
+pub const private: []const gantry.rules.EdgeRule = &.{
+    .{ .name = "refs internals", .to = "src/refs/reflog.zig", .kind = .import },
+    .{ .name = "refs internals", .to = "src/refs/packed.zig", .kind = .import },
+};
+
+/// Who may import each private module: its namespace.
+pub const private_owners: []const gantry.rules.Allow = &.{
+    .{ .rule = "refs internals", .from = "src/refs.zig" },
+    .{ .rule = "refs internals", .from = "src/refs/**" },
 };
 
 /// Namespace reexports added when each facade was folded into its implementation.

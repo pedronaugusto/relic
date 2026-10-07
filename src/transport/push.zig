@@ -46,7 +46,6 @@ const auth = @import("auth.zig");
 const warning = @import("../repo/warning.zig");
 const progress_mod = @import("progress.zig");
 const lfspush = @import("../lfs/push.zig");
-const reflog = @import("../refs/reflog.zig");
 const builtin = @import("builtin");
 
 const Oid = hash.Oid;
@@ -741,11 +740,8 @@ fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remo
     if (result.new.isZero()) {
         if (current == null) return;
         try tx.delete(name, .any);
+        // Deleting the ref deletes its log, in either format.
         try tx.commit(io, null);
-        const path = try reflog.pathFor(gpa, name);
-        defer gpa.free(path);
-        // ziglint-ignore: Z026 the ref is gone; a reflog that cannot be removed stays, as git leaves one it cannot unlink
-        repo.refStore().dirFor(name).deleteFile(io, path) catch {};
         return;
     }
     if (current) |c| {
