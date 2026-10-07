@@ -94,14 +94,14 @@ pub fn configured(arena: Allocator, config: *const config_mod.Config) (Allocator
         var key_buf: [512]u8 = undefined;
         const value = struct {
             fn get(a: Allocator, c: *const config_mod.Config, buf: []u8, adapter: []const u8, field: []const u8) (Allocator.Error || error{MalformedValue})!?[]const u8 {
-                const key = std.fmt.bufPrint(buf, "lfs.customtransfer.{s}.{s}", .{ adapter, field }) catch return null;
+                const key = std.mem.print(buf, "lfs.customtransfer.{s}.{s}", .{ adapter, field }) catch return null;
                 const raw = c.get(key) orelse return null;
                 const copy = try a.dupe(u8, raw);
                 return copy;
             }
         }.get;
         const path = try value(arena, config, &key_buf, name, "path") orelse continue;
-        const concurrent_key = std.fmt.bufPrint(&key_buf, "lfs.customtransfer.{s}.concurrent", .{name}) catch continue;
+        const concurrent_key = std.mem.print(&key_buf, "lfs.customtransfer.{s}.concurrent", .{name}) catch continue;
         const concurrent = config.getBool(concurrent_key, true) catch true;
         try out.append(arena, .{
             .name = try arena.dupe(u8, name),

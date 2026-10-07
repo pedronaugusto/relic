@@ -277,7 +277,7 @@ const PemIterator = struct {
         const label_start = start + begin_mark.len;
         const label_end = std.mem.findPos(u8, it.text, label_start, "-----") orelse return error.MalformedKey;
         const label = it.text[label_start..label_end];
-        const end_mark = try std.fmt.allocPrint(arena, "-----END {s}-----", .{label});
+        const end_mark = try arena.print("-----END {s}-----", .{label});
         const body_start = label_end + 5;
         const end = std.mem.findPos(u8, it.text, body_start, end_mark) orelse return error.MalformedKey;
         it.at = end + end_mark.len;
@@ -497,7 +497,7 @@ fn expectSignsFor(k: PrivateKey, cert_pem: []const u8, tls12: bool) !void {
                 const Sha256 = std.crypto.hash.sha2.Sha256;
                 const Sha384 = std.crypto.hash.sha2.Sha384;
                 const Sha512 = std.crypto.hash.sha2.Sha512;
-                const s = sig[0..256].*;
+                const s = sig[0..256];
                 switch (scheme) {
                     .rsa_pss_rsae_sha256 => try Cert.rsa.PSSSignature.verify(256, s, msg, public, Sha256),
                     .rsa_pss_rsae_sha384 => try Cert.rsa.PSSSignature.verify(256, s, msg, public, Sha384),

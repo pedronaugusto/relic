@@ -509,7 +509,7 @@ pub const Notes = struct {
     fn pathWithFanout(t: *const Notes, key: []const u8, fanout: usize, buf: []u8) []u8 {
         var hex_buf: [hash.max_hex_len]u8 = undefined;
         // unreachable: a raw name of the format's length is at most max_hex_len hex digits
-        const hex = std.fmt.bufPrint(&hex_buf, "{x}", .{key[0..t.rawLen()]}) catch unreachable;
+        const hex = std.mem.print(&hex_buf, "{x}", .{key[0..t.rawLen()]}) catch unreachable;
         // Each fanout level is two of the name's digits and a slash, and
         // some of the name is left for the file.
         assert(2 * fanout < hex.len);
@@ -1057,8 +1057,8 @@ pub const Strategy = enum {
 
     /// The strategy a `notes.mergeStrategy` value names, or `null`.
     pub fn parse(text: []const u8) ?Strategy {
-        inline for (@typeInfo(Strategy).@"enum".fields) |f| {
-            if (std.mem.eql(u8, text, f.name)) return @field(Strategy, f.name);
+        inline for (@typeInfo(Strategy).@"enum".field_names) |name| {
+            if (std.mem.eql(u8, text, name)) return @field(Strategy, name);
         }
         return null;
     }
@@ -1150,7 +1150,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     defer gpa.free(remote_ref);
 
     const strategy = options.strategy orelse configured: {
-        const key = try std.fmt.allocPrint(gpa, "notes.{s}.mergestrategy", .{local_ref["refs/notes/".len..]});
+        const key = try gpa.print("notes.{s}.mergestrategy", .{local_ref["refs/notes/".len..]});
         defer gpa.free(key);
         for ([_][]const u8{ key, "notes.mergestrategy" }) |k| {
             if (repo.configuration().get(k)) |raw| break :configured Strategy.parse(raw) orelse return error.InvalidStrategy;
@@ -1158,7 +1158,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
         break :configured Strategy.manual;
     };
 
-    const log = try std.fmt.allocPrint(gpa, "notes: Merged notes from {s} into {s}", .{ remote_ref, local_ref });
+    const log = try gpa.print("notes: Merged notes from {s} into {s}", .{ remote_ref, local_ref });
     defer gpa.free(log);
     var commit_msg: std.ArrayList(u8) = .empty;
     defer commit_msg.deinit(gpa);
@@ -1470,7 +1470,7 @@ const Twin = struct {
             var lines = std.mem.splitScalar(u8, input.items, '\n');
             while (lines.next()) |line| : (i += 1) {
                 if (line.len == 0) continue;
-                const name = try std.fmt.allocPrint(gpa, "o{d}", .{i});
+                const name = try gpa.print("o{d}", .{i});
                 defer gpa.free(name);
                 try r.writeFile(io, name, line);
             }
@@ -1485,7 +1485,7 @@ const Twin = struct {
     }
 
     fn blob(t: *Twin, io: Io, i: usize) !Oid {
-        const name = try std.fmt.allocPrint(t.git.gpa, "o{d}", .{i});
+        const name = try t.git.gpa.print("o{d}", .{i});
         defer t.git.gpa.free(name);
         const hex = try t.git.line(io, &.{ "hash-object", "-w", name });
         defer t.git.gpa.free(hex);
@@ -1547,7 +1547,7 @@ test "notes added, appended, copied and removed are git's commits, trees and log
     var hex2: [hash.max_hex_len]u8 = undefined;
     // Enough notes that the tree fans out.
     for (objects, 0..) |o, i| {
-        const msg = try std.fmt.allocPrint(gpa, "  note {d}  \n\n\n", .{i});
+        const msg = try gpa.print("  note {d}  \n\n\n", .{i});
         defer gpa.free(msg);
         try t.git.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
         _ = try add(gpa, io, &repo, o, .{ .who = fixture_who, .contents = &.{.{ .text = msg }} });
@@ -1628,7 +1628,7 @@ test "a notes tree's other entries and unread fanout survive an edit as git keep
         const note = try r.line(io, &.{ "hash-object", "-w", "objects.txt" });
         defer gpa.free(note);
         const h0 = hexOf(objects[0], &hex);
-        const sub_listing = try std.fmt.allocPrint(gpa, "100644 blob {s}\t{s}\n", .{ note, h0[2..] });
+        const sub_listing = try gpa.print("100644 blob {s}\t{s}\n", .{ note, h0[2..] });
         defer gpa.free(sub_listing);
         const sub = try r.runInput(io, &.{"mktree"}, sub_listing);
         defer gpa.free(sub);
@@ -1647,7 +1647,7 @@ test "a notes tree's other entries and unread fanout survive an edit as git keep
     var repo = try Repository.open(gpa, io, t.ours.dir, .{});
     defer repo.deinit(io);
     for (objects[2..], 2..) |o, i| {
-        const msg = try std.fmt.allocPrint(gpa, "n{d}", .{i});
+        const msg = try gpa.print("n{d}", .{i});
         defer gpa.free(msg);
         try t.git.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
         _ = try add(gpa, io, &repo, o, .{ .who = fixture_who, .contents = &.{.{ .text = msg }} });
@@ -1667,7 +1667,7 @@ test "a fanout subtree that cannot be read is a named error, and nothing read be
     defer gpa.free(note);
     // A fanout directory whose tree is missing, and a flat note under the
     // same two digits, which reading has to look for inside it.
-    const listing = try std.fmt.allocPrint(gpa, "040000 tree {s}\tab\n100644 blob {s}\tab{s}\n", .{ "1" ** 40, note, "c" ** 38 });
+    const listing = try gpa.print("040000 tree {s}\tab\n100644 blob {s}\tab{s}\n", .{ &@as([40]u8, @splat('1')), note, &@as([38]u8, @splat('c')) });
     defer gpa.free(listing);
     const tree = try r.runInput(io, &.{ "mktree", "--missing" }, listing);
     defer gpa.free(tree);
@@ -1679,7 +1679,7 @@ test "a fanout subtree that cannot be read is a named error, and nothing read be
     if (Notes.open(gpa, io, &repo, "refs/notes/commits", .concatenate)) |opened| {
         var notes = opened;
         defer notes.deinit();
-        try std.testing.expectError(error.ObjectNotFound, notes.get(io, try Oid.parse(.sha1, "ab" ++ "c" ** 38)));
+        try std.testing.expectError(error.ObjectNotFound, notes.get(io, try Oid.parse(.sha1, "ab" ++ @as([38]u8, @splat('c')))));
     } else |err| try std.testing.expectEqual(error.ObjectNotFound, err);
 }
 
@@ -1697,7 +1697,7 @@ test "notes merge under every strategy leaves what git notes merge leaves, and a
         // The same base, then each side changes, adds and deletes notes.
         for ([_]*testgit.Repo{ &t.git, &t.ours }) |r| {
             for (objects[0..5], 0..) |o, i| {
-                const msg = try std.fmt.allocPrint(gpa, "base {d}\nshared", .{i});
+                const msg = try gpa.print("base {d}\nshared", .{i});
                 defer gpa.free(msg);
                 try r.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
             }
@@ -1727,7 +1727,7 @@ test "notes merge under every strategy leaves what git notes merge leaves, and a
         try t.expectSame(io, &.{ "rev-parse", "--verify", "-q", "NOTES_MERGE_PARTIAL" });
         try t.expectSame(io, &.{ "symbolic-ref", "-q", "NOTES_MERGE_REF" });
         for (outcome.conflicts) |o| {
-            const path = try std.fmt.allocPrint(gpa, ".git/NOTES_MERGE_WORKTREE/{s}", .{hexOf(o, &hex)});
+            const path = try gpa.print(".git/NOTES_MERGE_WORKTREE/{s}", .{hexOf(o, &hex)});
             defer gpa.free(path);
             const a = try t.git.readFile(io, path);
             defer gpa.free(a);

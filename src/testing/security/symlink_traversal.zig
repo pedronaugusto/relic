@@ -10,8 +10,8 @@
 //! only as an object its refs name.
 
 const std = @import("std");
+const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const Io = std.Io;
 
 const apply = @import("../../patch/apply.zig");
@@ -30,7 +30,7 @@ const testgit = @import("../git.zig");
 const Repository = repo_mod.Repository;
 const who: object.Signature = .{ .name = "S", .email = "s@example.com", .when_secs = 1, .offset_minutes = 0 };
 /// A link needs a privilege on Windows, where git writes one as a file.
-const links = builtin.os.tag != .windows;
+const links = builtin.target.os.tag != .windows;
 
 /// Apply `patch` to the working tree of `git`, and say whether relic
 /// refused it.
@@ -77,7 +77,7 @@ test "git 2.3.3, t4139-apply-escape and t4122-apply-symlink-inside: apply writes
     if (!links) return;
     const outer_path = try outer.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(outer_path);
-    const absolute = try std.fmt.allocPrint(gpa, "diff --git a/tmp b/tmp\nnew file mode 120000\n--- /dev/null\n+++ b/tmp\n@@ -0,0 +1 @@\n+{s}\n\\ No newline at end of file\n" ++ comptime add("tmp/foo"), .{outer_path});
+    const absolute = try gpa.print("diff --git a/tmp b/tmp\nnew file mode 120000\n--- /dev/null\n+++ b/tmp\n@@ -0,0 +1 @@\n+{s}\n\\ No newline at end of file\n" ++ comptime add("tmp/foo"), .{outer_path});
     defer gpa.free(absolute);
     for ([_][]const u8{ comptime symlink("tmp", "..") ++ add("tmp/foo"), absolute }) |patch| {
         try std.testing.expect(try refuses(gpa, io, &inside, patch, .{}));
@@ -146,7 +146,7 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
     const io = std.testing.io;
     var env = try testgit.programEnviron(gpa);
     defer env.deinit();
-    const filter = try testgit.fixtureCommand(gpa, build_options.filter_helper_path, "--delay");
+    const filter = try testgit.fixtureCommand(gpa, suite.path(.filter_helper), "--delay");
     defer gpa.free(filter);
     const Mode = struct { dir: []const u8, link: []const u8 };
     for ([_]Mode{ .{ .dir = "A", .link = "a" }, .{ .dir = "a\u{308}", .link = "\u{e4}" } }) |mode| {
@@ -164,12 +164,12 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
             defer gpa.free(empty);
             const pointer = try git.runInput(io, &.{ "hash-object", "-w", "--stdin" }, target);
             defer gpa.free(pointer);
-            const attr_text = try std.fmt.allocPrint(gpa, "{s}/z filter=delay\n", .{mode.dir});
+            const attr_text = try gpa.print("{s}/z filter=delay\n", .{mode.dir});
             defer gpa.free(attr_text);
             const attr = try git.runInput(io, &.{ "hash-object", "-w", "--stdin" }, attr_text);
             defer gpa.free(attr);
             const e = std.mem.trimEnd(u8, empty, "\n");
-            const objs = try std.fmt.allocPrint(gpa, "100644 blob {s}\t{s}/x\n100644 blob {s}\t{s}/y\n100644 blob {s}\t{s}/z\n120000 blob {s}\t{s}\n100644 blob {s}\t.gitattributes\n", .{
+            const objs = try gpa.print("100644 blob {s}\t{s}/x\n100644 blob {s}\t{s}/y\n100644 blob {s}\t{s}/z\n120000 blob {s}\t{s}\n100644 blob {s}\t.gitattributes\n", .{
                 e, mode.dir, e, mode.dir, e, mode.dir, std.mem.trimEnd(u8, pointer, "\n"), mode.link, std.mem.trimEnd(u8, attr, "\n"),
             });
             defer gpa.free(objs);
@@ -216,7 +216,7 @@ fn expectNoLink(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, needle: []const u8)
             .file => {
                 const bytes = try dir.readFileAlloc(io, entry.path, gpa, .limited(64 << 20));
                 defer gpa.free(bytes);
-                if (needle.len != 0 and std.mem.indexOf(u8, bytes, needle) != null) {
+                if (needle.len != 0 and std.mem.find(u8, bytes, needle) != null) {
                     std.debug.print("{s} holds what a link pointed at\n", .{entry.path});
                     return error.TestUnexpectedResult;
                 }
@@ -254,7 +254,7 @@ test "CVE-2022-39253, t5604-clone-reference 'clone repo with symlinked or unknow
     defer gpa.free(secret);
     // A loose object's name that is a link to a file the cloner can read.
     try source.dir.createDirPath(io, ".git/objects/ab");
-    try source.dir.symLink(io, secret, ".git/objects/ab/" ++ "c" ** 38, .{});
+    try source.dir.symLink(io, secret, ".git/objects/ab/" ++ @as([38]u8, @splat('c')), .{});
     const path = try source.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);
 

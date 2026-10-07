@@ -17,7 +17,7 @@ const hash = @import("../../hash.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 
-const long = "x" ** 5000;
+const long = &@as([5000]u8, @splat('x'));
 
 /// `git mktree` of `entries`, `<mode> <type> <oid>\t<name>` each.
 fn mktree(gpa: std.mem.Allocator, io: Io, git: *testgit.Repo, entries: []const u8) !hash.Oid {
@@ -35,14 +35,14 @@ test "git 2.2.3 (strbuf for path buffers, no t/ test): a tree of names longer th
     defer gpa.free(blob_text);
     const blob = try hash.Oid.parse(.sha1, std.mem.trimEnd(u8, blob_text, "\n"));
     var hex: [hash.max_hex_len]u8 = undefined;
-    const inner_text = try std.fmt.allocPrint(gpa, "100644 blob {s}\tleaf\n", .{blob.hex(&hex)});
+    const inner_text = try gpa.print("100644 blob {s}\tleaf\n", .{blob.hex(&hex)});
     defer gpa.free(inner_text);
     const inner = try mktree(gpa, io, &git, inner_text);
 
     // A tree named `long` and a blob named `long-a`: git puts the blob
     // first, `-` sorting before the `/` a tree's name is compared with.
     var hex2: [hash.max_hex_len]u8 = undefined;
-    const listing = try std.fmt.allocPrint(gpa, "040000 tree {s}\t{s}\n100644 blob {s}\t{s}-a\n", .{ inner.hex(&hex2), long, blob.hex(&hex), long });
+    const listing = try gpa.print("040000 tree {s}\t{s}\n100644 blob {s}\t{s}-a\n", .{ inner.hex(&hex2), long, blob.hex(&hex), long });
     defer gpa.free(listing);
     const theirs = try mktree(gpa, io, &git, listing);
 
@@ -60,7 +60,7 @@ test "git 2.2.3 (strbuf for path buffers, no t/ test): a path longer than PATH_M
     const io = std.testing.io;
     var h = try hostile.Harness.init(gpa, io);
     defer h.deinit(io);
-    const name = "d" ** 250;
+    const name = &@as([250]u8, @splat('d'));
     var tree = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = name, .oid = try h.blob(io, "leaf\n") }});
     // Twenty levels: a path of five thousand bytes, past every fixed
     // array and past what most systems open in one call.

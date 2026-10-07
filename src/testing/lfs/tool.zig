@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     if (args.len == 0) return error.MissingProgramName;
     const executable = try std.process.executablePathAlloc(io, arena);
-    const sidecar = try std.fmt.allocPrint(arena, "{s}.fixture", .{executable});
+    const sidecar = try arena.print("{s}.fixture", .{executable});
     const description = try Io.Dir.cwd().readFileAlloc(io, sidecar, arena, .limited(16 << 10));
     var fields = std.mem.splitScalar(u8, description, '\n');
     const tool: Tool = .{
@@ -52,7 +52,7 @@ const Fields = std.mem.SplitIterator(u8, .scalar);
 /// anything else, logging the prompt.
 fn askpass(t: *const Tool) !void {
     const prompt = if (t.args.len > 1) t.args[1] else "";
-    try appendLog(t.arena, t.io, t.stem, try std.fmt.allocPrint(t.arena, "{s}\n", .{prompt}));
+    try appendLog(t.arena, t.io, t.stem, try t.arena.print("{s}\n", .{prompt}));
     var buf: [4096]u8 = undefined;
     var out = Io.File.stdout().writerStreaming(t.io, &buf);
     try out.interface.writeAll(if (std.mem.startsWith(u8, prompt, "Username")) "ada\n" else "secret\n");
@@ -84,7 +84,7 @@ fn credential(t: *const Tool, kind: []const u8, fields: *Fields) !void {
     try stdin.interface.appendRemainingUnlimited(arena, &input);
     try appendLog(arena, io, person_stem, try credentialLog(arena, kind, operation, input.items));
     const removable = std.mem.eql(u8, kind, "credential-removable") or std.mem.eql(u8, kind, "credential-removable-verbatim");
-    const erased_path = if (removable) try std.fmt.allocPrint(arena, "{s}.erased", .{t.stem}) else "";
+    const erased_path = if (removable) try arena.print("{s}.erased", .{t.stem}) else "";
     if (removable and std.mem.eql(u8, operation, "erase")) {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = erased_path, .data = "" });
     }
@@ -100,7 +100,7 @@ fn credential(t: *const Tool, kind: []const u8, fields: *Fields) !void {
     if (std.mem.eql(u8, kind, "password")) {
         try out.interface.print("password={s}\n", .{password});
     } else if (person) {
-        const answer_path = try std.fmt.allocPrint(arena, "{s}.answer", .{person_stem});
+        const answer_path = try arena.print("{s}.answer", .{person_stem});
         const answer = try Io.Dir.cwd().readFileAlloc(io, answer_path, arena, .limited(16 << 10));
         try out.interface.writeAll(answer);
     } else try out.interface.print("username={s}\npassword={s}\n", .{ user, password });
@@ -171,7 +171,7 @@ fn transfer(t: *const Tool, fields: *Fields) !void {
     const log_dir = fields.next() orelse return error.InvalidFixture;
     const extra = fields.next() orelse return error.InvalidFixture;
     var command: std.ArrayList([]const u8) = .empty;
-    try command.appendSlice(arena, &.{ program, try std.fmt.allocPrint(arena, "--root={s}", .{root}), try std.fmt.allocPrint(arena, "--log={s}", .{log_dir}) });
+    try command.appendSlice(arena, &.{ program, try arena.print("--root={s}", .{root}), try arena.print("--log={s}", .{log_dir}) });
     if (extra.len != 0) try command.append(arena, extra);
     try command.appendSlice(arena, t.args[1..]);
     var child = try std.process.spawn(t.io, .{ .argv = command.items, .environ_map = t.environ });
@@ -184,7 +184,7 @@ fn transfer(t: *const Tool, fields: *Fields) !void {
 }
 
 fn appendLog(arena: Allocator, io: Io, stem: []const u8, bytes: []const u8) !void {
-    const path = try std.fmt.allocPrint(arena, "{s}.log", .{stem});
+    const path = try arena.print("{s}.log", .{stem});
     const file = try Io.Dir.cwd().createFile(io, path, .{ .truncate = false, .read = true });
     defer file.close(io);
     try file.writePositionalAll(io, bytes, try file.length(io));

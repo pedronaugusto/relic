@@ -59,7 +59,7 @@ pub const Fields = struct {
             const text = std.mem.trim(u8, part, " \t\n\r\x0b\x0c");
             if (text.len == 0) continue;
             const f = Field.parse(text) orelse {
-                if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "unsupported field '{s}' in '{s}' config", .{ text, key }) });
+                if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("unsupported field '{s}' in '{s}' config", .{ text, key }) });
                 continue;
             };
             switch (f) {
@@ -130,7 +130,7 @@ pub fn remotes(arena: Allocator, config: *const config_mod.Config) Allocator.Err
 /// The value of `remote.<remote>.<key>`, unquoted, when set and not
 /// empty. The result is `arena`'s.
 fn remoteValue(arena: Allocator, config: *const config_mod.Config, remote: []const u8, key: []const u8) Allocator.Error!?[]const u8 {
-    const full = try std.fmt.allocPrint(arena, "remote.{s}.{s}", .{ remote, key });
+    const full = try arena.print("remote.{s}.{s}", .{ remote, key });
     const raw = config.get(full) orelse return null;
     const value = try arena.dupe(u8, raw);
     return if (value.len == 0) null else value;
@@ -225,7 +225,7 @@ pub fn acceptedByClient(arena: Allocator, config: *const config_mod.Config, repl
                 try out.append(arena, k);
                 break;
             }
-        } else if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "accepted promisor remote '{s}' not found", .{name}) });
+        } else if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("accepted promisor remote '{s}' not found", .{name}) });
     }
     return out.items;
 }
@@ -245,7 +245,7 @@ pub const Accept = enum {
         if (std.ascii.eqlIgnoreCase(raw, "KnownUrl")) return .known_url;
         if (std.ascii.eqlIgnoreCase(raw, "KnownName")) return .known_name;
         if (std.ascii.eqlIgnoreCase(raw, "All")) return .all;
-        if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "unknown '{s}' value for '{s}' config option", .{ raw, "promisor.acceptfromserver" }) });
+        if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("unknown '{s}' value for '{s}' config option", .{ raw, "promisor.acceptfromserver" }) });
         return .none;
     }
 };
@@ -260,7 +260,7 @@ pub const Store = struct {
 
     /// `remote.<remote>.<field>`. The result is `arena`'s.
     pub fn key(s: Store, arena: Allocator) Allocator.Error![]const u8 {
-        return std.fmt.allocPrint(arena, "remote.{s}.{s}", .{ s.remote, s.field.name() });
+        return arena.print("remote.{s}.{s}", .{ s.remote, s.field.name() });
     }
 };
 
@@ -321,7 +321,7 @@ fn parseOne(arena: Allocator, text: []const u8, warnings: ?*warning.Warnings) Al
     var it = std.mem.splitScalar(u8, text, ',');
     while (it.next()) |elem| {
         const eq = std.mem.findScalar(u8, elem, '=') orelse {
-            if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "invalid element '{s}' from remote info", .{elem}) });
+            if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid element '{s}' from remote info", .{elem}) });
             continue;
         };
         const key = elem[0..eq];
@@ -335,7 +335,7 @@ fn parseOne(arena: Allocator, text: []const u8, warnings: ?*warning.Warnings) Al
         } else if (std.mem.eql(u8, key, "token")) token = value;
     }
     if (name == null or name.?.len == 0 or url == null or url.?.len == 0) {
-        if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "server advertised a promisor remote without a name or URL: '{s}', ignoring this remote", .{text}) });
+        if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("server advertised a promisor remote without a name or URL: '{s}', ignoring this remote", .{text}) });
         return null;
     }
     return .{ .name = name.?, .url = url.?, .filter = filter, .token = token };
@@ -369,7 +369,7 @@ fn shouldAccept(accept: Accept, advertised: Info, configured_infos: []const Info
     const mine = find(configured_infos, advertised.name) orelse return false;
     if (accept == .known_name) return allFieldsMatch(advertised, configured_infos, fields, mine);
     if (!std.mem.eql(u8, mine.url, advertised.url)) {
-        if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "known remote named '{s}' but with URL '{s}' instead of '{s}', ignoring this remote", .{ advertised.name, mine.url, advertised.url }) });
+        if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("known remote named '{s}' but with URL '{s}' instead of '{s}', ignoring this remote", .{ advertised.name, mine.url, advertised.url }) });
         return false;
     }
     return allFieldsMatch(advertised, configured_infos, fields, mine);
@@ -381,14 +381,14 @@ fn storeFields(arena: Allocator, advertised: Info, stored: []const Info, fields:
     if (fields.partial_clone_filter) if (advertised.filter) |f| {
         if (filterspec.sendForm(arena, f)) |_| {
             try storeOne(arena, advertised.name, .partial_clone_filter, f, mine.filter, out);
-        } else |err| if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "invalid filter '{s}' for remote '{s}' will not be stored: {s}", .{ f, advertised.name, @errorName(err) }) });
+        } else |err| if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid filter '{s}' for remote '{s}' will not be stored: {s}", .{ f, advertised.name, @errorName(err) }) });
     };
     if (fields.token) if (advertised.token) |t| {
         const has_control = for (t) |c| {
             if (std.ascii.isControl(c)) break true;
         } else false;
         if (has_control) {
-            if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "invalid token '{s}' for remote '{s}' will not be stored", .{ t, advertised.name }) });
+            if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid token '{s}' for remote '{s}' will not be stored", .{ t, advertised.name }) });
         } else try storeOne(arena, advertised.name, .token, t, mine.token, out);
     };
 }

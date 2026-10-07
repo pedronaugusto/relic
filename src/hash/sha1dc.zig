@@ -957,11 +957,11 @@ test "the FIPS 180 vectors, unchanged by the check" {
     var out: [20]u8 = undefined;
     try testing.expect(!Sha1Dc.hash("abc", &out, .{}));
     var text: [40]u8 = undefined;
-    _ = try std.fmt.bufPrint(&text, "{x}", .{&out});
+    _ = try std.mem.print(&text, "{x}", .{&out});
     try testing.expectEqualStrings("a9993e364706816aba3e25717850c26c9cd0d89d", &text);
 
     try testing.expect(!Sha1Dc.hash("", &out, .{}));
-    _ = try std.fmt.bufPrint(&text, "{x}", .{&out});
+    _ = try std.mem.print(&text, "{x}", .{&out});
     try testing.expectEqualStrings("da39a3ee5e6b4b0d3255bfef95601890afd80709", &text);
 }
 

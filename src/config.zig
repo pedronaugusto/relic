@@ -15,6 +15,7 @@ pub const userconfig = @import("config/userconfig.zig");
 
 const config_write = @import("config/write.zig");
 const std = @import("std");
+const allocation = @import("testing/allocation.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -723,7 +724,7 @@ pub const Config = struct {
                 // A `gitdir:./` condition is the including file's
                 // directory's, absolute and with its links resolved.
                 var dir_buf: [4096]u8 = undefined;
-                const including_dir = if (std.mem.indexOf(u8, entry.subsection, ":./") != null)
+                const including_dir = if (std.mem.find(u8, entry.subsection, ":./") != null)
                     absoluteDirOf(io, dir, config.files.items[entry.file_index].path, &dir_buf)
                 else
                     null;
@@ -731,7 +732,7 @@ pub const Config = struct {
                 conditional = true;
             }
             const path = include_path orelse continue;
-            if (level == .command and !std.fs.path.isAbsolute(path) and !std.mem.startsWith(u8, path, "~/")) continue;
+            if (level == .command and !std.Io.Dir.path.isAbsolute(path) and !std.mem.startsWith(u8, path, "~/")) continue;
 
             var buf: [4096]u8 = undefined;
             const including_path = config.files.items[entry.file_index].path;
@@ -749,18 +750,18 @@ pub const Config = struct {
     fn absoluteDirOf(io: Io, dir: Io.Dir, sub_path: []const u8, buf: []u8) ?[]const u8 {
         const len = dir.realPathFile(io, sub_path, buf) catch return null;
         const path = buf[0..len];
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
-        return std.fs.path.dirnamePosix(path);
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+        return std.Io.Dir.path.dirnamePosix(path);
     }
 
     fn resolveIncludePath(config: *const Config, path: []const u8, including_path: []const u8, buf: []u8) ?[]const u8 {
         if (std.mem.startsWith(u8, path, "~/")) {
             const home = config.context.home orelse return null;
-            return std.fmt.bufPrint(buf, "{s}/{s}", .{ home, path[2..] }) catch null;
+            return std.mem.print(buf, "{s}/{s}", .{ home, path[2..] }) catch null;
         }
-        if (std.fs.path.isAbsolute(path)) return path;
-        if (std.fs.path.dirname(including_path)) |parent| {
-            if (parent.len != 0) return std.fmt.bufPrint(buf, "{s}/{s}", .{ parent, path }) catch null;
+        if (std.Io.Dir.path.isAbsolute(path)) return path;
+        if (std.Io.Dir.path.dirname(including_path)) |parent| {
+            if (parent.len != 0) return std.mem.print(buf, "{s}/{s}", .{ parent, path }) catch null;
         }
         return path;
     }
@@ -797,7 +798,7 @@ pub const Config = struct {
                 var rest_buf: [4096]u8 = undefined;
                 const rest = pattern_raw[2..];
                 const rest_pattern = if (std.mem.endsWith(u8, rest, "/"))
-                    std.fmt.bufPrint(&rest_buf, "{s}**", .{rest}) catch return false
+                    std.mem.print(&rest_buf, "{s}**", .{rest}) catch return false
                 else
                     rest;
                 return wildmatch.match(rest_pattern, git_dir[base.len + 1 ..], .{ .pathname = true, .case_fold = case_fold }) catch false;
@@ -807,7 +808,7 @@ pub const Config = struct {
             // Git matches paths with forward slashes on Windows, including
             // the home directory expanded from `~/`.
             var normalized: [4096]u8 = undefined;
-            const match_pattern = if (builtin.os.tag == .windows) blk: {
+            const match_pattern = if (builtin.target.os.tag == .windows) blk: {
                 if (pattern.len > normalized.len) return false;
                 @memcpy(normalized[0..pattern.len], pattern);
                 std.mem.replaceScalar(u8, normalized[0..pattern.len], '\\', '/');
@@ -820,7 +821,7 @@ pub const Config = struct {
             const branch = config.context.branch orelse return false;
             var buf: [4096]u8 = undefined;
             const pattern = if (std.mem.endsWith(u8, pattern_raw, "/"))
-                std.fmt.bufPrint(&buf, "{s}**", .{pattern_raw}) catch return false
+                std.mem.print(&buf, "{s}**", .{pattern_raw}) catch return false
             else
                 pattern_raw;
             return wildmatch.match(pattern, branch, .{ .pathname = true }) catch false;
@@ -888,16 +889,16 @@ pub const Config = struct {
         var scratch: [4096]u8 = undefined;
         if (std.mem.startsWith(u8, text, "~/")) {
             const home = config.context.home orelse return null;
-            text = std.fmt.bufPrint(&scratch, "{s}/{s}", .{ home, text[2..] }) catch return null;
+            text = std.mem.print(&scratch, "{s}/{s}", .{ home, text[2..] }) catch return null;
         } else if (!std.mem.startsWith(u8, text, "/") and !std.mem.startsWith(u8, text, "**") and
             !(text.len >= 2 and text[1] == ':'))
         {
-            text = std.fmt.bufPrint(&scratch, "**/{s}", .{text}) catch return null;
+            text = std.mem.print(&scratch, "**/{s}", .{text}) catch return null;
         }
         if (std.mem.endsWith(u8, text, "/")) {
-            return std.fmt.bufPrint(buf, "{s}**", .{text}) catch null;
+            return std.mem.print(buf, "{s}**", .{text}) catch null;
         }
-        return std.fmt.bufPrint(buf, "{s}", .{text}) catch null;
+        return std.mem.print(buf, "{s}", .{text}) catch null;
     }
 
     /// The value of `full_name`, or `null`.
@@ -987,7 +988,7 @@ pub const Config = struct {
         const value = config.get(full_name) orelse return null;
         const home = config.context.home orelse "";
         const path = if (std.mem.startsWith(u8, value, "~/") and config.context.home != null)
-            try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, value[2..] })
+            try gpa.print("{s}/{s}", .{ home, value[2..] })
         else
             try gpa.dupe(u8, value);
         return path;
@@ -1085,7 +1086,7 @@ pub const Config = struct {
             const escaped = try escapeValue(config.gpa, value);
             defer config.gpa.free(escaped);
             const replacement = if (line.has_value)
-                try std.fmt.allocPrint(config.gpa, "{s}{s}{s}", .{
+                try config.gpa.print("{s}{s}{s}", .{
                     line.text[0..line.value_start],
                     escaped,
                     line.text[line.value_end..],
@@ -1094,7 +1095,7 @@ pub const Config = struct {
                 var name_start: usize = 0;
                 while (name_start < line.text.len and isSpace(line.text[name_start])) name_start += 1;
                 const name_end = name_start + line.name.len;
-                break :blk try std.fmt.allocPrint(config.gpa, "{s} = {s}{s}", .{
+                break :blk try config.gpa.print("{s} = {s}{s}", .{
                     line.text[0..name_end],
                     escaped,
                     line.text[name_end..],
@@ -1264,7 +1265,7 @@ pub const Config = struct {
         const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
         const file = &config.files.items[file_index];
         const full = if (subsection) |sub|
-            try std.fmt.allocPrint(config.gpa, "{s}.{s}", .{ section, sub })
+            try config.gpa.print("{s}.{s}", .{ section, sub })
         else
             try config.gpa.dupe(u8, section);
         defer config.gpa.free(full);
@@ -1688,7 +1689,7 @@ fn parseSectionHeader(names: Allocator, text: []const u8, at: usize) ParseError!
     // `[a.b "c"]` is the section `a` with the subsection `b.c`: git
     // appends the quoted part to the name read so far.
     const subsection = if (dot) |d|
-        try std.fmt.allocPrint(names, "{s}.{s}", .{ name[d + 1 ..], quoted })
+        try names.print("{s}.{s}", .{ name[d + 1 ..], quoted })
     else
         quoted;
     return .{
@@ -1947,10 +1948,10 @@ test "integers and booleans read as git config --type reads them" {
     git.report_failures = false;
     for ([_][]const u8{ "0x10", "010", "08", "1_000", "2", "0", "-0x8k", "+3m", "1k ", "0x", "true", "Off", "", "nope" }) |value| {
         for ([_][]const u8{ "int", "bool" }) |kind| {
-            const text = try std.fmt.allocPrint(gpa, "[a]\n\tx = \"{s}\"\n", .{value});
+            const text = try gpa.print("[a]\n\tx = \"{s}\"\n", .{value});
             defer gpa.free(text);
             try git.writeFile(io, "probe.config", text);
-            const flag = try std.fmt.allocPrint(gpa, "--type={s}", .{kind});
+            const flag = try gpa.print("--type={s}", .{kind});
             defer gpa.free(flag);
             const theirs = git.run(io, &.{ "config", "-f", "probe.config", flag, "a.x" });
             defer if (theirs) |t| gpa.free(t) else |_| {};
@@ -1958,9 +1959,9 @@ test "integers and booleans read as git config --type reads them" {
             defer config.deinit();
             var buf: [64]u8 = undefined;
             const ours: anyerror![]const u8 = if (kind[0] == 'i')
-                (if (config.getInt("a.x", 0)) |n| std.fmt.bufPrint(&buf, "{d}\n", .{n}) else |err| err)
+                (if (config.getInt("a.x", 0)) |n| std.mem.print(&buf, "{d}\n", .{n}) else |err| err)
             else
-                (if (config.getBool("a.x", false)) |b| std.fmt.bufPrint(&buf, "{}\n", .{b}) else |err| err);
+                (if (config.getBool("a.x", false)) |b| std.mem.print(&buf, "{}\n", .{b}) else |err| err);
             if (theirs) |t| {
                 std.testing.expectEqualStrings(t, try ours) catch |err| {
                     std.debug.print("{s} as {s}\n", .{ value, kind });
@@ -2083,7 +2084,7 @@ test "a name is followed by a line break or an equals sign, and by nothing else 
         "\tb_1 = 2\n",  "\tbare=\n",    "\tbare = # c\n",
     };
     for (lines) |line| {
-        const text = try std.fmt.allocPrint(gpa, "[core]\n{s}", .{line});
+        const text = try gpa.print("[core]\n{s}", .{line});
         defer gpa.free(text);
         try git.writeFile(io, "probe.config", text);
         git.report_failures = false;
@@ -2139,7 +2140,7 @@ test "a new section owns its parsed name" {
     try std.testing.expectEqualStrings("kept", config.get("fresh.value").?);
     const rendered = try config.renderWritable();
     defer gpa.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "[fresh]\n\tvalue = kept\n") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "[fresh]\n\tvalue = kept\n") != null);
 }
 
 test "unsetting removes only the matching lines" {
@@ -2237,7 +2238,7 @@ test "a header reads as git reads it, and a header git refuses is refused" {
         "; x\n[core]\t; y",    "[s \"a\\\r\nb\"]", "[s\t\"a\"]",     "[s \"x\"]]",
     };
     for (headers) |header| {
-        const text = try std.fmt.allocPrint(gpa, "{s}\n\tx = 1\n", .{header});
+        const text = try gpa.print("{s}\n\tx = 1\n", .{header});
         defer gpa.free(text);
         try git.writeFile(io, "probe.config", text);
         git.report_failures = false;
@@ -2287,7 +2288,7 @@ test "a value reads as git reads it, carriage returns and all" {
         "\ty = \" p \"\t\n", "\ty = p;q\n",         "\ty = \"p;q\"\n",    "\ty =\r\n",
     };
     for (lines) |line| {
-        const text = try std.fmt.allocPrint(gpa, "[a]\n{s}", .{line});
+        const text = try gpa.print("[a]\n{s}", .{line});
         defer gpa.free(text);
         try git.writeFile(io, "probe.config", text);
         const theirs = try git.run(io, &.{ "config", "-f", "probe.config", "-z", "--get", "a.y" });
@@ -2297,7 +2298,7 @@ test "a value reads as git reads it, carriage returns and all" {
         defer config.deinit();
         const ours = try gpa.dupe(u8, config.get("a.y").?);
         defer gpa.free(ours);
-        const ours_z = try std.fmt.allocPrint(gpa, "{s}\x00", .{ours});
+        const ours_z = try gpa.print("{s}\x00", .{ours});
         defer gpa.free(ours_z);
         std.testing.expectEqualStrings(theirs, ours_z) catch |err| {
             std.debug.print("line {any}\n", .{line});
@@ -2367,7 +2368,7 @@ fn expectSetsAgree(git: *testgit.Repo, start: []const u8, sets: []const [2][]con
             else => return err,
         };
         defer gpa.free(read);
-        const want = try std.fmt.allocPrint(gpa, "{s}\n", .{pair[1]});
+        const want = try gpa.print("{s}\n", .{pair[1]});
         defer gpa.free(want);
         // A name git adds a line for rather than replaces reads back as more
         // than one value; the last is the one set.
@@ -2549,8 +2550,8 @@ test "a variable's name reads lower-cased, as git config --list prints it" {
     try config.set("core.AUTOcrlf", "input");
     const rendered = try config.renderWritable();
     defer gpa.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "\tFileMode = false\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "\tAutoCRLF = input\n") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "\tFileMode = false\n") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "\tAutoCRLF = input\n") != null);
     try std.testing.expectEqualStrings("filemode", config.find("core.filemode").?.name);
 }
 
@@ -2613,7 +2614,7 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     // with that value under that name, and the file it was written into
     // still parses. Only a line break in the subsection is refused.
     config.files.items[0].writable = true;
-    const key = try std.fmt.allocPrint(gpa, "fuzz.{s}.name", .{subsection});
+    const key = try gpa.print("fuzz.{s}.name", .{subsection});
     defer gpa.free(key);
     config.set(key, value) catch |err| switch (err) {
         error.InvalidKey => {
@@ -2658,7 +2659,7 @@ test "configuration sources have one owner when allocation stops" {
             try std.testing.expectEqualStrings("2", config.get("test.two").?);
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }
 
 test "configuration source paths enter their owner only after copying succeeds" {
@@ -2683,7 +2684,7 @@ test "configuration source paths enter their owner only after copying succeeds" 
             }
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{tmp.dir});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{tmp.dir});
 }
 
 test "replacing an inserted setting keeps its name under the new line owner" {

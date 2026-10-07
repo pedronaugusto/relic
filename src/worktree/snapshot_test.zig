@@ -1,4 +1,5 @@
 const std = @import("std");
+const allocation = @import("../testing/allocation.zig");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
@@ -201,7 +202,7 @@ test "snapshot allocation failures leave no published result or lost owner" {
     try source.exec(io, &.{ "add", "." });
     try source.exec(io, &.{ "commit", "-qm", "base" });
     try source.exec(io, &.{ "repack", "-ad" });
-    try testing.checkAllAllocationFailures(gpa, allocationCase, .{source.dir});
+    try testing.checkAllAllocationFailures(allocation.no_resize, allocationCase, .{source.dir});
 }
 
 fn allocationCase(gpa: std.mem.Allocator, source: Io.Dir) !void {
@@ -227,7 +228,7 @@ test "snapshot keeps native LFS writes inside the private store" {
     defer source.deinit();
     const source_path = try source.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(source_path);
-    const external = try std.fs.path.join(gpa, &.{ source_path, "external-lfs" });
+    const external = try std.Io.Dir.path.join(gpa, &.{ source_path, "external-lfs" });
     defer gpa.free(external);
     try source.exec(io, &.{ "config", "lfs.storage", external });
     try source.writeFile(io, ".gitattributes", "*.bin filter=lfs\n");
@@ -261,7 +262,7 @@ test "snapshot plain folders keep executable modes symlinks and SHA256 names" {
         defer file.close(io);
         try file.setPermissions(io, .fromMode(0o755));
     }
-    const symlink = if (builtin.os.tag != .windows) blk: {
+    const symlink = if (builtin.target.os.tag != .windows) blk: {
         try folder.dir.symLink(io, "run", "link", .{});
         break :blk true;
     } else false;
@@ -396,7 +397,7 @@ test "a live snapshot store reads its own objects after source packs are damaged
     defer store.deinit(io);
     const saved = (try store.capture(io, .{ .repository = &r }, .{})).snapshot;
     const pack_name = storage.get(r.odb._state).sources.items[0].packs.items[0].name;
-    const path = try std.fmt.allocPrint(gpa, ".git/objects/pack/{s}.pack", .{pack_name});
+    const path = try gpa.print(".git/objects/pack/{s}.pack", .{pack_name});
     defer gpa.free(path);
     try source.writeFile(io, path, "damaged\n");
     var dest = testing.tmpDir(.{ .iterate = true });
@@ -632,7 +633,7 @@ test "snapshot adoption preserves refusals and allocation ownership" {
             try expectClosure(&store.db, tree);
         }
     };
-    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+    try testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }
 
 test "snapshot adoption refuses file entries that name trees" {
@@ -668,10 +669,10 @@ test "a large first capture goes into packs, and a small one after it stays loos
     for (0..300) |i| {
         var path: [32]u8 = undefined;
         var text: [32]u8 = undefined;
-        try folder.dir.createDirPath(io, try std.fmt.bufPrint(&path, "d{d}", .{i % 7}));
+        try folder.dir.createDirPath(io, try std.mem.print(&path, "d{d}", .{i % 7}));
         try folder.dir.writeFile(io, .{
-            .sub_path = try std.fmt.bufPrint(&path, "d{d}/f{d}", .{ i % 7, i }),
-            .data = try std.fmt.bufPrint(&text, "file {d}\n", .{i}),
+            .sub_path = try std.mem.print(&path, "d{d}/f{d}", .{ i % 7, i }),
+            .data = try std.mem.print(&text, "file {d}\n", .{i}),
         });
     }
     var private = testing.tmpDir(.{ .iterate = true });

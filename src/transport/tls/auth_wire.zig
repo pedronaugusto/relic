@@ -76,7 +76,7 @@ pub const CertificateRequest = struct {
         for (mine) |want| {
             var i: usize = 0;
             while (i + 2 <= r.schemes.len) : (i += 2) {
-                if (mem.readInt(u16, r.schemes[i..][0..2], .big) == @intFromEnum(want)) return want;
+                if (mem.readInt(u16, r.schemes[i..][0..2], .big) == @backingInt(want)) return want;
             }
         }
         return null;
@@ -106,7 +106,7 @@ pub fn signWith(
 
 /// The nonce for record `seq` under `iv` (RFC 8446, 5.3).
 pub fn sequenceNonce(comptime P: type, iv: [P.AEAD.nonce_length]u8, seq: u64) [P.AEAD.nonce_length]u8 {
-    const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
+    const pad = @as([P.AEAD.nonce_length - 8]u8, @splat(0));
     const operand: NonceVector(P) = pad ++ @as([8]u8, @bitCast(mem.nativeToBig(u64, seq)));
     return @as(NonceVector(P), iv) ^ operand;
 }
@@ -144,12 +144,12 @@ pub fn Sealer13(comptime P: type) type {
 
         pub fn seal(s: *Self) Writer.Error!void {
             if (s.len == 0) return;
-            s.buf[s.len] = @intFromEnum(tls.ContentType.handshake);
+            s.buf[s.len] = @backingInt(tls.ContentType.handshake);
             const inner = s.buf[0 .. s.len + 1];
             var record: [tls.record_header_len + client_fragment_len + 1 + @as(usize, P.AEAD.tag_length)]u8 = undefined;
             const total = inner.len + P.AEAD.tag_length;
-            record[0] = @intFromEnum(tls.ContentType.application_data);
-            mem.writeInt(u16, record[1..3], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+            record[0] = @backingInt(tls.ContentType.application_data);
+            mem.writeInt(u16, record[1..3], @backingInt(tls.ProtocolVersion.tls_1_2), .big);
             mem.writeInt(u16, record[3..5], @intCast(total), .big);
             const header = record[0..tls.record_header_len];
             P.AEAD.encrypt(
@@ -177,8 +177,8 @@ pub fn writePlainHandshake(output: *Writer, parts: []const []const u8) Writer.Er
     while (total > 0) {
         const n = @min(total, client_fragment_len);
         var header: [tls.record_header_len]u8 = undefined;
-        header[0] = @intFromEnum(tls.ContentType.handshake);
-        mem.writeInt(u16, header[1..3], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+        header[0] = @backingInt(tls.ContentType.handshake);
+        mem.writeInt(u16, header[1..3], @backingInt(tls.ProtocolVersion.tls_1_2), .big);
         mem.writeInt(u16, header[3..5], @intCast(n), .big);
         try output.writeAll(&header);
         var left = n;

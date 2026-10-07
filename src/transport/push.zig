@@ -494,9 +494,9 @@ fn defaultRefspecs(
     }
     const current = (try repo.refStore().currentBranch(gpa, io)) orelse return error.NoPushDestination;
     defer gpa.free(current);
-    const branch_ref = try std.fmt.allocPrint(arena, "refs/heads/{s}", .{current});
+    const branch_ref = try arena.print("refs/heads/{s}", .{current});
     if (std.ascii.eqlIgnoreCase(mode_text, "current")) {
-        try specs.append(arena, try Refspec.parse(try std.fmt.allocPrint(arena, "{s}:{s}", .{ branch_ref, branch_ref }), .push));
+        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push));
         return;
     }
     var branch = try remote_mod.Branch.get(gpa, repo.configuration(), current);
@@ -506,14 +506,14 @@ fn defaultRefspecs(
     if (!upstream_mode and !same_remote) {
         // `simple` to a remote that is not the branch's own: the branch of
         // the same name.
-        try specs.append(arena, try Refspec.parse(try std.fmt.allocPrint(arena, "{s}:{s}", .{ branch_ref, branch_ref }), .push));
+        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push));
         return;
     }
     if (!same_remote or branch.merge.len != 1) return error.NoPushDestination;
     const upstream = branch.merge[0];
     // `simple` pushes to the upstream only when it has the branch's name.
     if (!upstream_mode and !std.mem.eql(u8, upstream, branch_ref)) return error.NoPushDestination;
-    try specs.append(arena, try Refspec.parse(try std.fmt.allocPrint(arena, "{s}:{s}", .{ branch_ref, try arena.dupe(u8, upstream) }), .push));
+    try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, try arena.dupe(u8, upstream) }), .push));
 }
 
 /// git's `ref_rev_parse_rules`, used to find what a short name names.
@@ -643,13 +643,13 @@ fn matchRefs(
             if (try bestMatch(dst_text, remote_names.items)) |found| break :blk found;
             // Guessed from the source, as git guesses it.
             if (src.name) |name| {
-                if (std.mem.startsWith(u8, name, "refs/heads/")) break :blk try std.fmt.allocPrint(arena, "refs/heads/{s}", .{dst_text});
-                if (std.mem.startsWith(u8, name, "refs/tags/")) break :blk try std.fmt.allocPrint(arena, "refs/tags/{s}", .{dst_text});
+                if (std.mem.startsWith(u8, name, "refs/heads/")) break :blk try arena.print("refs/heads/{s}", .{dst_text});
+                if (std.mem.startsWith(u8, name, "refs/tags/")) break :blk try arena.print("refs/tags/{s}", .{dst_text});
             }
             const header = try repo.odb.readHeader(io, src.oid);
             switch (header.type) {
-                .commit => break :blk try std.fmt.allocPrint(arena, "refs/heads/{s}", .{dst_text}),
-                .tag => break :blk try std.fmt.allocPrint(arena, "refs/tags/{s}", .{dst_text}),
+                .commit => break :blk try arena.print("refs/heads/{s}", .{dst_text}),
+                .tag => break :blk try arena.print("refs/tags/{s}", .{dst_text}),
                 else => return error.DestinationNotFullRefname,
             }
         };
@@ -789,9 +789,9 @@ const PushTwins = struct {
         const source_path = try testremote.absolutePath(gpa, io, source.dir);
         defer gpa.free(source_path);
         for ([_][]const u8{ "git", "relic" }) |who| {
-            const bare = try std.fmt.allocPrint(gpa, "{s}/remote-{s}.git", .{ root_path, who });
+            const bare = try gpa.print("{s}/remote-{s}.git", .{ root_path, who });
             defer gpa.free(bare);
-            const work = try std.fmt.allocPrint(gpa, "{s}/work-{s}", .{ root_path, who });
+            const work = try gpa.print("{s}/work-{s}", .{ root_path, who });
             defer gpa.free(work);
             try t.git(root.dir, &.{ "clone", "-q", "--bare", source_path, bare });
             try t.git(root.dir, &.{ "clone", "-q", bare, work });
@@ -816,7 +816,7 @@ const PushTwins = struct {
         try t.git(work_git, &.{ "commit", "-q", "-m", "new work" });
         try t.git(work_git, &.{ "branch", "feature" });
         try t.git(work_git, &.{ "tag", "-a", "v2", "-m", "two" });
-        const work_git_path = try std.fmt.allocPrint(gpa, "{s}/work-git", .{root_path});
+        const work_git_path = try gpa.print("{s}/work-git", .{root_path});
         defer gpa.free(work_git_path);
         var work_relic = try root.dir.openDir(io, "work-relic", .{});
         defer work_relic.close(io);
@@ -992,7 +992,7 @@ test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stal
 fn tagTarget(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) !Oid {
     var repo = try Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    const full = try std.fmt.allocPrint(gpa, "refs/tags/{s}", .{name});
+    const full = try gpa.print("refs/tags/{s}", .{name});
     defer gpa.free(full);
     const resolved = (try repo.refStore().resolve(gpa, io, full)).?;
     defer gpa.free(resolved.name);
@@ -1022,9 +1022,9 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     // git's own hook, noting its arguments and its input.
     var work_git = try twins.root.dir.openDir(io, "work-git", .{});
     defer work_git.close(io);
-    const hook_log = try std.fmt.allocPrint(gpa, "{s}/pre-push.log", .{twins.root_path});
+    const hook_log = try gpa.print("{s}/pre-push.log", .{twins.root_path});
     defer gpa.free(hook_log);
-    const hook_data = try std.fmt.allocPrint(gpa, "{s}\n", .{hook_log});
+    const hook_data = try gpa.print("{s}\n", .{hook_log});
     defer gpa.free(hook_data);
     try testgit.fixtureHook(gpa, io, work_git, ".git/hooks/pre-push", "record_stdin", hook_data);
     twins.git_settings = &.{ "-c", "core.hooksPath=.git/hooks" };
@@ -1072,7 +1072,7 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
         if (over_http) server = try testremote.HttpServer.start(gpa, io, twins.root.dir, .{});
         const ssh_path = try gpa.dupe(u8, twins.root_path);
         defer gpa.free(ssh_path);
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
         for ([_][2][]const u8{ .{ "work-git", "remote-git.git" }, .{ "work-relic", "remote-relic.git" } }) |pair| {
             var work = try twins.root.dir.openDir(io, pair[0], .{});
             defer work.close(io);
@@ -1082,7 +1082,7 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
             const url = if (server) |s|
                 try s.url(gpa, pair[1])
             else
-                try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/{s}", .{ if (builtin.os.tag == .windows) "/" else "", ssh_path, pair[1] });
+                try gpa.print("ssh://example.invalid{s}{s}/{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path, pair[1] });
             defer gpa.free(url);
             try twins.git(work, &.{ "remote", "set-url", "origin", url });
             try twins.git(work, &.{ "config", "core.sshCommand", fake });
@@ -1178,12 +1178,12 @@ test "a remote with two push URLs is pushed to both, as git pushes to both" {
     var twins = try PushTwins.init(gpa, io);
     defer twins.deinit();
     for ([_][]const u8{ "git", "relic" }) |who| {
-        const first = try std.fmt.allocPrint(gpa, "{s}/remote-{s}.git", .{ twins.root_path, who });
+        const first = try gpa.print("{s}/remote-{s}.git", .{ twins.root_path, who });
         defer gpa.free(first);
-        const second = try std.fmt.allocPrint(gpa, "{s}/extra-{s}.git", .{ twins.root_path, who });
+        const second = try gpa.print("{s}/extra-{s}.git", .{ twins.root_path, who });
         defer gpa.free(second);
         try twins.git(twins.root.dir, &.{ "clone", "-q", "--bare", first, second });
-        const work_name = try std.fmt.allocPrint(gpa, "work-{s}", .{who});
+        const work_name = try gpa.print("work-{s}", .{who});
         defer gpa.free(work_name);
         var work = try twins.root.dir.openDir(io, work_name, .{});
         defer work.close(io);

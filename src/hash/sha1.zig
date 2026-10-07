@@ -146,9 +146,9 @@ pub const Backend = enum {
 /// outlives a call without a caller holding it.
 pub fn backend() Backend {
     const cached = detected.load(.monotonic);
-    if (cached != unknown) return @enumFromInt(cached);
+    if (cached != unknown) return @fromBackingInt(@intCast(cached));
     const found = detect();
-    detected.store(@intFromEnum(found), .monotonic);
+    detected.store(@backingInt(found), .monotonic);
     return found;
 }
 
@@ -166,7 +166,7 @@ const hardware_arms_compile = builtin.zig_backend == .stage2_llvm;
 
 fn detect() Backend {
     if (!hardware_arms_compile) return .software;
-    switch (builtin.cpu.arch) {
+    switch (builtin.target.cpu.arch) {
         .aarch64, .aarch64_be => {
             if (hasAarch64Sha1()) return .aarch64_crypto;
             return .software;
@@ -186,12 +186,12 @@ fn detect() Backend {
 /// compiler was told, which is a floor rather than an answer, so a target
 /// built without the feature takes the software rounds.
 fn hasAarch64Sha1() bool {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .macos, .ios, .tvos, .watchos, .visionos => {
             var value: u32 = 0;
             var len: usize = @sizeOf(u32);
             const rc = std.c.sysctlbyname("hw.optional.arm.FEAT_SHA1", &value, &len, null, 0);
-            if (rc != 0) return builtin.cpu.has(.aarch64, .sha2);
+            if (rc != 0) return builtin.target.cpu.has(.aarch64, .sha2);
             return value != 0;
         },
         .linux => {
@@ -199,7 +199,7 @@ fn hasAarch64Sha1() bool {
             // HWCAP_SHA1 is bit 5 of AT_HWCAP on aarch64.
             return hwcap & (1 << 5) != 0;
         },
-        else => return builtin.cpu.has(.aarch64, .sha2),
+        else => return builtin.target.cpu.has(.aarch64, .sha2),
     }
 }
 
@@ -242,11 +242,11 @@ fn compressBlocks(s: *[5]u32, blocks: []const u8) void {
     switch (backend()) {
         .software => compressSoftware(s, blocks),
         .aarch64_crypto => if (hardware_arms_compile and
-            (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .aarch64_be))
+            (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .aarch64_be))
         {
             compressAarch64(s, blocks);
         } else unreachable,
-        .x86_sha_ni => if (hardware_arms_compile and builtin.cpu.arch == .x86_64) {
+        .x86_sha_ni => if (hardware_arms_compile and builtin.target.cpu.arch == .x86_64) {
             compressX86(s, blocks);
         } else unreachable,
     }
@@ -638,7 +638,7 @@ fn hexDigest(bytes: []const u8) [40]u8 {
     Sha1.hash(bytes, &out, .{});
     var text: [40]u8 = undefined;
     // unreachable: twenty bytes are forty hex digits
-    _ = std.fmt.bufPrint(&text, "{x}", .{&out}) catch unreachable;
+    _ = std.mem.print(&text, "{x}", .{&out}) catch unreachable;
     return text;
 }
 
@@ -668,7 +668,7 @@ test "FIPS 180 test vectors" {
     var out: [20]u8 = undefined;
     d.final(&out);
     var text: [40]u8 = undefined;
-    _ = try std.fmt.bufPrint(&text, "{x}", .{&out});
+    _ = try std.mem.print(&text, "{x}", .{&out});
     try testing.expectEqualStrings("34aa973cd4c4daa4f61eeb2bdbad27316534016f", &text);
 }
 

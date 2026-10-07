@@ -174,7 +174,7 @@ const Tail = struct {
         const file = tail.file orelse return;
         var chunk: [1024]u8 = undefined;
         while (true) {
-            const n = program.readAvailable(file, io, &chunk) catch return;
+            const n = program.readAvailable(io, file, &chunk) catch return;
             if (n == 0) return;
             tail.keep(chunk[0..n]);
         }

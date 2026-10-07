@@ -43,6 +43,7 @@ pub const lfsapi = @import("lfs/api.zig");
 // The modules relic's API puts under this one, as `relic.lfs.<name>`.
 
 const std = @import("std");
+const testbytes = @import("testing/bytes.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -331,11 +332,11 @@ pub const Store = struct {
     root: []const u8,
 
     /// The longest path `objectPath` writes.
-    pub const max_path = std.fs.max_path_bytes;
+    pub const max_path = std.Io.Dir.max_path_bytes;
 
     /// Where an object lives, written into `buf`.
     pub fn objectPath(store: *const Store, buf: *[max_path]u8, oid: *const [64]u8) error{NameTooLong}![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/objects/{s}/{s}/{s}", .{ store.root, oid[0..2], oid[2..4], oid }) catch
+        return std.mem.print(buf, "{s}/objects/{s}/{s}/{s}", .{ store.root, oid[0..2], oid[2..4], oid }) catch
             error.NameTooLong;
     }
 
@@ -388,12 +389,12 @@ pub const Store = struct {
     /// `error.ReadFailed`, and the reason is on the reader.
     pub fn install(store: *const Store, io: Io, source: *Io.Reader, expected: ?*const Pointer) InstallError!Pointer {
         var tmp_dir_buf: [max_path]u8 = undefined;
-        const tmp_dir = std.fmt.bufPrint(&tmp_dir_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
+        const tmp_dir = std.mem.print(&tmp_dir_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
         try store.base.createDirPath(io, tmp_dir);
         var name_buf: [64]u8 = undefined;
         const name = fs.tempName(io, &name_buf, "relic-");
         var tmp_buf: [max_path]u8 = undefined;
-        const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}/{s}", .{ tmp_dir, name }) catch return error.NameTooLong;
+        const tmp_path = std.mem.print(&tmp_buf, "{s}/{s}", .{ tmp_dir, name }) catch return error.NameTooLong;
 
         const file = try store.base.createFile(io, tmp_path, .{ .exclusive = true });
         var installed = false;
@@ -417,7 +418,7 @@ pub const Store = struct {
         var object_buf: [max_path]u8 = undefined;
         const object_path = try store.objectPath(&object_buf, &pointer.oid);
         if (try store.contains(io, &pointer)) return pointer;
-        try store.base.createDirPath(io, std.fs.path.dirnamePosix(object_path).?);
+        try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
         try fs.renameWithRetry(io, store.base, tmp_path, object_path);
         installed = true;
         return pointer;
@@ -448,7 +449,7 @@ fn copyHashing(source: *Io.Reader, sink: ?*Io.Writer) (Io.Reader.ShortError || I
     sha.final(&digest);
     var p: Pointer = .{ .oid = undefined, .size = size };
     // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits, the length of oid
-    _ = std.fmt.bufPrint(&p.oid, "{x}", .{&digest}) catch unreachable;
+    _ = std.mem.print(&p.oid, "{x}", .{&digest}) catch unreachable;
     return p;
 }
 
@@ -696,7 +697,7 @@ test "settings that outgrow the arena's first block are all freed with it" {
     // arena's state did not hold when it was taken before them.
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const many = "p," ** 3000 ++ "p";
+    const many = testbytes.repeat("p,", 3000) ++ "p";
     var config = try config_mod.Config.parseText(gpa, "[lfs]\n" ++
         "\tfetchinclude = " ++ many ++ "\n" ++
         "\tfetchexclude = " ++ many ++ "\n", .local);

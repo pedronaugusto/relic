@@ -344,8 +344,8 @@ const Run = struct {
     }
 
     fn reflogMessage(r: *Run, sub: []const u8, tail: ?[]const u8) Error![]const u8 {
-        if (tail) |t| return std.fmt.allocPrint(r.arena, "rebase ({s}): {s}", .{ sub, t });
-        return std.fmt.allocPrint(r.arena, "rebase ({s})", .{sub});
+        if (tail) |t| return r.arena.print("rebase ({s}): {s}", .{ sub, t });
+        return r.arena.print("rebase ({s})", .{sub});
     }
 };
 
@@ -569,9 +569,9 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
         defer commit.deinit();
         const subject = try message.onelineSubject(r.arena, commit.message);
         const arg = if (empty)
-            try std.fmt.allocPrint(r.arena, "{s} {s} empty", .{ r.comment, subject })
+            try r.arena.print("{s} {s} empty", .{ r.comment, subject })
         else
-            try std.fmt.allocPrint(r.arena, "{s} {s}", .{ r.comment, subject });
+            try r.arena.print("{s} {s}", .{ r.comment, subject });
         try items.append(r.arena, .{ .command = .pick, .commit = oid, .arg = arg });
     }
     return items.items;
@@ -704,7 +704,7 @@ const Tip = struct {
 
 fn resolveTip(r: *Run) Error!Tip {
     if (r.options.branch) |name| {
-        const full = try std.fmt.allocPrint(r.arena, "refs/heads/{s}", .{name});
+        const full = try r.arena.print("refs/heads/{s}", .{name});
         if (try r.repo.refStore().resolve(r.gpa, r.io, full)) |resolved| {
             defer r.gpa.free(resolved.name);
             return .{ .head_name = full, .orig_head = resolved.oid };
@@ -786,7 +786,7 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
     for (items) |item| {
         if (item.command != .comment) count += 1;
     }
-    const revisions = try std.fmt.allocPrint(r.arena, "{s}..{s}", .{ try r.short(upstream), try r.short(orig_head) });
+    const revisions = try r.arena.print("{s}..{s}", .{ try r.short(upstream), try r.short(orig_head) });
     todo.writeHelp(&out.writer, count, revisions, try r.short(onto), r.comment) catch return error.OutOfMemory;
     return out.toOwnedSlice() catch error.OutOfMemory;
 }
@@ -893,7 +893,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     var base = onto;
     if (r.allow_ff) base = try skipUnnecessaryPicks(&r, base);
     try saveTodo(&r, 0);
-    try r.state("end", try std.fmt.allocPrint(r.arena, "{d}\n", .{r.done_nr + countCommands(r.items.items)}));
+    try r.state("end", try r.arena.print("{d}\n", .{r.done_nr + countCommands(r.items.items)}));
 
     // Detach at `onto`.
     try checkoutOnto(&r, base, tip.orig_head, onto_name);
@@ -921,18 +921,18 @@ fn countCommands(items: []const todo.Item) usize {
 
 /// `write_basic_state`, and the files the sequencer adds to it.
 fn writeBasicState(r: *Run, tip: Tip, onto: Oid) Error!void {
-    try r.state("head-name", try std.fmt.allocPrint(r.arena, "{s}\n", .{tip.head_name orelse "detached HEAD"}));
-    try r.state("onto", try std.fmt.allocPrint(r.arena, "{s}\n", .{try r.hex(onto)}));
-    try r.state("orig-head", try std.fmt.allocPrint(r.arena, "{s}\n", .{try r.hex(tip.orig_head)}));
+    try r.state("head-name", try r.arena.print("{s}\n", .{tip.head_name orelse "detached HEAD"}));
+    try r.state("onto", try r.arena.print("{s}\n", .{try r.hex(onto)}));
+    try r.state("orig-head", try r.arena.print("{s}\n", .{try r.hex(tip.orig_head)}));
     if (r.options.strategy_options.len != 0) {
         try r.state("strategy", "ort\n");
         const line = try strategy.quote(r.arena, r.options.strategy_options);
-        try r.state("strategy_opts", try std.fmt.allocPrint(r.arena, "{s}\n", .{line}));
+        try r.state("strategy_opts", try r.arena.print("{s}\n", .{line}));
     }
     if (r.options.signoff) try r.state("signoff", "--signoff\n");
     // The signing decided on, as git's rebase records it: `-S` and the key.
     if (try sequencer.signs(r.repo, r.options.signing)) {
-        try r.state("gpg_sign_opt", try std.fmt.allocPrint(r.arena, "-S{s}\n", .{r.options.signing.key orelse ""}));
+        try r.state("gpg_sign_opt", try r.arena.print("-S{s}\n", .{r.options.signing.key orelse ""}));
     }
     switch (r.empty) {
         .drop => try r.state("drop_redundant_commits", ""),
@@ -1043,7 +1043,7 @@ fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error
     outcome.deinit();
     try index.write(r.io, r.repo.git_dir, "index", .{});
     try head_mod.writeRef(r.io, r.repo, "ORIG_HEAD", orig_head);
-    const log = try r.reflogMessage("start", try std.fmt.allocPrint(r.arena, "checkout {s}", .{onto_name}));
+    const log = try r.reflogMessage("start", try r.arena.print("checkout {s}", .{onto_name}));
     try head_mod.detach(r.io, r.repo, h.oid, base, .{ .who = r.options.who, .message = log });
     if (r.options.hooks) |runner| _ = try runner.postCheckout(r.io, h.oid orelse Oid.zero(r.repo.objectFormat()), base, .branch);
 }
@@ -1060,7 +1060,7 @@ fn checkoutTip(r: *Run, tip: Tip, name: []const u8) Error!void {
     var outcome = try threeway.apply(r.gpa, r.io, r.repo, &index, from_tree, from_tree, try r.repo.commitTree(r.io, tip.orig_head), .{ .blocked = r.options.blocked });
     outcome.deinit();
     try index.write(r.io, r.repo.git_dir, "index", .{});
-    const log = try std.fmt.allocPrint(r.arena, "rebase: checkout {s}", .{name});
+    const log = try r.arena.print("rebase: checkout {s}", .{name});
     if (tip.head_name) |branch| {
         try head_mod.attach(r.io, r.repo, branch, h.oid, .{ .who = r.options.who, .message = log });
     } else {
@@ -1123,7 +1123,7 @@ fn runLoop(r: *Run) Error!Outcome {
         try advance(r);
         if (item.command != .comment) {
             r.done_nr += 1;
-            try r.state("msgnum", try std.fmt.allocPrint(r.arena, "{d}\n", .{r.done_nr}));
+            try r.state("msgnum", try r.arena.print("{d}\n", .{r.done_nr}));
         }
         try r.removeState("author-script");
         try head_mod.removeState(r.io, r.repo.git_dir, "MERGE_HEAD");
@@ -1310,7 +1310,7 @@ fn pickOne(r: *Run) Error!?Outcome {
 /// the commit `HEAD` names, to be amended.
 fn errorWithPatch(r: *Run, commit: Oid, to_amend: bool) Error!void {
     if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
-    try r.state("stopped-sha", try std.fmt.allocPrint(r.arena, "{s}\n", .{try r.hex(commit)}));
+    try r.state("stopped-sha", try r.arena.print("{s}\n", .{try r.hex(commit)}));
     try head_mod.writeRef(r.io, r.repo, "REBASE_HEAD", commit);
     try writePatch(r, commit);
     if (!r.hasState("message")) {
@@ -1318,13 +1318,13 @@ fn errorWithPatch(r: *Run, commit: Oid, to_amend: bool) Error!void {
         defer r.repo.odb.allocator().free(found.bytes);
         var parsed = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
         defer parsed.deinit();
-        try r.state("message", try std.fmt.allocPrint(r.arena, "{s}\n", .{message.fromSubject(parsed.message)}));
+        try r.state("message", try r.arena.print("{s}\n", .{message.fromSubject(parsed.message)}));
     }
     if (to_amend) try intendToAmend(r);
 }
 
 fn intendToAmend(r: *Run) Error!void {
-    try r.state("amend", try std.fmt.allocPrint(r.arena, "{s}\n", .{try r.hex(try r.headOid())}));
+    try r.state("amend", try r.arena.print("{s}\n", .{try r.hex(try r.headOid())}));
 }
 
 /// The commit's diff against its first parent, as `git diff-tree -p`
@@ -1354,7 +1354,7 @@ fn writePatch(r: *Run, commit_oid: Oid) Error!void {
 /// is done: `rewritten-pending`, flushed into `rewritten-list` unless a
 /// fixup follows.
 fn recordInRewritten(r: *Run, old: Oid, next: todo.Command) Error!void {
-    try r.appendState("rewritten-pending", try std.fmt.allocPrint(r.arena, "{s}\n", .{try r.hex(old)}));
+    try r.appendState("rewritten-pending", try r.arena.print("{s}\n", .{try r.hex(old)}));
     if (!next.isFixup()) try flushRewritten(r);
 }
 
@@ -1415,8 +1415,8 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     const parent: ?Oid = if (commit.parents.len == 1) commit.parents[0] else null;
     const subject = message.subjectLine(commit.message);
     const short_name = try r.short(source.oid);
-    const label = try std.fmt.allocPrint(arena, "{s} ({s})", .{ short_name, subject });
-    const parent_label = try std.fmt.allocPrint(arena, "parent of {s}", .{label});
+    const label = try arena.print("{s} ({s})", .{ short_name, subject });
+    const parent_label = try arena.print("parent of {s}", .{label});
 
     // The commit sits on `HEAD` already: reuse it.
     if (r.allow_ff and !is_fixup and parent != null and parent.?.eql(head_oid)) {
@@ -1589,7 +1589,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         .extra = extra,
         .signing = r.options.signing,
     }, r.options.diagnostic);
-    const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ reflog_action, firstLine(final_text) });
+    const log = try arena.print("{s}: {s}", .{ reflog_action, firstLine(final_text) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     if (msg_source == .squash_edit) {
         // `git commit` takes the message's files away before its last hooks.
@@ -1713,7 +1713,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
         .message = text,
         .signing = r.options.signing,
     }, r.options.diagnostic);
-    const log = try std.fmt.allocPrint(r.arena, "{s}: {s}", .{ reflog_action, firstLine(text) });
+    const log = try r.arena.print("{s}: {s}", .{ reflog_action, firstLine(text) });
     try head_mod.advance(r.io, r.repo, head, made, .{ .who = r.options.who, .message = log });
     // The amend is `git commit --amend`, which takes `AUTO_MERGE` away.
     try head_mod.deleteRef(r.io, r.repo, "AUTO_MERGE");
@@ -1787,14 +1787,14 @@ fn updateSquashMessages(r: *Run, item: todo.Item, commit_message: []const u8) Er
     if (r.fixup_count > 0) {
         const old = (try r.readState("message-squash")) orelse return error.MalformedState;
         const eol = if (!std.mem.startsWith(u8, old, r.comment)) 0 else (std.mem.findScalar(u8, old, '\n') orelse old.len);
-        try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "{s} This is a combination of {d} commits.", .{ r.comment, r.fixup_count + 2 }));
+        try buf.appendSlice(arena, try arena.print("{s} This is a combination of {d} commits.", .{ r.comment, r.fixup_count + 2 }));
         try buf.appendSlice(arena, old[eol..]);
         if (isFixupFlag(item) and !seenSquash(r)) buf = try updateSquashMessageForFixup(r, buf.items);
     } else {
         const head_source = try readSource(r, try r.headOid());
         const body = message.fromSubject(head_source.commit.message);
         if (item.command == .fixup and !isFixupFlag(item)) try r.state("message-fixup", body);
-        try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "{s} This is a combination of 2 commits.\n{s} {s}\n\n", .{
+        try buf.appendSlice(arena, try arena.print("{s} This is a combination of 2 commits.\n{s} {s}\n\n", .{
             r.comment, r.comment, if (isFixupFlag(item)) skip_first_commit_msg else first_commit_msg,
         }));
         if (isFixupFlag(item)) try addCommented(r, &buf, body) else try buf.appendSlice(arena, body);
@@ -1805,7 +1805,7 @@ fn updateSquashMessages(r: *Run, item: todo.Item, commit_message: []const u8) Er
         try appendSquashMessage(r, &buf, body, item);
     } else {
         r.fixup_count += 1;
-        try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "\n{s} The commit message #{d} will be skipped:\n\n", .{ r.comment, r.fixup_count + 1 }));
+        try buf.appendSlice(arena, try arena.print("\n{s} The commit message #{d} will be skipped:\n\n", .{ r.comment, r.fixup_count + 1 }));
         try addCommented(r, &buf, body);
     }
     try r.state("message-squash", buf.items);
@@ -1827,7 +1827,7 @@ fn appendSquashMessage(r: *Run, buf: *std.ArrayList(u8), body: []const u8, item:
         commented_len = subjectLength(body);
     }
     r.fixup_count += 1;
-    try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "\n{s} This is the commit message #{d}:\n\n", .{ r.comment, r.fixup_count + 1 }));
+    try buf.appendSlice(arena, try arena.print("\n{s} This is the commit message #{d}:\n\n", .{ r.comment, r.fixup_count + 1 }));
     if (commented_len != 0) try addCommented(r, buf, body[0..commented_len]) else if (buf.items.len != 0 and buf.items[buf.items.len - 1] != '\n') try buf.append(arena, '\n');
     const fixup_off = buf.items.len;
     try buf.appendSlice(arena, body[commented_len..]);
@@ -1850,8 +1850,8 @@ fn appendSquashMessage(r: *Run, buf: *std.ArrayList(u8), body: []const u8, item:
 fn updateSquashMessageForFixup(r: *Run, orig: []const u8) Error!std.ArrayList(u8) {
     const arena = r.arena;
     var out: std.ArrayList(u8) = .empty;
-    var buf1 = try std.fmt.allocPrint(arena, "{s} {s}\n", .{ r.comment, first_commit_msg });
-    var buf2 = try std.fmt.allocPrint(arena, "{s} {s}\n", .{ r.comment, skip_first_commit_msg });
+    var buf1 = try arena.print("{s} {s}\n", .{ r.comment, first_commit_msg });
+    var buf2 = try arena.print("{s} {s}\n", .{ r.comment, skip_first_commit_msg });
     var commented = false;
     var from: usize = 0;
     var s: ?usize = 0;
@@ -1871,8 +1871,8 @@ fn updateSquashMessageForFixup(r: *Run, orig: []const u8) Error!std.ArrayList(u8
             s = next;
             commented = true;
             n += 1;
-            buf1 = try std.fmt.allocPrint(arena, "{s} This is the commit message #{d}:\n", .{ r.comment, n });
-            buf2 = try std.fmt.allocPrint(arena, "{s} The commit message #{d} will be skipped:\n", .{ r.comment, n });
+            buf1 = try arena.print("{s} This is the commit message #{d}:\n", .{ r.comment, n });
+            buf2 = try arena.print("{s} The commit message #{d} will be skipped:\n", .{ r.comment, n });
         } else if (std.mem.startsWith(u8, orig[at..], buf2)) {
             const next = at + buf2.len;
             const off: usize = if (at > from + 1 and orig[at - 2] == '\n') 1 else 0;
@@ -1881,8 +1881,8 @@ fn updateSquashMessageForFixup(r: *Run, orig: []const u8) Error!std.ArrayList(u8
             s = next;
             commented = false;
             n += 1;
-            buf1 = try std.fmt.allocPrint(arena, "{s} This is the commit message #{d}:\n", .{ r.comment, n });
-            buf2 = try std.fmt.allocPrint(arena, "{s} The commit message #{d} will be skipped:\n", .{ r.comment, n });
+            buf1 = try arena.print("{s} This is the commit message #{d}:\n", .{ r.comment, n });
+            buf2 = try arena.print("{s} The commit message #{d} will be skipped:\n", .{ r.comment, n });
         } else {
             s = if (std.mem.findScalarPos(u8, orig, at, '\n')) |nl| nl + 1 else null;
             if (s != null and s.? >= orig.len) s = null;
@@ -1941,17 +1941,17 @@ fn doExec(r: *Run, command_line: []const u8) Error!?Outcome {
 /// `label`: `refs/rewritten/<label>` at `HEAD`, deleted when the rebase is.
 fn doLabel(r: *Run, name: []const u8) Error!void {
     if (std.mem.eql(u8, name, "#")) return error.UnknownLabel;
-    const ref = try std.fmt.allocPrint(r.arena, "refs/rewritten/{s}", .{name});
+    const ref = try r.arena.print("refs/rewritten/{s}", .{name});
     var tx = r.repo.beginRefs();
     defer tx.deinit(r.io);
     try tx.update(ref, .{ .direct = try r.headOid() }, .any);
-    try tx.commit(r.io, .{ .who = r.options.who, .message = try std.fmt.allocPrint(r.arena, "rebase (label) '{s}'", .{name}), .policy = r.repo.reflogPolicy() });
-    try r.appendState("refs-to-delete", try std.fmt.allocPrint(r.arena, "{s}\n", .{ref}));
+    try tx.commit(r.io, .{ .who = r.options.who, .message = try r.arena.print("rebase (label) '{s}'", .{name}), .policy = r.repo.reflogPolicy() });
+    try r.appendState("refs-to-delete", try r.arena.print("{s}\n", .{ref}));
 }
 
 /// `lookup_label`: `refs/rewritten/<label>`, or any name a commit goes by.
 fn lookupLabel(r: *Run, name: []const u8) Error!Oid {
-    const ref = try std.fmt.allocPrint(r.arena, "refs/rewritten/{s}", .{name});
+    const ref = try r.arena.print("refs/rewritten/{s}", .{name});
     if (try r.repo.refStore().resolve(r.gpa, r.io, ref)) |resolved| {
         r.gpa.free(resolved.name);
         return resolved.oid;
@@ -1976,7 +1976,7 @@ fn doReset(r: *Run, arg: []const u8) Error!void {
     try index.write(r.io, r.repo.git_dir, "index", .{});
     var h = try r.head();
     defer h.deinit(r.gpa);
-    const log = try std.fmt.allocPrint(r.arena, "rebase (reset): '{s}'", .{name});
+    const log = try r.arena.print("rebase (reset): '{s}'", .{name});
     try head_mod.advance(r.io, r.repo, h, target, .{ .who = r.options.who, .message = log });
 }
 
@@ -2020,7 +2020,7 @@ fn writeUpdateRefs(r: *Run, records: []const UpdateRef) Error!void {
     if (records.len == 0) return r.removeState("update-refs");
     var out: std.ArrayList(u8) = .empty;
     for (records) |rec| {
-        try out.appendSlice(r.arena, try std.fmt.allocPrint(r.arena, "{s}\n{s}\n{s}\n", .{ rec.ref, try r.hex(rec.before), try r.hex(rec.after) }));
+        try out.appendSlice(r.arena, try r.arena.print("{s}\n{s}\n{s}\n", .{ rec.ref, try r.hex(rec.before), try r.hex(rec.after) }));
     }
     try r.state("update-refs", out.items);
 }
@@ -2075,7 +2075,7 @@ fn addUpdateRefCommands(r: *Run, items: []todo.Item, write: bool) Error![]todo.I
                 if (std.mem.eql(u8, branch, entry.name)) continue;
             }
             if (busy.get(entry.name)) |where| {
-                const line = try std.fmt.allocPrint(r.arena, "{s} Ref {s} checked out at '{s}'", .{ r.comment, entry.name, where });
+                const line = try r.arena.print("{s} Ref {s} checked out at '{s}'", .{ r.comment, entry.name, where });
                 try out.append(r.arena, .{ .command = .comment, .arg = line });
                 continue;
             }
@@ -2152,7 +2152,7 @@ fn checkedOutBranches(r: *Run) Error!std.StringHashMapUnmanaged([]const u8) {
     var listing = try worktrees.list(r.gpa, io, repo.common_dir, repo.objectFormat());
     defer listing.deinit();
     for (listing.entries) |entry| {
-        const sub = try std.fmt.allocPrint(r.arena, "worktrees/{s}", .{entry.name});
+        const sub = try r.arena.print("worktrees/{s}", .{entry.name});
         var admin = repo.common_dir.openDir(io, sub, .{}) catch continue;
         defer admin.close(io);
         try addWorktreeBranches(r, &map, admin, try r.arena.dupe(u8, entry.path));
@@ -2179,7 +2179,7 @@ fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), di
         // A bisection started from a detached `HEAD` names a commit.
         if (name.len != 0) {
             if (Oid.parse(r.repo.objectFormat(), name)) |_| {} else |_| {
-                try map.put(arena, try std.fmt.allocPrint(arena, "refs/heads/{s}", .{name}), where);
+                try map.put(arena, try arena.print("refs/heads/{s}", .{name}), where);
             }
         }
     }
@@ -2255,7 +2255,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     const reversed = try r.arena.alloc(Oid, bases.len);
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    const ref_name = try std.fmt.allocPrint(r.arena, "refs/rewritten/{s}", .{name});
+    const ref_name = try r.arena.print("refs/rewritten/{s}", .{name});
     var outcome = try threeway.applyCommits(gpa, io, repo, &index, head_oid, merge_head, reversed, .{
         .blob = .{
             .conflict_style = style,
@@ -2290,7 +2290,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         .message = text,
         .signing = r.options.signing,
     }, r.options.diagnostic);
-    const log = try std.fmt.allocPrint(r.arena, "rebase (merge): {s}", .{firstLine(text)});
+    const log = try r.arena.print("rebase (merge): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     // git makes this commit with `git commit`, whose clean-up takes
     // `AUTO_MERGE` with the merge's other files and runs rerere.
@@ -2325,10 +2325,10 @@ fn reuseMerge(r: *Run, h: head_mod.Head, original: Oid, merge_heads: []const Oid
 fn mergeSubject(arena: Allocator, labels: []const u8, count: usize) Allocator.Error![]const u8 {
     assert(count != 0);
     const names = std.mem.trim(u8, labels, " \t");
-    if (count > 1) return std.fmt.allocPrint(arena, "Merge branches '{s}'", .{names});
+    if (count > 1) return arena.print("Merge branches '{s}'", .{names});
     var first = std.mem.tokenizeAny(u8, names, " \t");
     // A count of one is one label, there to take.
-    return std.fmt.allocPrint(arena, "Merge branch '{s}'", .{first.next().?});
+    return arena.print("Merge branch '{s}'", .{first.next().?});
 }
 
 /// `do_merge` with a strategy: the merge `git merge` makes of it.
@@ -2376,7 +2376,7 @@ fn sameOids(a: []const Oid, b: []const Oid) bool {
 }
 
 fn lookupRewritten(r: *Run, name: []const u8) bool {
-    const ref = std.fmt.allocPrint(r.arena, "refs/rewritten/{s}", .{name}) catch return false;
+    const ref = r.arena.print("refs/rewritten/{s}", .{name}) catch return false;
     const found = r.repo.refStore().read(r.gpa, r.io, ref) catch return false;
     if (found) |f| switch (f) {
         .symbolic => |t| r.gpa.free(t),
@@ -2398,9 +2398,9 @@ fn finish(r: *Run) Error!Outcome {
     const onto = try ontoOf(r);
     const head_oid = try r.headOid();
     if (tip.head_name) |branch| {
-        const branch_log = try std.fmt.allocPrint(r.arena, "rebase (finish): {s} onto {s}", .{ branch, try r.hex(onto) });
+        const branch_log = try r.arena.print("rebase (finish): {s} onto {s}", .{ branch, try r.hex(onto) });
         try head_mod.moveBranch(io, repo, branch, .{ .matches = tip.orig_head }, head_oid, .{ .who = r.options.who, .message = branch_log });
-        const head_log = try std.fmt.allocPrint(r.arena, "rebase (finish): returning to {s}", .{branch});
+        const head_log = try r.arena.print("rebase (finish): returning to {s}", .{branch});
         try head_mod.attach(io, repo, branch, head_oid, .{ .who = r.options.who, .message = head_log });
     }
     try flushRewritten(r);
@@ -2577,7 +2577,7 @@ fn commitStagedChanges(r: *Run) Error!void {
         .extra = if (amend) try extraHeadersOf(r, head_oid) else &.{},
         .signing = r.options.signing,
     }, r.options.diagnostic);
-    const log = try std.fmt.allocPrint(r.arena, "rebase (continue): {s}", .{firstLine(text)});
+    const log = try r.arena.print("rebase (continue): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
     try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
@@ -2623,7 +2623,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, tip.orig_head), .hard, null);
     try repo.writeIndex(io, &index);
     const target = tip.head_name orelse try r.hex(tip.orig_head);
-    const log = try std.fmt.allocPrint(r.arena, "rebase (abort): returning to {s}", .{target});
+    const log = try r.arena.print("rebase (abort): returning to {s}", .{target});
     if (tip.head_name) |branch| {
         try head_mod.attach(io, repo, branch, h.oid, .{ .who = who, .message = log });
     } else {

@@ -223,7 +223,7 @@ test "a stream of every command imports to the objects and refs git makes, and a
 }
 
 test "quoted tab filenames import as git imports them where NTFS protection permits them" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var pair: Pair = try .init(gpa, io);

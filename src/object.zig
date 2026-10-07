@@ -97,14 +97,14 @@ pub const Mode = enum(u32) {
 
     /// The numeric mode, as an integer.
     pub fn raw(m: Mode) u32 {
-        return @intFromEnum(m);
+        return @backingInt(m);
     }
 
     /// The octal text a tree entry carries: no leading zero, so a directory
     /// is `40000` and a file is `100644`.
     pub fn text(m: Mode, buf: *[6]u8) []const u8 {
         // unreachable: every mode is at most 0o160000, six octal digits
-        return std.fmt.bufPrint(buf, "{o}", .{m.raw()}) catch unreachable;
+        return std.mem.print(buf, "{o}", .{m.raw()}) catch unreachable;
     }
 
     /// Whether the entry names a subtree.
@@ -378,8 +378,8 @@ pub const Signature = struct {
     /// ident; `write` refuses it rather than producing an object that cannot
     /// be read back.
     pub fn write(sig: Signature, w: *Io.Writer) (Io.Writer.Error || error{InvalidSignature})!void {
-        if (std.mem.indexOfAny(u8, sig.name, "<>\n") != null) return error.InvalidSignature;
-        if (std.mem.indexOfAny(u8, sig.email, "<>\n") != null) return error.InvalidSignature;
+        if (std.mem.findAny(u8, sig.name, "<>\n") != null) return error.InvalidSignature;
+        if (std.mem.findAny(u8, sig.email, "<>\n") != null) return error.InvalidSignature;
         const sign: u8 = if (sig.offset_minutes < 0) '-' else '+';
         const abs: u32 = @intCast(@abs(sig.offset_minutes));
         try w.print("{s} <{s}> {d} {c}{d:0>2}{d:0>2}", .{
@@ -813,7 +813,7 @@ test "tree entries sort by git's rule" {
     const gpa = std.testing.allocator;
     var b: Tree.Builder = .init(gpa, .sha1);
     defer b.deinit();
-    const oid = try Oid.parse(.sha1, "0" ** 40);
+    const oid = try Oid.parse(.sha1, &@as([40]u8, @splat('0')));
     try b.add(.tree, "a", oid);
     try b.add(.file, "a.c", oid);
     try b.add(.file, "a0", oid);
@@ -832,7 +832,7 @@ test "a duplicate entry is refused" {
     const gpa = std.testing.allocator;
     var b: Tree.Builder = .init(gpa, .sha1);
     defer b.deinit();
-    const oid = try Oid.parse(.sha1, "0" ** 40);
+    const oid = try Oid.parse(.sha1, &@as([40]u8, @splat('0')));
     try b.add(.file, "a", oid);
     try std.testing.expectError(error.DuplicateEntry, b.add(.file, "a", oid));
     try std.testing.expectError(error.DuplicateEntry, b.add(.tree, "a", oid));
@@ -843,12 +843,12 @@ test "a tree of many entries is built in what sorting them costs, and still refu
     const gpa = std.testing.allocator;
     var b: Tree.Builder = .init(gpa, .sha1);
     defer b.deinit();
-    const oid = try Oid.parse(.sha1, "0" ** 40);
+    const oid = try Oid.parse(.sha1, &@as([40]u8, @splat('0')));
     // Each add once scanned every entry before it: four hundred million
     // comparisons here, and seconds even when optimised.
     const count = 20_000;
     var name: [16]u8 = undefined;
-    for (0..count) |i| try b.add(.file, try std.fmt.bufPrint(&name, "f{d}", .{count - i}), oid);
+    for (0..count) |i| try b.add(.file, try std.mem.print(&name, "f{d}", .{count - i}), oid);
     try std.testing.expectError(error.DuplicateEntry, b.add(.tree, "f7", oid));
     const bytes = try b.build();
     defer gpa.free(bytes);
@@ -871,8 +871,8 @@ test "a tree with one file has the name git gives it" {
 test "commit round trip keeps parent order and header order" {
     const gpa = std.testing.allocator;
     const tree = try Oid.parse(.sha1, "496d6428b9cf92981dc9495211e6e1120fb6f2ba");
-    const p1 = try Oid.parse(.sha1, "1" ** 40);
-    const p2 = try Oid.parse(.sha1, "2" ** 40);
+    const p1 = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const p2 = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     const sig: Signature = .{
         .name = "Ada",
         .email = "ada@example.com",
@@ -909,9 +909,9 @@ test "commit round trip keeps parent order and header order" {
 
 test "a commit's tree is its first line and its parents the lines after, as git reads them" {
     const gpa = std.testing.allocator;
-    const zero = "0" ** 40;
-    const one = "1" ** 40;
-    const two = "2" ** 40;
+    const zero = &@as([40]u8, @splat('0'));
+    const one = &@as([40]u8, @splat('1'));
+    const two = &@as([40]u8, @splat('2'));
     const ident = "A <a@b> 1 +0000";
     // A second tree, a parent after the identities, and a second author
     // are all extra headers: git reads the first tree and no parents.
@@ -932,9 +932,9 @@ test "a commit's tree is its first line and its parents the lines after, as git 
 
 test "a tag's object, type and name are its first three lines" {
     const gpa = std.testing.allocator;
-    const zero = "0" ** 40;
+    const zero = &@as([40]u8, @splat('0'));
     var t = try Tag.parse(gpa, .sha1, "object " ++ zero ++ "\ntype commit\ntag v1\ntagger A <a@b> 1 +0000\n" ++
-        "object " ++ "1" ** 40 ++ "\ntag v2\n\nm\n");
+        "object " ++ @as([40]u8, @splat('1')) ++ "\ntag v2\n\nm\n");
     defer t.deinit();
     try std.testing.expect(t.target.eql(try Oid.parse(.sha1, zero)));
     try std.testing.expectEqualStrings("v1", t.name);
@@ -948,11 +948,11 @@ test "a header of many continuation lines costs its length to unfold, not its sq
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(gpa);
     const ident = "A <a@b> 1 +0000";
-    try bytes.appendSlice(gpa, "tree " ++ "0" ** 40 ++ "\nauthor " ++ ident ++ "\ncommitter " ++ ident ++ "\ngpgsig -----BEGIN-----\n");
+    try bytes.appendSlice(gpa, "tree " ++ @as([40]u8, @splat('0')) ++ "\nauthor " ++ ident ++ "\ncommitter " ++ ident ++ "\ngpgsig -----BEGIN-----\n");
     const lines = 4000;
-    for (0..lines) |_| try bytes.appendSlice(gpa, " " ++ "x" ** 63 ++ "\n");
+    for (0..lines) |_| try bytes.appendSlice(gpa, " " ++ @as([63]u8, @splat('x')) ++ "\n");
     try bytes.appendSlice(gpa, "\nm\n");
-    const tag_bytes = try std.mem.replaceOwned(u8, gpa, bytes.items, "tree " ++ "0" ** 40, "object " ++ "0" ** 40 ++ "\ntype commit\ntag v1");
+    const tag_bytes = try std.mem.replaceOwned(u8, gpa, bytes.items, "tree " ++ @as([40]u8, @splat('0')), "object " ++ @as([40]u8, @splat('0')) ++ "\ntype commit\ntag v1");
     defer gpa.free(tag_bytes);
     for ([_]bool{ false, true }) |tag| {
         var counting: std.testing.FailingAllocator = .init(gpa, .{});
@@ -972,7 +972,7 @@ test "a header of many continuation lines costs its length to unfold, not its sq
 
 test "tag round trip" {
     const gpa = std.testing.allocator;
-    const target = try Oid.parse(.sha1, "3" ** 40);
+    const target = try Oid.parse(.sha1, &@as([40]u8, @splat('3')));
     const bytes = try Tag.build(gpa, .sha1, .{
         .target = target,
         .target_type = .commit,

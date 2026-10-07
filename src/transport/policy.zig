@@ -41,7 +41,7 @@ pub fn allowed(config: ?*const config_mod.Config, environ: ?*const Environ.Map, 
         return false;
     };
     var key_buf: [128]u8 = undefined;
-    const key = std.fmt.bufPrint(&key_buf, "protocol.{s}.allow", .{name}) catch return false;
+    const key = std.mem.print(&key_buf, "protocol.{s}.allow", .{name}) catch return false;
     const configured = if (config) |c| c.get(key) orelse c.get("protocol.allow") else null;
     const policy = configured orelse builtIn(name);
     if (std.ascii.eqlIgnoreCase(policy, "always")) return true;

@@ -108,16 +108,16 @@ test "a clone given no settings of its own reaches the remote with the person's,
     defer gpa.free(root_path);
     const source_path = try testremote.absolutePath(gpa, io, source.dir);
     defer gpa.free(source_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
     const fake = try testremote.fakeSsh(gpa, io, root.dir);
     defer gpa.free(fake);
     // Only the person's own file says how to reach the remote.
-    const text = try std.fmt.allocPrint(gpa, "[core]\n\tsshCommand = {s}\n", .{fake});
+    const text = try gpa.print("[core]\n\tsshCommand = {s}\n", .{fake});
     defer gpa.free(text);
     try root.dir.writeFile(io, .{ .sub_path = "gitconfig", .data = text });
-    const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.os.tag == .windows) "/" else "", root_path });
+    const url = try gpa.print("ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.target.os.tag == .windows) "/" else "", root_path });
     defer gpa.free(url);
 
     try root.dir.createDirPath(io, "by-relic");
@@ -155,7 +155,7 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     defer gpa.free(root_path);
     const source_path = try testremote.absolutePath(gpa, io, source.dir);
     defer gpa.free(source_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
     // The person's own file names a short form for the server. It is the
@@ -163,16 +163,16 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     // through `HOME`.
     const url_root = try gpa.dupe(u8, root_path);
     defer gpa.free(url_root);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, url_root, '\\', '/');
-    const text = try std.fmt.allocPrint(gpa, "[url \"file://{s}/\"]\n\tinsteadOf = here:\n", .{url_root});
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, url_root, '\\', '/');
+    const text = try gpa.print("[url \"file://{s}/\"]\n\tinsteadOf = here:\n", .{url_root});
     defer gpa.free(text);
     try root.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = text });
-    const global = try std.fmt.allocPrint(gpa, "{s}/.gitconfig", .{root_path});
+    const global = try gpa.print("{s}/.gitconfig", .{root_path});
     defer gpa.free(global);
     try env.put("GIT_CONFIG_GLOBAL", global);
     try env.put("HOME", root_path);
 
-    const by_git = try std.fmt.allocPrint(gpa, "{s}/by-git", .{root_path});
+    const by_git = try gpa.print("{s}/by-git", .{root_path});
     defer gpa.free(by_git);
     const cloned = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", "here:repo.git", by_git }, "", true);
     gpa.free(cloned);

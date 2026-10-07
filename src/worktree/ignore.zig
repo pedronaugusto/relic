@@ -129,7 +129,7 @@ pub const Rules = struct {
         const path = if (base.len == 0)
             ".gitignore"
         else
-            std.fmt.bufPrint(&path_buf, "{s}/.gitignore", .{base}) catch return;
+            std.mem.print(&path_buf, "{s}/.gitignore", .{base}) catch return;
         try rules.addFileIfPresent(io, wt, path, base, path, depth + 2);
     }
 

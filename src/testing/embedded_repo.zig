@@ -70,7 +70,7 @@ fn fixture(gpa: Allocator, io: Io) !testgit.Repo {
 /// The lines of `git status --porcelain=v2` with the modes and object
 /// names taken off a changed entry's line, sorted.
 fn gitStatus(gpa: Allocator, io: Io, git: *testgit.Repo, untracked: []const u8, ignored: bool) ![]u8 {
-    const mode = try std.fmt.allocPrint(gpa, "--untracked-files={s}", .{untracked});
+    const mode = try gpa.print("--untracked-files={s}", .{untracked});
     defer gpa.free(mode);
     const out = if (ignored)
         try git.run(io, &.{ "status", "--porcelain=v2", mode, "--ignored" })
@@ -94,7 +94,7 @@ fn gitStatus(gpa: Allocator, io: Io, git: *testgit.Repo, untracked: []const u8, 
         const xy = fields.next().?;
         const sub = fields.next().?;
         for (0..5) |_| _ = fields.next();
-        try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} {s}", .{ xy, sub, fields.rest() }));
+        try lines.append(gpa, try gpa.print("{s} {s} {s}", .{ xy, sub, fields.rest() }));
     }
     return joinSorted(gpa, lines.items);
 }
@@ -135,9 +135,9 @@ fn relicStatus(gpa: Allocator, io: Io, git: *testgit.Repo, untracked: worktree.S
     }
     for (result.entries) |entry| {
         const line = switch (entry.unstaged) {
-            .untracked => try std.fmt.allocPrint(gpa, "? {s}", .{entry.path}),
-            .ignored => try std.fmt.allocPrint(gpa, "! {s}", .{entry.path}),
-            else => try std.fmt.allocPrint(gpa, "{c}{c} N... {s}", .{ letter(entry.staged), letter(entry.unstaged), entry.path }),
+            .untracked => try gpa.print("? {s}", .{entry.path}),
+            .ignored => try gpa.print("! {s}", .{entry.path}),
+            else => try gpa.print("{c}{c} N... {s}", .{ letter(entry.staged), letter(entry.unstaged), entry.path }),
         };
         try lines.append(gpa, line);
     }

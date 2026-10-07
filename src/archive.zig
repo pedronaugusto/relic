@@ -274,14 +274,14 @@ fn tarEntry(t: *Tar, a: Allocator, oid: Oid, path: []const u8, mode_in: u32, con
             @memcpy(h.prefix[0..plen], path[0..plen]);
             @memcpy(h.name[0..rest], path[plen + 1 ..]);
         } else {
-            const name = try std.fmt.allocPrint(a, "{s}.data", .{oid_hex});
+            const name = try a.print("{s}.data", .{oid_hex});
             @memcpy(h.name[0..@min(name.len, h.name.len - 1)], name[0..@min(name.len, h.name.len - 1)]);
             try appendExtHeader(a, &ext, "path", path);
         }
     } else @memcpy(h.name[0..path.len], path);
     if (kind == 0o120000) {
         if (content.len > h.linkname.len) {
-            const name = try std.fmt.allocPrint(a, "see {s}.paxheader", .{oid_hex});
+            const name = try a.print("see {s}.paxheader", .{oid_hex});
             @memcpy(h.linkname[0..@min(name.len, h.linkname.len - 1)], name[0..@min(name.len, h.linkname.len - 1)]);
             try appendExtHeader(a, &ext, "linkpath", content);
         } else @memcpy(h.linkname[0..content.len], content);
@@ -289,13 +289,13 @@ fn tarEntry(t: *Tar, a: Allocator, oid: Oid, path: []const u8, mode_in: u32, con
     var size_in_header: u64 = content.len;
     if (kind == 0o100000 and content.len > ustar_max_size) {
         size_in_header = 0;
-        try appendExtHeader(a, &ext, "size", try std.fmt.allocPrint(a, "{d}", .{content.len}));
+        try appendExtHeader(a, &ext, "size", try a.print("{d}", .{content.len}));
     }
     prepareHeader(&h, mode, size_in_header, t.time);
     if (ext.items.len > 0) {
         var eh: Header = std.mem.zeroes(Header);
         eh.typeflag[0] = 'x';
-        const name = try std.fmt.allocPrint(a, "{s}.paxheader", .{oid_hex});
+        const name = try a.print("{s}.paxheader", .{oid_hex});
         @memcpy(eh.name[0..@min(name.len, eh.name.len - 1)], name[0..@min(name.len, eh.name.len - 1)]);
         prepareHeader(&eh, 0o100666, ext.items.len, t.time);
         try t.writeBlocked(std.mem.asBytes(&eh));
@@ -310,7 +310,7 @@ fn tarGlobalHeader(t: *Tar, a: Allocator, commit: ?Oid) Error!void {
     var hex: [hash.max_hex_len]u8 = undefined;
     if (commit) |c| try appendExtHeader(a, &ext, "comment", c.hex(&hex));
     if (t.time > ustar_max_size) {
-        try appendExtHeader(a, &ext, "mtime", try std.fmt.allocPrint(a, "{d}", .{t.time}));
+        try appendExtHeader(a, &ext, "mtime", try a.print("{d}", .{t.time}));
         t.time = ustar_max_size;
     }
     if (ext.items.len == 0) return;
@@ -621,7 +621,7 @@ const Walk = struct {
         var it = tree.iterate();
         while (try it.next()) |entry| {
             const path = try std.mem.concat(wk.a, u8, &.{ base, entry.name });
-            const mode: u32 = @intFromEnum(entry.mode);
+            const mode: u32 = @backingInt(entry.mode);
             if (entry.mode == .tree) {
                 if (!wk.spec.couldMatchUnder(path) and !wk.spec.matchesDir(path)) continue;
                 const dir_path = try std.mem.concat(wk.a, u8, &.{ path, "/" });

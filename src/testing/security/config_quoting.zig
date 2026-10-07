@@ -40,7 +40,7 @@ test "CVE-2025-48384, t1300-config 'writing value with trailing CR not stripped 
 }
 
 test "CVE-2025-48384, t7450-bad-git-dotfiles 'submodule must not checkout into different directory': a submodule at sub<CR> is checked out there, not through a link at sub" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var sub = try testgit.Repo.init(gpa, io, &.{});
@@ -58,13 +58,13 @@ test "CVE-2025-48384, t7450-bad-git-dotfiles 'submodule must not checkout into d
     try repo.exec(io, &.{ "config", "-f", ".gitmodules", "--unset", "submodule.sub.path" });
     const modules = try repo.readFile(io, ".gitmodules");
     defer gpa.free(modules);
-    const with_path = try std.fmt.allocPrint(gpa, "{s}\tpath = \"sub\r\"\n", .{modules});
+    const with_path = try gpa.print("{s}\tpath = \"sub\r\"\n", .{modules});
     defer gpa.free(with_path);
     try repo.writeFile(io, ".gitmodules", with_path);
     try repo.exec(io, &.{ "config", "-f", ".git/modules/sub/config", "--unset", "core.worktree" });
     const module_config = try repo.readFile(io, ".git/modules/sub/config");
     defer gpa.free(module_config);
-    const with_worktree = try std.fmt.allocPrint(gpa, "{s}[core]\n\tworktree = \"../../../sub\r\"\n", .{module_config});
+    const with_worktree = try gpa.print("{s}[core]\n\tworktree = \"../../../sub\r\"\n", .{module_config});
     defer gpa.free(with_worktree);
     try repo.writeFile(io, ".git/modules/sub/config", with_worktree);
     try repo.dir.symLink(io, ".git/modules/sub/hooks", "sub", .{});

@@ -1,4 +1,4 @@
---- std/crypto/tls/Client.zig zig-0.16.0 sha256:1464bd0d53f799e7714fa073a0783cb94c68c10fb1ab4381246e01f9cb130c8a
+--- std/crypto/tls/Client.zig zig-0.17.0 sha256:c6fbf80138bcf5cf5e46090294e94159815e2e175df56256679ddec87cf64d2c
 +++ src/transport/tls/Client.zig
 @@ -1,7 +1,64 @@
 +//! A TLS 1.2 and 1.3 client: the standard library's `std.crypto.tls.Client`,
@@ -17,7 +17,7 @@
 +//! unexpected message. There is nothing a wrapper could hold on to, so the
 +//! answer has to be written into the handshake itself.
 +//!
-+//! **What differs.** This file is Zig 0.16.0's
++//! **What differs.** This file is Zig 0.17.0's
 +//! `lib/std/crypto/tls/Client.zig` with the changes in `Client.zig.diff`
 +//! beside it, and nothing else. They are:
 +//!
@@ -119,7 +119,7 @@
  
      var cleartext_fragment_start: usize = 0;
      var cleartext_fragment_end: usize = 0;
-@@ -520,6 +608,9 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+@@ -517,6 +605,9 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                  p.transcript_hash.update(cleartext_header[tls.record_header_len..]); // Client Hello part 1
                                  p.transcript_hash.update(host); // Client Hello part 2
                                  p.transcript_hash.update(wrapped_handshake);
@@ -129,7 +129,7 @@
                              },
  
                              else => return error.TlsIllegalParameter,
-@@ -609,6 +700,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+@@ -606,6 +697,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                          switch (handshake_cipher) {
                              inline else => |*p| p.transcript_hash.update(wrapped_handshake),
                          }
@@ -137,7 +137,7 @@
  
                          switch (tls_version) {
                              .tls_1_3 => {
-@@ -713,6 +805,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+@@ -710,6 +802,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                          switch (handshake_cipher) {
                              inline else => |*p| p.transcript_hash.update(wrapped_handshake),
                          }
@@ -145,7 +145,7 @@
                          try hsd.ensure(1 + 2 + 1);
                          const curve_type = hsd.decode(u8);
                          if (curve_type != 0x03) return error.TlsIllegalParameter; // named_curve
-@@ -725,6 +818,34 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+@@ -722,6 +815,34 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                          try key_share.exchange(named_group, server_pub_key);
                          handshake_state = .server_hello_done;
                      },
@@ -180,8 +180,8 @@
                      .server_hello_done => {
                          if (tls_version != .tls_1_2) return error.TlsUnexpectedMessage;
                          if (cipher_state != .cleartext) return error.TlsUnexpectedMessage;
-@@ -747,12 +868,42 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
-                             int(u16, @intFromEnum(tls.ProtocolVersion.tls_1_2)) ++
+@@ -744,12 +865,42 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+                             int(u16, @backingInt(tls.ProtocolVersion.tls_1_2)) ++
                              array(u16, tls.ChangeCipherSpecType, .{.change_cipher_spec});
                          const pre_master_secret = key_share.getSharedSecret().?;
 +                        // Asked for a certificate, the client sends its
@@ -190,7 +190,7 @@
 +                        var certificate_head: [7]u8 = undefined;
 +                        const client_list: []const u8 = if (options.client_auth) |auth| auth.list12 else &.{};
 +                        if (cert_requested) {
-+                            certificate_head[0] = @intFromEnum(tls.HandshakeType.certificate);
++                            certificate_head[0] = @backingInt(tls.HandshakeType.certificate);
 +                            mem.writeInt(u24, certificate_head[1..4], @intCast(3 + client_list.len), .big);
 +                            mem.writeInt(u24, certificate_head[4..7], @intCast(client_list.len), .big);
 +                        }
@@ -213,9 +213,9 @@
 +                                    try keepRaw(&raw_transcript, options.client_auth, &.{ client_key_exchange_prefix[tls.record_header_len..], public_key_bytes });
 +                                    const scheme = client_scheme.?;
 +                                    signature = try signWith(auth.key, scheme, raw_transcript.items, sign_entropy, &signature_buf);
-+                                    verify_head[0] = @intFromEnum(tls.HandshakeType.certificate_verify);
++                                    verify_head[0] = @backingInt(tls.HandshakeType.certificate_verify);
 +                                    mem.writeInt(u24, verify_head[1..4], @intCast(4 + signature.len), .big);
-+                                    mem.writeInt(u16, verify_head[4..6], @intFromEnum(scheme), .big);
++                                    mem.writeInt(u16, verify_head[4..6], @backingInt(scheme), .big);
 +                                    mem.writeInt(u16, verify_head[6..8], @intCast(signature.len), .big);
 +                                    p.transcript_hash.update(&verify_head);
 +                                    p.transcript_hash.update(signature);
@@ -223,7 +223,7 @@
                                  const master_secret = hmacExpandLabel(P.Hmac, pre_master_secret, &.{
                                      "master secret",
                                      &client_hello_rand,
-@@ -806,9 +957,11 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+@@ -803,9 +954,11 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                      nonce,
                                      pv.app_cipher.client_write_key,
                                  );
@@ -238,7 +238,7 @@
                                      &client_change_cipher_spec_msg,
                                      &client_verify_msg,
                                  };
-@@ -856,8 +1009,53 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+@@ -854,8 +1007,54 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                      p.transcript_hash.update(wrapped_handshake);
                                      const expected_server_verify_data = tls.hmac(P.Hmac, &finished_digest, pv.server_finished_key);
                                      if (!std.crypto.timing_safe.eql([P.Hmac.mac_length]u8, expected_server_verify_data, hsd.array(P.Hmac.mac_length).*)) return error.TlsDecryptError;
@@ -261,7 +261,7 @@
 +                                        const client_list: []const u8 = if (options.client_auth) |auth| auth.list13 else &.{};
 +                                        var head: [4 + 1 + 255 + 3]u8 = undefined;
 +                                        const ctx = cert_request_context;
-+                                        head[0] = @intFromEnum(tls.HandshakeType.certificate);
++                                        head[0] = @backingInt(tls.HandshakeType.certificate);
 +                                        mem.writeInt(u24, head[1..4], @intCast(1 + ctx.len + 3 + client_list.len), .big);
 +                                        head[4] = @intCast(ctx.len);
 +                                        @memcpy(head[5..][0..ctx.len], ctx);
@@ -273,14 +273,15 @@
 +                                        try sealer.add(client_list);
 +                                        if (options.client_auth) |auth| {
 +                                            const scheme = client_scheme.?;
-+                                            const context_string = " " ** 64 ++ "TLS 1.3, client CertificateVerify\x00";
++                                            const pad: [64]u8 = @splat(' ');
++                                            const context_string = pad ++ "TLS 1.3, client CertificateVerify\x00";
 +                                            const signed = context_string ++ p.transcript_hash.peek();
 +                                            var signature_buf: [PrivateKey.max_signature_len]u8 = undefined;
 +                                            const signature = try signWith(auth.key, scheme, signed, sign_entropy, &signature_buf);
 +                                            var verify_head: [8]u8 = undefined;
-+                                            verify_head[0] = @intFromEnum(tls.HandshakeType.certificate_verify);
++                                            verify_head[0] = @backingInt(tls.HandshakeType.certificate_verify);
 +                                            mem.writeInt(u24, verify_head[1..4], @intCast(4 + signature.len), .big);
-+                                            mem.writeInt(u16, verify_head[4..6], @intFromEnum(scheme), .big);
++                                            mem.writeInt(u16, verify_head[4..6], @backingInt(scheme), .big);
 +                                            mem.writeInt(u16, verify_head[6..8], @intCast(signature.len), .big);
 +                                            p.transcript_hash.update(&verify_head);
 +                                            p.transcript_hash.update(signature);
@@ -291,10 +292,10 @@
 +                                    }
 +                                    const finished_hash = p.transcript_hash.finalResult();
 +                                    const verify_data = tls.hmac(P.Hmac, &finished_hash, pv.client_finished_key);
-                                     const out_cleartext = .{@intFromEnum(tls.HandshakeType.finished)} ++
+                                     const out_cleartext = .{@backingInt(tls.HandshakeType.finished)} ++
                                          array(u24, u8, verify_data) ++
-                                         .{@intFromEnum(tls.ContentType.handshake)};
-@@ -871,14 +1069,10 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
+                                         .{@backingInt(tls.ContentType.handshake)};
+@@ -869,14 +1068,10 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                      const ad = finished_msg[0..tls.record_header_len];
                                      const ciphertext = finished_msg[tls.record_header_len..][0..out_cleartext.len];
                                      const auth_tag = finished_msg[finished_msg.len - P.AEAD.tag_length ..];
@@ -311,7 +312,7 @@
                                      try output.flush();
  
                                      const client_secret = hkdfExpandLabel(P.Hkdf, pv.master_secret, "c ap traffic", &handshake_hash, P.Hash.digest_length);
-@@ -1625,27 +1819,8 @@ fn tryDownloadRootCert(chain: *Certificate.Chain, options: *const Options) !void
+@@ -1627,27 +1822,8 @@ fn tryDownloadRootCert(chain: *Certificate.Chain, options: *const Options) !void
      return error.TlsCertificateNotVerified;
  }
  
@@ -341,3 +342,19 @@
  const cipher_suites = if (crypto.core.aes.has_hardware_support)
      array(u16, tls.CipherSuite, .{
          .AEGIS_128L_SHA256,
+@@ -1699,6 +1875,7 @@ fn testReadError(input_buf: []const u8, tls_version: tls.ProtocolVersion, cipher
+ }
+ 
+ test "empty inner plaintext" {
++    // ziglint-ignore: Z032 std's test, kept as std spells it
+     const AEAD = crypto.aead.chacha_poly.ChaCha20Poly1305;
+     const key: [AEAD.key_length]u8 = @splat(0);
+     const iv: [AEAD.nonce_length]u8 = @splat(0);
+@@ -1725,6 +1902,7 @@ test "empty inner plaintext" {
+ }
+ 
+ test "record shorter than tag" {
++    // ziglint-ignore: Z032 std's test, kept as std spells it
+     const AEAD = crypto.aead.chacha_poly.ChaCha20Poly1305;
+     const record_len: u16 = AEAD.tag_length - 1;
+     const header = [_]u8{ 0x17, 0x03, 0x03 } ++ mem.toBytes(big(record_len));

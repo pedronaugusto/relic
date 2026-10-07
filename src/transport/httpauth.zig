@@ -15,6 +15,7 @@
 const Self = @This();
 
 const std = @import("std");
+const allocation = @import("../testing/allocation.zig");
 const Allocator = std.mem.Allocator;
 
 /// A scheme a challenge names.
@@ -172,7 +173,7 @@ pub fn pick(arena: Allocator, challenges: []const Challenge, method: Method) All
 /// `Basic <base64 of user:password>`, into `gpa`.
 pub fn basic(gpa: Allocator, user: []const u8, password: []const u8) Allocator.Error![]u8 {
     const encoder = std.base64.standard.Encoder;
-    const plain = try std.fmt.allocPrint(gpa, "{s}:{s}", .{ user, password });
+    const plain = try gpa.print("{s}:{s}", .{ user, password });
     defer gpa.free(plain);
     const out = try gpa.alloc(u8, "Basic ".len + encoder.calcSize(plain.len));
     @memcpy(out[0.."Basic ".len], "Basic ");
@@ -276,7 +277,7 @@ pub const Digest = struct {
         d.nc += 1;
         var nc_buf: [8]u8 = undefined;
         // unreachable: a u32 is at most eight hex digits
-        const nc = std.fmt.bufPrint(&nc_buf, "{x:0>8}", .{d.nc}) catch unreachable;
+        const nc = std.mem.print(&nc_buf, "{x:0>8}", .{d.nc}) catch unreachable;
 
         var ha1 = try d.hash(gpa, &.{ user, ":", d.realm, ":", password });
         defer gpa.free(ha1);
@@ -371,13 +372,13 @@ test "a Digest answer is RFC 7616's, for its worked examples" {
         .{ .alg = "MD5", .response = "8ca523f5e9506fed4657c9700eebdbec" },
         .{ .alg = "SHA-256", .response = "753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1" },
     }) |case| {
-        const header = try std.fmt.allocPrint(arena.allocator(), "Digest realm=\"http-auth@example.org\", qop=\"auth, auth-int\", algorithm={s}, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\"", .{case.alg});
+        const header = try arena.allocator().print("Digest realm=\"http-auth@example.org\", qop=\"auth, auth-int\", algorithm={s}, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\"", .{case.alg});
         const list = try parse(arena.allocator(), header);
         var d: Digest = try .init(gpa, list[0], "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ");
         defer d.deinit(gpa);
         const value = try d.answer(gpa, "Mufasa", "Circle of Life", "GET", "/dir/index.html");
         defer gpa.free(value);
-        const want = try std.fmt.allocPrint(arena.allocator(), "response=\"{s}\"", .{case.response});
+        const want = try arena.allocator().print("response=\"{s}\"", .{case.response});
         testing.expect(std.mem.find(u8, value, want) != null) catch |err| {
             std.debug.print("{s}\n", .{value});
             return err;
@@ -399,7 +400,7 @@ test "Digest session answers release intermediate hashes when allocation stops" 
             try testing.expect(std.mem.find(u8, answer, "algorithm=SHA-256-sess") != null);
         }
     };
-    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+    try testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }
 
 test "fuzz: any Proxy-Authenticate value is read or refused by name" {

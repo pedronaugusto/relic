@@ -289,7 +289,7 @@ pub fn isRelativeUrl(url: []const u8) bool {
 }
 
 fn isSep(c: u8, cross_platform: bool) bool {
-    return c == '/' or ((cross_platform or builtin.os.tag == .windows) and c == '\\');
+    return c == '/' or ((cross_platform or builtin.target.os.tag == .windows) and c == '\\');
 }
 
 fn startsWithDotSlash(s: []const u8, cross_platform: bool) bool {
@@ -372,13 +372,13 @@ fn curlUrlIsSafe(url: []const u8) bool {
         i += 2;
     }
     // A scheme, then `://`.
-    const colon = std.mem.indexOf(u8, url, "://") orelse return false;
+    const colon = std.mem.find(u8, url, "://") orelse return false;
     if (colon == 0 or !std.ascii.isAlphabetic(url[0])) return false;
     for (url[0..colon]) |c| {
         if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
     }
     const after = url[colon + 3 ..];
-    const authority_end = std.mem.indexOfAny(u8, after, "/?#") orelse after.len;
+    const authority_end = std.mem.findAny(u8, after, "/?#") orelse after.len;
     var authority = after[0..authority_end];
     if (std.mem.findScalarLast(u8, authority, '@')) |at| authority = authority[at + 1 ..];
     // The host, then an optional port.
@@ -395,7 +395,7 @@ fn curlUrlIsSafe(url: []const u8) bool {
     if (host.len == 0) return false;
     // A `..` segment may not climb above the root.
     var depth: usize = 0;
-    const path_end = std.mem.indexOfAny(u8, after[authority_end..], "?#") orelse after.len - authority_end;
+    const path_end = std.mem.findAny(u8, after[authority_end..], "?#") orelse after.len - authority_end;
     var segments = std.mem.splitScalar(u8, after[authority_end..][0..path_end], '/');
     _ = segments.next();
     while (segments.next()) |segment| {
@@ -488,12 +488,12 @@ fn isLocalNotSsh(url: []const u8) bool {
     if (std.mem.findScalar(u8, url, '/')) |slash| {
         if (slash < colon) return true;
     }
-    return builtin.os.tag == .windows and hasDriveLetter(url);
+    return builtin.target.os.tag == .windows and hasDriveLetter(url);
 }
 
 fn isAbsolutePath(path: []const u8) bool {
     if (path.len > 0 and path[0] == '/') return true;
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         return (path.len > 0 and path[0] == '\\') or hasDriveLetter(path);
     }
     return false;
@@ -662,7 +662,7 @@ fn expectFsckAgrees(name: []const u8, url: []const u8, accepted: bool) !void {
         if (c == '"' or c == '\\') try escaped.append(gpa, '\\');
         try escaped.append(gpa, c);
     }
-    const text = try std.fmt.allocPrint(gpa, "[submodule \"{s}\"]\n\tpath = p\n\turl = {s}\n", .{ escaped.items, url });
+    const text = try gpa.print("[submodule \"{s}\"]\n\tpath = p\n\turl = {s}\n", .{ escaped.items, url });
     defer gpa.free(text);
     try git.writeFile(io, ".gitmodules", text);
     try git.exec(io, &.{ "add", ".gitmodules" });

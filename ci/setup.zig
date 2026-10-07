@@ -46,26 +46,26 @@ const Context = struct {
 };
 
 fn buildGit(c: Context, root: []const u8, master: bool) !void {
-    const prefix = try std.fs.path.join(c.a, &.{ root, if (master) "master" else "git" });
-    if (!master and c.exists(try std.fs.path.join(c.a, &.{ prefix, "bin", "git" }))) return;
+    const prefix = try std.Io.Dir.path.join(c.a, &.{ root, if (master) "master" else "git" });
+    if (!master and c.exists(try std.Io.Dir.path.join(c.a, &.{ prefix, "bin", "git" }))) return;
     try c.command(&.{ "sudo", "apt-get", "update" });
     try c.command(&.{ "sudo", "apt-get", "install", "-y", "--no-install-recommends", "build-essential", "gettext", "libcurl4-openssl-dev", "libexpat1-dev", "libssl-dev", "zlib1g-dev", "gnupg", "openssh-client" });
-    const source = try std.fs.path.join(c.a, &.{ root, if (master) "master-source" else "git-source" });
+    const source = try std.Io.Dir.path.join(c.a, &.{ root, if (master) "master-source" else "git-source" });
     if (master) {
         if (c.exists(source)) {
             try c.command(&.{ "git", "-C", source, "fetch", "--depth", "1", "origin", "master" });
             try c.command(&.{ "git", "-C", source, "checkout", "--detach", "FETCH_HEAD" });
         } else try c.command(&.{ "git", "clone", "--depth", "1", "https://github.com/git/git.git", source });
     } else {
-        const archive = try std.fs.path.join(c.a, &.{ root, "git.tar.xz" });
-        try c.fetch(try std.fmt.allocPrint(c.a, "https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{pins.git_version}), archive, pins.git_sha256);
+        const archive = try std.Io.Dir.path.join(c.a, &.{ root, "git.tar.xz" });
+        try c.fetch(try c.a.print("https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{pins.git_version}), archive, pins.git_sha256);
         try std.Io.Dir.cwd().createDirPath(c.io, source);
         try c.command(&.{ "tar", "-xJf", archive, "-C", source, "--strip-components=1" });
     }
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(c.a, &.{ "make", "-C", source, try std.fmt.allocPrint(c.a, "-j{d}", .{try std.Thread.getCpuCount()}) });
+    try args.appendSlice(c.a, &.{ "make", "-C", source, try c.a.print("-j{d}", .{try std.Thread.getCpuCount()}) });
     try args.appendSlice(c.a, if (master) &.{ "NO_TCLTK=1", "NO_GETTEXT=1" } else &pins.make_flags);
-    try args.append(c.a, try std.fmt.allocPrint(c.a, "prefix={s}", .{prefix}));
+    try args.append(c.a, try c.a.print("prefix={s}", .{prefix}));
     try args.append(c.a, "all");
     try c.command(args.items);
     args.items[args.items.len - 1] = "install";
@@ -73,26 +73,26 @@ fn buildGit(c: Context, root: []const u8, master: bool) !void {
 }
 
 fn lfs(c: Context, root: []const u8) !void {
-    const bin = try std.fs.path.join(c.a, &.{ root, "lfs", "bin" });
-    const executable = try std.fs.path.join(c.a, &.{ bin, if (builtin.os.tag == .windows) "git-lfs.exe" else "git-lfs" });
+    const bin = try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" });
+    const executable = try std.Io.Dir.path.join(c.a, &.{ bin, if (builtin.target.os.tag == .windows) "git-lfs.exe" else "git-lfs" });
     if (c.exists(executable)) return;
-    const asset, const digest = switch (builtin.os.tag) {
+    const asset, const digest = switch (builtin.target.os.tag) {
         .linux => .{ "git-lfs-linux-amd64-v3.8.0.tar.gz", "e455e00f15d9b95661b8d53498ffb0c3367962cf1ec73c31ab7369516cd6ab8d" },
         .macos => .{ "git-lfs-darwin-arm64-v3.8.0.zip", "caff76a7d070d8160c89bc39b6e85d98f24135b6fed038a3b4de2590d25102d8" },
         .windows => .{ "git-lfs-windows-amd64-v3.8.0.zip", "b62e7b8ceddee635f691233d77de8eaa4b213e9209e0173811d8cfa77f7882c1" },
         else => return error.UnsupportedHost,
     };
-    const archive = try std.fs.path.join(c.a, &.{ root, asset });
-    try c.fetch(try std.fmt.allocPrint(c.a, "https://github.com/git-lfs/git-lfs/releases/download/v{s}/{s}", .{ pins.lfs_version, asset }), archive, digest);
-    const unpacked = try std.fs.path.join(c.a, &.{ root, "lfs-unpacked" });
+    const archive = try std.Io.Dir.path.join(c.a, &.{ root, asset });
+    try c.fetch(try c.a.print("https://github.com/git-lfs/git-lfs/releases/download/v{s}/{s}", .{ pins.lfs_version, asset }), archive, digest);
+    const unpacked = try std.Io.Dir.path.join(c.a, &.{ root, "lfs-unpacked" });
     try std.Io.Dir.cwd().createDirPath(c.io, unpacked);
-    if (builtin.os.tag == .linux) try c.command(&.{ "tar", "-xzf", archive, "-C", unpacked }) else try c.command(&.{ "tar", "-xf", archive, "-C", unpacked });
+    if (builtin.target.os.tag == .linux) try c.command(&.{ "tar", "-xzf", archive, "-C", unpacked }) else try c.command(&.{ "tar", "-xf", archive, "-C", unpacked });
     var directory = try std.Io.Dir.cwd().openDir(c.io, unpacked, .{ .iterate = true });
     defer directory.close(c.io);
     var walker = try directory.walk(c.a);
     defer walker.deinit();
     while (try walker.next(c.io)) |entry| {
-        if (!std.mem.eql(u8, entry.basename, if (builtin.os.tag == .windows) "git-lfs.exe" else "git-lfs")) continue;
+        if (!std.mem.eql(u8, entry.basename, if (builtin.target.os.tag == .windows) "git-lfs.exe" else "git-lfs")) continue;
         try std.Io.Dir.cwd().createDirPath(c.io, bin);
         try directory.copyFile(entry.path, std.Io.Dir.cwd(), executable, c.io, .{});
         const file = try std.Io.Dir.cwd().openFile(c.io, executable, .{});
@@ -117,19 +117,19 @@ fn old(c: Context) !void {
 }
 
 fn selectLfs(c: Context, root: []const u8, git: []const u8) !void {
-    const bin = try std.fs.path.join(c.a, &.{ root, "lfs", "bin" });
-    if (builtin.os.tag == .windows) {
+    const bin = try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" });
+    if (builtin.target.os.tag == .windows) {
         // Git searches its own exec directory before PATH. Replace its
         // bundled LFS with the verified cached version on this hosted runner.
         const exec_path = std.mem.trim(u8, try c.capture(&.{ git, "--exec-path" }), "\r\n");
-        const source = try std.fs.path.join(c.a, &.{ bin, "git-lfs.exe" });
-        const destination = try std.fs.path.join(c.a, &.{ exec_path, "git-lfs.exe" });
+        const source = try std.Io.Dir.path.join(c.a, &.{ bin, "git-lfs.exe" });
+        const destination = try std.Io.Dir.path.join(c.a, &.{ exec_path, "git-lfs.exe" });
         try std.Io.Dir.cwd().copyFile(source, std.Io.Dir.cwd(), destination, c.io, .{});
     }
     var env = try c.env.clone(c.a);
     defer env.deinit();
-    const separator = if (builtin.os.tag == .windows) ";" else ":";
-    try env.put("PATH", try std.fmt.allocPrint(c.a, "{s}{s}{s}", .{ bin, separator, c.env.get("PATH") orelse "" }));
+    const separator = if (builtin.target.os.tag == .windows) ";" else ":";
+    try env.put("PATH", try c.a.print("{s}{s}{s}", .{ bin, separator, c.env.get("PATH") orelse "" }));
     const selected: Context = .{ .a = c.a, .io = c.io, .env = &env };
     const version = try selected.capture(&.{ git, "lfs", "version" });
     if (!std.mem.startsWith(u8, version, "git-lfs/" ++ pins.lfs_version ++ " ")) return error.WrongLfsVersion;
@@ -151,10 +151,10 @@ pub fn main(init: std.process.Init) !void {
     const c: Context = .{ .a = a, .io = init.io, .env = init.environ_map };
     const args = try init.minimal.args.toSlice(a);
     if (args.len > 1 and std.mem.eql(u8, args[1], "old")) return old(c);
-    const root = try std.fs.path.join(a, &.{ init.environ_map.get("RUNNER_TEMP") orelse return error.HostedSetupOnly, "preflight-tools" });
+    const root = try std.Io.Dir.path.join(a, &.{ init.environ_map.get("RUNNER_TEMP") orelse return error.HostedSetupOnly, "preflight-tools" });
     try std.Io.Dir.cwd().createDirPath(c.io, root);
     const master = args.len > 1 and std.mem.eql(u8, args[1], "master");
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .linux => try buildGit(c, root, master),
         .macos => {
             if (!pins.recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "brew", "upgrade", "git" });
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         else => return error.UnsupportedHost,
     }
     if (!master) try lfs(c, root);
-    const git = if (builtin.os.tag == .linux) try std.fs.path.join(a, &.{ root, if (master) "master" else "git", "bin", "git" }) else "git";
+    const git = if (builtin.target.os.tag == .linux) try std.Io.Dir.path.join(a, &.{ root, if (master) "master" else "git", "bin", "git" }) else "git";
     if (!master) try selectLfs(c, root, git);
     const version = try c.capture(&.{ git, "--version" });
     if (!pins.recent(version)) return error.GitTooOld;

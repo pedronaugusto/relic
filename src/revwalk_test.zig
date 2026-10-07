@@ -160,7 +160,7 @@ test "a commit's tree and parents are read where git reads them, whatever header
     defer gpa.free(empty_tree);
     // A second tree and a parent after the identities, which git's fsck
     // lets through and git's parser does not read.
-    const text = try std.fmt.allocPrint(gpa, "tree {s}\nauthor A <a@b> 1 +0000\ncommitter A <a@b> 1 +0000\ntree {s}\nparent {s}\n\nodd\n", .{ tree, empty_tree, parent });
+    const text = try gpa.print("tree {s}\nauthor A <a@b> 1 +0000\ncommitter A <a@b> 1 +0000\ntree {s}\nparent {s}\n\nodd\n", .{ tree, empty_tree, parent });
     defer gpa.free(text);
     try repo.writeFile(io, "odd", text);
     const odd = try repo.line(io, &.{ "hash-object", "-t", "commit", "-w", "--literally", "odd" });
@@ -170,7 +170,7 @@ test "a commit's tree and parents are read where git reads them, whatever header
     defer git_dir.close(io);
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    const tree_of = try std.fmt.allocPrint(gpa, "{s}^{{tree}}", .{odd});
+    const tree_of = try gpa.print("{s}^{{tree}}", .{odd});
     defer gpa.free(tree_of);
     const theirs_tree = try repo.line(io, &.{ "rev-parse", "--verify", tree_of });
     defer gpa.free(theirs_tree);

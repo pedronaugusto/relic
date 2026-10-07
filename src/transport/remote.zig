@@ -94,7 +94,7 @@ pub const Remote = struct {
         errdefer remote.arena.deinit();
         const arena = remote.arena.allocator();
 
-        const url_key = try std.fmt.allocPrint(arena, "remote.{s}.url", .{name});
+        const url_key = try arena.print("remote.{s}.url", .{name});
         const configured = try valuesOf(arena, config, url_key);
         if (configured.len == 0) {
             remote.urls = try arena.dupe([]const u8, &.{try rewrite(arena, config, name, .fetch) orelse try arena.dupe(u8, name)});
@@ -105,7 +105,7 @@ pub const Remote = struct {
         remote.name = try arena.dupe(u8, name);
         const key = struct {
             fn of(comptime field: []const u8, a: Allocator, remote_name: []const u8) Allocator.Error![]u8 {
-                return std.fmt.allocPrint(a, "remote.{s}." ++ field, .{remote_name});
+                return a.print("remote.{s}." ++ field, .{remote_name});
             }
         }.of;
 
@@ -211,7 +211,7 @@ pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Re
 /// `name`: every branch, forced, under `refs/remotes/<name>/`. The text is
 /// the caller's; `Refspec.parse` reads it.
 pub fn defaultFetchRefspec(gpa: Allocator, name: []const u8) Allocator.Error![]u8 {
-    return std.fmt.allocPrint(gpa, "+refs/heads/*:refs/remotes/{s}/*", .{name});
+    return gpa.print("+refs/heads/*:refs/remotes/{s}/*", .{name});
 }
 
 /// A branch's upstream settings.
@@ -240,9 +240,9 @@ pub const Branch = struct {
         errdefer branch.arena.deinit();
         const arena = branch.arena.allocator();
         branch.name = try arena.dupe(u8, name);
-        branch.remote = try valueOf(arena, config, try std.fmt.allocPrint(arena, "branch.{s}.remote", .{name}));
-        branch.push_remote = try valueOf(arena, config, try std.fmt.allocPrint(arena, "branch.{s}.pushremote", .{name}));
-        branch.merge = try valuesOf(arena, config, try std.fmt.allocPrint(arena, "branch.{s}.merge", .{name}));
+        branch.remote = try valueOf(arena, config, try arena.print("branch.{s}.remote", .{name}));
+        branch.push_remote = try valueOf(arena, config, try arena.print("branch.{s}.pushremote", .{name}));
+        branch.merge = try valuesOf(arena, config, try arena.print("branch.{s}.merge", .{name}));
         return branch;
     }
 

@@ -158,11 +158,11 @@ const Shifter = struct {
             if (!isDir(e.mode)) continue;
             const score = try s.scoreTrees(e.oid, oid2);
             if (best_score.* < score) {
-                best.* = try std.fmt.allocPrint(s.arena, "{s}{s}", .{ base, e.name });
+                best.* = try s.arena.print("{s}{s}", .{ base, e.name });
                 best_score.* = score;
             }
             if (limit != 0) {
-                const deeper = try std.fmt.allocPrint(s.arena, "{s}{s}/", .{ base, e.name });
+                const deeper = try s.arena.print("{s}{s}/", .{ base, e.name });
                 try s.matchTrees(e.oid, oid2, best_score, best, deeper, limit - 1);
             }
         }

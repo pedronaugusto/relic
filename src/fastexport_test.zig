@@ -41,13 +41,13 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     try git.writeFile(io, "run.sh", "#!/bin/sh\necho run\n");
     try git.writeFile(io, "with space.txt", "spaced\n");
     // Windows cannot create control characters in filenames.
-    if (builtin.os.tag != .windows) try git.writeFile(io, "tab\there.txt", "tabbed\n");
+    if (builtin.target.os.tag != .windows) try git.writeFile(io, "tab\there.txt", "tabbed\n");
     try git.writeFile(io, "h\xc3\xa9llo.txt", "accented\n");
     try git.exec(io, &.{ "add", "." });
     try git.exec(io, &.{ "update-index", "--chmod=+x", "run.sh" });
     const blob = try git.line(io, &.{ "hash-object", "-w", "README" });
     defer gpa.free(blob);
-    const link_spec = try std.fmt.allocPrint(gpa, "120000,{s},link", .{blob});
+    const link_spec = try gpa.print("120000,{s},link", .{blob});
     defer gpa.free(link_spec);
     try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", link_spec });
     try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000,0123456789012345678901234567890123456789,sub" });
@@ -83,7 +83,7 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     defer gpa.free(head);
     const tree = try git.line(io, &.{ "rev-parse", "HEAD^{tree}" });
     defer gpa.free(tree);
-    const signed = try std.fmt.allocPrint(gpa,
+    const signed = try gpa.print(
         \\tree {s}
         \\parent {s}
         \\author A U Thor <author@example.com> 1700000300 +0000
@@ -111,7 +111,7 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     }
     const target = try git.line(io, &.{ "rev-parse", "side" });
     defer gpa.free(target);
-    const bare_tag = try std.fmt.allocPrint(gpa, "object {s}\ntype commit\ntag untagged\n\nno tagger here\n", .{target});
+    const bare_tag = try gpa.print("object {s}\ntype commit\ntag untagged\n\nno tagger here\n", .{target});
     defer gpa.free(bare_tag);
     const bare_oid = try git.runInput(io, &.{ "hash-object", "-t", "tag", "-w", "--literally", "--stdin" }, bare_tag);
     defer gpa.free(bare_oid);

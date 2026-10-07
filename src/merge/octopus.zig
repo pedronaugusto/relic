@@ -263,7 +263,7 @@ const Octopus = struct {
         o.io.random(&raw);
         var name: [6]u8 = undefined;
         for (raw, &name) |r, *c| c.* = alphabet[r % alphabet.len];
-        return std.fmt.allocPrint(o.arena, ".merge_file_{s}", .{&name});
+        return o.arena.print(".merge_file_{s}", .{&name});
     }
 
     fn writeTree(o: *Octopus, map: *const Map) Error!Oid {

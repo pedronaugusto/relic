@@ -9,6 +9,7 @@
 //! git-lfs as well as git, and stand aside without it.
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -27,7 +28,6 @@ const program = @import("../repo/program.zig");
 const auth = @import("../transport/auth.zig");
 const worktree = @import("../worktree.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 
 /// A server, a home, and a place for tools and repositories.
 pub const Fixture = struct {
@@ -48,14 +48,14 @@ pub const Fixture = struct {
         const root = try testremote.absolutePath(gpa, io, tmp.dir);
         errdefer gpa.free(root);
         for ([_][]const u8{ "home", "tools", "served" }) |name| try tmp.dir.createDirPath(io, name);
-        const home = try std.fmt.allocPrint(gpa, "{s}/home", .{root});
+        const home = try gpa.print("{s}/home", .{root});
         defer gpa.free(home);
         var env = try testlfs.environ(gpa, home);
         errdefer env.deinit();
         try testlfs.requireGitLfs(gpa, io, &env);
         // The stand-ins go first on the path: git-lfs-authenticate for the
         // stand-in ssh to find.
-        const tools_path = try std.fmt.allocPrint(gpa, "{s}/tools{c}{s}", .{ root, std.fs.path.delimiter, env.get("PATH").? });
+        const tools_path = try gpa.print("{s}/tools{c}{s}", .{ root, std.Io.Dir.path.delimiter, env.get("PATH").? });
         defer gpa.free(tools_path);
         try env.put("PATH", tools_path);
         var tools = try tmp.dir.openDir(io, "tools", .{});
@@ -95,7 +95,7 @@ pub const Fixture = struct {
     }
 
     pub fn path(fx: *Fixture, name: []const u8) ![]u8 {
-        return std.fmt.allocPrint(fx.gpa, "{s}/{s}", .{ fx.root, name });
+        return fx.gpa.print("{s}/{s}", .{ fx.root, name });
     }
 
     pub fn gitIn(fx: *Fixture, d: Io.Dir, args: []const []const u8) !void {
@@ -285,7 +285,7 @@ pub fn committed(fx: *Fixture, name: []const u8, helper: []const u8, files: []co
     errdefer d.close(fx.io);
     try d.writeFile(fx.io, .{ .sub_path = ".gitattributes", .data = attributes });
     for (files) |f| {
-        if (std.fs.path.dirnamePosix(f[0])) |parent| try d.createDirPath(fx.io, parent);
+        if (std.Io.Dir.path.dirnamePosix(f[0])) |parent| try d.createDirPath(fx.io, parent);
         try d.writeFile(fx.io, .{ .sub_path = f[0], .data = f[1] });
     }
     try fx.gitIn(d, &.{ "add", "-A" });
@@ -452,7 +452,7 @@ test "a remote on this machine has its objects copied store to store, and git-lf
     }
     const oid = testlfs.sha256Hex(content);
     var path_buf: [256]u8 = undefined;
-    const stored = try std.fmt.bufPrint(&path_buf, "served/local.git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+    const stored = try std.mem.print(&path_buf, "served/local.git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
     try expectFile(fx, fx.tmp.dir, stored, content);
 
     // git-lfs pulls it from there.
@@ -495,7 +495,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
     var names: [12][16]u8 = undefined;
     var total: u64 = 0;
     for (&files, 0..) |*f, i| {
-        f[0] = try std.fmt.bufPrint(&names[i], "f{d:0>2}.bin", .{i});
+        f[0] = try std.mem.print(&names[i], "f{d:0>2}.bin", .{i});
         f[1] = try noise(gpa, 10 * 1024 + i * 1000, 100 + i);
         total += f[1].len;
     }
@@ -582,7 +582,7 @@ test "the endpoint and its access are the ones git lfs env names" {
     };
     for (cases, 0..) |case, n| {
         var name_buf: [16]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "env{d}", .{n});
+        const name = try std.mem.print(&name_buf, "env{d}", .{n});
         var d = try fx.dir(name);
         defer d.close(io);
         try fx.gitIn(d, &.{ "init", "-q", "-b", "main" });
@@ -602,11 +602,11 @@ test "the endpoint and its access are the ones git lfs env names" {
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
         const access = try server.settings.urlGet(arena_state.allocator(), "lfs", e.url, "access");
-        const ours = try std.fmt.allocPrint(gpa, "Endpoint={s} (auth={s})", .{ e.url, access orelse "none" });
+        const ours = try gpa.print("Endpoint={s} (auth={s})", .{ e.url, access orelse "none" });
         defer gpa.free(ours);
         try testing.expectEqualStrings(line, ours);
         if (e.ssh) |ssh| {
-            const ssh_line = try std.fmt.allocPrint(gpa, "\n  SSH={s}:{s}\n", .{ ssh.user_and_host, ssh.path });
+            const ssh_line = try gpa.print("\n  SSH={s}:{s}\n", .{ ssh.user_and_host, ssh.path });
             defer gpa.free(ssh_line);
             try testing.expect(std.mem.find(u8, env, ssh_line) != null);
         }
@@ -672,7 +672,7 @@ test "an action's URL is rewritten by insteadOf when git-lfs's setting asks, and
     try emptyStore(fx, ours);
     const real = try fx.server.url(gpa, "");
     defer gpa.free(real);
-    const key = try std.fmt.allocPrint(gpa, "url.{s}.insteadOf", .{real[0 .. real.len - 1]});
+    const key = try gpa.print("url.{s}.insteadOf", .{real[0 .. real.len - 1]});
     defer gpa.free(key);
     try fx.gitIn(ours, &.{ "config", key, "http://objects.invalid" });
     try fx.gitIn(ours, &.{ "config", "lfs.transfer.maxretries", "1" });
@@ -725,7 +725,7 @@ test "an .lfsconfig missing from the working tree is read from the index, then f
         const env = try fx.gitOut(d, &.{ "lfs", "env" });
         defer gpa.free(env);
         var want_buf: [128]u8 = undefined;
-        const want = try std.fmt.bufPrint(&want_buf, "\nEndpoint={s} (auth=none)\n", .{stage.want});
+        const want = try std.mem.print(&want_buf, "\nEndpoint={s} (auth=none)\n", .{stage.want});
         try testing.expect(std.mem.find(u8, env, want) != null);
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
@@ -753,12 +753,12 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
     try fx.gitIn(seed, &.{ "push", "-q", "--no-verify", "origin", "main" });
     const served = try fx.url();
     defer gpa.free(served);
-    const served_lfs = try std.fmt.allocPrint(gpa, "{s}/info/lfs", .{served});
+    const served_lfs = try gpa.print("{s}/info/lfs", .{served});
     defer gpa.free(served_lfs);
     const dead = "http://127.0.0.1:1/dead.git";
     const oid = testlfs.sha256Hex("a\n");
     var object_buf: [128]u8 = undefined;
-    const object_path = try std.fmt.bufPrint(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+    const object_path = try std.mem.print(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
 
     // The remote git-lfs picks is the one it fetches from: every other one
     // is a port nothing listens on.
@@ -785,7 +785,7 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
         for (case.setup) |args| try fx.gitIn(d, args);
         try fx.gitIn(d, &.{ "fetch", "-q", case.picked });
         var ref_buf: [64]u8 = undefined;
-        try fx.gitIn(d, &.{ "reset", "-q", "--hard", try std.fmt.bufPrint(&ref_buf, "{s}/main", .{case.picked}) });
+        try fx.gitIn(d, &.{ "reset", "-q", "--hard", try std.mem.print(&ref_buf, "{s}/main", .{case.picked}) });
         try fx.gitIn(d, &.{ "lfs", "fetch" });
         try d.access(io, object_path, .{});
 
@@ -838,7 +838,7 @@ test "a .netrc in the home directory is used before any helper, as git-lfs uses 
     var files: [2]Io.Dir = undefined;
     for ([_][]const u8{ "by-git", "by-relic" }, &files) |name, *d| {
         var helper_name: [32]u8 = undefined;
-        const helper = try testlfs.credentialHelper(gpa, io, fx.tools, try std.fmt.bufPrint(&helper_name, "{s}-helper", .{name}), "ada", "wrong");
+        const helper = try testlfs.credentialHelper(gpa, io, fx.tools, try std.mem.print(&helper_name, "{s}-helper", .{name}), "ada", "wrong");
         defer gpa.free(helper);
         d.* = try committed(fx, name, helper, &.{.{ "a.bin", content }});
         try emptyStore(fx, d.*);
@@ -865,7 +865,7 @@ test "a .netrc in the home directory is used before any helper, as git-lfs uses 
     try home.writeFile(io, .{ .sub_path = ".netrc", .data = "machine 127.0.0.1 login ada password stale\n" });
     for ([_][]const u8{ "by-git", "by-relic" }) |name| {
         var helper_name: [32]u8 = undefined;
-        const helper = try testlfs.credentialHelper(gpa, io, fx.tools, try std.fmt.bufPrint(&helper_name, "{s}-helper", .{name}), "ada", "secret");
+        const helper = try testlfs.credentialHelper(gpa, io, fx.tools, try std.mem.print(&helper_name, "{s}-helper", .{name}), "ada", "secret");
         gpa.free(helper);
     }
     for (files) |d| try emptyStore(fx, d);
@@ -919,7 +919,7 @@ test "a download that breaks off goes on from where it stopped, as git-lfs's doe
         }
         const oid = testlfs.sha256Hex(content);
         var path_buf: [128]u8 = undefined;
-        try expectFile(fx, d, try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid }), content);
+        try expectFile(fx, d, try std.mem.print(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid }), content);
         const seen = try fx.server.requests(gpa);
         defer gpa.free(seen);
         const at = std.mem.find(u8, seen, "range=") orelse return error.TestUnexpectedResult;
@@ -932,7 +932,7 @@ test "a download that breaks off goes on from where it stopped, as git-lfs's doe
     // the object's beginning is thrown away and the object fetched whole.
     const oid = testlfs.sha256Hex(content);
     var part_buf: [160]u8 = undefined;
-    const part = try std.fmt.bufPrint(&part_buf, ".git/lfs/incomplete/{s}.part", .{&oid});
+    const part = try std.mem.print(&part_buf, ".git/lfs/incomplete/{s}.part", .{&oid});
     for ([_][]const u8{ content[0 .. 100 * 1024], "not the beginning of it" }) |partial| {
         try emptyStore(fx, dirs[1]);
         try dirs[1].createDirPath(io, ".git/lfs/incomplete");
@@ -1004,7 +1004,7 @@ test "a recent fetch brings what git lfs fetch --recent brings, counted from the
         try seed.writeFile(io, .{ .sub_path = step.path, .data = step.content });
         try fx.gitIn(seed, &.{ "add", "-A" });
         var date_buf: [32]u8 = undefined;
-        const date = try std.fmt.bufPrint(&date_buf, "@{d} +0000", .{now - step.days_ago * day});
+        const date = try std.mem.print(&date_buf, "@{d} +0000", .{now - step.days_ago * day});
         try fx.gitWith(seed, &.{ .{ "GIT_AUTHOR_DATE", date }, .{ "GIT_COMMITTER_DATE", date } }, &.{ "commit", "-q", "-m", step.path });
     }
     try fx.gitIn(seed, &.{ "checkout", "-q", "main" });
@@ -1059,7 +1059,7 @@ test "a clone made with --shared takes its objects from the other repository's s
     defer gpa.free(u);
     const oid = testlfs.sha256Hex("shared once\n");
     var path_buf: [128]u8 = undefined;
-    const object_path = try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+    const object_path = try std.mem.print(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
     const seed_stat = try seed.statFile(io, object_path, .{});
 
     var listings: [2][]u8 = .{ &.{}, &.{} };
@@ -1141,7 +1141,7 @@ test "an upload is sent as the type its first bytes name, as git-lfs sends it, u
             &.{"application/octet-stream"};
         for (want) |t| {
             var buf: [64]u8 = undefined;
-            try testing.expect(std.mem.find(u8, logs[1], try std.fmt.bufPrint(&buf, "content-type={s}\n", .{t})) != null);
+            try testing.expect(std.mem.find(u8, logs[1], try std.mem.print(&buf, "content-type={s}\n", .{t})) != null);
         }
     }
 }
@@ -1153,7 +1153,7 @@ test "a download asks for gzip, or for zstd when lfs.transfer.httpDownloadEncodi
     defer gpa.free(content);
     const oid = testlfs.sha256Hex(content);
     var path_buf: [128]u8 = undefined;
-    const object_path = try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+    const object_path = try std.mem.print(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
     for ([_]?[]const u8{ null, "zstd", "brotli" }) |setting| {
         const fx = try Fixture.init(gpa, io, .{ .encode = true });
         defer fx.deinit();
@@ -1212,7 +1212,7 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
     for ([_]bool{ false, true }) |skip| {
         for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {
             var name_buf: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "{s}-{}", .{ base, skip });
+            const name = try std.mem.print(&name_buf, "{s}-{}", .{ base, skip });
             var d = try committed(fx, name, nobody, &.{ .{ "a.bin", here }, .{ "b.bin", gone } });
             defer d.close(io);
             try emptyStore(fx, d);
@@ -1348,7 +1348,7 @@ test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a
     // The API is on a host that only the proxy — the test server — can
     // reach; the actions it hands out are on 127.0.0.1, which goes direct.
     var proxy_buf: [64]u8 = undefined;
-    const proxy = try std.fmt.bufPrint(&proxy_buf, "http://127.0.0.1:{d}", .{fx.server.port});
+    const proxy = try std.mem.print(&proxy_buf, "http://127.0.0.1:{d}", .{fx.server.port});
     var logs: [2][]u8 = .{ &.{}, &.{} };
     defer for (logs) |l| gpa.free(l);
     for ([_][]const u8{ "by-git", "by-relic" }, 0..) |name, i| {
@@ -1433,9 +1433,9 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
     defer gpa.free(nobody);
     const content = "fetched over TLS\n";
     try fx.server.putObject(&testlfs.sha256Hex(content), content);
-    const named = try std.fmt.allocPrint(gpa, "https://lfs.example.invalid:{d}", .{front.port});
+    const named = try gpa.print("https://lfs.example.invalid:{d}", .{front.port});
     defer gpa.free(named);
-    const direct = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}", .{front.port});
+    const direct = try gpa.print("https://127.0.0.1:{d}", .{front.port});
     defer gpa.free(direct);
 
     const Case = struct { base: []const u8, config: []const [2][]const u8 = &.{}, env: []const [2][]const u8 = &.{}, tunneled: bool };
@@ -1447,7 +1447,7 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
     }, 0..) |case, n| {
         // The actions the server hands out are on the same server.
         fx.server.options.href_base = case.base;
-        const lfs_url = try std.fmt.allocPrint(gpa, "{s}/repo.git/info/lfs", .{case.base});
+        const lfs_url = try gpa.print("{s}/repo.git/info/lfs", .{case.base});
         defer gpa.free(lfs_url);
         var logs: [2][]u8 = .{ &.{}, &.{} };
         defer for (logs) |l| gpa.free(l);
@@ -1455,7 +1455,7 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
         defer for (connects) |l| gpa.free(l);
         for (0..2) |i| {
             var name_buf: [16]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "tls-{d}-{d}", .{ n, i });
+            const name = try std.mem.print(&name_buf, "tls-{d}-{d}", .{ n, i });
             var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
             defer d.close(io);
             try emptyStore(fx, d);
@@ -1478,7 +1478,7 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
             }
             const oid = testlfs.sha256Hex(content);
             var object_buf: [128]u8 = undefined;
-            const object_path = try std.fmt.bufPrint(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+            const object_path = try std.mem.print(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
             try expectFile(fx, d, object_path, content);
             logs[i] = try fx.server.requests(gpa);
             const first_lines = try proxy.take(gpa);
@@ -1510,9 +1510,9 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
     defer front.stop(io);
     const content = "fetched with a certificate\n";
     try fx.server.putObject(&testlfs.sha256Hex(content), content);
-    const base = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}", .{front.port});
+    const base = try gpa.print("https://127.0.0.1:{d}", .{front.port});
     defer gpa.free(base);
-    const lfs_url = try std.fmt.allocPrint(gpa, "{s}/repo.git/info/lfs", .{base});
+    const lfs_url = try gpa.print("{s}/repo.git/info/lfs", .{base});
     defer gpa.free(lfs_url);
     fx.server.options.href_base = base;
     defer fx.server.options.href_base = null;
@@ -1531,7 +1531,7 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
         defer for (helper_logs) |l| gpa.free(l);
         for (0..2) |i| {
             var name_buf: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "cert-{d}-{d}", .{ n, i });
+            const name = try std.mem.print(&name_buf, "cert-{d}-{d}", .{ n, i });
             const helper = try testlfs.credentialHelper(gpa, io, fx.tools, name, "", case.answer);
             defer gpa.free(helper);
             var d = try committed(fx, name, helper, &.{.{ "a.bin", content }});
@@ -1570,12 +1570,12 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
             if (case.refused == null) {
                 const oid = testlfs.sha256Hex(content);
                 var object_buf: [128]u8 = undefined;
-                const object_path = try std.fmt.bufPrint(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+                const object_path = try std.mem.print(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
                 try expectFile(fx, d, object_path, content);
             }
             logs[i] = try fx.server.requests(gpa);
             var log_name_buf: [40]u8 = undefined;
-            const log_name = try std.fmt.bufPrint(&log_name_buf, "{s}.log", .{name});
+            const log_name = try std.mem.print(&log_name_buf, "{s}.log", .{name});
             helper_logs[i] = fx.tools.readFileAlloc(io, log_name, gpa, .unlimited) catch |err| switch (err) {
                 error.FileNotFound => try gpa.dupe(u8, ""),
                 else => return err,
@@ -1625,7 +1625,7 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
             try testing.expectEqual(.credential, failure.helpers[0].answer);
         }
         var log_name: [64]u8 = undefined;
-        const log = try fx.tools.readFileAlloc(io, try std.fmt.bufPrint(&log_name, "{s}.log", .{helper_name}), gpa, .unlimited);
+        const log = try fx.tools.readFileAlloc(io, try std.mem.print(&log_name, "{s}.log", .{helper_name}), gpa, .unlimited);
         defer gpa.free(log);
         // What each `get` was told: the lines of every `get`, in order.
         var gets: std.ArrayList(u8) = .empty;
@@ -1663,10 +1663,10 @@ test "a zstd body is decoded with the window its frame asks for, up to git-lfs's
         const oid = testlfs.sha256Hex(case.content);
         try fx.server.putObject(&oid, case.content);
         var path_buf: [128]u8 = undefined;
-        const object_path = try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+        const object_path = try std.mem.print(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
         for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {
             var name_buf: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "{s}-{d}", .{ base, n });
+            const name = try std.mem.print(&name_buf, "{s}-{d}", .{ base, n });
             var d = try committed(fx, name, nobody, &.{.{ "a.bin", case.content }});
             defer d.close(io);
             try emptyStore(fx, d);
@@ -1710,7 +1710,7 @@ test "an action that expires within five seconds of the time given is not used, 
         defer for (logs) |l| gpa.free(l);
         for ([_][]const u8{ "by-git", "by-relic", "by-relic-untimed" }, 0..) |base, i| {
             var name_buf: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "{s}-{d}", .{ base, k });
+            const name = try std.mem.print(&name_buf, "{s}-{d}", .{ base, k });
             var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
             defer d.close(io);
             try emptyStore(fx, d);
@@ -1763,7 +1763,7 @@ test "a git-lfs-authenticate token is asked for again when it expires, lfs.defau
         defer for (logs) |l| gpa.free(l);
         for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {
             var name_buf: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "{s}-{d}", .{ base, n });
+            const name = try std.mem.print(&name_buf, "{s}-{d}", .{ base, n });
             var d = try committed(fx, name, nobody, &files);
             defer d.close(io);
             try emptyStore(fx, d);
@@ -1813,15 +1813,15 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
         const entries = [_]Entry{
             .{ .path = "old.tmp", .age_s = 7200 },
             .{ .path = "young.tmp", .age_s = 600 },
-            .{ .path = try std.fmt.bufPrint(&present_name, "{s}-partial", .{&present}), .age_s = 600 },
-            .{ .path = try std.fmt.bufPrint(&absent_name, "{s}-partial", .{&absent}), .age_s = 600 },
+            .{ .path = try std.mem.print(&present_name, "{s}-partial", .{&present}), .age_s = 600 },
+            .{ .path = try std.mem.print(&absent_name, "{s}-partial", .{&absent}), .age_s = 600 },
             .{ .path = "young-dir/old.tmp", .age_s = 7200 },
             .{ .path = "old-dir/old.tmp", .age_s = 7200 },
         };
         var tmp = try d.createDirPathOpen(io, ".git/lfs/tmp", .{ .open_options = .{ .iterate = true } });
         defer tmp.close(io);
         for (entries) |e| {
-            if (std.fs.path.dirnamePosix(e.path)) |parent| try tmp.createDirPath(io, parent);
+            if (std.Io.Dir.path.dirnamePosix(e.path)) |parent| try tmp.createDirPath(io, parent);
             try tmp.writeFile(io, .{ .sub_path = e.path, .data = "x" });
             try fs.setTimestamps(io, tmp, e.path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - e.age_s) * std.time.ns_per_s } } });
         }
@@ -1850,7 +1850,7 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
         }
         while (try walker.next(io)) |e| {
             const path = try gpa.dupe(u8, e.path);
-            if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+            if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
             try found.append(gpa, path);
         }
         std.mem.sort([]const u8, found.items, {}, struct {
@@ -1866,7 +1866,7 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
     }
     try testing.expectEqualStrings(listings[0], listings[1]);
     var want_buf: [256]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "{s}-partial\nold-dir\nyoung-dir\nyoung-dir/old.tmp\nyoung.tmp\n", .{&absent});
+    const want = try std.mem.print(&want_buf, "{s}-partial\nold-dir\nyoung-dir\nyoung-dir/old.tmp\nyoung.tmp\n", .{&absent});
     try testing.expectEqualStrings(want, listings[1]);
     // Without the time nothing is swept.
     try testing.expectEqual(@as(usize, 8), std.mem.count(u8, listings[2], "\n"));
@@ -1932,14 +1932,14 @@ test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secur
             // localhost. resolves locally and is allowed by the unchanged
             // Go proxy rules; .invalid is reachable only by our proxy.
             const host = if (remote_dns) "lfs.example.invalid" else "localhost.";
-            const base = try std.fmt.allocPrint(gpa, "{s}://{s}:{d}", .{ if (secure) "https" else "http", host, if (secure) front.port else fx.server.port });
+            const base = try gpa.print("{s}://{s}:{d}", .{ if (secure) "https" else "http", host, if (secure) front.port else fx.server.port });
             defer gpa.free(base);
             fx.server.options.href_base = base;
-            const endpoint = try std.fmt.allocPrint(gpa, "{s}/repo.git/info/lfs", .{base});
+            const endpoint = try gpa.print("{s}/repo.git/info/lfs", .{base});
             defer gpa.free(endpoint);
-            const name = try std.fmt.allocPrint(gpa, "{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            const name = try gpa.print("{s}-{s}", .{ scheme, if (secure) "https" else "http" });
             defer gpa.free(name);
-            const content = try std.fmt.allocPrint(gpa, "LFS through {s}\n", .{name});
+            const content = try gpa.print("LFS through {s}\n", .{name});
             defer gpa.free(content);
             var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
             defer d.close(io);
@@ -2025,7 +2025,7 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
     try fx.tmp.dir.createDirPath(io, "agent objects");
     {
         var name_buf: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "agent objects/{s}", .{&oid});
+        const name = try std.mem.print(&name_buf, "agent objects/{s}", .{&oid});
         try fx.tmp.dir.writeFile(io, .{ .sub_path = name, .data = content });
     }
     const objects = try fx.path("agent objects");
@@ -2034,14 +2034,14 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
     for ([_][]const u8{ "theirs", "ours" }, 0..) |name, i| {
         dirs[i] = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
         try emptyStore(fx, dirs[i]);
-        const logs = try std.fmt.allocPrint(gpa, "logs-{s}", .{name});
+        const logs = try gpa.print("logs-{s}", .{name});
         defer gpa.free(logs);
         try fx.tmp.dir.createDirPath(io, logs);
         const log_dir = try fx.path(logs);
         defer gpa.free(log_dir);
-        const args = try std.fmt.allocPrint(gpa, "'{s}' '{s}'", .{ objects, log_dir });
+        const args = try gpa.print("'{s}' '{s}'", .{ objects, log_dir });
         defer gpa.free(args);
-        try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.path", build_options.lfs_agent_path });
+        try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.path", suite.path(.lfs_agent) });
         try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.args", args });
         try fx.gitIn(dirs[i], &.{ "config", "lfs.concurrenttransfers", "1" });
     }
@@ -2085,7 +2085,7 @@ test "a redirect to another host leaves the request's own Authorization behind, 
     const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
     defer server.close();
 
-    const route = try std.fmt.allocPrint(gpa, "repo.git/info/lfs/objects/{s}", .{&oid});
+    const route = try gpa.print("repo.git/info/lfs/objects/{s}", .{&oid});
     defer gpa.free(route);
     const from = try fx.server.url(gpa, route);
     defer gpa.free(from);
@@ -2102,11 +2102,11 @@ test "a redirect to another host leaves the request's own Authorization behind, 
     defer gpa.free(here);
     const there = try other.requests(gpa);
     defer gpa.free(there);
-    const line = try std.fmt.allocPrint(gpa, "GET /objects/{s} ", .{&oid});
+    const line = try gpa.print("GET /objects/{s} ", .{&oid});
     defer gpa.free(line);
     // The same host: the first request and the one it was sent on to, both
     // with the token; the other host: no token at all.
-    const with_token = try std.fmt.allocPrint(gpa, "{s}ada\n", .{line});
+    const with_token = try gpa.print("{s}ada\n", .{line});
     defer gpa.free(with_token);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, here, with_token));
     try testing.expect(std.mem.find(u8, there, "ada") == null);

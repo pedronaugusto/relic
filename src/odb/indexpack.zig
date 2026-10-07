@@ -379,10 +379,10 @@ pub fn receive(
     const text = name.hex(&hex);
     var pack_name_buf: [96]u8 = undefined;
     // unreachable: a hex name is at most max_hex_len digits, the rest ten bytes
-    const pack_name = std.fmt.bufPrint(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
+    const pack_name = std.mem.print(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
     var idx_name_buf: [96]u8 = undefined;
     // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-    const idx_name = std.fmt.bufPrint(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
+    const idx_name = std.mem.print(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
     const result: Result = .{
         .name = name,
@@ -418,7 +418,7 @@ pub fn receive(
     if (rev_temp) |t| {
         var rev_name_buf: [96]u8 = undefined;
         // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-        const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
+        const rev_name = std.mem.print(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
         try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
     try renameBesidePack(io, pack_dir, idx_temp, idx_name, pack_name);
@@ -1698,10 +1698,10 @@ fn historyRepo(gpa: Allocator, io: Io, commits: usize) !testgit.Repo {
         try repo.writeFile(io, "src/a.txt", text.items);
         try repo.writeFile(io, "docs/b.md", text.items[0 .. text.items.len / 2]);
         var name_buf: [32]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "files/{d}.txt", .{i}), "new\n");
+        try repo.writeFile(io, try std.mem.print(&name_buf, "files/{d}.txt", .{i}), "new\n");
         try repo.exec(io, &.{ "add", "-A" });
         var msg_buf: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg_buf, "commit {d}", .{i}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg_buf, "commit {d}", .{i}) });
     }
     try repo.exec(io, &.{ "tag", "-a", "v1", "-m", "version one" });
     return repo;
@@ -1736,7 +1736,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         defer source.deinit();
         // Offset deltas, then reference deltas.
         var setting_buf: [64]u8 = undefined;
-        const setting = try std.fmt.bufPrint(&setting_buf, "repack.useDeltaBaseOffset={s}", .{offsets});
+        const setting = try std.mem.print(&setting_buf, "repack.useDeltaBaseOffset={s}", .{offsets});
         try source.exec(io, &.{ "-c", setting, "repack", "-a", "-d", "-f", "-q" });
         var source_git = try source.gitDir(io);
         defer source_git.close(io);
@@ -1744,9 +1744,9 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         defer source_packs.close(io);
         const base = try onlyPack(gpa, io, source_packs);
         defer gpa.free(base);
-        const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{base});
+        const pack_name = try gpa.print("{s}.pack", .{base});
         defer gpa.free(pack_name);
-        const idx_name = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+        const idx_name = try gpa.print("{s}.idx", .{base});
         defer gpa.free(idx_name);
         const pack_bytes = try source_packs.readFileAlloc(io, pack_name, gpa, .unlimited);
         defer gpa.free(pack_bytes);
@@ -1771,7 +1771,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
 
         // git reads it: the pack verifies, and with the history's refs in
         // place a strict fsck finds everything connected and well formed.
-        const verify_path = try std.fmt.allocPrint(gpa, "objects/pack/{s}", .{idx_name});
+        const verify_path = try gpa.print("objects/pack/{s}", .{idx_name});
         defer gpa.free(verify_path);
         try target.exec(io, &.{ "verify-pack", verify_path });
         const head = try source.line(io, &.{ "rev-parse", "HEAD" });
@@ -1822,7 +1822,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
                 try testing.expectEqual(@as(u32, 0), result.appended);
                 const base = try onlyPack(gpa, io, pack_dir);
                 defer gpa.free(base);
-                const idx_name = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+                const idx_name = try gpa.print("{s}.idx", .{base});
                 defer gpa.free(idx_name);
                 const index = try pack_dir.readFileAlloc(io, idx_name, gpa, .unlimited);
                 if (serial_index) |want| {
@@ -1856,7 +1856,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     defer pack_dir.close(io);
 
     // First what the target already has: everything up to `old`.
-    const first_input = try std.fmt.allocPrint(gpa, "{s}\n", .{old});
+    const first_input = try gpa.print("{s}\n", .{old});
     defer gpa.free(first_input);
     const first = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--stdout", "-q" }, first_input);
     defer gpa.free(first);
@@ -1865,7 +1865,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     const packs_before = try countEntries(io, pack_dir);
 
     // Then a thin pack of what is new, its deltas against what is not in it.
-    const thin_input = try std.fmt.allocPrint(gpa, "{s}\n^{s}\n", .{ new, old });
+    const thin_input = try gpa.print("{s}\n^{s}\n", .{ new, old });
     defer gpa.free(thin_input);
     const thin = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--thin", "--stdout", "-q" }, thin_input);
     defer gpa.free(thin);
@@ -1885,9 +1885,9 @@ test "a thin pack is completed from the database, and git indexes the result ide
     try testing.expect(result.appended > 0);
 
     var hex: [hash.max_hex_len]u8 = undefined;
-    const pack_path = try std.fmt.allocPrint(gpa, "objects/pack/pack-{s}.pack", .{result.name.?.hex(&hex)});
+    const pack_path = try gpa.print("objects/pack/pack-{s}.pack", .{result.name.?.hex(&hex)});
     defer gpa.free(pack_path);
-    const idx_path = try std.fmt.allocPrint(gpa, "objects/pack/pack-{s}.idx", .{result.name.?.hex(&hex)});
+    const idx_path = try gpa.print("objects/pack/pack-{s}.idx", .{result.name.?.hex(&hex)});
     defer gpa.free(idx_path);
     try target.exec(io, &.{ "index-pack", "--rev-index", "-o", "check.idx", pack_path });
     const ours = try target.readFile(io, idx_path);
@@ -1896,7 +1896,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     defer gpa.free(theirs);
     try testing.expectEqualSlices(u8, theirs, ours);
     // And the reverse index beside it, as git's index-pack writes it.
-    const rev_path = try std.fmt.allocPrint(gpa, "objects/pack/pack-{s}.rev", .{result.name.?.hex(&hex)});
+    const rev_path = try gpa.print("objects/pack/pack-{s}.rev", .{result.name.?.hex(&hex)});
     defer gpa.free(rev_path);
     const our_rev = try target.readFile(io, rev_path);
     defer gpa.free(our_rev);
@@ -1951,7 +1951,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
     var git = try testgit.Repo.init(gpa, io, &.{"--bare"});
     defer git.deinit();
 
-    const zero_hex = "0" ** 40;
+    const zero_hex = &@as([40]u8, @splat('0'));
     const ident = "A <a@example.com> 1700000000 +0000";
     const blob_oid = hash.Hasher.object(.sha1, "blob", "x\n");
     const modules_base = "[submodule \"a\"]\n\tpath = a\n";
@@ -1959,7 +1959,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
     const modules_oid = hash.Hasher.object(.sha1, "blob", modules_text);
     const modules_delta = try appendDelta(gpa, modules_base.len, "\turl = -u/x\n");
     defer gpa.free(modules_delta);
-    const attributes_text = "a" ** 2100 ++ " text\n";
+    const attributes_text = @as([2100]u8, @splat('a')) ++ " text\n";
     const attributes_oid = hash.Hasher.object(.sha1, "blob", attributes_text);
 
     var padded: std.ArrayList(u8) = .empty;
@@ -2008,10 +2008,10 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
         defer gpa.free(bytes);
 
         var name_buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "case{d}.pack", .{n});
+        const name = try std.mem.print(&name_buf, "case{d}.pack", .{n});
         try git.writeFile(io, name, bytes);
         var arg_buf: [128]u8 = undefined;
-        const arg = if (case.levels.len == 0) "--fsck-objects" else try std.fmt.bufPrint(&arg_buf, "--fsck-objects={s}", .{case.levels});
+        const arg = if (case.levels.len == 0) "--fsck-objects" else try std.mem.print(&arg_buf, "--fsck-objects={s}", .{case.levels});
         var said = try git.capture(io, &.{ "index-pack", arg, name });
         defer said.deinit(gpa);
         const git_refused = said.code != 0;
@@ -2250,7 +2250,7 @@ test "an object the database holds under the same name with other bytes is refus
     const oid = hash.Hasher.object(.sha1, "blob", "base");
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = oid.hex(&hex);
-    const loose_path = try std.fmt.allocPrint(gpa, "objects/{s}/{s}", .{ text[0..2], text[2..] });
+    const loose_path = try gpa.print("objects/{s}/{s}", .{ text[0..2], text[2..] });
     defer gpa.free(loose_path);
     try tmp.dir.createDirPath(io, loose_path[0.."objects/xx".len]);
     {
@@ -2416,7 +2416,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
     var names: [pairs][12]u8 = undefined;
     var entries: [3 * pairs]TestEntry = undefined;
     for (0..pairs) |i| {
-        _ = std.fmt.bufPrint(&names[i], "base {d:0>6}\n", .{i}) catch unreachable;
+        _ = std.mem.print(&names[i], "base {d:0>6}\n", .{i}) catch unreachable;
         entries[3 * i] = .{ .whole = .{ .t = .blob, .bytes = &names[i] } };
         entries[3 * i + 1] = .{ .ofs_delta = .{ .back = 1, .patch = patch } };
         entries[3 * i + 2] = .{ .whole = .{ .t = .blob, .bytes = fillers[i * filler_len ..][0..filler_len] } };
@@ -2522,7 +2522,7 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
     const name = result.name orelse return;
     var hex: [hash.max_hex_len]u8 = undefined;
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "pack-{s}", .{name.hex(&hex)});
+    const base = try std.mem.print(&base_buf, "pack-{s}", .{name.hex(&hex)});
     var p = try pack.Pack.open(gpa, io, pack_dir, base, .sha1, .{});
     defer p.deinit(io);
     const checked = try p.verify(io, null, 0);
@@ -2539,7 +2539,7 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     defer gpa.free(commit);
     const tree = try source.line(io, &.{ "rev-parse", "HEAD^{tree}" });
     defer gpa.free(tree);
-    const listing = try std.fmt.allocPrint(gpa, "{s}\n{s}\n", .{ commit, tree });
+    const listing = try gpa.print("{s}\n{s}\n", .{ commit, tree });
     defer gpa.free(listing);
     const bytes = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--stdout", "-q" }, listing);
     defer gpa.free(bytes);
@@ -2556,7 +2556,7 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .fsck = null, .links = &links });
     var hex: [hash.max_hex_len]u8 = undefined;
     var idx_buf: [96]u8 = undefined;
-    const idx_name = try std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
+    const idx_name = try std.mem.print(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
     var index = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     defer index.deinit();
     try testing.expect(!links.unreadable);

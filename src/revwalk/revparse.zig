@@ -24,6 +24,7 @@
 const Self = @This();
 
 const std = @import("std");
+const allocation = @import("../testing/allocation.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -81,8 +82,8 @@ fn resolveWith(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, cloc
 }
 
 fn revisionError(err: anyerror) Error {
-    inline for (std.meta.fields(ResourceError)) |field| {
-        const resource = @field(ResourceError, field.name);
+    inline for (@typeInfo(ResourceError).error_set.error_names.?) |name| {
+        const resource = @field(ResourceError, name);
         if (err == resource) return resource;
     }
     return error.BadRevision;
@@ -189,7 +190,7 @@ const Resolver = struct {
     fn dwim(r: *Resolver, name: []const u8) Error!?Oid {
         const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
         inline for (rules) |rule| {
-            const full = try std.fmt.allocPrint(r.a, rule, .{name});
+            const full = try r.a.print(rule, .{name});
             if (try r.refMaybe(full)) |oid| return oid;
         }
         return null;
@@ -199,7 +200,7 @@ const Resolver = struct {
     fn dwimName(r: *Resolver, name: []const u8) Error!?[]const u8 {
         const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
         inline for (rules) |rule| {
-            const full = try std.fmt.allocPrint(r.a, rule, .{name});
+            const full = try r.a.print(rule, .{name});
             if (try r.refMaybe(full) != null) return full;
         }
         return null;
@@ -357,7 +358,7 @@ const Resolver = struct {
         // current, matching, and simple to another remote: the same name.
         var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
-        const dest = try std.fmt.allocPrint(r.a, "refs/heads/{s}", .{branch});
+        const dest = try r.a.print("refs/heads/{s}", .{branch});
         for (remote.fetch) |spec| {
             if (try spec.mapSource(r.a, dest)) |tracking| return tracking;
         }
@@ -388,7 +389,7 @@ const Resolver = struct {
             if (from.len == r.repo.objectFormat().hexLen()) {
                 if (Oid.parse(r.repo.objectFormat(), from)) |oid| return oid else |_| {}
             }
-            if (try r.refMaybe(try std.fmt.allocPrint(r.a, "refs/heads/{s}", .{from}))) |oid| return oid;
+            if (try r.refMaybe(try r.a.print("refs/heads/{s}", .{from}))) |oid| return oid;
             return (try r.dwim(from)) orelse error.BadRevision;
         }
         return error.BadRevision;
@@ -561,20 +562,20 @@ test "every expression reads as git rev-parse reads it" {
     for (0..4) |i| {
         clock += 60;
         var date: [32]u8 = undefined;
-        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.fmt.bufPrint(&date, "{d} +0000", .{clock}));
+        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&date, "{d} +0000", .{clock}));
         var name: [16]u8 = undefined;
-        const file = try std.fmt.bufPrint(&name, "f{d}", .{i});
+        const file = try std.mem.print(&name, "f{d}", .{i});
         try r.writeFile(io, file, file);
         try r.writeFile(io, "dir/deep", file);
         try r.exec(io, &.{ "add", "-A" });
         var msg: [32]u8 = undefined;
-        try r.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "change number {d}", .{i}) });
+        try r.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "change number {d}", .{i}) });
     }
     try r.exec(io, &.{ "tag", "light", "HEAD~2" });
     try r.exec(io, &.{ "tag", "-a", "-m", "annotated", "v1", "HEAD~1" });
     clock += 60;
     var side_date: [32]u8 = undefined;
-    try r.isolated.?.put("GIT_COMMITTER_DATE", try std.fmt.bufPrint(&side_date, "{d} +0000", .{clock}));
+    try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&side_date, "{d} +0000", .{clock}));
     try r.exec(io, &.{ "checkout", "-q", "-b", "side", "HEAD~2" });
     try r.writeFile(io, "side", "side");
     try r.exec(io, &.{ "add", "side" });
@@ -582,7 +583,7 @@ test "every expression reads as git rev-parse reads it" {
     try r.exec(io, &.{ "checkout", "-q", "main" });
     clock += 60;
     var merge_date: [32]u8 = undefined;
-    try r.isolated.?.put("GIT_COMMITTER_DATE", try std.fmt.bufPrint(&merge_date, "{d} +0000", .{clock}));
+    try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&merge_date, "{d} +0000", .{clock}));
     try r.exec(io, &.{ "merge", "-q", "--no-edit", "side" });
     try r.exec(io, &.{ "checkout", "-q", "side" });
     try r.exec(io, &.{ "checkout", "-q", "main" });
@@ -659,7 +660,7 @@ test "@{-N} reads the branch a checkout left as a name or an object name, never 
     // A log line naming `@{-1}` as where it came from is no name at all.
     const head_text = try r.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head_text);
-    const line = try std.fmt.allocPrint(gpa, "{s} {s} A <a@b> 1 +0000\tcheckout: moving from @{{-1}} to main\n", .{ head_text, head_text });
+    const line = try gpa.print("{s} {s} A <a@b> 1 +0000\tcheckout: moving from @{{-1}} to main\n", .{ head_text, head_text });
     defer gpa.free(line);
     const log = try r.readFile(io, ".git/logs/HEAD");
     defer gpa.free(log);
@@ -680,13 +681,13 @@ test "a reflog entry chosen by a date is the one git rev-parse chooses" {
     const start: i64 = 1_700_000_000;
     const now = start + 2 * 24 * 60 * 60;
     var now_text: [32]u8 = undefined;
-    try r.isolated.?.put("GIT_TEST_DATE_NOW", try std.fmt.bufPrint(&now_text, "{d}", .{now}));
+    try r.isolated.?.put("GIT_TEST_DATE_NOW", try std.mem.print(&now_text, "{d}", .{now}));
     try r.isolated.?.put("TZ", "UTC");
     for (0..6) |i| {
         var date: [32]u8 = undefined;
-        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.fmt.bufPrint(&date, "{d} +0000", .{start + @as(i64, @intCast(i)) * 3 * 60 * 60})); // safe: below 6
+        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&date, "{d} +0000", .{start + @as(i64, @intCast(i)) * 3 * 60 * 60})); // safe: below 6
         var name: [16]u8 = undefined;
-        const file = try std.fmt.bufPrint(&name, "f{d}", .{i});
+        const file = try std.mem.print(&name, "f{d}", .{i});
         try r.writeFile(io, file, file);
         try r.exec(io, &.{ "add", "-A" });
         try r.exec(io, &.{ "commit", "-q", "-m", file });
@@ -707,9 +708,9 @@ test "a reflog entry chosen by a date is the one git rev-parse chooses" {
         "main@{1.year.ago}",
         "side@{1.week.ago}",
         "side@{now}",
-        try std.fmt.bufPrint(&exact, "main@{{{d}}}", .{start + 3 * 60 * 60}),
-        try std.fmt.bufPrint(&stamp, "main@{{{d}}}", .{start + 4 * 60 * 60}),
-        try std.fmt.bufPrint(&iso, "main@{{2023-11-14 23:30:00 +0000}}", .{}),
+        try std.mem.print(&exact, "main@{{{d}}}", .{start + 3 * 60 * 60}),
+        try std.mem.print(&stamp, "main@{{{d}}}", .{start + 4 * 60 * 60}),
+        try std.mem.print(&iso, "main@{{2023-11-14 23:30:00 +0000}}", .{}),
         "main@{last tuesday}",
     };
     for (cases) |expr| {
@@ -743,7 +744,7 @@ test "revision parsing preserves allocation resource failures" {
     defer tmp.cleanup();
     var repo = try Repository.init(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
-    const commit = try repo.odb.write(io, .commit, "tree " ++ "0" ** 40 ++ "\nparent " ++ "1" ** 40 ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nsubject\n");
+    const commit = try repo.odb.write(io, .commit, "tree " ++ @as([40]u8, @splat('0')) ++ "\nparent " ++ @as([40]u8, @splat('1')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nsubject\n");
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = commit.hex(&hex);
     try repo.git_dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = text });
@@ -753,10 +754,10 @@ test "revision parsing preserves allocation resource failures" {
             try std.testing.expect(got.eql(expected));
         }
     };
-    try std.testing.checkAllAllocationFailures(gpa, Check.run, .{ &repo, "HEAD", commit });
-    const parent_expr = try std.fmt.allocPrint(gpa, "{s}^", .{text});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{ &repo, "HEAD", commit });
+    const parent_expr = try gpa.print("{s}^", .{text});
     defer gpa.free(parent_expr);
-    try std.testing.checkAllAllocationFailures(gpa, Check.run, .{ &repo, parent_expr, try Oid.parse(.sha1, "1" ** 40) });
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{ &repo, parent_expr, try Oid.parse(.sha1, &@as([40]u8, @splat('1'))) });
 }
 
 test "revision parsing preserves I/O and cancellation resource failures" {
@@ -789,7 +790,7 @@ test "a walk back from a commit reads each commit once per repository handle" {
     defer r.deinit();
     for (0..30) |i| {
         var name: [16]u8 = undefined;
-        try r.writeFile(io, "f", try std.fmt.bufPrint(&name, "{d}\n", .{i}));
+        try r.writeFile(io, "f", try std.mem.print(&name, "{d}\n", .{i}));
         try r.exec(io, &.{ "commit", "-q", "-am", "c", "--allow-empty" });
         if (i == 0) try r.exec(io, &.{ "add", "f" });
     }

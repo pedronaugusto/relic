@@ -103,9 +103,9 @@ pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Stor
 /// `promisorRemotes` lists.
 pub fn isPromisor(config: *const config_mod.Config, name: []const u8) bool {
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "remote.{s}.promisor", .{name}) catch return false;
+    const key = std.mem.print(&buf, "remote.{s}.promisor", .{name}) catch return false;
     if (config.getBool(key, false) catch false) return true;
-    const filter_key = std.fmt.bufPrint(&buf, "remote.{s}.partialclonefilter", .{name}) catch return false;
+    const filter_key = std.mem.print(&buf, "remote.{s}.partialclonefilter", .{name}) catch return false;
     if (config.get(filter_key) != null) return true;
     const named = config.get("extensions.partialclone") orelse return false;
     return std.mem.eql(u8, named, name);
@@ -124,7 +124,7 @@ pub fn writePromisor(io: Io, pack_dir: Io.Dir, name: Oid, refs: []const Promisor
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [96]u8 = undefined;
     // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
-    const file_name = std.fmt.bufPrint(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
+    const file_name = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
     const file = try pack_dir.createFile(io, file_name, .{});
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
@@ -264,7 +264,7 @@ pub const Lazy = struct {
         const repo = l.repo;
         {
             var buf: [256]u8 = undefined;
-            const key = try std.fmt.bufPrint(&buf, "remote.{s}.partialclonefilter", .{name});
+            const key = try std.mem.print(&buf, "remote.{s}.partialclonefilter", .{name});
             if (repo.configuration().get(key) == null) {
                 try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = "blob:none" } }}, null);
                 try config_state.writeLocal(repo._config, io);

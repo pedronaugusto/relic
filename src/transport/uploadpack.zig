@@ -477,7 +477,7 @@ pub const Server = struct {
 
     fn notOurRef(s: *Server, out: *Io.Writer, oid: Oid) Error {
         var buf: [128]u8 = undefined;
-        try s.sendError(out, std.fmt.bufPrint(&buf, "not our ref {f}", .{oid}) catch "not our ref");
+        try s.sendError(out, std.mem.print(&buf, "not our ref {f}", .{oid}) catch "not our ref");
         return error.NotOurRef;
     }
 };
@@ -821,7 +821,7 @@ const Negotiation = struct {
     fn resolveRef(n: *Negotiation, name: []const u8) Error!?Oid {
         const store = n.server.remote.repo.refStore();
         for ([_][]const u8{ "", "refs/", "refs/tags/", "refs/heads/", "refs/remotes/" }) |prefix| {
-            const full = try std.fmt.allocPrint(n.arena, "{s}{s}", .{ prefix, name });
+            const full = try n.arena.print("{s}{s}", .{ prefix, name });
             if (try store.resolve(n.arena, n.io(), full)) |r| return r.oid;
         }
         return null;
@@ -882,7 +882,7 @@ const Negotiation = struct {
                 sparse_seen.* = true;
                 const rules = try n.sparseRules(name) orelse {
                     var buf: [512]u8 = undefined;
-                    return n.server.refuse(out, std.fmt.bufPrint(&buf, "unable to access sparse blob in '{s}'", .{name}) catch "unable to access sparse blob");
+                    return n.server.refuse(out, std.mem.print(&buf, "unable to access sparse blob in '{s}'", .{name}) catch "unable to access sparse blob");
                 };
                 return .{ .sparse = rules };
             },
@@ -1047,7 +1047,7 @@ const Sideband = struct {
         assert(bytes.len + 5 <= pktline.max_line);
         var head: [5]u8 = undefined;
         // unreachable: asserted above: the length fits four hex digits
-        _ = std.fmt.bufPrint(head[0..4], "{x:0>4}", .{bytes.len + 5}) catch unreachable;
+        _ = std.mem.print(head[0..4], "{x:0>4}", .{bytes.len + 5}) catch unreachable;
         head[4] = 1;
         try sb.out.writeAll(&head);
         try sb.out.writeAll(bytes);

@@ -30,7 +30,7 @@ test "every object of a packed repository reads back, both delta kinds" {
         try repo.writeFile(io, "shrink.txt", body.items[0 .. body.items.len / 2]);
         try repo.exec(io, &.{ "add", "-A" });
         var msg_buf: [32]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&msg_buf, "commit {d}", .{i});
+        const msg = try std.mem.print(&msg_buf, "commit {d}", .{i});
         try repo.exec(io, &.{ "commit", "-q", "-m", msg });
     }
     try repo.exec(io, &.{ "gc", "-q", "--aggressive" });
@@ -89,7 +89,7 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
         try repo.writeFile(io, "f.txt", body.items);
         try repo.exec(io, &.{ "add", "-A" });
         var msg_buf: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg_buf, "c{d}", .{i}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg_buf, "c{d}", .{i}) });
     }
     // `--no-delta-base-offset` makes the packer write ref-deltas; the default
     // writes ofs-deltas. One repacked repository of each proves both arms.
@@ -209,7 +209,7 @@ test "a loose object this writes is one git reads" {
     defer gpa.free(commit_name);
 
     // git must agree the commit is a commit and its tree is the tree.
-    const spec = try std.fmt.allocPrint(gpa, "{s}^{{tree}}", .{commit_name});
+    const spec = try gpa.print("{s}^{{tree}}", .{commit_name});
     defer gpa.free(spec);
     const shown = try repo.line(io, &.{ "rev-parse", spec });
     defer gpa.free(shown);
@@ -258,7 +258,7 @@ test "an index git wrote with the offset caches is written back byte for byte" {
 
     for (0..14) |i| {
         var name_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&name_buf, "dir{d}/file{d}.txt", .{ i % 3, i });
+        const path = try std.mem.print(&name_buf, "dir{d}/file{d}.txt", .{ i % 3, i });
         try repo.writeFile(io, path, "contents\n");
     }
 
@@ -306,7 +306,7 @@ test "a version 2 index git wrote is written back byte for byte" {
 
     for (0..12) |i| {
         var name_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&name_buf, "dir{d}/file{d}.txt", .{ i % 3, i });
+        const path = try std.mem.print(&name_buf, "dir{d}/file{d}.txt", .{ i % 3, i });
         try repo.writeFile(io, path, "contents\n");
     }
     try repo.writeFile(io, "top.txt", "top\n");
@@ -364,7 +364,7 @@ test "a version 4 index git wrote is written back byte for byte" {
     // apart here and both arms are exercised.
     for (0..30) |i| {
         var name_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&name_buf, "deep/nest{d}/file{d}.txt", .{ i % 4, i });
+        const path = try std.mem.print(&name_buf, "deep/nest{d}/file{d}.txt", .{ i % 4, i });
         try repo.writeFile(io, path, "x\n");
     }
     try repo.exec(io, &.{ "add", "-A" });
@@ -480,7 +480,7 @@ test "fsmonitor and untracked-cache extensions survive a round trip" {
     try repo.exec(io, &.{ "config", "core.untrackedCache", "true" });
     for (0..8) |i| {
         var buf: [32]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&buf, "d{d}/f{d}.txt", .{ i % 3, i }), "x\n");
+        try repo.writeFile(io, try std.mem.print(&buf, "d{d}/f{d}.txt", .{ i % 3, i }), "x\n");
     }
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "update-index", "--untracked-cache" });
@@ -716,11 +716,11 @@ test "the commit-graph and the multi-pack index read what git wrote" {
 
     for (0..12) |i| {
         var buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&buf, "f{d}.txt", .{i});
+        const name = try std.mem.print(&buf, "f{d}.txt", .{i});
         try repo.writeFile(io, name, "x\n");
         try repo.exec(io, &.{ "add", "-A" });
         var msg: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{i}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "c{d}", .{i}) });
         // A second pack each time, so the multi-pack index has something to
         // do.
         if (i % 4 == 3) try repo.exec(io, &.{ "repack", "-q", "-d" });
@@ -1053,10 +1053,10 @@ test "a walk with the commit-graph answers what a walk without it answers" {
     // exercised rather than assumed.
     for (0..6) |i| {
         var buf: [32]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&buf, "main{d}.txt", .{i}), "x\n");
+        try repo.writeFile(io, try std.mem.print(&buf, "main{d}.txt", .{i}), "x\n");
         try repo.exec(io, &.{ "add", "-A" });
         var msg: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "m{d}", .{i}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "m{d}", .{i}) });
     }
     try repo.exec(io, &.{ "checkout", "-q", "-b", "side", "HEAD~3" });
     try repo.writeFile(io, "side.txt", "y\n");
@@ -1128,7 +1128,7 @@ test "with the collision check on, nothing git wrote is flagged" {
         try repo.writeFile(io, "grow.txt", body.items);
         try repo.exec(io, &.{ "add", "-A" });
         var msg_buf: [32]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&msg_buf, "commit {d}", .{i});
+        const msg = try std.mem.print(&msg_buf, "commit {d}", .{i});
         try repo.exec(io, &.{ "commit", "-q", "-m", msg });
     }
     try repo.exec(io, &.{ "gc", "-q" });
@@ -1179,7 +1179,7 @@ test "the collision check does not change a name a database takes" {
         "a\n",
         sha1dc.collision_test_vector_a,
         sha1dc.collision_test_vector_b,
-        "x" ** 5000,
+        &@as([5000]u8, @splat('x')),
     };
 
     var plain_names: [contents.len]Oid = undefined;
@@ -1200,7 +1200,7 @@ test "the collision check does not change a name a database takes" {
     // pair being two objects rather than one.
     for (contents, plain_names) |content, name| {
         var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "obj{d}.bin", .{content.len});
+        const path = try std.mem.print(&path_buf, "obj{d}.bin", .{content.len});
         try repo.writeFile(io, path, content);
         const said = try repo.run(io, &.{ "hash-object", "-t", "blob", path });
         defer gpa.free(said);
@@ -1222,13 +1222,13 @@ test "a repository with a multi-pack index looks objects up through it" {
         for (0..6) |i| {
             var path_buf: [64]u8 = undefined;
             var body_buf: [128]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "r{d}f{d}.txt", .{ round, i });
-            const body = try std.fmt.bufPrint(&body_buf, "round {d} file {d}\n", .{ round, i });
+            const path = try std.mem.print(&path_buf, "r{d}f{d}.txt", .{ round, i });
+            const body = try std.mem.print(&body_buf, "round {d} file {d}\n", .{ round, i });
             try repo.writeFile(io, path, body);
         }
         try repo.exec(io, &.{ "add", "-A" });
         var msg_buf: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg_buf, "round {d}", .{round}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg_buf, "round {d}", .{round}) });
         // Pack what is loose without touching the packs already there.
         try repo.exec(io, &.{ "repack", "-q", "-d" });
         if (round == 0) continue;
@@ -1312,7 +1312,7 @@ test "a pack this wrote is a pack git verifies, object for object" {
     for (0..4) |round| {
         for (0..6) |i| {
             var name_buf: [64]u8 = undefined;
-            const path = try std.fmt.bufPrint(&name_buf, "dir{d}/file{d}.txt", .{ i % 2, i });
+            const path = try std.mem.print(&name_buf, "dir{d}/file{d}.txt", .{ i % 2, i });
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(gpa);
             for (0..(round + 1) * 40) |line| try body.print(gpa, "line {d} of file {d}\n", .{ line, i });
@@ -1320,7 +1320,7 @@ test "a pack this wrote is a pack git verifies, object for object" {
         }
         var msg: [32]u8 = undefined;
         try repo.exec(io, &.{ "add", "-A" });
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "round {d}", .{round}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "round {d}", .{round}) });
     }
 
     const git_dir = try repo.gitDir(io);
@@ -1350,9 +1350,9 @@ test "a pack this wrote is a pack git verifies, object for object" {
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = report.name.hex(&hex);
     var idx_path: [96]u8 = undefined;
-    const idx = try std.fmt.bufPrint(&idx_path, ".git/objects/pack/pack-{s}.idx", .{text});
+    const idx = try std.mem.print(&idx_path, ".git/objects/pack/pack-{s}.idx", .{text});
     var pack_path: [96]u8 = undefined;
-    const pack_file = try std.fmt.bufPrint(&pack_path, ".git/objects/pack/pack-{s}.pack", .{text});
+    const pack_file = try std.mem.print(&pack_path, ".git/objects/pack/pack-{s}.pack", .{text});
 
     // git's own two checkers: one walks the index and the pack together, the
     // other rebuilds the index from the pack and compares.
@@ -1414,7 +1414,7 @@ test "a deltified pack is read back by git and by this, object for object" {
     for (0..8) |round| {
         for (0..files) |i| {
             var name_buf: [64]u8 = undefined;
-            const path = try std.fmt.bufPrint(&name_buf, "src/file{d}.txt", .{i});
+            const path = try std.mem.print(&name_buf, "src/file{d}.txt", .{i});
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(gpa);
             for (0..(round + 1) * 60) |line| {
@@ -1424,7 +1424,7 @@ test "a deltified pack is read back by git and by this, object for object" {
         }
         var msg: [32]u8 = undefined;
         try repo.exec(io, &.{ "add", "-A" });
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "round {d}", .{round}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "round {d}", .{round}) });
     }
 
     const git_dir = try repo.gitDir(io);
@@ -1466,12 +1466,12 @@ test "a deltified pack is read back by git and by this, object for object" {
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = report.name.hex(&hex);
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "pack-{s}", .{text});
+    const base = try std.mem.print(&base_buf, "pack-{s}", .{text});
     var path_buf: [96]u8 = undefined;
 
     // git's checkers, and its own report of the chain lengths.
-    try repo.exec(io, &.{ "index-pack", "--verify", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.pack", .{base}) });
-    const listing = try repo.run(io, &.{ "verify-pack", "-v", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.idx", .{base}) });
+    try repo.exec(io, &.{ "index-pack", "--verify", try std.mem.print(&path_buf, ".git/objects/pack/{s}.pack", .{base}) });
+    const listing = try repo.run(io, &.{ "verify-pack", "-v", try std.mem.print(&path_buf, ".git/objects/pack/{s}.idx", .{base}) });
     defer gpa.free(listing);
     try std.testing.expect(std.mem.find(u8, listing, "chain length = 1") != null);
 
@@ -1489,8 +1489,8 @@ test "a deltified pack is read back by git and by this, object for object" {
     const ref_report = try db.writePack(io, pack_dir, entries.items, .{ .delta = .reference });
     try std.testing.expect(ref_report.deltas > 0);
     var ref_base_buf: [64]u8 = undefined;
-    const ref_base = try std.fmt.bufPrint(&ref_base_buf, "pack-{s}", .{ref_report.name.hex(&hex)});
-    try repo.exec(io, &.{ "index-pack", "--verify", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.pack", .{ref_base}) });
+    const ref_base = try std.mem.print(&ref_base_buf, "pack-{s}", .{ref_report.name.hex(&hex)});
+    try repo.exec(io, &.{ "index-pack", "--verify", try std.mem.print(&path_buf, ".git/objects/pack/{s}.pack", .{ref_base}) });
     {
         var p = try pack.Pack.open(gpa, io, pack_dir, ref_base, .sha1, .{});
         defer p.deinit(io);
@@ -1517,10 +1517,10 @@ test "reachability from the tips is the object set git lists" {
     for (0..3) |round| {
         try repo.writeFile(io, "a.txt", "a\n");
         var name_buf: [64]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "deep/dir{d}/b.txt", .{round}), "b\n");
+        try repo.writeFile(io, try std.mem.print(&name_buf, "deep/dir{d}/b.txt", .{round}), "b\n");
         try repo.exec(io, &.{ "add", "-A" });
         var msg: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{round}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "c{d}", .{round}) });
     }
     try repo.exec(io, &.{ "tag", "-a", "v1", "-m", "a tag" });
 
@@ -1607,11 +1607,11 @@ test "loose objects move into a pack and the pack is the only copy" {
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(gpa);
             for (0..(round + 1) * 50) |line| try body.print(gpa, "file {d} line {d}\n", .{ i, line });
-            try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "src/f{d}.txt", .{i}), body.items);
+            try repo.writeFile(io, try std.mem.print(&name_buf, "src/f{d}.txt", .{i}), body.items);
         }
         try repo.exec(io, &.{ "add", "-A" });
         var msg: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{round}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "c{d}", .{round}) });
     }
 
     const git_dir = try repo.gitDir(io);
@@ -1698,8 +1698,8 @@ test "a staging pass that writes a pack stages what one that writes loose object
             var body: [128]u8 = undefined;
             try repo_git.writeFile(
                 io,
-                try std.fmt.bufPrint(&name_buf, "d{d}/f{d}.txt", .{ i % 5, i }),
-                try std.fmt.bufPrint(&body, "file {d}\nwith a line or two of content\n", .{i}),
+                try std.mem.print(&name_buf, "d{d}/f{d}.txt", .{ i % 5, i }),
+                try std.mem.print(&body, "file {d}\nwith a line or two of content\n", .{i}),
             );
         }
         // Two files with the same bytes, so the pack meets a name twice.

@@ -201,7 +201,7 @@ test "scores are the ones git's rename detection prints" {
             paired += 1;
         } else apart += 1;
         const shown: []const u8 = if (got >= max_score / 100 and !std.mem.eql(u8, src.items, dst.items))
-            try std.fmt.bufPrint(&buf, "{d:0>3}", .{got * 100 / max_score})
+            try std.mem.print(&buf, "{d:0>3}", .{got * 100 / max_score})
         else if (std.mem.eql(u8, src.items, dst.items)) "100" else "none";
         std.testing.expectEqualStrings(expected, shown) catch |err| {
             std.debug.print("round {d}: git says {s}\n", .{ round, status });

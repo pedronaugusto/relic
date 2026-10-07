@@ -45,7 +45,7 @@ const Fixture = struct {
     release: []const u8,
 
     fn read(arena: Allocator, io: Io, executable: []const u8) !Fixture {
-        const fixture_path = try std.fmt.allocPrint(arena, "{s}.fixture", .{executable});
+        const fixture_path = try arena.print("{s}.fixture", .{executable});
         const fixture = Io.Dir.cwd().readFileAlloc(io, fixture_path, arena, .limited(4096)) catch |err| switch (err) {
             error.FileNotFound => "",
             else => return err,
@@ -66,7 +66,7 @@ const Fixture = struct {
 /// and home this saw when the mode is about authentication.
 fn logInvocation(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, executable: []const u8, args: []const []const u8, fixture: Fixture) !void {
     const stem = if (std.ascii.endsWithIgnoreCase(executable, ".exe")) executable[0 .. executable.len - 4] else executable;
-    const log_name = try std.fmt.allocPrint(arena, "{s}.log", .{stem});
+    const log_name = try arena.print("{s}.log", .{stem});
     const log = try Io.Dir.cwd().createFile(io, log_name, .{ .truncate = false, .read = true });
     defer log.close(io);
     var entry: std.ArrayList(u8) = .empty;
@@ -95,7 +95,7 @@ fn act(io: Io, executable: []const u8, fixture: Fixture) !void {
         // the standard error open after this program has ended. It
         // leaves the conversation's two pipes alone, as the master
         // does; a Windows child would otherwise inherit them too.
-        if (builtin.os.tag == .windows) {
+        if (builtin.target.os.tag == .windows) {
             _ = SetHandleInformation(Io.File.stdin().handle, handle_flag_inherit, 0);
             _ = SetHandleInformation(Io.File.stdout().handle, handle_flag_inherit, 0);
         }
@@ -146,14 +146,14 @@ fn localCommand(arena: Allocator, io: Io, environ: *const std.process.Environ.Ma
         try command.appendSlice(arena, &.{ try testprogram.path(arena, io, environ, "git"), words[0]["git-".len..] });
         try command.appendSlice(arena, words[1..]);
     } else try command.appendSlice(arena, words);
-    if (builtin.os.tag == .windows and command.items.len > 1) {
+    if (builtin.target.os.tag == .windows and command.items.len > 1) {
         const last = command.items.len - 1;
         const remote_path = command.items[last];
         if (remote_path.len >= 3 and remote_path[0] == '/' and std.ascii.isAlphabetic(remote_path[1]) and remote_path[2] == ':')
             command.items[last] = remote_path[1..];
     }
     if (std.mem.eql(u8, words[0], "git-lfs-transfer")) {
-        const sibling = try std.fs.path.join(arena, &.{ std.fs.path.dirname(executable) orelse ".", if (builtin.os.tag == .windows) "git-lfs-transfer.exe" else "git-lfs-transfer" });
+        const sibling = try std.Io.Dir.path.join(arena, &.{ std.Io.Dir.path.dirname(executable) orelse ".", if (builtin.target.os.tag == .windows) "git-lfs-transfer.exe" else "git-lfs-transfer" });
         if (Io.Dir.cwd().openFile(io, sibling, .{})) |file| {
             file.close(io);
             command.items[0] = sibling;
@@ -167,7 +167,7 @@ fn localCommand(arena: Allocator, io: Io, environ: *const std.process.Environ.Ma
 /// `<executable>.capture` when that file names where, and end with its
 /// status: 127 when it cannot be found, 255 when it did not exit.
 fn run(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, executable: []const u8, command: []const []const u8) !void {
-    const capture_sidecar = try std.fmt.allocPrint(arena, "{s}.capture", .{executable});
+    const capture_sidecar = try arena.print("{s}.capture", .{executable});
     const capture = Io.Dir.cwd().readFileAlloc(io, capture_sidecar, arena, .limited(4096)) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
@@ -202,8 +202,8 @@ fn holdStderr(io: Io, release: []const u8) !void {
         if (Io.Dir.cwd().access(io, release, .{})) |_| break else |_| {}
         try io.sleep(.fromMilliseconds(10), .awake);
     }
-    var name: [std.fs.max_path_bytes]u8 = undefined;
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "{s}.ended", .{release}), .data = "" });
+    var name: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.mem.print(&name, "{s}.ended", .{release}), .data = "" });
 }
 
 fn teeStdin(io: Io, pipe: Io.File, path: []const u8) void {

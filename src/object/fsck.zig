@@ -123,12 +123,12 @@ pub const Problem = enum {
     // Ignored unless raised.
     extra_header_entry,
 
-    pub const count = @typeInfo(Problem).@"enum".fields.len;
+    pub const count = @typeInfo(Problem).@"enum".field_names.len;
 
     /// git's message id: `treeNotSorted`, `badTimezone`, and so on, which
     /// is what `fsck.<msg-id>` configuration and git's own messages use.
     pub fn id(problem: Problem) []const u8 {
-        return ids[@intFromEnum(problem)];
+        return ids[@backingInt(problem)];
     }
 
     /// The id as configuration spells it once read: lower case, no
@@ -142,11 +142,11 @@ pub const Problem = enum {
 
     /// The level git gives the problem when nothing says otherwise.
     pub fn defaultLevel(problem: Problem) Level {
-        const at = @intFromEnum(problem);
-        if (at <= @intFromEnum(Problem.unterminated_header)) return .fatal;
-        if (at <= @intFromEnum(Problem.zero_padded_date)) return .@"error";
-        if (at <= @intFromEnum(Problem.zero_padded_filemode)) return .warn;
-        if (at <= @intFromEnum(Problem.trailing_ref_content)) return .info;
+        const at = @backingInt(problem);
+        if (at <= @backingInt(Problem.unterminated_header)) return .fatal;
+        if (at <= @backingInt(Problem.zero_padded_date)) return .@"error";
+        if (at <= @backingInt(Problem.zero_padded_filemode)) return .warn;
+        if (at <= @backingInt(Problem.trailing_ref_content)) return .info;
         return .ignore;
     }
 
@@ -311,7 +311,7 @@ pub const Rules = struct {
 
     /// The level `problem` is reported at.
     pub fn level(r: *const Rules, problem: Problem) Level {
-        if (r.levels[@intFromEnum(problem)]) |configured| return configured;
+        if (r.levels[@backingInt(problem)]) |configured| return configured;
         const default = problem.defaultLevel();
         if (r.strict and default == .warn) return .@"error";
         return default;
@@ -332,7 +332,7 @@ pub const Rules = struct {
         }
         const new = Level.parse(level_text) orelse return error.UnknownFsckLevel;
         if (new != .@"error" and problem.defaultLevel() == .fatal) return error.FsckFatalLowered;
-        r.levels[@intFromEnum(problem)] = new;
+        r.levels[@backingInt(problem)] = new;
     }
 
     /// Whether `oid` is on the skip list.
@@ -387,7 +387,7 @@ pub const Rules = struct {
                 var expanded: ?[]u8 = null;
                 defer if (expanded) |e| gpa.free(e);
                 if (std.mem.startsWith(u8, value, "~/")) if (config.context.home) |home| {
-                    expanded = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, value[2..] });
+                    expanded = try gpa.print("{s}/{s}", .{ home, value[2..] });
                     path = expanded.?;
                 };
                 try r.readSkipList(gpa, io, kind, path);
@@ -419,9 +419,9 @@ fn entryUnder(entry: config_mod.Entry, scope: Scope) bool {
 /// naming `.`, `..` or `.git` refused.
 pub const baseline: Rules = blk: {
     var r: Rules = .{};
-    r.levels[@intFromEnum(Problem.has_dot)] = .@"error";
-    r.levels[@intFromEnum(Problem.has_dotdot)] = .@"error";
-    r.levels[@intFromEnum(Problem.has_dotgit)] = .@"error";
+    r.levels[@backingInt(Problem.has_dot)] = .@"error";
+    r.levels[@backingInt(Problem.has_dotdot)] = .@"error";
+    r.levels[@backingInt(Problem.has_dotgit)] = .@"error";
     break :blk r;
 };
 
@@ -478,7 +478,7 @@ pub const Finding = struct {
     /// git's message: `<msg-id>: <text>`. The result is `gpa`'s.
     pub fn message(f: Finding, gpa: Allocator) Allocator.Error![]u8 {
         const problem = f.problem orelse return gpa.dupe(u8, "cannot be parsed");
-        return std.fmt.allocPrint(gpa, "{s}: {s}{s}", .{ problem.id(), problem.text(), f.detail });
+        return gpa.print("{s}: {s}{s}", .{ problem.id(), problem.text(), f.detail });
     }
 };
 
@@ -887,7 +887,7 @@ fn checkTag(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool {
     const tag_end = std.mem.findScalarPos(u8, bytes, at, '\n') orelse return r.report(.missing_tag, "");
     const tag_name = bytes[at..tag_end];
     var ref_buf: [4096]u8 = undefined;
-    const ref_name = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{tag_name}) catch "";
+    const ref_name = std.mem.print(&ref_buf, "refs/tags/{s}", .{tag_name}) catch "";
     if (ref_name.len == 0 or safepath.checkRefName(ref_name) != null) {
         if (try r.report(.bad_tag_name, tag_name)) return true;
     }
@@ -1055,7 +1055,7 @@ test "a well-formed commit, tree and tag have no problem" {
     try testing.expect(try baselineProblem(.commit, commit) == null);
     const tag = "object " ++ zero_hex ++ "\ntype commit\ntag v1\ntagger " ++ good_ident ++ "\n\nv1\n";
     try testing.expect(try baselineProblem(.tag, tag) == null);
-    const tree = "100644 a.c\x00" ++ ("\x01" ** 20) ++ "40000 a\x00" ++ ("\x02" ** 20) ++ "100644 a0\x00" ++ ("\x03" ** 20);
+    const tree = "100644 a.c\x00" ++ (&@as([20]u8, @splat(0x01))) ++ "40000 a\x00" ++ (&@as([20]u8, @splat(0x02))) ++ "100644 a0\x00" ++ (&@as([20]u8, @splat(0x03)));
     try testing.expect(try baselineProblem(.tree, tree) == null);
     try testing.expect(try baselineProblem(.tree, "") == null);
     try testing.expect(try baselineProblem(.blob, "\x00anything") == null);
@@ -1106,19 +1106,19 @@ test "each broken tag is named as git names it" {
 }
 
 test "a tree out of order, with a twin, or naming .git is refused by name" {
-    const oid = "\x01" ** 20;
+    const oid = &@as([20]u8, @splat(0x01));
     try testing.expectEqual(@as(?Problem, .tree_not_sorted), try baselineProblem(.tree, "100644 b\x00" ++ oid ++ "100644 a\x00" ++ oid));
     try testing.expectEqual(@as(?Problem, .duplicate_entries), try baselineProblem(.tree, "100644 a\x00" ++ oid ++ "100644 a\x00" ++ oid));
     // The blob `a` and the tree `a` sort apart, with `a.c` between them.
     try testing.expectEqual(@as(?Problem, .duplicate_entries), try baselineProblem(.tree, "100644 a\x00" ++ oid ++ "100644 a.c\x00" ++ oid ++ "40000 a\x00" ++ oid));
     for ([_][]const u8{ ".git", ".GIT", "git~1", ".git. ", ".g\u{200c}it", ".git::$INDEX_ALLOCATION" }) |name| {
         var buf: [64]u8 = undefined;
-        const tree = try std.fmt.bufPrint(&buf, "40000 {s}\x00{s}", .{ name, oid });
+        const tree = try std.mem.print(&buf, "40000 {s}\x00{s}", .{ name, oid });
         try testing.expectEqual(@as(?Problem, .has_dotgit), try baselineProblem(.tree, tree));
     }
     try testing.expectEqual(@as(?Problem, .has_dotdot), try baselineProblem(.tree, "40000 ..\x00" ++ oid));
     try testing.expectEqual(@as(?Problem, .has_dot), try baselineProblem(.tree, "40000 .\x00" ++ oid));
-    try testing.expectEqual(@as(?Problem, .bad_tree), try baselineProblem(.tree, "100644 a\x00" ++ "\x01" ** 3));
+    try testing.expectEqual(@as(?Problem, .bad_tree), try baselineProblem(.tree, "100644 a\x00" ++ @as([3]u8, @splat(0x01))));
     try testing.expectEqual(@as(?Problem, .bad_tree), try baselineProblem(.tree, "999999 a\x00" ++ oid));
     // A style warning is not an error unless strict.
     const padded = "040000 a\x00" ++ oid;
@@ -1133,8 +1133,8 @@ test "the found .gitmodules and .gitattributes are read as git reads them" {
     const gpa = testing.allocator;
     var found: Found = .{};
     defer found.deinit(gpa);
-    const a = "\x0a" ** 20;
-    const m = "\x0b" ** 20;
+    const a = &@as([20]u8, @splat('\n'));
+    const m = &@as([20]u8, @splat(0x0b));
     const tree = "100644 .gitattributes\x00" ++ a ++ "100644 .gitmodules\x00" ++ m ++ "120000 .mailmap\x00" ++ m;
     var warnings: Collected = .{ .gpa = gpa };
     defer warnings.deinit();
@@ -1162,7 +1162,7 @@ test "the found .gitmodules and .gitattributes are read as git reads them" {
     }
     // An unparsable file is information.
     try testing.expect(try checkBlob(gpa, &strict, oid, .modules, "[broken\n", null) == null);
-    const long = "a" ** 2048 ++ " text\n";
+    const long = @as([2048]u8, @splat('a')) ++ " text\n";
     try testing.expectEqual(@as(?Problem, .gitattributes_line_length), (try checkBlob(gpa, &strict, oid, .attributes, long, null)).?.problem);
     try testing.expect(try checkBlob(gpa, &strict, oid, .attributes, "*.c text\n", null) == null);
 }
@@ -1205,7 +1205,7 @@ test "levels and skip lists come from the scope's own settings" {
     defer gpa.free(skip_path);
     // A backslash would be an escape in the configuration.
     std.mem.replaceScalar(u8, skip_path, '\\', '/');
-    const text = try std.fmt.allocPrint(gpa,
+    const text = try gpa.print(
         \\[fsck]
         \\    missingEmail = ignore
         \\[fetch "fsck"]
@@ -1296,7 +1296,7 @@ test "git refuses the same objects and names the same problem" {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     const Case = struct { t: object.Type, bytes: []const u8, problem: Problem };
-    const oid = "\x01" ** 20;
+    const oid = &@as([20]u8, @splat(0x01));
     const cases = [_]Case{
         .{ .t = .commit, .bytes = "tree 123\nauthor " ++ good_ident ++ "\n", .problem = .bad_tree_sha1 },
         .{ .t = .commit, .bytes = "tree " ++ zero_hex ++ "\nauthor " ++ good_ident ++ "\n\n", .problem = .missing_committer },

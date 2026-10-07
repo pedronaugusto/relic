@@ -16,6 +16,7 @@
 const Self = @This();
 
 const std = @import("std");
+const allocation = @import("../testing/allocation.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -408,7 +409,7 @@ fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
     var buf: [hash.max_hex_len + 1]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     // unreachable: a hex name is at most max_hex_len digits, the buffer with its newline
-    const text = std.fmt.bufPrint(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch unreachable;
+    const text = std.mem.print(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch unreachable;
     try head_mod.writeState(io, repo.git_dir, safety_path, text);
 }
 
@@ -484,8 +485,8 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
 
     const subject = message.subjectLine(commit.message);
     const short_name = try r.short(oid);
-    const label = try std.fmt.allocPrint(arena, "{s} ({s})", .{ short_name, subject });
-    const parent_label = try std.fmt.allocPrint(arena, "parent of {s}", .{label});
+    const label = try arena.print("{s} ({s})", .{ short_name, subject });
+    const parent_label = try arena.print("parent of {s}", .{label});
 
     // `--ff`: the commit sits on `HEAD` already.
     if (r.options.allow_ff and !r.options.no_commit) {
@@ -495,7 +496,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
             var outcome = try threeway.apply(gpa, io, repo, &index, head_tree, head_tree, their_tree, .{ .blocked = r.options.blocked });
             defer outcome.deinit();
             try repo.writeIndex(io, &index);
-            const log = try std.fmt.allocPrint(arena, "{s}: fast-forward", .{r.action.name()});
+            const log = try arena.print("{s}: fast-forward", .{r.action.name()});
             try head_mod.advance(io, repo, head, oid, .{ .who = r.options.who, .message = log });
             try updateAbortSafety(gpa, io, repo);
             try r.made.append(arena, oid);
@@ -655,7 +656,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         .message = cleaned,
         .signing = r.options.signing,
     }, r.options.diagnostic);
-    const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
+    const log = try arena.print("{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
@@ -752,7 +753,7 @@ fn start(gpa: Allocator, io: Io, repo: *Repository, action: Action, commits: []c
         else => |e| return e,
     };
     var hex: [hash.max_hex_len]u8 = undefined;
-    const head_text = if (head.oid) |oid| try std.fmt.allocPrint(arena, "{s}\n", .{oid.hex(&hex)}) else "\n";
+    const head_text = if (head.oid) |oid| try arena.print("{s}\n", .{oid.hex(&hex)}) else "\n";
     try head_mod.writeState(io, repo.git_dir, head_path, head_text);
     try writeOpts(gpa, io, repo, action, options);
     try updateAbortSafety(gpa, io, repo);
@@ -827,7 +828,7 @@ pub const ResolverContext = struct {
             const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
             inline for (rules) |rule| {
                 if (oid == null) {
-                    if (std.fmt.allocPrint(gpa, rule, .{text})) |full| {
+                    if (gpa.print(rule, .{text})) |full| {
                         defer gpa.free(full);
                         if (c.repo.refStore().resolve(gpa, c.io, full) catch null) |resolved| {
                             gpa.free(resolved.name);
@@ -903,9 +904,9 @@ fn commitStaged(r: *Replay) Error!Oid {
         .signing = r.options.signing,
     }, r.options.diagnostic);
     const log = if (picked != null)
-        try std.fmt.allocPrint(arena, "commit (cherry-pick): {s}", .{firstLine(cleaned)})
+        try arena.print("commit (cherry-pick): {s}", .{firstLine(cleaned)})
     else
-        try std.fmt.allocPrint(arena, "commit: {s}", .{firstLine(cleaned)});
+        try arena.print("commit: {s}", .{firstLine(cleaned)});
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
     try head_mod.deleteRef(io, repo, "REVERT_HEAD");
@@ -1056,7 +1057,7 @@ pub fn resetMerge(
     var hex: [hash.max_hex_len]u8 = undefined;
     const log = if (target) |oid|
         // unreachable: the buffer is the words and the longest hex name
-        std.fmt.bufPrint(&buf, "reset: moving to {s}", .{oid.hex(&hex)}) catch unreachable
+        std.mem.print(&buf, "reset: moving to {s}", .{oid.hex(&hex)}) catch unreachable
     else
         "reset: moving to HEAD";
     try head_mod.advance(io, repo, head, to, .{ .who = who, .message = log });
@@ -1117,7 +1118,7 @@ test "sequencer settings preserve allocation resource failures" {
             try std.testing.expect(options.signoff);
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }
 
 test "sequencer signing policy refuses malformed values, and reads one without the configuration allocating" {
@@ -1160,7 +1161,7 @@ test "a reset to a SHA-256 commit records its whole name in the reflog" {
     try resetMerge(gpa, io, &repo, try Oid.parse(.sha256, hex), who, null);
     const subject = try fixture.line(io, &.{ "reflog", "-1", "--format=%gs" });
     defer gpa.free(subject);
-    const expected = try std.fmt.allocPrint(gpa, "reset: moving to {s}", .{hex});
+    const expected = try gpa.print("reset: moving to {s}", .{hex});
     defer gpa.free(expected);
     try std.testing.expectEqualStrings(expected, subject);
 }

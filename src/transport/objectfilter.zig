@@ -183,7 +183,7 @@ const Traversal = struct {
                 const child = if (path.len == 0)
                     try t.a.dupe(u8, entry.name)
                 else
-                    try std.fmt.allocPrint(t.a, "{s}/{s}", .{ path, entry.name });
+                    try t.a.print("{s}/{s}", .{ path, entry.name });
                 switch (entry.mode) {
                     .tree => try t.tree(entry.oid, child, false, depth + 1),
                     .gitlink => {},

@@ -8,6 +8,7 @@
 //! the files themselves — is compared with what git left in the other twin.
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -16,7 +17,6 @@ const testgit = @import("../testing/git.zig");
 const stash = @import("stash.zig");
 const object = @import("../object.zig");
 const Repository = @import("../repo.zig").Repository;
-const build_options = @import("build_options");
 const program = @import("../repo/program.zig");
 
 const who: object.Signature = .{
@@ -415,9 +415,9 @@ test "dropping and clearing leave git's list" {
 test "a stash goes through the clean and smudge filters as git's does" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const clean = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "upper");
+    const clean = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "upper");
     defer gpa.free(clean);
-    const smudge = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "lower");
+    const smudge = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "lower");
     defer gpa.free(smudge);
     var twin = try Twin.create(gpa, io);
     defer twin.destroy(gpa);

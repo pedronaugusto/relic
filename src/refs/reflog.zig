@@ -115,7 +115,7 @@ pub fn normalizeMessage(gpa: Allocator, message: []const u8) Allocator.Error![]u
 /// The path of a ref's log under the git directory: `logs/<ref>`.
 /// The result is the caller's.
 pub fn pathFor(gpa: Allocator, ref: []const u8) Allocator.Error![]u8 {
-    return std.fmt.allocPrint(gpa, "logs/{s}", .{ref});
+    return gpa.print("logs/{s}", .{ref});
 }
 
 /// Whether a log already exists for `ref`.
@@ -161,7 +161,7 @@ pub fn appendShared(
     if (isReftable(io, git_dir)) return error.ReftableRepository;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
-    if (std.fs.path.dirnamePosix(path)) |parent| {
+    if (std.Io.Dir.path.dirnamePosix(path)) |parent| {
         fs.makeDirs(io, git_dir, parent, shared) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
@@ -291,8 +291,8 @@ test "an appended entry reads back" {
     defer tmp.cleanup();
 
     const zero: Oid = .zero(.sha1);
-    const one = try Oid.parse(.sha1, "1" ** 40);
-    const two = try Oid.parse(.sha1, "2" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     const who: object.Signature = .{
         .name = "Ada",
         .email = "ada@example.com",
@@ -326,9 +326,9 @@ test "a malformed line leaves the other entries readable, as git skips it" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "logs/refs/heads");
-    const zero = "0" ** 40;
-    const one = "1" ** 40;
-    const two = "2" ** 40;
+    const zero = &@as([40]u8, @splat('0'));
+    const one = &@as([40]u8, @splat('1'));
+    const two = &@as([40]u8, @splat('2'));
     try tmp.dir.writeFile(io, .{ .sub_path = "logs/refs/heads/main", .data = zero ++ " " ++ one ++ " A <a@b> 1 +0000\tfirst\n" ++
         "not an entry\n" ++
         one ++ " " ++ two ++ " A <a@b> 2 +0000\tsecond\n" });

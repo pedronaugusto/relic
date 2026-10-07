@@ -2,6 +2,8 @@
 //! out, and a working tree git calls clean.
 
 const std = @import("std");
+const allocation = @import("testing/allocation.zig");
+const testbytes = @import("testing/bytes.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 
@@ -84,7 +86,7 @@ test "addAll then writeTree equals git add -A and git write-tree" {
     // the tree is compared as it is everywhere else.
     const has_exec_bit = Io.File.Permissions.has_executable_bit;
     if (has_exec_bit) {
-        try h.repo.dir.setFilePermissions(io, "run.sh", @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
+        try h.repo.dir.setFilePermissions(io, "run.sh", @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o755))), .{});
     }
     var has_link = true;
     h.repo.dir.symLink(io, "a.c", "link.c", .{}) catch {
@@ -130,8 +132,8 @@ test "addAll then writeTree equals git add -A and git write-tree" {
 // not make a file unreadable. These fixtures skip there, and under root,
 // whose permission to read survives chmod(000).
 fn makeUnreadable(io: Io, dir: Io.Dir, path: []const u8) !struct { err: Io.File.OpenError } {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    try dir.setFilePermissions(io, path, @enumFromInt(@as(std.posix.mode_t, 0)), .{});
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    try dir.setFilePermissions(io, path, @fromBackingInt(@intCast(@as(std.posix.mode_t, 0))), .{});
     if (dir.openFile(io, path, .{})) |file| {
         file.close(io);
         return error.SkipZigTest;
@@ -143,7 +145,7 @@ fn makeUnreadable(io: Io, dir: Io.Dir, path: []const u8) !struct { err: Io.File.
 
 test "ignore-errors reports unreadable files, keeps their entries and stages the rest as git does" {
     // Windows needs ACL changes, not chmod, to deny reading a file.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     for ([_]worktree.NewBlobs{ .loose, .pack }) |new_blobs| {
@@ -203,7 +205,7 @@ test "ignore-errors reports unreadable files, keeps their entries and stages the
 
 test "without ignore-errors the first unreadable file stops add" {
     // Windows needs ACL changes, not chmod, to deny reading a file.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var h = try Harness.init(gpa, io, &.{});
@@ -230,7 +232,7 @@ test "the stat shortcut means a warm addAll hashes nothing" {
 
     for (0..60) |i| {
         var buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "d{d}/f{d}.txt", .{ i % 6, i });
+        const path = try std.mem.print(&buf, "d{d}/f{d}.txt", .{ i % 6, i });
         try h.repo.writeFile(io, path, "contents\n");
         // This fixture is deliberately non-racy. The clock can give the
         // file and index writes the same tick, even with subsecond times.
@@ -999,7 +1001,7 @@ test "a staging scan owns each name when allocation stops" {
     var folder = std.testing.tmpDir(.{ .iterate = true });
     defer folder.cleanup();
     try folder.dir.writeFile(io, .{ .sub_path = "file", .data = "contents\n" });
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingAllocationCase, .{folder.dir});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, stagingAllocationCase, .{folder.dir});
 }
 
 fn stagingAllocationCase(gpa: std.mem.Allocator, wt: Io.Dir) !void {
@@ -1047,8 +1049,8 @@ test "a filesystem walk that reaches its depth limit refuses a partial result" {
     const gpa = std.testing.allocator;
     var folder = std.testing.tmpDir(.{ .iterate = true });
     defer folder.cleanup();
-    const path = "d/" ** 66 ++ "file";
-    try folder.dir.createDirPath(io, std.fs.path.dirnamePosix(path).?);
+    const path = testbytes.repeat("d/", 66) ++ "file";
+    try folder.dir.createDirPath(io, std.Io.Dir.path.dirnamePosix(path).?);
     try folder.dir.writeFile(io, .{ .sub_path = path, .data = "deep\n" });
     var private = std.testing.tmpDir(.{ .iterate = true });
     defer private.cleanup();
@@ -1112,8 +1114,8 @@ test "checkout writes files with git's modes, trimmed by the umask as git's are"
     _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, try Oid.parse(.sha1, tree_text), .{ .rules = h.worktreeRules() });
     const plain = try h.repo.dir.statFile(io, "plain.txt", .{});
     const run = try h.repo.dir.statFile(io, "run.sh", .{});
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), @as(std.posix.mode_t, @intCast(@intFromEnum(plain.permissions))) & 0o777);
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o750), @as(std.posix.mode_t, @intCast(@intFromEnum(run.permissions))) & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), @as(std.posix.mode_t, @intCast(@backingInt(plain.permissions))) & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o750), @as(std.posix.mode_t, @intCast(@backingInt(run.permissions))) & 0o777);
 }
 
 test "checkout writes the same files, index and error whatever the number of tasks" {
@@ -1129,7 +1131,7 @@ test "checkout writes the same files, index and error whatever the number of tas
     var text: [64]u8 = undefined;
     for (0..1500) |i| {
         const folder = if (i % 50 == 0) "locked" else "open";
-        try h.repo.writeFile(io, try std.fmt.bufPrint(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), try std.fmt.bufPrint(&text, "{d} first\n", .{i}));
+        try h.repo.writeFile(io, try std.mem.print(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), try std.mem.print(&text, "{d} first\n", .{i}));
     }
     try h.repo.exec(io, &.{ "add", "-A" });
     try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
@@ -1138,7 +1140,7 @@ test "checkout writes the same files, index and error whatever the number of tas
     const first = try Oid.parse(.sha1, first_text);
     for (0..1500) |i| {
         const folder = if (i % 50 == 0) "locked" else "open";
-        try h.repo.writeFile(io, try std.fmt.bufPrint(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), try std.fmt.bufPrint(&text, "{d} second\n", .{i}));
+        try h.repo.writeFile(io, try std.mem.print(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), try std.mem.print(&text, "{d} second\n", .{i}));
     }
     try h.repo.exec(io, &.{ "commit", "-q", "-am", "two" });
 
@@ -1148,11 +1150,11 @@ test "checkout writes the same files, index and error whatever the number of tas
         try h.repo.exec(io, &.{ "reset", "-q", "--hard", "HEAD" });
         try h.reload(gpa, io);
         for (0..7) |d| {
-            try h.repo.dir.setFilePermissions(io, try std.fmt.bufPrint(&name, "locked/d{d}", .{d}), @enumFromInt(@as(std.posix.mode_t, 0o555)), .{});
+            try h.repo.dir.setFilePermissions(io, try std.mem.print(&name, "locked/d{d}", .{d}), @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o555))), .{});
         }
         const result = worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, first, .{ .rules = h.worktreeRules(), .workers = workers });
         for (0..7) |d| {
-            try h.repo.dir.setFilePermissions(io, try std.fmt.bufPrint(&name, "locked/d{d}", .{d}), @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
+            try h.repo.dir.setFilePermissions(io, try std.mem.print(&name, "locked/d{d}", .{d}), @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o755))), .{});
         }
         // What came back, what the index holds and what the files say.
         var record: std.Io.Writer.Allocating = .init(gpa);
@@ -1163,7 +1165,7 @@ test "checkout writes the same files, index and error whatever the number of tas
         for (0..1500) |i| {
             const folder = if (i % 50 == 0) "locked" else "open";
             var buf: [64]u8 = undefined;
-            try record.writer.writeAll(try h.repo.dir.readFile(io, try std.fmt.bufPrint(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), &buf));
+            try record.writer.writeAll(try h.repo.dir.readFile(io, try std.mem.print(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), &buf));
         }
         if (seen) |s| {
             try std.testing.expectEqualStrings(s, record.written());
@@ -1260,7 +1262,7 @@ test "a link and a directory whose names a folding filesystem makes one are refu
 
 test "nothing is written or removed past a symbolic link in the working tree, and a forced checkout replaces the link as git's does" {
     // A link needs a privilege on Windows.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var h = try Harness.init(gpa, io, &.{});
@@ -1307,7 +1309,7 @@ test "a wider sparse pattern brings a link back as a link and a submodule back a
     var h = try Harness.init(gpa, io, &.{});
     defer h.deinit(io);
     // A link needs a privilege on Windows, where git writes it as a file.
-    const links = builtin.os.tag != .windows;
+    const links = builtin.target.os.tag != .windows;
     try h.repo.writeFile(io, "top", "top\n");
     try h.repo.writeFile(io, "dir/file", "file\n");
     if (links) try h.repo.dir.symLink(io, "file", "dir/link", .{});
@@ -1347,7 +1349,7 @@ test "a wider sparse pattern brings a link back as a link and a submodule back a
 
 test "a tree with names only Windows refuses checks out elsewhere as git checks it out" {
     // git itself refuses these names on Windows.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var h = try Harness.init(gpa, io, &.{});
@@ -1393,7 +1395,7 @@ fn expectCheckAttr(gpa: std.mem.Allocator, io: Io, h: *Harness, path: []const u8
             .value => |v| v,
             .unspecified => continue,
         };
-        try ours.append(a, try std.fmt.allocPrint(a, "{s}: {s}", .{ item.name, value }));
+        try ours.append(a, try a.print("{s}: {s}", .{ item.name, value }));
     }
     const less = struct {
         fn f(_: void, x: []const u8, y: []const u8) bool {
@@ -1430,7 +1432,7 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
     try h.git_dir.writeFile(io, .{ .sub_path = "info/attributes", .data = "[attr]n q\n" });
     try h.attrs.loadGlobal(io, h.git_dir, null, null);
     // A .gitattributes that is a link is not followed.
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         try h.repo.writeFile(io, "elsewhere.attrs", "* evil\n");
         try h.repo.dir.createDirPath(io, "link");
         try h.repo.dir.symLink(io, "../elsewhere.attrs", "link/.gitattributes", .{});

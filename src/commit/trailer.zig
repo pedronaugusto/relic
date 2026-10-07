@@ -326,7 +326,7 @@ const cut_line = "------------------------ >8 ------------------------";
 fn locateEnd(s: []const u8, comment: []const u8, len_in: usize) usize {
     var len = len_in;
     var pattern_buf: [256]u8 = undefined;
-    const pattern = std.fmt.bufPrint(&pattern_buf, "\n{s} {s}", .{ comment, cut_line }) catch return len;
+    const pattern = std.mem.print(&pattern_buf, "\n{s} {s}", .{ comment, cut_line }) catch return len;
     if (std.mem.startsWith(u8, s, pattern[1..])) {
         len = 0;
     } else if (std.mem.find(u8, s, pattern)) |p| {

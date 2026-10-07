@@ -41,7 +41,7 @@ pub const Store = struct {
             defer index.deinit();
             try index.verify();
             var hex: [hash.max_hex_len]u8 = undefined;
-            const path = try std.fmt.allocPrint(gpa, "multi-pack-index-{s}.bitmap", .{index.checksum().hex(&hex)});
+            const path = try gpa.print("multi-pack-index-{s}.bitmap", .{index.checksum().hex(&hex)});
             defer gpa.free(path);
             if (try fs.readFileAlloc(gpa, io, dir, path, 1 << 30)) |bytes| {
                 var parsed = try bitmap.Index.parse(gpa, kind, bytes, index.checksum(), index.count);
@@ -56,7 +56,7 @@ pub const Store = struct {
                 }
                 for (0..index.pack_count) |i| {
                     const base = index.packName(@intCast(i)) orelse return error.CorruptMultiPackIndex;
-                    const pack_path = try std.fmt.allocPrint(gpa, "{s}.pack", .{base});
+                    const pack_path = try gpa.print("{s}.pack", .{base});
                     defer gpa.free(pack_path);
                     dir.access(io, pack_path, .{}) catch |err| switch (err) {
                         error.FileNotFound => return error.CorruptMultiPackIndex,
@@ -70,11 +70,11 @@ pub const Store = struct {
         while (try iterator.next(io)) |entry| {
             if (!std.mem.startsWith(u8, entry.name, "pack-") or !std.mem.endsWith(u8, entry.name, ".bitmap")) continue;
             const base = entry.name[0 .. entry.name.len - 7];
-            const index_path = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+            const index_path = try gpa.print("{s}.idx", .{base});
             defer gpa.free(index_path);
             var index = try pack.Index.open(gpa, io, dir, index_path, kind, 1 << 30);
             defer index.deinit();
-            const pack_path = try std.fmt.allocPrint(gpa, "{s}.pack", .{base});
+            const pack_path = try gpa.print("{s}.pack", .{base});
             defer gpa.free(pack_path);
             dir.access(io, pack_path, .{}) catch |err| switch (err) {
                 error.FileNotFound => return error.CorruptReachabilityBitmap,

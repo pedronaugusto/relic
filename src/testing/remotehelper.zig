@@ -87,7 +87,7 @@ const Helper = struct {
     fn list(h: *Helper, with_values: bool) !void {
         if (h.object_format) try h.out.writeAll(":object-format sha1\n");
         const format = if (with_values) "%(objectname) %(refname)" else "? %(refname)";
-        const refs = try h.git(h.remote, &.{ "for-each-ref", try std.fmt.allocPrint(h.gpa, "--format={s}", .{format}), "refs/heads/", "refs/tags/" }, null);
+        const refs = try h.git(h.remote, &.{ "for-each-ref", try h.gpa.print("--format={s}", .{format}), "refs/heads/", "refs/tags/" }, null);
         defer h.gpa.free(refs);
         try h.out.writeAll(refs);
         const head = try h.git(h.remote, &.{ "symbolic-ref", "HEAD" }, null);
@@ -99,15 +99,15 @@ const Helper = struct {
     /// Make the marks files under `$GIT_DIR/testgit/<alias>` when they are
     /// not there yet, and name the private namespace's refspecs.
     fn prepareMarks(h: *Helper, alias: []const u8) !void {
-        const dir = try std.fmt.allocPrint(h.gpa, "{s}/testgit/{s}", .{ h.local, alias });
+        const dir = try h.gpa.print("{s}/testgit/{s}", .{ h.local, alias });
         try Io.Dir.cwd().createDirPath(h.io, dir);
-        h.gitmarks = try std.fmt.allocPrint(h.gpa, "{s}/git.marks", .{dir});
-        h.testgitmarks = try std.fmt.allocPrint(h.gpa, "{s}/testgit.marks", .{dir});
+        h.gitmarks = try h.gpa.print("{s}/git.marks", .{dir});
+        h.testgitmarks = try h.gpa.print("{s}/testgit.marks", .{dir});
         for ([_][]const u8{ h.gitmarks, h.testgitmarks }) |path| {
             Io.Dir.cwd().access(h.io, path, .{}) catch try Io.Dir.cwd().writeFile(h.io, .{ .sub_path = path, .data = "" });
         }
-        h.h_refspec = try std.fmt.allocPrint(h.gpa, "refs/heads/*:refs/testgit/{s}/heads/*", .{alias});
-        h.t_refspec = try std.fmt.allocPrint(h.gpa, "refs/tags/*:refs/testgit/{s}/tags/*", .{alias});
+        h.h_refspec = try h.gpa.print("refs/heads/*:refs/testgit/{s}/heads/*", .{alias});
+        h.t_refspec = try h.gpa.print("refs/tags/*:refs/testgit/{s}/tags/*", .{alias});
     }
 
     fn capabilities(h: *Helper) !void {
@@ -160,10 +160,10 @@ const Helper = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(gpa, &.{
             "fast-export",
-            try std.fmt.allocPrint(gpa, "--refspec={s}", .{h.h_refspec}),
-            try std.fmt.allocPrint(gpa, "--refspec={s}", .{h.t_refspec}),
-            try std.fmt.allocPrint(gpa, "--import-marks={s}", .{h.testgitmarks}),
-            try std.fmt.allocPrint(gpa, "--export-marks={s}", .{h.testgitmarks}),
+            try gpa.print("--refspec={s}", .{h.h_refspec}),
+            try gpa.print("--refspec={s}", .{h.t_refspec}),
+            try gpa.print("--import-marks={s}", .{h.testgitmarks}),
+            try gpa.print("--export-marks={s}", .{h.testgitmarks}),
         });
         try argv.appendSlice(gpa, refs);
         const stream = try h.git(h.remote, argv.items, null);
@@ -182,8 +182,8 @@ const Helper = struct {
         try argv.append(gpa, "fast-import");
         if (h.force) try argv.append(gpa, "--force");
         try argv.appendSlice(gpa, &.{
-            try std.fmt.allocPrint(gpa, "--import-marks={s}", .{h.testgitmarks}),
-            try std.fmt.allocPrint(gpa, "--export-marks={s}", .{h.testgitmarks}),
+            try gpa.print("--import-marks={s}", .{h.testgitmarks}),
+            try gpa.print("--export-marks={s}", .{h.testgitmarks}),
             "--quiet",
         });
         _ = try h.git(h.remote, argv.items, stream);
@@ -237,7 +237,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len < 3) return error.MissingArguments;
-    var base = std.fs.path.basename(args[0]);
+    var base = std.Io.Dir.path.basename(args[0]);
     if (std.mem.endsWith(u8, base, ".exe")) base = base[0 .. base.len - 4];
 
     // The gits this runs are pointed at their repository by name, never by

@@ -83,7 +83,7 @@ fn expectSameMerges(
     const arena = arena_state.allocator();
 
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(arena, &.{ "-c", try std.fmt.allocPrint(arena, "merge.conflictStyle={t}", .{style}), "merge-tree", "--stdin", "-z", "--no-messages" });
+    try args.appendSlice(arena, &.{ "-c", try arena.print("merge.conflictStyle={t}", .{style}), "merge-tree", "--stdin", "-z", "--no-messages" });
     for (words) |word| try args.appendSlice(arena, &.{ "-X", word });
     var input: std.ArrayList(u8) = .empty;
     for (cases) |c| try input.print(arena, "{s} {s}\n", .{ c.ours, c.theirs });
@@ -159,7 +159,7 @@ const Texts = struct {
     const tails = [_][]const u8{ "", "", "", " ", "\t", "\r", " \r" };
 
     fn line(t: Texts, word: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(t.arena, "{s}{s}{s}\n", .{ t.pick(&leads), word, t.pick(&tails) });
+        return t.arena.print("{s}{s}{s}\n", .{ t.pick(&leads), word, t.pick(&tails) });
     }
 
     fn pick(t: Texts, from: []const []const u8) []const u8 {
@@ -254,9 +254,9 @@ test "the whitespace strategy options merge as git's do" {
     const count = testgit.corpusCases(150);
     for (0..count) |n| {
         const base = try t.base();
-        const b = try std.fmt.allocPrint(arena, "b{d}", .{n});
-        const o = try std.fmt.allocPrint(arena, "o{d}", .{n});
-        const th = try std.fmt.allocPrint(arena, "t{d}", .{n});
+        const b = try arena.print("b{d}", .{n});
+        const o = try arena.print("o{d}", .{n});
+        const th = try arena.print("t{d}", .{n});
         try importCommit(arena, &stream, b, null, &.{.{ "f", try t.join(base) }});
         try importCommit(arena, &stream, o, b, &.{.{ "f", try t.join(try t.side(base)) }});
         try importCommit(arena, &stream, th, b, &.{.{ "f", try t.join(try t.side(base)) }});
@@ -274,9 +274,9 @@ test "the whitespace strategy options merge as git's do" {
         .{ "a\nb\nc\n", "a\nb\r\nc\n", "a\nb\nc\r" },
     };
     for (edges, 0..) |edge, n| {
-        const b = try std.fmt.allocPrint(arena, "eb{d}", .{n});
-        const o = try std.fmt.allocPrint(arena, "eo{d}", .{n});
-        const th = try std.fmt.allocPrint(arena, "et{d}", .{n});
+        const b = try arena.print("eb{d}", .{n});
+        const o = try arena.print("eo{d}", .{n});
+        const th = try arena.print("et{d}", .{n});
         try importCommit(arena, &stream, b, null, &.{.{ "f", edge[0] }});
         try importCommit(arena, &stream, o, b, &.{.{ "f", edge[1] }});
         try importCommit(arena, &stream, th, b, &.{.{ "f", edge[2] }});
@@ -320,8 +320,8 @@ const Trees = struct {
     fn files(t: Trees, n: usize) ![]const [2][]const u8 {
         var out: std.array_hash_map.String([]const u8) = .empty;
         for (0..n) |i| {
-            const path = try std.fmt.allocPrint(t.arena, "{s}{s}", .{ dirs[t.random.uintLessThan(usize, dirs.len)], names[t.random.uintLessThan(usize, names.len)] });
-            try out.put(t.arena, path, try std.fmt.allocPrint(t.arena, "{s}\nline {d}\nend\n", .{ path, i % 3 }));
+            const path = try t.arena.print("{s}{s}", .{ dirs[t.random.uintLessThan(usize, dirs.len)], names[t.random.uintLessThan(usize, names.len)] });
+            try out.put(t.arena, path, try t.arena.print("{s}\nline {d}\nend\n", .{ path, i % 3 }));
         }
         return pairs(t.arena, out);
     }
@@ -338,9 +338,9 @@ const Trees = struct {
         var map: std.array_hash_map.String([]const u8) = .empty;
         for (from) |f| try map.put(t.arena, f[0], f[1]);
         for (map.values()) |*v| {
-            if (t.random.uintLessThan(u8, 3) == 0) v.* = try std.fmt.allocPrint(t.arena, "{s}{s} edit\n", .{ v.*, tag });
+            if (t.random.uintLessThan(u8, 3) == 0) v.* = try t.arena.print("{s}{s} edit\n", .{ v.*, tag });
         }
-        if (t.random.boolean()) try map.put(t.arena, try std.fmt.allocPrint(t.arena, "new-{s}", .{tag}), "new\n");
+        if (t.random.boolean()) try map.put(t.arena, try t.arena.print("new-{s}", .{tag}), "new\n");
         if (map.count() > 1 and t.random.boolean()) map.orderedRemoveAt(t.random.uintLessThan(usize, map.count()));
         return pairs(t.arena, map);
     }
@@ -352,7 +352,7 @@ const Trees = struct {
             if (std.mem.startsWith(u8, f[0], prefix)) continue;
             try map.put(t.arena, f[0], f[1]);
         }
-        for (inner) |f| try map.put(t.arena, try std.fmt.allocPrint(t.arena, "{s}{s}", .{ prefix, f[0] }), f[1]);
+        for (inner) |f| try map.put(t.arena, try t.arena.print("{s}{s}", .{ prefix, f[0] }), f[1]);
         return pairs(t.arena, map);
     }
 };
@@ -378,9 +378,9 @@ test "the subtree strategy options line the trees up as git's do" {
         const prefix = prefixes[n % prefixes.len];
         const lib1 = try t.files(3 + t.random.uintLessThan(usize, 6));
         const project = try t.files(2 + t.random.uintLessThan(usize, 6));
-        const l1 = try std.fmt.allocPrint(arena, "l1-{d}", .{n});
-        const l2 = try std.fmt.allocPrint(arena, "l2-{d}", .{n});
-        const p = try std.fmt.allocPrint(arena, "p-{d}", .{n});
+        const l1 = try arena.print("l1-{d}", .{n});
+        const l2 = try arena.print("l2-{d}", .{n});
+        const p = try arena.print("p-{d}", .{n});
         // The library's history, then the project that took it in at its
         // first version, both going on from there.
         try importCommit(arena, &stream, l1, null, lib1);

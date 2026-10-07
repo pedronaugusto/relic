@@ -203,14 +203,14 @@ test "submodules cloned and fetched from a remote are what git submodule update 
     defer work.deinit();
     const names = [_][]const u8{ "inner", "lib", "super" };
     for (names, 0..) |name, i| {
-        const bare = try std.fmt.allocPrint(gpa, "{s}/{s}.git", .{ root_path, name });
+        const bare = try gpa.print("{s}/{s}.git", .{ root_path, name });
         defer gpa.free(bare);
         try gitIn(gpa, io, work.dir, &.{ "init", "-q", "--bare", "-b", "main", bare });
         try gitIn(gpa, io, work.dir, &.{ "--git-dir", bare, "config", "uploadpack.allowAnySHA1InWant", "true" });
         try gitIn(gpa, io, work.dir, &.{ "init", "-q", "-b", "main", name });
         var dir = try work.dir.openDir(io, name, .{});
         defer dir.close(io);
-        const file = try std.fmt.allocPrint(gpa, "{s}.git", .{name});
+        const file = try gpa.print("{s}.git", .{name});
         defer gpa.free(file);
         const url = try server.url(gpa, file);
         defer gpa.free(url);
@@ -218,7 +218,7 @@ test "submodules cloned and fetched from a remote are what git submodule update 
         try dir.writeFile(io, .{ .sub_path = "README", .data = name });
         try gitIn(gpa, io, dir, &.{ "add", "README" });
         if (i > 0) {
-            const relative = try std.fmt.allocPrint(gpa, "../{s}.git", .{names[i - 1]});
+            const relative = try gpa.print("../{s}.git", .{names[i - 1]});
             defer gpa.free(relative);
             try gitIn(gpa, io, dir, &.{ "submodule", "add", "-q", relative, names[i - 1] });
         }
@@ -252,7 +252,7 @@ test "submodules cloned and fetched from a remote are what git submodule update 
         var inner = try work.dir.openDir(io, "inner", .{});
         defer inner.close(io);
         try inner.writeFile(io, .{ .sub_path = "README", .data = "inner, again" });
-        const bare = try std.fmt.allocPrint(gpa, "{s}/inner.git", .{root_path});
+        const bare = try gpa.print("{s}/inner.git", .{root_path});
         defer gpa.free(bare);
         try gitIn(gpa, io, inner, &.{ "commit", "-q", "-am", "again" });
         try gitIn(gpa, io, inner, &.{ "push", "-q", bare, "main" });
@@ -272,7 +272,7 @@ test "submodules cloned and fetched from a remote are what git submodule update 
             try gitIn(gpa, io, sub, &.{ "pull", "-q", "origin", "main" });
         }
         try gitIn(gpa, io, dir, &.{ "commit", "-q", "-am", "move" });
-        const bare = try std.fmt.allocPrint(gpa, "{s}/{s}.git", .{ root_path, name });
+        const bare = try gpa.print("{s}/{s}.git", .{ root_path, name });
         defer gpa.free(bare);
         try gitIn(gpa, io, dir, &.{ "push", "-q", bare, "main" });
     }

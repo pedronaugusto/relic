@@ -12,7 +12,7 @@ const safepath = @import("../../worktree/safepath.zig");
 const fsck = @import("../../object/fsck.zig");
 const hash = @import("../../hash.zig");
 
-const windows = builtin.os.tag == .windows;
+const windows = builtin.target.os.tag == .windows;
 
 /// The rows of git's t1014-read-tree-confusing.sh, which git refuses with
 /// both `core.protectHFS` and `core.protectNTFS` on.
@@ -33,7 +33,7 @@ const t1014_rows = [_][]const u8{
 
 /// The tree problem fsck names for `name` as a tree entry, or `null`.
 fn fsckProblem(gpa: std.mem.Allocator, mode: []const u8, name: []const u8) !?fsck.Problem {
-    const bytes = try hostile.treeBytes(gpa, &.{.{ .mode = mode, .name = name, .oid = try hash.Oid.fromRaw(.sha1, &([_]u8{1} ** 20)) }});
+    const bytes = try hostile.treeBytes(gpa, &.{.{ .mode = mode, .name = name, .oid = try hash.Oid.fromRaw(.sha1, &(@as([20]u8, @splat(1)))) }});
     defer gpa.free(bytes);
     const finding = try fsck.checkObject(gpa, &fsck.baseline, .sha1, .zero(.sha1), .tree, bytes, null, null) orelse return null;
     return finding.problem;
@@ -139,7 +139,7 @@ test "CVE-2019-1352, t1014-read-tree-confusing (protectNTFS): .git with an alter
         try std.testing.expectEqual(fsck.Problem.has_dotgit, (try fsckProblem(gpa, "40000", name)).?);
     }
     var buf: [64]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, try h.git_dir.readFile(io, "config", &buf), "hooksPath") == null);
+    try std.testing.expect(std.mem.find(u8, try h.git_dir.readFile(io, "config", &buf), "hooksPath") == null);
 }
 
 test "CVE-2019-1353, t1014-read-tree-confusing and t0060-path-utils (MINGW): the NTFS .git rules hold on every platform and the Windows-only names only on Windows" {

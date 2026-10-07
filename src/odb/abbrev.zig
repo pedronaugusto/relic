@@ -94,7 +94,7 @@ test "a short name grows until it names one object" {
     var n: u32 = 0;
     while (pair == null) : (n += 1) {
         var text: [32]u8 = undefined;
-        const oid = try db.write(io, .blob, try std.fmt.bufPrint(&text, "{d}\n", .{n}));
+        const oid = try db.write(io, .blob, try std.mem.print(&text, "{d}\n", .{n}));
         var hex_buf: [hash.max_hex_len]u8 = undefined;
         const prefix = oid.hex(&hex_buf)[0..5];
         if (seen.get(prefix)) |other| {
@@ -121,7 +121,7 @@ test "a packed object is found by any prefix that names it alone" {
     var oids: [600]Oid = undefined;
     for (&oids, 0..) |*oid, n| {
         var text: [32]u8 = undefined;
-        oid.* = try db.write(io, .blob, try std.fmt.bufPrint(&text, "{d}\n", .{n}));
+        oid.* = try db.write(io, .blob, try std.mem.print(&text, "{d}\n", .{n}));
     }
     _ = try db.repack(io, .{});
 

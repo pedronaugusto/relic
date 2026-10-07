@@ -75,8 +75,8 @@ pub fn exists(io: Io, dir: Io.Dir, path: []const u8) Io.Dir.AccessError!bool {
 pub fn readRefusal(err: anyerror) bool {
     const ReadError = Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
         Io.Dir.Iterator.Error || Io.File.OpenError || Io.File.Reader.Error || Io.Reader.Error;
-    inline for (std.meta.fields(ReadError)) |field| {
-        if (err == @field(ReadError, field.name)) return true;
+    inline for (@typeInfo(ReadError).error_set.error_names.?) |name| {
+        if (err == @field(ReadError, name)) return true;
     }
     return false;
 }

@@ -442,13 +442,13 @@ pub const Remote = struct {
             "proc-receive", "push-to-checkout", "reference-transaction",
         }) |name| {
             if (dir.statFile(io, name, .{})) |stat| {
-                if (stat.kind == .file and (builtin.os.tag == .windows or stat.permissions.toMode() & 0o111 != 0))
+                if (stat.kind == .file and (builtin.target.os.tag == .windows or stat.permissions.toMode() & 0o111 != 0))
                     return error.RemoteHooksNotRun;
             } else |_| {}
-            if (builtin.os.tag != .windows) continue;
+            if (builtin.target.os.tag != .windows) continue;
             var name_buf: [64]u8 = undefined;
             // unreachable: the longest hook name above, reference-transaction, is 21 bytes, 25 with .exe
-            const executable = std.fmt.bufPrint(&name_buf, "{s}.exe", .{name}) catch unreachable;
+            const executable = std.mem.print(&name_buf, "{s}.exe", .{name}) catch unreachable;
             const stat = dir.statFile(io, executable, .{}) catch continue;
             if (stat.kind != .file) continue;
             return error.RemoteHooksNotRun;

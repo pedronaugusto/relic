@@ -19,6 +19,7 @@ pub const ort = @import("merge/ort.zig");
 pub const octopus = @import("merge/octopus.zig");
 
 const std = @import("std");
+const testbytes = @import("testing/bytes.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -457,7 +458,7 @@ fn flatten(
         const path = if (prefix.len == 0)
             try arena.dupe(u8, entry.name)
         else
-            try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
+            try arena.print("{s}/{s}", .{ prefix, entry.name });
         if (entry.mode == .tree) {
             try flatten(arena, io, db, entry.oid, path, out, depth + 1);
             continue;
@@ -508,7 +509,6 @@ pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const R
 //=========================================================================
 
 const testgit = @import("testing/git.zig");
-const test_case = @import("testing/case.zig");
 
 fn gitMergeFileFixture(
     gpa: Allocator,
@@ -571,7 +571,7 @@ fn gitMergeFile(
     }
     var size_buf: [32]u8 = undefined;
     if (options.marker_size != 7) {
-        try argv.append(gpa, try std.fmt.bufPrint(&size_buf, "--marker-size={d}", .{options.marker_size}));
+        try argv.append(gpa, try std.mem.print(&size_buf, "--marker-size={d}", .{options.marker_size}));
     }
     try argv.appendSlice(gpa, &.{
         "-L",   options.labels.ours, "-L",     options.labels.base, "-L", options.labels.theirs,
@@ -696,7 +696,6 @@ test "binary blob content is refused like git merge-file" {
 }
 
 test "a random corpus of three-way merges matches git merge-file in every style and every algorithm" {
-    if (!test_case.selected("a random corpus of three-way merges matches git merge-file in every style and every algorithm")) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // `--diff-algorithm` reached merge-file in 2.44, and git before 2.54
@@ -892,7 +891,7 @@ test "the content-merging tree merge writes the tree and the stages git merge-tr
     for (result.index.entries.items) |entry| {
         if (entry.stage == 0) continue;
         var mode_buf: [6]u8 = undefined;
-        const line = try std.fmt.allocPrint(gpa, "{s} {s} {d}\t{s}\n", .{
+        const line = try gpa.print("{s} {s} {d}\t{s}\n", .{
             entry.mode.text(&mode_buf), entry.oid.hex(&hex), entry.stage, entry.path,
         });
         defer gpa.free(line);
@@ -909,7 +908,7 @@ test "the content merge takes blob.whitespace, and reads a file 66 directories d
     try testgit.requireGitVersion(gpa, io, 2, 40);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
-    const deep = "d/" ** 66 ++ "f";
+    const deep = testbytes.repeat("d/", 66) ++ "f";
     try repo.writeFile(io, deep, "a\nb\nc\n");
     try repo.writeFile(io, "w", "x y\n");
     try repo.exec(io, &.{ "add", "-A" });

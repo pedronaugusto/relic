@@ -34,7 +34,7 @@ const Corpus = struct {
         defer body.deinit(gpa);
         for (0..files) |f| {
             body.clearRetainingCapacity();
-            const hint = try std.fmt.allocPrint(gpa, "src/file{d}.txt", .{f});
+            const hint = try gpa.print("src/file{d}.txt", .{f});
             try c.hints.append(gpa, hint);
             for (0..versions) |v| {
                 for (0..20 + random.uintLessThan(usize, 40)) |line| {
@@ -190,7 +190,7 @@ test "the tasks allocate nothing, and a batch holds no more than its budget" {
         }
         for (0..32) |i| {
             var text: [32]u8 = undefined;
-            try entries.append(gpa, .{ .oid = try db.write(io, .blob, try std.fmt.bufPrint(&text, "small {d}\n", .{i})) });
+            try entries.append(gpa, .{ .oid = try db.write(io, .blob, try std.mem.print(&text, "small {d}\n", .{i})) });
         }
     }
 
@@ -581,7 +581,7 @@ test "a pack with several search groups is the same on 1, 2, 7 and 16 tasks, any
         try std.testing.expect(report.deltas > 0);
     }
     for (cases) |c| {
-        const want = serial[@intFromEnum(c.encoding)];
+        const want = serial[@backingInt(c.encoding)];
         const report = try corpus.write(gpa, c.io, .{ .threads = c.threads, .delta = c.encoding, .batch_bytes = c.budget });
         if (!report.name.eql(want.name)) {
             std.debug.print("{t}, {d} tasks, batch {d}: {d} deltas, {d} bytes; serial {d}, {d}\n", .{ c.encoding, c.threads, c.budget, report.deltas, report.pack_bytes, want.deltas, want.pack_bytes });
@@ -676,7 +676,7 @@ fn gitPacked(gpa: std.mem.Allocator, io: Io, depth: []const u8) !testgit.Repo {
     }
     gpa.free(try repo.runInput(io, &.{ "fast-import", "--quiet" }, script.items));
     var depth_arg: [32]u8 = undefined;
-    gpa.free(try repo.run(io, &.{ "repack", "-a", "-d", "-q", "-f", "--window=10", try std.fmt.bufPrint(&depth_arg, "--depth={s}", .{depth}) }));
+    gpa.free(try repo.run(io, &.{ "repack", "-a", "-d", "-q", "-f", "--window=10", try std.mem.print(&depth_arg, "--depth={s}", .{depth}) }));
     return repo;
 }
 
@@ -691,7 +691,7 @@ const Entries = struct {
         var p = try pack_mod.Pack.open(gpa, io, dir, base, .sha1, .{});
         defer p.deinit(io);
         var name: [128]u8 = undefined;
-        var e: Entries = .{ .bytes = try dir.readFileAlloc(io, try std.fmt.bufPrint(&name, "{s}.pack", .{base}), gpa, .unlimited) };
+        var e: Entries = .{ .bytes = try dir.readFileAlloc(io, try std.mem.print(&name, "{s}.pack", .{base}), gpa, .unlimited) };
         errdefer e.deinit(gpa);
         const At = struct { offset: u64, oid: Oid };
         var all: std.ArrayList(At) = .empty;
@@ -758,7 +758,7 @@ test "a repack writes what git's pack stores as git stored it, deltas included, 
     const serial = try repackInto(gpa, io, &repo, "out1", .{ .threads = 1 });
     for ([_]u16{ 2, 7, 16 }) |threads| {
         var name: [16]u8 = undefined;
-        const report = try repackInto(gpa, io, &repo, try std.fmt.bufPrint(&name, "out{d}", .{threads}), .{ .threads = threads });
+        const report = try repackInto(gpa, io, &repo, try std.mem.print(&name, "out{d}", .{threads}), .{ .threads = threads });
         try std.testing.expect(report.name.eql(serial.name));
     }
 
@@ -807,7 +807,7 @@ test "deltas a repack reuses keep their chains within the depth asked for" {
     defer repo.deinit();
     for ([_]u32{ 1, 3 }) |depth| {
         var name: [16]u8 = undefined;
-        const dir_name = try std.fmt.bufPrint(&name, "depth{d}", .{depth});
+        const dir_name = try std.mem.print(&name, "depth{d}", .{depth});
         const report = try repackInto(gpa, io, &repo, dir_name, .{ .depth = depth });
         try std.testing.expect(report.deltas > 0);
         var out_dir = try repo.dir.openDir(io, dir_name, .{ .iterate = true });
@@ -850,13 +850,13 @@ test "a stored delta whose bytes no longer match the pack index's CRC is refused
     } else return error.TestUnexpectedResult;
     theirs.bytes[at] ^= 0x10;
     var name: [128]u8 = undefined;
-    const pack_name = try std.fmt.bufPrint(&name, "{s}.pack", .{git_base});
+    const pack_name = try std.mem.print(&name, "{s}.pack", .{git_base});
     try git_pack_dir.deleteFile(io, pack_name);
     try git_pack_dir.writeFile(io, .{ .sub_path = pack_name, .data = theirs.bytes });
 
     for ([_]u16{ 1, 4 }) |threads| {
         var dir_name: [16]u8 = undefined;
-        try std.testing.expectError(error.CorruptPackEntry, repackInto(gpa, io, &repo, try std.fmt.bufPrint(&dir_name, "after{d}", .{threads}), .{ .threads = threads }));
+        try std.testing.expectError(error.CorruptPackEntry, repackInto(gpa, io, &repo, try std.mem.print(&dir_name, "after{d}", .{threads}), .{ .threads = threads }));
     }
 }
 

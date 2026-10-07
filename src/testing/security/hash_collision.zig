@@ -44,9 +44,9 @@ test "git 2.13.0 SHAttered, t5300-pack-object 'make sure index-pack detects the 
     // here, made as git's test makes it.
     var objects = try corrupt.dir.openDir(io, ".git/objects", .{});
     defer objects.close(io);
-    const a_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ a[0..2], a[2..] });
+    const a_path = try gpa.print("{s}/{s}", .{ a[0..2], a[2..] });
     defer gpa.free(a_path);
-    const b_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ b[0..2], b[2..] });
+    const b_path = try gpa.print("{s}/{s}", .{ b[0..2], b[2..] });
     defer gpa.free(b_path);
     try objects.createDirPath(io, b[0..2]);
     try objects.copyFile(a_path, objects, b_path, io, .{});
@@ -57,7 +57,7 @@ test "git 2.13.0 SHAttered, t5300-pack-object 'make sure index-pack detects the 
     try other.writeFile(io, "b", "the second file\n");
     const again = try other.line(io, &.{ "hash-object", "-w", "b" });
     defer gpa.free(again);
-    const input = try std.fmt.allocPrint(gpa, "{s}\n", .{again});
+    const input = try gpa.print("{s}\n", .{again});
     defer gpa.free(input);
     const pack = try other.runInput(io, &.{ "pack-objects", "--stdout" }, input);
     defer gpa.free(pack);

@@ -15,14 +15,14 @@ pub fn recent(text: []const u8) bool {
 
 fn check(a: std.mem.Allocator, text: []const u8) !void {
     for ([_][]const u8{
-        try std.fmt.allocPrint(a, "ARG GIT_VERSION={s}\n", .{git_version}),
-        try std.fmt.allocPrint(a, "ARG GIT_SHA256={s}\n", .{git_sha256}),
-    }) |expected| if (std.mem.indexOf(u8, text, expected) == null) return error.ImageGitPinDiffers;
+        try a.print("ARG GIT_VERSION={s}\n", .{git_version}),
+        try a.print("ARG GIT_SHA256={s}\n", .{git_sha256}),
+    }) |expected| if (std.mem.find(u8, text, expected) == null) return error.ImageGitPinDiffers;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var builds: usize = 0;
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "make -C ") == null or std.mem.indexOf(u8, line, "prefix=/opt/git") == null) continue;
-        for (make_flags) |flag| if (std.mem.indexOf(u8, line, flag) == null) return error.ImageGitFlagDiffers;
+        if (std.mem.find(u8, line, "make -C ") == null or std.mem.find(u8, line, "prefix=/opt/git") == null) continue;
+        for (make_flags) |flag| if (std.mem.find(u8, line, flag) == null) return error.ImageGitFlagDiffers;
         builds += 1;
     }
     if (builds != 2) return error.ImageGitBuildMissing;
@@ -56,6 +56,6 @@ test "an image missing a release pin or make flag fails" {
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expectError(error.ImageGitPinDiffers, check(a, "ARG GIT_VERSION=2.39.0\n"));
-    const pins = try std.fmt.allocPrint(a, "ARG GIT_VERSION={s}\nARG GIT_SHA256={s}\nmake -C /tmp/git NO_TCLTK=1 NO_GETTEXT=1 prefix=/opt/git all\n", .{ git_version, git_sha256 });
+    const pins = try a.print("ARG GIT_VERSION={s}\nARG GIT_SHA256={s}\nmake -C /tmp/git NO_TCLTK=1 NO_GETTEXT=1 prefix=/opt/git all\n", .{ git_version, git_sha256 });
     try std.testing.expectError(error.ImageGitFlagDiffers, check(a, pins));
 }

@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
     const options = try Options.parse(gpa, args);
-    const repo_path = try std.fs.path.join(gpa, &.{ options.root, std.mem.trimStart(u8, options.path, "/") });
+    const repo_path = try std.Io.Dir.path.join(gpa, &.{ options.root, std.mem.trimStart(u8, options.path, "/") });
     var repo = try Io.Dir.cwd().createDirPathOpen(io, repo_path, .{});
     defer repo.close(io);
 
@@ -152,9 +152,9 @@ const Session = struct {
             else
                 (if (have) "download" else "noop");
             if (std.mem.eql(u8, action, "noop")) {
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} noop", .{ oid, size }));
+                try lines.append(gpa, try gpa.print("{s} {s} noop", .{ oid, size }));
             } else {
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} {s} id={s} token=tok-{s} expires-in=3600", .{ oid, size, action, oid[0..@min(oid.len, 8)], oid[0..@min(oid.len, 8)] }));
+                try lines.append(gpa, try gpa.print("{s} {s} {s} id={s} token=tok-{s} expires-in=3600", .{ oid, size, action, oid[0..@min(oid.len, 8)], oid[0..@min(oid.len, 8)] }));
             }
         }
         try status(s.w, 200, &.{"hash-algo=sha256"}, lines.items);
@@ -184,11 +184,11 @@ const Session = struct {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         var hex: [64]u8 = undefined;
-        _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
+        _ = try std.mem.print(&hex, "{x}", .{&digest});
         comptime std.debug.assert(std.crypto.hash.sha2.Sha256.digest_length * 2 == 64);
         if (!std.mem.eql(u8, &hex, oid)) return status(s.w, 400, &.{}, &.{"the data is not the object"});
         const path = try objectPath(s.gpa, oid);
-        try s.repo.createDirPath(s.io, std.fs.path.dirname(path).?);
+        try s.repo.createDirPath(s.io, std.Io.Dir.path.dirname(path).?);
         try s.repo.writeFile(s.io, .{ .sub_path = path, .data = bytes });
         try status(s.w, 200, &.{}, null);
     }
@@ -201,7 +201,7 @@ const Session = struct {
         for (locks.items) |l| {
             if (std.mem.eql(u8, l.path, path)) return status(s.w, 409, try lockArgs(gpa, l), &.{"already locked"});
         }
-        const l: Lock = .{ .id = try std.fmt.allocPrint(gpa, "{d}", .{nextId(locks.items)}), .path = path, .owner = s.user };
+        const l: Lock = .{ .id = try gpa.print("{d}", .{nextId(locks.items)}), .path = path, .owner = s.user };
         for (locks.items) |held| std.debug.assert(!std.mem.eql(u8, held.id, l.id));
         try locks.append(gpa, l);
         try writeLocks(gpa, s.io, s.repo, locks.items);
@@ -229,14 +229,14 @@ const Session = struct {
                 break;
             }
             shown += 1;
-            try lines.append(gpa, try std.fmt.allocPrint(gpa, "lock {s}", .{l.id}));
-            try lines.append(gpa, try std.fmt.allocPrint(gpa, "path {s} {s}", .{ l.id, l.path }));
-            try lines.append(gpa, try std.fmt.allocPrint(gpa, "locked-at {s} {s}", .{ l.id, locked_at }));
-            try lines.append(gpa, try std.fmt.allocPrint(gpa, "ownername {s} {s}", .{ l.id, l.owner }));
-            try lines.append(gpa, try std.fmt.allocPrint(gpa, "owner {s} {s}", .{ l.id, if (std.mem.eql(u8, l.owner, s.user)) "ours" else "theirs" }));
+            try lines.append(gpa, try gpa.print("lock {s}", .{l.id}));
+            try lines.append(gpa, try gpa.print("path {s} {s}", .{ l.id, l.path }));
+            try lines.append(gpa, try gpa.print("locked-at {s} {s}", .{ l.id, locked_at }));
+            try lines.append(gpa, try gpa.print("ownername {s} {s}", .{ l.id, l.owner }));
+            try lines.append(gpa, try gpa.print("owner {s} {s}", .{ l.id, if (std.mem.eql(u8, l.owner, s.user)) "ours" else "theirs" }));
         }
         var out_args: std.ArrayList([]const u8) = .empty;
-        if (next) |n| try out_args.append(gpa, try std.fmt.allocPrint(gpa, "next-cursor={d}", .{n}));
+        if (next) |n| try out_args.append(gpa, try gpa.print("next-cursor={d}", .{n}));
         try status(s.w, 200, out_args.items, lines.items);
     }
 
@@ -340,7 +340,7 @@ fn authorised(req: Request, oid: []const u8) !bool {
 
 fn objectPath(gpa: Allocator, oid: []const u8) ![]const u8 {
     if (oid.len != 64) return error.BadOid;
-    const path = try std.fmt.allocPrint(gpa, "lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], oid });
+    const path = try gpa.print("lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], oid });
     std.debug.assert(path.len == "lfs/objects/".len + "xx/xx/".len + oid.len);
     return path;
 }
@@ -392,10 +392,10 @@ fn nextId(locks: []const Lock) usize {
 
 fn lockArgs(gpa: Allocator, l: Lock) ![]const []const u8 {
     const out = try gpa.alloc([]const u8, 4);
-    out[0] = try std.fmt.allocPrint(gpa, "id={s}", .{l.id});
-    out[1] = try std.fmt.allocPrint(gpa, "path={s}", .{l.path});
+    out[0] = try gpa.print("id={s}", .{l.id});
+    out[1] = try gpa.print("path={s}", .{l.path});
     out[2] = "locked-at=" ++ locked_at;
-    out[3] = try std.fmt.allocPrint(gpa, "ownername={s}", .{l.owner});
+    out[3] = try gpa.print("ownername={s}", .{l.owner});
     return out;
 }
 
@@ -403,7 +403,7 @@ fn writeLog(io: Io, dir_path: []const u8, text: []const u8) void {
     var raw: [8]u8 = undefined;
     io.random(&raw);
     var name_buf: [64]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "{x}.log", .{&raw}) catch return;
+    const name = std.mem.print(&name_buf, "{x}.log", .{&raw}) catch return;
     var dir = Io.Dir.cwd().openDir(io, dir_path, .{}) catch return;
     defer dir.close(io);
     // ziglint-ignore: Z026 a helper exits with its own status; a test that reads this log fails on its absence

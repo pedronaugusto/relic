@@ -20,6 +20,7 @@ pub const inflate = @import("odb/inflate.zig");
 pub const midx = @import("odb/midx.zig");
 
 const std = @import("std");
+const allocation = @import("testing/allocation.zig");
 const crc32 = @import("crc32.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -563,7 +564,7 @@ pub const Odb = struct {
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
         // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
-        return std.fmt.bufPrint(buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+        return std.mem.print(buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
     }
 
     /// An object's type and bytes. The bytes are the caller's.
@@ -1063,7 +1064,7 @@ pub const Odb = struct {
         const temp = tempObjectName(io, &name_buf, text[0..2]);
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
         // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
-        const final = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+        const final = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
 
         const shared = odb.backendData().options.shared;
         var file = source.dir.createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions }) catch |err| switch (err) {
@@ -1099,7 +1100,7 @@ pub const Odb = struct {
         compress.* = try flate.Compress.init(&file_writer.interface, odb.backendData().deflate_window, .zlib, .level_1);
         var header_buf: [64]u8 = undefined;
         // unreachable: a type name is at most six bytes and a usize at most twenty digits
-        const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
+        const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
         try compress.writer.writeAll(header);
         try compress.writer.writeAll(bytes);
         try compress.writer.flush();
@@ -1131,7 +1132,7 @@ pub const Odb = struct {
 
     /// What git creates a loose object with: read-only to everyone, less
     /// the umask.
-    const object_permissions: Io.File.Permissions = if (Io.File.Permissions.has_executable_bit) @enumFromInt(@as(std.posix.mode_t, 0o444)) else .default_file;
+    const object_permissions: Io.File.Permissions = if (Io.File.Permissions.has_executable_bit) @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o444))) else .default_file;
 
     /// What `core.sharedRepository` asks of the permissions of what this
     /// database writes.
@@ -1147,7 +1148,7 @@ pub const Odb = struct {
         var raw: [12]u8 = undefined;
         io.random(&raw);
         // unreachable: two digits, nine bytes and twenty-four hex digits fit
-        return std.fmt.bufPrint(buf, "{s}/tmp_obj_{x}", .{ fan_out, &raw }) catch unreachable;
+        return std.mem.print(buf, "{s}/tmp_obj_{x}", .{ fan_out, &raw }) catch unreachable;
     }
 
     /// The deflate state, allocated on the first object this database writes.
@@ -1215,7 +1216,7 @@ pub const Odb = struct {
         out.hasher.updateHeader(t.name(), size);
         var header_buf: [64]u8 = undefined;
         // unreachable: a type name is at most six bytes and a u64 at most twenty digits
-        const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), size }) catch unreachable;
+        const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), size }) catch unreachable;
         try out.compress.writer.writeAll(header);
     }
 
@@ -1527,10 +1528,10 @@ pub const Odb = struct {
                 // `.pack` does not fit.
                 var path_buf: [512]u8 = undefined;
                 // unreachable: the pack opened, so its `.pack` name fits 512 bytes
-                const pack_path = std.fmt.bufPrint(&path_buf, "{s}.pack", .{named.name}) catch unreachable;
+                const pack_path = std.mem.print(&path_buf, "{s}.pack", .{named.name}) catch unreachable;
                 try durability.syncPath(io, source.pack_dir.?, pack_path);
                 // unreachable: `.idx` is shorter than `.pack`, which fits
-                const idx_path = std.fmt.bufPrint(&path_buf, "{s}.idx", .{named.name}) catch unreachable;
+                const idx_path = std.mem.print(&path_buf, "{s}.idx", .{named.name}) catch unreachable;
                 try durability.syncPath(io, source.pack_dir.?, idx_path);
             } else {
                 var path_buf: [hash.max_hex_len + 2]u8 = undefined;
@@ -1542,7 +1543,7 @@ pub const Odb = struct {
         for (fanouts, 0..) |used, byte| if (used) {
             var path: [2]u8 = undefined;
             // unreachable: a byte is two hex digits
-            _ = std.fmt.bufPrint(&path, "{x:0>2}", .{byte}) catch unreachable;
+            _ = std.mem.print(&path, "{x:0>2}", .{byte}) catch unreachable;
             try durability.syncDirectory(io, source.dir, &path);
         };
         if (packs.count() != 0) try durability.syncDirectory(io, source.dir, "pack");
@@ -1966,7 +1967,7 @@ pub const Odb = struct {
                 const path = if (node.path.len == 0)
                     try arena.dupe(u8, entry.name)
                 else
-                    try std.fmt.allocPrint(arena, "{s}/{s}", .{ node.path, entry.name });
+                    try arena.print("{s}/{s}", .{ node.path, entry.name });
                 switch (entry.mode) {
                     .tree => try trees.append(odb.backendData().gpa, .{ .oid = entry.oid, .path = path }),
                     // A gitlink names a commit in another repository, which
@@ -2323,7 +2324,7 @@ pub const Odb = struct {
         var hex: [hash.max_hex_len]u8 = undefined;
         var base_buf: [hash.max_hex_len + 8]u8 = undefined;
         // unreachable: a hex name is at most max_hex_len digits, the prefix five bytes
-        const base = std.fmt.bufPrint(&base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable;
+        const base = std.mem.print(&base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable;
         const opened = odb.findPackByName(base) orelse return report;
 
         if (options.remove_loose) {
@@ -2380,7 +2381,7 @@ pub const Odb = struct {
                 var name_buf: [128]u8 = undefined;
                 var removed = false;
                 for ([_][]const u8{ ".idx", ".pack", ".rev", ".bitmap" }) |extension| {
-                    const name = std.fmt.bufPrint(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
+                    const name = std.mem.print(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
                     if (pack_dir.deleteFile(io, name)) {
                         if (std.mem.eql(u8, extension, ".pack")) removed = true;
                     } else |_| {}
@@ -2581,7 +2582,7 @@ pub const ObjectStream = struct {
         }
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
         // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
-        const final_path = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+        const final_path = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
         fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
             // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
             s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
@@ -3807,8 +3808,8 @@ fn nameHash(name: []const u8) u32 {
 /// files with the same ending next to each other, and the largest first, so
 /// that what follows is a delta against something at least as big.
 fn beforeInPackOrder(_: void, a: Ordered, b: Ordered) bool {
-    const at = @intFromEnum(a.type);
-    const bt = @intFromEnum(b.type);
+    const at = @backingInt(a.type);
+    const bt = @backingInt(b.type);
     if (at != bt) return at > bt;
     if (a.name_hash != b.name_hash) return a.name_hash > b.name_hash;
     if (a.size != b.size) return a.size > b.size;
@@ -3911,7 +3912,7 @@ test "a loose object written is a loose object read" {
 
     try std.testing.expectError(
         error.ObjectNotFound,
-        odb.read(io, try Oid.parse(.sha1, "1" ** 40)),
+        odb.read(io, try Oid.parse(.sha1, &@as([40]u8, @splat('1')))),
     );
 }
 
@@ -4039,8 +4040,8 @@ test "git reads an alternate relic wrote and relic reads one git wrote" {
     try std.testing.expect(!try db.exists(io, oid));
     borrower.report_failures = false;
     try std.testing.expectError(error.GitFailed, borrower.run(io, &.{ "cat-file", "-e", std.mem.trim(u8, oid_text, "\r\n") }));
-    if (builtin.os.tag != .windows) {
-        const quoted_line = try std.fmt.allocPrint(gpa, "\"{s}\"\n", .{source_objects});
+    if (builtin.target.os.tag != .windows) {
+        const quoted_line = try gpa.print("\"{s}\"\n", .{source_objects});
         defer gpa.free(quoted_line);
         try borrower.dir.writeFile(io, .{ .sub_path = ".git/objects/info/alternates", .data = quoted_line });
         const quoted_from_git = try borrower.run(io, &.{ "cat-file", "-p", std.mem.trim(u8, oid_text, "\r\n") });
@@ -4054,7 +4055,7 @@ test "git reads an alternate relic wrote and relic reads one git wrote" {
     defer gpa.free(source_root);
     const clone_root = try borrower.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(clone_root);
-    const clone_path = try std.fs.path.join(gpa, &.{ clone_root, "shared" });
+    const clone_path = try std.Io.Dir.path.join(gpa, &.{ clone_root, "shared" });
     defer gpa.free(clone_path);
     try source.exec(io, &.{ "clone", "-q", "--shared", source_root, clone_path });
     const clone_git_dir = try borrower.dir.openDir(io, "shared/.git", .{});
@@ -4082,7 +4083,7 @@ test "alternates are read as git reads them: each once, never the database's own
             repos[made].deinit();
             return err;
         };
-        const content = try std.fmt.allocPrint(gpa, "level {d}\n", .{made});
+        const content = try gpa.print("level {d}\n", .{made});
         defer gpa.free(content);
         try repos[made].writeFile(io, "blob", content);
         const out = try repos[made].run(io, &.{ "hash-object", "-w", "blob" });
@@ -4140,9 +4141,9 @@ test "a pack and an index that are not a pair are refused, as git refuses them" 
     // Each index beside the other's pack.
     for (bases.items, 0..) |base, i| {
         const other = bases.items[1 - i];
-        const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{other});
+        const pack_name = try gpa.print("{s}.pack", .{other});
         defer gpa.free(pack_name);
-        const idx_name = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+        const idx_name = try gpa.print("{s}.idx", .{base});
         defer gpa.free(idx_name);
         try pack_dir.copyFile(pack_name, pack_dir, "mixed.pack", io, .{});
         defer pack_dir.deleteFile(io, "mixed.pack") catch {};
@@ -4158,7 +4159,7 @@ test "an index offset past its pack is refused by verify, not read as another en
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..4) |i| {
-        const content = try std.fmt.allocPrint(gpa, "file {d}\n", .{i});
+        const content = try gpa.print("file {d}\n", .{i});
         defer gpa.free(content);
         try repo.writeFile(io, "f", content);
         try repo.exec(io, &.{ "add", "f" });
@@ -4173,9 +4174,9 @@ test "an index offset past its pack is refused by verify, not read as another en
     while (try it.next(io)) |entry| if (std.mem.endsWith(u8, entry.name, ".idx")) {
         base = try gpa.dupe(u8, entry.name[0 .. entry.name.len - 4]);
     };
-    const idx_name = try std.fmt.allocPrint(gpa, "{s}.idx", .{base.?});
+    const idx_name = try gpa.print("{s}.idx", .{base.?});
     defer gpa.free(idx_name);
-    const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{base.?});
+    const pack_name = try gpa.print("{s}.pack", .{base.?});
     defer gpa.free(pack_name);
     var index = try pack.Index.open(gpa, io, pack_dir, idx_name, .sha1, 1 << 20);
     defer index.deinit();
@@ -4211,7 +4212,7 @@ test "bytes after a loose object's stream are refused, as git refuses them" {
     const out = try repo.run(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(out);
     const hex = out[0..40];
-    const path = try std.fmt.allocPrint(gpa, ".git/objects/{s}/{s}", .{ hex[0..2], hex[2..] });
+    const path = try gpa.print(".git/objects/{s}/{s}", .{ hex[0..2], hex[2..] });
     defer gpa.free(path);
     const stored = try repo.readFile(io, path);
     defer gpa.free(stored);
@@ -4338,7 +4339,7 @@ test "loose inflate preserves allocation resource failures" {
             try std.testing.expectEqualStrings("blob 6\x00hello\n", bytes);
         }
     };
-    try std.testing.checkAllAllocationFailures(gpa, Check.run, .{ &odb, file });
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{ &odb, file });
 }
 
 test "loose inflate distinguishes policy resource failures from corruption" {
@@ -4448,7 +4449,7 @@ test "packed source registration owns its files and names when allocation stops"
             try std.testing.expectEqual(@as(usize, 1), db.packCount());
         }
     };
-    try std.testing.checkAllAllocationFailures(gpa, Case.run, .{dir});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Case.run, .{dir});
 }
 
 test "openAt borrows its directory on success and every allocation failure" {
@@ -4480,7 +4481,7 @@ test "openAt borrows its directory on success and every allocation failure" {
             try tmp.dir.access(base, "pack", .{});
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }
 
 test "selected object durability names a foreign object format" {
@@ -4711,6 +4712,6 @@ test "an object read into a kept buffer is the object read, and borrows the buff
     try std.testing.expectEqual(before_ptr, again.bytes.ptr);
 
     // A miss is the miss `read` gives, and leaves the buffer the caller's.
-    try std.testing.expectError(error.ObjectNotFound, odb.readInto(io, try Oid.parse(.sha1, "1" ** 40), &buffer));
+    try std.testing.expectError(error.ObjectNotFound, odb.readInto(io, try Oid.parse(.sha1, &@as([40]u8, @splat('1'))), &buffer));
     _ = try odb.readInto(io, names.items[0], &buffer);
 }

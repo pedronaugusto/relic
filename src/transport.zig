@@ -160,7 +160,7 @@ fn checkCredentialsInUrl(gpa: Allocator, text: []const u8, parsed: url.Url, opti
     if (std.mem.eql(u8, value, "allow")) return;
     if (!std.mem.eql(u8, value, "warn")) return error.CredentialsInUrl;
     const at = @intFromPtr(password.ptr) - @intFromPtr(text.ptr); // safe: `Url.parse` sliced `password` out of `text`
-    const redacted = try std.fmt.allocPrint(gpa, "{s}<redacted>{s}", .{ text[0..at], text[at + password.len ..] });
+    const redacted = try gpa.print("{s}<redacted>{s}", .{ text[0..at], text[at + password.len ..] });
     defer gpa.free(redacted);
     try warning.note(options.warnings, .{ .credentials_in_url = redacted });
 }
@@ -362,7 +362,7 @@ pub const Session = struct {
     ) Error!?Session {
         const vcs: ?[]const u8 = if (options.remote_name) |name| if (options.config) |c| blk: {
             var key_buf: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "remote.{s}.vcs", .{name}) catch break :blk null;
+            const key = std.mem.print(&key_buf, "remote.{s}.vcs", .{name}) catch break :blk null;
             break :blk c.get(key);
         } else null else null;
         const spec = remotehelper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;

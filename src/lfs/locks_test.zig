@@ -185,7 +185,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
 
 test "lockable files are read-only unless the person holds the lock, with git-lfs's bits" {
     // Windows has no POSIX write bits for git-lfs's lockable-file mode check.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var pair = try Pair.init(gpa, io);
@@ -234,7 +234,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
 
 test "a lock's file is the one asked about, and a path the server answers with outside the tree is never touched" {
     // Windows has no POSIX write bits for git-lfs's lockable-file mode check.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var pair = try Pair.init(gpa, io);
@@ -291,7 +291,7 @@ test "a server with no locking API is named" {
 
 test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     // The final assertions compare POSIX write bits that Windows does not preserve.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const hooks = @import("../repo/hooks.zig");
@@ -310,7 +310,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
         defer gpa.free(text);
         try testing.expect(hooks.isGitLfsHook(event, text));
         var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, ".git/hooks/{s}", .{event});
+        const path = try std.mem.print(&path_buf, ".git/hooks/{s}", .{event});
         try pair.ours.writeFile(io, .{ .sub_path = path, .data = text });
         const file = try pair.ours.openFile(io, path, .{});
         defer file.close(io);

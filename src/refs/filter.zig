@@ -1439,11 +1439,11 @@ pub const Listing = struct {
         switch (atom.kind) {
             .refname => {
                 const name = if (item.kind == .detached_head) try l.headDescription() else try l.showRef(atom.refname, item.name);
-                return .{ .s = if (atom.deref) try std.fmt.allocPrint(ar, "{s}^{{}}", .{name}) else name };
+                return .{ .s = if (atom.deref) try ar.print("{s}^{{}}", .{name}) else name };
             },
             .symref => {
                 const name = if (item.symref) |t| try l.showRef(atom.refname, t) else "";
-                return .{ .s = if (atom.deref) try std.fmt.allocPrint(ar, "{s}^{{}}", .{name}) else name };
+                return .{ .s = if (atom.deref) try ar.print("{s}^{{}}", .{name}) else name };
             },
             .worktreepath => return .{ .s = if (item.kind == .branch) try l.worktreePath(item.name) else "" },
             .upstream => {
@@ -1477,13 +1477,13 @@ pub const Listing = struct {
                 if (counts.len == 0) return .{};
                 const n = l.ordinal(atom, .@"ahead-behind");
                 const pair = counts[n].?;
-                return .{ .s = try std.fmt.allocPrint(ar, "{d} {d}", .{ pair[0], pair[1] }) };
+                return .{ .s = try ar.print("{d} {d}", .{ pair[0], pair[1] }) };
             },
             .@"is-base" => {
                 if (item.is_base == null) try l.prepare();
                 const n = l.ordinal(atom, .@"is-base");
                 const name = item.is_base.?[n] orelse return .{};
-                return .{ .s = try std.fmt.allocPrint(ar, "({s})", .{name}) };
+                return .{ .s = try ar.print("({s})", .{name}) };
             },
             .objectname => if (!atom.deref) return .{ .s = try l.showOid(atom.oid, item.oid) },
             else => {},
@@ -1554,7 +1554,7 @@ pub const Listing = struct {
             .objecttype => return .{ .s = data.type.name() },
             .objectsize => {
                 const n: u64 = if (atom.size_disk) (try l.repo.odb.placement(l.io, data.oid)).disk_size else data.bytes.len;
-                return .{ .s = try std.fmt.allocPrint(ar, "{d}", .{n}), .num = n };
+                return .{ .s = try ar.print("{d}", .{n}), .num = n };
             },
             .deltabase => {
                 // git asks for the object's content when any atom reads it,
@@ -1569,7 +1569,7 @@ pub const Listing = struct {
             },
             .objectname => return .{ .s = try l.showOid(atom.oid, data.oid) },
             .raw => {
-                if (atom.raw_length) return .{ .s = try std.fmt.allocPrint(ar, "{d}", .{data.bytes.len}), .num = data.bytes.len };
+                if (atom.raw_length) return .{ .s = try ar.print("{d}", .{data.bytes.len}), .num = data.bytes.len };
                 return .{ .s = data.bytes, .sized = true };
             },
             else => {},
@@ -1598,7 +1598,7 @@ pub const Listing = struct {
                         try text.appendSlice(ar, try l.showOid(atom.oid, oid));
                         count += 1;
                     }
-                    if (atom.kind == .numparent) return .{ .s = try std.fmt.allocPrint(ar, "{d}", .{count}), .num = count };
+                    if (atom.kind == .numparent) return .{ .s = try ar.print("{d}", .{count}), .num = count };
                     return .{ .s = text.items };
                 },
                 .author, .authorname, .authoremail, .authordate => return l.person(atom, buf, "author"),
@@ -1816,7 +1816,7 @@ pub const Listing = struct {
                 return .{ .s = out.items };
             },
             .body_dep => return .{ .s = pos.body },
-            .length => return .{ .s = try std.fmt.allocPrint(ar, "{d}", .{pos.from_sub.len}), .num = pos.from_sub.len },
+            .length => return .{ .s = try ar.print("{d}", .{pos.from_sub.len}), .num = pos.from_sub.len },
             .body => return .{ .s = pos.body[0..pos.nonsig_len] },
             .sig => return .{ .s = pos.sig },
             .lines => {
@@ -1916,7 +1916,7 @@ pub const Listing = struct {
             defer listing.deinit();
             for (listing.entries) |entry| {
                 const branch = entry.branch orelse continue;
-                const full = if (std.mem.startsWith(u8, branch, "refs/")) try l.a().dupe(u8, branch) else try std.fmt.allocPrint(l.a(), "refs/heads/{s}", .{branch});
+                const full = if (std.mem.startsWith(u8, branch, "refs/")) try l.a().dupe(u8, branch) else try l.a().print("refs/heads/{s}", .{branch});
                 try map.put(l.a(), full, try normalizePath(l.a(), entry.path));
             }
             l.worktree_map = map;
@@ -2012,7 +2012,7 @@ pub const Listing = struct {
         const config = l.repo.configuration();
         var branch = try remote_mod.Branch.get(l.gpa, config, short);
         defer branch.deinit();
-        const full = try std.fmt.allocPrint(l.a(), "refs/heads/{s}", .{short});
+        const full = try l.a().print("refs/heads/{s}", .{short});
         const remote_name = l.pushRemoteName(&branch).name;
         var remote = try remote_mod.Remote.get(l.gpa, config, remote_name);
         defer remote.deinit();
@@ -2054,11 +2054,11 @@ pub const Listing = struct {
                 }
                 const text: []const u8 = if (counts) |c| blk: {
                     if (c[0] == 0 and c[1] == 0) break :blk "";
-                    if (c[0] == 0) break :blk try std.fmt.allocPrint(ar, "behind {d}", .{c[1]});
-                    if (c[1] == 0) break :blk try std.fmt.allocPrint(ar, "ahead {d}", .{c[0]});
-                    break :blk try std.fmt.allocPrint(ar, "ahead {d}, behind {d}", .{ c[0], c[1] });
+                    if (c[0] == 0) break :blk try ar.print("behind {d}", .{c[1]});
+                    if (c[1] == 0) break :blk try ar.print("ahead {d}", .{c[0]});
+                    break :blk try ar.print("ahead {d}, behind {d}", .{ c[0], c[1] });
                 } else "gone";
-                if (!atom.nobracket and text.len != 0) return std.fmt.allocPrint(ar, "[{s}]", .{text});
+                if (!atom.nobracket and text.len != 0) return ar.print("[{s}]", .{text});
                 return text;
             },
             .remotename => {
@@ -2078,7 +2078,7 @@ pub const Listing = struct {
                 var remote = try remote_mod.Remote.get(l.gpa, l.repo.configuration(), l.pushRemoteName(&branch).name);
                 defer remote.deinit();
                 if (remote.push.len == 0) return "";
-                const full = try std.fmt.allocPrint(ar, "refs/heads/{s}", .{short});
+                const full = try ar.print("refs/heads/{s}", .{short});
                 return (try applyRefspecs(ar, remote.push, full)) orelse "";
             },
         }
@@ -2091,7 +2091,7 @@ pub const Listing = struct {
         const theirs_ref = (l.repo.refStore().resolve(l.gpa, l.io, base) catch return null) orelse return null;
         defer l.gpa.free(theirs_ref.name);
         const theirs = (try l.peelToCommit(theirs_ref.oid)) orelse return null;
-        const full = try std.fmt.allocPrint(l.a(), "refs/heads/{s}", .{short});
+        const full = try l.a().print("refs/heads/{s}", .{short});
         const ours_ref = (l.repo.refStore().resolve(l.gpa, l.io, full) catch return null) orelse return null;
         defer l.gpa.free(ours_ref.name);
         const ours = (try l.peelToCommit(ours_ref.oid)) orelse return null;
@@ -2123,15 +2123,15 @@ pub const Listing = struct {
         const detached = try l.detachedFrom();
         if (rebasing) {
             if (branch) |b| {
-                text = try std.fmt.allocPrint(ar, "(no branch, rebasing {s})", .{b});
+                text = try ar.print("(no branch, rebasing {s})", .{b});
             } else {
-                text = try std.fmt.allocPrint(ar, "(no branch, rebasing detached HEAD {s})", .{if (detached) |d| d.from else "(null)"});
+                text = try ar.print("(no branch, rebasing detached HEAD {s})", .{if (detached) |d| d.from else "(null)"});
             }
         } else if (exists(io, dir, "BISECT_LOG")) {
             const from = try l.stateBranch("BISECT_START");
-            text = try std.fmt.allocPrint(ar, "(no branch, bisect started on {s})", .{from orelse "(null)"});
+            text = try ar.print("(no branch, bisect started on {s})", .{from orelse "(null)"});
         } else if (detached) |d| {
-            text = try std.fmt.allocPrint(ar, "(HEAD detached {s} {s})", .{ if (d.at) "at" else "from", d.from });
+            text = try ar.print("(HEAD detached {s} {s})", .{ if (d.at) "at" else "from", d.from });
         }
         l.head_description = text;
         return text;
@@ -2288,7 +2288,7 @@ fn exists(io: Io, dir: Io.Dir, path: []const u8) bool {
 
 fn normalizePath(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
     const copy = try gpa.dupe(u8, path);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, copy, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, copy, '\\', '/');
     return copy;
 }
 
@@ -2703,7 +2703,7 @@ pub const for_each_ref_format = "%(objectname) %(objecttype)\t%(refname)";
 /// shows that many lines of each message.
 pub fn tagFormat(gpa: Allocator, lines: u32) Allocator.Error![]u8 {
     if (lines == 0) return gpa.dupe(u8, "%(refname:lstrip=2)");
-    return std.fmt.allocPrint(gpa, "%(align:15)%(refname:lstrip=2)%(end) %(contents:lines={d})", .{lines});
+    return gpa.print("%(align:15)%(refname:lstrip=2)%(end) %(contents:lines={d})", .{lines});
 }
 
 /// What `git branch` shows: `verbose` 0, 1 (`-v`) or 2 (`-vv`), `abbrev`
@@ -2742,7 +2742,7 @@ pub fn branchFormat(gpa: Allocator, l: *Listing, options: BranchOptions) Error![
             maxwidth = @max(maxwidth, w);
         }
         const obname = if (options.abbrev) |n|
-            (if (n == 0) try gpa.dupe(u8, "%(objectname)") else try std.fmt.allocPrint(gpa, "%(objectname:short={d})", .{n}))
+            (if (n == 0) try gpa.dupe(u8, "%(objectname)") else try gpa.print("%(objectname:short={d})", .{n}))
         else
             try gpa.dupe(u8, "%(objectname:short)");
         defer gpa.free(obname);
@@ -2758,7 +2758,7 @@ pub fn branchFormat(gpa: Allocator, l: *Listing, options: BranchOptions) Error![
         try local.appendSlice(gpa, "%(refname:lstrip=2)%(if)%(symref)%(then) -> %(symref:short)%(end)");
         try remote.print(gpa, "{s}%(refname:lstrip=2)%(if)%(symref)%(then) -> %(symref:short)%(end)", .{quoted_prefix.items});
     }
-    return std.fmt.allocPrint(gpa, "%(if:notequals=refs/remotes)%(refname:rstrip=-2)%(then){s}%(else){s}%(end)", .{ local.items, remote.items });
+    return gpa.print("%(if:notequals=refs/remotes)%(refname:rstrip=-2)%(then){s}%(else){s}%(end)", .{ local.items, remote.items });
 }
 
 /// Filter, sort and write as `git for-each-ref` does.

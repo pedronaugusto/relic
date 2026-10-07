@@ -224,7 +224,7 @@ fn lessThan(_: void, x: []const u8, y: []const u8) bool {
 const State = enum(u2) { none, recurse, excluded, untracked };
 
 fn max(x: State, y: State) State {
-    return if (@intFromEnum(y) > @intFromEnum(x)) y else x;
+    return if (@backingInt(y) > @backingInt(x)) y else x;
 }
 
 const Treated = struct { state: State, excluded: bool };
@@ -284,14 +284,14 @@ const Walk = struct {
             const path = if (base.len == 0)
                 try w.a.dupe(u8, item.name)
             else
-                try std.fmt.allocPrint(w.a, "{s}/{s}", .{ base, item.name });
+                try w.a.print("{s}/{s}", .{ base, item.name });
             const treated = try w.treatPath(path, item.name, item.kind, excluded);
             dir_state = max(dir_state, treated.state);
             if (treated.state == .recurse) {
                 dir_state = max(dir_state, try w.readDirectory(path, depth + 1, treated.excluded));
                 continue;
             }
-            const listed = if (item.kind == .directory) try std.fmt.allocPrint(w.a, "{s}/", .{path}) else path;
+            const listed = if (item.kind == .directory) try w.a.print("{s}/", .{path}) else path;
             try w.add(listed, treated.state);
         }
         return dir_state;
@@ -349,7 +349,7 @@ const Walk = struct {
         }
         var how: pathspec_mod.How = .none;
         if (w.spec) |spec| if (!excluded) {
-            const slashed = try std.fmt.allocPrint(w.a, "{s}/", .{path});
+            const slashed = try w.a.print("{s}/", .{path});
             how = spec.how(slashed, .{ .leading = true });
             if (how == .none) return .none;
         };
@@ -459,9 +459,9 @@ fn cwdUnder(a: Allocator, io: Io, wt: Io.Dir) ?[]const u8 {
     const cwd = std.process.currentPathAlloc(io, a) catch return null;
     const top = wt.realPathFileAlloc(io, ".", a) catch return null;
     if (std.mem.eql(u8, cwd, top)) return "";
-    if (cwd.len > top.len and std.mem.startsWith(u8, cwd, top) and std.fs.path.isSep(cwd[top.len])) {
+    if (cwd.len > top.len and std.mem.startsWith(u8, cwd, top) and std.Io.Dir.path.isSep(cwd[top.len])) {
         const rest = a.dupe(u8, cwd[top.len + 1 ..]) catch return null;
-        if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, rest, std.fs.path.sep, '/');
+        if (std.Io.Dir.path.sep != '/') std.mem.replaceScalar(u8, rest, std.Io.Dir.path.sep, '/');
         return rest;
     }
     return null;

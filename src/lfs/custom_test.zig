@@ -4,6 +4,8 @@
 //! and an agent that refuses to start.
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
+const testbytes = @import("../testing/bytes.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -16,7 +18,6 @@ const lfstransfer = @import("transfer.zig");
 const objectwalk = @import("../transport/objectwalk.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
-const build_options = @import("build_options");
 
 const Fixture = struct {
     gpa: Allocator,
@@ -31,7 +32,7 @@ const Fixture = struct {
         const root = try testremote.absolutePath(gpa, io, tmp.dir);
         errdefer gpa.free(root);
         for ([_][]const u8{ "home", "objects with space" }) |name| try tmp.dir.createDirPath(io, name);
-        const home = try std.fmt.allocPrint(gpa, "{s}/home", .{root});
+        const home = try gpa.print("{s}/home", .{root});
         defer gpa.free(home);
         var env = try testlfs.environ(gpa, home);
         errdefer env.deinit();
@@ -51,7 +52,7 @@ const Fixture = struct {
     }
 
     fn path(fx: *Fixture, name: []const u8) ![]u8 {
-        return std.fmt.allocPrint(fx.gpa, "{s}/{s}", .{ fx.root, name });
+        return fx.gpa.print("{s}/{s}", .{ fx.root, name });
     }
 
     /// A repository with two LFS files committed, `origin` a bare
@@ -71,24 +72,24 @@ const Fixture = struct {
             .{ "lfs.concurrenttransfers", "1" },
             .{ "lfs.standalonetransferagent", "agent" },
         }) |kv| try fx.git(d, &.{ "config", kv[0], kv[1] });
-        const agent = build_options.lfs_agent_path;
+        const agent = suite.path(.lfs_agent);
         try fx.git(d, &.{ "config", "lfs.customtransfer.agent.path", agent });
         const objects = try fx.path("objects with space");
         defer fx.gpa.free(objects);
         const log_dir = try fx.path(logs);
         defer fx.gpa.free(log_dir);
-        const args = try std.fmt.allocPrint(fx.gpa, "'{s}' '{s}'", .{ objects, log_dir });
+        const args = try fx.gpa.print("'{s}' '{s}'", .{ objects, log_dir });
         defer fx.gpa.free(args);
         try fx.git(d, &.{ "config", "lfs.customtransfer.agent.args", args });
         for (extra) |kv| try fx.git(d, &.{ "config", kv[0], kv[1] });
-        const bare = try std.fmt.allocPrint(fx.gpa, "{s}.git", .{name});
+        const bare = try fx.gpa.print("{s}.git", .{name});
         defer fx.gpa.free(bare);
         try fx.git(fx.tmp.dir, &.{ "init", "-q", "--bare", bare });
         const bare_path = try fx.path(bare);
         defer fx.gpa.free(bare_path);
         try fx.git(d, &.{ "remote", "add", "origin", bare_path });
         try d.writeFile(fx.io, .{ .sub_path = ".gitattributes", .data = "*.bin filter=lfs diff=lfs merge=lfs -text\n" });
-        try d.writeFile(fx.io, .{ .sub_path = "a.bin", .data = "the first object\n" ** 64 });
+        try d.writeFile(fx.io, .{ .sub_path = "a.bin", .data = testbytes.repeat("the first object\n", 64) });
         try d.writeFile(fx.io, .{ .sub_path = "b.bin", .data = "the second object\n" });
         try fx.git(d, &.{ "add", "-A" });
         try fx.git(d, &.{ "commit", "-q", "-m", "files" });
@@ -100,7 +101,7 @@ const Fixture = struct {
     fn sent(fx: *Fixture, logs: []const u8, repo_dir: Io.Dir) ![]u8 {
         const repo_path = try repo_dir.realPathFileAlloc(fx.io, ".", fx.gpa);
         defer fx.gpa.free(repo_path);
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, repo_path, '\\', '/');
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, repo_path, '\\', '/');
         var lines: std.ArrayList([]u8) = .empty;
         defer {
             for (lines.items) |l| fx.gpa.free(l);
@@ -125,7 +126,7 @@ const Fixture = struct {
                     if (value.* == .string) {
                         const path_text = try fx.gpa.dupe(u8, value.string);
                         defer fx.gpa.free(path_text);
-                        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path_text, '\\', '/');
+                        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path_text, '\\', '/');
                         normalized = try std.mem.replaceOwned(u8, fx.gpa, path_text, repo_path, "<repo>");
                         value.* = .{ .string = normalized.? };
                     }
@@ -208,7 +209,7 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
         defer gpa.free(objects);
         const log_dir = try fx.path(pair[1]);
         defer gpa.free(log_dir);
-        const args = try std.fmt.allocPrint(gpa, "'{s}' '{s}'", .{ objects, log_dir });
+        const args = try gpa.print("'{s}' '{s}'", .{ objects, log_dir });
         defer gpa.free(args);
         try fx.git(d, &.{ "config", "lfs.customtransfer.agent.args", args });
     }
@@ -227,7 +228,7 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
     defer repo.deinit(io);
     var store = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, null, .{});
     defer store.deinit();
-    const content = "the first object\n" ** 64;
+    const content = testbytes.repeat("the first object\n", 64);
     const pointer: lfs.Pointer = .{ .oid = testlfs.sha256Hex(content), .size = content.len };
     try testing.expect(try store.store.contains(io, &pointer));
 }
@@ -275,7 +276,7 @@ test "concurrent agents start as many as git-lfs starts, one when not concurrent
     defer gpa.free(objects);
     const log_dir = try fx.path("logs-refusing");
     defer gpa.free(log_dir);
-    const args = try std.fmt.allocPrint(gpa, "'{s}' '{s}' refuse-init", .{ objects, log_dir });
+    const args = try gpa.print("'{s}' '{s}' refuse-init", .{ objects, log_dir });
     defer gpa.free(args);
     try fx.git(refusing, &.{ "config", "lfs.customtransfer.agent.args", args });
     try testing.expectError(error.LfsAdapterInitFailed, relicUpload(&fx, refusing));

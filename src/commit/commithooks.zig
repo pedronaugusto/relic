@@ -44,11 +44,11 @@ pub const Hooks = struct {
     pub fn init(arena: Allocator, io: Io, repo: *Repository, runner: ?*hooks.Runner, verify: bool) Self.Error!Hooks {
         var h: Hooks = .{ .runner = runner, .verify = verify, .git_dir = ".git" };
         if (runner == null) return h;
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const git_path = try arena.dupe(u8, buf[0..try repo.git_dir.realPath(io, &buf)]);
         if (repo.work_dir) |wt| {
             const top = buf[0..try wt.realPath(io, &buf)];
-            const expected = try std.fs.path.join(arena, &.{ top, ".git" });
+            const expected = try std.Io.Dir.path.join(arena, &.{ top, ".git" });
             if (std.mem.eql(u8, expected, git_path)) return h;
         }
         h.git_dir = git_path;
@@ -57,9 +57,9 @@ pub const Hooks = struct {
 
     /// `git_path(name)`: a file of the git directory as a hook is handed it.
     pub fn path(h: *const Hooks, arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
-        const path_name = try std.fs.path.join(arena, &.{ h.git_dir, name });
+        const path_name = try std.Io.Dir.path.join(arena, &.{ h.git_dir, name });
         // Git hands hook scripts slash-separated paths on Windows too.
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path_name, '\\', '/');
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path_name, '\\', '/');
         return path_name;
     }
 

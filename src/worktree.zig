@@ -122,7 +122,7 @@ pub const Rules = struct {
     /// Whether symlinks can be created, from `core.symlinks`. When false a
     /// symlink is written as a file holding its target, which is what that
     /// setting means, and the outcome records it.
-    symlinks: bool = builtin.os.tag != .windows,
+    symlinks: bool = builtin.target.os.tag != .windows,
 };
 
 /// What `addAll` changed.
@@ -431,7 +431,7 @@ const Walker = struct {
             const path = if (dir_path.len == 0)
                 try w.gpa.dupe(u8, e.name)
             else
-                try std.fmt.allocPrint(w.gpa, "{s}/{s}", .{ dir_path, e.name });
+                try w.gpa.print("{s}/{s}", .{ dir_path, e.name });
             defer w.gpa.free(path);
 
             switch (e.entry.kind) {
@@ -1060,7 +1060,7 @@ fn keepChanged(
 fn validTrees(arena: Allocator, node: *const index_mod.CacheTree.Node, path: []const u8, out: *std.StringHashMapUnmanaged(Oid)) Allocator.Error!void {
     if (node.isValid()) try out.put(arena, path, node.oid.?);
     for (node.children.items) |*child| {
-        const sub = if (path.len == 0) child.name else try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, child.name });
+        const sub = if (path.len == 0) child.name else try arena.print("{s}/{s}", .{ path, child.name });
         try validTrees(arena, child, sub, out);
     }
 }
@@ -1090,7 +1090,7 @@ fn flattenStaged(
         const path = if (prefix.len == 0)
             try arena.dupe(u8, entry.name)
         else
-            try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
+            try arena.print("{s}/{s}", .{ prefix, entry.name });
         if (entry.mode == .tree) {
             if (same.get(path)) |oid| {
                 if (oid.eql(entry.oid)) continue;
@@ -1194,7 +1194,7 @@ const StatusScan = struct {
             const path = if (dir_path.len == 0)
                 try s.arena.dupe(u8, item.name)
             else
-                try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dir_path, item.name });
+                try s.arena.print("{s}/{s}", .{ dir_path, item.name });
 
             const found = item.entry;
             if (found.kind == .directory) {
@@ -1212,7 +1212,7 @@ const StatusScan = struct {
                     continue;
                 }
                 if (s.options.untracked == .no) continue;
-                const as_directory = try std.fmt.allocPrint(s.arena, "{s}/", .{path});
+                const as_directory = try s.arena.print("{s}/", .{path});
                 if (s.excluded(path, true)) {
                     if (s.options.include_ignored) try s.ignoredDirectory(path, as_directory, depth);
                     continue;
@@ -1320,9 +1320,9 @@ const StatusScan = struct {
         var names = try s.readNames(path);
         defer names.deinit(s.gpa);
         for (names.items) |item| {
-            const child = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ path, item.name });
+            const child = try s.arena.print("{s}/{s}", .{ path, item.name });
             if (item.kind == .directory) {
-                try s.ignoredDirectory(child, try std.fmt.allocPrint(s.arena, "{s}/", .{child}), depth + 1);
+                try s.ignoredDirectory(child, try s.arena.print("{s}/", .{child}), depth + 1);
             } else if (item.kind == .file or item.kind == .sym_link) {
                 try s.record(child, .ignored);
             }
@@ -1360,9 +1360,9 @@ const StatusScan = struct {
         defer names.deinit(s.gpa);
         var untracked = false;
         for (names.items) |item| {
-            const child = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ path, item.name });
+            const child = try s.arena.print("{s}/{s}", .{ path, item.name });
             if (item.kind == .directory) {
-                const as_directory = try std.fmt.allocPrint(s.arena, "{s}/", .{child});
+                const as_directory = try s.arena.print("{s}/", .{child});
                 if (s.excluded(child, true)) {
                     if (!s.options.include_ignored) continue;
                     if (try gitlink.isRepository(s.gpa, s.io, s.wt, child) or try s.holdsAnything(child, depth + 1)) {
@@ -1404,7 +1404,7 @@ const StatusScan = struct {
         for (names.items) |item| {
             if (item.kind == .file or item.kind == .sym_link) return true;
             if (item.kind != .directory) continue;
-            const child = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ path, item.name });
+            const child = try s.arena.print("{s}/{s}", .{ path, item.name });
             if (try gitlink.isRepository(s.gpa, s.io, s.wt, child)) return true;
             if (try s.holdsAnything(child, depth + 1)) return true;
         }
@@ -1508,7 +1508,7 @@ fn flattenTree(
         const path = if (prefix.len == 0)
             try arena.dupe(u8, entry.name)
         else
-            try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
+            try arena.print("{s}/{s}", .{ prefix, entry.name });
         if (entry.mode == .tree) {
             // A subtree a sparse directory already names, unchanged, has
             // nothing in it to compare.
@@ -1933,7 +1933,7 @@ fn removeUnwanted(
             i += 1;
             continue;
         }
-        if (!try leading.real(io, wt, std.fs.path.dirnamePosix(entry.path) orelse "")) {
+        if (!try leading.real(io, wt, std.Io.Dir.path.dirnamePosix(entry.path) orelse "")) {
             // Past a symbolic link: nothing of the working tree's to remove.
         } else if (entry.mode == .gitlink) {
             // A submodule nobody populated leaves with its empty directory;
@@ -1947,7 +1947,7 @@ fn removeUnwanted(
             error.FileNotFound, error.NotDir, error.IsDir => {},
             else => |e| return e,
         };
-        if (std.fs.path.dirnamePosix(entry.path)) |parent| {
+        if (std.Io.Dir.path.dirnamePosix(entry.path)) |parent| {
             try removed_dirs.put(arena, try arena.dupe(u8, parent), {});
         }
         const tree = try index.cacheTree();
@@ -1975,7 +1975,7 @@ fn removeEmptiedDirectories(
         const want = wanted.get(path).?;
         if (want.mode == .gitlink) continue;
         if (keeps(index, path, want, force)) continue;
-        if (!try leading.real(io, wt, std.fs.path.dirnamePosix(path) orelse "")) continue;
+        if (!try leading.real(io, wt, std.Io.Dir.path.dirnamePosix(path) orelse "")) continue;
         if (try fs.statAt(io, wt, path)) |found| {
             if (found.kind == .directory) try wt.deleteDir(io, path);
         }
@@ -2011,7 +2011,7 @@ const CheckoutWrite = struct {
                 c.outcome.unchanged += 1;
                 continue;
             }
-            if (std.fs.path.dirnamePosix(path)) |parent| {
+            if (std.Io.Dir.path.dirnamePosix(path)) |parent| {
                 try leading.make(c.io, c.wt, parent, c.options.force, c.options.refusal);
             }
             try c.one(&batch, &leading, path, want);
@@ -2173,7 +2173,7 @@ const LeadingDirs = struct {
 /// turned around. A caller about to remove or replace `path` itself, as
 /// relic's merge and patch do, removes nothing when this is `false`.
 pub fn realLeadingPath(io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
-    const parent = std.fs.path.dirnamePosix(path) orelse return true;
+    const parent = std.Io.Dir.path.dirnamePosix(path) orelse return true;
     var leading: LeadingDirs = .{};
     return leading.real(io, wt, parent);
 }
@@ -2181,7 +2181,7 @@ pub fn realLeadingPath(io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
 /// Make the directories above `path` for a write that replaces whatever is
 /// at it, refusing a symbolic link among them.
 fn makeLeadingDirs(io: Io, wt: Io.Dir, path: []const u8) Error!void {
-    const parent = std.fs.path.dirnamePosix(path) orelse return;
+    const parent = std.Io.Dir.path.dirnamePosix(path) orelse return;
     var leading: LeadingDirs = .{};
     try leading.make(io, wt, parent, false, null);
 }
@@ -2240,11 +2240,11 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
 }
 
 fn addSyncParents(dirs: *std.StringHashMap(bool), path: []const u8, required: bool) Allocator.Error!void {
-    var parent = std.fs.path.dirnamePosix(path);
+    var parent = std.Io.Dir.path.dirnamePosix(path);
     while (parent) |p| {
         const slot = try dirs.getOrPut(p);
         slot.value_ptr.* = if (slot.found_existing) slot.value_ptr.* or required else required;
-        parent = std.fs.path.dirnamePosix(p);
+        parent = std.Io.Dir.path.dirnamePosix(p);
     }
 }
 
@@ -2495,7 +2495,7 @@ pub fn writePaths(
     var leading: LeadingDirs = .{};
     for (writes) |w| {
         const want = w.blob orelse continue;
-        if (std.fs.path.dirnamePosix(w.path)) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
+        if (std.Io.Dir.path.dirnamePosix(w.path)) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
         if (try fs.statAt(io, wt, w.path)) |found| {
             // An empty directory gives way; one with anything in it is
             // someone's work.
@@ -2553,7 +2553,7 @@ fn removePaths(
     for (writes) |w| {
         if (w.blob != null) continue;
         // A file past a symbolic link is not the working tree's to remove.
-        if (try leading.real(io, wt, std.fs.path.dirnamePosix(w.path) orelse "")) fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
+        if (try leading.real(io, wt, std.Io.Dir.path.dirnamePosix(w.path) orelse "")) fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {},
             else => |e| return e,
         };
@@ -2564,7 +2564,7 @@ fn removePaths(
         }
         outcome.removed += 1;
         if (remove_empty_directories) {
-            if (std.fs.path.dirnamePosix(w.path)) |parent| removeEmptyDirectories(io, wt, parent);
+            if (std.Io.Dir.path.dirnamePosix(w.path)) |parent| removeEmptyDirectories(io, wt, parent);
         }
     }
 }
@@ -2720,7 +2720,7 @@ pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
         error.IsDir => wt.deleteDir(io, path) catch {},
         else => |e| return e,
     };
-    if (std.fs.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, wt, parent);
+    if (std.Io.Dir.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, wt, parent);
 }
 
 /// The paths an update would lose work at, as git lists them.
@@ -2851,7 +2851,7 @@ fn directoryGoes(
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |item| {
-        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, item.name });
+        const path = try arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {
             if (!try directoryGoes(arena, io, wt, path, index, updates)) return false;
             continue;
@@ -2954,7 +2954,7 @@ fn directoryIsReplaceable(
     defer dir.close(io);
     var iterator = dir.iterate();
     while (try iterator.next(io)) |item| {
-        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, item.name });
+        const path = try arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {
             if (!try directoryIsReplaceable(arena, io, wt, path, index, wanted)) return false;
             continue;
@@ -2991,10 +2991,10 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
     // reader sees the old bytes or the new ones.
     var name_buf: [256]u8 = undefined;
     const temp_name = fs.tempName(io, &name_buf, ".relic-");
-    const dir_path = std.fs.path.dirnamePosix(path);
+    const dir_path = std.Io.Dir.path.dirnamePosix(path);
     var temp_path_buf: [4096]u8 = undefined;
     const temp_path = if (dir_path) |parent|
-        std.fmt.bufPrint(&temp_path_buf, "{s}/{s}", .{ parent, temp_name }) catch return error.UnsafePath
+        std.mem.print(&temp_path_buf, "{s}/{s}", .{ parent, temp_name }) catch return error.UnsafePath
     else
         temp_name;
 
@@ -3038,7 +3038,7 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
     var current = path;
     while (current.len != 0) {
         wt.deleteDir(io, current) catch return;
-        current = std.fs.path.dirnamePosix(current) orelse return;
+        current = std.Io.Dir.path.dirnamePosix(current) orelse return;
     }
 }
 
@@ -3137,7 +3137,7 @@ pub fn applySparse(
                     else => |e| return e,
                 };
                 if (options.remove_empty_directories) {
-                    if (std.fs.path.dirnamePosix(entry.path)) |parent| {
+                    if (std.Io.Dir.path.dirnamePosix(entry.path)) |parent| {
                         removeEmptyDirectories(io, wt, parent);
                     }
                 }
@@ -3179,7 +3179,7 @@ fn restoreSparse(
     options: CheckoutOptions,
 ) Error!void {
     var leading: LeadingDirs = .{};
-    if (std.fs.path.dirnamePosix(entry.path)) |parent| try leading.make(io, wt, parent, false, options.refusal);
+    if (std.Io.Dir.path.dirnamePosix(entry.path)) |parent| try leading.make(io, wt, parent, false, options.refusal);
     switch (entry.mode) {
         // The submodule's commit is in its own repository, not this one.
         .gitlink => return leading.make(io, wt, entry.path, false, options.refusal),
@@ -3304,7 +3304,7 @@ const ListScan = struct {
             const path = if (dir_path.len == 0)
                 try s.arena.dupe(u8, item.name)
             else
-                try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dir_path, item.name });
+                try s.arena.print("{s}/{s}", .{ dir_path, item.name });
             const found = item.entry;
             if (found.kind == .directory) {
                 // A submodule's directory is its own repository's to list.
@@ -3318,12 +3318,12 @@ const ListScan = struct {
                     // A repository inside the working tree is its own to
                     // list: git names it once, as `sub/`.
                     if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) {
-                        try s.out.append(s.arena, try std.fmt.allocPrint(s.arena, "{s}/", .{path}));
+                        try s.out.append(s.arena, try s.arena.print("{s}/", .{path}));
                         continue;
                     }
                 }
                 if (s.index.sparse) {
-                    const as_dir = try std.fmt.allocPrint(s.arena, "{s}/", .{path});
+                    const as_dir = try s.arena.print("{s}/", .{path});
                     if (s.index.find(as_dir)) |entry| {
                         if (entry.isSparseDirectory()) continue;
                     }

@@ -16,8 +16,8 @@
 //! directory of its own, no system configuration, no terminal prompt.
 
 const std = @import("std");
+const suite = @import("helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
@@ -74,7 +74,7 @@ pub fn requireGitLfs(gpa: Allocator, io: Io, env: *const Environ.Map) !void {
 /// Hooks are kept in the home directory: git-lfs installs its own wherever
 /// `core.hooksPath` points, and they must not land in a working tree.
 pub fn git(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map, args: []const []const u8, report: bool) ![]u8 {
-    const hooks = try std.fmt.allocPrint(gpa, "core.hooksPath={s}/hooks", .{env.get("HOME").?});
+    const hooks = try gpa.print("core.hooksPath={s}/hooks", .{env.get("HOME").?});
     defer gpa.free(hooks);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
@@ -240,7 +240,7 @@ pub const Server = struct {
 
     /// `http://127.0.0.1:<port>/<path>`. The result is the caller's.
     pub fn url(s: *const Server, gpa: Allocator, path: []const u8) ![]u8 {
-        return std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}/{s}", .{ s.port, path });
+        return gpa.print("http://127.0.0.1:{d}/{s}", .{ s.port, path });
     }
 
     /// Queue a fault.
@@ -291,7 +291,7 @@ pub const Server = struct {
             for (lines.items) |l| gpa.free(l);
             lines.deinit(gpa);
         }
-        for (s.locks.items) |l| try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s}\n", .{ l.path, l.owner }));
+        for (s.locks.items) |l| try lines.append(gpa, try gpa.print("{s} {s}\n", .{ l.path, l.owner }));
         std.mem.sort([]const u8, lines.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
                 return std.mem.lessThan(u8, a, b);
@@ -464,10 +464,10 @@ pub const Server = struct {
 
         const user = s.authenticate(headers.authorization);
         if (headers.range) |r| {
-            const logged = try std.fmt.allocPrint(arena, "{s} range={s}", .{ user orelse "?", r });
+            const logged = try arena.print("{s} range={s}", .{ user orelse "?", r });
             try s.logRequest(method, route, logged);
         } else if (proxied_for) |host| {
-            const logged = try std.fmt.allocPrint(arena, "{s} proxied-for={s}", .{ user orelse "?", host });
+            const logged = try arena.print("{s} proxied-for={s}", .{ user orelse "?", host });
             try s.logRequest(method, route, logged);
         } else try s.logRequest(method, route, user orelse "?");
         if (user == null) {
@@ -482,9 +482,9 @@ pub const Server = struct {
         }
 
         const base = if (s.options.href_base) |b|
-            try std.fmt.allocPrint(arena, "{s}{s}", .{ b, prefix })
+            try arena.print("{s}{s}", .{ b, prefix })
         else
-            try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}{s}", .{ s.port, prefix });
+            try arena.print("http://127.0.0.1:{d}{s}", .{ s.port, prefix });
         if (method == .POST and std.mem.eql(u8, route, "/objects/batch")) {
             if (s.takeFault(.batch)) |f| return respondFault(&request, f);
             // A token is handed back in each action, as a hosting service
@@ -531,7 +531,7 @@ pub const Server = struct {
             const end = @min(last + 1, bytes.len);
             std.debug.assert(first < end);
             std.debug.assert(end <= bytes.len);
-            const content_range = try std.fmt.allocPrint(arena, "bytes {d}-{d}/{d}", .{ first, end - 1, bytes.len });
+            const content_range = try arena.print("bytes {d}-{d}/{d}", .{ first, end - 1, bytes.len });
             return request.respond(bytes[first..end], .{ .status = .partial_content, .keep_alive = false, .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "application/octet-stream" },
                 .{ .name = "Content-Range", .value = content_range },
@@ -605,7 +605,7 @@ pub const Server = struct {
     }
 
     fn batch(s: *Server, arena: Allocator, request: *http.Server.Request, base: []const u8, body: []const u8, token: ?[]const u8) !void {
-        const auth_header = if (token) |t| try std.fmt.allocPrint(arena, ",\"Authorization\":\"{s}\"", .{t}) else "";
+        const auth_header = if (token) |t| try arena.print(",\"Authorization\":\"{s}\"", .{t}) else "";
         const Wanted = struct { oid: []const u8, size: u64 };
         const Ref = struct { name: ?[]const u8 = null };
         const Batch = struct { operation: []const u8, objects: []const Wanted, ref: ?Ref = null };
@@ -614,7 +614,7 @@ pub const Server = struct {
         {
             s.mutex.lockUncancelable(s.io);
             defer s.mutex.unlock(s.io);
-            const name: []const u8 = if (b.ref) |r| (if (r.name) |n| try std.fmt.allocPrint(arena, "\"{s}\"", .{n}) else "no name") else "no ref";
+            const name: []const u8 = if (b.ref) |r| (if (r.name) |n| try arena.print("\"{s}\"", .{n}) else "no name") else "no ref";
             try s.batch_refs.print(s.gpa, "{s} {s}\n", .{ b.operation, name });
         }
         const upload = std.mem.eql(u8, b.operation, "upload");
@@ -655,10 +655,10 @@ pub const Server = struct {
 
     fn newLockLocked(s: *Server, path: []const u8, owner: []const u8) !Lock {
         const lock: Lock = .{
-            .id = try std.fmt.allocPrint(s.gpa, "{d}", .{s.next_lock}),
+            .id = try s.gpa.print("{d}", .{s.next_lock}),
             .path = try s.gpa.dupe(u8, path),
             .owner = try s.gpa.dupe(u8, owner),
-            .locked_at = try std.fmt.allocPrint(s.gpa, "2026-09-24T10:{d:0>2}:00Z", .{s.next_lock % 60}),
+            .locked_at = try s.gpa.print("2026-09-24T10:{d:0>2}:00Z", .{s.next_lock % 60}),
         };
         s.next_lock += 1;
         try s.locks.append(s.gpa, lock);
@@ -808,7 +808,7 @@ pub const Server = struct {
         try cgi_env.put("REMOTE_USER", "tester");
         if (content_type) |ct| try cgi_env.put("CONTENT_TYPE", ct);
         if (git_protocol) |gp| try cgi_env.put("GIT_PROTOCOL", gp);
-        if (method == .POST) try cgi_env.put("CONTENT_LENGTH", try std.fmt.allocPrint(arena, "{d}", .{body.len}));
+        if (method == .POST) try cgi_env.put("CONTENT_LENGTH", try arena.print("{d}", .{body.len}));
         var outcome = try program.run(.{ .environ = &cgi_env }, s.gpa, s.io, .{ .argv = &.{ "git", "-c", "http.receivepack=true", "http-backend" } }, body, .{});
         defer outcome.deinit(s.gpa);
         const output = outcome.stdout;
@@ -824,7 +824,7 @@ pub const Server = struct {
                 status = std.fmt.parseInt(u16, value[0..3], 10) catch 500;
             } else try response_headers.append(arena, .{ .name = name, .value = value });
         }
-        try request.respond(output[split + 4 ..], .{ .status = @enumFromInt(status), .keep_alive = false, .extra_headers = response_headers.items });
+        try request.respond(output[split + 4 ..], .{ .status = @fromBackingInt(@intCast(status)), .keep_alive = false, .extra_headers = response_headers.items });
     }
 };
 
@@ -867,7 +867,7 @@ fn respondFault(request: *http.Server.Request, f: Fault) !void {
         headers[n] = .{ .name = "Location", .value = l };
         n += 1;
     }
-    return request.respond("{\"message\":\"injected fault\"}", .{ .status = @enumFromInt(f.status), .keep_alive = false, .extra_headers = headers[0..n] });
+    return request.respond("{\"message\":\"injected fault\"}", .{ .status = @fromBackingInt(@intCast(f.status)), .keep_alive = false, .extra_headers = headers[0..n] });
 }
 
 fn writeLock(w: *std.Io.Writer, l: Lock) !void {
@@ -962,32 +962,32 @@ pub fn sha256Hex(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var out: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{x}", .{&digest}) catch unreachable;
+    _ = std.mem.print(&out, "{x}", .{&digest}) catch unreachable;
     return out;
 }
 
 /// Install an executable named `name` in a fixture directory, returning its
 /// absolute path. The copy lets a test give a server the name git expects.
 pub fn installProgram(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, source: []const u8) ![]u8 {
-    const executable = if (builtin.os.tag == .windows) try std.fmt.allocPrint(gpa, "{s}.exe", .{name}) else try gpa.dupe(u8, name);
+    const executable = if (builtin.target.os.tag == .windows) try gpa.print("{s}.exe", .{name}) else try gpa.dupe(u8, name);
     defer gpa.free(executable);
     try Io.Dir.cwd().copyFile(source, dir, executable, io, .{});
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         const file = try dir.openFile(io, executable, .{});
         defer file.close(io);
         try file.setPermissions(io, .fromMode(0o755));
     }
     const base = try testremote.absolutePath(gpa, io, dir);
     defer gpa.free(base);
-    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, executable });
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    const path = try gpa.print("{s}/{s}", .{ base, executable });
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
     return path;
 }
 
 fn installTool(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, kind: []const u8, values: []const []const u8) ![]u8 {
-    const path = try installProgram(gpa, io, dir, name, build_options.lfs_test_tool_path);
+    const path = try installProgram(gpa, io, dir, name, suite.path(.lfs_test_tool));
     errdefer gpa.free(path);
-    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{path});
+    const sidecar = try gpa.print("{s}.fixture", .{path});
     defer gpa.free(sidecar);
     var description: std.ArrayList(u8) = .empty;
     defer description.deinit(gpa);
@@ -1002,7 +1002,7 @@ fn installTool(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, kind: []co
 /// each connection was asked into `log_dir`. `extra` goes to it as well:
 /// `--user=<name>`, `--no-version`.
 pub fn transferScript(gpa: Allocator, io: Io, dir: Io.Dir, root: []const u8, log_dir: []const u8, extra: []const u8) ![]u8 {
-    return installTool(gpa, io, dir, "git-lfs-transfer", "transfer", &.{ build_options.lfs_transfer_helper_path, root, log_dir, extra });
+    return installTool(gpa, io, dir, "git-lfs-transfer", "transfer", &.{ suite.path(.lfs_transfer_helper), root, log_dir, extra });
 }
 
 /// What every connection to the stand-in `git-lfs-transfer` was asked,

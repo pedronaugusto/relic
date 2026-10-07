@@ -191,7 +191,7 @@ test "SOCKS authentication follows the selected method and bounds credential len
         try testing.expectError(error.ProxyAuthenticationRequired, authenticate(&r, &w, .{ .user = "user", .password = "pass" }));
     }
     r = .fixed(&.{ 5, 2 });
-    try testing.expectError(error.ProxyAuthenticationRequired, authenticate(&r, &w, .{ .user = "u" ** 256, .password = "pass" }));
+    try testing.expectError(error.ProxyAuthenticationRequired, authenticate(&r, &w, .{ .user = &@as([256]u8, @splat('u')), .password = "pass" }));
     r = .fixed(&.{ 5, 1 });
     try testing.expectError(error.ProxyAuthMethodUnsupported, authenticate(&r, &w, null));
 }

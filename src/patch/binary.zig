@@ -18,6 +18,7 @@
 const Self = @This();
 
 const std = @import("std");
+const testbytes = @import("../testing/bytes.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -206,8 +207,8 @@ test "base 85 round-trips and matches git's alphabet" {
 
 test "a binary patch's hunks inflate to both sides" {
     const gpa = std.testing.allocator;
-    const old = "\x00binary\x00" ** 40;
-    const new = "\x00binary\x00" ** 39 ++ "\x01changed";
+    const old = testbytes.repeat("\x00binary\x00", 40);
+    const new = testbytes.repeat("\x00binary\x00", 39) ++ "\x01changed";
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try write(gpa, &out.writer, old, new);

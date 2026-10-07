@@ -46,7 +46,7 @@ test "CVE-2016-2324 (with CVE-2016-2315, no t/ test): an object walk names every
     var h = try hostile.Harness.init(gpa, io);
     defer h.deinit(io);
     const depth = 200;
-    const name = "n" ** 250;
+    const name = &@as([250]u8, @splat('n'));
     var tree = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = name, .oid = try h.blob(io, "leaf\n") }});
     for (1..depth) |_| tree = try h.writeTree(gpa, io, &.{.{ .mode = "40000", .name = name, .oid = tree }});
     var collected = try objectwalk.missing(gpa, io, &h.db, &.{tree}, &.{});

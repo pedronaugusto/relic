@@ -256,7 +256,7 @@ const Reader = struct {
         var bytes: []const u8 = undefined;
         if (e.mode == .gitlink) {
             var hex: [hash.max_hex_len]u8 = undefined;
-            bytes = try std.fmt.allocPrint(r.a, "Subproject commit {s}\n", .{e.oid.hex(&hex)});
+            bytes = try r.a.print("Subproject commit {s}\n", .{e.oid.hex(&hex)});
         } else {
             const found = try r.repo.odb.read(r.io, e.oid);
             defer r.repo.odb.allocator().free(found.bytes);
@@ -287,7 +287,7 @@ const Reader = struct {
         } else try text.appendSlice(a, new.?.path);
         const file_name = if (new) |n| n.path else old.?.path;
         if (old != null and new != null and old.?.mode != new.?.mode) {
-            try text.print(a, " (mode change {o:0>6} => {o:0>6})", .{ @intFromEnum(old.?.mode), @intFromEnum(new.?.mode) });
+            try text.print(a, " (mode change {o:0>6} => {o:0>6})", .{ @backingInt(old.?.mode), @backingInt(new.?.mode) });
         }
         try text.appendSlice(a, " ##\n");
         patch.diff_size += 1;
@@ -328,7 +328,7 @@ const Reader = struct {
 };
 
 fn typeChanged(a: object.Mode, b: object.Mode) bool {
-    return (@intFromEnum(a) & 0o170000) != (@intFromEnum(b) & 0o170000);
+    return (@backingInt(a) & 0o170000) != (@backingInt(b) & 0o170000);
 }
 
 /// The message as `--pretty=medium` shows it, less its indent's trailing
@@ -829,7 +829,7 @@ const Writer = struct {
         };
         var number: [20]u8 = undefined;
         // unreachable: a usize is at most 20 digits
-        const text = std.fmt.bufPrint(&number, "{d}", .{index + 1}) catch unreachable;
+        const text = std.mem.print(&number, "{d}", .{index + 1}) catch unreachable;
         if (text.len < s.width) try s.w.splatByteAll(' ', s.width - text.len);
         var buf: [hash.max_hex_len]u8 = undefined;
         try s.w.print("{s}:  {s}", .{ text, try abbrev.unique(s.io, &s.repo.odb, p.oid, s.abbrev_len, &buf) });

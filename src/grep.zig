@@ -862,7 +862,7 @@ fn collectTree(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mo
     const tree = object.Tree.parse(db.objectFormat(), found.bytes);
     var it = tree.iterate();
     while (try it.next()) |entry| {
-        const path = if (prefix.len == 0) try a.dupe(u8, entry.name) else try std.fmt.allocPrint(a, "{s}/{s}", .{ prefix, entry.name });
+        const path = if (prefix.len == 0) try a.dupe(u8, entry.name) else try a.print("{s}/{s}", .{ prefix, entry.name });
         switch (entry.mode) {
             .file, .exec => if (spec.matches(path)) {
                 const name = try std.mem.concat(a, u8, &.{ name_prefix, path });

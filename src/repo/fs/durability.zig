@@ -20,7 +20,7 @@ pub const Error = Io.File.OpenError || Io.Dir.OpenError || Io.File.SyncError;
 
 pub fn syncFile(io: Io, file: Io.File) Io.File.SyncError!void {
     try file.sync(io);
-    if (builtin.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         // fsync only writes out to the device on macOS. F_FULLFSYNC also
         // asks the device to flush its cache; a refused request is a failure.
         if (std.c.fcntl(file.handle, std.c.F.FULLFSYNC, @as(c_int, 0)) == -1) return error.InputOutput;
@@ -28,13 +28,13 @@ pub fn syncFile(io: Io, file: Io.File) Io.File.SyncError!void {
 }
 
 pub fn syncPath(io: Io, dir: Io.Dir, path: []const u8) Self.Error!void {
-    const file = try dir.openFile(io, path, .{ .mode = if (builtin.os.tag == .windows) .read_write else .read_only });
+    const file = try dir.openFile(io, path, .{ .mode = if (builtin.target.os.tag == .windows) .read_write else .read_only });
     defer file.close(io);
     try syncFile(io, file);
 }
 
 pub fn syncDirectory(io: Io, dir: Io.Dir, path: []const u8) Self.Error!void {
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         const file = try openDirectoryWindows(dir, path);
         defer file.close(io);
         try syncFile(io, file);

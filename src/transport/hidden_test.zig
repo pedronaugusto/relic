@@ -64,7 +64,7 @@ test "a repository on this machine lists what git ls-remote lists of it, hidden 
         while (it.next()) |line| {
             if (std.mem.endsWith(u8, line, "^{}")) continue;
             const tab = std.mem.findScalar(u8, line, '\t').?;
-            try theirs.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s}", .{ line[0..tab], line[tab + 1 ..] }));
+            try theirs.append(gpa, try gpa.print("{s} {s}", .{ line[0..tab], line[tab + 1 ..] }));
         }
 
         var session = try transport.Session.open(gpa, io, source_path, .upload_pack, null, .{ .protocol_v2 = v2 });
@@ -78,7 +78,7 @@ test "a repository on this machine lists what git ls-remote lists of it, hidden 
         }
         for (refs.refs) |ref| {
             if (ref.unborn or std.mem.endsWith(u8, ref.name, "^{}")) continue;
-            try ours.append(gpa, try std.fmt.allocPrint(gpa, "{f} {s}", .{ ref.oid, ref.name }));
+            try ours.append(gpa, try gpa.print("{f} {s}", .{ ref.oid, ref.name }));
         }
         sortLines(&theirs);
         sortLines(&ours);
@@ -112,7 +112,7 @@ test "a hidden ref's tip is a v0 want only where git's upload-pack allows a tip"
         try twin.exec(io, &.{ "remote", "add", "origin", source_path });
         try twin.exec(io, &.{ "config", "protocol.version", "0" });
     }
-    const spec = try std.fmt.allocPrint(gpa, "{s}:refs/heads/got", .{hidden_tip});
+    const spec = try gpa.print("{s}:refs/heads/got", .{hidden_tip});
     defer gpa.free(spec);
 
     for ([_]bool{ false, true }) |allow_tip| {

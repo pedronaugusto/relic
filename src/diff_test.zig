@@ -10,7 +10,6 @@ const odb_mod = @import("odb.zig");
 const diff = @import("diff.zig");
 const textdiff = @import("diff/textdiff.zig");
 const object = @import("object.zig");
-const test_case = @import("testing/case.zig");
 
 const Oid = hash.Oid;
 
@@ -113,7 +112,7 @@ const RandomTree = struct {
         for (names) |name| {
             if (random.boolean()) continue;
             // No subtree below the third level.
-            const kind: Kind = if (depth < 2) random.enumValue(Kind) else @enumFromInt(random.uintLessThan(u8, 3));
+            const kind: Kind = if (depth < 2) random.enumValue(Kind) else @fromBackingInt(@intCast(random.uintLessThan(u8, 3)));
             switch (kind) {
                 .tree => {
                     const sub = try build(gpa, io, db, random, depth + 1, null);
@@ -121,7 +120,7 @@ const RandomTree = struct {
                 },
                 else => {
                     var text: [16]u8 = undefined;
-                    const blob = try db.write(io, .blob, try std.fmt.bufPrint(&text, "{d}\n", .{random.uintLessThan(u8, 3)}));
+                    const blob = try db.write(io, .blob, try std.mem.print(&text, "{d}\n", .{random.uintLessThan(u8, 3)}));
                     try b.add(switch (kind) {
                         .file => .file,
                         .exec => .exec,
@@ -247,9 +246,9 @@ test "the unified patch is byte for byte what git prints" {
 }
 
 fn setupGitlink(io: Io, repo: *testgit.Repo) anyerror!void {
-    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",vendor/lib" });
+    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ @as([40]u8, @splat('1')) ++ ",vendor/lib" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
-    try repo.exec(io, &.{ "update-index", "--cacheinfo", "160000," ++ "2" ** 40 ++ ",vendor/lib" });
+    try repo.exec(io, &.{ "update-index", "--cacheinfo", "160000," ++ @as([40]u8, @splat('2')) ++ ",vendor/lib" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
 }
 
@@ -337,7 +336,7 @@ test "the hunk header carries the enclosing line git puts there" {
         try diff.unified(gpa, io, &out.writer, &pair.db, changes.items[0], .{ .context = context });
 
         var arg_buf: [8]u8 = undefined;
-        const context_arg = try std.fmt.bufPrint(&arg_buf, "-U{d}", .{context});
+        const context_arg = try std.mem.print(&arg_buf, "-U{d}", .{context});
         const expected = try pair.repo.run(io, &.{
             "diff",         "--no-color",  context_arg,
             "--no-renames", pair.old_text, pair.new_text,
@@ -519,7 +518,7 @@ fn setupAlgorithms(io: Io, repo: *testgit.Repo) anyerror!void {
         const lines = 10 + l.next(70);
         for (0..lines) |_| try generatedLine(gpa, &l, text);
         var name: [32]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&name, "gen{d:0>2}.txt", .{i}), text.items);
+        try repo.writeFile(io, try std.mem.print(&name, "gen{d:0>2}.txt", .{i}), text.items);
     }
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
@@ -546,7 +545,7 @@ fn setupAlgorithms(io: Io, repo: *testgit.Repo) anyerror!void {
             }
         }
         var name: [32]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&name, "gen{d:0>2}.txt", .{i}), after.items);
+        try repo.writeFile(io, try std.mem.print(&name, "gen{d:0>2}.txt", .{i}), after.items);
     }
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
@@ -612,7 +611,6 @@ fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
 }
 
 test "the histogram, patience and minimal diffs land on the lines git's do, over a random corpus" {
-    if (!test_case.selected("the histogram, patience and minimal diffs land on the lines git's do, over a random corpus")) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var repo = try testgit.Repo.init(gpa, io, &.{});

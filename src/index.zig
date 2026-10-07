@@ -894,7 +894,7 @@ pub const Index = struct {
                 if (rest.len < 8) return error.CorruptFsmonitor;
                 const nanoseconds = std.mem.readInt(u64, rest[0..8], .big);
                 rest = rest[8..];
-                break :blk try std.fmt.allocPrint(gpa, "{d}", .{nanoseconds});
+                break :blk try gpa.print("{d}", .{nanoseconds});
             },
             2 => blk: {
                 const end = std.mem.findScalar(u8, rest, 0) orelse return error.CorruptFsmonitor;
@@ -947,7 +947,7 @@ pub const Index = struct {
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [hash.max_hex_len + 16]u8 = undefined;
         // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
-        const name = std.fmt.bufPrint(&name_buf, "sharedindex.{s}", .{base.hex(&hex)}) catch unreachable;
+        const name = std.mem.print(&name_buf, "sharedindex.{s}", .{base.hex(&hex)}) catch unreachable;
         const shared_bytes = (try fs.readFileAlloc(gpa, io, git_dir, name, 1 << 31)) orelse
             return error.SharedIndexMissing;
         defer gpa.free(shared_bytes);
@@ -1293,7 +1293,7 @@ pub const Index = struct {
 
     /// Remove every entry under the directory `dir`. Returns how many went.
     pub fn removeDirectory(index: *Index, dir: []const u8) Allocator.Error!usize {
-        const prefix = try std.fmt.allocPrint(index.gpa, "{s}/", .{dir});
+        const prefix = try index.gpa.print("{s}/", .{dir});
         defer index.gpa.free(prefix);
         var removed: usize = 0;
         const at = index.position(prefix, 0);
@@ -1902,7 +1902,7 @@ test "the offset caches are written on request, and kept by an index that had th
     for (0..7) |i| {
         var name: [32]u8 = undefined;
         try index.addMany(&.{.{
-            .path = try std.fmt.bufPrint(&name, "dir/file{d}.txt", .{i}),
+            .path = try std.mem.print(&name, "dir/file{d}.txt", .{i}),
             .oid = .zero(.sha1),
             .mode = .file,
             .stat = .{},
@@ -2102,14 +2102,14 @@ test "the racy rule marks an entry whose time is not older than the index" {
 test "an index git writes with names only Windows refuses is read, as git reads it" {
     // git itself refuses these names on Windows, so there is no such index
     // to read there.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     const blob = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
     for ([_][]const u8{ "drivers/i2c/aux.c", "a\tb", "t.", "con", "x:y" }) |path| {
-        const info = try std.fmt.allocPrint(gpa, "100644,{s},{s}", .{ blob, path });
+        const info = try gpa.print("100644,{s},{s}", .{ blob, path });
         defer gpa.free(info);
         try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", info });
     }
@@ -2159,7 +2159,7 @@ test "a split index is checked once merged: no empty name, no name twice, and th
     defer gpa.free(shared_bytes);
     const base = try Oid.fromRaw(.sha1, shared_bytes[shared_bytes.len - 20 ..]);
     var hex: [hash.max_hex_len]u8 = undefined;
-    const shared_name = try std.fmt.allocPrint(gpa, "sharedindex.{s}", .{base.hex(&hex)});
+    const shared_name = try gpa.print("sharedindex.{s}", .{base.hex(&hex)});
     defer gpa.free(shared_name);
     try tmp.dir.writeFile(io, .{ .sub_path = shared_name, .data = shared_bytes });
 
@@ -2181,8 +2181,8 @@ test "a split index is checked once merged: no empty name, no name twice, and th
     }
 
     // A shared file under a name its checksum is not.
-    const other = try Oid.parse(.sha1, "1" ** 40);
-    const other_name = try std.fmt.allocPrint(gpa, "sharedindex.{s}", .{other.hex(&hex)});
+    const other = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const other_name = try gpa.print("sharedindex.{s}", .{other.hex(&hex)});
     defer gpa.free(other_name);
     try tmp.dir.writeFile(io, .{ .sub_path = other_name, .data = shared_bytes });
     var overlay: Index = .initEmpty(gpa, .sha1);
@@ -2302,12 +2302,12 @@ test "an entry added many at once replaces the one already there, whatever the c
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);
     defer index.deinit();
-    const old = try Oid.parse(.sha1, "1" ** 40);
-    const new = try Oid.parse(.sha1, "2" ** 40);
+    const old = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const new = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     var names: [300][16]u8 = undefined;
     var batch: [300]Entry = undefined;
     for (&batch, &names, 0..) |*entry, *name, i| {
-        entry.* = .{ .path = try std.fmt.bufPrint(name, "f{d:0>4}", .{i}), .oid = old, .mode = .file };
+        entry.* = .{ .path = try std.mem.print(name, "f{d:0>4}", .{i}), .oid = old, .mode = .file };
     }
     try index.addMany(&batch);
     for (&batch) |*entry| entry.oid = new;

@@ -170,10 +170,10 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
             // A formerly monolithic graph becomes the first immutable layer.
             var bottom = base;
             while (bottom.base) |lower| bottom = lower;
-            const name = try std.fmt.allocPrint(arena, "info/commit-graphs/graph-{s}.graph", .{bottom.checksum().hex(&hex_buffer)});
+            const name = try arena.print("info/commit-graphs/graph-{s}.graph", .{bottom.checksum().hex(&hex_buffer)});
             try publish(gpa, io, db, dir, name, bottom.bytes, options.sync, .read_only);
         }
-        const name = try std.fmt.allocPrint(arena, "info/commit-graphs/graph-{s}.graph", .{checksum.hex(&hex_buffer)});
+        const name = try arena.print("info/commit-graphs/graph-{s}.graph", .{checksum.hex(&hex_buffer)});
         try publish(gpa, io, db, dir, name, bytes, options.sync, .read_only);
         try bases.append(arena, checksum);
         for (bases.items) |base| {
@@ -249,7 +249,7 @@ fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Gr
                 break;
             };
             if (kept) continue;
-            const filename = try std.fmt.allocPrint(arena, "graph-{s}.graph", .{layer.checksum().hex(&hex)});
+            const filename = try arena.print("graph-{s}.graph", .{layer.checksum().hex(&hex)});
             fs.setTimestamps(io, graph_dir, filename, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now) * std.time.ns_per_s } } }) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
@@ -311,7 +311,7 @@ fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind) MidxErro
         var index = try pack_mod.Index.open(gpa, io, dir, entry.name, kind, 1 << 30);
         defer index.deinit();
         const base = entry.name[0 .. entry.name.len - 4];
-        const pack_path = try std.fmt.allocPrint(arena, "{s}.pack", .{base});
+        const pack_path = try arena.print("{s}.pack", .{base});
         const stat = (try dir.statFile(io, pack_path, .{}));
         const objects = try arena.alloc(midx_mod.WriteEntry, index.count);
         for (objects, 0..) |*obj, i| obj.* = .{ .oid = index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)) };
@@ -416,11 +416,11 @@ pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: fs.Sync) Self.Midx
         // it loaded: the index's word for a name is not enough to remove
         // files by.
         if (!ownsPack(db, name)) continue;
-        const keep = try std.fmt.allocPrint(arena, "{s}.keep", .{name});
-        const cruft = try std.fmt.allocPrint(arena, "{s}.mtimes", .{name});
+        const keep = try arena.print("{s}.keep", .{name});
+        const cruft = try arena.print("{s}.mtimes", .{name});
         if (try existsFile(io, dir, keep) or try existsFile(io, dir, cruft)) continue;
         for ([_][]const u8{ ".pack", ".idx", ".rev", ".bitmap" }) |extension| {
-            const path = try std.fmt.allocPrint(arena, "{s}{s}", .{ name, extension });
+            const path = try arena.print("{s}{s}", .{ name, extension });
             try removeIfPresent(io, dir, path);
         }
         removed += 1;
@@ -675,11 +675,11 @@ fn setBit(words: []u64, pos: u32) void {
 /// Write a reachability bitmap for an existing pack. The pack must contain the
 /// entire history of every commit it holds, as Git's FULL_DAG flag requires.
 pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const u8, tips: []const Oid, options: BitmapOptions) Self.BitmapError!void {
-    if (std.mem.indexOfAny(u8, pack_name, "/\\") != null or !std.mem.startsWith(u8, pack_name, "pack-")) return error.InvalidBitmapInput;
+    if (std.mem.findAny(u8, pack_name, "/\\") != null or !std.mem.startsWith(u8, pack_name, "pack-")) return error.InvalidBitmapInput;
     const base = if (std.mem.endsWith(u8, pack_name, ".pack")) pack_name[0 .. pack_name.len - 5] else if (std.mem.endsWith(u8, pack_name, ".idx")) pack_name[0 .. pack_name.len - 4] else pack_name;
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
-    const path = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+    const path = try gpa.print("{s}.idx", .{base});
     defer gpa.free(path);
     var index = try pack_mod.Index.open(gpa, io, dir, path, db.objectFormat(), 1 << 30);
     defer index.deinit();
@@ -705,7 +705,7 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const 
     defer if (previous) |*value| value.deinit();
     const bytes = try buildBitmap(gpa, io, db, index.pack_checksum, names, reverse, tips, options, false, if (previous) |*value| value else null);
     defer gpa.free(bytes);
-    const target = try std.fmt.allocPrint(gpa, "{s}.bitmap", .{base});
+    const target = try gpa.print("{s}.bitmap", .{base});
     defer gpa.free(target);
     try publish(gpa, io, db, dir, target, bytes, options.sync, .read_only);
     try db.refresh(io);
@@ -737,7 +737,7 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, 
     const bytes = try buildBitmap(gpa, io, db, checksum, names, reverse, tips, options, true, if (previous) |*value| value else null);
     defer gpa.free(bytes);
     var hex: [hash.max_hex_len]u8 = undefined;
-    const path = try std.fmt.allocPrint(gpa, "multi-pack-index-{s}.bitmap", .{checksum.hex(&hex)});
+    const path = try gpa.print("multi-pack-index-{s}.bitmap", .{checksum.hex(&hex)});
     defer gpa.free(path);
     try publish(gpa, io, db, dir, path, bytes, options.sync, .read_only);
     try clearMidxBitmaps(gpa, io, dir, path);
@@ -775,10 +775,10 @@ pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptio
     @memset(mtimes, 0);
     for (0..index.pack_count) |i| {
         const base = index.packName(@intCast(i)) orelse return error.CorruptMultiPackIndex;
-        const keep = try std.fmt.allocPrint(arena, "{s}.keep", .{base});
-        const cruft = try std.fmt.allocPrint(arena, "{s}.mtimes", .{base});
+        const keep = try arena.print("{s}.keep", .{base});
+        const cruft = try arena.print("{s}.mtimes", .{base});
         if ((!options.pack_kept_objects and try existsFile(io, dir, keep)) or try existsFile(io, dir, cruft)) continue;
-        const path = try std.fmt.allocPrint(arena, "{s}.pack", .{base});
+        const path = try arena.print("{s}.pack", .{base});
         const stat = try dir.statFile(io, path, .{});
         for (inputs.packs) |p| if (std.mem.eql(u8, p.name[0 .. p.name.len - 4], base) and p.entries.len != 0) {
             eligible[i] = true;
@@ -883,7 +883,7 @@ pub fn repackRepository(gpa: Allocator, io: Io, repo: *repo_mod.Repository, opti
         const tips = try repositoryTips(gpa, io, repo);
         defer gpa.free(tips);
         var hex: [hash.max_hex_len]u8 = undefined;
-        const name = try std.fmt.allocPrint(gpa, "pack-{s}", .{written.name.hex(&hex)});
+        const name = try gpa.print("pack-{s}", .{written.name.hex(&hex)});
         defer gpa.free(name);
         try writePackBitmap(gpa, io, &repo.odb, name, tips, .{ .hash_cache = try config.getBool("pack.writebitmaphashcache", true), .lookup_table = try config.getBool("pack.writebitmaplookuptable", false), .sync = repo.odb.settings().sync });
     };

@@ -97,7 +97,7 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
     errdefer l.arena.deinit();
     const arena = l.arena.allocator();
 
-    l.home = environ.get("HOME") orelse if (builtin.os.tag == .windows) environ.get("USERPROFILE") else null;
+    l.home = environ.get("HOME") orelse if (builtin.target.os.tag == .windows) environ.get("USERPROFILE") else null;
     if (l.home) |h| l.home = try arena.dupe(u8, h);
 
     // The system file.
@@ -123,9 +123,9 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
         if (path.len != 0 and exists(io, path)) try global.append(arena, try arena.dupe(u8, path));
     } else {
         const xdg: ?[]const u8 = if (environ.get("XDG_CONFIG_HOME")) |base|
-            if (base.len != 0) try std.fs.path.join(arena, &.{ base, "git", "config" }) else null
+            if (base.len != 0) try std.Io.Dir.path.join(arena, &.{ base, "git", "config" }) else null
         else if (l.home) |home|
-            try std.fs.path.join(arena, &.{ home, ".config", "git", "config" })
+            try std.Io.Dir.path.join(arena, &.{ home, ".config", "git", "config" })
         else
             null;
         if (xdg) |path| if (exists(io, path)) {
@@ -133,7 +133,7 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
             l.xdg = path;
         };
         if (l.home) |home| {
-            const path = try std.fs.path.join(arena, &.{ home, ".gitconfig" });
+            const path = try std.Io.Dir.path.join(arena, &.{ home, ".gitconfig" });
             if (exists(io, path)) try global.append(arena, path);
         }
     }
@@ -147,10 +147,10 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
             var key_buf: [32]u8 = undefined;
             var value_buf: [32]u8 = undefined;
             // unreachable: a u32 is at most ten digits after a seventeen-byte prefix
-            const key = environ.get(std.fmt.bufPrint(&key_buf, "GIT_CONFIG_KEY_{d}", .{i}) catch unreachable) orelse
+            const key = environ.get(std.mem.print(&key_buf, "GIT_CONFIG_KEY_{d}", .{i}) catch unreachable) orelse
                 return error.MalformedConfigEnvironment;
             // unreachable: a u32 is at most ten digits after a nineteen-byte prefix
-            const value = environ.get(std.fmt.bufPrint(&value_buf, "GIT_CONFIG_VALUE_{d}", .{i}) catch unreachable) orelse
+            const value = environ.get(std.mem.print(&value_buf, "GIT_CONFIG_VALUE_{d}", .{i}) catch unreachable) orelse
                 return error.MalformedConfigEnvironment;
             try pairs.append(arena, .{ .name = try arena.dupe(u8, key), .value = try arena.dupe(u8, value) });
         }
@@ -269,7 +269,7 @@ const testing = std.testing;
 const testgit = @import("../testing/git.zig");
 
 fn expectSameTestPath(gpa: Allocator, actual: []const u8, expected: []const u8) !void {
-    if (builtin.os.tag != .windows) return testing.expectEqualStrings(expected, actual);
+    if (builtin.target.os.tag != .windows) return testing.expectEqualStrings(expected, actual);
     const a = try gpa.dupe(u8, actual);
     defer gpa.free(a);
     const b = try gpa.dupe(u8, expected);
@@ -291,7 +291,7 @@ test "the files are the ones git names, found from the person's environment" {
     try home.dir.writeFile(io, .{ .sub_path = ".config/git/config", .data = "[x]\n\ta = xdg\n" });
     try home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[x]\n\ta = home\n" });
     try home.dir.writeFile(io, .{ .sub_path = "system", .data = "[credential]\n\thelper = osxkeychain\n" });
-    const system = try std.fs.path.join(gpa, &.{ home_path, "system" });
+    const system = try std.Io.Dir.path.join(gpa, &.{ home_path, "system" });
     defer gpa.free(system);
 
     var env: Environ.Map = .init(gpa);
@@ -311,7 +311,7 @@ test "the files are the ones git names, found from the person's environment" {
     defer l.deinit();
     try testing.expectEqualStrings(system, l.system.?);
     try testing.expectEqual(@as(usize, 2), l.global.len);
-    const xdg_path = try std.fs.path.join(gpa, &.{ home_path, ".config", "git", "config" });
+    const xdg_path = try std.Io.Dir.path.join(gpa, &.{ home_path, ".config", "git", "config" });
     defer gpa.free(xdg_path);
     try expectSameTestPath(gpa, l.global[0], xdg_path);
     try testing.expect(std.mem.endsWith(u8, l.global[1], ".gitconfig"));

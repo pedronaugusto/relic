@@ -10,6 +10,7 @@
 //! and `parse_connect_url`.
 
 const std = @import("std");
+const allocation = @import("../testing/allocation.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
@@ -76,7 +77,7 @@ pub const Url = struct {
             if (scheme == .file) {
                 // On Windows `file://C:/repo` is the path with its drive, as
                 // git for Windows reads it.
-                if (builtin.os.tag == .windows and rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') {
+                if (builtin.target.os.tag == .windows and rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') {
                     return .{ .scheme = .file, .path = rest, .raw = text };
                 }
                 // git for Windows keeps an authority as a UNC path.
@@ -84,7 +85,7 @@ pub const Url = struct {
                 const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
                 const host = rest[0..slash];
                 if (slash == rest.len) return error.MalformedUrl;
-                if (builtin.os.tag == .windows and host.len != 0) {
+                if (builtin.target.os.tag == .windows and host.len != 0) {
                     return .{ .scheme = .file, .host = host, .path = text[sep + 1 ..], .raw = text };
                 }
                 return .{ .scheme = .file, .path = rest[slash..], .raw = text };
@@ -298,7 +299,7 @@ pub fn isLocal(text: []const u8) bool {
     if (std.mem.findScalar(u8, text, '/')) |slash| {
         if (slash < colon) return true;
     }
-    return builtin.os.tag == .windows and text.len >= 2 and
+    return builtin.target.os.tag == .windows and text.len >= 2 and
         std.ascii.isAlphabetic(text[0]) and text[1] == ':' and colon == 1;
 }
 
@@ -368,13 +369,13 @@ test "each shape of URL is read as git reads it" {
     }
     try testing.expectEqual(Scheme.local, (try Url.parse("../other/repo")).scheme);
     try testing.expectEqual(Scheme.local, (try Url.parse("/srv/a:b")).scheme);
-    try testing.expectEqual(if (builtin.os.tag == .windows) Scheme.local else Scheme.ssh, (try Url.parse("C:\\repos\\x")).scheme);
+    try testing.expectEqual(if (builtin.target.os.tag == .windows) Scheme.local else Scheme.ssh, (try Url.parse("C:\\repos\\x")).scheme);
     {
         const url = try Url.parse("file:///srv/repo.git");
         try testing.expectEqual(Scheme.file, url.scheme);
         try testing.expectEqualStrings("/srv/repo.git", url.path);
     }
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         const url = try Url.parse("file://C:\\srv/repo.git");
         try testing.expectEqual(Scheme.file, url.scheme);
         try testing.expectEqualStrings("C:\\srv/repo.git", url.path);
@@ -467,10 +468,10 @@ test "bracketed remote identities follow git t5601 clone URLs" {
 test "file and local URL identities follow git path and scheme boundaries" {
     const remote_file = try Url.parse("file://server/share/repo.git");
     try testing.expectEqual(Scheme.file, remote_file.scheme);
-    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "server" else "", remote_file.host);
-    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "//server/share/repo.git" else "/share/repo.git", remote_file.path);
+    try testing.expectEqualStrings(if (builtin.target.os.tag == .windows) "server" else "", remote_file.host);
+    try testing.expectEqualStrings(if (builtin.target.os.tag == .windows) "//server/share/repo.git" else "/share/repo.git", remote_file.path);
     const local_file = try Url.parse("file://localhost/srv/repo.git");
-    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "//localhost/srv/repo.git" else "/srv/repo.git", local_file.path);
+    try testing.expectEqualStrings(if (builtin.target.os.tag == .windows) "//localhost/srv/repo.git" else "/srv/repo.git", local_file.path);
     const embedded = try Url.parse("./folder/ssh://host/repo");
     try testing.expectEqual(Scheme.local, embedded.scheme);
     try testing.expectEqualStrings("./folder/ssh://host/repo", embedded.path);
@@ -481,8 +482,8 @@ test "file and local URL identities follow git path and scheme boundaries" {
 test "local URL classification follows the platform and survives display" {
     // t5601: c:temp is SSH on Unix and a drive-relative path on Windows.
     const drive = try Url.parse("c:temp");
-    try testing.expectEqual(if (builtin.os.tag == .windows) Scheme.local else Scheme.ssh, drive.scheme);
-    if (builtin.os.tag != .windows) {
+    try testing.expectEqual(if (builtin.target.os.tag == .windows) Scheme.local else Scheme.ssh, drive.scheme);
+    if (builtin.target.os.tag != .windows) {
         try testing.expectEqualStrings("c", drive.host);
         try testing.expectEqualStrings("temp", drive.path);
     }
@@ -495,7 +496,7 @@ test "local URL classification follows the platform and survives display" {
 }
 
 test "file URL authorities follow git on this platform" {
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         const parsed = try Url.parse("file://server/share/repo.git");
         try testing.expectEqualStrings("//server/share/repo.git", parsed.path);
         return;
@@ -509,7 +510,7 @@ test "file URL authorities follow git on this platform" {
     defer gpa.free(path);
     // connect.c uses only the slash onwards on Unix; this authority is
     // neither resolved nor opened. Windows retains it as a UNC path.
-    const text = try std.fmt.allocPrint(gpa, "file://elsewhere{s}", .{path});
+    const text = try gpa.print("file://elsewhere{s}", .{path});
     defer gpa.free(text);
     const parsed = try Url.parse(text);
     try testing.expectEqualStrings(path, parsed.path);
@@ -542,5 +543,5 @@ test "decoded URL identities own their text and follow Git percent rules" {
             }
         }
     };
-    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+    try testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }

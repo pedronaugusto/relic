@@ -36,7 +36,7 @@ pub const Ownership = enum {
 /// A path as git compares them: `/` between components on every platform.
 pub fn normalize(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
     const copy = try gpa.dupe(u8, path);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, copy, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, copy, '\\', '/');
     return copy;
 }
 
@@ -49,11 +49,11 @@ fn realPath(gpa: Allocator, io: Io, path: []const u8) Allocator.Error!?[]u8 {
         const value = try normalize(gpa, real);
         return value;
     } else |_| {}
-    const parent = std.fs.path.dirname(path) orelse return null;
-    const base = std.fs.path.basename(path);
+    const parent = std.Io.Dir.path.dirname(path) orelse return null;
+    const base = std.Io.Dir.path.basename(path);
     const real_parent = Io.Dir.cwd().realPathFileAlloc(io, parent, gpa) catch return null;
     defer gpa.free(real_parent);
-    const joined = try std.fs.path.join(gpa, &.{ real_parent, base });
+    const joined = try std.Io.Dir.path.join(gpa, &.{ real_parent, base });
     defer gpa.free(joined);
     const value = try normalize(gpa, joined);
     return value;
@@ -85,10 +85,10 @@ pub fn directoryIsSafe(gpa: Allocator, io: Io, protected: *const config_mod.Conf
         defer if (expanded) |e| gpa.free(e);
         if (std.mem.startsWith(u8, value, "~/")) {
             const h = home orelse continue;
-            expanded = try std.fs.path.join(gpa, &.{ h, value[2..] });
+            expanded = try std.Io.Dir.path.join(gpa, &.{ h, value[2..] });
             allowed = expanded.?;
         }
-        if (!std.fs.path.isAbsolute(allowed) and !std.mem.eql(u8, allowed, ".")) continue;
+        if (!std.Io.Dir.path.isAbsolute(allowed) and !std.mem.eql(u8, allowed, ".")) continue;
         const normalized = (try realPath(gpa, io, allowed)) orelse continue;
         defer gpa.free(normalized);
         if (std.mem.endsWith(u8, normalized, "/*")) {
@@ -151,8 +151,8 @@ test "safe.bareRepository takes git's two values, quoted or not, and refuses any
 pub fn isImplicitBare(path: []const u8) bool {
     const trimmed = std.mem.trimEnd(u8, path, "/");
     if (std.mem.eql(u8, trimmed, ".git") or std.mem.endsWith(u8, trimmed, "/.git")) return true;
-    if (std.mem.indexOf(u8, path, "/.git/worktrees/") != null) return true;
-    if (std.mem.indexOf(u8, path, "/.git/modules/") != null) return true;
+    if (std.mem.find(u8, path, "/.git/worktrees/") != null) return true;
+    if (std.mem.find(u8, path, "/.git/modules/") != null) return true;
     return false;
 }
 

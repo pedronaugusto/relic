@@ -5,6 +5,7 @@
 //! and relic fetches from it in process for a `file://` remote.
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -18,7 +19,6 @@ const warning = @import("../repo/warning.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 
-const helper = @import("build_options").upload_pack_helper_path;
 const config_mod = @import("../config.zig");
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -30,7 +30,7 @@ const sparse_spec = "/file\n/dir/\n!/dir/deep/\n";
 fn served(gpa: Allocator, io: Io, root: Io.Dir) ![]u8 {
     const root_path = try testremote.absolutePath(gpa, io, root);
     defer gpa.free(root_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     errdefer gpa.free(bare);
     var maker = try testgit.Repo.init(gpa, io, &.{});
     defer maker.deinit();
@@ -116,9 +116,9 @@ fn sortLines(gpa: Allocator, text: []const u8) ![]u8 {
 test "git clones from relic's upload-pack what it clones from its own, in v2 and v0, whole, shallow and filtered" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const shell_helper = try gpa.dupe(u8, helper);
+    const shell_helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
     defer gpa.free(shell_helper);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
     // git before 2.43 cannot walk what a combine: filter with object:type=
     // left.
     try testgit.requireGitVersion(gpa, io, 2, 43);
@@ -126,14 +126,14 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
     defer root.cleanup();
     const bare = try served(gpa, io, root.dir);
     defer gpa.free(bare);
-    const url = try std.fmt.allocPrint(gpa, "file://{s}", .{bare});
+    const url = try gpa.print("file://{s}", .{bare});
     defer gpa.free(url);
     var env = try testremote.environ(gpa);
     defer env.deinit();
 
     const day = 86400;
     var since_buf: [64]u8 = undefined;
-    const since = try std.fmt.bufPrint(&since_buf, "--shallow-since={d}", .{1_600_000_000 + 5 * day + 1});
+    const since = try std.mem.print(&since_buf, "--shallow-since={d}", .{1_600_000_000 + 5 * day + 1});
     const cases = [_][]const []const u8{
         &.{},
         &.{"--depth=1"},
@@ -166,7 +166,7 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
         for ([_]?[]const u8{ null, shell_helper }, [_][]const u8{ "by-git", "by-relic" }) |upload_pack, name| {
             var args: std.ArrayList([]const u8) = .empty;
             defer args.deinit(gpa);
-            const version_setting = try std.fmt.allocPrint(gpa, "protocol.version={s}", .{version});
+            const version_setting = try gpa.print("protocol.version={s}", .{version});
             defer gpa.free(version_setting);
             try args.appendSlice(gpa, &.{ "-c", version_setting, "clone", "-q", "--no-checkout" });
             if (upload_pack) |p| try args.appendSlice(gpa, &.{ "--upload-pack", p });
@@ -194,14 +194,14 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
 test "git deepens, unshallows and fetches again from relic's upload-pack as from its own" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const shell_helper = try gpa.dupe(u8, helper);
+    const shell_helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
     defer gpa.free(shell_helper);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
     const bare = try served(gpa, io, root.dir);
     defer gpa.free(bare);
-    const url = try std.fmt.allocPrint(gpa, "file://{s}", .{bare});
+    const url = try gpa.print("file://{s}", .{bare});
     defer gpa.free(url);
     var env = try testremote.environ(gpa);
     defer env.deinit();
@@ -209,7 +209,7 @@ test "git deepens, unshallows and fetches again from relic's upload-pack as from
     for ([_][]const u8{ "2", "0" }) |version| {
         var tmp = testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
-        const version_setting = try std.fmt.allocPrint(gpa, "protocol.version={s}", .{version});
+        const version_setting = try gpa.print("protocol.version={s}", .{version});
         defer gpa.free(version_setting);
         for ([_]?[]const u8{ null, shell_helper }, [_][]const u8{ "by-git", "by-relic" }) |upload_pack, name| {
             var args: std.ArrayList([]const u8) = .empty;
@@ -229,7 +229,7 @@ test "git deepens, unshallows and fetches again from relic's upload-pack as from
                 var args: std.ArrayList([]const u8) = .empty;
                 defer args.deinit(gpa);
                 try args.appendSlice(gpa, &.{ "-c", version_setting });
-                const setting = try std.fmt.allocPrint(gpa, "remote.origin.uploadpack={s}", .{shell_helper});
+                const setting = try gpa.print("remote.origin.uploadpack={s}", .{shell_helper});
                 defer gpa.free(setting);
                 if (relic_server) try args.appendSlice(gpa, &.{ "-c", setting });
                 try args.appendSlice(gpa, &.{ "fetch", "-q" });
@@ -250,7 +250,7 @@ test "relic clones and fetches over file:// through its own upload-pack, and ign
     defer root.cleanup();
     const bare = try served(gpa, io, root.dir);
     defer gpa.free(bare);
-    const url = try std.fmt.allocPrint(gpa, "file://{s}", .{bare});
+    const url = try gpa.print("file://{s}", .{bare});
     defer gpa.free(url);
     var env = try testremote.environ(gpa);
     defer env.deinit();
@@ -319,7 +319,7 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
     defer env.deinit();
     const theirs_server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer theirs_server.stop();
-    const ours_server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .upload_pack = helper });
+    const ours_server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .upload_pack = suite.path(.upload_pack_helper) });
     defer ours_server.stop();
     const theirs_url = try theirs_server.url(gpa, "repo.git");
     defer gpa.free(theirs_url);
@@ -329,7 +329,7 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
     for ([_][]const u8{ "2", "0" }) |version| for ([_][]const []const u8{ &.{}, &.{"--depth=2"}, &.{"--filter=blob:none"} }) |extra| {
         var tmp = testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
-        const version_setting = try std.fmt.allocPrint(gpa, "protocol.version={s}", .{version});
+        const version_setting = try gpa.print("protocol.version={s}", .{version});
         defer gpa.free(version_setting);
         for ([_][]const u8{ theirs_url, ours_url }, [_][]const u8{ "by-git", "from-relic" }) |url, name| {
             var args: std.ArrayList([]const u8) = .empty;

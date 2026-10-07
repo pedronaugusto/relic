@@ -285,7 +285,7 @@ fn selected(paths: ?[]const []const u8, path: []const u8) bool {
 //=========================================================================
 
 fn configKey(arena: Allocator, name: []const u8, variable: []const u8) Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(arena, "submodule.{s}.{s}", .{ name, variable });
+    return arena.print("submodule.{s}.{s}", .{ name, variable });
 }
 
 /// A configuration value with its quotes and escapes undone, or `null`.
@@ -321,7 +321,7 @@ fn pathspecMatches(specs: []const []const u8, path: []const u8) Error!bool {
         var literal = false;
         var glob = false;
         if (std.mem.startsWith(u8, spec, ":(")) {
-            const close = std.mem.indexOfScalar(u8, spec, ')') orelse return error.UnsupportedPathspec;
+            const close = std.mem.findScalar(u8, spec, ')') orelse return error.UnsupportedPathspec;
             var words = std.mem.splitScalar(u8, spec[2..close], ',');
             while (words.next()) |word| {
                 if (std.mem.eql(u8, word, "exclude")) {
@@ -373,7 +373,7 @@ fn matchOne(spec: []const u8, path: []const u8, literal: bool, glob: bool) bool 
 /// `origin`.
 fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
     if (try repo.refStore().currentBranch(arena, io)) |branch| {
-        const key = try std.fmt.allocPrint(arena, "branch.{s}.remote", .{branch});
+        const key = try arena.print("branch.{s}.remote", .{branch});
         if (try configString(arena, repo.configuration(), key)) |remote| return remote;
     }
     const remotes = try repo.configuration().subsections(arena, "remote");
@@ -386,7 +386,7 @@ fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
 /// repository is its own authoritative upstream".
 fn superprojectUrl(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
     const remote = try defaultRemote(arena, io, repo);
-    const key = try std.fmt.allocPrint(arena, "remote.{s}.url", .{remote});
+    const key = try arena.print("remote.{s}.url", .{remote});
     if (try configString(arena, repo.configuration(), key)) |url| {
         if (url.len > 0) return url;
     }
@@ -499,7 +499,7 @@ fn absolutePath(arena: Allocator, io: Io, dir: Io.Dir) Error![]u8 {
     var buf: [4096]u8 = undefined;
     const len = try dir.realPath(io, &buf);
     const out = try arena.dupe(u8, buf[0..len]);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
     return out;
 }
 
@@ -516,13 +516,13 @@ fn relativePath(arena: Allocator, target: []const u8, base: []const u8) Allocato
     while (b.next()) |part| try b_parts.append(arena, part);
     var common: usize = 0;
     while (common < t_parts.items.len and common < b_parts.items.len) : (common += 1) {
-        const same = if (builtin.os.tag == .windows)
+        const same = if (builtin.target.os.tag == .windows)
             std.ascii.eqlIgnoreCase(t_parts.items[common], b_parts.items[common])
         else
             std.mem.eql(u8, t_parts.items[common], b_parts.items[common]);
         if (!same) break;
     }
-    if (common == 0 and builtin.os.tag == .windows) return target;
+    if (common == 0 and builtin.target.os.tag == .windows) return target;
     var out: std.ArrayList(u8) = .empty;
     for (b_parts.items[common..]) |_| try out.appendSlice(arena, "../");
     for (t_parts.items[common..], 0..) |part, i| {
@@ -549,7 +549,7 @@ fn connect(
     const to_git_dir = try relativePath(arena, git_dir_abs, work_abs);
     // `gitlink.gitFileTarget` refuses a `.git` file with no path in it.
     assert(to_git_dir.len != 0);
-    const line = try std.fmt.allocPrint(arena, "gitdir: {s}\n", .{to_git_dir});
+    const line = try arena.print("gitdir: {s}\n", .{to_git_dir});
     try work.writeFile(io, .{ .sub_path = ".git", .data = line });
     try editConfigFile(gpa, io, git_dir, "core.worktree", try relativePath(arena, work_abs, git_dir_abs));
 }
@@ -575,7 +575,7 @@ fn validatePath(io: Io, wt: Io.Dir, path: []const u8, display: []const u8, refus
 fn validateGitDir(arena: Allocator, io: Io, git_dir: Io.Dir, name: []const u8, display: []const u8, refusal: ?*Refusal) Error!void {
     for (name, 0..) |c, i| {
         if (c != '/' and c != '\\') continue;
-        const prefix = try std.fmt.allocPrint(arena, "modules/{s}", .{name[0..i]});
+        const prefix = try arena.print("modules/{s}", .{name[0..i]});
         var dir = git_dir.openDir(io, prefix, .{}) catch continue;
         defer dir.close(io);
         if (gitlink.isGitDirectory(io, dir)) return refuse(refusal, display, prefix, error.GitDirInsideGitDir);
@@ -604,7 +604,7 @@ fn headOf(gpa: Allocator, io: Io, repo: *Repository) Error!?Oid {
 
 fn join(arena: Allocator, prefix: []const u8, path: []const u8) Allocator.Error![]const u8 {
     if (prefix.len == 0) return arena.dupe(u8, path);
-    return std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, path });
+    return arena.print("{s}{s}", .{ prefix, path });
 }
 
 //=========================================================================
@@ -736,7 +736,7 @@ fn statusInto(
         if (options.recursive) {
             var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
             defer sub.deinit(io);
-            try statusInto(arena, gpa, io, &sub, options, null, try std.fmt.allocPrint(arena, "{s}/", .{display}), depth + 1, out);
+            try statusInto(arena, gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, out);
         }
     }
 }
@@ -853,7 +853,7 @@ pub const StatusProbe = struct {
             if (nested_failure) |nested| {
                 // Say which submodule, from this superproject.
                 var failure = nested;
-                const full = std.fmt.allocPrint(arena, "{s}/{s}", .{ path, nested.path() }) catch path;
+                const full = arena.print("{s}/{s}", .{ path, nested.path() }) catch path;
                 failure.path_len = @min(full.len, failure.path_buffer.len);
                 @memcpy(failure.path_buffer[0..failure.path_len], full[0..failure.path_len]);
                 p.failure = failure;
@@ -1080,10 +1080,10 @@ fn syncIn(
         var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
         defer sub.deinit(io);
         const remote = try defaultRemote(arena, io, &sub);
-        try setInRepository(gpa, io, &sub, try std.fmt.allocPrint(arena, "remote.{s}.url", .{remote}), for_sub);
+        try setInRepository(gpa, io, &sub, try arena.print("remote.{s}.url", .{remote}), for_sub);
         outcome.remotes += 1;
         if (options.recursive) {
-            try syncIn(gpa, io, &sub, options, null, try std.fmt.allocPrint(arena, "{s}/", .{display}), depth + 1, outcome);
+            try syncIn(gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, outcome);
         }
     }
     try edits.commit(io, repo);
@@ -1144,7 +1144,7 @@ pub fn deinitialize(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOp
 
         const on_disk = try fs.statAt(io, wt, entry.path);
         if (on_disk != null and on_disk.?.kind == .directory) {
-            const dot_git = try std.fmt.allocPrint(arena, "{s}/.git", .{entry.path});
+            const dot_git = try arena.print("{s}/.git", .{entry.path});
             if (try fs.statAt(io, wt, dot_git)) |git_entry| {
                 if (git_entry.kind == .directory) {
                     try relocate(arena, gpa, io, repo, module, entry.path, entry.path, options.refusal);
@@ -1175,7 +1175,7 @@ pub fn deinitialize(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOp
 }
 
 fn modulePath(arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(arena, "modules/{s}", .{name});
+    return arena.print("modules/{s}", .{name});
 }
 
 /// What `git rm -n` refuses a submodule for: a staged gitlink change, a
@@ -1275,7 +1275,7 @@ fn absorbIn(
     for (listing.entries) |entry| {
         const display = try join(arena, prefix, entry.path);
         try validatePath(io, wt, entry.path, display, options.refusal);
-        const dot_git = try std.fmt.allocPrint(arena, "{s}/.git", .{entry.path});
+        const dot_git = try arena.print("{s}/.git", .{entry.path});
         const git_entry = (try fs.statAt(io, wt, dot_git)) orelse continue;
 
         if (git_entry.kind == .directory) {
@@ -1300,7 +1300,7 @@ fn absorbIn(
 
         var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
         defer sub.deinit(io);
-        try absorbIn(gpa, io, &sub, options, null, try std.fmt.allocPrint(arena, "{s}/", .{display}), depth + 1, outcome);
+        try absorbIn(gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, outcome);
     }
 }
 
@@ -1316,8 +1316,8 @@ fn relocate(
     refusal: ?*Refusal,
 ) Error!void {
     const wt = repo.work_dir orelse return error.BareRepository;
-    const dot_git = try std.fmt.allocPrint(arena, "{s}/.git", .{path});
-    if (wt.openDir(io, try std.fmt.allocPrint(arena, "{s}/worktrees", .{dot_git}), .{ .iterate = true })) |dir_const| {
+    const dot_git = try arena.print("{s}/.git", .{path});
+    if (wt.openDir(io, try arena.print("{s}/worktrees", .{dot_git}), .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
         defer dir.close(io);
         var it = dir.iterate();
@@ -1326,7 +1326,7 @@ fn relocate(
     try validateGitDir(arena, io, repo.git_dir, module.name, display, refusal);
     const target = try modulePath(arena, module.name);
     if (try fs.statAt(io, repo.git_dir, target) != null) return refuse(refusal, display, target, error.GitDirExists);
-    if (std.fs.path.dirnamePosix(target)) |parent| {
+    if (std.Io.Dir.path.dirnamePosix(target)) |parent| {
         repo.git_dir.createDirPath(io, parent) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
@@ -1475,7 +1475,7 @@ fn updateIn(
         try validatePath(io, wt, entry.path, display, options.refusal);
         try validateGitDir(arena, io, repo.git_dir, module.name, display, options.refusal);
 
-        const dot_git = try std.fmt.allocPrint(arena, "{s}/.git", .{entry.path});
+        const dot_git = try arena.print("{s}/.git", .{entry.path});
         const just_cloned = try fs.statAt(io, wt, dot_git) == null;
         if (just_cloned) {
             try populate(arena, gpa, io, repo, module, entry.path, url, display, options, outcome);
@@ -1513,7 +1513,7 @@ fn updateIn(
         }
 
         if (options.recursive) {
-            try updateIn(gpa, io, &sub, options, null, try std.fmt.allocPrint(arena, "{s}/", .{display}), depth + 1, outcome);
+            try updateIn(gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, outcome);
         }
     }
 }
@@ -1688,7 +1688,7 @@ fn checkoutCommit(
     try tx.change("HEAD", .{ .direct = commit }, .any, .{ .no_deref = true });
     const log: ?refs_mod.LogMessage = if (options.who) |who| .{
         .who = who,
-        .message = try std.fmt.allocPrint(arena, "checkout: moving from {s} to {s}", .{ from, commit.hex(&hex) }),
+        .message = try arena.print("checkout: moving from {s} to {s}", .{ from, commit.hex(&hex) }),
         .policy = sub.reflogPolicy(),
     } else null;
     try tx.commit(io, log);
@@ -1841,7 +1841,7 @@ pub const Walk = struct {
                 child.repo_storage.?.deinit(w.io);
                 child.arena.deinit();
             }
-            child.prefix = try std.fmt.allocPrint(child.arena.allocator(), "{s}/", .{display});
+            child.prefix = try child.arena.allocator().print("{s}/", .{display});
             if (w.options.recursive) {
                 try w.frames.ensureUnusedCapacity(w.gpa, 1);
                 var index = try child.repo.openIndex(w.io);

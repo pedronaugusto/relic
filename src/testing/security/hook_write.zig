@@ -34,16 +34,16 @@ test "git 2.39.4 defense-in-depth (reverted in 2.39.5 and 2.45.2), t5601-clone '
     // own, which git 2.45.2 runs after a clone's checkout and relic runs
     // no hook for at all.
     try owner.dir.createDirPath(io, "hooks");
-    const marker = try std.fmt.allocPrint(gpa, "{s}/ran\n", .{owner_path});
+    const marker = try gpa.print("{s}/ran\n", .{owner_path});
     defer gpa.free(marker);
     try testgit.fixtureHook(gpa, io, owner.dir, "hooks/post-checkout", "record_stdin", marker);
-    const null_device = if (builtin.os.tag == .windows) "NUL" else "/dev/null";
+    const null_device = if (builtin.target.os.tag == .windows) "NUL" else "/dev/null";
     for ([_][]const u8{ null_device, "hooks" }, [_][]const u8{ "c1", "c2" }) |hooks, name| {
-        const hooks_path = if (std.mem.eql(u8, hooks, "hooks")) try std.fmt.allocPrint(gpa, "{s}/hooks", .{owner_path}) else try gpa.dupe(u8, hooks);
+        const hooks_path = if (std.mem.eql(u8, hooks, "hooks")) try gpa.print("{s}/hooks", .{owner_path}) else try gpa.dupe(u8, hooks);
         defer gpa.free(hooks_path);
         // A configuration value spells a Windows path with `/`: `\` begins an escape.
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, hooks_path, '\\', '/');
-        const text = try std.fmt.allocPrint(gpa, "[core]\n\thooksPath = {s}\n", .{hooks_path});
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, hooks_path, '\\', '/');
+        const text = try gpa.print("[core]\n\thooksPath = {s}\n", .{hooks_path});
         defer gpa.free(text);
         var config = try config_mod.Config.parseText(gpa, text, .local);
         defer config.deinit();

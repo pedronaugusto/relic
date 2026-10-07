@@ -479,12 +479,12 @@ pub const Pack = struct {
         // The pack first: an index with no pack beside it is one being
         // written, or left behind, and is `FileNotFound` whatever it holds.
         var pack_buf: [512]u8 = undefined;
-        const pack_name = std.fmt.bufPrint(&pack_buf, "{s}.pack", .{base}) catch return error.NameTooLong;
+        const pack_name = std.mem.print(&pack_buf, "{s}.pack", .{base}) catch return error.NameTooLong;
         const file = try dir.openFile(io, pack_name, .{});
         errdefer file.close(io);
 
         var name_buf: [512]u8 = undefined;
-        const idx_name = std.fmt.bufPrint(&name_buf, "{s}.idx", .{base}) catch return error.NameTooLong;
+        const idx_name = std.mem.print(&name_buf, "{s}.idx", .{base}) catch return error.NameTooLong;
         var index = try Index.open(gpa, io, dir, idx_name, kind, options.max_index_bytes);
         errdefer index.deinit();
 
@@ -1507,7 +1507,7 @@ const TestPack = struct {
         try pack_bytes.appendSlice(p.gpa, p.body.items);
         try pack_bytes.appendSlice(p.gpa, checksum.raw());
         try dir.writeFile(io, .{
-            .sub_path = try std.fmt.bufPrint(&pack_name, "{s}.pack", .{base}),
+            .sub_path = try std.mem.print(&pack_name, "{s}.pack", .{base}),
             .data = pack_bytes.items,
         });
 
@@ -1556,7 +1556,7 @@ const TestPack = struct {
 
         var idx_name: [64]u8 = undefined;
         try dir.writeFile(io, .{
-            .sub_path = try std.fmt.bufPrint(&idx_name, "{s}.idx", .{base}),
+            .sub_path = try std.mem.print(&idx_name, "{s}.idx", .{base}),
             .data = idx.items,
         });
     }
@@ -1794,19 +1794,19 @@ pub const Deflater = struct {
         // std's initial chain and token bytes are undefined: their heads
         // and counts make them unreachable until filled. Copy only the
         // defined state, rather than moving 224 KiB for every small entry.
-        inline for (std.meta.fields(flate.Compress)) |field| {
-            if (comptime std.mem.eql(u8, field.name, "lookup")) {
-                inline for (std.meta.fields(@TypeOf(fresh.lookup))) |part| {
-                    if (comptime !std.mem.eql(u8, part.name, "chain"))
-                        @field(d.compress.lookup, part.name) = @field(fresh.lookup, part.name);
+        inline for (@typeInfo(flate.Compress).@"struct".field_names) |field| {
+            if (comptime std.mem.eql(u8, field, "lookup")) {
+                inline for (@typeInfo(@TypeOf(fresh.lookup)).@"struct".field_names) |part| {
+                    if (comptime !std.mem.eql(u8, part, "chain"))
+                        @field(d.compress.lookup, part) = @field(fresh.lookup, part);
                 }
-            } else if (comptime std.mem.eql(u8, field.name, "buffered_tokens")) {
-                inline for (std.meta.fields(@TypeOf(fresh.buffered_tokens))) |part| {
-                    if (comptime !std.mem.eql(u8, part.name, "list"))
-                        @field(d.compress.buffered_tokens, part.name) = @field(fresh.buffered_tokens, part.name);
+            } else if (comptime std.mem.eql(u8, field, "buffered_tokens")) {
+                inline for (@typeInfo(@TypeOf(fresh.buffered_tokens)).@"struct".field_names) |part| {
+                    if (comptime !std.mem.eql(u8, part, "list"))
+                        @field(d.compress.buffered_tokens, part) = @field(fresh.buffered_tokens, part);
                 }
             } else {
-                @field(d.compress, field.name) = @field(fresh, field.name);
+                @field(d.compress, field) = @field(fresh, field);
             }
         }
         try d.compress.writer.writeAll(payload);
@@ -2226,10 +2226,10 @@ pub const Writer = struct {
         const text = checksum.hex(&hex);
         var pack_name_buf: [hash.max_hex_len + 16]u8 = undefined;
         // unreachable: a hex name is at most max_hex_len digits, the rest ten bytes
-        const pack_name = std.fmt.bufPrint(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
+        const pack_name = std.mem.print(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
         var idx_name_buf: [hash.max_hex_len + 16]u8 = undefined;
         // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-        const idx_name = std.fmt.bufPrint(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
+        const idx_name = std.mem.print(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
         // The index goes to a temporary of its own, because the order the two
         // become visible in is not free to choose: a reader finds a pack by
@@ -2260,7 +2260,7 @@ pub const Writer = struct {
         if (rev_temp) |t| {
             var rev_name_buf: [hash.max_hex_len + 16]u8 = undefined;
             // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-            const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
+            const rev_name = std.mem.print(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
             try fs.renameWithRetry(io, w.dir, t, rev_name);
         }
         fs.renameWithRetry(io, w.dir, idx_temp, idx_name) catch |err| {
@@ -2426,8 +2426,8 @@ test "a written pack and its index read back, entry kind for entry kind" {
     defer tmp.cleanup();
 
     const blob_bytes = "a blob with some length to it, so the delta has something to copy\n";
-    const tree_bytes = "100644 a\x00" ++ ("\x01" ** 20);
-    const commit_bytes = "tree " ++ ("0" ** 40) ++ "\nsome header lines\n\nmessage\n";
+    const tree_bytes = "100644 a\x00" ++ (&@as([20]u8, @splat(0x01)));
+    const commit_bytes = "tree " ++ (&@as([40]u8, @splat('0'))) ++ "\nsome header lines\n\nmessage\n";
 
     const blob_oid = hash.Hasher.nameObject(.sha1, .{}, "blob", blob_bytes).oid;
     const tree_oid = hash.Hasher.nameObject(.sha1, .{}, "tree", tree_bytes).oid;
@@ -2459,7 +2459,7 @@ test "a written pack and its index read back, entry kind for entry kind" {
 
     var hex: [hash.max_hex_len]u8 = undefined;
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
+    const base = try std.mem.print(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
 
     var p = try Pack.open(gpa, io, tmp.dir, base, .sha1, .{});
     defer p.deinit(io);
@@ -2547,7 +2547,7 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
     const report = try w.finish(io);
     var hex: [hash.max_hex_len]u8 = undefined;
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
+    const base = try std.mem.print(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
     var p = try Pack.open(gpa, io, tmp.dir, base, .sha1, .{});
     defer p.deinit(io);
     // Rehashes every object against the name the index gives it, deltas
@@ -2586,7 +2586,7 @@ test "a pack written to a stream is byte for byte the pack written to a file" {
     try std.testing.expect(written.name.eql(streamed.name));
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [64]u8 = undefined;
-    const pack_name = try std.fmt.bufPrint(&name_buf, "pack-{s}.pack", .{written.name.hex(&hex)});
+    const pack_name = try std.mem.print(&name_buf, "pack-{s}.pack", .{written.name.hex(&hex)});
     const on_disk = try tmp.dir.readFileAlloc(io, pack_name, gpa, .unlimited);
     defer gpa.free(on_disk);
     try std.testing.expectEqualSlices(u8, on_disk, stream.written());
@@ -2607,7 +2607,7 @@ test "a pack with no objects is still a pack, under either name format" {
 
         var hex: [hash.max_hex_len]u8 = undefined;
         var base_buf: [hash.max_hex_len + 8]u8 = undefined;
-        var p = try Pack.open(gpa, io, tmp.dir, try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)}), kind, .{});
+        var p = try Pack.open(gpa, io, tmp.dir, try std.mem.print(&base_buf, "pack-{s}", .{report.name.hex(&hex)}), kind, .{});
         defer p.deinit(io);
         try std.testing.expectEqual(@as(u32, 0), p.index.count);
     }
@@ -2748,12 +2748,12 @@ const FailurePack = struct {
         prng.random().bytes(noise);
         var w = try Writer.init(gpa, io, f.tmp.dir, .sha1, 3, .{});
         defer w.deinit(io);
-        f.small = try w.add(try Oid.parse(.sha1, "1" ** 40), .blob, "small");
-        f.spanning = try w.add(try Oid.parse(.sha1, "2" ** 40), .blob, noise[0 .. 3 * read_block_bytes]);
-        f.large = try w.add(try Oid.parse(.sha1, "3" ** 40), .blob, noise);
+        f.small = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('1'))), .blob, "small");
+        f.spanning = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('2'))), .blob, noise[0 .. 3 * read_block_bytes]);
+        f.large = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('3'))), .blob, noise);
         const report = try w.finish(io);
         var hex: [hash.max_hex_len]u8 = undefined;
-        f.name_len = (try std.fmt.bufPrint(&f.name_buf, "pack-{s}", .{report.name.hex(&hex)})).len;
+        f.name_len = (try std.mem.print(&f.name_buf, "pack-{s}", .{report.name.hex(&hex)})).len;
         return f;
     }
 
@@ -2804,7 +2804,7 @@ test "the block reader serves every std reader call across block boundaries" {
     defer fixture.tmp.cleanup();
     var p = try Pack.open(gpa, io, fixture.tmp.dir, fixture.name(), .sha1, .{ .read_cache_bytes = 2 * read_block_bytes });
     defer p.deinit(io);
-    const file = try fixture.tmp.dir.readFileAlloc(io, try std.fmt.bufPrint(&fixture.name_buf2, "{s}.pack", .{fixture.name()}), gpa, .limited(1 << 20));
+    const file = try fixture.tmp.dir.readFileAlloc(io, try std.mem.print(&fixture.name_buf2, "{s}.pack", .{fixture.name()}), gpa, .limited(1 << 20));
     defer gpa.free(file);
 
     // Starting a few bytes before each of the first boundaries, every kind
@@ -2935,7 +2935,7 @@ test "a pass whose delta-base cache holds more reads no more of the pack" {
             }
         }
         var base_buf: [32]u8 = undefined;
-        const base_name = try std.fmt.bufPrint(&base_buf, "random{d}", .{round});
+        const base_name = try std.mem.print(&base_buf, "random{d}", .{round});
         try builder.write(io, tmp.dir, base_name);
 
         // Any cache size, down to the single block.
@@ -3038,7 +3038,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     const report = try w.finish(io);
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
+    const base = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
 
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Counter.read;
@@ -3150,13 +3150,13 @@ test "small random packed reads keep large sequential reads buffered" {
     prng.random().bytes(large);
     var w = try Writer.init(gpa, io, tmp.dir, .sha1, 3, .{});
     defer w.deinit(io);
-    const first = try w.add(try Oid.parse(.sha1, "1" ** 40), .blob, "first");
-    const middle = try w.add(try Oid.parse(.sha1, "2" ** 40), .blob, large);
-    const last = try w.add(try Oid.parse(.sha1, "3" ** 40), .blob, "last");
+    const first = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('1'))), .blob, "first");
+    const middle = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('2'))), .blob, large);
+    const last = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('3'))), .blob, "last");
     const report = try w.finish(io);
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [64]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
+    const name = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
     var p = try Pack.open(gpa, io, tmp.dir, name, .sha1, .{});
     defer p.deinit(io);
     var vtable = io.vtable.*;
@@ -3195,7 +3195,7 @@ test "a packed entry header survives a short positional read" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const bytes = "b" ** 1000;
+    const bytes = &@as([1000]u8, @splat('b'));
     const oid = hash.Hasher.nameObject(.sha1, .{}, "blob", bytes).oid;
     var w = try Writer.init(gpa, io, tmp.dir, .sha1, 1, .{});
     defer w.deinit(io);
@@ -3203,7 +3203,7 @@ test "a packed entry header survives a short positional read" {
     const report = try w.finish(io);
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [64]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
+    const name = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
     var p = try Pack.open(gpa, io, tmp.dir, name, .sha1, .{});
     defer p.deinit(io);
     var vtable = io.vtable.*;

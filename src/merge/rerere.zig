@@ -124,8 +124,8 @@ const Run = struct {
     dirs: std.StringHashMapUnmanaged(std.ArrayList(u8)) = .empty,
 
     fn pathOf(r: *Run, id: Id, file: []const u8) Allocator.Error![]const u8 {
-        if (id.variant <= 0) return std.fmt.allocPrint(r.arena, "rr-cache/{s}/{s}", .{ id.hex, file });
-        return std.fmt.allocPrint(r.arena, "rr-cache/{s}/{s}.{d}", .{ id.hex, file, id.variant });
+        if (id.variant <= 0) return r.arena.print("rr-cache/{s}/{s}", .{ id.hex, file });
+        return r.arena.print("rr-cache/{s}/{s}.{d}", .{ id.hex, file, id.variant });
     }
 
     /// `find_rerere_dir` and `scan_rerere_dir`.
@@ -134,7 +134,7 @@ const Run = struct {
         if (slot.found_existing) return slot.value_ptr;
         slot.key_ptr.* = try r.arena.dupe(u8, hex);
         slot.value_ptr.* = .empty;
-        const sub = try std.fmt.allocPrint(r.arena, "rr-cache/{s}", .{hex});
+        const sub = try r.arena.print("rr-cache/{s}", .{hex});
         var dir = r.repo.common_dir.openDir(r.io, sub, .{ .iterate = true }) catch return slot.value_ptr;
         defer dir.close(r.io);
         var it = dir.iterate();
@@ -370,7 +370,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
         if (n.conflicts < 1) continue;
         try rr.put(arena, path, .{ .hex = n.id.? });
         _ = try r.status(n.id.?);
-        const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{n.id.?});
+        const sub = try arena.print("rr-cache/{s}", .{n.id.?});
         try repo.common_dir.createDirPath(io, sub);
     }
     sortRr(&rr);
@@ -585,7 +585,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
     }
     var favor: blobmerge.Favor = .none;
     if (name) |driver| {
-        if (r.repo.configuration().get(try std.fmt.allocPrint(r.arena, "merge.{s}.driver", .{driver})) != null) {
+        if (r.repo.configuration().get(try r.arena.print("merge.{s}.driver", .{driver})) != null) {
             return error.UnsupportedMergeDriver;
         } else if (std.mem.eql(u8, driver, "binary")) {
             return .{ .bytes = ours, .clean = false };
@@ -647,7 +647,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
         try r.removeFile(try r.pathOf(id, "thisimage"));
         try r.removeFile(try r.pathOf(id, "preimage"));
         try r.removeFile(try r.pathOf(id, "postimage"));
-        const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{id.hex});
+        const sub = try arena.print("rr-cache/{s}", .{id.hex});
         repo.common_dir.deleteDir(io, sub) catch |err| switch (err) {
             error.DirNotEmpty, error.FileNotFound => {},
             else => return err,
@@ -1000,7 +1000,7 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Self.Error!void {
         if (now_empty) try to_remove.append(arena, hex);
     }
     for (to_remove.items) |hex| {
-        const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{hex});
+        const sub = try arena.print("rr-cache/{s}", .{hex});
         repo.common_dir.deleteDir(io, sub) catch |err| switch (err) {
             error.DirNotEmpty, error.FileNotFound => {},
             else => return err,
@@ -1075,16 +1075,16 @@ test "a marker ends at a space, a tab or a line end, as git's isspace has it, an
     const a = arena.allocator();
     // A vertical tab or a form feed after the marker is content.
     for ([_][]const u8{ "\x0b", "\x0c" }) |space| {
-        const text = try std.fmt.allocPrint(a, "<<<<<<< a\nmine\n=======\nyours\n======={s}\n>>>>>>> b\n", .{space});
+        const text = try a.print("<<<<<<< a\nmine\n=======\nyours\n======={s}\n>>>>>>> b\n", .{space});
         const n = try normalize(a, text, 7, .sha1);
         try std.testing.expectEqual(@as(i8, 1), n.conflicts);
-        const want = try std.fmt.allocPrint(a, "<<<<<<<\nmine\n=======\nyours\n======={s}\n>>>>>>>\n", .{space});
+        const want = try a.print("<<<<<<<\nmine\n=======\nyours\n======={s}\n>>>>>>>\n", .{space});
         try std.testing.expectEqualStrings(want, n.text);
     }
     // The markers a merge writes at a size past a byte's are the ones read.
     var merged = try blobmerge.blobs(a, "base\n", "mine\n", "yours\n", .{ .marker_size = 300 });
     defer merged.deinit();
-    try std.testing.expect(std.mem.startsWith(u8, merged.bytes, "<" ** 300 ++ " "));
+    try std.testing.expect(std.mem.startsWith(u8, merged.bytes, @as([300]u8, @splat('<')) ++ " "));
     try std.testing.expectEqual(@as(i8, 1), (try normalize(a, merged.bytes, 300, .sha1)).conflicts);
 }
 
@@ -1096,10 +1096,10 @@ test "a variant is digits, no sign, and no more than rerere keeps" {
     }
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const id = "a" ** 40;
+    const id = &@as([40]u8, @splat('a'));
     try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), id ++ ".-1\tf\x00", .sha1));
     try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), id ++ ".2147483647\tf\x00", .sha1));
-    try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), "../../victim/" ++ "a" ** 27 ++ "\tf\x00", .sha1));
+    try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), "../../victim/" ++ @as([27]u8, @splat('a')) ++ "\tf\x00", .sha1));
     try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), id ++ "\t../outside\x00", .sha1));
 }
 

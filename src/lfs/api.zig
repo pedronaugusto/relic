@@ -239,7 +239,7 @@ pub const Settings = struct {
             return std.ascii.eqlIgnoreCase(entry.name, "access");
         }
         var buf: [64]u8 = undefined;
-        const key = std.fmt.bufPrint(&buf, "{s}.{s}", .{ entry.section, entry.name }) catch return false;
+        const key = std.mem.print(&buf, "{s}.{s}", .{ entry.section, entry.name }) catch return false;
         for (file_keys) |safe| {
             if (std.ascii.eqlIgnoreCase(safe, key)) return true;
         }
@@ -526,7 +526,7 @@ pub const Endpoint = struct {
         const path = e.url["file://".len..];
         // A Windows file URL is file:///C:/path. The slash introduces the
         // URL path; it is not part of the native drive-absolute path.
-        if (builtin.os.tag == .windows and path.len >= 3 and path[0] == '/' and
+        if (builtin.target.os.tag == .windows and path.len >= 3 and path[0] == '/' and
             std.ascii.isAlphabetic(path[1]) and path[2] == ':') return path[1..];
         return path;
     }
@@ -602,13 +602,13 @@ pub fn fetchHeadUrl(text: []const u8) ?[]const u8 {
 pub fn defaultRemote(arena: Allocator, settings: *const Settings, branch: ?[]const u8, operation: Operation) Self.Error![]const u8 {
     if (operation == .upload) {
         if (branch) |b| {
-            if (try settings.get(arena, try std.fmt.allocPrint(arena, "branch.{s}.pushremote", .{b}))) |r| return r;
+            if (try settings.get(arena, try arena.print("branch.{s}.pushremote", .{b}))) |r| return r;
         }
         if (try settings.get(arena, "remote.lfspushdefault")) |r| return r;
         if (try settings.get(arena, "remote.pushdefault")) |r| return r;
     }
     if (branch) |b| {
-        if (try settings.get(arena, try std.fmt.allocPrint(arena, "branch.{s}.remote", .{b}))) |r| return r;
+        if (try settings.get(arena, try arena.print("branch.{s}.remote", .{b}))) |r| return r;
     }
     if (try settings.get(arena, "remote.lfsdefault")) |r| return r;
     const names = try remote_mod.names(arena, settings.config);
@@ -618,13 +618,13 @@ pub fn defaultRemote(arena: Allocator, settings: *const Settings, branch: ?[]con
 
 fn remoteEndpoint(arena: Allocator, settings: *const Settings, remote: []const u8, operation: Operation, base: ?[]const u8) Error!?Endpoint {
     if (operation == .upload) {
-        const key = try std.fmt.allocPrint(arena, "remote.{s}.lfspushurl", .{remote});
+        const key = try arena.print("remote.{s}.lfspushurl", .{remote});
         if (try settings.get(arena, key)) |u| {
             const endpoint = try newEndpoint(arena, settings, operation, u, base);
             return endpoint;
         }
     }
-    const key = try std.fmt.allocPrint(arena, "remote.{s}.lfsurl", .{remote});
+    const key = try arena.print("remote.{s}.lfsurl", .{remote});
     if (try settings.get(arena, key)) |u| {
         const endpoint = try newEndpoint(arena, settings, operation, u, base);
         return endpoint;
@@ -638,10 +638,10 @@ fn remoteEndpoint(arena: Allocator, settings: *const Settings, remote: []const u
 /// `url`, else the name itself when it is a URL.
 pub fn gitRemoteUrl(arena: Allocator, settings: *const Settings, remote: []const u8, for_push: bool) Self.Error!?[]const u8 {
     if (for_push) {
-        const key = try std.fmt.allocPrint(arena, "remote.{s}.pushurl", .{remote});
+        const key = try arena.print("remote.{s}.pushurl", .{remote});
         if (try settings.get(arena, key)) |u| return u;
     }
-    const key = try std.fmt.allocPrint(arena, "remote.{s}.url", .{remote});
+    const key = try arena.print("remote.{s}.url", .{remote});
     if (try settings.get(arena, key)) |u| return u;
     // A name with a scheme, or with a colon as the scp-like form has one,
     // is a URL git-lfs takes as given.
@@ -664,7 +664,7 @@ fn endpointFromCloneUrl(arena: Allocator, settings: *const Settings, operation: 
     const last_slash = std.mem.findScalarLast(u8, u, '/') orelse 0;
     const ext_start = std.mem.findScalarLast(u8, u, '.');
     const ends_git = if (ext_start) |dot| dot > last_slash and std.mem.eql(u8, u[dot..], ".git") else false;
-    e.url = try std.fmt.allocPrint(arena, "{s}{s}", .{ u, if (ends_git) "/info/lfs" else ".git/info/lfs" });
+    e.url = try arena.print("{s}{s}", .{ u, if (ends_git) "/info/lfs" else ".git/info/lfs" });
     return e;
 }
 
@@ -693,28 +693,28 @@ fn newEndpoint(arena: Allocator, settings: *const Settings, operation: Operation
             // `git://` has no API; git-lfs asks `lfs.gitprotocol`'s scheme
             // at the same host and path.
             const protocol = (try settings.get(arena, "lfs.gitprotocol")) orelse "https";
-            const u = try std.fmt.allocPrint(arena, "{s}{s}", .{ protocol, raw[scheme.len..] });
+            const u = try arena.print("{s}{s}", .{ protocol, raw[scheme.len..] });
             return .{ .url = u, .original = u };
         }
         return error.LfsEndpointUnknown;
     }
     if (url_mod.isLocal(raw)) {
-        const absolute = if (std.fs.path.isAbsolute(raw) or base == null)
+        const absolute = if (std.Io.Dir.path.isAbsolute(raw) or base == null)
             raw
         else
-            try std.fs.path.resolve(arena, &.{ base.?, raw });
+            try std.Io.Dir.path.resolveAlloc(arena, &.{ base.?, raw });
         const u = try localFileUrl(arena, absolute);
         return .{ .url = u, .original = u };
     }
     // `[user@]host:path`, or `[host:port]:path`.
     const parsed = url_mod.Url.parse(raw) catch return error.LfsEndpointUnknown;
     if (parsed.scheme != .ssh) return error.LfsEndpointUnknown;
-    const user_and_host = if (parsed.user) |user| try std.fmt.allocPrint(arena, "{s}@{s}", .{ user, parsed.host }) else parsed.host;
+    const user_and_host = if (parsed.user) |user| try arena.print("{s}@{s}", .{ user, parsed.host }) else parsed.host;
     var port: ?[]const u8 = null;
-    if (parsed.port) |p| port = try std.fmt.allocPrint(arena, "{d}", .{p});
+    if (parsed.port) |p| port = try arena.print("{d}", .{p});
     const path = parsed.path;
     return .{
-        .url = try std.fmt.allocPrint(arena, "https://{s}/{s}", .{ parsed.host, path }),
+        .url = try arena.print("https://{s}/{s}", .{ parsed.host, path }),
         .ssh = .{ .user_and_host = user_and_host, .port = port, .path = std.mem.trimStart(u8, path, "/")[0..] },
         .original = raw,
     };
@@ -739,12 +739,12 @@ fn sshEndpoint(arena: Allocator, raw: []const u8, parts: UrlParts) Error!Endpoin
         for (p) |c| if (!std.ascii.isDigit(c)) return error.LfsEndpointUnknown;
     }
     const user_and_host = if (parts.user) |user|
-        (if (user.len != 0) try std.fmt.allocPrint(arena, "{s}@{s}", .{ user, parts.host }) else parts.host)
+        (if (user.len != 0) try arena.print("{s}@{s}", .{ user, parts.host }) else parts.host)
     else
         parts.host;
     const path = try percentDecode(arena, parts.path);
     return .{
-        .url = try std.fmt.allocPrint(arena, "https://{s}{s}", .{ parts.host, path }),
+        .url = try arena.print("https://{s}{s}", .{ parts.host, path }),
         .ssh = .{ .user_and_host = user_and_host, .port = parts.port, .path = path },
         .original = raw,
     };
@@ -753,9 +753,9 @@ fn sshEndpoint(arena: Allocator, raw: []const u8, parts: UrlParts) Error!Endpoin
 /// `file://` and an absolute path, `/`-separated, as git-lfs writes one.
 fn localFileUrl(arena: Allocator, path: []const u8) Allocator.Error![]const u8 {
     const slashed = try arena.dupe(u8, path);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, slashed, '\\', '/');
-    if (slashed.len != 0 and slashed[0] != '/') return std.fmt.allocPrint(arena, "file:///{s}", .{slashed});
-    return std.fmt.allocPrint(arena, "file://{s}", .{slashed});
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, slashed, '\\', '/');
+    if (slashed.len != 0 and slashed[0] != '/') return arena.print("file:///{s}", .{slashed});
+    return arena.print("file://{s}", .{slashed});
 }
 
 fn percentDecode(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
@@ -818,7 +818,7 @@ pub fn sshArguments(
     ssh: Endpoint.Ssh,
     operation: Operation,
 ) Self.Error!program.Invocation {
-    const remote = try std.fmt.allocPrint(arena, "git-lfs-authenticate {s} {s}", .{ ssh.path, @tagName(operation) });
+    const remote = try arena.print("git-lfs-authenticate {s} {s}", .{ ssh.path, @tagName(operation) });
     return sshInvocation(arena, environ, settings, ssh, remote, null);
 }
 
@@ -913,7 +913,7 @@ pub fn sshInvocation(
     if (multiplex) |m| {
         if (prog.variant == .ssh) {
             try argv.append(arena, if (m.master) "-oControlMaster=yes" else "-oControlMaster=no");
-            try argv.append(arena, try std.fmt.allocPrint(arena, "-oControlPath={s}", .{m.control_path}));
+            try argv.append(arena, try arena.print("-oControlPath={s}", .{m.control_path}));
         }
     }
     if (ssh.port) |port| {
@@ -1109,7 +1109,7 @@ pub const Client = struct {
         var dir = Io.Dir.cwd().openDir(c.io, home, .{}) catch return;
         defer dir.close(c.io);
         const text = (fs.readFileAlloc(c.gpa, c.io, dir, ".netrc", 1 << 20) catch null) orelse
-            (if (builtin.os.tag == .windows) (fs.readFileAlloc(c.gpa, c.io, dir, "_netrc", 1 << 20) catch null) else null) orelse
+            (if (builtin.target.os.tag == .windows) (fs.readFileAlloc(c.gpa, c.io, dir, "_netrc", 1 << 20) catch null) else null) orelse
             return;
         defer c.gpa.free(text);
         c.netrc = netrc_mod.Netrc.parse(c.gpa, text) catch |err| switch (err) {
@@ -1173,7 +1173,7 @@ pub const Client = struct {
 
     fn fail(c: *Client, comptime fmt: []const u8, args: anytype, err: Error) Error {
         var buf: [512]u8 = undefined;
-        c.setMessage(std.fmt.bufPrint(&buf, fmt, args) catch fmt);
+        c.setMessage(std.mem.print(&buf, fmt, args) catch fmt);
         return err;
     }
 
@@ -1216,7 +1216,7 @@ pub const Client = struct {
     }
 
     fn endpointLocked(c: *Client, operation: Operation) Error!Endpoint {
-        const i = @intFromEnum(operation);
+        const i = @backingInt(operation);
         if (c.endpoints[i]) |e| return e;
         const e = try findEndpoint(c.arena.allocator(), c.settings, c.remote, operation, c.where);
         c.endpoints[i] = e;
@@ -1234,7 +1234,7 @@ pub const Client = struct {
     }
 
     fn sshAuthLocked(c: *Client, e: Endpoint, operation: Operation) Error!SshAuth {
-        const i = @intFromEnum(operation);
+        const i = @backingInt(operation);
         if (c.ssh_auth[i]) |a| {
             // git-lfs keeps an answer until it is five seconds from expiring.
             const now = c.options.now orelse return a;
@@ -1305,7 +1305,7 @@ pub const Client = struct {
     pub fn sshTransfer(c: *Client, operation: Operation) Self.Error!?*lfsssh.Transfer {
         try c.mutex.lock(c.io);
         defer c.mutex.unlock(c.io);
-        const i = @intFromEnum(operation);
+        const i = @backingInt(operation);
         switch (c.ssh_transfers[i]) {
             .open => |t| return t,
             .none => return null,
@@ -1319,15 +1319,15 @@ pub const Client = struct {
             if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "always")) return null;
         }
         const programs = c.options.programs orelse return error.ProgramsNotGranted;
-        const remote = try std.fmt.allocPrint(arena, "git-lfs-transfer {s} {s}", .{ ssh.path, @tagName(operation) });
+        const remote = try arena.print("git-lfs-transfer {s} {s}", .{ ssh.path, @tagName(operation) });
         var first = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, null);
         var rest = first;
         var control_dir: ?[]const u8 = null;
         const prog = try sshProgram(arena, programs.environ, c.settings);
-        if (prog.variant == .ssh and c.settings.getBool("lfs.ssh.automultiplex", builtin.os.tag != .windows)) {
+        if (prog.variant == .ssh and c.settings.getBool("lfs.ssh.automultiplex", builtin.target.os.tag != .windows)) {
             if (try controlDir(arena, c.io, programs.environ)) |dir| {
                 control_dir = dir;
-                const path = try std.fmt.allocPrint(arena, "{s}/lfs.sock", .{dir});
+                const path = try arena.print("{s}/lfs.sock", .{dir});
                 first = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = true, .control_path = path });
                 rest = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = false, .control_path = path });
             }
@@ -1349,7 +1349,7 @@ pub const Client = struct {
     /// Forget `git-lfs-authenticate`'s answer, so the next request asks
     /// again: what a refused token calls for.
     fn dropSshAuth(c: *Client, operation: Operation) void {
-        c.ssh_auth[@intFromEnum(operation)] = null;
+        c.ssh_auth[@backingInt(operation)] = null;
     }
 
     fn accessFor(c: *Client, url: []const u8) Error!Access {
@@ -1368,7 +1368,7 @@ pub const Client = struct {
         const plain = try arena.dupe(u8, try stripUserinfo(arena, url));
         try c.access.insert(c.gpa, 0, .{ .url = plain, .mode = mode });
         try c.learned.append(c.gpa, .{
-            .key = try std.fmt.allocPrint(arena, "lfs.{s}.access", .{plain}),
+            .key = try arena.print("lfs.{s}.access", .{plain}),
             .value = @tagName(mode),
         });
     }
@@ -1380,7 +1380,7 @@ pub const Client = struct {
         defer c.mutex.unlock(c.io);
         const arena = c.arena.allocator();
         try c.learned.append(c.gpa, .{
-            .key = try std.fmt.allocPrint(arena, "lfs.{s}.locksverify", .{try stripUserinfo(arena, url)}),
+            .key = try arena.print("lfs.{s}.locksverify", .{try stripUserinfo(arena, url)}),
             .value = if (value) "true" else "false",
         });
     }
@@ -1898,7 +1898,7 @@ pub const Client = struct {
         }
         const proxy = try c.proxyFor(scratch, request_url, url);
         const timeouts = try timeoutsFor(c.settings, scratch, url);
-        const key = try std.fmt.allocPrint(scratch, "{s}\x00{s}\x00{s}\x00{}\x00{d}\x00{s}\x00{s}", .{
+        const key = try scratch.print("{s}\x00{s}\x00{s}\x00{}\x00{d}\x00{s}\x00{s}", .{
             proxy orelse "",
             ca_info orelse "",
             ca_path orelse "",
@@ -1946,9 +1946,9 @@ pub const Client = struct {
     /// neither; `~` expanded, as git-lfs expands it.
     fn clientCertificateFiles(c: *Client, scratch: Allocator, url: url_mod.Url, environ: ?*const std.process.Environ.Map) Error!?clientcert.Files {
         const host_url = if (url.port) |port|
-            try std.fmt.allocPrint(scratch, "https://{s}:{d}/", .{ url.host, port })
+            try scratch.print("https://{s}:{d}/", .{ url.host, port })
         else
-            try std.fmt.allocPrint(scratch, "https://{s}/", .{url.host});
+            try scratch.print("https://{s}/", .{url.host});
         const key = try c.settings.urlGet(scratch, "http", host_url, "sslkey") orelse return null;
         const cert = try c.settings.urlGet(scratch, "http", host_url, "sslcert") orelse return null;
         return .{ .cert = try expandHome(scratch, cert, environ), .key = try expandHome(scratch, key, environ) };
@@ -1971,7 +1971,7 @@ pub const Client = struct {
             // Git LFS names the key with slashes on Windows, unlike Git's
             // own certificate helper request.
             const helper_path = try arena.dupe(u8, key_path);
-            if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, helper_path, '\\', '/');
+            if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, helper_path, '\\', '/');
             session = .forCertificate(c.gpa, helper_path);
             const s = &session.?;
             if (try s.fill(c.io, c.credentialOptions())) passphrase = s.password;
@@ -2044,7 +2044,7 @@ pub const Client = struct {
         if (try c.settings.urlGet(scratch, "http", request_url, "proxy")) |v| {
             if (v.len != 0) chosen = v;
         }
-        const remote_key = try std.fmt.allocPrint(scratch, "remote.{s}.proxy", .{c.remote});
+        const remote_key = try scratch.print("remote.{s}.proxy", .{c.remote});
         if (try c.settings.get(scratch, remote_key)) |v| {
             if (v.len == 0) return null;
             chosen = v;
@@ -2134,9 +2134,9 @@ pub const Client = struct {
         const Reason = struct { message: ?[]const u8 = null };
         const reason = std.json.parseFromSliceLeaky(Reason, ex.arena.allocator(), body, .{ .ignore_unknown_fields = true }) catch Reason{};
         var buf: [512]u8 = undefined;
-        c.setMessage(std.fmt.bufPrint(&buf, "{s}: HTTP {d}{s}{s}", .{
+        c.setMessage(std.mem.print(&buf, "{s}: HTTP {d}{s}{s}", .{
             what,
-            @intFromEnum(status),
+            @backingInt(status),
             if (reason.message != null) ": " else "",
             reason.message orelse "",
         }) catch what);
@@ -2386,7 +2386,7 @@ pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings:
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const key = try std.fmt.allocPrint(a, "branch.{s}.merge", .{head.name["refs/heads/".len..]});
+    const key = try a.print("branch.{s}.merge", .{head.name["refs/heads/".len..]});
     if (try settings.get(a, key)) |merge| return gpa.dupe(u8, merge);
     return gpa.dupe(u8, head.name);
 }
@@ -2395,7 +2395,7 @@ fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.E
     if (!std.mem.startsWith(u8, path, "~/")) return path;
     const env = environ orelse return path;
     const home = env.get("HOME") orelse return path;
-    return std.fs.path.join(arena, &.{ home, path[2..] });
+    return std.Io.Dir.path.join(arena, &.{ home, path[2..] });
 }
 
 /// git-lfs's timeouts for a request to `url`: `lfs.dialtimeout` and
@@ -2408,9 +2408,9 @@ pub fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.U
     const dial = settings.getInt("lfs.dialtimeout", 0);
     const handshake = settings.getInt("lfs.tlstimeout", 0);
     const host_url = if (url.port) |port|
-        try std.fmt.allocPrint(scratch, "https://{s}:{d}", .{ url.host, port })
+        try scratch.print("https://{s}:{d}", .{ url.host, port })
     else
-        try std.fmt.allocPrint(scratch, "https://{s}", .{url.host});
+        try scratch.print("https://{s}", .{url.host});
     var activity: i64 = 30;
     if (try settings.urlGet(scratch, "lfs", host_url, "activitytimeout")) |text| {
         activity = std.fmt.parseInt(i64, std.mem.trim(u8, text, " \t"), 10) catch 0;
@@ -2434,7 +2434,7 @@ pub fn goProxyAllowed(raw_host: []const u8, port: u16, no_proxy: []const u8) boo
     if (ip) |a| if (isLoopback(a)) return false;
     var port_buf: [8]u8 = undefined;
     // unreachable: a u16 is at most five digits
-    const port_text = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch unreachable;
+    const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch unreachable;
     var it = std.mem.splitScalar(u8, no_proxy, ',');
     while (it.next()) |raw| {
         const entry = std.mem.trim(u8, raw, " \t\r\n");
@@ -2545,14 +2545,14 @@ pub fn retryAfterSeconds(value: []const u8, now: ?i64) ?u64 {
 /// directory makes a socket path too long, else `TMPDIR` or `/tmp`. `null`
 /// when none can be made, and ssh runs unshared.
 fn controlDir(arena: Allocator, io: Io, environ: *const std.process.Environ.Map) Allocator.Error!?[]const u8 {
-    const base = environ.get("XDG_RUNTIME_DIR") orelse if (builtin.os.tag == .macos)
+    const base = environ.get("XDG_RUNTIME_DIR") orelse if (builtin.target.os.tag == .macos)
         "/tmp"
     else
         (environ.get("TMPDIR") orelse "/tmp");
     var name_buf: [64]u8 = undefined;
     const name = fs.tempName(io, &name_buf, "sock-");
-    const dir = try std.fmt.allocPrint(arena, "{s}/{s}", .{ std.mem.trimEnd(u8, base, "/"), name });
-    const private: Io.File.Permissions = if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
+    const dir = try arena.print("{s}/{s}", .{ std.mem.trimEnd(u8, base, "/"), name });
+    const private: Io.File.Permissions = if (builtin.target.os.tag == .windows) .default_dir else .fromMode(0o700);
     Io.Dir.cwd().createDir(io, dir, private) catch return null;
     return dir;
 }
@@ -2586,7 +2586,7 @@ fn hasHeader(headers: []const http.Header, name: []const u8) bool {
 
 /// `Basic <base64 of user:password>`.
 fn basicHeader(a: Allocator, user: []const u8, password: []const u8) Allocator.Error![]const u8 {
-    const plain = try std.fmt.allocPrint(a, "{s}:{s}", .{ user, password });
+    const plain = try a.print("{s}:{s}", .{ user, password });
     const encoder = std.base64.standard.Encoder;
     const out = try a.alloc(u8, "Basic ".len + encoder.calcSize(plain.len));
     @memcpy(out[0.."Basic ".len], "Basic ");
@@ -2612,8 +2612,8 @@ pub fn stripQuery(url: []const u8) []const u8 {
 /// `prefix` and `suffix` with one slash between them, as git-lfs joins
 /// them.
 pub fn joinUrl(a: Allocator, prefix: []const u8, suffix: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.endsWith(u8, prefix, "/")) return std.fmt.allocPrint(a, "{s}{s}", .{ prefix, suffix });
-    return std.fmt.allocPrint(a, "{s}/{s}", .{ prefix, suffix });
+    if (std.mem.endsWith(u8, prefix, "/")) return a.print("{s}{s}", .{ prefix, suffix });
+    return a.print("{s}/{s}", .{ prefix, suffix });
 }
 
 /// `location` taken against `base`, as a redirect is.
@@ -2621,10 +2621,10 @@ fn resolveLocation(a: Allocator, base: []const u8, location: []const u8) Error![
     if (UrlParts.parse(location) != null) return a.dupe(u8, location);
     const sep = std.mem.find(u8, base, "://") orelse return error.MalformedUrl;
     const origin_end = std.mem.findAnyPos(u8, base, sep + 3, "/?#") orelse base.len;
-    if (location.len != 0 and location[0] == '/') return std.fmt.allocPrint(a, "{s}{s}", .{ base[0..origin_end], location });
+    if (location.len != 0 and location[0] == '/') return a.print("{s}{s}", .{ base[0..origin_end], location });
     const path_end = std.mem.findAnyPos(u8, base, origin_end, "?#") orelse base.len;
     const dir_end = std.mem.findScalarLast(u8, base[origin_end..path_end], '/') orelse 0;
-    return std.fmt.allocPrint(a, "{s}/{s}", .{ base[0 .. origin_end + dir_end], location });
+    return a.print("{s}/{s}", .{ base[0 .. origin_end + dir_end], location });
 }
 
 /// The part of a URL that names a credential for git-lfs's cache:
@@ -2914,7 +2914,7 @@ test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
     client.message_len = 0;
     var transport: httpclient.Client = undefined;
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
-        const text = try std.fmt.allocPrint(arena.allocator(), "{s}://us%65r:p%40ss@127.0.0.1", .{scheme});
+        const text = try arena.allocator().print("{s}://us%65r:p%40ss@127.0.0.1", .{scheme});
         try client.useProxy(arena.allocator(), &transport, text);
         try testing.expectEqual(@as(u16, 1080), transport.proxy.?.port);
         try testing.expectEqualStrings("user", transport.proxy.?.credential.?.user);

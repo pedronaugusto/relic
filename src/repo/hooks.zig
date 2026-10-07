@@ -302,19 +302,19 @@ pub const Runner = struct {
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
 
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const top = place.work_dir orelse place.git_dir;
         const cwd = try arena.dupe(u8, buf[0..try top.realPath(io, &buf)]);
 
         const dir: []const u8 = if (try place.config.getPath(arena, "core.hookspath")) |configured|
             // A relative `core.hooksPath` is taken from where the hooks run.
-            if (std.fs.path.isAbsolute(configured))
+            if (std.Io.Dir.path.isAbsolute(configured))
                 configured
             else
-                try std.fs.path.join(arena, &.{ cwd, configured })
+                try std.Io.Dir.path.join(arena, &.{ cwd, configured })
         else blk: {
             const common = buf[0..try place.common_dir.realPath(io, &buf)];
-            break :blk try std.fs.path.join(arena, &.{ common, "hooks" });
+            break :blk try std.Io.Dir.path.join(arena, &.{ common, "hooks" });
         };
 
         var disabled_events: std.ArrayList([]const u8) = .empty;
@@ -378,7 +378,7 @@ pub const Runner = struct {
             try runner.runOne(io, event, &ran, request, command, true);
         }
 
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         switch (try runner.findFile(io, event, &path_buf)) {
             .missing => {},
             .not_executable => ran.passed_over = true,
@@ -408,7 +408,7 @@ pub const Runner = struct {
                 } else return true;
             }
         }
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         return switch (runner.findFile(io, event, &path_buf) catch return false) {
             .found => true,
             else => false,
@@ -418,13 +418,13 @@ pub const Runner = struct {
     const Lookup = union(enum) { missing, not_executable, found: []const u8 };
 
     fn findFile(runner: *Runner, io: Io, event: []const u8, buf: []u8) error{NameTooLong}!Lookup {
-        const path = std.fmt.bufPrint(buf, "{s}/{s}", .{ runner.dir, event }) catch return error.NameTooLong;
-        if (builtin.os.tag == .windows) {
+        const path = std.mem.print(buf, "{s}/{s}", .{ runner.dir, event }) catch return error.NameTooLong;
+        if (builtin.target.os.tag == .windows) {
             // Windows has no executable bit. git for Windows runs a file whose
             // name ends in `.exe` or whose first two bytes are `#!`, and tries
             // `<name>.exe` when `<name>` is not one of those.
             if (runsOnWindows(io, path)) return .{ .found = path };
-            const exe = std.fmt.bufPrint(buf, "{s}/{s}.exe", .{ runner.dir, event }) catch return error.NameTooLong;
+            const exe = std.mem.print(buf, "{s}/{s}.exe", .{ runner.dir, event }) catch return error.NameTooLong;
             Io.Dir.accessAbsolute(io, exe, .{}) catch return .missing;
             return .{ .found = exe };
         }
@@ -452,7 +452,7 @@ pub const Runner = struct {
         defer argv.deinit(gpa);
 
         var interpreter_buf: [100]u8 = undefined;
-        if (!shell and builtin.os.tag == .windows) {
+        if (!shell and builtin.target.os.tag == .windows) {
             // git for Windows reads the `#!` line itself and starts the
             // interpreter it names, by its base name, with the script as its
             // first argument.
@@ -797,7 +797,7 @@ fn formatDate(buf: *[64]u8, who: object.Signature) []const u8 {
     const sign: u8 = if (who.offset_minutes < 0) '-' else '+';
     const abs: u32 = @intCast(@abs(who.offset_minutes));
     // unreachable: an i64 is at most twenty characters and an i16 offset seven, well under 64
-    return std.fmt.bufPrint(buf, "@{d} {c}{d:0>2}{d:0>2}", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch unreachable;
+    return std.mem.print(buf, "@{d} {c}{d:0>2}{d:0>2}", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch unreachable;
 }
 
 /// Read `hook.<name>.*` in git's way: an event list per name in the order the
@@ -916,11 +916,11 @@ fn windowsInterpreter(io: Io, path: []const u8, buf: *[100]u8) ?[]const u8 {
 
 fn parseInterpreter(head: []const u8) ?[]const u8 {
     if (head.len < 4 or head[0] != '#' or head[1] != '!') return null;
-    const end = std.mem.indexOfAny(u8, head, "\r\n") orelse return null;
+    const end = std.mem.findAny(u8, head, "\r\n") orelse return null;
     const line = head[2..end];
-    const slash = std.mem.lastIndexOfAny(u8, line, "/\\") orelse return null;
+    const slash = std.mem.findLastAny(u8, line, "/\\") orelse return null;
     const rest = line[slash + 1 ..];
-    const space = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
     return rest[0..space];
 }
 
@@ -990,7 +990,7 @@ test "a hook runs from the top of the working tree with git's arguments, and not
 
 test "a hook that is not executable is passed over and said to be" {
     // Windows has no executable bit; git runs named hook programs there.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -1157,7 +1157,7 @@ test "pre-push, reference-transaction and post-rewrite read git's lines" {
     defer environ.deinit();
     for ([_][]const u8{ "pre-push", "reference-transaction", "post-rewrite" }) |name| {
         var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, ".git/hooks/{s}", .{name});
+        const path = try std.mem.print(&path_buf, ".git/hooks/{s}", .{name});
         try testgit.fixtureHook(gpa, io, repo.dir, path, "args_stdin", "");
     }
     var opened = try openRunner(gpa, io, &repo, &environ, "");
@@ -1165,8 +1165,8 @@ test "pre-push, reference-transaction and post-rewrite read git's lines" {
     defer opened.config.deinit();
     defer opened.runner.deinit();
 
-    const one = try Oid.parse(.sha1, "1" ** 40);
-    const two = try Oid.parse(.sha1, "2" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     _ = try opened.runner.prePush(io, "origin", "file:///r", &.{
         .{ .local_ref = "refs/heads/main", .local = one, .remote_ref = "refs/heads/main", .remote = two },
         .{ .local_ref = "(delete)", .local = Oid.zero(.sha1), .remote_ref = "refs/heads/old", .remote = one },
@@ -1179,14 +1179,14 @@ test "pre-push, reference-transaction and post-rewrite read git's lines" {
     _ = try opened.runner.postRewrite(io, .amend, &.{.{ .old = one, .new = two }});
     try testing.expectEqualStrings(
         "pre-push origin file:///r\n" ++
-            "refs/heads/main " ++ "1" ** 40 ++ " refs/heads/main " ++ "2" ** 40 ++ "\n" ++
-            "(delete) " ++ "0" ** 40 ++ " refs/heads/old " ++ "1" ** 40 ++ "\n" ++
+            "refs/heads/main " ++ @as([40]u8, @splat('1')) ++ " refs/heads/main " ++ @as([40]u8, @splat('2')) ++ "\n" ++
+            "(delete) " ++ @as([40]u8, @splat('0')) ++ " refs/heads/old " ++ @as([40]u8, @splat('1')) ++ "\n" ++
             "reference-transaction prepared\n" ++
-            "0" ** 40 ++ " " ++ "1" ** 40 ++ " refs/heads/new\n" ++
-            "1" ** 40 ++ " " ++ "0" ** 40 ++ " refs/heads/gone\n" ++
-            "0" ** 40 ++ " ref:refs/heads/new HEAD\n" ++
+            @as([40]u8, @splat('0')) ++ " " ++ @as([40]u8, @splat('1')) ++ " refs/heads/new\n" ++
+            @as([40]u8, @splat('1')) ++ " " ++ @as([40]u8, @splat('0')) ++ " refs/heads/gone\n" ++
+            @as([40]u8, @splat('0')) ++ " ref:refs/heads/new HEAD\n" ++
             "post-rewrite amend\n" ++
-            "1" ** 40 ++ " " ++ "2" ** 40 ++ "\n",
+            @as([40]u8, @splat('1')) ++ " " ++ @as([40]u8, @splat('2')) ++ "\n",
         opened.runner.captured.items,
     );
 }
@@ -1204,7 +1204,7 @@ test "a hook that fails where it cannot stop anything is reported, not raised" {
     defer opened.git_dir.close(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
-    const one = try Oid.parse(.sha1, "1" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     const committed = try opened.runner.referenceTransaction(io, .sha1, .committed, &.{});
     try testing.expect(!committed.succeeded());
     try testing.expectError(error.HookRejected, opened.runner.referenceTransaction(io, .sha1, .preparing, &.{}));

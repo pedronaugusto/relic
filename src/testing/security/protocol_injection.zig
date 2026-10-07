@@ -20,7 +20,7 @@ test "CVE-2021-40330, t5570-git-daemon 'client refuses to ask for repo with newl
     // From a `.gitmodules`, decoded or not, it is a URL fsck refuses.
     for ([_][]const u8{ "git://example.com/re%0apo.git", "git://example.com/re%0Apo.git" }) |url| {
         try std.testing.expect(!gitmodules.checkUrl(url));
-        const text = try std.fmt.allocPrint(gpa, "[submodule \"x\"]\n\tpath = x\n\turl = {s}\n", .{url});
+        const text = try gpa.print("[submodule \"x\"]\n\tpath = x\n\turl = {s}\n", .{url});
         defer gpa.free(text);
         const finding = (try fsck.checkBlob(gpa, &fsck.baseline, .zero(.sha1), .modules, text, null)).?;
         try std.testing.expectEqual(fsck.Problem.gitmodules_url, finding.problem.?);

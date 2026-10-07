@@ -29,11 +29,11 @@ test "a pack relic writes has the reverse index git's index-pack writes for it" 
     defer tmp.cleanup();
     const report = try repo.odb.writePack(io, tmp.dir, collected.entries, .{ .reverse_index = true });
     var hex: [hash.max_hex_len]u8 = undefined;
-    const base = try std.fmt.allocPrint(gpa, "pack-{s}", .{report.name.hex(&hex)});
+    const base = try gpa.print("pack-{s}", .{report.name.hex(&hex)});
     defer gpa.free(base);
-    const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{base});
+    const pack_name = try gpa.print("{s}.pack", .{base});
     defer gpa.free(pack_name);
-    const rev_name = try std.fmt.allocPrint(gpa, "{s}.rev", .{base});
+    const rev_name = try gpa.print("{s}.rev", .{base});
     defer gpa.free(rev_name);
     // Outside any repository: index-pack reads the pack it is given.
     var env = try testremote.environ(gpa);

@@ -237,7 +237,7 @@ test "a listing finds the first of two lines naming one ref, sorted or not" {
     var listing = try parse(gpa, .sha1, try gpa.dupe(u8, text));
     defer listing.deinit();
     try std.testing.expectEqualStrings("refs/heads/a", listing.entries[0].name);
-    try std.testing.expect(listing.find("refs/tags/b").?.oid.eql(try Oid.parse(.sha1, "2" ** 40)));
+    try std.testing.expect(listing.find("refs/tags/b").?.oid.eql(try Oid.parse(.sha1, &@as([40]u8, @splat('2')))));
     try std.testing.expect(listing.find("refs/tags/a") == null);
     try std.testing.expect(listing.find("refs/tags/c") == null);
 }

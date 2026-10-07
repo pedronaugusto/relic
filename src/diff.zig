@@ -260,7 +260,7 @@ const Walk = struct {
     /// The entry's path, or `null` when the prefix leaves it out: a file
     /// outside it, or a subtree that neither lies inside it nor holds it.
     fn pathIfWanted(w: *Walk, e: object.Tree.Entry, base: []const u8) Allocator.Error!?[]const u8 {
-        const path = if (base.len == 0) try w.arena.dupe(u8, e.name) else try std.fmt.allocPrint(w.arena, "{s}/{s}", .{ base, e.name });
+        const path = if (base.len == 0) try w.arena.dupe(u8, e.name) else try w.arena.print("{s}/{s}", .{ base, e.name });
         if (underPrefix(path, w.prefix)) return path;
         if (e.mode.isTree() and std.mem.startsWith(u8, w.prefix, path) and w.prefix[path.len] == '/') return path;
         return null;
@@ -308,7 +308,7 @@ fn flatten(
         const path = if (prefix.len == 0)
             try arena.dupe(u8, entry.name)
         else
-            try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
+            try arena.print("{s}/{s}", .{ prefix, entry.name });
         if (entry.mode == .tree) {
             try flatten(arena, io, db, entry.oid, path, out, depth + 1);
             continue;
@@ -528,7 +528,7 @@ pub const BinaryRule = struct {
                 .set => return false,
                 .value => |driver| if (rule.config) |config| {
                     var key_buf: [512]u8 = undefined;
-                    if (std.fmt.bufPrint(&key_buf, "diff.{s}.binary", .{driver})) |key| {
+                    if (std.mem.print(&key_buf, "diff.{s}.binary", .{driver})) |key| {
                         if (config.has(key)) {
                             // git dies on a value that is not a boolean;
                             // here it decides nothing.
@@ -549,7 +549,7 @@ const gitlink_text_max = "Subproject commit \n".len + hash.max_hex_len;
 fn gitlinkText(buf: *[gitlink_text_max]u8, oid: Oid) []const u8 {
     var hex: [hash.max_hex_len]u8 = undefined;
     // unreachable: the buffer holds the words and the widest name
-    return std.fmt.bufPrint(buf, "Subproject commit {s}\n", .{oid.hex(&hex)}) catch unreachable;
+    return std.mem.print(buf, "Subproject commit {s}\n", .{oid.hex(&hex)}) catch unreachable;
 }
 
 /// The added and removed line counts between two blobs.

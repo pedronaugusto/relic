@@ -116,7 +116,7 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
     var key_buf: [32]u8 = undefined;
     if (email == null) {
         // unreachable: the longest role, committer, and `.email` are fifteen bytes
-        const key = std.fmt.bufPrint(&key_buf, "{s}.email", .{role_name}) catch unreachable;
+        const key = std.mem.print(&key_buf, "{s}.email", .{role_name}) catch unreachable;
         if (try configValue(arena, config, key)) |v| {
             if (v.len != 0) email = v;
         }
@@ -139,7 +139,7 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
     }
     if (name == null) {
         // unreachable: the longest role, committer, and `.name` are fourteen bytes
-        const key = std.fmt.bufPrint(&key_buf, "{s}.name", .{role_name}) catch unreachable;
+        const key = std.mem.print(&key_buf, "{s}.name", .{role_name}) catch unreachable;
         if (try configValue(arena, config, key)) |v| {
             if (v.len != 0) name = v;
         }

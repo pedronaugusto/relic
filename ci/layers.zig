@@ -32,7 +32,9 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/socks.zig",
         "src/hash/sha1.zig",
         "src/hash/sha1dc.zig",
-        "src/testing/case.zig",
+        "src/testing/allocation.zig",
+        "src/testing/bytes.zig",
+        "src/testing/helpers.zig",
         "src/testing/io.zig",
         "src/testing/git.zig",
         "src/testing/program.zig",
@@ -362,13 +364,13 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "build_options",
         "builtin",
         "conduit",
-        "relic_test_cases",
         "root",
         "std",
+        "std_tls_client",
     } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
     .{ .name = "conduit owner", .target = "conduit", .except_from = &.{"src/dependencies.zig"} },
-    .{ .name = "relic_test_cases owner", .target = "relic_test_cases", .except_from = &.{"src/testing/case.zig"} },
+    .{ .name = "std_tls_client owner", .target = "std_tls_client", .except_from = &.{"src/testing/tls_fork.zig"} },
 };
 
 pub const required = blk: {
@@ -386,14 +388,9 @@ pub const required = blk: {
 /// Tokens only their owners may spell: starting and waiting on processes is
 /// conduit's, and this package's Windows declarations live in one file.
 pub const owned: []const gantry.rules.TokenRule = &.{
-    .{ .name = "process owner", .token = "waitpid" },
-    .{ .name = "process owner", .token = "wait4" },
-    .{ .name = "process owner", .token = "execve" },
-    .{ .name = "process owner", .token = "posix_spawn" },
-    .{ .name = "process owner", .token = "setsid" },
-    .{ .name = "process owner", .token = "CreateProcessW" },
+    .{ .name = "process owner", .tokens = &.{ "waitpid", "wait4", "execve", "posix_spawn", "setsid", "CreateProcessW" } },
     // the ssh stand-in is another program, holding its handles as ssh does
-    .{ .name = "windows declarations", .kind = .string, .token = "kernel32", .owners = &.{ "src/repo/fs.zig", "src/testing/fake_ssh.zig" } },
+    .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/repo/fs.zig", "src/testing/fake_ssh.zig" } },
 };
 
 /// Namespace reexports added when each facade was folded into its implementation.

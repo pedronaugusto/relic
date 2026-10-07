@@ -155,7 +155,7 @@ pub fn appendCherryPicked(gpa: Allocator, msg: *std.ArrayList(u8), hex: []const 
 /// message already ends in trailers, and not again when it is already the
 /// last one.
 pub fn appendSignoff(gpa: Allocator, msg: *std.ArrayList(u8), who: object.Signature, settings: trailer.Settings) Allocator.Error!void {
-    const line = try std.fmt.allocPrint(gpa, "Signed-off-by: {s} <{s}>\n", .{ who.name, who.email });
+    const line = try gpa.print("Signed-off-by: {s} <{s}>\n", .{ who.name, who.email });
     defer gpa.free(line);
     try completeLine(gpa, msg);
     const footer: Footer = if (std.mem.eql(u8, msg.items, line))

@@ -185,15 +185,15 @@ pub fn refExists(io: Io, repo: *Repository, name: []const u8) bool {
 /// Replace the state file `sub_path` under `dir` with `bytes`, making the
 /// directories above it.
 pub fn writeState(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) Self.Error!void {
-    if (std.fs.path.dirnamePosix(sub_path)) |parent| {
+    if (std.Io.Dir.path.dirnamePosix(sub_path)) |parent| {
         dir.createDirPath(io, parent) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
         };
     }
     var dir_buf: [512]u8 = undefined;
-    const prefix = if (std.fs.path.dirnamePosix(sub_path)) |parent|
-        std.fmt.bufPrint(&dir_buf, "{s}/.relic-", .{parent}) catch ".relic-"
+    const prefix = if (std.Io.Dir.path.dirnamePosix(sub_path)) |parent|
+        std.mem.print(&dir_buf, "{s}/.relic-", .{parent}) catch ".relic-"
     else
         ".relic-";
     try fs.atomicWrite(io, dir, sub_path, bytes, prefix, .none);

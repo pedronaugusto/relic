@@ -3,6 +3,7 @@
 //! refusal with nothing changed.
 
 const std = @import("std");
+const testbytes = @import("../testing/bytes.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -86,7 +87,7 @@ fn snapshot(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
             .file => {
                 const bytes = try r.dir.readFileAlloc(io, name, gpa, .limited(1 << 20));
                 defer gpa.free(bytes);
-                const exec = builtin.os.tag != .windows and stat.permissions.toMode() & 0o100 != 0;
+                const exec = builtin.target.os.tag != .windows and stat.permissions.toMode() & 0o100 != 0;
                 try out.print(gpa, "{s} {s} {d}\n", .{ name, if (exec) "exec" else "file", bytes.len });
                 try out.appendSlice(gpa, bytes);
                 try out.append(gpa, '\n');
@@ -170,7 +171,7 @@ fn setupBase(p: *Pair, io: Io) !void {
     try p.write(io, "b.txt", "one\ntwo\nthree\n");
     try p.write(io, "dir/c.txt", "c1\nc2\nc3\nc4\nc5\nc6\n");
     try p.write(io, "run.sh", "#!/bin/sh\necho hi\n");
-    try p.write(io, "bin.dat", "\x00\x01\x02binary\x00" ** 30);
+    try p.write(io, "bin.dat", testbytes.repeat("\x00\x01\x02binary\x00", 30));
     try p.both(io, &.{ "add", "-A" });
     try p.both(io, &.{ "commit", "-q", "-m", "base" });
     try p.both(io, &.{ "tag", "base" });
@@ -199,7 +200,7 @@ fn changeMany(p: *Pair, io: Io) !void {
     try r.exec(io, &.{ "mv", "dir/c.txt", "dir/moved.txt" });
     try r.writeFile(io, "dir/moved.txt", "c1\nc2\nc3\nC4\nc5\nc6\n");
     try r.exec(io, &.{ "update-index", "--chmod=+x", "run.sh" });
-    try r.writeFile(io, "bin.dat", "\x00\x01\x02binary\x00" ** 29 ++ "\x00changed!");
+    try r.writeFile(io, "bin.dat", testbytes.repeat("\x00\x01\x02binary\x00", 29) ++ "\x00changed!");
 }
 
 test "a patch with every kind of change applies as git applies it, to the working tree, the index or the index alone" {
@@ -352,13 +353,13 @@ test "a hunk placed past what an int holds lands where git's lands it" {
     // Git for Windows reads a position into a 32-bit `unsigned long` and
     // calls a wider one corrupt; elsewhere it is cut to an `int` as here.
     const wide = [_][]const u8{ "9223372036854775808", "18446744073709551615", "4294967297", "2147483649" };
-    const positions = if (builtin.os.tag == .windows) wide[3..] else wide[0..];
+    const positions = if (builtin.target.os.tag == .windows) wide[3..] else wide[0..];
     for (positions) |at| {
-        const forward = try std.fmt.allocPrint(gpa, "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1,3 +{s},3 @@\n one\n-two\n+TWO\n three\n", .{at});
+        const forward = try gpa.print("diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1,3 +{s},3 @@\n one\n-two\n+TWO\n three\n", .{at});
         defer gpa.free(forward);
         try compare(&p, io, forward, &.{}, .{});
         try reset(&p, io);
-        const backward = try std.fmt.allocPrint(gpa, "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -{s},3 +1,3 @@\n one\n-TWO\n+two\n three\n", .{at});
+        const backward = try gpa.print("diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -{s},3 +1,3 @@\n one\n-TWO\n+two\n three\n", .{at});
         defer gpa.free(backward);
         try p.write(io, "b.txt", "one\nTWO\nthree\n");
         try compare(&p, io, backward, &.{"-R"}, .{ .reverse = true });
@@ -501,7 +502,7 @@ fn changeModesAndLinks(p: *Pair, io: Io) !void {
 }
 
 test "mode changes, symlinks and copies apply as git applies them" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var p = try Pair.init(gpa, io);
@@ -554,7 +555,7 @@ fn expectBothRefuse(p: *Pair, io: Io, patch: []const u8) !void {
 }
 
 test "a patch that reads, removes or writes past a symbolic link, or names an invalid path, is refused as git refuses it" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var p = try Pair.init(gpa, io);

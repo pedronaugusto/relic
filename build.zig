@@ -1,14 +1,9 @@
 const std = @import("std");
-const test_cases = @import("ci/test_cases.zig");
 
 pub fn build(b: *std.Build) void {
+    const std_tls_client = b.graph.path(.zig_lib, "std/crypto/tls/Client.zig");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const selected_case = b.option([]const u8, "test-case", "Select a named Windows comparison shard");
-    const case_names = if (selected_case) |name| test_cases.filters(b, name) else &.{};
-    const case_options = b.addOptions();
-    case_options.addOption([]const u8, "name", selected_case orelse "");
-    case_options.addOption([]const []const u8, "names", case_names);
 
     //=====================================================================
     // The module. Conduit runs programs and carries its platform linkage;
@@ -24,7 +19,6 @@ pub fn build(b: *std.Build) void {
     });
 
     module.addImport("conduit", conduit);
-    module.addOptions("relic_test_cases", case_options);
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -152,14 +146,18 @@ pub fn build(b: *std.Build) void {
     const install_process_fixture = b.addInstallArtifact(process_fixture, .{});
 
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "gnupg_fixture_root", b.pathFromRoot(b.option(
+    const gnupg_fixture_root = b.option(
         []const u8,
         "gnupg-fixture-root",
         "A short directory for private GnuPG test homes (defaults to .zig-cache/gpg)",
-    ) orelse ".zig-cache/gpg"));
-    build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
-    build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
-    build_options.addOption([]const u8, "lfs_transfer_helper_path", b.getInstallPath(.bin, lfs_transfer_helper.out_filename));
+    ) orelse ".zig-cache/gpg";
+    build_options.addOptionPathUntracked("gnupg_fixture_root", if (std.Io.Dir.path.isAbsolute(gnupg_fixture_root))
+        b.graph.cwdRelativePath(gnupg_fixture_root)
+    else
+        b.path(gnupg_fixture_root));
+    build_options.addOptionPathUntracked("lock_helper_path", b.graph.path(.install_bin, lock_helper.out_filename));
+    build_options.addOptionPathUntracked("filter_helper_path", b.graph.path(.install_bin, filter_helper.out_filename));
+    build_options.addOptionPathUntracked("lfs_transfer_helper_path", b.graph.path(.install_bin, lfs_transfer_helper.out_filename));
     // A real `git-lfs-transfer` server — Scutiger's is the one git-lfs's
     // own suite uses — for the tests that prove relic's client against one
     // rather than against the suite's own; they skip without it.
@@ -168,31 +166,25 @@ pub fn build(b: *std.Build) void {
         "lfs-transfer-server",
         "A git-lfs-transfer server program to prove the pure-ssh client against",
     ) orelse "");
-    build_options.addOption([]const u8, "upload_pack_helper_path", b.getInstallPath(.bin, upload_pack_helper.out_filename));
-    build_options.addOption([]const u8, "hook_fixture_path", b.getInstallPath(.bin, hook_fixture.out_filename));
-    build_options.addOption([]const u8, "fake_ssh_helper_path", b.getInstallPath(.bin, fake_ssh.out_filename));
-    build_options.addOption([]const u8, "lfs_test_tool_path", b.getInstallPath(.bin, lfs_tool.out_filename));
-    build_options.addOption([]const u8, "process_fixture_path", b.getInstallPath(.bin, process_fixture.out_filename));
-    build_options.addOption([]const u8, "remote_helper_path", b.getInstallPath(.bin, remote_helper.out_filename));
-    build_options.addOption([]const u8, "lfs_agent_path", b.getInstallPath(.bin, lfs_agent.out_filename));
+    build_options.addOptionPathUntracked("upload_pack_helper_path", b.graph.path(.install_bin, upload_pack_helper.out_filename));
+    build_options.addOptionPathUntracked("hook_fixture_path", b.graph.path(.install_bin, hook_fixture.out_filename));
+    build_options.addOptionPathUntracked("fake_ssh_helper_path", b.graph.path(.install_bin, fake_ssh.out_filename));
+    build_options.addOptionPathUntracked("lfs_test_tool_path", b.graph.path(.install_bin, lfs_tool.out_filename));
+    build_options.addOptionPathUntracked("process_fixture_path", b.graph.path(.install_bin, process_fixture.out_filename));
+    build_options.addOptionPathUntracked("remote_helper_path", b.graph.path(.install_bin, remote_helper.out_filename));
+    build_options.addOptionPathUntracked("lfs_agent_path", b.graph.path(.install_bin, lfs_agent.out_filename));
     // The standard library's TLS client, which `src/transport/tls/Client.zig` is a copy
     // of with client authentication added: `src/testing/tls_fork.zig` holds the
     // copy to it, and fails when the compiler building this ships another.
-    // Hosted Zig installations use a fresh temporary path on every job. The
-    // compiler's bytes belong in the test options so that path cannot invalidate
-    // every native and cross-target test binary on each CI run.
-    const std_client = b.graph.zig_lib_directory.handle.readFileAlloc(b.graph.io, "std/crypto/tls/Client.zig", b.allocator, .limited(1 << 20)) catch @panic("cannot read std's TLS client");
-    build_options.addOption([]const u8, "std_tls_client_source", std_client);
+    // Hosted Zig installations use a fresh temporary path on every job, so the
+    // suite embeds a copy of the file rather than its path: a copy's path
+    // follows its bytes, and the test binaries stay cached across CI runs.
+    const std_client = b.addWriteFiles();
+    _ = std_client.addCopyFile(std_tls_client, "Client.zig.txt");
+    const std_client_module = b.createModule(.{
+        .root_source_file = std_client.add("std_tls_client.zig", "pub const source = @embedFile(\"Client.zig.txt\");\n"),
+    });
 
-    // Error return traces are off for the test binary, and the reason is
-    // `zig build test --fuzz`. Building the suite with fuzzing instrumented
-    // recompiles it against the fuzzing test runner, and on 0.16.0 that
-    // runner hands `@errorReturnTrace()`'s `std.builtin.StackTrace` to a
-    // function taking `std.debug.StackTrace` -- two structs of the same
-    // shape and different identity -- which is one compile error per fuzz
-    // test. With tracing off nothing in the runner asks for a trace, and the
-    // fuzzers build and run. What it costs is the return trace under a
-    // failing test; the error and the test's name are still printed.
     // The delta search runs its candidates on the caller's executor when
     // `PackOptions.threads` asks for more than one, and the suite writes
     // the same repository from two processes and two tasks at once. Whether
@@ -209,10 +201,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .sanitize_thread = if (thread_sanitizer) true else null,
-        .error_tracing = false,
     });
     test_module.addImport("conduit", conduit);
-    test_module.addOptions("relic_test_cases", case_options);
+    test_module.addImport("std_tls_client", std_client_module);
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
     hook_fixture.root_module.addImport("relic", module);
@@ -224,7 +215,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .name = "relic-tests",
         .root_module = test_module,
-        .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else case_names,
+        .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else &.{},
     });
 
     const run_tests = b.addRunArtifact(tests);
@@ -294,7 +285,7 @@ pub fn build(b: *std.Build) void {
     const examples_step = b.step("examples", "Build and run the examples");
     for (example_sources) |source| {
         const example = b.addExecutable(.{
-            .name = std.fs.path.stem(source),
+            .name = std.Io.Dir.path.stem(source),
             .root_module = b.createModule(.{
                 .root_source_file = b.path(source),
                 .target = target,
@@ -311,8 +302,8 @@ pub fn build(b: *std.Build) void {
 
         const example_tests = b.addTest(.{ .root_module = example.root_module });
         const run_example_tests = b.addRunArtifact(example_tests);
-        if (target.result.os.tag == .windows and selected_case != null) {
-            // Zig 0.16 inherits all inheritable Windows pipe handles at
+        if (target.result.os.tag == .windows) {
+            // Zig inherits all inheritable Windows pipe handles at
             // spawn. Concurrent runners can keep each other's pipes open.
             run_example_tests.step.dependOn(&run_tests.step);
             run.step.dependOn(&run_example_tests.step);
@@ -327,18 +318,17 @@ pub fn build(b: *std.Build) void {
         if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{ .tests = test_step });
     }
     namespaceImportChecker(b);
-    _ = ciCheck(b, "check-cases", "ci/cases_check.zig");
     _ = ciCheck(b, "check-git-flags", "ci/git_checks.zig");
-    const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = b.path("ci/setup.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = b.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
     const prepare = b.addRunArtifact(setup);
-    if (b.args) |args| prepare.addArgs(args);
+    prepare.addPassthruArgs();
     b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
     // Keep the package root at src so the moved check can embed its TLS sibling.
     const tls_test = b.addTest(.{ .root_module = test_module, .filters = &.{"the TLS client is std's, with the recorded diff and nothing else"} });
     b.step("check-tls-fork", "Verify the TLS fork against std and its recorded patch").dependOn(&b.addRunArtifact(tls_test).step);
-    const tls_writer = b.addExecutable(.{ .name = "tls-fork", .root_module = b.createModule(.{ .root_source_file = b.path("ci/tls_fork.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    const tls_writer = b.addExecutable(.{ .name = "tls-fork", .root_module = b.createModule(.{ .root_source_file = b.path("ci/tls_fork.zig"), .target = b.graph.host, .optimize = .safe }) });
     const tls_writer_options = b.addOptions();
-    tls_writer_options.addOption([]const u8, "std_tls_client", b.graph.zig_lib_directory.join(b.allocator, &.{ "std", "crypto", "tls", "Client.zig" }) catch @panic("OOM"));
+    tls_writer_options.addOptionPath("std_tls_client", std_tls_client);
     tls_writer.root_module.addOptions("build_options", tls_writer_options);
     b.step("tls-fork", "Re-record the TLS client's patch against std").dependOn(&b.addRunArtifact(tls_writer).step);
 }
@@ -351,7 +341,7 @@ const example_sources = [_][]const u8{
 
 // Build-only tooling belongs to a root invocation, never a consumer's dependency graph.
 fn ciCheck(b: *std.Build, name: []const u8, source: []const u8) *std.Build.Step.Compile {
-    const module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = .Debug });
+    const module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = .debug });
     const executable = b.addExecutable(.{ .name = name, .root_module = module });
     const tests = b.addTest(.{ .root_module = module });
     const run = b.addRunArtifact(executable);

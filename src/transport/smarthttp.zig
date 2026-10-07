@@ -321,7 +321,7 @@ const Http = struct {
             // Git for Windows leaves the helper's certificate passphrase in
             // place on a local key parse error; its curl backend does not
             // classify that error as a rejected credential.
-            if (builtin.os.tag != .windows) {
+            if (builtin.target.os.tag != .windows) {
                 if (session_slot.*) |*session| try forgetRefused(h.io, session, h.credentialOptions());
             }
             return switch (err) {
@@ -384,7 +384,7 @@ const Http = struct {
         if (!std.mem.startsWith(u8, path, "~/")) return path;
         const env = environ orelse return path;
         const home = env.get("HOME") orelse return path;
-        return std.fs.path.join(arena, &.{ home, path[2..] });
+        return std.Io.Dir.path.join(arena, &.{ home, path[2..] });
     }
 
     /// The proxy, and its credential: the user and password its URL
@@ -412,7 +412,7 @@ const Http = struct {
             try warning.note(h.options.warnings, .{ .proxy_auth_method_unknown = method_name });
             break :blk .any;
         };
-        const text = if (std.mem.find(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
+        const text = if (std.mem.find(u8, raw, "://") == null) try arena.print("http://{s}", .{raw}) else raw;
         const proxy_url = url_mod.Url.parse(text) catch return error.InvalidProxy;
         if (proxy_url.user != null) {
             h.proxy_credentials = .{ .gpa = h.gpa, .url = proxy_url };
@@ -462,7 +462,7 @@ const Http = struct {
     fn rejectProxy(h: *Http) Error {
         if (h.proxy_credentials) |*session| try forgetRefused(h.io, session, h.credentialOptions());
         var buf: [32]u8 = undefined;
-        return h.fail(error.ProxyAuthenticationFailed, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 407}) catch "proxy answered 407");
+        return h.fail(error.ProxyAuthenticationFailed, std.mem.print(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 407}) catch "proxy answered 407");
     }
 
     /// Tell the helpers to forget a refused credential, which is forgotten
@@ -502,11 +502,11 @@ const Http = struct {
         if (method == .POST) {
             try list.append(arena, .{
                 .name = "Content-Type",
-                .value = try std.fmt.allocPrint(arena, "application/x-{s}-request", .{h.service.name()}),
+                .value = try arena.print("application/x-{s}-request", .{h.service.name()}),
             });
             try list.append(arena, .{
                 .name = "Accept",
-                .value = try std.fmt.allocPrint(arena, "application/x-{s}-result", .{h.service.name()}),
+                .value = try arena.print("application/x-{s}-result", .{h.service.name()}),
             });
             if (gzipped) try list.append(arena, .{ .name = "Content-Encoding", .value = "gzip" });
         }
@@ -533,7 +533,7 @@ const Http = struct {
             error.ProxyAuthMethodUnsupported => h.fail(error.ProxyAuthMethodUnsupported, h.diagnostic.proxy_offered orelse "the proxy's scheme"),
             error.ProxyRefused => {
                 var buf: [32]u8 = undefined;
-                return h.fail(error.ProxyRefused, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 0}) catch "proxy refused");
+                return h.fail(error.ProxyRefused, std.mem.print(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 0}) catch "proxy refused");
             },
             error.ProxyHostUnreachable,
             error.ProxyNetworkUnreachable,
@@ -553,7 +553,7 @@ const Http = struct {
     }
 
     fn pathFor(h: *Http, suffix: []const u8) Allocator.Error![]const u8 {
-        return std.fmt.allocPrint(h.arena.allocator(), "{s}{s}", .{ h.base_path, suffix });
+        return h.arena.allocator().print("{s}{s}", .{ h.base_path, suffix });
     }
 
     /// Send a `GET` and read its head, following redirects as curl does for
@@ -571,7 +571,7 @@ const Http = struct {
             h.in_flight = h.client.send(.GET, h.target, path, list, null, &h.diagnostic) catch |err| return h.clientFailed(err);
             const res = &h.in_flight.?;
             if (h.client.proxy != null) try h.approveProxy();
-            const status = @intFromEnum(res.head.status);
+            const status = @backingInt(res.head.status);
             if (status == 407) return h.rejectProxy();
             if (status == 301 or status == 302 or status == 303 or status == 307 or status == 308) {
                 if (h.follow_redirects == .never) return h.fail(error.HttpStatus, "a redirect, and http.followRedirects is false");
@@ -633,7 +633,7 @@ const Http = struct {
         if (location.len != 0 and location[0] == '/') return arena.dupe(u8, location);
         // Relative to the directory of the request that was redirected.
         const dir_end = (std.mem.findScalarLast(u8, from[0 .. std.mem.findScalar(u8, from, '?') orelse from.len], '/') orelse 0) + 1;
-        return std.fmt.allocPrint(arena, "{s}{s}", .{ from[0..dir_end], location });
+        return arena.print("{s}{s}", .{ from[0..dir_end], location });
     }
 
     /// `headers` without the ones that carry a credential, which curl drops
@@ -680,7 +680,7 @@ const Http = struct {
     fn authFailed(h: *Http, err: anyerror, reason: auth.Failure.Reason, status: u16, said: []const u8) Error {
         const trimmed = std.mem.trim(u8, said, " \t\r\n");
         var status_buf: [16]u8 = undefined;
-        h.connection.setMessage(if (trimmed.len != 0) trimmed else std.fmt.bufPrint(&status_buf, "HTTP {d}", .{status}) catch "HTTP");
+        h.connection.setMessage(if (trimmed.len != 0) trimmed else std.mem.print(&status_buf, "HTTP {d}", .{status}) catch "HTTP");
         if (h.options.auth_failure) |described| describe: {
             described.begin(h.gpa, reason, h.credentials.url.scheme, h.credentials.url.raw) catch break :describe;
             described.status = status;
@@ -703,7 +703,7 @@ const Http = struct {
     }
 
     fn checkStatus(h: *Http, res: *httpclient.Response) Error!void {
-        const status = @intFromEnum(res.head.status);
+        const status = @backingInt(res.head.status);
         switch (res.head.status) {
             .ok => return,
             .unauthorized, .forbidden => {
@@ -715,7 +715,7 @@ const Http = struct {
             else => {
                 const said = std.mem.trim(u8, try h.serverText(res), " \t\r\n");
                 var buf: [32]u8 = undefined;
-                const text = if (said.len != 0) said else std.fmt.bufPrint(&buf, "HTTP {d}", .{status}) catch "HTTP";
+                const text = if (said.len != 0) said else std.mem.print(&buf, "HTTP {d}", .{status}) catch "HTTP";
                 return h.fail(if (res.head.status == .not_found) error.RepositoryNotFound else error.HttpStatus, text);
             },
         }
@@ -728,12 +728,12 @@ const Http = struct {
     fn advertisementInner(h: *Http) Error!*Io.Reader {
         var suffix_buf: [64]u8 = undefined;
         // unreachable: the longer service name, git-receive-pack, makes 35 bytes
-        const suffix = std.fmt.bufPrint(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch unreachable;
+        const suffix = std.mem.print(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch unreachable;
         const res = try h.get(suffix);
         try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
         // unreachable: the longer service name, git-receive-pack, makes 44 bytes
-        const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch unreachable;
+        const expected = std.mem.print(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch unreachable;
         const content_type = res.head.content_type orelse "";
         if (!std.mem.eql(u8, content_type, expected)) return error.DumbHttpUnsupported;
 
@@ -797,7 +797,7 @@ const Http = struct {
     fn startStreaming(h: *Http) Error!void {
         var suffix_buf: [64]u8 = undefined;
         // unreachable: a service name is at most 16 bytes
-        const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
+        const suffix = std.mem.print(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
         const arena = h.arena.allocator();
         if (h.stream_buffer.len == 0) h.stream_buffer = try arena.alloc(u8, 64 * 1024);
         const list = try h.headers(arena, .POST, h.credentials.authorization(), false);
@@ -824,7 +824,7 @@ const Http = struct {
         } else {
             var suffix_buf: [64]u8 = undefined;
             // unreachable: a service name is at most 16 bytes
-            const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
+            const suffix = std.mem.print(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
             var arena_state: std.heap.ArenaAllocator = .init(h.gpa);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
@@ -839,7 +839,7 @@ const Http = struct {
         try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
         // unreachable: the longer service name, git-receive-pack, makes 37 bytes
-        const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-result", .{h.service.name()}) catch unreachable;
+        const expected = std.mem.print(&expected_buf, "application/x-{s}-result", .{h.service.name()}) catch unreachable;
         if (!std.mem.eql(u8, res.head.content_type orelse "", expected)) return h.fail(error.ProtocolError, "unexpected content type");
         h.body_reader = res.reader();
         return h.body_reader;

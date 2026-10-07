@@ -120,9 +120,9 @@ test "relic's TLS client answers OpenSSL's demand for a certificate in TLS 1.3 a
                 var arena_state: std.heap.ArenaAllocator = .init(gpa);
                 defer arena_state.deinit();
                 const arena = arena_state.allocator();
-                const cert = try pki.path(try std.fmt.allocPrint(arena, "{s}.pem", .{kind}));
+                const cert = try pki.path(try arena.print("{s}.pem", .{kind}));
                 defer gpa.free(cert);
-                const key = try pki.path(try std.fmt.allocPrint(arena, "{s}.{s}", .{ kind, if (encrypted) "enc.key" else "key" }));
+                const key = try pki.path(try arena.print("{s}.{s}", .{ kind, if (encrypted) "enc.key" else "key" }));
                 defer gpa.free(key);
                 var auth = try clientcert.load(gpa, arena, io, .{ .cert = cert, .key = key }, if (encrypted) passphrase else null);
                 defer auth.deinit();
@@ -156,7 +156,7 @@ fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir) !void {
     defer gpa.free(source_path);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
 }
@@ -221,7 +221,7 @@ test "git and relic fetch from a server that requires a certificate alike: key b
     for ([_]bool{ false, true }) |tls12| {
         const front = try testremote.TlsFront.startWith(gpa, io, server.port, .{ .client_ca = client_ca, .tls12 = tls12, .rsa = true });
         defer front.stop(io);
-        const url = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+        const url = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
         defer gpa.free(url);
 
         for ([_]Case{
@@ -251,9 +251,9 @@ fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, front: *testremote.TlsFront, ur
     const arena = arena_state.allocator();
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    const cert = try pki.path(case.cert orelse try std.fmt.allocPrint(arena, "{s}.pem", .{case.kind}));
+    const cert = try pki.path(case.cert orelse try arena.print("{s}.pem", .{case.kind}));
     defer gpa.free(cert);
-    const key: ?[]u8 = if (case.key) |k| try pki.path(try std.fmt.allocPrint(arena, "{s}.{s}", .{ case.kind, k })) else null;
+    const key: ?[]u8 = if (case.key) |k| try pki.path(try arena.print("{s}.{s}", .{ case.kind, k })) else null;
     defer if (key) |k| gpa.free(k);
 
     var tools_git = testing.tmpDir(.{ .iterate = true });
@@ -340,7 +340,7 @@ test "an https proxy that requires a certificate is answered with http.proxySSLC
     // TLS in front of the proxy makes it an https one.
     const front = try testremote.TlsFront.startWith(gpa, io, proxy.port, .{ .client_ca = client_ca });
     defer front.stop(io);
-    const proxy_url = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}", .{front.port});
+    const proxy_url = try gpa.print("https://127.0.0.1:{d}", .{front.port});
     defer gpa.free(proxy_url);
     const url = try server.url(gpa, "repo.git");
     defer gpa.free(url);

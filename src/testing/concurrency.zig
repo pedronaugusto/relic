@@ -4,6 +4,7 @@
 //! processes and a single-process test of one proves nothing.
 
 const std = @import("std");
+const suite = @import("helpers.zig");
 const Io = std.Io;
 const testgit = @import("git.zig");
 const hash = @import("../hash.zig");
@@ -13,9 +14,6 @@ const index_mod = @import("../index.zig");
 const reflog = @import("../refs/reflog.zig");
 
 const Oid = hash.Oid;
-
-/// The helper's path, compiled in by `build.zig`.
-const lock_helper_path: []const u8 = @import("build_options").lock_helper_path;
 
 /// Run the helper, which takes a lock and holds it until its standard input
 /// closes.
@@ -29,7 +27,7 @@ const Holder = struct {
         var env = try testgit.programEnviron(gpa);
         defer env.deinit();
         var child = try std.process.spawn(io, .{
-            .argv = &.{ lock_helper_path, lock_path },
+            .argv = &.{ suite.path(.lock_helper), lock_path },
             .cwd = .{ .dir = dir },
             .environ_map = &env,
             .stdin = .pipe,
@@ -62,7 +60,6 @@ const Holder = struct {
 };
 
 test "a lock a second process holds is refused, and left exactly as it was" {
-    if (lock_helper_path.len == 0) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -145,7 +142,7 @@ test "writing the index while git reads the same repository" {
 
     for (0..25) |i| {
         var buf: [32]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&buf, "f{d}.txt", .{i}), "contents\n");
+        try repo.writeFile(io, try std.mem.print(&buf, "f{d}.txt", .{i}), "contents\n");
     }
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -159,7 +156,7 @@ test "writing the index while git reads the same repository" {
     // is a complete index, old or new.
     for (0..10) |round| {
         var buf: [32]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "round{d}.txt", .{round});
+        const path = try std.mem.print(&buf, "round{d}.txt", .{round});
         try repo.writeFile(io, path, "added\n");
         const blob = hash.Hasher.object(.sha1, "blob", "added\n");
         var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
@@ -185,8 +182,8 @@ test "a gc while the object database is being walked finds every object" {
     defer names.deinit(gpa);
     for (0..40) |i| {
         var buf: [32]u8 = undefined;
-        const content = try std.fmt.bufPrint(&buf, "object number {d}\n", .{i});
-        try repo.writeFile(io, try std.fmt.bufPrint(&buf, "f{d}.txt", .{i}), content);
+        const content = try std.mem.print(&buf, "object number {d}\n", .{i});
+        try repo.writeFile(io, try std.mem.print(&buf, "f{d}.txt", .{i}), content);
     }
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
@@ -282,8 +279,8 @@ test "concurrent reflog appends preserve every complete line" {
         }
     };
 
-    const old = try Oid.parse(.sha1, "1" ** 40);
-    const new = try Oid.parse(.sha1, "2" ** 40);
+    const old = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const new = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     var start: Io.Event = .unset;
     var failed: std.atomic.Value(bool) = .init(false);
     var context: ThreadContext = .{ .io = io, .dir = tmp.dir, .start = &start, .failed = &failed, .old = old, .new = new };

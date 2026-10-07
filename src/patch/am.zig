@@ -39,7 +39,6 @@ const rerere = @import("../merge/rerere.zig");
 const hooks_mod = @import("../repo/hooks.zig");
 const signing = @import("../commit/signing.zig");
 const gitdate = @import("../object/gitdate.zig");
-const fs = @import("../repo/fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -216,7 +215,7 @@ const Session = struct {
     skipped: usize = 0,
 
     fn path(s: *Session, name: []const u8) Allocator.Error![]const u8 {
-        return std.fmt.allocPrint(s.a, state_dir ++ "/{s}", .{name});
+        return s.a.print(state_dir ++ "/{s}", .{name});
     }
 
     fn write(s: *Session, name: []const u8, bytes: []const u8) Error!void {
@@ -368,7 +367,7 @@ fn sqDequoteWords(a: Allocator, text: []const u8) Allocator.Error!?[]const []con
 /// collects them.
 fn applyWords(a: Allocator, o: ApplyOptions) Allocator.Error![]const []const u8 {
     var words: std.ArrayList([]const u8) = .empty;
-    if (o.whitespace) |w| try words.append(a, try std.fmt.allocPrint(a, "--whitespace={s}", .{switch (w) {
+    if (o.whitespace) |w| try words.append(a, try a.print("--whitespace={s}", .{switch (w) {
         .nowarn => "nowarn",
         .warn => "warn",
         .fix => "fix",
@@ -376,10 +375,10 @@ fn applyWords(a: Allocator, o: ApplyOptions) Allocator.Error![]const []const u8 
         .error_all => "error-all",
     }}));
     if (o.ignore_space_change) try words.append(a, "--ignore-space-change");
-    if (o.directory.len > 0) try words.append(a, try std.fmt.allocPrint(a, "--directory={s}", .{o.directory}));
-    for (o.limits) |l| try words.append(a, try std.fmt.allocPrint(a, "--{s}={s}", .{ if (l.include) "include" else "exclude", l.pattern }));
-    if (o.min_context) |c| try words.append(a, try std.fmt.allocPrint(a, "-C{d}", .{c}));
-    if (o.strip) |p| try words.append(a, try std.fmt.allocPrint(a, "-p{d}", .{p}));
+    if (o.directory.len > 0) try words.append(a, try a.print("--directory={s}", .{o.directory}));
+    for (o.limits) |l| try words.append(a, try a.print("--{s}={s}", .{ if (l.include) "include" else "exclude", l.pattern }));
+    if (o.min_context) |c| try words.append(a, try a.print("-C{d}", .{c}));
+    if (o.strip) |p| try words.append(a, try a.print("-p{d}", .{p}));
     if (o.reject) try words.append(a, "--reject");
     return words.items;
 }
@@ -487,8 +486,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
         try s.writeText("abort-safety", "");
         try head_mod.deleteRef(io, repo, "ORIG_HEAD");
     }
-    try s.writeText("next", try std.fmt.allocPrint(a, "{d}", .{s.cur}));
-    try s.writeText("last", try std.fmt.allocPrint(a, "{d}", .{s.last}));
+    try s.writeText("next", try a.print("{d}", .{s.cur}));
+    try s.writeText("last", try a.print("{d}", .{s.last}));
 
     return run(&s, &arena_instance, false);
 }
@@ -648,9 +647,9 @@ fn hasUnmerged(index: *const Index) bool {
 }
 
 fn absolutePath(s: *Session, name: []const u8) Error![]const u8 {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try s.repo.git_dir.realPath(s.io, &buf);
-    return std.fs.path.join(s.a, &.{ buf[0..len], state_dir, name });
+    return std.Io.Dir.path.join(s.a, &.{ buf[0..len], state_dir, name });
 }
 
 fn runHook(s: *Session, event: []const u8, args: []const []const u8) Error!bool {
@@ -668,8 +667,8 @@ const Applied = enum { applied, failed, conflicts, no_changes };
 /// Whether `apply` refused the patch itself, rather than failed to read or
 /// write: what `git am` stops at.
 fn patchFailure(err: anyerror) bool {
-    inline for (@typeInfo(patchparse.Error).error_set.?) |e| {
-        if (err == @field(anyerror, e.name) and err != error.OutOfMemory) return true;
+    inline for (@typeInfo(patchparse.Error).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name) and err != error.OutOfMemory) return true;
     }
     return switch (err) {
         error.PatchDoesNotApply, error.NoValidPatches, error.WhitespaceErrors, error.ConflictingWhitespaceRules, error.PatchTooLarge => true,
@@ -755,7 +754,7 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
     try fake.write(io, repo.git_dir, state_dir ++ "/patch-merge-index", .{});
 
     const our_tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(s);
-    const label = try std.fmt.allocPrint(s.a, "{s}", .{subjectOf(s.msg.?)});
+    const label = try s.a.print("{s}", .{subjectOf(s.msg.?)});
     var outcome = try threeway.apply(gpa, io, repo, &current, base_tree, our_tree, their_tree, .{
         .blob = .{ .algorithm = .histogram, .labels = .{ .ours = "HEAD", .base = "constructed fake ancestor", .theirs = label } },
         .directory_renames = .off,
@@ -814,7 +813,7 @@ fn doCommit(s: *Session) Error!void {
         .message = s.msg.?,
         .signing = s.options.signing,
     }, null);
-    const log_message = try std.fmt.allocPrint(s.a, "am: {s}", .{subjectOf(s.msg.?)});
+    const log_message = try s.a.print("am: {s}", .{subjectOf(s.msg.?)});
     try head_mod.advance(io, repo, head, commit, .{ .who = committer, .message = log_message });
     try s.commits.append(s.a, commit);
     _ = try runHook(s, "post-applypatch", &.{});
@@ -837,7 +836,7 @@ fn next(s: *Session) Error!void {
         try s.writeText("abort-safety", oid.hex(&hex));
     } else try s.writeText("abort-safety", "");
     s.cur += 1;
-    try s.writeText("next", try std.fmt.allocPrint(s.a, "{d}", .{s.cur}));
+    try s.writeText("next", try s.a.print("{d}", .{s.cur}));
 }
 
 fn isEmptyOrMissing(s: *Session, name: []const u8) Error!bool {

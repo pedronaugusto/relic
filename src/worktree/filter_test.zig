@@ -7,9 +7,9 @@
 //! compiles and hands in through `build_options`.
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
-const build_options = @import("build_options");
 
 const testgit = @import("../testing/git.zig");
 const hash = @import("../hash.zig");
@@ -176,7 +176,7 @@ test "command-line filters store what git stores and check out what git checks o
     var env = try environ(gpa);
     defer env.deinit();
 
-    const fixture = build_options.process_fixture_path;
+    const fixture = suite.path(.process_fixture);
     const up = try testgit.fixtureCommand(gpa, fixture, "upper");
     defer gpa.free(up);
     const down = try testgit.fixtureCommand(gpa, fixture, "lower");
@@ -286,15 +286,15 @@ test "the conversion order is the order git runs, not the one its manual gives" 
 
 /// The helper as a `filter.<driver>.process` command line.
 fn helperCommand(gpa: std.mem.Allocator, args: []const u8) ![]u8 {
-    return testgit.fixtureCommand(gpa, build_options.filter_helper_path, args);
+    return testgit.fixtureCommand(gpa, suite.path(.filter_helper), args);
 }
 
 /// Give each caller its own process logs, independent of later git commands.
 fn loggedHelperCommand(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) ![]u8 {
     const path = try dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
-    const arg = try std.fmt.allocPrint(gpa, "--log={s}", .{path});
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    const arg = try gpa.print("--log={s}", .{path});
     defer gpa.free(arg);
     return helperCommand(gpa, arg);
 }
@@ -340,7 +340,7 @@ fn processFilterAdd(racy: bool) !void {
     defer gpa.free(command);
     const relic_command = try loggedHelperCommand(gpa, io, relic_logs_tmp.dir);
     defer gpa.free(relic_command);
-    const fail = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "fail");
+    const fail = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "fail");
     defer gpa.free(fail);
 
     var twin = try Twin.init(gpa, io, &.{
@@ -410,8 +410,8 @@ test "a delayed smudge is written after the rest, as git writes it" {
     defer log_tmp.cleanup();
     const log_path = try log_tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(log_path);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, log_path, '\\', '/');
-    const args = try std.fmt.allocPrint(gpa, "--delay --log={s}", .{log_path});
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, log_path, '\\', '/');
+    const args = try gpa.print("--delay --log={s}", .{log_path});
     defer gpa.free(args);
     const command = try helperCommand(gpa, args);
     defer gpa.free(command);
@@ -473,9 +473,9 @@ test "a failing required filter stops the add by name, as it stops git" {
     const io = testing.io;
     var env = try environ(gpa);
     defer env.deinit();
-    const reject = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "reject-filter");
+    const reject = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "reject-filter");
     defer gpa.free(reject);
-    const copy = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "copy");
+    const copy = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "copy");
     defer gpa.free(copy);
     var twin = try Twin.init(gpa, io, &.{
         .{ "filter.must.clean", reject },
@@ -587,7 +587,7 @@ test "a process filter that does not speak pkt-line is a named error, as it is f
 
     // A filter that will not start is passed over, which is what git does
     // when the greeting never comes.
-    const silent = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "silent");
+    const silent = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "silent");
     defer gpa.free(silent);
     try twin.ours.exec(io, &.{ "config", "filter.rot.process", silent });
     var report: filter.Report = .init(gpa);

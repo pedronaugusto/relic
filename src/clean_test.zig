@@ -43,7 +43,7 @@ fn fixture(io: Io, git: *testgit.Repo) !void {
     try git.writeFile(io, "holder/loose.txt", "beside a repository\n");
     try git.writeFile(io, "holder/inner/f", "in a repository inside an untracked directory\n");
     try git.exec(io, &.{ "init", "-q", "holder/inner" });
-    if (builtin.os.tag != .windows) try git.dir.symLink(io, "README", "link", .{});
+    if (builtin.target.os.tag != .windows) try git.dir.symLink(io, "README", "link", .{});
 }
 
 /// Every path under `dir`, directories with a trailing `/`, sorted. A
@@ -58,11 +58,11 @@ fn listTree(gpa: Allocator, io: Io, dir: Io.Dir) ![]const u8 {
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         if (std.mem.eql(u8, entry.basename, ".git")) {
-            if (!std.mem.eql(u8, entry.path, ".git")) try out.append(gpa, try std.fmt.allocPrint(gpa, "{s}/", .{entry.path}));
+            if (!std.mem.eql(u8, entry.path, ".git")) try out.append(gpa, try gpa.print("{s}/", .{entry.path}));
             continue;
         }
         if (entry.kind == .directory) {
-            try out.append(gpa, try std.fmt.allocPrint(gpa, "{s}/", .{entry.path}));
+            try out.append(gpa, try gpa.print("{s}/", .{entry.path}));
             try walker.enter(io, entry);
         } else try out.append(gpa, try gpa.dupe(u8, entry.path));
     }
@@ -187,7 +187,7 @@ test "clean refuses without force as git does, and names a bare repository" {
     var refused = try git.capture(io, &.{"clean"});
     defer refused.deinit(gpa);
     try std.testing.expect(refused.code != 0);
-    try std.testing.expect(std.mem.indexOf(u8, refused.stderr, "refusing to clean") != null);
+    try std.testing.expect(std.mem.find(u8, refused.stderr, "refusing to clean") != null);
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     try std.testing.expectError(error.ForceRequired, clean_mod.clean(gpa, io, &repo, .{}));
@@ -202,7 +202,7 @@ test "clean refuses without force as git does, and names a bare repository" {
 
 test "clean leaves a directory whose .git file cannot be read, as git takes it for a repository" {
     // A mode that refuses reading is POSIX's, and refuses no one as root.
-    if (builtin.os.tag == .windows or std.c.getuid() == 0) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows or std.c.getuid() == 0) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var outs: [2][]const u8 = undefined;
@@ -215,8 +215,8 @@ test "clean leaves a directory whose .git file cannot be read, as git takes it f
         try git.exec(io, &.{ "commit", "-q", "-m", "one" });
         try git.writeFile(io, "nested/work.txt", "someone's work\n");
         try git.writeFile(io, "nested/.git", "gitdir: ../.git/modules/nested\n");
-        try git.dir.setFilePermissions(io, "nested/.git", @enumFromInt(@as(std.posix.mode_t, 0)), .{});
-        defer git.dir.setFilePermissions(io, "nested/.git", @enumFromInt(@as(std.posix.mode_t, 0o644)), .{}) catch {};
+        try git.dir.setFilePermissions(io, "nested/.git", @fromBackingInt(@intCast(@as(std.posix.mode_t, 0))), .{});
+        defer git.dir.setFilePermissions(io, "nested/.git", @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o644))), .{}) catch {};
         if (side == 0) {
             outs[side] = try git.run(io, &.{ "clean", "-f", "-d" });
         } else {
@@ -233,5 +233,5 @@ test "clean leaves a directory whose .git file cannot be read, as git takes it f
     defer for (outs ++ trees) |text| gpa.free(text);
     try std.testing.expectEqualStrings(outs[0], outs[1]);
     try std.testing.expectEqualStrings(trees[0], trees[1]);
-    try std.testing.expect(std.mem.indexOf(u8, trees[1], "nested/work.txt") != null);
+    try std.testing.expect(std.mem.find(u8, trees[1], "nested/work.txt") != null);
 }

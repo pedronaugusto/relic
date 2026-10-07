@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const config_mod = @import("config.zig");
 const config_state = @import("config/state.zig");
 const std = @import("std");
+const allocation = @import("testing/allocation.zig");
 const Io = std.Io;
 
 const testgit = @import("testing/git.zig");
@@ -39,7 +40,7 @@ test "peeling refuses an annotated tag chain beyond the limit" {
     var target_type: object.Type = .blob;
     for (0..17) |i| {
         var name_buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "tag-{d}", .{i});
+        const name = try std.mem.print(&name_buf, "tag-{d}", .{i});
         target = try repo.writeTag(io, .{
             .target = target,
             .target_type = target_type,
@@ -141,10 +142,10 @@ test "a whole commit cycle, and git agrees with every part of it" {
     // The reflog is there, for HEAD as well as for the branch.
     const head_log = try git.run(io, &.{ "reflog", "show", "HEAD" });
     defer gpa.free(head_log);
-    try std.testing.expect(std.mem.indexOf(u8, head_log, "commit (initial): first commit") != null);
+    try std.testing.expect(std.mem.find(u8, head_log, "commit (initial): first commit") != null);
     const branch_log = try git.run(io, &.{ "reflog", "show", "main" });
     defer gpa.free(branch_log);
-    try std.testing.expect(std.mem.indexOf(u8, branch_log, "commit (initial): first commit") != null);
+    try std.testing.expect(std.mem.find(u8, branch_log, "commit (initial): first commit") != null);
 
     try git.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 
@@ -360,9 +361,9 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     // git sees it, and says it is detached at the right commit.
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "trees/one") != null);
-    try std.testing.expect(std.mem.indexOf(u8, listed, commit_text) != null);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "detached") != null);
+    try std.testing.expect(std.mem.find(u8, listed, "trees/one") != null);
+    try std.testing.expect(std.mem.find(u8, listed, commit_text) != null);
+    try std.testing.expect(std.mem.find(u8, listed, "detached") != null);
 
     // And this sees it too.
     var ours = try repo.listWorktrees(io);
@@ -413,7 +414,7 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     try std.testing.expectEqual(@as(usize, 0), after.entries.len);
     const after_git = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(after_git);
-    try std.testing.expect(std.mem.indexOf(u8, after_git, "trees/one") == null);
+    try std.testing.expect(std.mem.find(u8, after_git, "trees/one") == null);
 }
 
 test "worktree remove takes the tree and the admin directory with it" {
@@ -445,7 +446,7 @@ test "worktree remove takes the tree and the admin directory with it" {
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "trees/two", .{}));
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "trees/two") == null);
+    try std.testing.expect(std.mem.find(u8, listed, "trees/two") == null);
 }
 
 test "a worktree git added with relative paths lists and removes, and remove touches only a tree that points back" {
@@ -471,8 +472,8 @@ test "a worktree git added with relative paths lists and removes, and remove tou
         try std.testing.expectEqualStrings("linked", linked.branch.?);
         var real_buf: [4096]u8 = undefined;
         const len = try git.dir.realPath(io, &real_buf);
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, real_buf[0..len], '\\', '/');
-        const want = try std.fmt.allocPrint(gpa, "{s}/linked", .{real_buf[0..len]});
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, real_buf[0..len], '\\', '/');
+        const want = try gpa.print("{s}/linked", .{real_buf[0..len]});
         defer gpa.free(want);
         try std.testing.expectEqualStrings(want, linked.path);
     }
@@ -490,7 +491,7 @@ test "a worktree git added with relative paths lists and removes, and remove tou
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "linked", .{}));
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "/linked\n") == null);
+    try std.testing.expect(std.mem.find(u8, listed, "/linked\n") == null);
 }
 
 test "worktree add refuses a destination with something in it and a branch git would not name" {
@@ -585,7 +586,7 @@ test "discovery stops at a damaged .git file, passes over a .git that is no repo
         defer repo.deinit(io);
         var ours_buf: [4096]u8 = undefined;
         const len = try repo.work_dir.?.realPath(io, &ours_buf);
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ours_buf[0..len], '\\', '/');
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ours_buf[0..len], '\\', '/');
         try std.testing.expectEqualStrings(theirs, ours_buf[0..len]);
     }
 
@@ -595,7 +596,7 @@ test "discovery stops at a damaged .git file, passes over a .git that is no repo
     defer a_dir.close(io);
     const ceiling = try a_dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(ceiling);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ceiling, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ceiling, '\\', '/');
     try git.isolated.?.put("GIT_CEILING_DIRECTORIES", ceiling);
     try std.testing.expectError(error.GitFailed, git.run(io, &.{ "-C", "a/b", "rev-parse", "--git-dir" }));
     var b_dir = try git.dir.openDir(io, "a/b", .{});
@@ -625,7 +626,7 @@ test "an includeIf gitdir:./ starts from the including file's directory, and -c 
     }
     var environ = try testgit.isolatedEnviron(gpa, home_path);
     defer environ.deinit();
-    const cmd_inc = try std.fmt.allocPrint(gpa, "include.path={s}/cmd.inc", .{home_path});
+    const cmd_inc = try gpa.print("include.path={s}/cmd.inc", .{home_path});
     defer gpa.free(cmd_inc);
     const said = try std.process.run(gpa, io, .{
         .argv = &.{ "git", "-c", cmd_inc, "config", "--get-regexp", "^probe\\." },
@@ -1233,7 +1234,7 @@ test "required filter discovery keeps full names, and reads the policy without t
     defer tmp.cleanup();
     var r = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
-    const long_name = "x" ** 300;
+    const long_name = &@as([300]u8, @splat('x'));
     try r.editConfig(&.{.{ .set = .{ .name = "filter." ++ long_name ++ ".required", .value = "true" } }}, null);
     const names = try r.requiredFilters(gpa);
     defer gpa.free(names);
@@ -1328,7 +1329,7 @@ test "repository configuration edit copies keep their owners when allocation sto
             try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }
 
 /// `path`, as `git -C <where> rev-parse --git-path` prints it (relative
@@ -1337,9 +1338,9 @@ test "repository configuration edit copies keep their owners when allocation sto
 fn resolvedPath(gpa: std.mem.Allocator, io: Io, base: Io.Dir, where: []const u8, path: []const u8) ![]u8 {
     var at = try base.openDir(io, where, .{});
     defer at.close(io);
-    const dir = try at.realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", gpa);
+    const dir = try at.realPathFileAlloc(io, std.Io.Dir.path.dirname(path) orelse ".", gpa);
     defer gpa.free(dir);
-    return std.fs.path.join(gpa, &.{ dir, std.fs.path.basename(path) });
+    return std.Io.Dir.path.join(gpa, &.{ dir, std.Io.Dir.path.basename(path) });
 }
 
 test "the ignore sources and the index are named where git reads them, in a linked worktree too" {
@@ -1351,7 +1352,7 @@ test "the ignore sources and the index are named where git reads them, in a link
     try git.exec(io, &.{ "worktree", "add", "-q", "-b", "side", "linked" });
     const excludes = try git.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(excludes);
-    const excludes_file = try std.fs.path.join(gpa, &.{ excludes, "excludes" });
+    const excludes_file = try std.Io.Dir.path.join(gpa, &.{ excludes, "excludes" });
     defer gpa.free(excludes_file);
     try git.exec(io, &.{ "config", "core.excludesFile", excludes_file });
 
@@ -1418,11 +1419,11 @@ fn probedOptions(gpa: std.mem.Allocator, io: Io, config_text: []const u8) repo_m
     _ = gpa;
     _ = io;
     var options: repo_mod.InitOptions = .{};
-    options.file_mode = std.mem.indexOf(u8, config_text, "filemode = true") != null;
-    options.ignore_case = std.mem.indexOf(u8, config_text, "ignorecase = true") != null;
-    options.symlinks = std.mem.indexOf(u8, config_text, "symlinks = false") == null;
-    if (std.mem.indexOf(u8, config_text, "precomposeunicode = true") != null) options.precompose_unicode = true;
-    if (std.mem.indexOf(u8, config_text, "precomposeunicode = false") != null) options.precompose_unicode = false;
+    options.file_mode = std.mem.find(u8, config_text, "filemode = true") != null;
+    options.ignore_case = std.mem.find(u8, config_text, "ignorecase = true") != null;
+    options.symlinks = std.mem.find(u8, config_text, "symlinks = false") == null;
+    if (std.mem.find(u8, config_text, "precomposeunicode = true") != null) options.precompose_unicode = true;
+    if (std.mem.find(u8, config_text, "precomposeunicode = false") != null) options.precompose_unicode = false;
     return options;
 }
 
@@ -1439,7 +1440,7 @@ fn treeOf(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.Strin
             .sym_link => blk: {
                 var buf: [Io.Dir.max_path_bytes]u8 = undefined;
                 const n = try dir.readLink(io, entry.path, &buf);
-                break :blk try std.fmt.allocPrint(gpa, "-> {s}", .{buf[0..n]});
+                break :blk try gpa.print("-> {s}", .{buf[0..n]});
             },
             else => try gpa.dupe(u8, ""),
         };
@@ -1459,13 +1460,13 @@ fn freeTree(gpa: std.mem.Allocator, tree: *std.array_hash_map.String([]u8)) void
 /// `git init --template=<template>` in one directory and `init` with the
 /// same template in another, compared path by path and byte by byte.
 fn compareInit(gpa: std.mem.Allocator, io: Io, scratch: *testgit.Repo, template: []const u8, git_args: []const []const u8, shared: ?repo_mod.fs.Shared) !void {
-    const by_git = try std.fmt.allocPrint(gpa, "by-git-{s}", .{template});
+    const by_git = try gpa.print("by-git-{s}", .{template});
     defer gpa.free(by_git);
-    const by_relic = try std.fmt.allocPrint(gpa, "by-relic-{s}", .{template});
+    const by_relic = try gpa.print("by-relic-{s}", .{template});
     defer gpa.free(by_relic);
     const template_path = try scratch.dir.realPathFileAlloc(io, template, gpa);
     defer gpa.free(template_path);
-    const template_arg = try std.fmt.allocPrint(gpa, "--template={s}", .{template_path});
+    const template_arg = try gpa.print("--template={s}", .{template_path});
     defer gpa.free(template_arg);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
@@ -1536,7 +1537,7 @@ test "init copies a template and starts from its configuration, as git init does
     try scratch.writeFile(io, "full/info/exclude", "*.tmp\n");
     try scratch.writeFile(io, "full/.hidden", "not copied\n");
     try scratch.dir.createDirPath(io, "full/empty");
-    if (builtin.os.tag != .windows) try scratch.dir.symLink(io, "description", "full/link", .{});
+    if (builtin.target.os.tag != .windows) try scratch.dir.symLink(io, "description", "full/link", .{});
     try compareInit(gpa, io, &scratch, "full", &.{}, null);
     // a template without a configuration
     try scratch.writeFile(io, "plain/description", "plain\n");

@@ -359,7 +359,7 @@ const Importer = struct {
     pending: Oid.Map(Pending) = .empty,
     pending_bytes: usize = 0,
     pack: ?odb_mod.Odb.OpenPack = null,
-    branches: std.StringArrayHashMapUnmanaged(*Branch) = .empty,
+    branches: std.array_hash_map.String(*Branch) = .empty,
     tags: std.ArrayList(TagRef) = .empty,
     rejected: std.ArrayList(Rejected) = .empty,
     next_mark: u64 = 0,
@@ -546,8 +546,8 @@ const Importer = struct {
     }
 
     fn marksPath(imp: *Importer, path: []const u8) Error![]const u8 {
-        if (!imp.relative_marks or std.fs.path.isAbsolute(path)) return imp.arena().dupe(u8, path);
-        return std.fmt.allocPrint(imp.arena(), "info/fast-import/{s}", .{path});
+        if (!imp.relative_marks or std.Io.Dir.path.isAbsolute(path)) return imp.arena().dupe(u8, path);
+        return imp.arena().print("info/fast-import/{s}", .{path});
     }
 
     /// The directory a marks path is relative to.
@@ -583,7 +583,7 @@ const Importer = struct {
         const path = imp.export_marks orelse return;
         if (imp.import_marks != null and !imp.import_marks_done) return;
         const dir = imp.marksDir(path);
-        if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(imp.io, parent);
+        if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(imp.io, parent);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(imp.gpa, imp.io, dir, path, &buffer, .{});
         defer lock.deinit(imp.io);
@@ -1330,7 +1330,7 @@ const Importer = struct {
     fn withDate(imp: *Importer, head: []const u8, secs: i64, offset_minutes: i32) Error![]const u8 {
         const sign: u8 = if (offset_minutes < 0) '-' else '+';
         const abs: u32 = @abs(offset_minutes);
-        return std.fmt.allocPrint(imp.arena(), "{s}{d} {c}{d:0>2}{d:0>2}", .{ head, secs, sign, abs / 60, abs % 60 });
+        return imp.arena().print("{s}{d} {c}{d:0>2}{d:0>2}", .{ head, secs, sign, abs / 60, abs % 60 });
     }
 
     //=================================================================
@@ -1687,7 +1687,7 @@ const Importer = struct {
             i -= 1;
             const t = imp.tags.items[i];
             if ((try seen.getOrPut(imp.gpa, t.name)).found_existing) continue;
-            const name = try std.fmt.allocPrint(imp.gpa, "refs/tags/{s}", .{t.name});
+            const name = try imp.gpa.print("refs/tags/{s}", .{t.name});
             defer imp.gpa.free(name);
             try tx.update(name, .{ .direct = t.oid }, .any);
         }

@@ -377,7 +377,7 @@ pub const Repository = struct {
 
             if (!options.discover) break;
             if (ceiling) |stop| {
-                const up = std.fs.path.dirnamePosix(path) orelse break;
+                const up = std.Io.Dir.path.dirnamePosix(path) orelse break;
                 // The root's length counts as its slash's.
                 if (@max(up.len, 1) <= stop) break;
                 path = up;
@@ -436,7 +436,7 @@ pub const Repository = struct {
         if (target.len == 0) return error.BrokenGitFile;
         // A linked worktree's names its directory absolutely; a
         // submodule's names it relative to the file itself.
-        const git_dir = (if (std.fs.path.isAbsolute(target))
+        const git_dir = (if (std.Io.Dir.path.isAbsolute(target))
             Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
         else
             dir.openDir(io, target, .{ .iterate = true })) catch return error.BrokenGitFile;
@@ -711,7 +711,7 @@ pub const Repository = struct {
     fn absoluteGitDir(io: Io, git_dir: Io.Dir, buffer: []u8) Error![]const u8 {
         const len = try git_dir.realPath(io, buffer);
         const path = buffer[0..len];
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
         return path;
     }
 
@@ -868,13 +868,13 @@ pub const Repository = struct {
             .files => {
                 try fs.makeDirs(io, git_dir, "refs/heads", shared);
                 try fs.makeDirs(io, git_dir, "refs/tags", shared);
-                const head_line = std.fmt.bufPrint(&head_buf, "ref: refs/heads/{s}\n", .{options.default_branch}) catch
+                const head_line = std.mem.print(&head_buf, "ref: refs/heads/{s}\n", .{options.default_branch}) catch
                     return error.NotARepository;
                 try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = head_line });
                 fs.adjustShared(io, git_dir, "HEAD", shared);
             },
             .reftable => {
-                const target = std.fmt.bufPrint(&head_buf, "refs/heads/{s}", .{options.default_branch}) catch
+                const target = std.mem.print(&head_buf, "refs/heads/{s}", .{options.default_branch}) catch
                     return error.NotARepository;
                 try reftablestack.initialize(gpa, io, git_dir, options.object_format, .{ .symbolic = target }, null, .{});
             },
@@ -935,7 +935,7 @@ pub const Repository = struct {
             .group => "1",
             .everybody => "2",
             // unreachable: a u16 is at most six octal digits after the zero
-            .mode => |m| std.fmt.bufPrint(buf, "0{o}", .{m}) catch unreachable,
+            .mode => |m| std.mem.print(buf, "0{o}", .{m}) catch unreachable,
         };
     }
 
@@ -957,7 +957,7 @@ pub const Repository = struct {
         if (options.ref_format == .reftable) try set(&config, "extensions.refstorage", "reftable");
         var version_buf: [4]u8 = undefined;
         // unreachable: a u8 is at most three digits
-        try set(&config, "core.repositoryformatversion", std.fmt.bufPrint(&version_buf, "{d}", .{version}) catch unreachable);
+        try set(&config, "core.repositoryformatversion", std.mem.print(&version_buf, "{d}", .{version}) catch unreachable);
         try set(&config, "core.filemode", if (options.file_mode) "true" else "false");
         try set(&config, "core.bare", if (options.bare) "true" else "false");
         if (!options.bare and !config.has("core.logallrefupdates")) try set(&config, "core.logallrefupdates", "true");
@@ -1147,8 +1147,8 @@ pub const Repository = struct {
     fn coreChoice(repo: *const Repository, comptime T: type, comptime boolean: bool, setting: []const u8, fallback: T) Error!T {
         const text = repo.configuration().get(setting) orelse return fallback;
         if (T == fs.Stat.Check and std.ascii.eqlIgnoreCase(text, "default")) return .full;
-        inline for (@typeInfo(T).@"enum".fields) |field| {
-            if ((!boolean or (!std.mem.eql(u8, field.name, "true") and !std.mem.eql(u8, field.name, "false"))) and std.ascii.eqlIgnoreCase(text, field.name)) return @enumFromInt(field.value);
+        inline for (@typeInfo(T).@"enum".field_names) |name| {
+            if ((!boolean or (!std.mem.eql(u8, name, "true") and !std.mem.eql(u8, name, "false"))) and std.ascii.eqlIgnoreCase(text, name)) return @field(T, name);
         }
         if (boolean) return if (try repo.configuration().getBool(setting, false)) .true else .false;
         return error.MalformedValue;
@@ -1164,7 +1164,7 @@ pub const Repository = struct {
             .check_stat = try repo.coreChoice(@TypeOf(@as(worktree.Rules, .{}).check_stat), false, "core.checkstat", .full),
             .timestamp_resolution = repo.odb.timestamp_resolution,
             .file_mode = try repo.configuration().getBool("core.filemode", Io.File.Permissions.has_executable_bit),
-            .symlinks = try repo.configuration().getBool("core.symlinks", builtin.os.tag != .windows),
+            .symlinks = try repo.configuration().getBool("core.symlinks", builtin.target.os.tag != .windows),
         };
     }
 
@@ -1190,15 +1190,15 @@ pub const Repository = struct {
     pub fn ignoreSources(repo: *const Repository, gpa: Allocator, io: Io) PathError!IgnoreSources {
         const common = try repo.common_dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(common);
-        const info_exclude = try std.fs.path.join(gpa, &.{ common, "info", "exclude" });
+        const info_exclude = try std.Io.Dir.path.join(gpa, &.{ common, "info", "exclude" });
         errdefer gpa.free(info_exclude);
         const configured = try repo.configuration().getPath(gpa, "core.excludesfile");
         defer if (configured) |path| gpa.free(path);
         const excludes_file: ?[]u8 = if (configured) |path| blk: {
-            if (std.fs.path.isAbsolute(path)) break :blk try gpa.dupe(u8, path);
+            if (std.Io.Dir.path.isAbsolute(path)) break :blk try gpa.dupe(u8, path);
             const cwd = try std.process.currentPathAlloc(io, gpa);
             defer gpa.free(cwd);
-            break :blk try std.fs.path.join(gpa, &.{ cwd, path });
+            break :blk try std.Io.Dir.path.join(gpa, &.{ cwd, path });
         } else null;
         return .{ .excludes_file = excludes_file, .info_exclude = info_exclude };
     }
@@ -1209,7 +1209,7 @@ pub const Repository = struct {
     pub fn indexPath(repo: *const Repository, gpa: Allocator, io: Io) PathError![]u8 {
         const git_dir = try repo.git_dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(git_dir);
-        return std.fs.path.join(gpa, &.{ git_dir, "index" });
+        return std.Io.Dir.path.join(gpa, &.{ git_dir, "index" });
     }
 
     /// Load the attributes for the working tree's root.
@@ -1234,7 +1234,7 @@ pub const Repository = struct {
         const names = try repo.configuration().subsections(gpa, "filter");
         defer gpa.free(names);
         for (names) |name| {
-            const key = try std.fmt.allocPrint(gpa, "filter.{s}.required", .{name});
+            const key = try gpa.print("filter.{s}.required", .{name});
             defer gpa.free(key);
             const required = try repo.configuration().getBool(key, false);
             if (required) try out.append(gpa, name);
@@ -1283,7 +1283,7 @@ pub const Repository = struct {
             // Windows file timestamps can stay unchanged when a same-size
             // worktree file is rewritten immediately. Re-read that small
             // file rather than handing out stale settings.
-            if (std.meta.eql(cached.key, key) and !(builtin.os.tag == .windows and key.worktree != null)) {
+            if (std.meta.eql(cached.key, key) and !(builtin.target.os.tag == .windows and key.worktree != null)) {
                 return if (cached.text) |t| try repo.gpa.dupe(u8, t) else null;
             }
         }

@@ -209,9 +209,13 @@ pub const Session = struct {
     fn fromUrl(s: *Session) Self.Error!void {
         if (s.initialised) return if (s.unsafe_url) error.CredentialValueUnsafe;
         s.initialised = true;
-        errdefer |err| if (err == error.CredentialValueUnsafe) {
-            s.unsafe_url = true;
+        s.readUrl() catch |err| {
+            if (err == error.CredentialValueUnsafe) s.unsafe_url = true;
+            return err;
         };
+    }
+
+    fn readUrl(s: *Session) Self.Error!void {
         // git's `check_url_component`: a URL whose parts hold a newline
         // describes no credential, here or in any helper.
         if (s.cert_path == null) {
@@ -250,7 +254,7 @@ pub const Session = struct {
         if (s.header) |h| return h;
         if (s.capa_authtype) {
             if (s.authtype) |kind| if (s.credential) |value| {
-                s.header = std.fmt.allocPrint(s.gpa, "{s} {s}", .{ kind, value }) catch return null;
+                s.header = s.gpa.print("{s} {s}", .{ kind, value }) catch return null;
                 return s.header;
             };
         }
@@ -321,11 +325,11 @@ pub const Session = struct {
         // Ask for what is still missing, as git's `credential_getpass`.
         if (!settings.interactive) return error.CredentialsUnavailable;
         if (s.username == null) {
-            const prompt = try std.fmt.allocPrint(arena, "Username for '{s}': ", .{try s.describe(arena, false, settings.sanitize_prompt)});
+            const prompt = try arena.print("Username for '{s}': ", .{try s.describe(arena, false, settings.sanitize_prompt)});
             s.username = try s.ask(io, opts, .username, prompt) orelse return false;
         }
         if (s.password == null) {
-            const prompt = try std.fmt.allocPrint(arena, "Password for '{s}': ", .{try s.describe(arena, true, settings.sanitize_prompt)});
+            const prompt = try arena.print("Password for '{s}': ", .{try s.describe(arena, true, settings.sanitize_prompt)});
             s.password = try s.ask(io, opts, .password, prompt) orelse return false;
         }
         s.source = .prompt;
@@ -436,7 +440,7 @@ pub const Session = struct {
     }
 
     fn hostField(s: *Session, arena: Allocator) Allocator.Error![]const u8 {
-        if (s.url.port) |port| return std.fmt.allocPrint(arena, "{s}:{d}", .{ s.url.host, port });
+        if (s.url.port) |port| return arena.print("{s}:{d}", .{ s.url.host, port });
         return s.url.host;
     }
 
@@ -483,7 +487,7 @@ pub const Session = struct {
             if (s.password) |p| try w.item("password", p);
         }
         if (s.oauth_refresh_token) |t| try w.item("oauth_refresh_token", t);
-        if (s.password_expiry_utc) |t| try w.item("password_expiry_utc", try std.fmt.allocPrint(arena, "{d}", .{t}));
+        if (s.password_expiry_utc) |t| try w.item("password_expiry_utc", try arena.print("{d}", .{t}));
         for (s.challenges.items) |c| try w.item("wwwauth[]", c);
         if (state) {
             for (s.state.items) |v| try w.item("state[]", v);
@@ -514,11 +518,11 @@ pub const Session = struct {
         settings: Settings,
     ) Error!Outcome {
         const command = if (helper[0] == '!')
-            try std.fmt.allocPrint(arena, "{s} {t}", .{ helper[1..], operation })
-        else if (std.fs.path.isAbsolute(helper))
-            try std.fmt.allocPrint(arena, "{s} {t}", .{ helper, operation })
+            try arena.print("{s} {t}", .{ helper[1..], operation })
+        else if (std.Io.Dir.path.isAbsolute(helper))
+            try arena.print("{s} {t}", .{ helper, operation })
         else
-            try std.fmt.allocPrint(arena, "git credential-{s} {t}", .{ helper, operation });
+            try arena.print("git credential-{s} {t}", .{ helper, operation });
 
         var input: std.ArrayList(u8) = .empty;
         defer {
@@ -674,9 +678,9 @@ fn appendPart(arena: Allocator, out: *std.ArrayList(u8), text: []const u8, part:
     for (text) |c| {
         const encode = c <= 0x1f or c >= 0x7f or switch (part) {
             .raw => unreachable,
-            .host => !std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, "-.:[]", c) == null,
-            .user => c == '/' or std.mem.indexOfScalar(u8, unsafe, c) != null,
-            .path => std.mem.indexOfScalar(u8, unsafe, c) != null,
+            .host => !std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "-.:[]", c) == null,
+            .user => c == '/' or std.mem.findScalar(u8, unsafe, c) != null,
+            .path => std.mem.findScalar(u8, unsafe, c) != null,
         };
         if (encode) try out.print(arena, "%{X:0>2}", .{c}) else try out.append(arena, c);
     }
@@ -759,7 +763,7 @@ fn partialMatches(pattern: []const u8, url: url_mod.Url) bool {
     if (host.len != 0) {
         var buf: [300]u8 = undefined;
         const have = if (url.port) |port|
-            std.fmt.bufPrint(&buf, "{s}:{d}", .{ url.host, port }) catch return false
+            std.mem.print(&buf, "{s}:{d}", .{ url.host, port }) catch return false
         else
             url.host;
         if (!std.mem.eql(u8, host, have)) return false;

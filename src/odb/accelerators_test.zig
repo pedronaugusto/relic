@@ -12,9 +12,9 @@ const gpa = std.testing.allocator;
 fn commit(repo: *testgit.Repo, n: usize) !void {
     try repo.dir.createDirPath(io, "dir/sub");
     var content: [80]u8 = undefined;
-    try repo.writeFile(io, "dir/sub/na\xc3\xafve.txt", try std.fmt.bufPrint(&content, "change {d}\n", .{n}));
+    try repo.writeFile(io, "dir/sub/na\xc3\xafve.txt", try std.mem.print(&content, "change {d}\n", .{n}));
     try repo.exec(io, &.{ "add", "dir/sub/na\xc3\xafve.txt" });
-    const date = try std.fmt.allocPrint(gpa, "@{d} +0000", .{switch (n % 4) {
+    const date = try gpa.print("@{d} +0000", .{switch (n % 4) {
         0 => @as(i64, 4_200_000_000),
         1 => @as(i64, 1_000_000_000),
         else => 1_700_000_000 + @as(i64, @intCast(n)),
@@ -22,7 +22,7 @@ fn commit(repo: *testgit.Repo, n: usize) !void {
     defer gpa.free(date);
     try repo.isolated.?.put("GIT_AUTHOR_DATE", date);
     try repo.isolated.?.put("GIT_COMMITTER_DATE", date);
-    try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&content, "commit {d}", .{n}) });
+    try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&content, "commit {d}", .{n}) });
 }
 
 fn tip(repo: *testgit.Repo, kind: hash.Kind) !Oid {
@@ -57,7 +57,7 @@ test "commit graph writing agrees byte for byte with git, including overflow and
         defer db.deinit(io);
         const head = try tip(&repo, kind);
         for ([_]u32{ 0, 1, 2 }) |version| {
-            const config = try std.fmt.allocPrint(gpa, "commitGraph.changedPathsVersion={d}", .{version});
+            const config = try gpa.print("commitGraph.changedPathsVersion={d}", .{version});
             defer gpa.free(config);
             try repo.exec(io, if (version == 0) &.{ "commit-graph", "write", "--reachable" } else &.{ "-c", config, "commit-graph", "write", "--reachable", "--changed-paths" });
             const expected = try repo.readFile(io, ".git/objects/info/commit-graph");
@@ -94,7 +94,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
             before_files.deinit(gpa);
         }
         while (before_hashes.next()) |name| {
-            const path = try std.fmt.allocPrint(gpa, ".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
+            const path = try gpa.print(".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
             defer gpa.free(path);
             try before_files.append(gpa, try repo.readFile(io, path));
         }
@@ -116,7 +116,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
             expected_files.deinit(gpa);
         }
         while (hashes.next()) |name| {
-            const path = try std.fmt.allocPrint(gpa, ".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
+            const path = try gpa.print(".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
             defer gpa.free(path);
             try expected_files.append(gpa, try repo.readFile(io, path));
         }
@@ -125,7 +125,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
         before_hashes.reset();
         var before_i: usize = 0;
         while (before_hashes.next()) |name| : (before_i += 1) {
-            const path = try std.fmt.allocPrint(gpa, ".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
+            const path = try gpa.print(".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
             defer gpa.free(path);
             repo.dir.deleteFile(io, path) catch |err| if (err != error.FileNotFound) {
                 return err;
@@ -140,7 +140,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
         hashes.reset();
         var i: usize = 0;
         while (hashes.next()) |name| : (i += 1) {
-            const path = try std.fmt.allocPrint(gpa, ".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
+            const path = try gpa.print(".git/objects/info/commit-graphs/graph-{s}.graph", .{name});
             defer gpa.free(path);
             try sameFile(&repo, path, expected_files.items[i]);
         }
@@ -164,10 +164,10 @@ const repo_mod = @import("../repo.zig");
 
 fn linearCommit(repo: *testgit.Repo, n: usize) !void {
     var text: [64]u8 = undefined;
-    try repo.writeFile(io, "file", try std.fmt.bufPrint(&text, "contents {d}\n", .{n}));
+    try repo.writeFile(io, "file", try std.mem.print(&text, "contents {d}\n", .{n}));
     try repo.exec(io, &.{ "add", "file" });
     try testgit.setDate(&repo.isolated.?, 1_700_000_000 + @as(i64, @intCast(n)));
-    try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&text, "commit {d}", .{n}) });
+    try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&text, "commit {d}", .{n}) });
 }
 
 fn bitmapPath(repo: *testgit.Repo, prefix: []const u8) ![]u8 {
@@ -175,7 +175,7 @@ fn bitmapPath(repo: *testgit.Repo, prefix: []const u8) ![]u8 {
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| if (std.mem.startsWith(u8, entry.name, prefix) and std.mem.endsWith(u8, entry.name, ".bitmap")) {
-        return std.fmt.allocPrint(gpa, ".git/objects/pack/{s}", .{entry.name});
+        return gpa.print(".git/objects/pack/{s}", .{entry.name});
     };
     return error.TestUnexpectedResult;
 }
@@ -242,7 +242,7 @@ test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree
         var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
         defer db.deinit(io);
         const head = try tip(&repo, .sha1);
-        const pack_name = std.fs.path.basename(path);
+        const pack_name = std.Io.Dir.path.basename(path);
         try repo.dir.deleteFile(io, path);
         try ops.writePackBitmap(gpa, io, &db, pack_name[0 .. pack_name.len - 7], &.{head}, .{ .lookup_table = lookup });
         // git writes these bytes from 2.55 on; every git reads them.
@@ -298,7 +298,7 @@ test "MIDX repack and expire retain kept packs and match git's two-step semantic
         defer before.deinit();
         try std.testing.expectEqual(@as(u32, 3), before.pack_count);
         if (kept) {
-            const path = try std.fmt.allocPrint(gpa, ".git/objects/pack/{s}.keep", .{before.packName(0).?});
+            const path = try gpa.print(".git/objects/pack/{s}.keep", .{before.packName(0).?});
             defer gpa.free(path);
             try repo.writeFile(io, path, "");
         }
@@ -363,7 +363,7 @@ test "bitmap commit selection past the dense region agrees byte for byte with gi
     var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
     const head = try tip(&repo, .sha1);
-    const base = std.fs.path.basename(path);
+    const base = std.Io.Dir.path.basename(path);
     try repo.dir.deleteFile(io, path);
     try ops.writePackBitmap(gpa, io, &db, base[0 .. base.len - 7], &.{head}, .{});
     // git writes these bytes from 2.55 on; every git reads them.
@@ -392,7 +392,7 @@ test "preferred pack duplicate selection agrees byte for byte with git" {
         preferred = try gpa.dupe(u8, entry.name);
         break;
     };
-    const arg = try std.fmt.allocPrint(gpa, "--preferred-pack={s}", .{preferred.?});
+    const arg = try gpa.print("--preferred-pack={s}", .{preferred.?});
     defer gpa.free(arg);
     try repo.exec(io, &.{ "multi-pack-index", "write", arg });
     const expected = try repo.readFile(io, ".git/objects/pack/multi-pack-index");
@@ -455,7 +455,7 @@ test "merged split layers are marked at the write time before an older expiry cu
     try repo.exec(io, &.{ "commit-graph", "write", "--reachable", "--split" });
     const chain = try repo.readFile(io, ".git/objects/info/commit-graphs/commit-graph-chain");
     defer gpa.free(chain);
-    const path = try std.fmt.allocPrint(gpa, ".git/objects/info/commit-graphs/graph-{s}.graph", .{std.mem.trim(u8, chain, "\n")});
+    const path = try gpa.print(".git/objects/info/commit-graphs/graph-{s}.graph", .{std.mem.trim(u8, chain, "\n")});
     defer gpa.free(path);
     const fs = @import("../repo/fs.zig");
     try fs.setTimestamps(io, repo.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } } });
@@ -508,7 +508,7 @@ test "a bitmap whose pack has disappeared is refused instead of answering phanto
     try repo.exec(io, &.{ "repack", "-q", "-a", "-d", "-b" });
     const bitmap_path = try bitmapPath(&repo, "pack-");
     defer gpa.free(bitmap_path);
-    const pack_path = try std.fmt.allocPrint(gpa, "{s}.pack", .{bitmap_path[0 .. bitmap_path.len - 7]});
+    const pack_path = try gpa.print("{s}.pack", .{bitmap_path[0 .. bitmap_path.len - 7]});
     defer gpa.free(pack_path);
     try repo.dir.deleteFile(io, pack_path);
     const objects = try repo.dir.openDir(io, ".git/objects", .{ .iterate = true });
@@ -584,14 +584,14 @@ test "a MIDX naming a path outside its pack directory is no index, and expire re
     var at = packNamesAt(bytes);
     for (0..empty) |_| at = std.mem.findScalarPos(u8, bytes, at, 0).? + 1;
     const len = std.mem.findScalarPos(u8, bytes, at, 0).? - at;
-    const name = "../../" ++ "v" ** 39 ++ ".idx";
+    const name = "../../" ++ @as([39]u8, @splat('v')) ++ ".idx";
     try std.testing.expectEqual(name.len, len);
     @memcpy(bytes[at..][0..len], name);
     resealMidx(bytes);
     try repo.dir.deleteFile(io, midx_path);
     try repo.writeFile(io, midx_path, bytes);
     for ([_][]const u8{ ".pack", ".idx", ".rev", ".bitmap" }) |extension| {
-        const victim = try std.fmt.allocPrint(gpa, ".git/{s}{s}", .{ "v" ** 39, extension });
+        const victim = try gpa.print(".git/{s}{s}", .{ &@as([39]u8, @splat('v')), extension });
         defer gpa.free(victim);
         try repo.writeFile(io, victim, "keep me");
     }
@@ -603,7 +603,7 @@ test "a MIDX naming a path outside its pack directory is no index, and expire re
     try std.testing.expectEqual(@as(usize, 0), db.multiPackIndexCount());
     try std.testing.expectEqual(@as(u32, 0), try ops.expireMidx(gpa, io, &db, .none));
     for ([_][]const u8{ ".pack", ".idx", ".rev", ".bitmap" }) |extension| {
-        const victim = try std.fmt.allocPrint(gpa, ".git/{s}{s}", .{ "v" ** 39, extension });
+        const victim = try gpa.print(".git/{s}{s}", .{ &@as([39]u8, @splat('v')), extension });
         defer gpa.free(victim);
         const kept = try repo.readFile(io, victim);
         defer gpa.free(kept);

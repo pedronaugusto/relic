@@ -727,7 +727,7 @@ fn attributesAbove(arena: Allocator, io: Io, db: *odb_mod.Odb, tree: Oid, paths:
             const folder = path[0..end];
             if (!looked.contains(folder)) {
                 try looked.put(arena, folder, {});
-                const file = if (folder.len == 0) ".gitattributes" else try std.fmt.allocPrint(arena, "{s}/.gitattributes", .{folder});
+                const file = if (folder.len == 0) ".gitattributes" else try arena.print("{s}/.gitattributes", .{folder});
                 if (try entryAt(io, db, tree, file)) |found| try out.put(arena, file, found);
             }
             const slash = std.mem.findScalarPos(u8, path, if (end == 0) 0 else end + 1, '/') orelse break;
@@ -777,7 +777,7 @@ fn configuredDrivers(arena: Allocator, repo: *Repository) Allocator.Error![]cons
     const names = try repo.configuration().subsections(arena, "merge");
     var out: std.ArrayList([]const u8) = .empty;
     for (names) |name| {
-        const key = try std.fmt.allocPrint(arena, "merge.{s}.driver", .{name});
+        const key = try arena.print("merge.{s}.driver", .{name});
         if (repo.configuration().get(key) != null) try out.append(arena, name);
     }
     return out.items;
@@ -795,7 +795,7 @@ test "a merge reads the trees it changes, not the whole tree" {
     defer r.deinit();
     var name: [32]u8 = undefined;
     var text: [32]u8 = undefined;
-    for (0..300) |i| try r.writeFile(io, try std.fmt.bufPrint(&name, "d{d:0>3}/f", .{i}), try std.fmt.bufPrint(&text, "{d}\n", .{i}));
+    for (0..300) |i| try r.writeFile(io, try std.mem.print(&name, "d{d:0>3}/f", .{i}), try std.mem.print(&text, "{d}\n", .{i}));
     try r.exec(io, &.{ "add", "-A" });
     try r.exec(io, &.{ "commit", "-q", "-m", "base" });
     try r.exec(io, &.{ "checkout", "-q", "-b", "side" });

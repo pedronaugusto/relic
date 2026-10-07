@@ -236,7 +236,7 @@ pub const Listing = struct {
 fn refFor(arena: Allocator, io: Io, repo: *Repository, options: Options) Error!?[]const u8 {
     if (options.ref) |r| return r;
     const branch = (try repo.refStore().currentBranch(arena, io)) orelse return null;
-    const ref = try std.fmt.allocPrint(arena, "refs/heads/{s}", .{branch});
+    const ref = try arena.print("refs/heads/{s}", .{branch});
     return ref;
 }
 
@@ -328,7 +328,7 @@ fn unlockAsked(arena: Allocator, server: *lfsapi.Server, repo: *Repository, id: 
         writeRef(&s, ref) catch return error.OutOfMemory;
         s.endObject() catch return error.OutOfMemory;
     }
-    const suffix = try std.fmt.allocPrint(arena, "locks/{s}/unlock", .{id});
+    const suffix = try arena.print("locks/{s}/unlock", .{id});
     const ex = try server.client.api(.upload, .POST, suffix, body.written(), 0);
     defer ex.close();
     const status = ex.status();
@@ -431,7 +431,7 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
             .{ "path", filter.path },
             .{ "id", filter.id },
             .{ "cursor", cursor },
-            .{ "limit", if (filter.limit != 0) try std.fmt.allocPrint(arena, "{d}", .{filter.limit}) else null },
+            .{ "limit", if (filter.limit != 0) try arena.print("{d}", .{filter.limit}) else null },
             .{ "refspec", ref },
         };
         for (params) |p| {
@@ -548,7 +548,7 @@ fn sshFailed(server: *lfsapi.Server, status: lfsssh.Status, what: []const u8) Er
 /// Leave what the server said about a refused `what` as the client's message.
 fn sshSay(server: *lfsapi.Server, status: lfsssh.Status, what: []const u8) void {
     var buf: [512]u8 = undefined;
-    server.client.setMessage(std.fmt.bufPrint(&buf, "{s}: status {d}{s}{s}", .{
+    server.client.setMessage(std.mem.print(&buf, "{s}: status {d}{s}{s}", .{
         what,
         status.code,
         if (status.lines.len != 0) ": " else "",
@@ -571,8 +571,8 @@ fn sshLock(arena: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, path: 
     try conn.mutex.lock(server.io);
     defer conn.mutex.unlock(server.io);
     var args: std.ArrayList([]const u8) = .empty;
-    try args.append(arena, try std.fmt.allocPrint(arena, "path={s}", .{path}));
-    if (ref) |r| try args.append(arena, try std.fmt.allocPrint(arena, "refname={s}", .{r}));
+    try args.append(arena, try arena.print("path={s}", .{path}));
+    if (ref) |r| try args.append(arena, try arena.print("refname={s}", .{r}));
     try conn.send("lock", args.items);
     const status = try conn.readStatus(arena);
     if (status.code == 409) return .{ .held = try sshLockOf(arena, status) };
@@ -594,9 +594,9 @@ fn sshUnlock(arena: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, id: 
         for ([_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/" }) |prefix| {
             if (std.mem.startsWith(u8, r, prefix)) short = r[prefix.len..];
         }
-        try args.append(arena, try std.fmt.allocPrint(arena, "refname={s}", .{short}));
+        try args.append(arena, try arena.print("refname={s}", .{short}));
     }
-    try conn.send(try std.fmt.allocPrint(arena, "unlock {s}", .{id}), args.items);
+    try conn.send(try arena.print("unlock {s}", .{id}), args.items);
     const status = try conn.readStatus(arena);
     if (!status.ok()) {
         sshSay(server, status, "unlock");
@@ -632,15 +632,15 @@ fn sshListPage(arena: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, q:
     try conn.mutex.lock(server.io);
     defer conn.mutex.unlock(server.io);
     var args: std.ArrayList([]const u8) = .empty;
-    if (q.path) |v| try args.append(arena, try std.fmt.allocPrint(arena, "path={s}", .{v}));
-    if (q.id) |v| try args.append(arena, try std.fmt.allocPrint(arena, "id={s}", .{v}));
+    if (q.path) |v| try args.append(arena, try arena.print("path={s}", .{v}));
+    if (q.id) |v| try args.append(arena, try arena.print("id={s}", .{v}));
     if (q.verify) {
-        if (q.refspec) |v| try args.append(arena, try std.fmt.allocPrint(arena, "refname={s}", .{v}));
-        if (q.cursor) |v| try args.append(arena, try std.fmt.allocPrint(arena, "cursor={s}", .{v}));
+        if (q.refspec) |v| try args.append(arena, try arena.print("refname={s}", .{v}));
+        if (q.cursor) |v| try args.append(arena, try arena.print("cursor={s}", .{v}));
     } else {
-        if (q.cursor) |v| try args.append(arena, try std.fmt.allocPrint(arena, "cursor={s}", .{v}));
-        if (q.limit != 0) try args.append(arena, try std.fmt.allocPrint(arena, "limit={d}", .{q.limit}));
-        if (q.refspec) |v| try args.append(arena, try std.fmt.allocPrint(arena, "refspec={s}", .{v}));
+        if (q.cursor) |v| try args.append(arena, try arena.print("cursor={s}", .{v}));
+        if (q.limit != 0) try args.append(arena, try arena.print("limit={d}", .{q.limit}));
+        if (q.refspec) |v| try args.append(arena, try arena.print("refspec={s}", .{v}));
     }
     try conn.send("list-lock", args.items);
     const status = try conn.readStatus(arena);
@@ -717,8 +717,8 @@ pub const Cache = struct {
     /// Where the cache for `ref` lives, under the store's root:
     /// `<lfs>/cache/locks/<ref>`, or `<lfs>/cache/locks` with no ref.
     pub fn dirPath(a: Allocator, store: *const lfs.Store, ref: ?[]const u8) Allocator.Error![]const u8 {
-        if (ref) |r| return std.fmt.allocPrint(a, "{s}/cache/locks/{s}", .{ store.root, r });
-        return std.fmt.allocPrint(a, "{s}/cache/locks", .{store.root});
+        if (ref) |r| return a.print("{s}/cache/locks/{s}", .{ store.root, r });
+        return a.print("{s}/cache/locks", .{store.root});
     }
 
     /// Read what is cached for `ref`, which is nothing when there is no
@@ -726,14 +726,14 @@ pub const Cache = struct {
     pub fn read(a: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Self.Error!Cache {
         var c: Cache = .{};
         const dir = try dirPath(a, store, ref);
-        const remote_path = try std.fmt.allocPrint(a, "{s}/remote", .{dir});
+        const remote_path = try a.print("{s}/remote", .{dir});
         if (try fs.readFileAlloc(a, io, store.base, remote_path, 64 << 20)) |bytes| {
             if (parseListPage(a, bytes)) |page| {
                 c.remote = page.locks;
                 c.have_remote = true;
             } else |_| {}
         }
-        const verifiable_path = try std.fmt.allocPrint(a, "{s}/verifiable", .{dir});
+        const verifiable_path = try a.print("{s}/verifiable", .{dir});
         if (try fs.readFileAlloc(a, io, store.base, verifiable_path, 64 << 20)) |bytes| {
             if (parseVerifyPage(a, bytes)) |page| {
                 c.ours = page.ours;

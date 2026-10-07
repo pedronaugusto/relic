@@ -389,7 +389,7 @@ const Walk = struct {
                 const path = if (item.path.len == 0)
                     try arena.dupe(u8, entry.name)
                 else
-                    try std.fmt.allocPrint(arena, "{s}/{s}", .{ item.path, entry.name });
+                    try arena.print("{s}/{s}", .{ item.path, entry.name });
                 switch (entry.mode) {
                     .tree => try stack.append(w.gpa, .{ .oid = entry.oid, .path = path }),
                     // A gitlink names a commit in another repository.
@@ -542,12 +542,12 @@ test "what is missing is what git rev-list --objects lists" {
     defer repo.deinit();
     for (0..6) |i| {
         var buf: [64]u8 = undefined;
-        try repo.writeFile(io, "a.txt", try std.fmt.bufPrint(&buf, "version {d}\n", .{i}));
+        try repo.writeFile(io, "a.txt", try std.mem.print(&buf, "version {d}\n", .{i}));
         try repo.writeFile(io, "dir/same.txt", "never changes\n");
         var name_buf: [64]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "dir/n{d}.txt", .{i % 3}), try std.fmt.bufPrint(&buf, "n {d}\n", .{i}));
+        try repo.writeFile(io, try std.mem.print(&name_buf, "dir/n{d}.txt", .{i % 3}), try std.mem.print(&buf, "n {d}\n", .{i}));
         try repo.exec(io, &.{ "add", "-A" });
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&buf, "c{d}", .{i}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&buf, "c{d}", .{i}) });
         if (i == 1) try repo.exec(io, &.{ "branch", "side" });
     }
     try repo.exec(io, &.{ "checkout", "-q", "side" });
@@ -590,7 +590,7 @@ test "what is missing is what git rev-list --objects lists" {
             const hex = try repo.line(io, &.{ "rev-parse", name });
             try owned.append(gpa, hex);
             try exclude.append(gpa, try Oid.parse(.sha1, hex));
-            const not = try std.fmt.allocPrint(gpa, "^{s}", .{hex});
+            const not = try gpa.print("^{s}", .{hex});
             try owned.append(gpa, not);
             try argv.append(gpa, not);
         }
@@ -626,7 +626,7 @@ test "a tip with an object missing below it is refused, and names the object" {
     const head = try Oid.parse(.sha1, head_hex);
     try checkConnected(gpa, io, &opened.odb, &.{head}, null, null);
 
-    const path = try std.fmt.allocPrint(gpa, ".git/objects/{s}/{s}", .{ blob_hex[0..2], blob_hex[2..] });
+    const path = try gpa.print(".git/objects/{s}/{s}", .{ blob_hex[0..2], blob_hex[2..] });
     defer gpa.free(path);
     try repo.dir.deleteFile(io, path);
     var gone: Oid = undefined;

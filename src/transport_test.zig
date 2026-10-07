@@ -8,6 +8,7 @@
 //! import.
 
 const std = @import("std");
+const suite = @import("testing/helpers.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -24,7 +25,6 @@ const testremote = @import("testing/remote.zig");
 const testlfs = @import("testing/lfs.zig");
 const object = @import("object.zig");
 const progress_mod = @import("transport/progress.zig");
-const build_options = @import("build_options");
 const builtin = @import("builtin");
 const warning = @import("repo/warning.zig");
 const push_mod = @import("transport/push.zig");
@@ -39,7 +39,7 @@ fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir, commits: usize) !vo
     defer gpa.free(source_path);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
 }
@@ -144,7 +144,7 @@ test "a redirect to another server takes no credential with it, an extraHeader's
     try servedRepo(gpa, io, &root, 1);
     const other = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer other.stop();
-    const other_base = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{other.port});
+    const other_base = try gpa.print("http://127.0.0.1:{d}", .{other.port});
     defer gpa.free(other_base);
     const away = try testremote.HttpServer.start(gpa, io, root.dir, .{ .redirect = true, .redirect_to = other_base });
     defer away.stop();
@@ -189,7 +189,7 @@ test "a redirect whose user decodes to a newline is refused before any helper he
     try servedRepo(gpa, io, &root, 1);
     const guarded = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" } });
     defer guarded.stop();
-    const hostile = try std.fmt.allocPrint(gpa, "http://u%0ahost=github.com@127.0.0.1:{d}", .{guarded.port});
+    const hostile = try gpa.print("http://u%0ahost=github.com@127.0.0.1:{d}", .{guarded.port});
     defer gpa.free(hostile);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .redirect = true, .redirect_to = hostile });
     defer server.stop();
@@ -231,7 +231,7 @@ test "a missing repository, a dumb setting and a header that is not one are refu
     defer gpa.free(url);
     // The TLS ones are read for an https URL, and refused before anything
     // is sent.
-    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{server.port});
+    const secure = try gpa.print("https://127.0.0.1:{d}/repo.git", .{server.port});
     defer gpa.free(secure);
     for ([_][]const u8{
         "[http]\nextraHeader = no colon here\n",
@@ -257,12 +257,12 @@ test "a missing repository, a dumb setting and a header that is not one are refu
 /// A credential helper that notes each operation and its input in `<dir>/helper.log`
 /// and answers `get` with `ada` and `password`.
 fn helperScript(gpa: Allocator, io: Io, dir: Io.Dir, password: []const u8) ![]u8 {
-    const path = try testlfs.installProgram(gpa, io, dir, "helper", build_options.lfs_test_tool_path);
+    const path = try testlfs.installProgram(gpa, io, dir, "helper", suite.path(.lfs_test_tool));
     errdefer gpa.free(path);
-    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{path});
+    const sidecar = try gpa.print("{s}.fixture", .{path});
     defer gpa.free(sidecar);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = "credential-person\n" });
-    const answer = try std.fmt.allocPrint(gpa, "username=ada\npassword={s}\n", .{password});
+    const answer = try gpa.print("username=ada\npassword={s}\n", .{password});
     defer gpa.free(answer);
     try dir.writeFile(io, .{ .sub_path = "helper.answer", .data = answer });
     return path;
@@ -341,7 +341,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" } });
     defer server.stop();
 
-    const with_userinfo = try std.fmt.allocPrint(gpa, "http://ada:secret@127.0.0.1:{d}/repo.git", .{server.port});
+    const with_userinfo = try gpa.print("http://ada:secret@127.0.0.1:{d}/repo.git", .{server.port});
     defer gpa.free(with_userinfo);
     {
         var session = try transport.Session.open(gpa, io, with_userinfo, .upload_pack, .sha1, .{});
@@ -357,9 +357,9 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     // askpass: asked with git's own prompts.
     var tools = testing.tmpDir(.{ .iterate = true });
     defer tools.cleanup();
-    const askpass = try testlfs.installProgram(gpa, io, tools.dir, "askpass", build_options.lfs_test_tool_path);
+    const askpass = try testlfs.installProgram(gpa, io, tools.dir, "askpass", suite.path(.lfs_test_tool));
     defer gpa.free(askpass);
-    const askpass_sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{askpass});
+    const askpass_sidecar = try gpa.print("{s}.fixture", .{askpass});
     defer gpa.free(askpass_sidecar);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = askpass_sidecar, .data = "askpass\n" });
     var env = try testremote.environ(gpa);
@@ -434,22 +434,22 @@ test "ssh is handed the same arguments git hands it" {
     defer repo.deinit(io);
 
     const Case = struct { url: []const u8, variant: ?[]const u8 = null };
-    const drive_slash = if (builtin.os.tag == .windows) "/" else "";
-    const url_port = try std.fmt.allocPrint(gpa, "ssh://ada@example.invalid:2222{s}{s}", .{ drive_slash, source_path });
+    const drive_slash = if (builtin.target.os.tag == .windows) "/" else "";
+    const url_port = try gpa.print("ssh://ada@example.invalid:2222{s}{s}", .{ drive_slash, source_path });
     defer gpa.free(url_port);
-    const url_scp = try std.fmt.allocPrint(gpa, "example.invalid:{s}/it's", .{source_path});
+    const url_scp = try gpa.print("example.invalid:{s}/it's", .{source_path});
     defer gpa.free(url_scp);
-    const url_plain = try std.fmt.allocPrint(gpa, "ssh://example.invalid:22{s}{s}", .{ drive_slash, source_path });
+    const url_plain = try gpa.print("ssh://example.invalid:22{s}{s}", .{ drive_slash, source_path });
     defer gpa.free(url_plain);
-    const url_ipv6 = try std.fmt.allocPrint(gpa, "[::1]:{s}", .{source_path});
+    const url_ipv6 = try gpa.print("[::1]:{s}", .{source_path});
     defer gpa.free(url_ipv6);
-    const url_user_ipv6 = try std.fmt.allocPrint(gpa, "ada@[::1]:{s}", .{source_path});
+    const url_user_ipv6 = try gpa.print("ada@[::1]:{s}", .{source_path});
     defer gpa.free(url_user_ipv6);
-    const url_inside = try std.fmt.allocPrint(gpa, "ssh://[ada@::1]:2222{s}{s}", .{ drive_slash, source_path });
+    const url_inside = try gpa.print("ssh://[ada@::1]:2222{s}{s}", .{ drive_slash, source_path });
     defer gpa.free(url_inside);
-    const url_scp_port = try std.fmt.allocPrint(gpa, "[example.invalid:2222]:{s}", .{source_path});
+    const url_scp_port = try gpa.print("[example.invalid:2222]:{s}", .{source_path});
     defer gpa.free(url_scp_port);
-    const url_encoded = try std.fmt.allocPrint(gpa, "ssh://ada@example.invalid:2222{s}{s}/it%27s", .{ drive_slash, source_path });
+    const url_encoded = try gpa.print("ssh://ada@example.invalid:2222{s}{s}/it%27s", .{ drive_slash, source_path });
     defer gpa.free(url_encoded);
     const cases = [_]Case{
         .{ .url = url_encoded },
@@ -465,7 +465,7 @@ test "ssh is handed the same arguments git hands it" {
     for (cases) |case| {
         tools.dir.deleteFile(io, "fake-ssh.log") catch |err| if (err != error.FileNotFound) return err;
         var variant_buf: [64]u8 = undefined;
-        const variant_setting = if (case.variant) |v| try std.fmt.bufPrint(&variant_buf, "ssh.variant={s}", .{v}) else "ssh.variant=auto";
+        const variant_setting = if (case.variant) |v| try std.mem.print(&variant_buf, "ssh.variant={s}", .{v}) else "ssh.variant=auto";
         here.report_failures = case.variant == null;
         // git's own arguments, from the same stand-in. A plink given a
         // repository it cannot reach fails after it has been started, which
@@ -514,8 +514,8 @@ test "a fetch over ssh leaves what git fetch leaves, in v2 and in v0" {
         defer source.deinit();
         const source_path = try testremote.absolutePath(gpa, io, source.dir);
         defer gpa.free(source_path);
-        const drive_slash = if (builtin.os.tag == .windows) "/" else "";
-        const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}", .{ drive_slash, source_path });
+        const drive_slash = if (builtin.target.os.tag == .windows) "/" else "";
+        const url = try gpa.print("ssh://example.invalid{s}{s}", .{ drive_slash, source_path });
         defer gpa.free(url);
 
         var by_git = try testgit.Repo.init(gpa, io, &.{});
@@ -571,7 +571,7 @@ test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted 
     defer server.stop();
     const front = try testremote.TlsFront.start(gpa, io, server.port);
     defer front.stop(io);
-    const url = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    const url = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(url);
     var env = try testremote.environ(gpa);
     defer env.deinit();
@@ -587,7 +587,7 @@ test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted 
     }
     // Trusted through the configuration, scoped to the server, or through
     // git's environment variable.
-    const scoped = try std.fmt.allocPrint(gpa, "http.https://127.0.0.1:{d}.sslCAInfo", .{front.port});
+    const scoped = try gpa.print("http.https://127.0.0.1:{d}.sslCAInfo", .{front.port});
     defer gpa.free(scoped);
     const Case = struct { key: ?[]const u8, value: []const u8, env: ?[]const u8 = null };
     for ([_]Case{
@@ -647,7 +647,7 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
     defer gpa.free(proxy_url);
     const plain = try server.url(gpa, "repo.git");
     defer gpa.free(plain);
-    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    const secure = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(secure);
 
     const Case = struct {
@@ -663,7 +663,7 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
         .{ .url = secure, .config = &.{.{ "http.proxy", proxy_url }}, .through = true },
         // On Windows environment names are case-insensitive, so asking for
         // http_proxy finds the value set as HTTP_PROXY.
-        .{ .url = plain, .env = &.{.{ "HTTP_PROXY", proxy_url }}, .through = builtin.os.tag == .windows },
+        .{ .url = plain, .env = &.{.{ "HTTP_PROXY", proxy_url }}, .through = builtin.target.os.tag == .windows },
         .{ .url = secure, .env = &.{ .{ "https_proxy", proxy_url }, .{ "no_proxy", "127.0.0.1" } }, .through = false },
         .{ .url = plain, .env = &.{.{ "http_proxy", proxy_url }}, .config = &.{.{ "http.proxy", "" }}, .through = false },
     }, 0..) |case, case_index| {
@@ -789,7 +789,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
     defer front.stop(io);
     const plain = try server.url(gpa, "repo.git");
     defer gpa.free(plain);
-    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    const secure = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(secure);
 
     const Case = struct { scheme: @FieldType(testremote.Proxy, "scheme"), method: ?[]const u8 = null, ok: bool = true };
@@ -804,7 +804,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
     }) |case| for ([_][]const u8{ plain, secure }) |url| {
         const proxy = try testremote.Proxy.startAsking(gpa, io, "ada:secret", case.scheme);
         defer proxy.stop();
-        const proxy_url = try std.fmt.allocPrint(gpa, "http://ada:secret@127.0.0.1:{d}", .{proxy.port});
+        const proxy_url = try gpa.print("http://ada:secret@127.0.0.1:{d}", .{proxy.port});
         defer gpa.free(proxy_url);
         var env = try testremote.environ(gpa);
         defer env.deinit();
@@ -813,7 +813,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
         // curl's Windows SSPI build cannot answer SHA-256 Digest. Git
         // returns CURLE_AUTH_ERROR after the first 407; relic still proves
         // that its own SHA-256 answer is accepted by this proxy.
-        const git_ok = case.ok and !(builtin.os.tag == .windows and case.scheme == .digest_sha256);
+        const git_ok = case.ok and !(builtin.target.os.tag == .windows and case.scheme == .digest_sha256);
         var logs: [2][]u8 = undefined;
         var results: [2]bool = undefined;
         var by_git = try testgit.Repo.init(gpa, io, &.{});
@@ -852,7 +852,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
         if (case.ok and !git_ok) {
             const request = if (url.ptr == secure.ptr) "CONNECT" else "GET";
             var expected_buf: [32]u8 = undefined;
-            const expected = try std.fmt.bufPrint(&expected_buf, "{s} none refused\n", .{request});
+            const expected = try std.mem.print(&expected_buf, "{s} none refused\n", .{request});
             try testing.expectEqualStrings(expected, logs[0]);
             try testing.expect(std.mem.find(u8, logs[1], "digest taken\n") != null);
         } else {
@@ -878,7 +878,7 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
     defer proxy.stop();
     const plain = try server.url(gpa, "repo.git");
     defer gpa.free(plain);
-    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    const secure = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(secure);
 
     var tools = testing.tmpDir(.{ .iterate = true });
@@ -892,7 +892,7 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
         .{ .url = plain, .proxy_user = "ada:wrong", .ok = false },
         .{ .url = secure, .proxy_user = "ada", .helper_password = "wrong", .ok = false },
     }) |case| {
-        const proxy_url = try std.fmt.allocPrint(gpa, "http://{s}@127.0.0.1:{d}", .{ case.proxy_user, proxy.port });
+        const proxy_url = try gpa.print("http://{s}@127.0.0.1:{d}", .{ case.proxy_user, proxy.port });
         defer gpa.free(proxy_url);
         var env = try testremote.environ(gpa);
         defer env.deinit();
@@ -950,7 +950,7 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
     defer server.stop();
     const front = try testremote.TlsFront.start(gpa, io, server.port);
     defer front.stop(io);
-    const url = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    const url = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(url);
     for ([_]bool{ false, true }) |through_env| {
         var env = try testremote.environ(gpa);
@@ -1094,8 +1094,8 @@ test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe 
     defer server.stop();
     const http_url = try server.url(gpa, "repo.git");
     defer gpa.free(http_url);
-    const drive_slash = if (builtin.os.tag == .windows) "/" else "";
-    const ssh_url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ drive_slash, root_path });
+    const drive_slash = if (builtin.target.os.tag == .windows) "/" else "";
+    const ssh_url = try gpa.print("ssh://example.invalid{s}{s}/repo.git", .{ drive_slash, root_path });
     defer gpa.free(ssh_url);
 
     for ([_][]const u8{ ssh_url, http_url }) |url| for ([_]bool{ false, true }) |v2| {
@@ -1166,7 +1166,7 @@ fn withoutAgent(gpa: Allocator, bytes: []const u8) ![]u8 {
 
 test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     // the stand-in is a shell script; Windows has no /bin/sh to run it
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const Child = @import("dependencies.zig").conduit.Child;
     const Controlled = struct {
@@ -1183,7 +1183,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
 
         fn start(allocator: Allocator, task_io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
             const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
-            const child = try Child.spawn(task_io, allocator, options);
+            const child = try Child.spawn(allocator, task_io, options);
             for (options.argv) |arg| if (std.mem.eql(u8, arg, "-G")) return child;
             state.child = child;
             state.stdout = child.stdoutFile().?.handle;
@@ -1192,8 +1192,8 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
 
         fn terminate(task_io: Io, raw: *anyopaque, child: *Child) void {
             const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
-            const tracked = state.child != null and state.child.? == child.*;
-            _ = child.killWait(task_io, 0) catch return;
+            const tracked = state.child != null and state.child.?.processId() == child.processId();
+            _ = child.killWait(task_io, .zero) catch return;
             if (tracked) state.reaped = true;
         }
 
@@ -1238,14 +1238,14 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "ssh", .data = "#!/bin/sh\n[ \"$1\" = \"-G\" ] && exit 1\nexec sleep 30\n" });
     try tmp.dir.setFilePermissions(io, "ssh", .fromMode(0o755), .{});
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = buf[0..try tmp.dir.realPath(io, &buf)];
     try tmp.dir.createDirPath(io, "repo");
     var repo_dir = try tmp.dir.openDir(io, "repo", .{});
     defer repo_dir.close(io);
     var made = try repo_mod.Repository.init(gpa, io, repo_dir, .{});
     made.deinit(io);
-    const config = try std.fmt.allocPrint(gpa, "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tsshCommand = {s}/ssh\n[remote \"origin\"]\n\turl = ssh://example.invalid/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", .{root});
+    const config = try gpa.print("[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tsshCommand = {s}/ssh\n[remote \"origin\"]\n\turl = ssh://example.invalid/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", .{root});
     defer gpa.free(config);
     try repo_dir.writeFile(io, .{ .sub_path = ".git/config", .data = config });
     var repo = try repo_mod.Repository.open(gpa, io, repo_dir, .{ .discover = false });
@@ -1293,13 +1293,13 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             defer env.deinit();
             const proxy_url = try proxy.url(gpa, scheme, "ada:secret@");
             defer gpa.free(proxy_url);
-            const url = try std.fmt.allocPrint(gpa, "{s}://localhost:{d}/repo.git", .{ if (secure) "https" else "http", if (secure) front.port else server.port });
+            const url = try gpa.print("{s}://localhost:{d}/repo.git", .{ if (secure) "https" else "http", if (secure) front.port else server.port });
             defer gpa.free(url);
             // The same explicit -c spelling works with git's curl. SSL
             // verification is covered elsewhere; this test checks TLS on wire.
-            const setting = try std.fmt.allocPrint(gpa, "http.proxy={s}", .{proxy_url});
+            const setting = try gpa.print("http.proxy={s}", .{proxy_url});
             defer gpa.free(setting);
-            const config_text = try std.fmt.allocPrint(gpa, "[http]\nproxy = {s}\nsslVerify = false\n", .{proxy_url});
+            const config_text = try gpa.print("[http]\nproxy = {s}\nsslVerify = false\n", .{proxy_url});
             defer gpa.free(config_text);
             var config = try config_mod.Config.parseText(gpa, config_text, .command);
             defer config.deinit();
@@ -1327,7 +1327,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             const fetched_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "fetch", "-q", "origin" }, "", true);
             gpa.free(fetched_git);
             // Both clients push new objects, from identical commits.
-            const commit_text = try std.fmt.allocPrint(gpa, "{s} {s}\n", .{ scheme, if (secure) "https" else "http" });
+            const commit_text = try gpa.print("{s} {s}\n", .{ scheme, if (secure) "https" else "http" });
             defer gpa.free(commit_text);
             for ([_]Io.Dir{ by_git, ours.dir }) |dir| {
                 try dir.writeFile(io, .{ .sub_path = "socks.txt", .data = commit_text });
@@ -1336,13 +1336,13 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
                 const committed = try testremote.gitInput(gpa, io, dir, &.{ "commit", "-q", "-m", commit_text }, "");
                 gpa.free(committed);
             }
-            const git_ref = try std.fmt.allocPrint(gpa, "refs/heads/socks-git-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            const git_ref = try gpa.print("refs/heads/socks-git-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
             defer gpa.free(git_ref);
-            const relic_ref = try std.fmt.allocPrint(gpa, "refs/heads/socks-relic-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            const relic_ref = try gpa.print("refs/heads/socks-relic-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
             defer gpa.free(relic_ref);
-            const git_spec = try std.fmt.allocPrint(gpa, "HEAD:{s}", .{git_ref});
+            const git_spec = try gpa.print("HEAD:{s}", .{git_ref});
             defer gpa.free(git_spec);
-            const relic_spec = try std.fmt.allocPrint(gpa, "HEAD:{s}", .{relic_ref});
+            const relic_spec = try gpa.print("HEAD:{s}", .{relic_ref});
             defer gpa.free(relic_spec);
             const pushed_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "push", "-q", "origin", git_spec }, "", true);
             gpa.free(pushed_git);

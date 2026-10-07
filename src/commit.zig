@@ -241,7 +241,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     else
         "commit";
     const subject_end = std.mem.findScalar(u8, cleaned, '\n') orelse cleaned.len;
-    const log_message = try std.fmt.allocPrint(arena, "{s}: {s}", .{ action, cleaned[0..subject_end] });
+    const log_message = try arena.print("{s}: {s}", .{ action, cleaned[0..subject_end] });
     const policy = repo.reflogPolicy();
     {
         var tx = repo.beginRefs();
@@ -298,7 +298,7 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 pub fn template(gpa: Allocator, io: Io, repo: *Repository) Allocator.Error!?[]u8 {
     const path = (try repo.configuration().getPath(gpa, "commit.template")) orelse return null;
     defer gpa.free(path);
-    const dir = if (std.fs.path.isAbsolute(path)) Io.Dir.cwd() else repo.work_dir orelse Io.Dir.cwd();
+    const dir = if (std.Io.Dir.path.isAbsolute(path)) Io.Dir.cwd() else repo.work_dir orelse Io.Dir.cwd();
     const text = dir.readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;
     if (text.len == 0) {
         gpa.free(text);
@@ -472,7 +472,7 @@ const Twin = struct {
     /// Put the same native hook in both repositories.
     fn fixtureHook(t: *Twin, io: Io, name: []const u8, action: []const u8, data: []const u8) !void {
         var path_buf: [96]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, ".git/hooks/{s}", .{name});
+        const path = try std.mem.print(&path_buf, ".git/hooks/{s}", .{name});
         inline for (.{ &t.git, &t.relic }) |r| try testgit.fixtureHook(r.gpa, io, r.dir, path, action, data);
     }
 
@@ -661,7 +661,7 @@ test "a message that is commit.template unedited is refused, as git commit refus
     twin.git.report_failures = false;
     for ([_][]const u8{"strip"}) |cleanup| {
         for ([_]bool{ false, true }) |signoff| {
-            const mode = try std.fmt.allocPrint(gpa, "commit.cleanup={s}", .{cleanup});
+            const mode = try gpa.print("commit.cleanup={s}", .{cleanup});
             defer gpa.free(mode);
             var theirs = try twin.git.capture(io, if (signoff) &.{ "-c", "core.editor=true", "-c", mode, "commit", "-q", "-s" } else &.{ "-c", "core.editor=true", "-c", mode, "commit", "-q" });
             defer theirs.deinit(gpa);

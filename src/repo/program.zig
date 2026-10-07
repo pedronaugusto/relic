@@ -22,6 +22,7 @@
 const Self = @This();
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -140,23 +141,14 @@ pub fn run(
     defer started.deinit(io);
     // A program that ends without reading all of its input is no error, as
     // git has it: conduit does not report the closed pipe.
-    var output = try started.child.exchange(io, gpa, input, .{
+    var output = try started.child.exchange(gpa, io, input, .{
         .max_bytes = limits.output.toInt() orelse std.math.maxInt(usize),
-        .timeout_ms = timeoutMs(io, limits.timeout),
+        .timeout = limits.timeout,
     });
-    defer output.deinit(gpa);
+    defer output.deinit();
     if (output.timedOut()) return error.Timeout;
     if (output.stdoutTruncated() or output.stderrTruncated()) return error.OutputTooLong;
     return .{ .term = gitTerm(output.term()), .stdout = output.takeStdout(), .stderr = output.takeStderr() };
-}
-
-/// What is left of `timeout` from now, in conduit's whole milliseconds,
-/// rounded up so a deadline still ahead is never spent at once; `null` for
-/// none.
-fn timeoutMs(io: Io, timeout: Io.Timeout) ?u32 {
-    const left = timeout.toDurationFromNow(io) orelse return null;
-    const ns = @max(left.raw.nanoseconds, 0);
-    return std.math.lossyCast(u32, @divFloor(ns + std.time.ns_per_ms - 1, std.time.ns_per_ms));
 }
 
 // relic's status is git's byte-sized exit status, as std's Child exposed it.
@@ -199,7 +191,7 @@ pub const Running = struct {
             }
         }
         // ziglint-ignore: Z026 killing cannot fail its caller; a child already gone has nothing left to reap
-        _ = running.child.killWait(io, 0) catch {};
+        _ = running.child.killWait(io, .zero) catch {};
     }
 
     /// Stop it if it is still running and release everything.
@@ -229,12 +221,12 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
     // Windows looks for a bare name in this executable's directory and the
     // current one before `PATH`, where a working tree may have put one;
     // git for Windows looks in `PATH` alone, and so does this.
-    if (builtin.os.tag == .windows and isBare(line.argv[0])) {
+    if (builtin.target.os.tag == .windows and isBare(line.argv[0])) {
         line.program = try lookupOnPath(gpa, io, pathOf(&environ), line.argv[0]) orelse return error.FileNotFound;
         line.argv[0] = line.program;
     }
 
-    var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd: ?[]const u8 = switch (invocation.cwd) {
         .inherit => null,
         .path => |path| path,
@@ -261,7 +253,7 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
             },
         } },
     };
-    const child = if (programs.spawn) |hook| try hook.start(gpa, io, hook.context, options) else try Child.spawn(io, gpa, options);
+    const child = if (programs.spawn) |hook| try hook.start(gpa, io, hook.context, options) else try Child.spawn(gpa, io, options);
     return .{ .child = child, .spawn = programs.spawn, .environ = environ, .line = line, .gpa = gpa };
 }
 
@@ -282,7 +274,7 @@ const CommandLine = struct {
         if (!invocation.shell or !needsShell(argv[0])) return .{ .argv = try gpa.dupe([]const u8, argv) };
         const out = try gpa.alloc([]const u8, argv.len + 3);
         errdefer gpa.free(out);
-        const owned = if (argv.len > 1) try std.fmt.allocPrint(gpa, "{s} \"$@\"", .{argv[0]}) else "";
+        const owned = if (argv.len > 1) try gpa.print("{s} \"$@\"", .{argv[0]}) else "";
         out[0] = "sh";
         out[1] = "-c";
         out[2] = if (argv.len > 1) owned else argv[0];
@@ -300,7 +292,7 @@ const CommandLine = struct {
 /// Whether `name` is a program to be looked for rather than a path: no
 /// separator of either kind and no drive.
 fn isBare(name: []const u8) bool {
-    return std.mem.indexOfAny(u8, name, "/\\:") == null;
+    return std.mem.findAny(u8, name, "/\\:") == null;
 }
 
 /// The `PATH` of an environment, whatever the case of its name, as Windows
@@ -319,15 +311,15 @@ fn pathOf(environ: *const Environ.Map) ?[]const u8 {
 /// entry is skipped. The result is `gpa`'s; `null` when no entry has it.
 pub fn lookupOnPath(gpa: Allocator, io: Io, path: ?[]const u8, name: []const u8) Allocator.Error!?[]u8 {
     const list = path orelse return null;
-    const windows = builtin.os.tag == .windows;
+    const windows = builtin.target.os.tag == .windows;
     const has_exe = name.len >= 4 and std.ascii.eqlIgnoreCase(name[name.len - 4 ..], ".exe");
-    var entries = std.mem.splitScalar(u8, list, std.fs.path.delimiter);
+    var entries = std.mem.splitScalar(u8, list, std.Io.Dir.path.delimiter);
     while (entries.next()) |raw| {
         const dir = if (windows) std.mem.trim(u8, raw, "\"") else raw;
         if (dir.len == 0) continue;
         for ([_]bool{ true, false }) |with_exe| {
             if (with_exe and (!windows or has_exe)) continue;
-            const candidate = try std.fmt.allocPrint(gpa, "{s}{c}{s}{s}", .{ dir, std.fs.path.sep, name, if (with_exe) ".exe" else "" });
+            const candidate = try gpa.print("{s}{c}{s}{s}", .{ dir, std.Io.Dir.path.sep, name, if (with_exe) ".exe" else "" });
             const stat = Io.Dir.cwd().statFile(io, candidate, .{}) catch null;
             if (stat) |found| if (found.kind != .directory) return candidate;
             gpa.free(candidate);
@@ -362,11 +354,10 @@ pub const repository_variables = [_][]const u8{
 /// Whether git would hand this command line to a shell: it holds a byte of
 /// `|&;<>()$\`\\"' \t\n*?[#~=%`.
 pub fn needsShell(line: []const u8) bool {
-    return std.mem.indexOfAny(u8, line, "|&;<>()$`\\\"' \t\n*?[#~=%") != null;
+    return std.mem.findAny(u8, line, "|&;<>()$`\\\"' \t\n*?[#~=%") != null;
 }
 
 const testing = std.testing;
-const process_fixture = @import("build_options").process_fixture_path;
 const testgit = @import("../testing/git.zig");
 
 fn testEnviron() !Environ.Map {
@@ -388,17 +379,17 @@ const SpawnHooks = struct {
         const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // safe: the test hands the hook a *SpawnHooks as its context
         self.started = true;
         const hooked = options.environ.?.get("RELIC_HOOKED") orelse "";
-        self.prepared = std.mem.eql(u8, process_fixture, options.argv[0]) and
+        self.prepared = std.mem.eql(u8, suite.path(.process_fixture), options.argv[0]) and
             std.mem.eql(u8, "copy", options.argv[1]) and
             std.mem.eql(u8, "hooked", hooked);
-        return Child.spawn(io, gpa, options);
+        return Child.spawn(gpa, io, options);
     }
 
     fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
         const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // safe: the test hands the hook a *SpawnHooks as its context
         self.ended = true;
         // ziglint-ignore: Z026 termination cannot fail its caller; a child already gone has nothing left to reap
-        _ = child.killWait(io, 0) catch {};
+        _ = child.killWait(io, .zero) catch {};
     }
 };
 
@@ -411,7 +402,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
         .start = SpawnHooks.start,
         .terminate = SpawnHooks.terminate,
     } }, testing.allocator, testing.io, .{
-        .argv = &.{ process_fixture, "copy" },
+        .argv = &.{ suite.path(.process_fixture), "copy" },
         .set = &.{.{ .name = "RELIC_HOOKED", .value = "hooked" }},
     }, "hello", .{});
     defer outcome.deinit(testing.allocator);
@@ -463,7 +454,7 @@ test "input larger than a pipe goes in while output larger than a pipe comes out
     const input = try gpa.alloc(u8, 4 << 20);
     defer gpa.free(input);
     for (input, 0..) |*b, i| b.* = @truncate(i *% 31);
-    var outcome = try run(.{ .environ = &environ }, gpa, io, .{ .argv = &.{ process_fixture, "copy" } }, input, .{});
+    var outcome = try run(.{ .environ = &environ }, gpa, io, .{ .argv = &.{ suite.path(.process_fixture), "copy" } }, input, .{});
     defer outcome.deinit(gpa);
     try testing.expect(outcome.succeeded());
     try testing.expectEqualSlices(u8, input, outcome.stdout);
@@ -476,7 +467,7 @@ test "a failing program is its status, its diagnostics kept apart" {
     defer environ.deinit();
 
     var outcome = try run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "streams", "3" },
+        .argv = &.{ suite.path(.process_fixture), "streams", "3" },
     }, "ignored input", .{});
     defer outcome.deinit(gpa);
     try testing.expect(!outcome.succeeded());
@@ -492,7 +483,7 @@ test "output sent elsewhere is not collected, and the status still is" {
     defer environ.deinit();
 
     var outcome = try run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "streams", "4" },
+        .argv = &.{ suite.path(.process_fixture), "streams", "4" },
         .stdout = .ignore,
         .stderr = .ignore,
     }, "", .{});
@@ -502,7 +493,7 @@ test "output sent elsewhere is not collected, and the status still is" {
     try testing.expectEqualStrings("", outcome.stderr);
 
     var kept = try run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "stderr" },
+        .argv = &.{ suite.path(.process_fixture), "stderr" },
         .stdout = .ignore,
     }, "", .{});
     defer kept.deinit(gpa);
@@ -516,7 +507,7 @@ test "output past the limit is refused by name" {
     var environ = try testEnviron();
     defer environ.deinit();
     try testing.expectError(error.OutputTooLong, run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "bytes" },
+        .argv = &.{ suite.path(.process_fixture), "bytes" },
     }, "", .{ .output = .limited(1000) }));
 }
 
@@ -534,7 +525,7 @@ test "timeout bounds a helper that closes its output and keeps running" {
     for ([_][]const u8{ "", input }) |bytes| {
         for ([_]bool{ false, true }) |capture| {
             const result = run(.{ .environ = &env }, testing.allocator, testing.io, .{
-                .argv = &.{ process_fixture, "closed-output" },
+                .argv = &.{ suite.path(.process_fixture), "closed-output" },
                 .stdout = if (capture) .capture else .ignore,
                 .stderr = if (capture) .capture else .ignore,
                 .cwd = .{ .dir = tmp.dir },
@@ -566,7 +557,7 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
         .{},
     }) |limits| {
         const result = run(.{ .environ = &env }, testing.allocator, threaded.io(), .{
-            .argv = &.{ process_fixture, "opposite-pipes" },
+            .argv = &.{ suite.path(.process_fixture), "opposite-pipes" },
             .cwd = .{ .dir = tmp.dir },
         }, input, limits);
         defer if (result) |value| {
@@ -579,7 +570,7 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var outcome = try run(.{ .environ = &env }, arena.allocator(), testing.io, .{
-        .argv = &.{ process_fixture, "opposite-pipes" },
+        .argv = &.{ suite.path(.process_fixture), "opposite-pipes" },
         .cwd = .{ .dir = tmp.dir },
     }, input, .{});
     defer outcome.deinit(arena.allocator());

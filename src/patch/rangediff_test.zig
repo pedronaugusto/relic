@@ -138,11 +138,11 @@ test "patches alike are paired as git's hash map pairs them, and a large series 
         try git.exec(io, &.{ "checkout", "-q", "-b", side, "base" });
         for (0..3) |k| {
             try git.writeFile(io, "f.txt", "one\ntwo\n");
-            const add = try std.fmt.allocPrint(gpa, "{s}: add {d}", .{ side, k });
+            const add = try gpa.print("{s}: add {d}", .{ side, k });
             defer gpa.free(add);
             try commitAll(io, &git, add);
             try git.writeFile(io, "f.txt", "one\n");
-            const remove = try std.fmt.allocPrint(gpa, "{s}: remove {d}", .{ side, k });
+            const remove = try gpa.print("{s}: remove {d}", .{ side, k });
             defer gpa.free(remove);
             try commitAll(io, &git, remove);
         }
@@ -153,14 +153,14 @@ test "patches alike are paired as git's hash map pairs them, and a large series 
     try git.exec(io, &.{ "checkout", "-q", "-b", "long", "base" });
     for (0..60) |k| {
         try git.writeFile(io, "f.txt", if (k % 2 == 0) "one\ntwo\n" else "one\n");
-        const message = try std.fmt.allocPrint(gpa, "long {d}", .{k});
+        const message = try gpa.print("long {d}", .{k});
         defer gpa.free(message);
         try commitAll(io, &git, message);
     }
     try git.exec(io, &.{ "checkout", "-q", "-b", "long2", "base" });
     for (0..58) |k| {
         try git.writeFile(io, "f.txt", if (k % 2 == 0) "one\ntwo\n" else "one\n");
-        const message = try std.fmt.allocPrint(gpa, "long2 {d}", .{k});
+        const message = try gpa.print("long2 {d}", .{k});
         defer gpa.free(message);
         try commitAll(io, &git, message);
     }
@@ -210,10 +210,10 @@ fn writePlanned(gpa: Allocator, io: Io, git: *testgit.Repo, file: usize, lines: 
         if (changed == k) try content.appendSlice(gpa, " changed");
         try content.append(gpa, '\n');
     }
-    const name = try std.fmt.allocPrint(gpa, "f{d}.txt", .{file});
+    const name = try gpa.print("f{d}.txt", .{file});
     defer gpa.free(name);
     try git.writeFile(io, name, content.items);
-    const message = try std.fmt.allocPrint(gpa, "{s} {d}", .{ word, file });
+    const message = try gpa.print("{s} {d}", .{ word, file });
     defer gpa.free(message);
     try commitAll(io, git, message);
 }

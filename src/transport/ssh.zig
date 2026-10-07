@@ -125,10 +125,10 @@ pub fn connect(
         if (user.len != 0 and user[0] == '-') return error.SuspiciousHostname;
     }
     if (url.path.len != 0 and url.path[0] == '-') return error.SuspiciousPathname;
-    const host = if (url.user) |user| try std.fmt.allocPrint(arena, "{s}@{s}", .{ user, url.host }) else url.host;
+    const host = if (url.user) |user| try arena.print("{s}@{s}", .{ user, url.host }) else url.host;
     var port_buf: [8]u8 = undefined;
     // unreachable: a u16 is at most five digits
-    const port: ?[]const u8 = if (url.port) |p| std.fmt.bufPrint(&port_buf, "{d}", .{p}) catch unreachable else null;
+    const port: ?[]const u8 = if (url.port) |p| std.mem.print(&port_buf, "{d}", .{p}) catch unreachable else null;
 
     // The program, and whether it is a command line.
     var command: []const u8 = "ssh";

@@ -7,8 +7,8 @@
 //! opened with none.
 
 const std = @import("std");
+const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const Io = std.Io;
 
 const clone_mod = @import("../../transport/clone.zig");
@@ -31,23 +31,23 @@ test "CVE-2024-32465, t0411-clone-from-partial 'local clone must not fetch from 
     try owner.dir.deleteTree(io, "tmp");
     // The promisor remote's upload-pack, were anything to ask it, leaves
     // a mark.
-    const marker = try std.fmt.allocPrint(gpa, "{s}/script-executed", .{owner_path});
+    const marker = try gpa.print("{s}/script-executed", .{owner_path});
     defer gpa.free(marker);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, marker, '\\', '/');
-    const args = try std.fmt.allocPrint(gpa, "record '{s}'", .{marker});
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, marker, '\\', '/');
+    const args = try gpa.print("record '{s}'", .{marker});
     defer gpa.free(args);
-    const fake = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, args);
+    const fake = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), args);
     defer gpa.free(fake);
     try owner.exec(io, &.{ "-C", "evil", "config", "remote.origin.uploadpack", fake });
 
     var env = try testgit.programEnviron(gpa);
     defer env.deinit();
     const who: object.Signature = .{ .name = "S", .email = "s@example.com", .when_secs = 1, .offset_minutes = 0 };
-    const evil = try std.fmt.allocPrint(gpa, "{s}/evil", .{owner_path});
+    const evil = try gpa.print("{s}/evil", .{owner_path});
     defer gpa.free(evil);
-    const file_url = try std.fmt.allocPrint(gpa, "file://{s}{s}", .{ if (builtin.os.tag == .windows) "/" else "", evil });
+    const file_url = try gpa.print("file://{s}{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", evil });
     defer gpa.free(file_url);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, file_url, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, file_url, '\\', '/');
     for ([_][]const u8{ evil, file_url }, [_][]const u8{ "clone1", "clone2" }) |url, name| {
         try owner.dir.createDirPath(io, name);
         var target = try owner.dir.openDir(io, name, .{ .iterate = true });

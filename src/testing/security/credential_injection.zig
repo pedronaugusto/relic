@@ -6,8 +6,8 @@
 //! into a request in one place.
 
 const std = @import("std");
+const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 
 const credential = @import("../../transport/credential.zig");
 const url_mod = @import("../../transport/url.zig");
@@ -42,14 +42,14 @@ fn fill(gpa: std.mem.Allocator, io: std.Io, url_text: []const u8, extra: []const
     defer tmp.cleanup();
     const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(dir);
-    const record = try std.fmt.allocPrint(gpa, "{s}/sent", .{dir});
+    const record = try gpa.print("{s}/sent", .{dir});
     defer gpa.free(record);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, record, '\\', '/');
-    const args = try std.fmt.allocPrint(gpa, "record '{s}'", .{record});
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, record, '\\', '/');
+    const args = try gpa.print("record '{s}'", .{record});
     defer gpa.free(args);
-    const helper = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, args);
+    const helper = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), args);
     defer gpa.free(helper);
-    const text = try std.fmt.allocPrint(gpa, "[credential]\n\thelper = !{s}\n{s}", .{ helper, extra });
+    const text = try gpa.print("[credential]\n\thelper = !{s}\n{s}", .{ helper, extra });
     defer gpa.free(text);
     var config = try config_mod.Config.parseText(gpa, text, .local);
     defer config.deinit();
@@ -119,12 +119,12 @@ test "CVE-2024-52006, t0300-credentials 'url parser rejects embedded carriage re
     var allowed = try fill(gpa, io, "https://u%0d@example.com/r.git", "\tprotectProtocol = false\n");
     defer allowed.deinit();
     try std.testing.expect(allowed.sent != null);
-    try std.testing.expect(std.mem.indexOf(u8, allowed.sent.?, "username=u\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, allowed.sent.?, "username=u\r\n") != null);
 
     // A host is never decoded into a request, so git's vector there
     // reaches a helper with no carriage return in it at all.
     var host = try fill(gpa, io, "https://example%0d.com/r.git", "");
     defer host.deinit();
     try std.testing.expect(host.sent != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, host.sent.?, '\r') == null);
+    try std.testing.expect(std.mem.findScalar(u8, host.sent.?, '\r') == null);
 }

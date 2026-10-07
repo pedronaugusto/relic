@@ -123,7 +123,7 @@ test "a push changing a file someone else has locked is refused or reported, as 
     // one by git with git-lfs's hooks.
     const lfs_url = try fx.server.url(gpa, "repo.git/info/lfs");
     defer gpa.free(lfs_url);
-    const key = try std.fmt.allocPrint(gpa, "lfs.{s}.locksverify", .{lfs_url});
+    const key = try gpa.print("lfs.{s}.locksverify", .{lfs_url});
     defer gpa.free(key);
     var clones: [2]Io.Dir = undefined;
     for ([_][]const u8{ "by-relic", "by-git" }, &clones) |name, *d| {

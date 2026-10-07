@@ -25,7 +25,7 @@ test "encoded file URL paths reach the same repository as Git" {
     defer gpa.free(escaped_percent);
     const escaped = try std.mem.replaceOwned(u8, gpa, escaped_percent, " ", "%20");
     defer gpa.free(escaped);
-    const text = try std.fmt.allocPrint(gpa, "file://{s}", .{escaped});
+    const text = try gpa.print("file://{s}", .{escaped});
     defer gpa.free(text);
     try fixture.exec(io, &.{ "ls-remote", text });
     var remote = try local.Remote.open(gpa, io, text);

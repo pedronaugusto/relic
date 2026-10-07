@@ -51,7 +51,7 @@ const Kind = enum(u3) { literal, length, end, subtable, invalid };
 const Entry = u32;
 
 inline fn entry(kind: Kind, bits: u32, extra: u32, value: u32) Entry {
-    return bits | (extra << 4) | (@as(u32, @intFromEnum(kind)) << 8) | (value << 16);
+    return bits | (extra << 4) | (@as(u32, @backingInt(kind)) << 8) | (value << 16);
 }
 inline fn entryBits(e: Entry) u6 {
     return @intCast(e & 15);
@@ -60,7 +60,7 @@ inline fn entryExtra(e: Entry) u6 {
     return @intCast((e >> 4) & 15);
 }
 inline fn entryKind(e: Entry) Kind {
-    return @enumFromInt((e >> 8) & 7);
+    return @fromBackingInt(@intCast((e >> 8) & 7));
 }
 inline fn entryValue(e: Entry) u32 {
     return e >> 16;
@@ -238,7 +238,7 @@ fn canonicalOrder(lens: []const u8, count: *const [16]u16, sorted: *[288]u16) vo
 
 /// How many of `lens` have each length.
 fn countLengths(lens: []const u8) [16]u16 {
-    var count = [_]u16{0} ** 16;
+    var count = @as([16]u16, @splat(0));
     for (lens) |l| count[l] += 1;
     return count;
 }
@@ -328,7 +328,7 @@ pub const Decoder = struct {
         @memset(lens[280..288], 8);
         // unreachable: RFC 1951's fixed literal lengths are a complete code
         build(.litlen, litlen_table_bits, &d.fixed_litlen, &lens, &countLengths(&lens)) catch unreachable;
-        var dlens = [_]u8{5} ** 32;
+        var dlens = @as([32]u8, @splat(5));
         // unreachable: RFC 1951's fixed distance lengths are a complete code
         build(.dist, dist_table_bits, &d.fixed_dist, &dlens, &countLengths(&dlens)) catch unreachable;
         d.fixed_built = true;
@@ -343,7 +343,7 @@ pub const Decoder = struct {
         // zlib refuses more than 286 and 30 before reading on.
         if (hlit > 286 or hdist > 30) return error.CorruptStream;
         const order = [19]u8{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
-        var pre = [_]u8{0} ** 19;
+        var pre = @as([19]u8, @splat(0));
         for (order[0..hclen]) |at| {
             try s.need(3);
             pre[at] = @truncate(s.bitbuf & 7);
@@ -353,8 +353,8 @@ pub const Decoder = struct {
 
         var lens: [286 + 30]u8 = undefined;
         // Counted as they are read, for `build`.
-        var lit_count = [_]u16{0} ** 16;
-        var dist_count = [_]u16{0} ** 16;
+        var lit_count = @as([16]u16, @splat(0));
+        var dist_count = @as([16]u16, @splat(0));
         const total = hlit + hdist;
         var i: usize = 0;
         while (i < total) {
@@ -815,7 +815,7 @@ test "Adler-32 is zlib's, at every length" {
     for ([_]usize{ 0, 1, 31, 32, 33, 100, 2999, 3000 }) |n| {
         try testing.expectEqual(std.hash.Adler32.hash(buf[0..n]), adler32(buf[0..n]));
     }
-    const ones = [_]u8{0xff} ** 20000;
+    const ones = @as([20000]u8, @splat(0xff));
     try testing.expectEqual(std.hash.Adler32.hash(&ones), adler32(&ones));
 }
 

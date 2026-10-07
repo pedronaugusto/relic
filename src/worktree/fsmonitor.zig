@@ -214,7 +214,7 @@ fn lowerBound(items: []const index_mod.Entry, path: []const u8) usize {
 /// git's `getnanotime`, as text.
 fn nanoseconds(arena: Allocator, io: Io) Allocator.Error![]const u8 {
     const now = Io.Clock.real.now(io);
-    return std.fmt.allocPrint(arena, "{d}", .{@max(now.nanoseconds, 0)});
+    return arena.print("{d}", .{@max(now.nanoseconds, 0)});
 }
 
 test "an answer's paths and a directory's entries are taken out of what is vouched for" {

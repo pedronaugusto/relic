@@ -1395,11 +1395,11 @@ const Loaded = enum { ok, submodule_without_index, beyond_symlink };
 
 fn loadPatchTarget(st: *State, out: *std.ArrayList(u8), ce: ?index_mod.Entry, found: ?fs.Entry, entry: *Entry, name: ?[]const u8, expected_mode: Mode) Error!Loaded {
     if (st.cached or st.check_index) {
-        if (ce) |e| try readBlobFor(st, e.oid, @intFromEnum(e.mode), out);
+        if (ce) |e| try readBlobFor(st, e.oid, @backingInt(e.mode), out);
     } else if (name) |n| {
         if (patchparse.isGitlink(expected_mode)) {
             if (ce) |e| {
-                try readBlobFor(st, e.oid, @intFromEnum(e.mode), out);
+                try readBlobFor(st, e.oid, @backingInt(e.mode), out);
                 return .ok;
             }
             return .submodule_without_index;
@@ -1616,7 +1616,7 @@ fn pathIsBeyondSymlink(st: *State, name: []const u8) Error!bool {
 }
 
 fn modeOf(m: object.Mode) Mode {
-    return @intFromEnum(m);
+    return @backingInt(m);
 }
 
 /// The mode a file on the disk stands for, as git's `ce_mode_from_stat`
@@ -1820,7 +1820,7 @@ fn removeFile(st: *State, entry: *Entry, rmdir_empty: bool) Error!void {
             };
         }
         if (rmdir_empty) {
-            if (std.fs.path.dirnamePosix(old)) |parent| removeEmptyDirectories(st.io, wt, parent);
+            if (std.Io.Dir.path.dirnamePosix(old)) |parent| removeEmptyDirectories(st.io, wt, parent);
         }
     }
 }
@@ -1829,7 +1829,7 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
     var current = path;
     while (current.len != 0) {
         wt.deleteDir(io, current) catch return;
-        current = std.fs.path.dirnamePosix(current) orelse return;
+        current = std.Io.Dir.path.dirnamePosix(current) orelse return;
     }
 }
 
@@ -1911,7 +1911,7 @@ fn writeOutOneReject(st: *State, entry: *Entry) Error!void {
         try out.appendSlice(st.gpa, frag.text);
         if (frag.text.len == 0 or frag.text[frag.text.len - 1] != '\n') try out.append(st.gpa, '\n');
     }
-    const rej = try std.fmt.allocPrint(st.a, "{s}.rej", .{name});
+    const rej = try st.a.print("{s}.rej", .{name});
     st.wt.?.deleteFile(st.io, rej) catch |err| switch (err) {
         error.FileNotFound => {},
         else => |e| return e,
@@ -1963,7 +1963,7 @@ const Fixture = struct {
 
 fn writeFiles(io: Io, dir: Io.Dir, files: []const [2][]const u8) !void {
     for (files) |f| {
-        if (std.fs.path.dirnamePosix(f[0])) |parent| try dir.createDirPath(io, parent);
+        if (std.Io.Dir.path.dirnamePosix(f[0])) |parent| try dir.createDirPath(io, parent);
         try dir.writeFile(io, .{ .sub_path = f[0], .data = f[1] });
     }
 }

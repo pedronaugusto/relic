@@ -70,14 +70,14 @@ fn lfsTwin(gpa: std.mem.Allocator, io: Io, big: []const u8, extra_config: []cons
 }
 
 fn objectPath(buf: []u8, root: []const u8, oid: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, ".git/{s}/objects/{s}/{s}/{s}", .{ root, oid[0..2], oid[2..4], oid }) catch unreachable;
+    return std.mem.print(buf, ".git/{s}/objects/{s}/{s}/{s}", .{ root, oid[0..2], oid[2..4], oid }) catch unreachable;
 }
 
 fn sha256Hex(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var out: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{x}", .{&digest}) catch unreachable;
+    _ = std.mem.print(&out, "{x}", .{&digest}) catch unreachable;
     return out;
 }
 

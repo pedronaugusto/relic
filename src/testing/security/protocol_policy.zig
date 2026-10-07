@@ -44,7 +44,7 @@ test "CVE-2015-7545, t5812..t5815-proto-disable: ext:: is never allowed, file://
     defer gpa.free(dir);
     var programs_env = try testgit.programEnviron(gpa);
     defer programs_env.deinit();
-    const url = try std.fmt.allocPrint(gpa, "ext::sh -c touch% {s}/pwned", .{dir});
+    const url = try gpa.print("ext::sh -c touch% {s}/pwned", .{dir});
     defer gpa.free(url);
     try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{
         .programs = .{ .environ = &programs_env },
@@ -88,7 +88,7 @@ fn served(gpa: std.mem.Allocator, io: Io, root: *std.testing.TmpDir) !void {
     defer gpa.free(source_path);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
 }
@@ -127,6 +127,6 @@ test "git 2.11.1, t5812-proto-disable-http 'curl limits redirects' and t5550-htt
     defer refs.deinit();
     const log = try server.requests(gpa);
     defer gpa.free(log);
-    try std.testing.expect(std.mem.indexOf(u8, log, "POST /repo.git/git-upload-pack") != null);
-    try std.testing.expect(std.mem.indexOf(u8, log, "POST /moved/") == null);
+    try std.testing.expect(std.mem.find(u8, log, "POST /repo.git/git-upload-pack") != null);
+    try std.testing.expect(std.mem.find(u8, log, "POST /moved/") == null);
 }

@@ -511,7 +511,7 @@ test "gitignore-shaped patterns" {
 }
 
 test "pathological star pattern finishes without hanging" {
-    const text = "a" ** 400;
+    const text = &@as([400]u8, @splat('a'));
     try no("*a*a*a*a*a*a*a*a*b", text);
     try expect(!try match("*a*a*a*a*a*a*a*a*b", text, .{ .pathname = false }));
     try yes("*a*a*a*a*a*a*a*a*a", text);

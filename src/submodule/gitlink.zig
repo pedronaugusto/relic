@@ -76,7 +76,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
         defer gpa.free(text);
         const target = gitFileTarget(text) orelse return null;
         via_file = true;
-        break :blk (if (std.fs.path.isAbsolute(target))
+        break :blk (if (std.Io.Dir.path.isAbsolute(target))
             Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
         else
             work.openDir(io, target, .{ .iterate = true })) catch return null;
@@ -102,7 +102,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
     if (common_text) |text| {
         defer gpa.free(text);
         const target = std.mem.trim(u8, text, " \t\r\n");
-        const common = (if (std.fs.path.isAbsolute(target))
+        const common = (if (std.Io.Dir.path.isAbsolute(target))
             Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
         else
             git_dir.openDir(io, target, .{ .iterate = true })) catch null;
@@ -122,7 +122,7 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.E
     // Almost every directory has no `.git` at all, and one access says so
     // without opening anything.
     var buf: [4096]u8 = undefined;
-    const dot_git = std.fmt.bufPrint(&buf, "{s}/.git", .{path}) catch return false;
+    const dot_git = std.mem.print(&buf, "{s}/.git", .{path}) catch return false;
     wt.access(io, dot_git, .{}) catch return false;
     var found = (try open(gpa, io, wt, path)) orelse {
         // git's `is_nonbare_repository_dir`: a `.git` file that is there and

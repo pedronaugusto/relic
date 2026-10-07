@@ -267,7 +267,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
     var tag_hex: [hash.max_hex_len]u8 = undefined;
     var peel_hex: [hash.max_hex_len]u8 = undefined;
     var topic_hex: [hash.max_hex_len]u8 = undefined;
-    const want = try std.fmt.allocPrint(gpa, "{s} HEAD\n{s} refs/heads/link\n{s} refs/heads/main\n{s} refs/heads/topic\n{s} refs/tags/v1\n{s} refs/tags/v1^{{}}\n", .{
+    const want = try gpa.print("{s} HEAD\n{s} refs/heads/link\n{s} refs/heads/main\n{s} refs/heads/topic\n{s} refs/tags/v1\n{s} refs/tags/v1^{{}}\n", .{
         commits[11].hex(&hex),
         commits[5].hex(&topic_hex),
         commits[11].hex(&hex),
@@ -321,7 +321,7 @@ test "a table written for a transaction is the table git writes for it" {
         try t.writeFile(io, "blob.txt", "the same blob\n");
         gpa.free(blob_text);
         blob_text = try t.line(io, &.{ "hash-object", "-w", "blob.txt" });
-        const tag_body = try std.fmt.allocPrint(gpa, "object {s}\ntype blob\ntag v1\ntagger Fixture <fixture@example.com> 1700000000 +0000\n\nannotated\n", .{blob_text});
+        const tag_body = try gpa.print("object {s}\ntype blob\ntag v1\ntagger Fixture <fixture@example.com> 1700000000 +0000\n\nannotated\n", .{blob_text});
         defer gpa.free(tag_body);
         try t.writeFile(io, "tag.txt", tag_body);
         gpa.free(tag_text);
@@ -352,7 +352,7 @@ test "a table written for a transaction is the table git writes for it" {
         defer tx.deinit(io);
         var names: [120][16]u8 = undefined;
         for (0..120) |i| {
-            const name = try std.fmt.bufPrint(&names[i], "refs/tags/t{d:0>3}", .{i});
+            const name = try std.mem.print(&names[i], "refs/tags/t{d:0>3}", .{i});
             try tx.create(name, .{ .direct = if (i % 7 == 0) tag_oid else blob_oid });
         }
         try tx.create("refs/tags/zz-link", .{ .symbolic = "refs/heads/main" });
@@ -367,7 +367,7 @@ test "a table written for a transaction is the table git writes for it" {
         var last: []const u8 = "";
         while (lines.next()) |line| last = line;
         var path_buf: [128]u8 = undefined;
-        newest[i] = try t.readFile(io, try std.fmt.bufPrint(&path_buf, ".git/reftable/{s}", .{last}));
+        newest[i] = try t.readFile(io, try std.mem.print(&path_buf, ".git/reftable/{s}", .{last}));
     }
     defer for (lists) |bytes| gpa.free(bytes);
     defer for (newest) |bytes| gpa.free(bytes);
@@ -415,7 +415,7 @@ test "a name and a directory of names conflict with what is already there" {
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
     defer repo.deinit(io);
-    const one = try Oid.parse(.sha1, "1" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
@@ -455,7 +455,7 @@ test "FETCH_HEAD and MERGE_HEAD are files no transaction writes, and the other p
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     var line_buf: [64]u8 = undefined;
-    const want_line = try std.fmt.bufPrint(&line_buf, "{s}\n", .{tip_text});
+    const want_line = try std.mem.print(&line_buf, "{s}\n", .{tip_text});
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
@@ -463,7 +463,7 @@ test "FETCH_HEAD and MERGE_HEAD are files no transaction writes, and the other p
         // files themselves.
         for ([_][]const u8{ "FETCH_HEAD", "MERGE_HEAD" }) |name| {
             try std.testing.expectError(error.InvalidRefName, tx.create(name, .{ .direct = tip }));
-            const path = try std.fmt.allocPrint(gpa, ".git/{s}", .{name});
+            const path = try gpa.print(".git/{s}", .{name});
             defer gpa.free(path);
             try git.writeFile(io, path, want_line);
         }
@@ -618,7 +618,7 @@ fn createMain(io: Io, repo: *repo_mod.Repository) refs.TransactionError!void {
 fn openWithTimeout(gpa: Allocator, io: Io, dir: Io.Dir, text: []const u8) !repo_mod.Repository {
     const config = try dir.readFileAlloc(io, ".git/config", gpa, .limited(1 << 16));
     defer gpa.free(config);
-    const with = try std.fmt.allocPrint(gpa, "{s}[reftable]\n\tlockTimeout = {s}\n", .{ config, text });
+    const with = try gpa.print("{s}[reftable]\n\tlockTimeout = {s}\n", .{ config, text });
     defer gpa.free(with);
     try dir.writeFile(io, .{ .sub_path = ".git/config", .data = with });
     return repo_mod.Repository.open(gpa, io, dir, .{});

@@ -118,7 +118,7 @@ pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 
     // git reads its `-BOM` names as plain `UTF-16`: the mark decides, and
     // without one iconv reads big-endian.
     var body = src;
-    var endian: std.builtin.Endian = .big;
+    var endian: std.lang.Endian = .big;
     switch (e) {
         .utf16le, .utf32le => endian = .little,
         .utf16be, .utf32be => {},
@@ -174,14 +174,14 @@ pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 
 
 /// The byte order `UTF-16` and `UTF-32` are written in, with a mark: the
 /// platform iconv's, which is the platform git's.
-pub const written_order: std.builtin.Endian = if (builtin.os.tag == .linux) builtin.cpu.arch.endian() else .big;
+pub const written_order: std.lang.Endian = if (builtin.target.os.tag == .linux) builtin.target.cpu.arch.endian() else .big;
 
 /// `src`, UTF-8 from the repository, in encoding `e` for the working tree.
 /// Empty content is returned as it is; content that is not UTF-8 is
 /// `error.InvalidContent`, which git leaves unconverted.
 pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 {
     if (src.len == 0) return src;
-    const endian: std.builtin.Endian, const bom: []const u8 = switch (e) {
+    const endian: std.lang.Endian, const bom: []const u8 = switch (e) {
         .utf16le => .{ .little, "" },
         .utf16be => .{ .big, "" },
         .utf32le => .{ .little, "" },
@@ -216,7 +216,7 @@ pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u
     return out.toOwnedSlice(a);
 }
 
-fn appendInt(comptime T: type, a: Allocator, out: *std.ArrayList(u8), value: T, endian: std.builtin.Endian) Allocator.Error!void {
+fn appendInt(comptime T: type, a: Allocator, out: *std.ArrayList(u8), value: T, endian: std.lang.Endian) Allocator.Error!void {
     var bytes: [@sizeOf(T)]u8 = undefined;
     std.mem.writeInt(T, &bytes, value, endian);
     try out.appendSlice(a, &bytes);

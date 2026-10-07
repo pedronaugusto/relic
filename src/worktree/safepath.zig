@@ -87,7 +87,7 @@ pub const Use = enum {
 pub fn checkComponent(name: []const u8, use: Use) ?Reason {
     if (name.len == 0) return .empty;
     if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return .dot_component;
-    const windows = builtin.os.tag == .windows;
+    const windows = builtin.target.os.tag == .windows;
     for (name) |c| {
         if (c == '/' or (c == '\\' and windows)) return .separator_inside_component;
         // No git path holds a NUL, whatever the platform.
@@ -214,7 +214,7 @@ pub fn check(path: []const u8, use: Use) ?Refusal {
     if (path.len == 0) return .{ .reason = .empty, .component = path };
     // A backslash and `C:\x` or `C:x` name something outside the working
     // tree where they are separators.
-    const windows = builtin.os.tag == .windows;
+    const windows = builtin.target.os.tag == .windows;
     if (path[0] == '/' or (path[0] == '\\' and windows)) return .{ .reason = .absolute, .component = path[0..1] };
     if (windows) {
         const drive = dosDrivePrefixLen(path);
@@ -308,7 +308,7 @@ fn nextHfsChar(s: []const u8, at: *usize) u21 {
 }
 
 fn isDirSep(c: u21) bool {
-    return c == '/' or (builtin.os.tag == .windows and c == '\\');
+    return c == '/' or (builtin.target.os.tag == .windows and c == '\\');
 }
 
 /// git's `is_hfs_dot_generic`: `.<needle>` as HFS+ reads it, ignoring
@@ -453,7 +453,7 @@ test "the git directory is refused in every spelling" {
 
 test "device names are refused with and without an extension where Windows opens them" {
     for ([_][]const u8{ "con", "CON", "aux", "nul.txt", "com1", "LPT9.tar.gz", "prn" }) |name| {
-        if (builtin.os.tag == .windows) {
+        if (builtin.target.os.tag == .windows) {
             try std.testing.expectEqual(Reason.device_name, checkComponent(name, .worktree).?);
         } else try std.testing.expectEqual(null, checkComponent(name, .worktree));
     }
@@ -469,7 +469,7 @@ test "traversal and separators are refused" {
     try std.testing.expectEqual(Reason.control_character, checkComponent("a\x00b", .stored).?);
     try std.testing.expect(check("a/b/c.txt", .worktree) == null);
     for ([_]Use{ .stored, .worktree }) |use| {
-        if (builtin.os.tag == .windows) {
+        if (builtin.target.os.tag == .windows) {
             try std.testing.expectEqual(Reason.absolute, check("C:/Windows", use).?.reason);
             try std.testing.expectEqual(Reason.separator_inside_component, checkComponent("a\\b", use).?);
         } else {
@@ -484,7 +484,7 @@ test "a path refuses what git's verify_path refuses on this platform, and no mor
     // and git writes there.
     for ([_][]const u8{ "d/aux.c", "a\tb", "t.", "x ", "con", "ab:c", "v1." }) |path| {
         try std.testing.expectEqual(null, check(path, .stored));
-        if (builtin.os.tag == .windows) {
+        if (builtin.target.os.tag == .windows) {
             try std.testing.expect(check(path, .worktree) != null);
         } else try std.testing.expectEqual(null, check(path, .worktree));
     }
@@ -496,7 +496,7 @@ test "a path refuses what git's verify_path refuses on this platform, and no mor
 
 test "trailing dots and spaces are refused where Windows strips them" {
     for ([_][]const u8{ "x.", "x " }) |name| {
-        if (builtin.os.tag == .windows) {
+        if (builtin.target.os.tag == .windows) {
             try std.testing.expectEqual(Reason.trailing_dot_or_space, checkComponent(name, .worktree).?);
         } else try std.testing.expectEqual(null, checkComponent(name, .worktree));
     }

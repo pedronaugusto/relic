@@ -35,8 +35,8 @@ test "staging and cache-tree reuse count only the work they need" {
     var content: [96]u8 = undefined;
     for (0..file_count) |i| {
         var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
-        const text = try std.fmt.bufPrint(&content, "file {d}\nsome contents that are not all the same\n", .{i});
+        const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
+        const text = try std.mem.print(&content, "file {d}\nsome contents that are not all the same\n", .{i});
         try repo_git.writeFile(io, path, text);
         try fs.setTimestamps(io, repo_git.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } });
     }
@@ -72,8 +72,8 @@ test "staging and cache-tree reuse count only the work they need" {
     // actually meets.
     for (0..file_count / 10) |i| {
         var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "d{d}/f{d}.txt", .{ (i * 10) % directory_count, i * 10 });
-        const text = try std.fmt.bufPrint(&content, "file {d} changed\n", .{i * 10});
+        const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ (i * 10) % directory_count, i * 10 });
+        const text = try std.mem.print(&content, "file {d} changed\n", .{i * 10});
         try repo_git.writeFile(io, path, text);
     }
     var result = try worktree.status(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
@@ -219,7 +219,7 @@ test "cold and warm delta-chain reads scan the same objects and bytes" {
         try repo_git.writeFile(io, "grow.txt", body.items);
         try repo_git.exec(io, &.{ "add", "-A" });
         var msg: [32]u8 = undefined;
-        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{i}) });
+        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "c{d}", .{i}) });
     }
     // One thread, so the deltas git picks do not depend on the machine's
     // core count.
@@ -259,7 +259,7 @@ test "a warm pass over a small pack reads no more than a cold one, at every pinn
         for (0..rounds) |i| {
             try body.print(gpa, "line {d} of a file that keeps growing\n", .{i});
             var msg_buf: [16]u8 = undefined;
-            const msg = try std.fmt.bufPrint(&msg_buf, "c{d}", .{i});
+            const msg = try std.mem.print(&msg_buf, "c{d}", .{i});
             try stream.print(gpa, "commit refs/heads/main\ncommitter Fixture <fixture@example.com> {d} +0000\ndata {d}\n{s}\n", .{ when, msg.len, msg });
             try stream.print(gpa, "M 100644 inline grow.txt\ndata {d}\n{s}\n", .{ body.items.len, body.items });
         }
@@ -371,8 +371,8 @@ test "loose and packed staging count object writes and deltas reduce pack bytes"
         var content: [96]u8 = undefined;
         for (0..file_count) |i| {
             var path_buf: [64]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
-            const text = try std.fmt.bufPrint(&content, "file {d}\nsome contents that are not all the same\n", .{i});
+            const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
+            const text = try std.mem.print(&content, "file {d}\nsome contents that are not all the same\n", .{i});
             try repo_git.writeFile(io, path, text);
         }
 
@@ -414,11 +414,11 @@ test "loose and packed staging count object writes and deltas reduce pack bytes"
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(gpa);
             for (0..(round + 1) * 80) |line| try body.print(gpa, "file {d} line {d} of text\n", .{ i, line });
-            try repo_git.writeFile(io, try std.fmt.bufPrint(&path_buf, "src/f{d}.txt", .{i}), body.items);
+            try repo_git.writeFile(io, try std.mem.print(&path_buf, "src/f{d}.txt", .{i}), body.items);
         }
         try repo_git.exec(io, &.{ "add", "-A" });
         var msg: [32]u8 = undefined;
-        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{round}) });
+        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "c{d}", .{round}) });
     }
 
     const git_dir = try repo_git.gitDir(io);

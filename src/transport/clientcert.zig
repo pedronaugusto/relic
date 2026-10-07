@@ -127,7 +127,7 @@ test "a certificate and key are read from one file or two, and each refusal has 
     const base = try dir.dir.realPathFileAlloc(io, ".", arena);
     const at = struct {
         fn f(a: Allocator, b: []const u8, name: []const u8) []const u8 {
-            return std.fs.path.join(a, &.{ b, name }) catch unreachable;
+            return std.Io.Dir.path.join(a, &.{ b, name }) catch unreachable;
         }
     }.f;
 

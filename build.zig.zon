@@ -3,22 +3,22 @@
     .version = "0.3.0",
     .dependencies = .{
         .preflight = .{
-            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba",
-            .hash = "preflight-0.1.0-LX1Zwh6GAgDLU4nrPE1JxDIKVTLR4x_bUwdOHh-bnQYc",
+            .url = "git+https://github.com/pedronaugusto/preflight#260ed79cf626e7ab8fb05039db476bb680b4a653",
+            .hash = "preflight-0.1.0-LX1ZwjvuBADAj7ukyFSK8YT0EXBlwN8CZkprUGIpFE2u",
             .lazy = true,
         },
         .gantry = .{
-            .url = "git+https://github.com/pedronaugusto/gantry#b5b991bcc590a8f7032444287465269acda4fdaa",
-            .hash = "gantry-0.1.0-1iNrkcw4BwBD3pRucqF5FkGsGSOPIhkPh0rLr1u4EMDW",
+            .url = "git+https://github.com/pedronaugusto/gantry#15bf11b9b25e8df7c5542fffeef8b7cd1c9e1b7b",
+            .hash = "gantry-0.1.0-1iNrkR8jDQAJTyJyKeMgSwzkGKDsKqCocG1PrLG10vip",
             .lazy = true,
         },
 
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit#33a956ed2e77ec0e9bf8d8f79ba6429c171333ba",
-            .hash = "conduit-0.5.1-4rIA7we9EgD9kSsaj7aR1M6U4VrjLP6mHGYHjsW1Y6o6",
+            .url = "git+https://github.com/pedronaugusto/conduit#43751a5cf7bd9359e1016508dbce8120483853b0",
+            .hash = "conduit-0.5.1-4rIA71luEwDzl3f1NGpLRpmpSvwEBuUaw6b7FmnLySCQ",
         },
     },
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0x688191cb6037a69f,
     .paths = .{
         "build.zig",

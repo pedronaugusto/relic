@@ -31,7 +31,7 @@ const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .wh
 fn servedHistory(gpa: Allocator, io: Io, root: Io.Dir) !void {
     const root_path = try testremote.absolutePath(gpa, io, root);
     defer gpa.free(root_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     var maker = try testgit.Repo.init(gpa, io, &.{});
     defer maker.deinit();
@@ -120,7 +120,7 @@ const Twins = struct {
             .tmp = tmp,
             .by_git = try tmp.dir.openDir(io, "by-git", .{ .iterate = true }),
             .by_relic = try tmp.dir.openDir(io, "by-relic", .{ .iterate = true }),
-            .git_path = try std.fs.path.join(gpa, &.{ base, "by-git" }),
+            .git_path = try std.Io.Dir.path.join(gpa, &.{ base, "by-git" }),
         };
     }
 
@@ -146,7 +146,7 @@ test "a shallow clone is the one git makes, cut by depth, by date and by ref, in
     const day = 86400;
     const since = 1_600_000_000 + 5 * day + 1;
     var since_arg_buf: [64]u8 = undefined;
-    const since_arg = try std.fmt.bufPrint(&since_arg_buf, "--shallow-since={d}", .{since});
+    const since_arg = try std.mem.print(&since_arg_buf, "--shallow-since={d}", .{since});
     const cases = [_]Case{
         .{ .git_args = &.{"--depth=1"}, .options = .{ .who = test_who, .depth = 1 } },
         .{ .git_args = &.{"--depth=3"}, .options = .{ .who = test_who, .depth = 3 } },
@@ -226,7 +226,7 @@ test "a fetch deepens, and unshallows, as git fetch does, and a plain fetch into
             try maker.exec(io, &.{ "commit", "-q", "-am", "ninth" });
             const root_path = try testremote.absolutePath(gpa, io, root.dir);
             defer gpa.free(root_path);
-            const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+            const bare = try gpa.print("{s}/repo.git", .{root_path});
             defer gpa.free(bare);
             try maker.exec(io, &.{ "push", "-q", bare, "HEAD:main" });
         }
@@ -271,7 +271,7 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
     try env.put("GIT_SSH_COMMAND", fake);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.os.tag == .windows) "/" else "", root_path });
+    const url = try gpa.print("ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.target.os.tag == .windows) "/" else "", root_path });
     defer gpa.free(url);
 
     var twins = try Twins.init(gpa, io);
@@ -286,7 +286,7 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
     // git's local clone does; the caller is told.
     var local = try Twins.init(gpa, io);
     defer local.deinit(gpa, io);
-    const path = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const path = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(path);
     const cloned = try testremote.gitInputEnv(gpa, io, local.tmp.dir, &env, &.{ "clone", "-q", "--depth=1", path, local.git_path }, "", true);
     gpa.free(cloned);
@@ -310,10 +310,10 @@ test "from a shallow remote a fetch leaves the refs that would move the boundary
     defer env.deinit();
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const origin = try std.fmt.allocPrint(gpa, "file://{s}/repo.git", .{root_path});
+    const origin = try gpa.print("file://{s}/repo.git", .{root_path});
     defer gpa.free(origin);
     // The shallow remote: git's own depth-2 clone, with a branch of its own.
-    const shallow_path = try std.fmt.allocPrint(gpa, "{s}/shallow", .{root_path});
+    const shallow_path = try gpa.print("{s}/shallow", .{root_path});
     defer gpa.free(shallow_path);
     const made = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", "--bare", "--depth=2", origin, shallow_path }, "", true);
     gpa.free(made);
@@ -372,7 +372,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
     defer env.deinit();
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const origin = try std.fmt.allocPrint(gpa, "file://{s}/repo.git", .{root_path});
+    const origin = try gpa.print("file://{s}/repo.git", .{root_path});
     defer gpa.free(origin);
 
     // A stand-in ssh that keeps what it is sent.
@@ -395,9 +395,9 @@ test "a push from a shallow repository tells the server its boundary, as git's s
             const tmp_path = try testremote.absolutePath(gpa, io, tmp.dir);
             defer gpa.free(tmp_path);
             const target = if (to_origin)
-                try std.fmt.allocPrint(gpa, "{s}/target.git", .{tmp_path})
+                try gpa.print("{s}/target.git", .{tmp_path})
             else
-                try std.fmt.allocPrint(gpa, "{s}/empty.git", .{tmp_path});
+                try gpa.print("{s}/empty.git", .{tmp_path});
             defer gpa.free(target);
             if (to_origin) {
                 const out = try testremote.gitInputEnv(gpa, io, tmp.dir, &env, &.{ "clone", "-q", "--bare", origin, target }, "", true);
@@ -415,7 +415,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
                 const out = try testremote.gitInputEnv(gpa, io, work, &env, args, "", true);
                 gpa.free(out);
             }
-            const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}", .{ if (builtin.os.tag == .windows) "/" else "", target });
+            const url = try gpa.print("ssh://example.invalid{s}{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", target });
             defer gpa.free(url);
             tools.dir.deleteFile(io, "sent") catch |err| if (err != error.FileNotFound) return err;
             if (who == 0) {

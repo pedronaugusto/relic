@@ -136,7 +136,7 @@ test "back-references match where git grep's matcher matches" {
     try compare(gpa, io, &git, &repo, &.{ "-v", "\\(...\\)\\1" }, .{ .patterns = &.{"\\(...\\)\\1"}, .invert = true });
     // macOS's regcomp, which git uses there, takes no back-reference in an
     // extended expression and compares one with case; glibc's does both
-    if (builtin.os.tag == .macos) return;
+    if (builtin.target.os.tag == .macos) return;
     try compare(gpa, io, &git, &repo, &.{ "-E", "-o", "(z)\\1" }, .{ .patterns = &.{"(z)\\1"}, .syntax = .extended, .only_matching = true });
     try compare(gpa, io, &git, &repo, &.{ "-i", "-n", "\\(ab\\)\\1" }, .{ .patterns = &.{"\\(ab\\)\\1"}, .ignore_case = true, .line_number = true });
 }
@@ -258,7 +258,7 @@ const FixedMatcher = struct {
     fn find(context: *anyopaque, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?grep_mod.Match {
         _ = not_bol;
         const m: *FixedMatcher = @ptrCast(@alignCast(context)); // safe: the context is always a FixedMatcher
-        const at = std.mem.indexOf(u8, line, m.patterns[index]) orelse return null;
+        const at = std.mem.find(u8, line, m.patterns[index]) orelse return null;
         return .{ .start = at, .end = at + m.patterns[index].len };
     }
 };

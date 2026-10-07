@@ -242,7 +242,7 @@ pub const Shortlog = struct {
     /// `%aN` or `%aN <%aE>`.
     fn formatPerson(s: *const Shortlog, a: Allocator, name: []const u8, email: []const u8) Allocator.Error![]const u8 {
         const shown = if (s.options.mailmap) |m| m.map(name, email) else mailmap_mod.Identity{ .name = name, .email = email };
-        if (s.options.email) return std.fmt.allocPrint(a, "{s} <{s}>", .{ shown.name, shown.email });
+        if (s.options.email) return a.print("{s} <{s}>", .{ shown.name, shown.email });
         return a.dupe(u8, shown.name);
     }
 
@@ -467,11 +467,11 @@ const revwalk = @import("../revwalk.zig");
 
 fn commitAs(io: Io, r: *testgit.Repo, author: []const u8, committer: []const u8, msg: []const u8) !void {
     const lt = std.mem.findScalar(u8, committer, '<').?;
-    const name = try std.fmt.allocPrint(r.gpa, "user.name={s}", .{std.mem.trim(u8, committer[0..lt], " ")});
+    const name = try r.gpa.print("user.name={s}", .{std.mem.trim(u8, committer[0..lt], " ")});
     defer r.gpa.free(name);
-    const email = try std.fmt.allocPrint(r.gpa, "user.email={s}", .{committer[lt + 1 .. committer.len - 1]});
+    const email = try r.gpa.print("user.email={s}", .{committer[lt + 1 .. committer.len - 1]});
     defer r.gpa.free(email);
-    const who = try std.fmt.allocPrint(r.gpa, "--author={s}", .{author});
+    const who = try r.gpa.print("--author={s}", .{author});
     defer r.gpa.free(who);
     try r.exec(io, &.{ "-c", name, "-c", email, "commit", "-q", "--allow-empty", "--allow-empty-message", "--cleanup=verbatim", who, "-m", msg });
 }
@@ -559,7 +559,7 @@ test "shortlog refuses what it does not do by name" {
     try std.testing.expectError(error.InvalidWrap, Shortlog.init(gpa, .{ .wrap = .{ .width = 6 } }));
     var formatted = try Shortlog.init(gpa, .{ .groups = &.{.{ .format = "%an" }} });
     defer formatted.deinit();
-    var commit = try object.Commit.parse(gpa, .sha1, "tree " ++ "0" ** 40 ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\ns\n");
+    var commit = try object.Commit.parse(gpa, .sha1, "tree " ++ @as([40]u8, @splat('0')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\ns\n");
     defer commit.deinit();
     try std.testing.expectError(error.FormatGroupNeedsName, formatted.addCommit(&commit));
 }

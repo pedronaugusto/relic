@@ -3,6 +3,7 @@
 //! compared.
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -12,8 +13,6 @@ const worktree = @import("../worktree.zig");
 const index_mod = @import("../index.zig");
 const fsmonitor = @import("fsmonitor.zig");
 const fs = @import("../repo/fs.zig");
-
-const process_fixture = @import("build_options").process_fixture_path;
 
 /// testgit's settings without its `core.fsmonitor=`, so the repository's
 /// own decides.
@@ -47,7 +46,7 @@ const Pair = struct {
         errdefer pair.git.deinit();
         pair.ours = try testgit.Repo.init(gpa, io, &.{});
         errdefer pair.ours.deinit();
-        const hook = try testgit.fixtureCommand(gpa, process_fixture, "fsmonitor");
+        const hook = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "fsmonitor");
         defer gpa.free(hook);
         pair.written = 1_000_000_000;
         try pair.writeBoth(io, "a", "a\n");
@@ -73,7 +72,7 @@ const Pair = struct {
     /// Both hooks' answer to a question of `version`.
     fn answer(pair: *Pair, io: Io, version: []const u8, bytes: []const u8) !void {
         var buf: [32]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, ".git/fsmonitor-v{s}", .{version});
+        const path = try std.mem.print(&buf, ".git/fsmonitor-v{s}", .{version});
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.writeFile(io, path, bytes);
     }
 

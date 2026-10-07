@@ -410,7 +410,7 @@ fn checkNames(tx: anytype, stacks: *const Stacks) refs.TransactionError!void {
             if (record.value != .deletion) return error.RefNameConflict;
         }
         // Refs where this one's directory would be.
-        const below = try std.fmt.allocPrint(arena, "{s}/", .{edit.name});
+        const below = try arena.print("{s}/", .{edit.name});
         for (try stack.refsWithPrefix(gpa, arena, below, false)) |record| {
             if (!deletedHere(tx, record.name)) return error.RefNameConflict;
         }
@@ -465,8 +465,8 @@ pub fn appendLog(
     who: object.Signature,
     message: []const u8,
 ) refs.TransactionError!void {
-    if (std.mem.indexOfAny(u8, who.name, "<>\n") != null or
-        std.mem.indexOfAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
+    if (std.mem.findAny(u8, who.name, "<>\n") != null or
+        std.mem.findAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
     const parent = if (isLinked(store) and isPerWorktree(store, name)) store.gitDir() else store.commonDir();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer {
@@ -578,8 +578,8 @@ fn addTable(
             // resolve yet.
             .symbolic => (try resolveIn(gpa, &pending.stacks, store, source.name, tx)) orelse continue,
         } else Oid.zero(store.objectFormat());
-        if (std.mem.indexOfAny(u8, message.who.name, "<>\n") != null or
-            std.mem.indexOfAny(u8, message.who.email, "<>\n") != null) return error.InvalidSignature;
+        if (std.mem.findAny(u8, message.who.name, "<>\n") != null or
+            std.mem.findAny(u8, message.who.email, "<>\n") != null) return error.InvalidSignature;
         try logs.append(arena, .{
             .name = edit.name,
             .update_index = update_index,
@@ -687,7 +687,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     }
     var i = last + 1;
     while (i > first) : (i -= 1) {
-        const lock_name = try std.fmt.allocPrint(gpa, "{s}.lock", .{stack.names[i - 1]});
+        const lock_name = try gpa.print("{s}.lock", .{stack.names[i - 1]});
         if (dir.createFile(io, lock_name, .{ .exclusive = true })) |file| {
             file.close(io);
             held.append(gpa, lock_name) catch |err| {
@@ -863,7 +863,7 @@ pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: ref
     try writeTable(gpa, io, dir, name, bytes, options.shared);
     var list_buf: [96]u8 = undefined;
     // unreachable: a table name is at most 46 bytes
-    const list_text = std.fmt.bufPrint(&list_buf, "{s}\n", .{name}) catch unreachable;
+    const list_text = std.mem.print(&list_buf, "{s}\n", .{name}) catch unreachable;
     try dir.writeFile(io, .{ .sub_path = "tables.list", .data = list_text });
 
     try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/.invalid\n" });

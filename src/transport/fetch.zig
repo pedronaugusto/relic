@@ -269,7 +269,7 @@ fn selectFilter(arena: Allocator, config: *const config_mod.Config, explicit: ?[
     var auto_filter = false;
     const filter_spec: ?[]const u8 = blk: {
         const spec = explicit orelse if (promisor) configured: {
-            const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote_name.?});
+            const key = try arena.print("remote.{s}.partialclonefilter", .{remote_name.?});
             const raw = config.get(key) orelse break :configured null;
             break :configured try arena.dupe(u8, raw);
         } else null;
@@ -873,7 +873,7 @@ fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r
     if (r.pack) |name| {
         var hex: [hash.max_hex_len]u8 = undefined;
         var idx_buf: [96]u8 = undefined;
-        const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
+        const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
         fresh = try pack.Index.open(gpa, io, r.pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     }
     if (fresh) |*index| {
@@ -979,7 +979,7 @@ fn planUpdates(
                     .name = dst,
                     .old = decision.old,
                     .new = entry.oid,
-                    .message = try std.fmt.allocPrint(arena, "{s}: {s}", .{ rla, message }),
+                    .message = try arena.print("{s}: {s}", .{ rla, message }),
                 });
             }
         }
@@ -1027,7 +1027,7 @@ fn expectation(old: ?Oid) refs_mod.Expected {
 /// to be created when it is missing, which is its default.
 fn followRemoteHead(config: *const config_mod.Config, name: []const u8) bool {
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "remote.{s}.followremotehead", .{name}) catch return false;
+    const key = std.mem.print(&buf, "remote.{s}.followremotehead", .{name}) catch return false;
     const value = config.get(key) orelse return true;
     return !std.ascii.eqlIgnoreCase(value, "never");
 }
@@ -1354,7 +1354,7 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
     defer listing.deinit();
     for (listing.entries) |entry| {
         const branch = entry.branch orelse continue;
-        try out.append(arena, try std.fmt.allocPrint(arena, "refs/heads/{s}", .{branch}));
+        try out.append(arena, try arena.print("refs/heads/{s}", .{branch}));
     }
     return out.items;
 }
@@ -1508,7 +1508,7 @@ fn createRemoteHead(
     who: object.Signature,
 ) Error!void {
     var head_buf: [512]u8 = undefined;
-    const local_head = std.fmt.bufPrint(&head_buf, "refs/remotes/{s}/HEAD", .{name}) catch return;
+    const local_head = std.mem.print(&head_buf, "refs/remotes/{s}/HEAD", .{name}) catch return;
     if (try repo.refStore().read(gpa, io, local_head)) |existing| {
         switch (existing) {
             .symbolic => |target| gpa.free(target),
@@ -1523,7 +1523,7 @@ fn createRemoteHead(
     const remote_target = target orelse return;
     if (!std.mem.startsWith(u8, remote_target, "refs/heads/")) return;
     var local_target_buf: [512]u8 = undefined;
-    const local_target = std.fmt.bufPrint(&local_target_buf, "refs/remotes/{s}/{s}", .{ name, remote_target["refs/heads/".len..] }) catch return;
+    const local_target = std.mem.print(&local_target_buf, "refs/remotes/{s}/{s}", .{ name, remote_target["refs/heads/".len..] }) catch return;
     // Only where the configured refspecs keep that branch.
     var kept = false;
     for (specs) |spec| {
@@ -1629,7 +1629,7 @@ fn expectSameRefs(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo) !v
     var lines = std.mem.tokenizeScalar(u8, refs_a, '\n');
     while (lines.next()) |line| {
         const name = line[0..std.mem.findScalar(u8, line, ' ').?];
-        const log_path = try std.fmt.allocPrint(gpa, ".git/logs/{s}", .{name});
+        const log_path = try gpa.print(".git/logs/{s}", .{name});
         defer gpa.free(log_path);
         const log_a = a.readFile(io, log_path) catch try gpa.dupe(u8, "");
         defer gpa.free(log_a);

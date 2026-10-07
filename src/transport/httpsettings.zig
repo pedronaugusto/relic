@@ -242,9 +242,9 @@ pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, env
             const raw = entry.value orelse "";
             const value = try arena.dupe(u8, raw);
             const origin = if (entry.subsection.len == 0)
-                try std.fmt.allocPrint(arena, "http.{s}", .{name})
+                try arena.print("http.{s}", .{name})
             else
-                try std.fmt.allocPrint(arena, "http.{s}.{s}", .{ entry.subsection, name });
+                try arena.print("http.{s}.{s}", .{ entry.subsection, name });
             if (std.mem.eql(u8, name, "proxy")) proxy_set = true;
             try s.take(arena, name, value, entry.value == null, origin, &headers);
         }
@@ -252,7 +252,7 @@ pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, env
     s.extra_headers = headers.items;
 
     if (config) |c| if (remote_name) |name| {
-        const key = try std.fmt.allocPrint(arena, "remote.{s}.proxy", .{name});
+        const key = try arena.print("remote.{s}.proxy", .{name});
         if (c.get(key)) |raw| {
             s.proxy = try arena.dupe(u8, raw);
             proxy_set = true;
@@ -418,7 +418,7 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
     // curl ignores an upper-case HTTP_PROXY, and so git does. On Windows a
     // variable's name has no case: `http_proxy` is the variable set as
     // `HTTP_PROXY`, and curl, asking for the one, is given the other.
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         try testing.expectEqualStrings("http://upper:3128", plain.proxy.?);
     } else {
         try testing.expect(plain.proxy == null);

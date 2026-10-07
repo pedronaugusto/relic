@@ -495,7 +495,7 @@ fn commitParents(gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error![]Oid
 }
 
 fn genMessageId(a: Allocator, base: []const u8, t: Thread) Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(a, "{s}.{d}.git.{s}", .{ base, t.now, t.email });
+    return a.print("{s}.{d}.git.{s}", .{ base, t.now, t.email });
 }
 
 fn cleanMessageId(a: Allocator, id: []const u8) Allocator.Error![]const u8 {
@@ -809,8 +809,8 @@ fn emailHeaders(ctx: *Ctx, out: *std.ArrayList(u8), commit: Oid, subject_for_att
     if (ctx.options.attach) |att| {
         if (subject_for_attach) |subject| {
             try headers.print(a, "MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"{s}{s}\"\n\nThis is a multi-part message in MIME format.\n--{s}{s}\nContent-Type: text/plain; charset=UTF-8; format=fixed\nContent-Transfer-Encoding: 8bit\n\n", .{ mime_boundary_leader, att.boundary, mime_boundary_leader, att.boundary });
-            const filename = if (ctx.options.numbered_files) try std.fmt.allocPrint(a, "{d}", .{ctx.nr}) else try fileNameFor(ctx, subject);
-            stat_sep = try std.fmt.allocPrint(a, "\n--{s}{s}\nContent-Type: text/x-patch; name=\"{s}\"\nContent-Transfer-Encoding: 8bit\nContent-Disposition: {s}; filename=\"{s}\"\n\n", .{ mime_boundary_leader, att.boundary, filename, if (att.@"inline") "inline" else "attachment", filename });
+            const filename = if (ctx.options.numbered_files) try a.print("{d}", .{ctx.nr}) else try fileNameFor(ctx, subject);
+            stat_sep = try a.print("\n--{s}{s}\nContent-Type: text/x-patch; name=\"{s}\"\nContent-Transfer-Encoding: 8bit\nContent-Disposition: {s}; filename=\"{s}\"\n\n", .{ mime_boundary_leader, att.boundary, filename, if (att.@"inline") "inline" else "attachment", filename });
         }
     }
     return .{ .after_subject = headers.items, .stat_sep = stat_sep };
@@ -849,7 +849,7 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
     var from_email = author.email;
     if (ctx.options.from) |sender| {
         if (ctx.options.force_in_body_from or !identEql(sender, .{ .name = author.name, .email = author.email })) {
-            try in_body.append(a, try std.fmt.allocPrint(a, "From: {s} <{s}>\n", .{ author.name, author.email }));
+            try in_body.append(a, try a.print("From: {s} <{s}>\n", .{ author.name, author.email }));
             from_name = sender.name;
             from_email = sender.email;
         }
@@ -864,7 +864,7 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
     try out.append(a, '\n');
     if (out.items.len <= beginning_of_body) try out.append(a, '\n');
     if (ctx.options.signoff) |who| {
-        const line = try std.fmt.allocPrint(a, "Signed-off-by: {s} <{s}>\n", .{ who.name, who.email });
+        const line = try a.print("Signed-off-by: {s} <{s}>\n", .{ who.name, who.email });
         const trailers = try message.trailerSettings(a, ctx.repo.configuration());
         const footer: message.Footer = if (std.mem.eql(u8, out.items, line)) .ends_with_line else try message.conformingFooter(a, out.items, line, trailers);
         if (footer != .has_line) {
@@ -914,7 +914,7 @@ fn fileNameFor(ctx: *Ctx, subject: []const u8) Allocator.Error![]const u8 {
     const min_len = "0000-".len + ctx.options.suffix.len;
     if (ctx.options.filename_max_length <= min_len) max_len = min_len - ctx.options.suffix.len - 1;
     if (ctx.options.reroll_count) |v| {
-        const tmp = try std.fmt.allocPrint(a, "v{s}", .{v});
+        const tmp = try a.print("v{s}", .{v});
         try name.appendSlice(a, try sanitizedSubject(a, tmp));
         try name.append(a, '-');
     }
@@ -925,7 +925,7 @@ fn fileNameFor(ctx: *Ctx, subject: []const u8) Allocator.Error![]const u8 {
 }
 
 fn fileName(ctx: *Ctx, commit: ?Oid, subject: ?[]const u8) Error![]const u8 {
-    if (ctx.options.numbered_files) return std.fmt.allocPrint(ctx.a, "{d}", .{ctx.nr});
+    if (ctx.options.numbered_files) return ctx.a.print("{d}", .{ctx.nr});
     if (commit) |oid| {
         var c = try readCommit(ctx, oid);
         const msg = try utf8Message(ctx, &c);
@@ -960,14 +960,14 @@ const Side = struct {
 };
 
 fn modeNum(m: object.Mode) u32 {
-    return @intFromEnum(m);
+    return @backingInt(m);
 }
 
 fn loadSide(ctx: *Ctx, e: diff.Entry) Error!Side {
     var bytes: []const u8 = undefined;
     if (e.mode == .gitlink) {
         var hex: [hash.max_hex_len]u8 = undefined;
-        bytes = try std.fmt.allocPrint(ctx.a, "Subproject commit {s}\n", .{e.oid.hex(&hex)});
+        bytes = try ctx.a.print("Subproject commit {s}\n", .{e.oid.hex(&hex)});
     } else {
         const found = try ctx.db.read(ctx.io, e.oid);
         defer ctx.db.allocator().free(found.bytes);

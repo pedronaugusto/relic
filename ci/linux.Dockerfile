@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gnupg openssh-client \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=git /opt/git /opt/git
-ARG ZIG=0.16.0
+ARG ZIG=0.17.0
 RUN set -e; arch=$(uname -m); \
     for name in "zig-${arch}-linux-${ZIG}" "zig-linux-${arch}-${ZIG}"; do \
       if curl -fsSL "https://ziglang.org/download/${ZIG}/${name}.tar.xz" -o /tmp/zig.tar.xz; then break; fi; done; \

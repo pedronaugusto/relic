@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
         };
         var guard = try io.concurrent(Guard.stop, .{io});
         defer guard.cancel(io);
-        const block = "x" ** 1024;
+        const block = &@as([1024]u8, @splat('x'));
         for (0..4096) |_| try out.interface.writeAll(block);
         try out.interface.flush();
         var in_buf: [4096]u8 = undefined;
@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, args[1], "stderr")) {
         try err.interface.writeAll("err\n");
     } else if (std.mem.eql(u8, args[1], "bytes")) {
-        const block = "x" ** 1024;
+        const block = &@as([1024]u8, @splat('x'));
         for (0..100) |_| try out.interface.writeAll(block);
     } else if (std.mem.eql(u8, args[1], "reject-filter")) {
         try err.interface.writeAll("nope\n");
@@ -95,8 +95,8 @@ pub fn main(init: std.process.Init) !void {
         const arena = init.arena.allocator();
         const cwd = Io.Dir.cwd();
         const log = cwd.readFileAlloc(io, ".git/fsmonitor-log", arena, .limited(1 << 20)) catch "";
-        try cwd.writeFile(io, .{ .sub_path = ".git/fsmonitor-log", .data = try std.fmt.allocPrint(arena, "{s}{s} {s}\n", .{ log, args[2], args[3] }) });
-        const answer_path = try std.fmt.allocPrint(arena, ".git/fsmonitor-v{s}", .{args[2]});
+        try cwd.writeFile(io, .{ .sub_path = ".git/fsmonitor-log", .data = try arena.print("{s}{s} {s}\n", .{ log, args[2], args[3] }) });
+        const answer_path = try arena.print(".git/fsmonitor-v{s}", .{args[2]});
         const answer = cwd.readFileAlloc(io, answer_path, arena, .limited(1 << 20)) catch std.process.exit(1);
         try out.interface.writeAll(answer);
     } else if (std.mem.eql(u8, args[1], "record")) {

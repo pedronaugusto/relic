@@ -485,7 +485,7 @@ fn parseHeader(s: *State, line: []const u8, hdr: []const u8) Error!?[]const u8 {
 }
 
 fn slurpAttr(line: []const u8, name: []const u8) ?[]const u8 {
-    const at = std.ascii.indexOfIgnoreCase(line, name) orelse return null;
+    const at = std.ascii.findIgnoreCase(line, name) orelse return null;
     var ap = at + name.len;
     var ends: []const u8 = "; \t";
     if (ap < line.len and line[ap] == '"') {
@@ -518,9 +518,9 @@ fn handleContentType(s: *State, line: []const u8) Error!void {
 }
 
 fn handleContentTransferEncoding(s: *State, line: []const u8) void {
-    if (std.ascii.indexOfIgnoreCase(line, "base64") != null) {
+    if (std.ascii.findIgnoreCase(line, "base64") != null) {
         s.transfer_encoding = .base64;
-    } else if (std.ascii.indexOfIgnoreCase(line, "quoted-printable") != null) {
+    } else if (std.ascii.findIgnoreCase(line, "quoted-printable") != null) {
         s.transfer_encoding = .qp;
     } else s.transfer_encoding = .dontcare;
 }

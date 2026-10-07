@@ -154,7 +154,7 @@ pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Er
         // placeholder.
         if (try reftablestack.headIn(gpa, arena, io, admin, kind)) |value| {
             head_text = switch (value) {
-                .symbolic => |target| try std.fmt.allocPrint(arena, "ref: {s}", .{target}),
+                .symbolic => |target| try arena.print("ref: {s}", .{target}),
                 .direct => |oid| blk: {
                     var hex: [hash.max_hex_len]u8 = undefined;
                     break :blk try arena.dupe(u8, oid.hex(&hex));
@@ -210,9 +210,9 @@ fn namedTree(arena: Allocator, io: Io, admin: Io.Dir) Self.Error!?Named {
     const text = (try fs.readFileAlloc(arena, io, admin, "gitdir", 4096)) orelse return null;
     const written = std.mem.trim(u8, text, " \t\r\n");
     if (written.len == 0) return null;
-    const gitfile = if (std.fs.path.isAbsolute(written)) written else blk: {
+    const gitfile = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
         var buf: [4096]u8 = undefined;
-        break :blk try std.fs.path.resolvePosix(arena, &.{ try absolutePath(io, admin, &buf), written });
+        break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try absolutePath(io, admin, &buf), written });
     };
     // The `gitdir` file names the destination's `.git` *file*; the
     // working tree is its parent.
@@ -234,7 +234,7 @@ fn pointsBack(arena: Allocator, io: Io, admin: Io.Dir, named: Named) Self.Error!
     if (!std.mem.startsWith(u8, trimmed, "gitdir:")) return false;
     const target = std.mem.trim(u8, trimmed["gitdir:".len..], " \t");
     if (target.len == 0) return false;
-    var target_dir = (if (std.fs.path.isAbsolute(target))
+    var target_dir = (if (std.Io.Dir.path.isAbsolute(target))
         Io.Dir.openDirAbsolute(io, target, .{})
     else
         work.openDir(io, target, .{})) catch return false;
@@ -283,7 +283,7 @@ pub fn add(
     if (options.detach_at == null) {
         if (options.branch) |branch| {
             var ref_buf: [512]u8 = undefined;
-            const ref = std.fmt.bufPrint(&ref_buf, "refs/heads/{s}", .{branch}) catch return error.InvalidBranchName;
+            const ref = std.mem.print(&ref_buf, "refs/heads/{s}", .{branch}) catch return error.InvalidBranchName;
             if (!safepath.isValidRefName(ref)) return error.InvalidBranchName;
         }
     }
@@ -318,7 +318,7 @@ pub fn add(
     var abs_buf: [4096]u8 = undefined;
     const dest_abs = try absolutePath(io, dest_dir, &abs_buf);
     var gitdir_buf: [4200]u8 = undefined;
-    const gitfile_path = std.fmt.bufPrint(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
+    const gitfile_path = std.mem.print(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
         return error.InvalidWorktreeName;
     try writeLine(io, admin, "gitdir", gitfile_path);
 
@@ -335,7 +335,7 @@ pub fn add(
         if (options.detach_at) |oid| {
             try reftablestack.initialize(gpa, io, admin, kind, .{ .direct = oid }, oid, .{});
         } else if (options.branch) |branch| {
-            const target = std.fmt.bufPrint(&target_buf, "refs/heads/{s}", .{branch}) catch
+            const target = std.mem.print(&target_buf, "refs/heads/{s}", .{branch}) catch
                 return error.InvalidWorktreeName;
             try reftablestack.initialize(gpa, io, admin, kind, .{ .symbolic = target }, null, .{});
         } else {
@@ -347,7 +347,7 @@ pub fn add(
         try writeLine(io, admin, "ORIG_HEAD", oid.hex(&hex));
     } else if (options.branch) |branch| {
         var line_buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "ref: refs/heads/{s}", .{branch}) catch
+        const line = std.mem.print(&line_buf, "ref: refs/heads/{s}", .{branch}) catch
             return error.InvalidWorktreeName;
         try writeLine(io, admin, "HEAD", line);
     } else {
@@ -371,7 +371,7 @@ pub fn add(
     var admin_abs_buf: [4096]u8 = undefined;
     const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
     var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.fmt.bufPrint(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
+    const pointer = std.mem.print(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 
@@ -383,7 +383,7 @@ fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void
     // trimmed of its newline; a path holding one cannot be written there.
     if (std.mem.findScalar(u8, text, '\n') != null) return error.InvalidWorktreeName;
     var buf: [4300]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s}\n", .{text}) catch return error.InvalidWorktreeName;
+    const line = std.mem.print(&buf, "{s}\n", .{text}) catch return error.InvalidWorktreeName;
     try dir.writeFile(io, .{ .sub_path = name, .data = line });
 }
 
@@ -398,7 +398,7 @@ fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void
 fn absolutePath(io: Io, dir: Io.Dir, buf: []u8) Error![]const u8 {
     const len = try dir.realPath(io, buf);
     const out = buf[0..len];
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
     return out;
 }
 
@@ -535,14 +535,14 @@ pub fn repair(
     var abs_buf: [4096]u8 = undefined;
     const dest_abs = try absolutePath(io, dest_dir, &abs_buf);
     var gitdir_buf: [4200]u8 = undefined;
-    const gitfile_path = std.fmt.bufPrint(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
+    const gitfile_path = std.mem.print(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
         return error.InvalidWorktreeName;
     try writeLine(io, admin, "gitdir", gitfile_path);
 
     var admin_abs_buf: [4096]u8 = undefined;
     const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
     var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.fmt.bufPrint(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
+    const pointer = std.mem.print(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 }

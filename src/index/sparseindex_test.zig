@@ -43,7 +43,7 @@ fn setupTree(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "add", "-A" });
     // A gitlink in a directory the cone leaves out, which keeps that one
     // directory from collapsing.
-    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",G/sub" });
+    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ @as([40]u8, @splat('1')) ++ ",G/sub" });
     try repo.writeFile(io, "G/g.txt", "g\n");
     try repo.exec(io, &.{ "add", "G/g.txt" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });

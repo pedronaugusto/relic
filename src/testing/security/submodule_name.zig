@@ -57,9 +57,9 @@ test "CVE-2019-1387, t7450-bad-git-dotfiles 'git dirs of sibling submodules must
     try nested.writeFile(io, ".gitmodules", "[submodule \"hippo\"]\n\turl = .\n\tpath = thing1\n[submodule \"hippo/hooks\"]\n\turl = .\n\tpath = thing2\n");
     const head = try nested.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head);
-    const thing1 = try std.fmt.allocPrint(gpa, "160000,{s},thing1", .{head});
+    const thing1 = try gpa.print("160000,{s},thing1", .{head});
     defer gpa.free(thing1);
-    const thing2 = try std.fmt.allocPrint(gpa, "160000,{s},thing2", .{head});
+    const thing2 = try gpa.print("160000,{s},thing2", .{head});
     defer gpa.free(thing2);
     try nested.exec(io, &.{ "update-index", "--add", "--cacheinfo", thing1, "--cacheinfo", thing2 });
     try nested.exec(io, &.{ "add", ".gitmodules" });

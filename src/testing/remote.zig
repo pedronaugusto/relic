@@ -8,8 +8,8 @@
 //! reaches all of them through the same code a real remote meets.
 
 const std = @import("std");
+const suite = @import("helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
@@ -111,10 +111,10 @@ pub fn addCommits(gpa: Allocator, io: Io, repo: *testgit.Repo, first: usize, cou
         try repo.writeFile(io, "src/a.txt", text.items);
         try repo.writeFile(io, "docs/b.md", text.items[0 .. text.items.len / 2]);
         var name_buf: [32]u8 = undefined;
-        try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "files/{d}.txt", .{i}), "new\n");
+        try repo.writeFile(io, try std.mem.print(&name_buf, "files/{d}.txt", .{i}), "new\n");
         try repo.exec(io, &.{ "add", "-A" });
         var msg_buf: [32]u8 = undefined;
-        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg_buf, "commit {d}", .{i}) });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg_buf, "commit {d}", .{i}) });
     }
 }
 
@@ -123,17 +123,17 @@ pub fn addCommits(gpa: Allocator, io: Io, repo: *testgit.Repo, first: usize, cou
 /// and runs the remote command here with the same standard streams. Git and
 /// relic use the same copy.
 pub fn fakeSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
-    const name = if (builtin.os.tag == .windows) "fake-ssh.exe" else "fake-ssh";
-    try Io.Dir.cwd().copyFile(build_options.fake_ssh_helper_path, dir, name, io, .{});
-    if (builtin.os.tag != .windows) {
+    const name = if (builtin.target.os.tag == .windows) "fake-ssh.exe" else "fake-ssh";
+    try Io.Dir.cwd().copyFile(suite.path(.fake_ssh_helper), dir, name, io, .{});
+    if (builtin.target.os.tag != .windows) {
         const file = try dir.openFile(io, name, .{});
         defer file.close(io);
         try file.setPermissions(io, .fromMode(0o755));
     }
     const base = try absolutePath(gpa, io, dir);
     defer gpa.free(base);
-    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, name });
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    const path = try gpa.print("{s}/{s}", .{ base, name });
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
     return path;
 }
 
@@ -144,9 +144,9 @@ pub fn capturingSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
     errdefer gpa.free(path);
     const base = try absolutePath(gpa, io, dir);
     defer gpa.free(base);
-    const sent = try std.fs.path.join(gpa, &.{ base, "sent" });
+    const sent = try std.Io.Dir.path.join(gpa, &.{ base, "sent" });
     defer gpa.free(sent);
-    const sidecar = try std.fmt.allocPrint(gpa, "{s}.capture", .{path});
+    const sidecar = try gpa.print("{s}.capture", .{path});
     defer gpa.free(sidecar);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = sent });
     return path;
@@ -243,7 +243,7 @@ pub const HttpServer = struct {
 
     /// `http://127.0.0.1:<port>/<path>`. The result is the caller's.
     pub fn url(s: *const HttpServer, gpa: Allocator, path: []const u8) ![]u8 {
-        return std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}/{s}", .{ s.port, path });
+        return gpa.print("http://127.0.0.1:{d}/{s}", .{ s.port, path });
     }
 
     /// The requests seen so far, one per line. The result is the caller's.
@@ -309,7 +309,7 @@ pub const HttpServer = struct {
         const io = s.io;
         const info_refs = std.mem.endsWith(u8, path, "/info/refs");
         const repo_path = path[0 .. path.len - (if (info_refs) "/info/refs".len else "/git-upload-pack".len)];
-        const full = try std.fmt.allocPrint(arena, "{s}{s}", .{ s.root, repo_path });
+        const full = try arena.print("{s}{s}", .{ s.root, repo_path });
         var env = try s.env.clone(arena);
         const v2 = s.options.protocol_v2 and git_protocol != null and std.mem.find(u8, git_protocol.?, "version=2") != null;
         if (v2) try env.put("GIT_PROTOCOL", "version=2");
@@ -365,19 +365,19 @@ pub const HttpServer = struct {
         const query = if (question) |q| target[q + 1 ..] else "";
 
         if (s.options.redirect and method == .GET and std.mem.startsWith(u8, path, "/moved/")) {
-            const location = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
+            const location = try arena.print("{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
             return request.respond("", .{ .status = .found, .keep_alive = s.options.keep_alive, .extra_headers = &.{.{ .name = "Location", .value = location }} });
         }
 
         var remote_user: ?[]const u8 = null;
         if (s.options.basic_auth) |auth| {
-            const expected_plain = try std.fmt.allocPrint(arena, "{s}:{s}", .{ auth.user, auth.password });
+            const expected_plain = try arena.print("{s}:{s}", .{ auth.user, auth.password });
             const encoder = std.base64.standard.Encoder;
             const expected = try arena.alloc(u8, "Basic ".len + encoder.calcSize(expected_plain.len));
             @memcpy(expected[0.."Basic ".len], "Basic ");
             _ = encoder.encode(expected["Basic ".len..], expected_plain);
             const bearer_ok = if (s.options.bearer) |token| blk: {
-                const want = try std.fmt.allocPrint(arena, "Bearer {s}", .{token});
+                const want = try arena.print("Bearer {s}", .{token});
                 break :blk authorization != null and std.mem.eql(u8, authorization.?, want);
             } else false;
             if (!bearer_ok and (authorization == null or !std.mem.eql(u8, authorization.?, expected))) {
@@ -417,7 +417,7 @@ pub const HttpServer = struct {
         try cgi_env.put("REMOTE_ADDR", "127.0.0.1");
         if (content_type) |ct| try cgi_env.put("CONTENT_TYPE", ct);
         if (content_encoding) |ce| try cgi_env.put("HTTP_CONTENT_ENCODING", ce);
-        if (method == .POST) try cgi_env.put("CONTENT_LENGTH", try std.fmt.allocPrint(arena, "{d}", .{body.len}));
+        if (method == .POST) try cgi_env.put("CONTENT_LENGTH", try arena.print("{d}", .{body.len}));
         if (s.options.protocol_v2) {
             if (git_protocol) |value| try cgi_env.put("GIT_PROTOCOL", value);
         }
@@ -442,7 +442,7 @@ pub const HttpServer = struct {
             } else try response_headers.append(arena, .{ .name = name, .value = value });
         }
         try request.respond(output[split + 4 ..], .{
-            .status = @enumFromInt(status),
+            .status = @fromBackingInt(@intCast(status)),
             .keep_alive = s.options.keep_alive,
             .extra_headers = response_headers.items,
         });
@@ -547,11 +547,11 @@ pub const TlsFront = struct {
         errdefer dir.cleanup();
         const base = try absolutePath(gpa, io, dir.dir);
         defer gpa.free(base);
-        const cert_path = try std.fs.path.join(gpa, &.{ base, "cert.pem" });
+        const cert_path = try std.Io.Dir.path.join(gpa, &.{ base, "cert.pem" });
         errdefer gpa.free(cert_path);
-        const key_path = try std.fs.path.join(gpa, &.{ base, "key.pem" });
+        const key_path = try std.Io.Dir.path.join(gpa, &.{ base, "key.pem" });
         defer gpa.free(key_path);
-        const ca_dir = try std.fs.path.join(gpa, &.{ base, "ca" });
+        const ca_dir = try std.Io.Dir.path.join(gpa, &.{ base, "ca" });
         errdefer gpa.free(ca_dir);
 
         // An EC key, which the standard library's TLS client verifies, and
@@ -576,12 +576,12 @@ pub const TlsFront = struct {
         }, "", .{});
         defer hashed.deinit(gpa);
         if (!hashed.succeeded()) return error.SkipZigTest;
-        const ca_name = try std.fmt.allocPrint(gpa, "ca/{s}.0", .{std.mem.trim(u8, hashed.stdout, "\r\n")});
+        const ca_name = try gpa.print("ca/{s}.0", .{std.mem.trim(u8, hashed.stdout, "\r\n")});
         defer gpa.free(ca_name);
         try dir.dir.copyFile("cert.pem", dir.dir, ca_name, io, .{});
 
         var port_buf: [8]u8 = undefined;
-        const backend = try std.fmt.bufPrint(&port_buf, "{d}", .{backend_port});
+        const backend = try std.mem.print(&port_buf, "{d}", .{backend_port});
         var running = program.start(.{ .environ = &env }, gpa, io, .{
             .argv = &.{ "python3", "-c", script, cert_path, key_path, backend, options.client_ca orelse "", if (options.tls12) "1.2" else "" },
             .stderr = .ignore,
@@ -609,14 +609,14 @@ pub const TlsFront = struct {
 
 test "a TLS helper exits when a parent test fails without cleanup" {
     // This test inspects another process with POSIX signals and `ps`.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     const front = try TlsFront.start(gpa, io, 1);
     defer front.stop(io);
     const base = try absolutePath(gpa, io, front.dir.dir);
     defer gpa.free(base);
-    const key = try std.fs.path.join(gpa, &.{ base, "key.pem" });
+    const key = try std.Io.Dir.path.join(gpa, &.{ base, "key.pem" });
     defer gpa.free(key);
     var env = try environ(gpa);
     defer env.deinit();
@@ -696,17 +696,17 @@ pub const Pki = struct {
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "stranger.key", "-out", "stranger.pem", "-days", "2", "-subj", "/CN=relic-test-stranger" });
         try p.openssl(io, &.{ "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "server.key", "-out", "server.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1" });
         for (kinds) |kind| {
-            const key = try std.fmt.allocPrint(gpa, "{s}.key", .{kind});
+            const key = try gpa.print("{s}.key", .{kind});
             defer gpa.free(key);
-            const csr = try std.fmt.allocPrint(gpa, "{s}.csr", .{kind});
+            const csr = try gpa.print("{s}.csr", .{kind});
             defer gpa.free(csr);
-            const cert = try std.fmt.allocPrint(gpa, "{s}.pem", .{kind});
+            const cert = try gpa.print("{s}.pem", .{kind});
             defer gpa.free(cert);
-            const strange = try std.fmt.allocPrint(gpa, "{s}.stranger.pem", .{kind});
+            const strange = try gpa.print("{s}.stranger.pem", .{kind});
             defer gpa.free(strange);
-            const enc = try std.fmt.allocPrint(gpa, "{s}.enc.key", .{kind});
+            const enc = try gpa.print("{s}.enc.key", .{kind});
             defer gpa.free(enc);
-            const subject = try std.fmt.allocPrint(gpa, "/CN=client-{s}", .{kind});
+            const subject = try gpa.print("/CN=client-{s}", .{kind});
             defer gpa.free(subject);
             const algorithm: []const []const u8 = if (std.mem.eql(u8, kind, "rsa"))
                 &.{ "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048" }
@@ -748,7 +748,7 @@ pub const Pki = struct {
 
     /// The absolute path of `name`, in `gpa`.
     pub fn path(p: *const Pki, name: []const u8) ![]u8 {
-        return std.fs.path.join(p.gpa, &.{ p.base, name });
+        return std.Io.Dir.path.join(p.gpa, &.{ p.base, name });
     }
 
     /// Remove them all.
@@ -824,7 +824,7 @@ pub const Proxy = struct {
 
     /// `http://127.0.0.1:<port>`. The result is the caller's.
     pub fn url(p: *const Proxy, gpa: Allocator) ![]u8 {
-        return std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{p.port});
+        return gpa.print("http://127.0.0.1:{d}", .{p.port});
     }
 
     /// The first line of every request so far, one per line, and forget
@@ -1007,7 +1007,7 @@ pub const Proxy = struct {
             const rest = target[prefix.len..];
             const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
             host_port = rest[0..slash];
-            rewritten = try std.fmt.bufPrint(&line_buf, "{s} {s} {s}", .{ method, if (slash < rest.len) rest[slash..] else "/", words.rest() });
+            rewritten = try std.mem.print(&line_buf, "{s} {s} {s}", .{ method, if (slash < rest.len) rest[slash..] else "/", words.rest() });
         }
         const colon = std.mem.findScalarLast(u8, host_port, ':') orelse return error.BadRequest;
         const port = try std.fmt.parseUnsigned(u16, host_port[colon + 1 ..], 10);
@@ -1148,7 +1148,7 @@ pub const SocksProxy = struct {
     }
 
     pub fn url(p: *const SocksProxy, gpa: Allocator, scheme: []const u8, userinfo: []const u8) ![]u8 {
-        return std.fmt.allocPrint(gpa, "{s}://{s}127.0.0.1:{d}", .{ scheme, userinfo, p.port });
+        return gpa.print("{s}://{s}127.0.0.1:{d}", .{ scheme, userinfo, p.port });
     }
 
     pub fn take(p: *SocksProxy, gpa: Allocator) ![]u8 {
@@ -1215,7 +1215,7 @@ pub const SocksProxy = struct {
                 host = try zeroString(r, &host_buffer);
             } else {
                 kind = "ipv4";
-                host = try std.fmt.bufPrint(&host_buffer, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
+                host = try std.mem.print(&host_buffer, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
             }
             if (p.options.credential) |c| accepted = std.mem.eql(u8, user, c.user);
         } else if (version == 5) {
@@ -1249,7 +1249,7 @@ pub const SocksProxy = struct {
                     kind = "ipv4";
                     var address: [4]u8 = undefined;
                     try r.readSliceAll(&address);
-                    host = try std.fmt.bufPrint(&host_buffer, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
+                    host = try std.mem.print(&host_buffer, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
                 },
                 3 => {
                     kind = "name";
@@ -1261,7 +1261,7 @@ pub const SocksProxy = struct {
                     kind = "ipv6";
                     var address: [16]u8 = undefined;
                     try r.readSliceAll(&address);
-                    host = try std.fmt.bufPrint(&host_buffer, "{f}", .{Io.net.Ip6Address{ .bytes = address, .port = 0 }});
+                    host = try std.mem.print(&host_buffer, "{f}", .{Io.net.Ip6Address{ .bytes = address, .port = 0 }});
                 },
                 else => return error.BadRequest,
             }

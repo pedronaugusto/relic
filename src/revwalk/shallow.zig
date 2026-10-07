@@ -97,15 +97,15 @@ test "the file is written sorted, read back, and removed when the boundary goes"
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const a = try Oid.parse(.sha1, "b" ** 40);
-    const b = try Oid.parse(.sha1, "a" ** 40);
+    const a = try Oid.parse(.sha1, &@as([40]u8, @splat('b')));
+    const b = try Oid.parse(.sha1, &@as([40]u8, @splat('a')));
     var empty: Oid.Set = .empty;
     var set = try apply(gpa, &empty, &.{ a, b }, &.{});
     defer set.deinit(gpa);
     try write(gpa, io, tmp.dir, &set);
     const text = try tmp.dir.readFileAlloc(io, file_name, gpa, .unlimited);
     defer gpa.free(text);
-    try std.testing.expectEqualStrings("a" ** 40 ++ "\n" ++ "b" ** 40 ++ "\n", text);
+    try std.testing.expectEqualStrings(@as([40]u8, @splat('a')) ++ "\n" ++ @as([40]u8, @splat('b')) ++ "\n", text);
     var back = try read(gpa, io, tmp.dir, .sha1);
     defer back.deinit(gpa);
     try std.testing.expectEqual(@as(u32, 2), back.count());

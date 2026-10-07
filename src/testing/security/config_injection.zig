@@ -28,7 +28,7 @@ test "CVE-2019-19604, t7406-submodule-update 'submodule update - command in .git
     try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
     const head = try git.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head);
-    const gitlink = try std.fmt.allocPrint(gpa, "160000,{s},sub", .{head});
+    const gitlink = try gpa.print("160000,{s},sub", .{head});
     defer gpa.free(gitlink);
     try git.writeFile(io, ".gitmodules", text);
     try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", gitlink });
@@ -42,8 +42,8 @@ test "CVE-2019-19604, t7406-submodule-update 'submodule update - command in .git
     try std.testing.expectError(error.InvalidUpdate, submodule.update(gpa, io, &repo, .{ .init = true, .programs = .{ .environ = &env } }));
     const config = try git.readFile(io, ".git/config");
     defer gpa.free(config);
-    try std.testing.expect(std.mem.indexOf(u8, config, "[submodule") == null);
-    try std.testing.expect(std.mem.indexOf(u8, config, "pwned") == null);
+    try std.testing.expect(std.mem.find(u8, config, "[submodule") == null);
+    try std.testing.expect(std.mem.find(u8, config, "pwned") == null);
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "pwned", .{}));
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "sub/pwned", .{}));
 }
@@ -53,7 +53,7 @@ test "CVE-2023-29007, t1300-config 'renaming a section with a long line' and 're
     const io = std.testing.io;
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
-    const pad = " " ** 1024;
+    const pad = &@as([1024]u8, @splat(' '));
     for ([_][]const u8{
         "[b]\n  c = d " ++ pad ++ " [a] e = f\n[a] g = h\n",
         "[b]\n  c = d " ++ pad ++ " [a] [foo] e = f\n[a] g = h\n",

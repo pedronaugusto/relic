@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
 
     var raw: [12]u8 = undefined;
     io.random(&raw);
-    const log_path = try std.fmt.allocPrint(arena, "{s}/{x}.log", .{ args[2], &raw });
+    const log_path = try arena.print("{s}/{x}.log", .{ args[2], &raw });
     const log = try Io.Dir.cwd().createFile(io, log_path, .{});
     defer log.close(io);
     var log_buf: [4096]u8 = undefined;
@@ -50,13 +50,13 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, msg.event, "init")) {
             try w.writeAll(if (refuse_init) "{\"error\":{\"code\":32,\"message\":\"refused by the agent\"}}\n" else "{}\n");
         } else if (std.mem.eql(u8, msg.event, "upload")) {
-            const to = try std.fmt.allocPrint(arena, "{s}/{s}", .{ objects, msg.oid });
+            const to = try arena.print("{s}/{s}", .{ objects, msg.oid });
             try Io.Dir.cwd().copyFile(msg.path, Io.Dir.cwd(), to, io, .{});
             try w.print("{{\"event\":\"progress\",\"oid\":\"{s}\",\"bytesSoFar\":{d},\"bytesSinceLast\":{d}}}\n", .{ msg.oid, msg.size, msg.size });
             try w.print("{{\"event\":\"complete\",\"oid\":\"{s}\"}}\n", .{msg.oid});
         } else if (std.mem.eql(u8, msg.event, "download")) {
-            const from = try std.fmt.allocPrint(arena, "{s}/{s}", .{ objects, msg.oid });
-            const tmp = try std.fmt.allocPrint(arena, "{s}/tmp-{s}-{x}", .{ objects, msg.oid, &raw });
+            const from = try arena.print("{s}/{s}", .{ objects, msg.oid });
+            const tmp = try arena.print("{s}/tmp-{s}-{x}", .{ objects, msg.oid, &raw });
             if (Io.Dir.cwd().copyFile(from, Io.Dir.cwd(), tmp, io, .{})) |_| {
                 try w.print("{{\"event\":\"progress\",\"oid\":\"{s}\",\"bytesSoFar\":{d},\"bytesSinceLast\":{d}}}\n", .{ msg.oid, msg.size, msg.size });
                 try w.print("{{\"event\":\"complete\",\"oid\":\"{s}\",\"path\":", .{msg.oid});

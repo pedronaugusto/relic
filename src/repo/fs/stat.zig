@@ -31,7 +31,7 @@ pub const Extra = struct {
 /// Whether this platform reports the three fields at all.
 ///
 /// False on Windows, where git's own port writes zeros, and on WASI.
-pub const supported = switch (builtin.os.tag) {
+pub const supported = switch (builtin.target.os.tag) {
     .windows, .wasi => false,
     .linux => true,
     else => builtin.link_libc,
@@ -78,7 +78,7 @@ pub fn full(dir: Io.Dir, sub_path: []const u8) FullResult {
     path_buf[sub_path.len] = 0;
     const path: [*:0]const u8 = path_buf[0..sub_path.len :0].ptr;
 
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .linux => {
             const linux = std.os.linux;
             var statx: linux.Statx = std.mem.zeroes(linux.Statx);
@@ -180,7 +180,7 @@ pub fn statAt(dir: Io.Dir, sub_path: []const u8) Extra {
     path_buf[sub_path.len] = 0;
     const path: [*:0]const u8 = path_buf[0..sub_path.len :0].ptr;
 
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .linux => {
             const linux = std.os.linux;
             var statx: linux.Statx = std.mem.zeroes(linux.Statx);

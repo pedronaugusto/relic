@@ -630,7 +630,7 @@ test "a valid delta over the result limit is not a size overflow" {
     const base: [0x10000]u8 = @splat('a');
     // 65 536 copies of 65 536 bytes, then one inserted byte: 4 GiB + 1.
     const delta = [_]u8{ 0x80, 0x80, 0x04, 0x81, 0x80, 0x80, 0x80, 0x10 } ++
-        ([_]u8{0x80} ** 0x10000) ++ [_]u8{ 1, 'x' };
+        (@as([0x10000]u8, @splat(0x80))) ++ [_]u8{ 1, 'x' };
     const sizes = try header(&delta);
     try std.testing.expectEqual(max_result_bytes + 1, sizes.target);
     var out: std.ArrayList(u8) = .empty;
@@ -643,11 +643,11 @@ test "a valid delta over the result limit is not a size overflow" {
     try std.testing.expectError(error.DeltaSizeLimitExceeded, apply(gpa, &base, &delta));
     // At the policy limit, a failure to reserve the result is a resource failure.
     const at_limit = [_]u8{ 0x80, 0x80, 0x04, 0x80, 0x80, 0x80, 0x80, 0x10 } ++
-        ([_]u8{0x80} ** 0x10000);
+        (@as([0x10000]u8, @splat(0x80)));
     var empty: std.ArrayList(u8) = .empty;
     try std.testing.expectError(if (@sizeOf(usize) > 4) error.OutOfMemory else error.DeltaSizeLimitExceeded, applyTo(failing.allocator(), &empty, &base, &at_limit));
     // A size that does not fit the wire's u64 is still malformed input.
-    try std.testing.expectError(error.DeltaSizeOverflow, readSize(&([_]u8{0xff} ** 9 ++ [_]u8{2})));
+    try std.testing.expectError(error.DeltaSizeOverflow, readSize(&(@as([9]u8, @splat(0xff)) ++ [_]u8{2})));
 }
 
 test "delta matches stop at each byte of an unaligned word and at the tail" {

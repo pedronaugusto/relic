@@ -2,6 +2,7 @@
 //! same bytes.
 
 const std = @import("std");
+const testbytes = @import("testing/bytes.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -60,17 +61,17 @@ fn fixture(io: Io, git: *testgit.Repo) !void {
     // git writes `%aI` at UTC as `Z` since 2.45, and as `+00:00` before
     const strict = if (try testgit.gitAtLeast(git.gpa, io, 2, 45)) "|%aI" else "";
     var text_buf: [256]u8 = undefined;
-    try git.writeFile(io, "version.txt", try std.fmt.bufPrint(&text_buf, "Commit $Format:%H$ (%h) by $Format:%an <%ae>%n%ad|%ai{s}|%at$ $Format:%s%+b%-b$ $Format:%T %t %P %p %cn %ce %cd %ci%%x41$\n", .{strict}));
-    try git.writeFile(io, "data.bin", "\x00\x01\x02 binary " ** 50);
+    try git.writeFile(io, "version.txt", try std.mem.print(&text_buf, "Commit $Format:%H$ (%h) by $Format:%an <%ae>%n%ad|%ai{s}|%at$ $Format:%s%+b%-b$ $Format:%T %t %P %p %cn %ce %cd %ci%%x41$\n", .{strict}));
+    try git.writeFile(io, "data.bin", testbytes.repeat("\x00\x01\x02 binary ", 50));
     const long_dir = "a-directory-name-that-is-quite-long/another-directory-name-that-is-long-too/and-a-third-one";
     try git.writeFile(io, long_dir ++ "/file-with-a-long-name-as-well.txt", "long path\n");
-    try git.writeFile(io, "x" ** 120 ++ "/" ++ "y" ** 120 ++ "/" ++ "z" ** 30, "longer than ustar holds\n");
+    try git.writeFile(io, @as([120]u8, @splat('x')) ++ "/" ++ @as([120]u8, @splat('y')) ++ "/" ++ @as([30]u8, @splat('z')), "longer than ustar holds\n");
     try git.writeFile(io, ".gitattributes", "ignored/ export-ignore\nnotes/*.md export-ignore\ncrlf.txt eol=crlf\nversion.txt export-subst\n");
     try git.exec(io, &.{ "add", "-A" });
     try git.exec(io, &.{ "update-index", "--chmod=+x", "bin/run.sh" });
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         try git.dir.symLink(io, "README", "link", .{});
-        try git.dir.symLink(io, "t" ** 150, "longlink", .{});
+        try git.dir.symLink(io, &@as([150]u8, @splat('t')), "longlink", .{});
         try git.exec(io, &.{ "add", "link", "longlink" });
     }
     try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000,1234567890123456789012345678901234567890,sub" });
@@ -115,7 +116,7 @@ test "export-subst names people by the mailmap and commits by their refs, and ta
     try git.writeFile(io, ".gitattributes", "subst.txt export-subst\n");
     // Git 2.43 introduced the configurable decoration placeholder.
     const decorations = if (try testgit.gitAtLeast(gpa, io, 2, 43)) "%(decorate:prefix=[,suffix=],separator=%x3b,pointer=>,tag=T:)|%(decorate)|%(decorate:bogus)|" else "";
-    const subst = try std.fmt.allocPrint(gpa, "$Format:%aN <%aE> %aL|%cN <%cE> %cL|%an|%d|%D|%+d|{s}%N|%G?|%GS|%GK|%GT$\n", .{decorations});
+    const subst = try gpa.print("$Format:%aN <%aE> %aL|%cN <%cE> %cL|%an|%d|%D|%+d|{s}%N|%G?|%GS|%GK|%GT$\n", .{decorations});
     defer gpa.free(subst);
     try git.writeFile(io, "subst.txt", subst);
     try git.exec(io, &.{ "add", "-A" });
@@ -222,7 +223,7 @@ test "a commit dated before 1970 is archived as git archives it: a tar with git'
     try git.exec(io, &.{ "add", "f" });
     const tree = try git.line(io, &.{"write-tree"});
     defer gpa.free(tree);
-    const body = try std.fmt.allocPrint(gpa, "tree {s}\nauthor A <a@a> -5 +0000\ncommitter A <a@a> -5 +0000\n\nm\n", .{tree});
+    const body = try gpa.print("tree {s}\nauthor A <a@a> -5 +0000\ncommitter A <a@a> -5 +0000\n\nm\n", .{tree});
     defer gpa.free(body);
     const text = try git.runInput(io, &.{ "hash-object", "-t", "commit", "-w", "--literally", "--stdin" }, body);
     defer gpa.free(text);
@@ -230,7 +231,7 @@ test "a commit dated before 1970 is archived as git archives it: a tar with git'
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     var hex: [hash.max_hex_len]u8 = undefined;
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         try compare(gpa, io, &git, &repo, &.{commit.hex(&hex)}, commit, .{});
     } else {
         // git for Windows casts the clamped time to a 32-bit `unsigned
@@ -238,12 +239,12 @@ test "a commit dated before 1970 is archived as git archives it: a tar with git'
         // maximum; the pax record is the same everywhere.
         const tar = try ours(gpa, io, &repo, commit, .{});
         defer gpa.free(tar);
-        try std.testing.expect(std.mem.indexOf(u8, tar, "30 mtime=18446744073709551611\n") != null);
+        try std.testing.expect(std.mem.find(u8, tar, "30 mtime=18446744073709551611\n") != null);
     }
     // git's zip writer dies: "timestamp too large for this system".
     var zip = try git.capture(io, &.{ "archive", "--format=zip", commit.hex(&hex) });
     defer zip.deinit(gpa);
-    if (builtin.os.tag != .windows) try std.testing.expect(zip.code != 0);
+    if (builtin.target.os.tag != .windows) try std.testing.expect(zip.code != 0);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, &repo, commit, .{ .format = .zip }, &out.writer));

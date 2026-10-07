@@ -7,8 +7,8 @@
 //! line itself.
 
 const std = @import("std");
+const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 
 const transport = @import("../../transport.zig");
 const gitmodules = @import("../../submodule/gitmodules.zig");
@@ -23,10 +23,10 @@ test "CVE-2017-1000117, t5813-proto-disable-ssh 'hostnames starting with dash ar
     defer tmp.cleanup();
     const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(dir);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, dir, '\\', '/');
-    const args = try std.fmt.allocPrint(gpa, "record '{s}/ran'", .{dir});
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, dir, '\\', '/');
+    const args = try gpa.print("record '{s}/ran'", .{dir});
     defer gpa.free(args);
-    const ssh = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, args);
+    const ssh = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), args);
     defer gpa.free(ssh);
     var env = try testgit.programEnviron(gpa);
     defer env.deinit();
@@ -91,14 +91,14 @@ test "CVE-2019-1350, t7416-submodule-dash-url 'trailing backslash is handled cor
         try expected.append(gpa, 0);
     }
     // Directly, as a hook or a helper named by path runs.
-    try argv.appendSlice(gpa, &.{ build_options.process_fixture_path, "args" });
+    try argv.appendSlice(gpa, &.{ suite.path(.process_fixture), "args" });
     try argv.appendSlice(gpa, &tricky);
     var direct = try program.run(.{ .environ = &env }, gpa, io, .{ .argv = argv.items }, "", .{});
     defer direct.deinit(gpa);
     try std.testing.expect(direct.succeeded());
     try std.testing.expectEqualStrings(expected.items, direct.stdout);
     // Through the shell, as a configured command line runs.
-    const line = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "args");
+    const line = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "args");
     defer gpa.free(line);
     argv.clearRetainingCapacity();
     try argv.append(gpa, line);

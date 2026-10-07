@@ -536,11 +536,11 @@ fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store) Allocator.Er
             line = unquoted.items;
         }
         line = std.mem.trimEnd(u8, line, "/");
-        const parent = std.fs.path.dirname(line) orelse continue;
-        const dir = if (std.fs.path.isAbsolute(parent))
-            try std.fmt.allocPrint(arena, "{s}/lfs/objects", .{parent})
+        const parent = std.Io.Dir.path.dirname(line) orelse continue;
+        const dir = if (std.Io.Dir.path.isAbsolute(parent))
+            try arena.print("{s}/lfs/objects", .{parent})
         else
-            try std.fmt.allocPrint(arena, "objects/{s}/lfs/objects", .{parent});
+            try arena.print("objects/{s}/lfs/objects", .{parent});
         const stat = store.base.statFile(io, dir, .{}) catch continue;
         if (stat.kind == .directory) try out.append(arena, dir);
     }
@@ -558,10 +558,10 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
     const object_path = try store.objectPath(&object_buf, &pointer.oid);
     for (references) |dir| {
         var ref_buf: [lfs.Store.max_path]u8 = undefined;
-        const ref_path = std.fmt.bufPrint(&ref_buf, "{s}/{s}/{s}/{s}", .{ dir, pointer.oid[0..2], pointer.oid[2..4], &pointer.oid }) catch continue;
+        const ref_path = std.mem.print(&ref_buf, "{s}/{s}/{s}/{s}", .{ dir, pointer.oid[0..2], pointer.oid[2..4], &pointer.oid }) catch continue;
         const stat = store.base.statFile(io, ref_path, .{}) catch continue;
         if (stat.kind != .file or stat.size != pointer.size) continue;
-        try store.base.createDirPath(io, std.fs.path.dirnamePosix(object_path).?);
+        try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
         if (fs.hardLink(io, store.base, ref_path, object_path)) {
             return true;
         } else |_| {}
@@ -599,7 +599,7 @@ pub const SweepError = Allocator.Error || Io.Dir.OpenError || Io.Dir.Iterator.Er
 /// something is still using. Directories stay.
 pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now: i64) transfer.SweepError!void {
     var path_buf: [lfs.Store.max_path]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&path_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
+    const tmp_path = std.mem.print(&path_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
     var tmp = store.base.openDir(io, tmp_path, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return,
         else => |e| return e,
@@ -622,7 +622,7 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now: i64) trans
                 } else |_| {}
             } else |_| {}
         }
-        if (std.fs.path.dirname(entry.path)) |parent| {
+        if (std.Io.Dir.path.dirname(entry.path)) |parent| {
             const dir_stat = tmp.statFile(io, parent, .{}) catch continue;
             if (now - epochSeconds(dir_stat.mtime) <= hour) continue;
         }
@@ -798,7 +798,7 @@ fn batchChunk(
         };
         if (o.@"error") |e| {
             r.status = .refused;
-            r.message = try std.fmt.allocPrint(arena, "[{d}] {s}", .{ e.code, e.message });
+            r.message = try arena.print("[{d}] {s}", .{ e.code, e.message });
             continue;
         }
         switch (operation) {
@@ -915,7 +915,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
     const scratch = scratch_state.allocator();
     var path_buf: [lfs.Store.max_path]u8 = undefined;
     const upload_path: ?[]const u8 = if (state.operation == .upload)
-        try std.fs.path.join(scratch, &.{ state.store_base, try store.objectPath(&path_buf, &r.oid) })
+        try std.Io.Dir.path.join(scratch, &.{ state.store_base, try store.objectPath(&path_buf, &r.oid) })
     else
         null;
     var request_action: ?custom.Action = null;
@@ -943,7 +943,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
         .action = request_action,
     }, Progress{ .state = state });
     switch (ended) {
-        .failed => |f| return .{ .fail = try std.fmt.allocPrint(state.arena, "[{d}] {s}", .{ f.code, f.message }) },
+        .failed => |f| return .{ .fail = try state.arena.print("[{d}] {s}", .{ f.code, f.message }) },
         .done => |path| {
             if (state.operation == .upload) {
                 const v = verify orelse return .ok;
@@ -952,7 +952,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
             // The agent's file, checked against the object's name on its
             // way into the store, then given up as git-lfs gives it up.
             const named = path orelse return .{ .fail = "the custom transfer named no file" };
-            const full = if (std.fs.path.isAbsolute(named)) named else try std.fs.path.join(scratch, &.{ server.base_path, named });
+            const full = if (std.Io.Dir.path.isAbsolute(named)) named else try std.Io.Dir.path.join(scratch, &.{ server.base_path, named });
             const file = Io.Dir.cwd().openFile(io, full, .{}) catch return .{ .fail = "the custom transfer's file cannot be read" };
             defer {
                 file.close(io);
@@ -1232,11 +1232,11 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     // The download goes into `<lfs>/incomplete`, as git-lfs's does, and a
     // download that breaks off leaves `<oid>.part` there for the next
     // attempt — this operation's or a later one's — to go on from.
-    const incomplete = try std.fmt.allocPrint(scratch, "{s}/incomplete", .{store.root});
+    const incomplete = try scratch.print("{s}/incomplete", .{store.root});
     try store.base.createDirPath(io, incomplete);
-    const part_path = try std.fmt.allocPrint(scratch, "{s}/{s}.part", .{ incomplete, &r.oid });
+    const part_path = try scratch.print("{s}/{s}.part", .{ incomplete, &r.oid });
     var name_buf: [64]u8 = undefined;
-    const temp_path = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ incomplete, fs.tempName(io, &name_buf, "dl-") });
+    const temp_path = try scratch.print("{s}/{s}", .{ incomplete, fs.tempName(io, &name_buf, "dl-") });
     var resumed = true;
     fs.renameWithRetry(io, store.base, part_path, temp_path) catch |err| switch (err) {
         error.FileNotFound => resumed = false,
@@ -1276,7 +1276,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     var digest: [32]u8 = undefined;
     partial.sha.final(&digest);
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable; // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits
+    _ = std.mem.print(&hex, "{x}", .{&digest}) catch unreachable; // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits
     if (!std.mem.eql(u8, &hex, &r.oid)) {
         // A partial file that was not the start of this object: it is
         // thrown away, and the next attempt starts from nothing.
@@ -1288,7 +1288,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
     const object_path = try store.objectPath(&object_buf, &pointer.oid);
     if (try store.contains(io, &pointer)) return .ok;
-    try store.base.createDirPath(io, std.fs.path.dirnamePosix(object_path).?);
+    try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
     try fs.renameWithRetry(io, store.base, temp_path, object_path);
     installed = true;
     return .ok;
@@ -1303,7 +1303,7 @@ fn downloadAccept(state: *Run, scratch: Allocator, href: []const u8) Error!Downl
     const encoding = try state.server.settings.urlGet(scratch, "lfs.transfer", href, "httpdownloadencoding");
     if (encoding == null or encoding.?.len == 0 or std.mem.eql(u8, encoding.?, "gzip")) return .{ .accept = .gzip };
     if (std.mem.eql(u8, encoding.?, "zstd")) return .{ .accept = .zstd };
-    return .{ .fail = try state.dupe(try std.fmt.allocPrint(scratch, "unsupported lfs.transfer.httpDownloadEncoding value \"{s}\": must be \"gzip\" or \"zstd\"", .{encoding.?})) };
+    return .{ .fail = try state.dupe(try scratch.print("unsupported lfs.transfer.httpDownloadEncoding value \"{s}\": must be \"gzip\" or \"zstd\"", .{encoding.?})) };
 }
 
 /// A download's file in `<lfs>/incomplete`, and how far it has come.
@@ -1346,7 +1346,7 @@ const Partial = struct {
         const status = ex.status();
         if (status.class() != .success) {
             p.keep = p.from > 0;
-            const why = try std.fmt.allocPrint(scratch, "HTTP {d} from {s}", .{ @intFromEnum(status), lfsapi.stripQuery(href) });
+            const why = try scratch.print("HTTP {d} from {s}", .{ @backingInt(status), lfsapi.stripQuery(href) });
             if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after_s = ex.retryAfter() } };
             return .{ .retry = .{ .message = try state.dupe(why) } };
         }
@@ -1413,7 +1413,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
         try all.appendSlice(scratch, req.headers);
         // `hashResumed` starts again from a file as long as the object.
         if (attempt_range) assert(partial.from < req.size);
-        if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ partial.from, req.size - 1 }) });
+        if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.mem.print(&range_buf, "bytes={d}-{d}", .{ partial.from, req.size - 1 }) });
         const sent = server.client.send(.{
             .method = .GET,
             .url = req.href,
@@ -1443,7 +1443,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
         if (status == .partial_content) {
             const content_range = sent.header("content-range") orelse "";
             var want_buf: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&want_buf, "bytes {d}-", .{partial.from}) catch unreachable; // unreachable: a u64 is at most 20 digits, 27 bytes with the words around it
+            const want = std.mem.print(&want_buf, "bytes {d}-", .{partial.from}) catch unreachable; // unreachable: a u64 is at most 20 digits, 27 bytes with the words around it
             if (!std.mem.startsWith(u8, content_range, want)) {
                 sent.close();
                 try partial.restart(io);
@@ -1492,7 +1492,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
     ex.close();
     if (status.class() != .success) {
         state.say(.{ .unsent = sent });
-        const why = try state.dupe(try std.fmt.allocPrint(scratch, "HTTP {d} from {s}", .{ @intFromEnum(status), lfsapi.stripQuery(action.href) }));
+        const why = try state.dupe(try scratch.print("HTTP {d} from {s}", .{ @backingInt(status), lfsapi.stripQuery(action.href) }));
         return switch (status) {
             .unprocessable_entity => .{ .fail = why },
             .too_many_requests => .{ .retry = .{ .message = why, .after_s = null } },
@@ -1513,7 +1513,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
         error.InvalidHttpHeader => return .{ .fail = "the server's verify action has a header with a line break in it" },
         error.OutOfMemory => return error.OutOfMemory,
     };
-    const body = try std.fmt.allocPrint(scratch, "{{\"oid\":\"{s}\",\"size\":{d}}}", .{ &r.oid, r.size });
+    const body = try scratch.print("{{\"oid\":\"{s}\",\"size\":{d}}}", .{ &r.oid, r.size });
     var last: []const u8 = "";
     var attempt: u32 = 0;
     while (attempt < state.limits.max_verifies) : (attempt += 1) {
@@ -1535,7 +1535,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
         const status = ex.status();
         ex.close();
         if (status.class() == .success) return .ok;
-        last = try std.fmt.allocPrint(scratch, "verify: HTTP {d}", .{@intFromEnum(status)});
+        last = try scratch.print("verify: HTTP {d}", .{@backingInt(status)});
     }
     return .{ .fail = try state.dupe(last) };
 }
@@ -1661,14 +1661,14 @@ fn sshBatch(a: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, objects: 
     defer conn.mutex.unlock(io);
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(a, &.{ "transfer=ssh", "hash-algo=sha256" });
-    if (ref) |r| try args.append(a, try std.fmt.allocPrint(a, "refname={s}", .{r}));
+    if (ref) |r| try args.append(a, try a.print("refname={s}", .{r}));
     var lines: std.ArrayList([]const u8) = .empty;
-    for (objects) |o| try lines.append(a, try std.fmt.allocPrint(a, "{s} {d}", .{ &o.oid, o.size }));
+    for (objects) |o| try lines.append(a, try a.print("{s} {d}", .{ &o.oid, o.size }));
     conn.sendLines("batch", args.items, lines.items) catch |err| return sshBatchFailed(server, err, "");
     const status = conn.readStatus(a) catch |err| return sshBatchFailed(server, err, "");
     if (status.code != 200) {
         var buf: [512]u8 = undefined;
-        server.client.setMessage(std.fmt.bufPrint(&buf, "batch response: status {d} from server ({s})", .{
+        server.client.setMessage(std.mem.print(&buf, "batch response: status {d} from server ({s})", .{
             status.code,
             if (status.lines.len != 0) status.lines[0] else "no message provided",
         }) catch "batch response");
@@ -1737,7 +1737,7 @@ fn sshBatchFailed(server: *lfsapi.Server, err: lfsssh.Error, said: []const u8) E
         else => {},
     }
     var buf: [512]u8 = undefined;
-    server.client.setMessage(std.fmt.bufPrint(&buf, "batch request: {s}{s}{s}", .{ @errorName(err), if (said.len != 0) ": " else "", said }) catch "batch request");
+    server.client.setMessage(std.mem.print(&buf, "batch request: {s}{s}{s}", .{ @errorName(err), if (said.len != 0) ": " else "", said }) catch "batch request");
     return error.LfsBatchFailed;
 }
 
@@ -1745,9 +1745,9 @@ fn sshBatchFailed(server: *lfsapi.Server, err: lfsssh.Error, said: []const u8) E
 /// request for an object carries.
 fn sshObjectArgs(a: Allocator, r: *const Result, action: Action) Allocator.Error![]const []const u8 {
     var args: std.ArrayList([]const u8) = .empty;
-    try args.append(a, try std.fmt.allocPrint(a, "size={d}", .{r.size}));
-    if (action.id) |v| if (v.len != 0) try args.append(a, try std.fmt.allocPrint(a, "id={s}", .{v}));
-    if (action.token) |v| if (v.len != 0) try args.append(a, try std.fmt.allocPrint(a, "token={s}", .{v}));
+    try args.append(a, try a.print("size={d}", .{r.size}));
+    if (action.id) |v| if (v.len != 0) try args.append(a, try a.print("id={s}", .{v}));
+    if (action.token) |v| if (v.len != 0) try args.append(a, try a.print("token={s}", .{v}));
     return args.items;
 }
 
@@ -1770,7 +1770,7 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
     const conn = t.connection(worker) catch |err| return sshRetry(state, err);
     try conn.mutex.lock(io);
     defer conn.mutex.unlock(io);
-    const command = try std.fmt.allocPrint(scratch, "get-object {s}", .{&r.oid});
+    const command = try scratch.print("get-object {s}", .{&r.oid});
     conn.send(command, try sshObjectArgs(scratch, r, action)) catch |err| return sshRetry(state, err);
     const head = conn.readStatusWithData(scratch) catch |err| return sshRetry(state, err);
     if (head.code < 200 or head.code > 299) {
@@ -1778,7 +1778,7 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
         while (conn.nextData() catch |err| return sshRetry(state, err)) |bytes| {
             if (said.items.len < 1024) try said.appendSlice(scratch, bytes[0..@min(bytes.len, 1024 - said.items.len)]);
         }
-        return .{ .retry = .{ .message = try state.dupe(try std.fmt.allocPrint(scratch, "got status {d} when fetching OID {s}: {s}", .{ head.code, &r.oid, said.items })) } };
+        return .{ .retry = .{ .message = try state.dupe(try scratch.print("got status {d} when fetching OID {s}: {s}", .{ head.code, &r.oid, said.items })) } };
     }
     const size_text = lfsssh.argValue(head.args, "size") orelse {
         conn.skipData() catch |err| return sshRetry(state, err);
@@ -1817,7 +1817,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     defer conn.mutex.unlock(io);
     const args = try sshObjectArgs(scratch, r, action);
     var sent: u64 = 0;
-    const put = try std.fmt.allocPrint(scratch, "put-object {s}", .{&r.oid});
+    const put = try scratch.print("put-object {s}", .{&r.oid});
     {
         conn.beginData(put, args) catch |err| return sshRetry(state, err);
         var chunk: [32 * 1024]u8 = undefined;
@@ -1848,7 +1848,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
         state.say(.{ .unsent = sent });
         // A 403 is likely a token that expired, and a 429 a server that
         // asks for a pause: both are tried again, as git-lfs tries them.
-        const why = try state.dupe(try std.fmt.allocPrint(scratch, "got status {d} when uploading OID {s}{s}{s}", .{
+        const why = try state.dupe(try scratch.print("got status {d} when uploading OID {s}{s}{s}", .{
             status.code,
             &r.oid,
             if (status.lines.len != 0) ": " else "",
@@ -1859,11 +1859,11 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     }
     // git-lfs verifies every upload over ssh, with the upload's own
     // arguments.
-    const verify = try std.fmt.allocPrint(scratch, "verify-object {s}", .{&r.oid});
+    const verify = try scratch.print("verify-object {s}", .{&r.oid});
     conn.send(verify, args) catch |err| return sshRetry(state, err);
     const verified = conn.readStatus(scratch) catch |err| return sshRetry(state, err);
     if (!verified.ok()) {
-        return .{ .fail = try state.dupe(try std.fmt.allocPrint(scratch, "got status {d} when verifying upload OID {s}{s}{s}", .{
+        return .{ .fail = try state.dupe(try scratch.print("got status {d} when verifying upload OID {s}{s}{s}", .{
             verified.code,
             &r.oid,
             if (verified.lines.len != 0) ": " else "",
@@ -2122,7 +2122,7 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
         const since = (now orelse return error.LfsRecentNeedsTime) - refs_days * 86400;
         var listing = try repo.refStore().list(server.gpa, io, "refs/");
         defer listing.deinit();
-        const remote_prefix = try std.fmt.allocPrint(arena, "refs/remotes/{s}/", .{server.remote});
+        const remote_prefix = try arena.print("refs/remotes/{s}/", .{server.remote});
         for (listing.entries) |entry| {
             // git-lfs's pattern takes `refs/<kind>/<name>`: a branch, a
             // tag, a remote's branch.
@@ -2241,7 +2241,7 @@ fn scanTree(arena: Allocator, io: Io, repo: *Repository, tree: Oid, prefix: []co
     defer repo.odb.allocator().free(found.bytes);
     var entries = object_mod.Tree.parse(repo.objectFormat(), found.bytes).iterate();
     while (try entries.next()) |entry| {
-        const path = if (prefix.len == 0) try arena.dupe(u8, entry.name) else try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
+        const path = if (prefix.len == 0) try arena.dupe(u8, entry.name) else try arena.print("{s}/{s}", .{ prefix, entry.name });
         switch (entry.mode) {
             .tree => try scanTree(arena, io, repo, entry.oid, path, out, seen, depth + 1),
             .file, .exec => {
@@ -2274,7 +2274,7 @@ const Resolved = struct { oid: Oid, ref: ?[]const u8 };
 fn resolve(arena: Allocator, io: Io, repo: *Repository, name: []const u8) FetchError!Resolved {
     const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
     inline for (rules) |rule| {
-        const full = try std.fmt.allocPrint(arena, rule, .{name});
+        const full = try arena.print(rule, .{name});
         if (try repo.refStore().resolve(arena, io, full)) |found| return .{ .oid = found.oid, .ref = found.name };
     }
     if (name.len == repo.objectFormat().hexLen()) {
@@ -2363,10 +2363,10 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
 fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable: bool) FetchError!void {
     var name_buf: [64]u8 = undefined;
     const temp_name = fs.tempName(io, &name_buf, ".relic-lfs-");
-    const dir_path = std.fs.path.dirnamePosix(path);
-    var temp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = std.Io.Dir.path.dirnamePosix(path);
+    var temp_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const temp_path = if (dir_path) |d|
-        std.fmt.bufPrint(&temp_path_buf, "{s}/{s}", .{ d, temp_name }) catch return error.NameTooLong
+        std.mem.print(&temp_path_buf, "{s}/{s}", .{ d, temp_name }) catch return error.NameTooLong
     else
         temp_name;
     const out = try wt.createFile(io, temp_path, .{ .exclusive = true, .permissions = fs.permissionsFor(executable) });
@@ -2503,8 +2503,8 @@ test "an ssh batch answer's lines become the objects and actions git-lfs reads f
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const b = "b" ** 64;
-    const c = "c" ** 64;
+    const b = &@as([64]u8, @splat('b'));
+    const c = &@as([64]u8, @splat('c'));
     const got = try parseSshBatch(a, &.{
         c ++ " 3 noop",
         b ++ " 5 download id=x token=y expires-in=60",

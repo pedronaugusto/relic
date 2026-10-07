@@ -181,7 +181,7 @@ test "objects go up and come down over git-lfs-transfer, asked for as git-lfs as
     try expectSame(up[0], up[1]);
     try testing.expect(std.mem.find(u8, up[1][0], "> put-object ") != null);
     try testing.expect(std.mem.find(u8, up[1][0], "> verify-object ") != null);
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         // Git LFS leaves SSH multiplexing off by default on Windows.
         try testing.expect(std.mem.find(u8, up[1][1], "[-oControlMaster=") == null);
     } else {
@@ -270,7 +270,7 @@ test "lfs.sshtransfer=always is the pure-ssh protocol or nothing, and never is g
         var logs: [2][2][]u8 = undefined;
         for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {
             var name_buf: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buf, "{s}-{s}", .{ base, mode });
+            const name = try std.mem.print(&name_buf, "{s}-{s}", .{ base, mode });
             var d = try s.repo(name, &.{.{ "a.bin", content }});
             defer d.close(io);
             try t.emptyStore(s.fx, d);
@@ -379,8 +379,8 @@ test "each transfer worker has its own git-lfs-transfer, sharing the first's ssh
     var names: [6][8]u8 = undefined;
     var contents: [6][32]u8 = undefined;
     for (&files, 0..) |*f, i| {
-        f[0] = try std.fmt.bufPrint(&names[i], "f{d}.bin", .{i});
-        f[1] = try std.fmt.bufPrint(&contents[i], "worker object {d}\n", .{i});
+        f[0] = try std.mem.print(&names[i], "f{d}.bin", .{i});
+        f[1] = try std.mem.print(&contents[i], "worker object {d}\n", .{i});
     }
     {
         var d = try s.repo("seed", &files);
@@ -436,7 +436,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     gpa.free(try testlfs.installProgram(gpa, io, fx.tools, "git-lfs-transfer", server_program));
     const remote_path = try fx.path("served/repo.git");
     defer gpa.free(remote_path);
-    const url = try std.fmt.allocPrint(gpa, "ssh://git@example.invalid:2222{s}{s}", .{ if (builtin.os.tag == .windows) "/" else "", remote_path });
+    const url = try gpa.print("ssh://git@example.invalid:2222{s}{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", remote_path });
     defer gpa.free(url);
     const Point = struct {
         fn at(f: *Fixture, d: Io.Dir, u: []const u8, ssh: []const u8) !void {
@@ -488,7 +488,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
         try fx.gitIn(d, &.{ "lfs", "fetch" });
         const oid = testlfs.sha256Hex(third);
         var path_buf: [128]u8 = undefined;
-        try t.expectFile(fx, d, try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid }), third);
+        try t.expectFile(fx, d, try std.mem.print(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid }), third);
     }
 
     // A lock relic takes git-lfs lists, and one git-lfs takes relic

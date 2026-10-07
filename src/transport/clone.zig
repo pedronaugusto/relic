@@ -270,7 +270,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
 
     // One branch, or one tag, when that is all that is fetched.
     const single_tag: ?[]const u8 = if (single_branch and head.branch == null and head.detached != null and options.branch != null)
-        try std.fmt.allocPrint(arena, "refs/tags/{s}", .{options.branch.?})
+        try arena.print("refs/tags/{s}", .{options.branch.?})
     else
         null;
     try configureRemote(arena, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
@@ -290,7 +290,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     try writeRemoteRefs(io, &repo, chosen.packed_entries.items);
 
     const display = try url_mod.anonymize(arena, target.recorded);
-    const message = try std.fmt.allocPrint(arena, "clone: from {s}", .{display});
+    const message = try arena.print("clone: from {s}", .{display});
     const log: refs_mod.LogMessage = .{ .who = options.who, .message = message, .policy = repo.reflogPolicy() };
     const head_commit = try pointHead(arena, io, &repo, &session, &remote_refs, head.branch, detached, log, options);
     // The remote's own `HEAD`, where it points at a branch, whatever was
@@ -322,7 +322,7 @@ fn moveHelperHead(arena: Allocator, io: Io, repo: *Repository, remote_format: ha
     if (std.mem.eql(u8, initial, default_branch)) return;
     var tx = repo.beginRefs();
     defer tx.deinit(io);
-    try tx.update("HEAD", .{ .symbolic = try std.fmt.allocPrint(arena, "refs/heads/{s}", .{initial}) }, .any);
+    try tx.update("HEAD", .{ .symbolic = try arena.print("refs/heads/{s}", .{initial}) }, .any);
     try tx.commit(io, null);
 }
 
@@ -475,8 +475,8 @@ const Head = struct { branch: ?[]const u8 = null, detached: ?Oid = null };
 /// The branch or tag `branch` names, else what the remote's `HEAD` is.
 fn chooseHead(arena: Allocator, remote_refs: *const protocol.RefList, branch: ?[]const u8) Error!Head {
     if (branch) |name| {
-        const branch_ref = try std.fmt.allocPrint(arena, "refs/heads/{s}", .{name});
-        const tag_ref = try std.fmt.allocPrint(arena, "refs/tags/{s}", .{name});
+        const branch_ref = try arena.print("refs/heads/{s}", .{name});
+        const tag_ref = try arena.print("refs/tags/{s}", .{name});
         if (remote_refs.find(branch_ref) != null) return .{ .branch = branch_ref };
         if (remote_refs.find(tag_ref)) |tag| return .{ .detached = tag.peeled orelse tag.oid };
         return error.RemoteBranchNotFound;
@@ -500,21 +500,21 @@ fn configureRemote(
     options: Options,
 ) Error!void {
     const origin = options.origin;
-    try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.url", .{origin}), .value = recorded } }}, null);
-    if (!options.tags) try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.tagopt", .{origin}), .value = "--no-tags" } }}, null);
+    try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.url", .{origin}), .value = recorded } }}, null);
+    if (!options.tags) try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.tagopt", .{origin}), .value = "--no-tags" } }}, null);
     if (!options.bare) {
         const spec = if (single_branch and head_branch != null)
-            try std.fmt.allocPrint(arena, "+{s}:refs/remotes/{s}/{s}", .{ head_branch.?, origin, head_branch.?["refs/heads/".len..] })
+            try arena.print("+{s}:refs/remotes/{s}/{s}", .{ head_branch.?, origin, head_branch.?["refs/heads/".len..] })
         else if (single_tag) |tag|
-            try std.fmt.allocPrint(arena, "+{s}:{s}", .{ tag, tag })
+            try arena.print("+{s}:{s}", .{ tag, tag })
         else
             try remote_mod.defaultFetchRefspec(arena, origin);
-        try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{origin}), .value = spec } }}, null);
+        try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.fetch", .{origin}), .value = spec } }}, null);
     }
     if (filter_spec) |spec| {
         try repo.editConfig(&.{.{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } }}, null);
-        try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.promisor", .{origin}), .value = "true" } }}, null);
-        try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{origin}), .value = spec } }}, null);
+        try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.promisor", .{origin}), .value = "true" } }}, null);
+        try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.partialclonefilter", .{origin}), .value = spec } }}, null);
     }
 }
 
@@ -569,7 +569,7 @@ fn chooseRefs(arena: Allocator, remote_refs: []const protocol.RemoteRef, head: H
         try c.wants.append(arena, ref.oid);
         try c.want_names.append(arena, ref.name);
         const local_name = if (is_branch and !options.bare)
-            try std.fmt.allocPrint(arena, "refs/remotes/{s}/{s}", .{ options.origin, ref.name["refs/heads/".len..] })
+            try arena.print("refs/remotes/{s}/{s}", .{ options.origin, ref.name["refs/heads/".len..] })
         else
             try arena.dupe(u8, ref.name);
         if (!safepath.isValidRefName(local_name)) continue;
@@ -608,7 +608,7 @@ fn checkCloned(gpa: Allocator, io: Io, repo: *Repository, pack_dir: Io.Dir, pack
     if (pack_name) |name| {
         var hex: [hash.max_hex_len]u8 = undefined;
         var idx_buf: [96]u8 = undefined;
-        const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
+        const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
         fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     }
     const connected = if (fresh) |*index|
@@ -644,8 +644,8 @@ fn pointHead(
         try tx.commit(io, log);
         if (!options.bare) {
             const short = branch["refs/heads/".len..];
-            try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "branch.{s}.remote", .{short}), .value = options.origin } }}, null);
-            try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "branch.{s}.merge", .{short}), .value = branch } }}, null);
+            try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("branch.{s}.remote", .{short}), .value = options.origin } }}, null);
+            try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("branch.{s}.merge", .{short}), .value = branch } }}, null);
         }
         return value;
     }
@@ -677,8 +677,8 @@ fn followRemoteHead(
     if (!std.mem.startsWith(u8, target, "refs/heads/") or remote_refs.find(target) == null or !fetched_target) return;
     var tx = repo.beginRefs();
     defer tx.deinit(io);
-    const local_head = try std.fmt.allocPrint(arena, "refs/remotes/{s}/HEAD", .{origin});
-    const local_target = try std.fmt.allocPrint(arena, "refs/remotes/{s}/{s}", .{ origin, target["refs/heads/".len..] });
+    const local_head = try arena.print("refs/remotes/{s}/HEAD", .{origin});
+    const local_target = try arena.print("refs/remotes/{s}/{s}", .{ origin, target["refs/heads/".len..] });
     try tx.update(local_head, .{ .symbolic = local_target }, .must_not_exist);
     try tx.commit(io, log);
 }
@@ -735,7 +735,7 @@ fn lazyFailed(err: anyerror) Error {
 fn refspecNameOk(name: []const u8) bool {
     if (name.len == 0) return false;
     var buf: [512]u8 = undefined;
-    const probe = std.fmt.bufPrint(&buf, "refs/remotes/{s}/x", .{name}) catch return false;
+    const probe = std.mem.print(&buf, "refs/remotes/{s}/x", .{name}) catch return false;
     return refspec.checkRefFormat(probe, .{});
 }
 
@@ -817,9 +817,9 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
 /// other after the working directory and a slash. git's working directory
 /// on Windows is written with forward slashes.
 fn absolutePathAsGit(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return path;
+    if (std.Io.Dir.path.isAbsolute(path)) return path;
     const cwd = try Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, cwd, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, cwd, '\\', '/');
     const sep: []const u8 = if (cwd.len != 0 and (cwd[cwd.len - 1] == '/' or cwd[cwd.len - 1] == '\\')) "" else "/";
     return std.mem.concat(arena, u8, &.{ cwd, sep, path });
 }
@@ -893,7 +893,7 @@ const Twin = struct {
         const dir = try tmp.dir.openDir(io, "clone", .{ .iterate = true });
         const base = try testremote.absolutePath(gpa, io, tmp.dir);
         defer gpa.free(base);
-        return .{ .tmp = tmp, .path = try std.fmt.allocPrint(gpa, "{s}/clone", .{base}), .dir = dir };
+        return .{ .tmp = tmp, .path = try gpa.print("{s}/clone", .{base}), .dir = dir };
     }
 
     fn deinit(t: *Twin, gpa: Allocator, io: Io) void {
@@ -967,7 +967,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     for (0..32) |i| {
         var name_buf: [32]u8 = undefined;
         var body_buf: [32]u8 = undefined;
-        try source.writeFile(io, try std.fmt.bufPrint(&name_buf, "many/{d}.txt", .{i}), try std.fmt.bufPrint(&body_buf, "file {d}\n", .{i}));
+        try source.writeFile(io, try std.mem.print(&name_buf, "many/{d}.txt", .{i}), try std.mem.print(&body_buf, "file {d}\n", .{i}));
     }
     try source.exec(io, &.{ "add", "-A" });
     try source.exec(io, &.{ "commit", "-q", "-m", "many" });
@@ -1047,7 +1047,7 @@ test "a clone over ssh and over HTTP is the clone git makes" {
         defer gpa.free(source_path);
         const root_path = try testremote.absolutePath(gpa, io, root.dir);
         defer gpa.free(root_path);
-        const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+        const bare = try gpa.print("{s}/repo.git", .{root_path});
         defer gpa.free(bare);
         try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
     }
@@ -1061,8 +1061,8 @@ test "a clone over ssh and over HTTP is the clone git makes" {
     defer gpa.free(root_path);
     const ssh_path = try gpa.dupe(u8, root_path);
     defer gpa.free(ssh_path);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
-    const ssh_url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.os.tag == .windows) "/" else "", ssh_path });
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+    const ssh_url = try gpa.print("ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path });
     defer gpa.free(ssh_url);
 
     var settings_text: std.ArrayList(u8) = .empty;
@@ -1070,7 +1070,7 @@ test "a clone over ssh and over HTTP is the clone git makes" {
     try settings_text.print(gpa, "[core]\nsshCommand = {s}\n", .{fake});
     var settings = try config_mod.Config.parseText(gpa, settings_text.items, .command);
     defer settings.deinit();
-    const ssh_setting = try std.fmt.allocPrint(gpa, "core.sshCommand={s}", .{fake});
+    const ssh_setting = try gpa.print("core.sshCommand={s}", .{fake});
     defer gpa.free(ssh_setting);
 
     for ([_][]const u8{ http_url, ssh_url }) |url| {

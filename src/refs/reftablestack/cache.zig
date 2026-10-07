@@ -323,7 +323,7 @@ fn logOrder(_: void, a: reftable.LogRecord, b: reftable.LogRecord) bool {
 /// anything else ending `.ref` without a slash, which it also reads.
 fn isTableName(name: []const u8) bool {
     if (!std.mem.endsWith(u8, name, ".ref")) return false;
-    if (std.mem.indexOfAny(u8, name, "/\\") != null) return false;
+    if (std.mem.findAny(u8, name, "/\\") != null) return false;
     if (std.mem.eql(u8, name, ".ref") or name[0] == '.') return false;
     return true;
 }
@@ -332,7 +332,7 @@ fn isTableName(name: []const u8) bool {
 fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) []const u8 {
     var random: [4]u8 = undefined;
     io.random(&random);
-    return std.fmt.bufPrint(buf, "0x{x:0>12}-0x{x:0>12}-{x:0>8}.ref", .{
+    return std.mem.print(buf, "0x{x:0>12}-0x{x:0>12}-{x:0>8}.ref", .{
         min,
         max,
         std.mem.readInt(u32, &random, .little),

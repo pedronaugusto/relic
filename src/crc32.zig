@@ -12,8 +12,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const hardware = builtin.cpu.arch == .aarch64 and
-    std.Target.aarch64.featureSetHas(builtin.cpu.features, .crc);
+const hardware = builtin.target.cpu.arch == .aarch64 and
+    std.Target.aarch64.featureSetHas(builtin.target.cpu.features, .crc);
 
 const tables = blk: {
     @setEvalBranchQuota(100_000);

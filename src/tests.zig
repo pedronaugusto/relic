@@ -44,8 +44,8 @@ test {
     // Every module the API reaches, one level down as well as at the top,
     // so that every file under the root is compiled and its tests run.
     std.testing.refAllDecls(relic);
-    inline for (@typeInfo(relic).@"struct".decls) |decl| {
-        std.testing.refAllDecls(@field(relic, decl.name));
+    inline for (@typeInfo(relic).@"struct".decl_names) |name| {
+        std.testing.refAllDecls(@field(relic, name));
     }
     if (builtin.is_test) {
         // the plumbing the API keeps to itself: reached by no public name,
@@ -58,6 +58,9 @@ test {
         _ = @import("lfs/timetext.zig");
         _ = @import("lfs/mimesniff.zig");
         _ = @import("testing/git.zig");
+        _ = @import("testing/allocation.zig");
+        _ = @import("testing/bytes.zig");
+        _ = @import("testing/helpers.zig");
         _ = @import("testing/fixtures.zig");
         _ = @import("odb/accelerators_test.zig");
         _ = @import("worktree_test.zig");

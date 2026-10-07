@@ -186,7 +186,7 @@ pub const Oid = struct {
     pub const MapContext = struct {
         /// The map's hash of a name: the raw digest, seeded with the kind.
         pub fn hash(_: Oid.MapContext, oid: Oid) u64 {
-            var h: std.hash.Wyhash = .init(@intFromEnum(oid.kind));
+            var h: std.hash.Wyhash = .init(@backingInt(oid.kind));
             h.update(oid.raw());
             return h.final();
         }
@@ -364,7 +364,7 @@ test "oid parse and format round trip" {
     try std.testing.expect(!oid.isZero());
     try std.testing.expect(Oid.zero(.sha1).isZero());
     try std.testing.expectError(error.InvalidLength, Oid.parse(.sha256, hex));
-    try std.testing.expectError(error.InvalidCharacter, Oid.parse(.sha1, "z" ** 40));
+    try std.testing.expectError(error.InvalidCharacter, Oid.parse(.sha1, &@as([40]u8, @splat('z'))));
 }
 
 test "the empty blob has the name git gives it" {

@@ -122,7 +122,7 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
         // that made it is still open: without this every sample would be the
         // time the file was created and the answer would be of nothing.
         // A write whose time cannot be put on the file is a sample not taken.
-        if (builtin.os.tag == .windows) file.sync(io) catch break;
+        if (builtin.target.os.tag == .windows) file.sync(io) catch break;
         const s = file.stat(io) catch break;
         const nsec: u64 = @intCast(@mod(s.mtime.toNanoseconds(), std.time.ns_per_s));
         divisor = std.math.gcd(divisor, nsec);
@@ -300,7 +300,7 @@ pub fn isExecutable(p: Io.File.Permissions) bool {
 /// another thread creates in that moment is made without it. Windows has
 /// no umask, and git there reads zero.
 pub fn processUmask() u32 {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .windows => return 0,
         .linux => if (!builtin.link_libc) {
             const linux = std.os.linux;
@@ -321,7 +321,7 @@ pub fn processUmask() u32 {
 /// the index's mode is what carries the truth.
 pub fn permissionsFor(executable: bool) Io.File.Permissions {
     if (!Io.File.Permissions.has_executable_bit) return .default_file;
-    return @enumFromInt(@as(std.posix.mode_t, if (executable) 0o777 else 0o666));
+    return @fromBackingInt(@intCast(@as(std.posix.mode_t, if (executable) 0o777 else 0o666)));
 }
 
 /// Whether directory entries are made durable after a rename.
@@ -340,7 +340,7 @@ pub const sync_directories_default = false;
 /// On Linux `dir` must have been opened with `iterate = true`: otherwise
 /// Zig uses `O_PATH`, whose handle cannot be synced.
 pub fn syncDir(io: Io, dir: Io.Dir) Io.File.SyncError!void {
-    if (builtin.os.tag == .windows) return;
+    if (builtin.target.os.tag == .windows) return;
     const as_file: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
     as_file.sync(io) catch |err| switch (err) {
         // A filesystem that refuses to sync a directory handle is not one
@@ -454,7 +454,7 @@ pub const LockFile = struct {
         buffer: []u8,
         options: Options,
     ) (LockError || Allocator.Error)!LockFile {
-        const lock_name = try std.fmt.allocPrint(gpa, "{s}.lock", .{sub_path});
+        const lock_name = try gpa.print("{s}.lock", .{sub_path});
         errdefer gpa.free(lock_name);
 
         const file = try createExclusive(io, dir, lock_name, options.on_contention);
@@ -468,7 +468,7 @@ pub const LockFile = struct {
         if (options.write_pid) {
             var text: [32]u8 = undefined;
             // unreachable: a u32 pid is at most ten digits
-            const line = std.fmt.bufPrint(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
+            const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
             // Only a name for a report: a lock that could not say it is
             // still the lock.
             if (file.writePositionalAll(io, line, 0)) |_| {
@@ -517,12 +517,12 @@ pub const LockFile = struct {
             lock.dir.deleteFile(io, lock.lock_name) catch {};
             return err;
         };
-        if (lock.sync_directory and builtin.os.tag != .windows) {
+        if (lock.sync_directory and builtin.target.os.tag != .windows) {
             // `target` may be refs/heads/main relative to the repository:
             // it is heads, not the repository directory, that was changed.
             // Linux's non-iterable directory handles use O_PATH, which
             // fsync cannot use. Open for reading even when this is `dir`.
-            const parent = std.fs.path.dirname(lock.target) orelse ".";
+            const parent = std.Io.Dir.path.dirname(lock.target) orelse ".";
             const dir = try lock.dir.openDir(io, parent, .{ .iterate = true });
             defer dir.close(io);
             try syncDir(io, dir);
@@ -564,7 +564,7 @@ fn createExclusive(
             // an indexer or a scanner holds the file between the write and
             // the rename. Two independent implementations settled on the
             // same answer: retry briefly.
-            error.AccessDenied, error.PermissionDenied => if (builtin.os.tag != .windows) return err,
+            error.AccessDenied, error.PermissionDenied => if (builtin.target.os.tag != .windows) return err,
             else => return err,
         }
         if (waited >= deadline_ms) return error.LockHeld;
@@ -603,7 +603,7 @@ test "the backoff grows as git's does, by squares to a second, with spread" {
 /// rename, and ten attempts at five milliseconds apart is what the field has
 /// settled on. Elsewhere the first attempt is the only one.
 pub fn renameWithRetry(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         return dir.rename(old_name, dir, new_name, io);
     }
     var attempts: u8 = 0;
@@ -634,7 +634,7 @@ pub fn renameWithRetry(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []co
 /// did. Elsewhere a file's own write bits do not stop either, and this does
 /// nothing.
 fn clearReadOnly(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
-    if (builtin.os.tag != .windows) return false;
+    if (builtin.target.os.tag != .windows) return false;
     const st = dir.statFile(io, sub_path, .{}) catch return false;
     if (!isReadOnly(st.permissions)) return false;
     setFilePermissions(io, dir, sub_path, withReadOnly(st.permissions, false)) catch return false;
@@ -645,7 +645,7 @@ fn clearReadOnly(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
 /// read-only attribute. The standard library's own test for it does not
 /// compile for Windows in 0.16.
 pub fn isReadOnly(p: Io.File.Permissions) bool {
-    if (builtin.os.tag == .windows) return @intFromEnum(p) & 1 != 0;
+    if (builtin.target.os.tag == .windows) return @backingInt(p) & 1 != 0;
     if (!Io.File.Permissions.has_executable_bit) return false;
     return p.toMode() & 0o222 == 0;
 }
@@ -654,13 +654,13 @@ pub fn isReadOnly(p: Io.File.Permissions) bool {
 /// two moves for a lockable file — or Windows's read-only attribute set or
 /// cleared.
 pub fn withReadOnly(p: Io.File.Permissions, read_only: bool) Io.File.Permissions {
-    if (builtin.os.tag == .windows) {
-        const attributes: u32 = @intFromEnum(p);
-        if (read_only) return @enumFromInt(attributes | 1);
+    if (builtin.target.os.tag == .windows) {
+        const attributes: u32 = @backingInt(p);
+        if (read_only) return @fromBackingInt(@intCast(attributes | 1));
         // No attributes at all is written as `FILE_ATTRIBUTE_NORMAL`: to
         // `NtSetInformationFile` a zero means "leave them as they are".
         const cleared = attributes & ~@as(u32, 1);
-        return @enumFromInt(if (cleared == 0) 0x80 else cleared);
+        return @fromBackingInt(@intCast(if (cleared == 0) 0x80 else cleared));
     }
     if (!Io.File.Permissions.has_executable_bit) return p;
     const mode = p.toMode();
@@ -768,7 +768,7 @@ pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) v
         new |= (new & 0o444) >> 2;
         if (new & 0o060 != 0) new |= 0o2000;
     }
-    if (new != old) dir.setFilePermissions(io, sub_path, @enumFromInt(@as(std.posix.mode_t, @intCast(new))), .{}) catch return;
+    if (new != old) dir.setFilePermissions(io, sub_path, @fromBackingInt(@intCast(@as(std.posix.mode_t, @intCast(new)))), .{}) catch return;
 }
 
 /// A file git writes read-only into `objects` — a loose object, a pack and
@@ -778,7 +778,7 @@ pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) v
 pub fn readOnlyObject(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) void {
     if (!Io.File.Permissions.has_executable_bit) return;
     const mode: u32 = 0o444 & ~processUmask();
-    dir.setFilePermissions(io, sub_path, @enumFromInt(@as(std.posix.mode_t, @intCast(mode))), .{}) catch return;
+    dir.setFilePermissions(io, sub_path, @fromBackingInt(@intCast(@as(std.posix.mode_t, @intCast(mode)))), .{}) catch return;
     adjustShared(io, dir, sub_path, shared);
 }
 
@@ -789,7 +789,7 @@ pub fn makeDirs(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Io.Di
     if (shared == .umask) return dir.createDirPath(io, sub_path);
     var end: usize = 0;
     while (end < sub_path.len) {
-        end = std.mem.indexOfAnyPos(u8, sub_path, end + 1, "/\\") orelse sub_path.len;
+        end = std.mem.findAnyPos(u8, sub_path, end + 1, "/\\") orelse sub_path.len;
         const part = sub_path[0..end];
         if (dir.createDir(io, part, .default_dir)) |_| {
             adjustShared(io, dir, part, shared);
@@ -801,21 +801,21 @@ pub fn makeDirs(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Io.Di
 }
 
 /// `Dir.setFilePermissions`, on Windows as well, where the standard
-/// library's has no implementation in 0.16: there the file's attributes are
+/// library's has no implementation in 0.17: there the file's attributes are
 /// written through a handle opened for nothing else, which Windows grants
 /// on a read-only file too.
 pub fn setFilePermissions(io: Io, dir: Io.Dir, sub_path: []const u8, permissions: Io.File.Permissions) Io.Dir.SetFilePermissionsError!void {
-    if (builtin.os.tag != .windows) return dir.setFilePermissions(io, sub_path, permissions, .{});
+    if (builtin.target.os.tag != .windows) return dir.setFilePermissions(io, sub_path, permissions, .{});
     const file = try openAttributesWindows(dir, sub_path);
     defer file.close(io);
     try file.setPermissions(io, permissions);
 }
 
 /// `Dir.setTimestamps`, on Windows as well, where the standard library's
-/// has no implementation in 0.16: there the times are written through a
+/// has no implementation in 0.17: there the times are written through a
 /// handle opened for nothing else.
 pub fn setTimestamps(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File.SetTimestampsOptions) (Io.Dir.SetTimestampsError || error{FileNotFound})!void {
-    if (builtin.os.tag != .windows) return dir.setTimestamps(io, sub_path, .{
+    if (builtin.target.os.tag != .windows) return dir.setTimestamps(io, sub_path, .{
         .access_timestamp = options.access_timestamp,
         .modify_timestamp = options.modify_timestamp,
     });
@@ -824,17 +824,17 @@ pub fn setTimestamps(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File
     try file.setTimestamps(io, options);
 }
 
-/// Link two paths in a directory. Zig 0.16's threaded I/O has no Windows
+/// Link two paths in a directory. Zig 0.17's threaded I/O has no Windows
 /// implementation of `Dir.hardLink`, although the filesystem supports it.
 pub fn hardLink(io: Io, dir: Io.Dir, old_path: []const u8, new_path: []const u8) !void {
-    if (builtin.os.tag != .windows) return dir.hardLink(old_path, dir, new_path, io, .{});
+    if (builtin.target.os.tag != .windows) return dir.hardLink(old_path, dir, new_path, io, .{});
     var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try dir.realPath(io, &root_buf);
     const root = root_buf[0..root_len];
     var old_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     var new_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-    const old_absolute = if (std.fs.path.isAbsolute(old_path)) old_path else try std.fmt.bufPrint(&old_buf, "{s}/{s}", .{ root, old_path });
-    const new_absolute = if (std.fs.path.isAbsolute(new_path)) new_path else try std.fmt.bufPrint(&new_buf, "{s}/{s}", .{ root, new_path });
+    const old_absolute = if (std.Io.Dir.path.isAbsolute(old_path)) old_path else try std.mem.print(&old_buf, "{s}/{s}", .{ root, old_path });
+    const new_absolute = if (std.Io.Dir.path.isAbsolute(new_path)) new_path else try std.mem.print(&new_buf, "{s}/{s}", .{ root, new_path });
     const old_w = try Io.Threaded.sliceToPrefixedFileW(null, old_absolute, .{});
     const new_w = try Io.Threaded.sliceToPrefixedFileW(null, new_absolute, .{});
     if (!CreateHardLinkW(new_w.span().ptr, old_w.span().ptr, null).toBool()) return error.OperationUnsupported;
@@ -852,7 +852,7 @@ extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]co
 /// beyond Linux -- nothing is, and a caller that trusts its paths there
 /// opens with `OpenOptions.ownership = .trust`.
 pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .windows => return ownedWindows(io, dir, sub_path, home),
         .wasi => return false,
         else => {
@@ -860,7 +860,7 @@ pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]co
                 .found => |f| f,
                 .absent, .unavailable => return false,
             };
-            const euid: u32 = switch (builtin.os.tag) {
+            const euid: u32 = switch (builtin.target.os.tag) {
                 .linux => std.os.linux.geteuid(),
                 else => if (builtin.link_libc) std.c.geteuid() else return false,
             };
@@ -895,7 +895,7 @@ fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bo
     const path = if (std.mem.eql(u8, sub_path, "."))
         root_buf[0..root_len]
     else
-        std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ root_buf[0..root_len], sub_path }) catch return false;
+        std.mem.print(&path_buf, "{s}\\{s}", .{ root_buf[0..root_len], sub_path }) catch return false;
     if (home) |h| if (std.ascii.eqlIgnoreCase(h, path)) return true;
     var wide_buf: [Io.Dir.max_path_bytes]u16 = undefined;
     const wide_len = std.unicode.wtf8ToWtf16Le(&wide_buf, path) catch return false;
@@ -996,7 +996,7 @@ pub const StaleReport = struct {
 /// lock it did not take, whatever the report says.
 pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
     var name_buf: [512]u8 = undefined;
-    const lock_name = std.fmt.bufPrint(&name_buf, "{s}.lock", .{sub_path}) catch return .{ .held = false, .pid = null, .holder_alive = null };
+    const lock_name = std.mem.print(&name_buf, "{s}.lock", .{sub_path}) catch return .{ .held = false, .pid = null, .holder_alive = null };
     dir.access(io, lock_name, .{}) catch return .{ .held = false, .pid = null, .holder_alive = null };
 
     // The lock's own first bytes while it is held: `pid <n>`.
@@ -1005,7 +1005,7 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
     comptime assert(contents.len >= "pid 4294967295\n".len);
     const text = dir.readFile(io, lock_name, &contents) catch
         return .{ .held = true, .pid = null, .holder_alive = null };
-    const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+    const line = text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
     if (!std.mem.startsWith(u8, line, "pid ")) return .{ .held = true, .pid = null, .holder_alive = null };
     const pid = std.fmt.parseInt(u32, line[4..], 10) catch
         return .{ .held = true, .pid = null, .holder_alive = null };
@@ -1013,7 +1013,7 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
 }
 
 fn currentPid() u32 {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .windows => std.os.windows.GetCurrentProcessId(),
         .wasi => 0,
         else => @intCast(std.posix.system.getpid()),
@@ -1021,7 +1021,7 @@ fn currentPid() u32 {
 }
 
 test "currentPid uses the host process API" {
-    const expected: u32 = switch (builtin.os.tag) {
+    const expected: u32 = switch (builtin.target.os.tag) {
         .windows => std.os.windows.GetCurrentProcessId(),
         .wasi => 0,
         else => @intCast(std.posix.system.getpid()),
@@ -1091,9 +1091,9 @@ pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     assert(buf.len >= prefix.len + hex.len);
     io.random(&raw);
     // unreachable: twelve bytes are twenty-four hex digits
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&raw}) catch unreachable;
+    _ = std.mem.print(&hex, "{x}", .{&raw}) catch unreachable;
     // unreachable: the caller's buffer holds the prefix and the digits, asserted above
-    return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;
+    return std.mem.print(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;
 }
 
 /// Errors from reading a file whose length is already known.
@@ -1313,7 +1313,7 @@ test "a lock is refused, not broken, and says who holds it" {
     );
     const report = staleReport(io, dir, "thing");
     try std.testing.expect(report.held);
-    if (builtin.os.tag != .wasi) try std.testing.expectEqual(@as(?u32, currentPid()), report.pid);
+    if (builtin.target.os.tag != .wasi) try std.testing.expectEqual(@as(?u32, currentPid()), report.pid);
     if (report.holder_alive) |alive| try std.testing.expect(alive);
 
     try lock.writer().writeAll("new\n");
@@ -1407,7 +1407,7 @@ test "a lock syncs the target's directory after rename only when asked" {
                 defer lock.deinit(io);
                 try lock.writer().writeAll("new\n");
                 try lock.commit(io);
-                const expected_dirs: usize = if (sync_directory and builtin.os.tag != .windows) 1 else 0;
+                const expected_dirs: usize = if (sync_directory and builtin.target.os.tag != .windows) 1 else 0;
                 try std.testing.expectEqual(expected_dirs, Counting.directories);
                 try std.testing.expectEqual(@as(usize, if (sync == .none) 0 else 1), Counting.files);
                 try std.testing.expect(Counting.correct_parent);

@@ -5,6 +5,7 @@
 //! helper's private refs and its marks agree.
 
 const std = @import("std");
+const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -19,7 +20,6 @@ const push_mod = @import("push.zig");
 const transport = @import("../transport.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
-const build_options = @import("build_options");
 const program = @import("../repo/program.zig");
 
 const Repository = repo_mod.Repository;
@@ -38,10 +38,10 @@ const Helpers = struct {
         var bin = std.testing.tmpDir(.{});
         errdefer bin.cleanup();
         for ([_][]const u8{ "git-remote-testgit", "git-remote-testfetch" }) |name| {
-            const exe = if (builtin.os.tag == .windows) try std.fmt.allocPrint(gpa, "{s}.exe", .{name}) else try gpa.dupe(u8, name);
+            const exe = if (builtin.target.os.tag == .windows) try gpa.print("{s}.exe", .{name}) else try gpa.dupe(u8, name);
             defer gpa.free(exe);
-            try Io.Dir.cwd().copyFile(build_options.remote_helper_path, bin.dir, exe, io, .{});
-            if (builtin.os.tag != .windows) {
+            try Io.Dir.cwd().copyFile(suite.path(.remote_helper), bin.dir, exe, io, .{});
+            if (builtin.target.os.tag != .windows) {
                 const file = try bin.dir.openFile(io, exe, .{});
                 defer file.close(io);
                 try file.setPermissions(io, .fromMode(0o755));
@@ -53,7 +53,7 @@ const Helpers = struct {
         defer gpa.free(exec_path);
         var environ = try testremote.environ(gpa);
         errdefer environ.deinit();
-        const sep = [_]u8{std.fs.path.delimiter};
+        const sep = [_]u8{std.Io.Dir.path.delimiter};
         const path = try std.mem.concat(gpa, u8, &.{ bin_path, &sep, exec_path, &sep, environ.get("PATH").? });
         errdefer gpa.free(path);
         try environ.put("PATH", path);
@@ -102,7 +102,7 @@ fn commitIn(gpa: Allocator, io: Io, scratch: *testgit.Repo, dir: []const u8, sec
     const saved = scratch.environ;
     scratch.environ = &env;
     defer scratch.environ = saved;
-    const path = try std.fs.path.join(gpa, &.{ dir, file });
+    const path = try std.Io.Dir.path.join(gpa, &.{ dir, file });
     defer gpa.free(path);
     try scratch.writeFile(io, path, file);
     try scratch.exec(io, &.{ "-C", dir, "add", file });
@@ -130,7 +130,7 @@ fn pathOf(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
     const real = try dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(real);
     const p = try gpa.dupe(u8, real);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, p, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, p, '\\', '/');
     return p;
 }
 
@@ -153,9 +153,9 @@ test "clone, fetch and push through a helper's import and export as git does, it
     defer gpa.free(theirs_path);
     const mine_path = try pathOf(gpa, io, mine_remote.dir);
     defer gpa.free(mine_path);
-    const theirs_url = try std.fmt.allocPrint(gpa, "testgit::{s}", .{theirs_path});
+    const theirs_url = try gpa.print("testgit::{s}", .{theirs_path});
     defer gpa.free(theirs_url);
-    const mine_url = try std.fmt.allocPrint(gpa, "testgit::{s}", .{mine_path});
+    const mine_url = try gpa.print("testgit::{s}", .{mine_path});
     defer gpa.free(mine_url);
 
     try scratch.exec(io, &.{ "clone", "-q", theirs_url, "theirs" });
@@ -221,16 +221,16 @@ test "clone and push through a helper's fetch and push, and a connect helper's c
     var config = try config_mod.Config.parseText(gpa, "[protocol \"ext\"]\n\tallow = always\n", .command);
     defer config.deinit();
     const urls = [_][]const u8{
-        try std.fmt.allocPrint(gpa, "testfetch::{s}", .{remote_path}),
-        try std.fmt.allocPrint(gpa, "ext::git %s {s}", .{remote_path}),
+        try gpa.print("testfetch::{s}", .{remote_path}),
+        try gpa.print("ext::git %s {s}", .{remote_path}),
     };
     defer for (urls) |u| gpa.free(u);
     // `git-remote-ext` is a git builtin, on `PATH` only where git installs
     // its dashed names — not every Git for Windows does.
     const exec_path = try scratch.line(io, &.{"--exec-path"});
     defer gpa.free(exec_path);
-    const ext_name = if (builtin.os.tag == .windows) "git-remote-ext.exe" else "git-remote-ext";
-    const ext_path = try std.fs.path.join(gpa, &.{ exec_path, ext_name });
+    const ext_name = if (builtin.target.os.tag == .windows) "git-remote-ext.exe" else "git-remote-ext";
+    const ext_path = try std.Io.Dir.path.join(gpa, &.{ exec_path, ext_name });
     defer gpa.free(ext_path);
     const have_ext = if (Io.Dir.cwd().access(io, ext_path, .{})) |_| true else |_| false;
     for (urls, 0..) |url, i| {

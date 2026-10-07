@@ -73,16 +73,16 @@ pub fn main(init: std.process.Init) !void {
     }
     var implementation = try gantry.Graph.fromEdges(a, graph.paths(), implementation_edges.items);
     defer implementation.deinit();
-    const implementation_findings = try implementation.check(a, .{
+    var implementation_findings = try implementation.check(a, .{
         .ordered = &.{.{ .name = "layers", .layers = declared.layers }},
         .no_cycles = "cycles",
     });
-    defer a.free(implementation_findings);
-    for (implementation_findings) |finding| {
+    defer implementation_findings.deinit();
+    for (implementation_findings.items()) |finding| {
         if (finding.edge) |edge| try report("imports: {s}: {s} -> {s} ({s})\n", init.io, .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
     }
-    const findings = try graph.check(a, rules);
-    defer a.free(findings);
+    var findings = try graph.check(a, rules);
+    defer findings.deinit();
     for (graph.paths()) |path| {
         var owners: usize = 0;
         for (declared.required) |source| if (std.mem.eql(u8, path, source)) {
@@ -98,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     for (graph.unread()) |path| try report("imports: {s}: unread\n", init.io, .{path});
-    for (findings) |finding| {
+    for (findings.items()) |finding| {
         if (finding.edge) |edge| {
             try report("imports: {s}: {s} -> {s} ({s})\n", init.io, .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
         } else if (finding.reference) |ref| {
@@ -107,5 +107,5 @@ pub fn main(init: std.process.Init) !void {
             try report("imports: {s}: {s}:{d}:{d}: {t} \"{f}\"\n", init.io, .{ finding.rule, token.path, token.line, token.column, token.kind, std.zig.fmtString(token.text) });
         } else if (finding.path) |path| try report("imports: {s}: {s}\n", init.io, .{ finding.rule, path });
     }
-    if (graph.unread().len != 0 or findings.len != 0 or implementation_findings.len != 0) return error.ImportBoundary;
+    if (graph.unread().len != 0 or findings.items().len != 0 or implementation_findings.items().len != 0) return error.ImportBoundary;
 }

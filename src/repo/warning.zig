@@ -58,19 +58,19 @@ pub const Warning = union(enum) {
     /// The result is `arena`'s.
     pub fn message(w: Warning, arena: Allocator) Allocator.Error![]const u8 {
         return switch (w) {
-            .ignored_for_local => |option| std.fmt.allocPrint(arena, "{s} is ignored in local clones; use file:// instead.", .{option}),
+            .ignored_for_local => |option| arena.print("{s} is ignored in local clones; use file:// instead.", .{option}),
             .filter_not_supported => "filtering not recognized by server, ignoring",
-            .ssl_verify_disabled => |setting| std.fmt.allocPrint(arena, "the server's certificate is not checked ({s})", .{setting}),
+            .ssl_verify_disabled => |setting| arena.print("the server's certificate is not checked ({s})", .{setting}),
             .ssh_said => |text| text,
-            .shallow_update_rejected => |name| std.fmt.allocPrint(arena, "rejected {s} because shallow roots are not allowed to be updated", .{name}),
-            .proxy_auth_method_unknown => |name| std.fmt.allocPrint(arena, "unsupported proxy authentication method {s}: using anyauth", .{name}),
-            .commit_graph_write_failed => |err| std.fmt.allocPrint(arena, "commit-graph write failed: {s}", .{@errorName(err)}),
-            .tag_known_as => |t| std.fmt.allocPrint(arena, "tag '{s}' is externally known as '{s}'", .{ t.path, t.name }),
-            .fsck => |f| std.fmt.allocPrint(arena, "object {s}: {s}", .{ f.object, f.message }),
-            .fsck_unknown_message => |name| std.fmt.allocPrint(arena, "Skipping unknown msg id '{s}'", .{name}),
+            .shallow_update_rejected => |name| arena.print("rejected {s} because shallow roots are not allowed to be updated", .{name}),
+            .proxy_auth_method_unknown => |name| arena.print("unsupported proxy authentication method {s}: using anyauth", .{name}),
+            .commit_graph_write_failed => |err| arena.print("commit-graph write failed: {s}", .{@errorName(err)}),
+            .tag_known_as => |t| arena.print("tag '{s}' is externally known as '{s}'", .{ t.path, t.name }),
+            .fsck => |f| arena.print("object {s}: {s}", .{ f.object, f.message }),
+            .fsck_unknown_message => |name| arena.print("Skipping unknown msg id '{s}'", .{name}),
             .promisor => |text| text,
-            .promisor_stored => |s| std.fmt.allocPrint(arena, "Storing new {s} from server for remote '{s}'.\n    '{s}' -> '{s}'", .{ s.field, s.remote, s.old, s.new }),
-            .credentials_in_url => |redacted| std.fmt.allocPrint(arena, "URL '{s}' uses plaintext credentials", .{redacted}),
+            .promisor_stored => |s| arena.print("Storing new {s} from server for remote '{s}'.\n    '{s}' -> '{s}'", .{ s.field, s.remote, s.old, s.new }),
+            .credentials_in_url => |redacted| arena.print("URL '{s}' uses plaintext credentials", .{redacted}),
         };
     }
 };

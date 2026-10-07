@@ -1,6 +1,7 @@
 //! Repository configuration ownership and detached edit copies.
 //! Package plumbing, reached by no public name.
 const std = @import("std");
+const allocation = @import("../testing/allocation.zig");
 const config = @import("../config.zig");
 const Allocator = std.mem.Allocator;
 
@@ -124,5 +125,5 @@ test "detached configuration copies preserve sources origins and refresh metadat
             try std.testing.expectEqualStrings("kept", original.get("fixture.edited").?);
         }
     };
-    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{&source});
+    try testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{&source});
 }

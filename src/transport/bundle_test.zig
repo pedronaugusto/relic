@@ -29,7 +29,7 @@ fn history(gpa: Allocator, io: Io, env: *std.process.Environ.Map) !testgit.Repo 
     for (0..4) |i| {
         when += 100;
         try testgit.setDate(env, when);
-        const name = try std.fmt.allocPrint(gpa, "f{d}", .{i});
+        const name = try gpa.print("f{d}", .{i});
         defer gpa.free(name);
         try r.writeFile(io, name, name);
         try r.exec(io, &.{ "add", name });
@@ -40,7 +40,7 @@ fn history(gpa: Allocator, io: Io, env: *std.process.Environ.Map) !testgit.Repo 
     for (0..2) |i| {
         when += 100;
         try testgit.setDate(env, when);
-        const name = try std.fmt.allocPrint(gpa, "t{d}", .{i});
+        const name = try gpa.print("t{d}", .{i});
         defer gpa.free(name);
         try r.writeFile(io, name, name);
         try r.exec(io, &.{ "add", name });
@@ -92,9 +92,9 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
         defer tmp.cleanup();
         const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(tmp_path);
-        const theirs = try std.fmt.allocPrint(gpa, "{s}/git.bundle", .{tmp_path});
+        const theirs = try gpa.print("{s}/git.bundle", .{tmp_path});
         defer gpa.free(theirs);
-        const ours = try std.fmt.allocPrint(gpa, "{s}/relic.bundle", .{tmp_path});
+        const ours = try gpa.print("{s}/relic.bundle", .{tmp_path});
         defer gpa.free(ours);
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
@@ -150,13 +150,13 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
 fn packObjects(gpa: Allocator, io: Io, r: *testgit.Repo, dir: Io.Dir, dir_path: []const u8, name: []const u8) ![]u8 {
     const bytes = try dir.readFileAlloc(io, name, gpa, .unlimited);
     defer gpa.free(bytes);
-    const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{name});
+    const pack_name = try gpa.print("{s}.pack", .{name});
     defer gpa.free(pack_name);
     try dir.writeFile(io, .{ .sub_path = pack_name, .data = bytes[headerOf(bytes).len..] });
-    const pack_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir_path, pack_name });
+    const pack_path = try gpa.print("{s}/{s}", .{ dir_path, pack_name });
     defer gpa.free(pack_path);
     try r.exec(io, &.{ "index-pack", pack_path });
-    const idx_path = try std.fmt.allocPrint(gpa, "{s}/{s}.idx", .{ dir_path, name });
+    const idx_path = try gpa.print("{s}/{s}.idx", .{ dir_path, name });
     defer gpa.free(idx_path);
     const listing = try r.run(io, &.{ "verify-pack", "-v", idx_path });
     defer gpa.free(listing);
@@ -188,18 +188,18 @@ test "a bundle filtered by sparse:oid= holds the objects git's holds" {
     var repo = try Repository.open(gpa, io, src.dir, .{});
     defer repo.deinit(io);
 
-    const by_hex = try std.fmt.allocPrint(gpa, "sparse:oid={s}", .{blob});
+    const by_hex = try gpa.print("sparse:oid={s}", .{blob});
     defer gpa.free(by_hex);
-    const combined = try std.fmt.allocPrint(gpa, "combine:sparse:oid={s}+blob:limit=1", .{blob});
+    const combined = try gpa.print("combine:sparse:oid={s}+blob:limit=1", .{blob});
     defer gpa.free(combined);
     for ([_][]const u8{ by_hex, combined }) |spec| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(tmp_path);
-        const theirs = try std.fmt.allocPrint(gpa, "{s}/git.bundle", .{tmp_path});
+        const theirs = try gpa.print("{s}/git.bundle", .{tmp_path});
         defer gpa.free(theirs);
-        const filter_arg = try std.fmt.allocPrint(gpa, "--filter={s}", .{spec});
+        const filter_arg = try gpa.print("--filter={s}", .{spec});
         defer gpa.free(filter_arg);
         try src.exec(io, &.{ "bundle", "create", "-q", theirs, filter_arg, "main", "topic" });
         try create(gpa, io, &repo, tmp.dir, "relic.bundle", .{ .include = &.{ "main", "topic" }, .filter = spec });
@@ -240,7 +240,7 @@ test "git's bundles are read, verified, listed, unbundled and fetched from as gi
     defer tmp.cleanup();
     const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(tmp_path);
-    const path = try std.fmt.allocPrint(gpa, "{s}/inc.bundle", .{tmp_path});
+    const path = try gpa.print("{s}/inc.bundle", .{tmp_path});
     defer gpa.free(path);
     try src.exec(io, &.{ "bundle", "create", "-q", path, "main", "topic", "lw", "^v1" });
 

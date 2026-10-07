@@ -246,7 +246,7 @@ const Parser = struct {
     }
 };
 
-const Set = std.DynamicBitSetUnmanaged;
+const Set = std.bit_set.Dynamic;
 
 const Matcher = struct {
     a: Allocator,

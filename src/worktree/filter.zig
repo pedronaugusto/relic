@@ -82,7 +82,7 @@ pub const Driver = struct {
 pub fn isGitLfsCommand(line: []const u8, subcommand: []const u8) bool {
     var words = std.mem.tokenizeAny(u8, line, " \t");
     const first = words.next() orelse return false;
-    const base = std.fs.path.basenamePosix(first);
+    const base = std.Io.Dir.path.basenamePosix(first);
     if (std.mem.eql(u8, base, "git")) {
         const second = words.next() orelse return false;
         if (!std.mem.eql(u8, second, "lfs")) return false;

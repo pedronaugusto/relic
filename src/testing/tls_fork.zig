@@ -16,14 +16,14 @@
 //! says what to do when this fails.
 
 const std = @import("std");
-const build_options = @import("build_options");
+const std_tls_client = @import("std_tls_client");
 
 const fork = @embedFile("../transport/tls/Client.zig");
 const recorded = @embedFile("../transport/tls/Client.zig.diff");
 
 test "the TLS client is std's, with the recorded diff and nothing else" {
     const gpa = std.testing.allocator;
-    const std_client = build_options.std_tls_client_source;
+    const std_client = std_tls_client.source;
 
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(std_client, &digest, .{});

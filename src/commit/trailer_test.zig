@@ -264,18 +264,18 @@ test "%(trailers) in a log format writes what git log writes" {
     defer arena_state.deinit();
     for (0..5) |back| {
         var rev_buf: [16]u8 = undefined;
-        const rev = try std.fmt.bufPrint(&rev_buf, "HEAD~{d}", .{back});
+        const rev = try std.mem.print(&rev_buf, "HEAD~{d}", .{back});
         const text = try f.git.line(io, &.{ "rev-parse", rev });
         defer gpa.free(text);
         const oid = try Oid.parse(.sha1, text);
         for (trailer_formats) |format| {
-            const arg = try std.fmt.allocPrint(gpa, "--format=[{s}]", .{format});
+            const arg = try gpa.print("--format=[{s}]", .{format});
             defer gpa.free(arg);
             const theirs = try f.git.run(io, &.{ "show", "-s", arg, rev });
             defer gpa.free(theirs);
             const a = arena_state.allocator();
             var ours: std.ArrayList(u8) = .empty;
-            const wrapped = try std.fmt.allocPrint(a, "[{s}]", .{format});
+            const wrapped = try a.print("[{s}]", .{format});
             try pretty.formatCommit(a, io, &repo.odb, oid, wrapped, .{ .trailers = try message.trailerSettings(a, repo.configuration()) }, &ours);
             try ours.append(a, '\n');
             std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
@@ -295,15 +295,15 @@ test "%(trailers) and %(contents:trailers) in a ref format write what git for-ea
     for (0..5) |back| {
         var name_buf: [32]u8 = undefined;
         var rev_buf: [16]u8 = undefined;
-        try f.git.exec(io, &.{ "branch", try std.fmt.bufPrint(&name_buf, "b{d}", .{back}), try std.fmt.bufPrint(&rev_buf, "HEAD~{d}", .{back}) });
+        try f.git.exec(io, &.{ "branch", try std.mem.print(&name_buf, "b{d}", .{back}), try std.mem.print(&rev_buf, "HEAD~{d}", .{back}) });
     }
     try f.git.exec(io, &.{ "tag", "-a", "signed-tag", "-m", "tag subject\n\nAcked-by: Tag <t@example.com>\n-----BEGIN PGP SIGNATURE-----\nnot really\n-----END PGP SIGNATURE-----\n" });
     var repo = try Repository.open(gpa, io, f.git.dir, .{});
     defer repo.deinit(io);
     for (trailer_formats[0 .. trailer_formats.len - 2]) |format| {
-        const full = try std.fmt.allocPrint(gpa, "[{s}] [%(contents:{s})]", .{ format, format[2 .. format.len - 1] });
+        const full = try gpa.print("[{s}] [%(contents:{s})]", .{ format, format[2 .. format.len - 1] });
         defer gpa.free(full);
-        const arg = try std.fmt.allocPrint(gpa, "--format={s}", .{full});
+        const arg = try gpa.print("--format={s}", .{full});
         defer gpa.free(arg);
         const theirs = try f.git.run(io, &.{ "for-each-ref", arg });
         defer gpa.free(theirs);
@@ -330,7 +330,7 @@ test "a shortlog by trailer reads them as the repository's trailer rules say" {
     try f.git.exec(io, &.{ "config", "trailer.sob.key", "Signed-off-by" });
     try f.git.exec(io, &.{ "config", "trailer.separators", ":#" });
     for ([_][]const u8{ "signed-off-by", "helped", "acked-by" }) |key| {
-        const group = try std.fmt.allocPrint(gpa, "--group=trailer:{s}", .{key});
+        const group = try gpa.print("--group=trailer:{s}", .{key});
         defer gpa.free(group);
         const theirs = try f.git.run(io, &.{ "shortlog", "HEAD", group });
         defer gpa.free(theirs);

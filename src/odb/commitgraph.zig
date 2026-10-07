@@ -111,7 +111,7 @@ pub const Graph = struct {
             var depth: usize = 0;
             while (names.next()) |name| {
                 const chain_checksum = Oid.parse(kind, name) catch return error.CorruptCommitGraph;
-                const path = try std.fmt.allocPrint(gpa, "info/commit-graphs/graph-{s}.graph", .{name});
+                const path = try gpa.print("info/commit-graphs/graph-{s}.graph", .{name});
                 defer gpa.free(path);
                 const content = (try fs.readFileAlloc(gpa, io, objects_dir, path, 1 << 30)) orelse return error.CorruptCommitGraph;
                 const next = gpa.create(Graph) catch |err| {

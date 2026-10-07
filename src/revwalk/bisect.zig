@@ -269,7 +269,7 @@ fn resetWhenFound(c: *Ctx, step: Step) Error!void {
     const mode = ResetWhenFound.parse(std.mem.trim(u8, text, " \t\n\r")) orelse return error.InvalidResetWhenFound;
     const target: ?[]const u8 = switch (mode) {
         .original => null,
-        .found => try std.fmt.allocPrint(c.a, "refs/bisect/{s}", .{(try readTerms(c)).bad}),
+        .found => try c.a.print("refs/bisect/{s}", .{(try readTerms(c)).bad}),
     };
     try resetTo(c, target);
 }
@@ -303,7 +303,7 @@ fn writeTerms(c: *Ctx, bad: []const u8, good: []const u8) Error!void {
     if (std.mem.eql(u8, bad, good)) return error.InvalidTerm;
     try checkTerm(c, bad, "bad");
     try checkTerm(c, good, "good");
-    try c.writeState("BISECT_TERMS", try std.fmt.allocPrint(c.a, "{s}\n{s}\n", .{ bad, good }));
+    try c.writeState("BISECT_TERMS", try c.a.print("{s}\n{s}\n", .{ bad, good }));
 }
 
 /// `get_terms`: the terms `BISECT_TERMS` records, or `null` when there is
@@ -384,9 +384,9 @@ fn cleanState(c: *Ctx) Error!void {
 /// `BISECT_LOG`.
 fn bisectWrite(c: *Ctx, state: []const u8, rev: []const u8, t: Terms, nolog: bool) Error!void {
     const tag = if (std.mem.eql(u8, state, t.bad))
-        try std.fmt.allocPrint(c.a, "refs/bisect/{s}", .{state})
+        try c.a.print("refs/bisect/{s}", .{state})
     else if (oneOf(state, &.{ t.good, "skip" }))
-        try std.fmt.allocPrint(c.a, "refs/bisect/{s}-{s}", .{ state, rev })
+        try c.a.print("refs/bisect/{s}-{s}", .{ state, rev })
     else
         return error.InvalidCommand;
     const oid = revparse.resolve(c.gpa, c.io, c.repo, rev) catch |err| switch (err) {
@@ -406,9 +406,9 @@ const Known = struct { good: usize = 0, bad: bool = false };
 /// `bisect_status`.
 fn status(c: *Ctx, t: Terms) Error!Known {
     var known: Known = .{};
-    const bad_ref = try std.fmt.allocPrint(c.a, "refs/bisect/{s}", .{t.bad});
+    const bad_ref = try c.a.print("refs/bisect/{s}", .{t.bad});
     if (try c.readRef(bad_ref) != null) known.bad = true;
-    const good_prefix = try std.fmt.allocPrint(c.a, "refs/bisect/{s}-", .{t.good});
+    const good_prefix = try c.a.print("refs/bisect/{s}-", .{t.good});
     var listing = try c.repo.refStore().list(c.gpa, c.io, "refs/bisect/");
     defer listing.deinit();
     for (listing.entries) |e| {
@@ -419,7 +419,7 @@ fn status(c: *Ctx, t: Terms) Error!Known {
 
 /// `bisect_log_printf`: printed, and kept in the log behind `# `.
 fn logPrint(c: *Ctx, comptime fmt: []const u8, args: anytype) Error!void {
-    const text = try std.fmt.allocPrint(c.a, fmt, args);
+    const text = try c.a.print(fmt, args);
     try c.out.appendSlice(c.a, text);
     try c.appendState("BISECT_LOG", try std.mem.concat(c.a, u8, &.{ "# ", text }));
 }
@@ -463,7 +463,7 @@ fn next(c: *Ctx, t: Terms) Error!Step {
     _ = try nextCheck(c, t, t.good);
     const step = try nextAll(c, t);
     switch (step) {
-        .first_bad => |oid| try c.appendState("BISECT_LOG", try std.fmt.allocPrint(c.a, "# first '{s}' commit: [{s}] {s}\n", .{ t.bad, try c.hex(oid), try c.subject(oid) })),
+        .first_bad => |oid| try c.appendState("BISECT_LOG", try c.a.print("# first '{s}' commit: [{s}] {s}\n", .{ t.bad, try c.hex(oid), try c.subject(oid) })),
         .only_skipped => try skippedCommits(c, t),
         else => {},
     }
@@ -476,8 +476,8 @@ fn skippedCommits(c: *Ctx, t: Terms) Error!void {
     defer walk.deinit();
     var listing = try c.repo.refStore().list(c.gpa, c.io, "refs/bisect/");
     defer listing.deinit();
-    const bad_prefix = try std.fmt.allocPrint(c.a, "refs/bisect/{s}", .{t.bad});
-    const good_prefix = try std.fmt.allocPrint(c.a, "refs/bisect/{s}-", .{t.good});
+    const bad_prefix = try c.a.print("refs/bisect/{s}", .{t.bad});
+    const good_prefix = try c.a.print("refs/bisect/{s}-", .{t.good});
     for (listing.entries) |e| if (std.mem.startsWith(u8, e.name, bad_prefix)) {
         if (e.target == .direct) try walk.push(e.target.direct);
     };
@@ -515,7 +515,7 @@ fn readRefs(c: *Ctx, t: Terms) Error!Revs {
     var revs: Revs = .{};
     var listing = try c.repo.refStore().list(c.gpa, c.io, "refs/bisect/");
     defer listing.deinit();
-    const good_prefix = try std.fmt.allocPrint(c.a, "{s}-", .{t.good});
+    const good_prefix = try c.a.print("{s}-", .{t.good});
     for (listing.entries) |e| {
         const name = e.name["refs/bisect/".len..];
         const oid = switch (e.target) {
@@ -935,7 +935,7 @@ fn switchTo(c: *Ctx, target: Oid, branch: ?[]const u8, given: []const u8) Error!
     var outcome = try threeway.apply(c.gpa, c.io, c.repo, &index, from_tree, from_tree, try c.repo.commitTree(c.io, target), .{ .blocked = c.options.blocked });
     outcome.deinit();
     try c.repo.writeIndex(c.io, &index);
-    const msg = try std.fmt.allocPrint(c.a, "checkout: moving from {s} to {s}", .{ old_desc, given });
+    const msg = try c.a.print("checkout: moving from {s} to {s}", .{ old_desc, given });
     const line: head_mod.Log = .{ .who = c.options.who, .message = msg };
     if (branch) |b| {
         try head_mod.attach(c.io, c.repo, b, h.oid, line);
@@ -1266,7 +1266,7 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, o
         } else continue;
         if (p.len == 0 or !isSpace(p[0])) continue;
         p = std.mem.trimStart(u8, p, " \t");
-        const word_end = std.mem.indexOfAny(u8, p, " \t") orelse p.len;
+        const word_end = std.mem.findAny(u8, p, " \t") orelse p.len;
         const word = p[0..word_end];
         const rev = std.mem.trimStart(u8, p[word_end..], " \t");
         if (try getTerms(&c)) |recorded| t = recorded;
@@ -1396,7 +1396,7 @@ fn runCommand(c: *Ctx, line: []const u8, run_options: RunOptions) Error!i32 {
 /// commit being tested put back.
 fn verifyGood(c: *Ctx, t: Terms, line: []const u8, run_options: RunOptions) Error!i32 {
     const no_checkout = try c.readRef("BISECT_HEAD") != null;
-    const good_prefix = try std.fmt.allocPrint(c.a, "refs/bisect/{s}-", .{t.good});
+    const good_prefix = try c.a.print("refs/bisect/{s}-", .{t.good});
     var listing = try c.repo.refStore().list(c.gpa, c.io, "refs/bisect/");
     defer listing.deinit();
     var good: ?Oid = null;
@@ -1475,11 +1475,11 @@ const Twin = struct {
                     k.* += 1;
                     try testgit.setDate(env, w.*);
                     var buf: [32]u8 = undefined;
-                    try rr.writeFile(i, "n", try std.fmt.bufPrint(&buf, "{d}\n", .{k.*}));
+                    try rr.writeFile(i, "n", try std.mem.print(&buf, "{d}\n", .{k.*}));
                     if (extra.len != 0) try rr.writeFile(i, extra, extra);
                     try rr.exec(i, &.{ "add", "-A" });
                     var msg: [32]u8 = undefined;
-                    try rr.exec(i, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "commit {d}", .{k.*}) });
+                    try rr.exec(i, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "commit {d}", .{k.*}) });
                 }
             }.f;
             for (0..6) |_| try commit(io, r, &t.env, &when, &n, "");
@@ -1487,7 +1487,7 @@ const Twin = struct {
                 for (0..12) |k| {
                     if (k % 3 == 0) {
                         var buf: [16]u8 = undefined;
-                        try r.writeFile(io, "p/x", try std.fmt.bufPrint(&buf, "{d}\n", .{k}));
+                        try r.writeFile(io, "p/x", try std.mem.print(&buf, "{d}\n", .{k}));
                     }
                     try commit(io, r, &t.env, &when, &n, "");
                 }
@@ -1500,9 +1500,9 @@ const Twin = struct {
                     when += 60;
                     try testgit.setDate(&t.env, when);
                     var buf: [32]u8 = undefined;
-                    try r.writeFile(io, "side", try std.fmt.bufPrint(&buf, "{d}\n", .{k}));
+                    try r.writeFile(io, "side", try std.mem.print(&buf, "{d}\n", .{k}));
                     try r.exec(io, &.{ "add", "side" });
-                    try r.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&buf, "side {d}", .{k}) });
+                    try r.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&buf, "side {d}", .{k}) });
                 }
                 try r.exec(io, &.{ "checkout", "-q", "main" });
                 for (0..3) |_| try commit(io, r, &t.env, &when, &n, "");
@@ -1548,7 +1548,7 @@ const Twin = struct {
     fn expectSameState(t: *Twin, io: Io) !void {
         const gpa = t.git.gpa;
         for ([_][]const u8{ "BISECT_START", "BISECT_TERMS", "BISECT_NAMES", "BISECT_LOG", "BISECT_ANCESTORS_OK", "BISECT_FIRST_PARENT", "BISECT_EXPECTED_REV", "BISECT_HEAD", "BISECT_RUN" }) |name| {
-            const path = try std.fmt.allocPrint(gpa, ".git/{s}", .{name});
+            const path = try gpa.print(".git/{s}", .{name});
             defer gpa.free(path);
             const a = t.git.readFile(io, path) catch |err| switch (err) {
                 error.FileNotFound => try gpa.dupe(u8, "<missing>"),

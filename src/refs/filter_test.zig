@@ -257,7 +257,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
 /// Git uses the host C library for `%x`; macOS releases disagree on its
 /// year width. Supply that locale property separately from the ref dates.
 fn localeDateFullYear(gpa: Allocator, io: Io, git: *testgit.Repo) !bool {
-    if (builtin.os.tag == .windows) return false;
+    if (builtin.target.os.tag == .windows) return false;
     const date = try git.line(io, &.{ "log", "-1", "--format=%cd", "--date=format:%x" });
     defer gpa.free(date);
     const slash = std.mem.findScalarLast(u8, date, '/') orelse return error.TestUnexpectedResult;
@@ -347,7 +347,7 @@ fn fixture(gpa: Allocator, io: Io) !struct { git: testgit.Repo, env: *std.proces
     env.* = try git.isolated.?.clone(gpa);
     errdefer env.deinit();
     var now_buf: [32]u8 = undefined;
-    try env.put("GIT_TEST_DATE_NOW", try std.fmt.bufPrint(&now_buf, "{d}", .{now}));
+    try env.put("GIT_TEST_DATE_NOW", try std.mem.print(&now_buf, "{d}", .{now}));
     try env.put("TZ", "UTC");
     try buildFixture(gpa, io, &git, env);
     return .{ .git = git, .env = env };
@@ -385,7 +385,7 @@ test "every atom git offers for refs comes out as git's for-each-ref writes it" 
         try compare(gpa, io, git, .for_each_ref, &.{"--format=%(authordate" ++ mode ++ ")|%(committerdate" ++ mode ++ ")|%(taggerdate" ++ mode ++ ")|%(creatordate" ++ mode ++ ")"});
     }
     // the C99 and POSIX conversions, where the C library has them
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         try compare(gpa, io, git, .for_each_ref, &.{"--format=%(creatordate:format:%F %T %D %e %R %r %u %V %G %g %C %y %U %W %w %I %p %n %t)|%(creatordate:format-local:%c %x %X %h %k %l)"});
     }
     // a time in UTC is written with `Z` from 2.45 on

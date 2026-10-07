@@ -105,7 +105,7 @@ pub const Target = struct {
 pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!Target {
     const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
     inline for (rules) |rule| {
-        const full = try std.fmt.allocPrint(gpa, rule, .{name});
+        const full = try gpa.print(rule, .{name});
         defer gpa.free(full);
         if (std.mem.startsWith(u8, full, "refs/") or std.mem.eql(u8, rule, "{s}")) {
             if (repo.refStore().resolve(gpa, io, full) catch null) |resolved| {
@@ -136,12 +136,12 @@ pub fn upstreams(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository) Se
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const branch = head.shortName() orelse return error.NoDefaultUpstream;
-    const remote = repo.configuration().get(try std.fmt.allocPrint(arena, "branch.{s}.remote", .{branch})) orelse
+    const remote = repo.configuration().get(try arena.print("branch.{s}.remote", .{branch})) orelse
         return error.NoDefaultUpstream;
-    const merges = try repo.configuration().all(try std.fmt.allocPrint(arena, "branch.{s}.merge", .{branch}));
+    const merges = try repo.configuration().all(try arena.print("branch.{s}.merge", .{branch}));
     defer repo.configuration().gpa.free(merges);
     if (merges.len == 0) return error.NoDefaultUpstream;
-    const specs = try repo.configuration().all(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{remote}));
+    const specs = try repo.configuration().all(try arena.print("remote.{s}.fetch", .{remote}));
     defer repo.configuration().gpa.free(specs);
     const out = try arena.alloc(Target, merges.len);
     for (merges, out) |merge_name, *target| {
@@ -335,7 +335,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         var outcome = try threeway.apply(gpa, io, repo, &index, our_tree, our_tree, their_tree, .{ .blocked = options.blocked });
         defer outcome.deinit();
         try repo.writeIndex(io, &index);
-        const log_message = try std.fmt.allocPrint(arena, "{s}: Fast-forward", .{reflog_action});
+        const log_message = try arena.print("{s}: Fast-forward", .{reflog_action});
         try head_mod.advance(io, repo, head, target.oid, .{ .who = options.who, .message = log_message });
         if (options.hooks) |runner| _ = try runner.postMerge(io, false);
         try removeMergeState(io, repo);
@@ -556,7 +556,7 @@ fn commitOrStop(
             .message = cleaned,
             .signing = options.signing,
         }, options.diagnostic);
-        const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the '{s}' strategy.", .{ made.reflog_action, made.strategy });
+        const log_message = try arena.print("{s}: Merge made by the '{s}' strategy.", .{ made.reflog_action, made.strategy });
         try head_mod.advance(io, repo, made.head, commit, .{ .who = options.who, .message = log_message });
         // `post-merge` runs before the merge's files go, as in git.
         if (options.hooks) |runner| _ = try runner.postMerge(io, false);
@@ -663,7 +663,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
         .message = cleaned,
         .signing = options.signing,
     }, options.diagnostic);
-    const log_message = try std.fmt.allocPrint(arena, "commit (merge): {s}", .{message.subjectLine(cleaned)});
+    const log_message = try arena.print("commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
     try finishCommit(gpa, io, repo);
     try h.postCommit(arena, io, author);

@@ -905,7 +905,7 @@ const NameRev = struct {
         const a = nr.arena.allocator();
         if (try nr.beforeCutoff(io, start)) return;
         const start_name = (try nr.createOrUpdate(start, taggerdate, 0, 0, from_tag)) orelse return;
-        start_name.tip_name = if (deref) try std.fmt.allocPrint(a, "{s}^0", .{tip_name}) else tip_name;
+        start_name.tip_name = if (deref) try a.print("{s}^0", .{tip_name}) else tip_name;
 
         var stack: std.ArrayList(Oid) = .empty;
         defer stack.deinit(nr.gpa);
@@ -931,9 +931,9 @@ const NameRev = struct {
                 if (number > 1) {
                     const base = stripPeelSuffix(name.tip_name);
                     parent_name.tip_name = if (name.generation > 0)
-                        try std.fmt.allocPrint(a, "{s}~{d}^{d}", .{ base, name.generation, number })
+                        try a.print("{s}~{d}^{d}", .{ base, name.generation, number })
                     else
-                        try std.fmt.allocPrint(a, "{s}^{d}", .{ base, number });
+                        try a.print("{s}^{d}", .{ base, number });
                 } else {
                     parent_name.tip_name = name.tip_name;
                 }
@@ -1093,7 +1093,7 @@ fn relicSays(gpa: Allocator, io: Io, repo: *Repository, rev: []const u8, options
         else => return gpa.dupe(u8, "<failed>"),
     };
     defer gpa.free(text);
-    return std.fmt.allocPrint(gpa, "{s}\n", .{text});
+    return gpa.print("{s}\n", .{text});
 }
 
 test "describe names every commit as git describe does, under every option" {

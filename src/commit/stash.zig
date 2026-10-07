@@ -509,23 +509,23 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     var abbrev_buf: [hash.max_hex_len]u8 = undefined;
     const abbrev = try abbreviate(io, repo, head.oid, &abbrev_buf);
     const subject = try oneline(arena, head_commit.message);
-    const label = try std.fmt.allocPrint(arena, "{s}: {s} {s}", .{ branch, abbrev, subject });
+    const label = try arena.print("{s}: {s} {s}", .{ branch, abbrev, subject });
 
     // `I`: the index as it stands.
     const index_tree = try worktree.writeTree(gpa, io, &ctx.index, &repo.odb);
-    const index_commit = try writeCommit(io, repo, index_tree, &.{head.oid}, options.who, try std.fmt.allocPrint(arena, "index on {s}\n", .{label}));
+    const index_commit = try writeCommit(io, repo, index_tree, &.{head.oid}, options.who, try arena.print("index on {s}\n", .{label}));
 
     // `U`: the untracked files, in a tree of their own.
     var untracked_commit: ?Oid = null;
     if (untracked_files.items.len != 0) {
         const tree = try untrackedTree(&ctx, untracked_files.items);
-        untracked_commit = try writeCommit(io, repo, tree, &.{}, options.who, try std.fmt.allocPrint(arena, "untracked files on {s}\n", .{label}));
+        untracked_commit = try writeCommit(io, repo, tree, &.{}, options.who, try arena.print("untracked files on {s}\n", .{label}));
     }
     const work_tree = try workTree(&ctx, updates.items);
     const message = if (options.message) |m|
-        try std.fmt.allocPrint(arena, "On {s}: {s}", .{ branch, m })
+        try arena.print("On {s}: {s}", .{ branch, m })
     else
-        try std.fmt.allocPrint(arena, "WIP on {s}", .{label});
+        try arena.print("WIP on {s}", .{label});
     var parents: std.ArrayList(Oid) = .empty;
     try parents.appendSlice(arena, &.{ head.oid, index_commit });
     if (untracked_commit) |u| try parents.append(arena, u);
@@ -611,7 +611,7 @@ fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const
         if (found.kind == .directory) {
             // A directory reported whole: an ignored one, whose files `--all`
             // takes one by one, or one holding a repository of its own.
-            if (ctx.wt.access(ctx.io, try std.fmt.allocPrint(ctx.arena, "{s}/.git", .{e.path}), .{})) |_| {
+            if (ctx.wt.access(ctx.io, try ctx.arena.print("{s}/.git", .{e.path}), .{})) |_| {
                 if (options.refusal) |r| r.set(e.path);
                 return error.NestedRepository;
             } else |_| {}
@@ -629,7 +629,7 @@ fn walkFiles(ctx: *Ctx, dir_path: []const u8, specs: []const []const u8, out: *s
     defer dir.close(ctx.io);
     var it = dir.iterate();
     while (try it.next(ctx.io)) |item| {
-        const path = try std.fmt.allocPrint(ctx.arena, "{s}/{s}", .{ dir_path, item.name });
+        const path = try ctx.arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {
             try walkFiles(ctx, path, specs, out, depth + 1);
         } else if (matchesAny(specs, path)) {
@@ -667,7 +667,7 @@ fn resetAfterPush(
                 error.FileNotFound => {},
                 else => |e| return e,
             };
-            if (std.fs.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, ctx.wt, parent);
+            if (std.Io.Dir.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, ctx.wt, parent);
         }
         _ = try worktree.checkout(ctx.gpa, io, ctx.wt, &ctx.index, db, head_tree, checkout_options);
         if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
@@ -716,7 +716,7 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
     var current = path;
     while (current.len != 0) {
         wt.deleteDir(io, current) catch return;
-        current = std.fs.path.dirnamePosix(current) orelse return;
+        current = std.Io.Dir.path.dirnamePosix(current) orelse return;
     }
 }
 

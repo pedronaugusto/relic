@@ -8,8 +8,8 @@
 //! configuration files byte for byte, and `git fsck`.
 
 const std = @import("std");
+const suite = @import("testing/helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -40,7 +40,7 @@ fn absolute(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
     var buf: [4096]u8 = undefined;
     const len = try dir.realPath(io, &buf);
     const out = try gpa.dupe(u8, buf[0..len]);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
     return out;
 }
 
@@ -62,7 +62,7 @@ const Fixture = struct {
         errdefer lib.deinit();
         try lib.writeFile(io, "l.txt", "lib\n");
         try lib.exec(io, &.{ "add", "-A" });
-        const inner_url = try std.fmt.allocPrint(gpa, "../{s}", .{dirName(&inner)});
+        const inner_url = try gpa.print("../{s}", .{dirName(&inner)});
         defer gpa.free(inner_url);
         try lib.exec(io, &.{ "submodule", "add", "-q", inner_url, "deep/inner" });
         try lib.exec(io, &.{ "commit", "-q", "-m", "lib" });
@@ -72,7 +72,7 @@ const Fixture = struct {
         try super.writeFile(io, "s.txt", "super\n");
         try super.exec(io, &.{ "add", "-A" });
         try super.exec(io, &.{ "commit", "-q", "-m", "super" });
-        const lib_url = try std.fmt.allocPrint(gpa, "../{s}", .{dirName(&lib)});
+        const lib_url = try gpa.print("../{s}", .{dirName(&lib)});
         defer gpa.free(lib_url);
         try super.exec(io, &.{ "submodule", "add", "-q", lib_url, "vendor/lib" });
         try super.exec(io, &.{ "commit", "-q", "-m", "add lib" });
@@ -129,7 +129,7 @@ fn gitSubmoduleStatus(gpa: Allocator, io: Io, git: *testgit.Repo) ![]u8 {
     var lines = std.mem.splitScalar(u8, out, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        const end = std.mem.indexOf(u8, line, " (") orelse line.len;
+        const end = std.mem.find(u8, line, " (") orelse line.len;
         try kept.appendSlice(gpa, line[0..end]);
         try kept.append(gpa, '\n');
     }
@@ -144,7 +144,7 @@ fn relicSubmoduleStatus(gpa: Allocator, io: Io, repo: *Repository) ![]u8 {
     errdefer out.deinit(gpa);
     for (result.entries) |entry| {
         var hex: [hash.max_hex_len]u8 = undefined;
-        const line = try std.fmt.allocPrint(gpa, "{c}{s} {s}\n", .{ @intFromEnum(entry.state), entry.oid.hex(&hex), entry.path });
+        const line = try gpa.print("{c}{s} {s}\n", .{ @backingInt(entry.state), entry.oid.hex(&hex), entry.path });
         defer gpa.free(line);
         try out.appendSlice(gpa, line);
     }
@@ -194,7 +194,7 @@ fn gitPorcelainV2(gpa: Allocator, io: Io, git: *testgit.Repo) ![]u8 {
         const sub = fields.next().?;
         for (0..5) |_| _ = fields.next();
         const path = fields.rest();
-        try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} {s}", .{ xy, sub, path }));
+        try lines.append(gpa, try gpa.print("{s} {s} {s}", .{ xy, sub, path }));
     }
     return joinSorted(gpa, lines.items);
 }
@@ -228,7 +228,7 @@ fn relicPorcelainV2(gpa: Allocator, io: Io, repo: *Repository, options: submodul
     }
     for (result.entries) |entry| {
         if (entry.unstaged == .untracked) {
-            try lines.append(gpa, try std.fmt.allocPrint(gpa, "? {s}", .{entry.path}));
+            try lines.append(gpa, try gpa.print("? {s}", .{entry.path}));
             continue;
         }
         var sub: [4]u8 = "N...".*;
@@ -240,7 +240,7 @@ fn relicPorcelainV2(gpa: Allocator, io: Io, repo: *Repository, options: submodul
                 if (state.untracked_content) 'U' else '.',
             };
         }
-        try lines.append(gpa, try std.fmt.allocPrint(gpa, "{c}{c} {s} {s}", .{
+        try lines.append(gpa, try gpa.print("{c}{c} {s} {s}", .{
             changeLetter(entry.staged), changeLetter(entry.unstaged), &sub, entry.path,
         }));
     }
@@ -694,7 +694,7 @@ test "a relative url resolves against the default remote, or against the superpr
     try testgit.requireGitVersion(gpa, io, 2, 51);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
-    try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",a" });
+    try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ @as([40]u8, @splat('1')) ++ ",a" });
     try git.writeFile(io, ".gitmodules", "[submodule \"a\"]\n\tpath = a\n\turl = ../x/y\n");
     try git.exec(io, &.{ "add", ".gitmodules" });
     try git.exec(io, &.{ "commit", "-q", "-m", "a" });
@@ -951,9 +951,9 @@ test "update checks out the recorded commit, and refuses what it will not do by 
     // A commit the submodule does not have needs a fetch.
     try c.git.exec(io, &.{ "config", "--unset", "submodule.vendor/lib.update" });
     try reopen(gpa, io, &repo, c.git.dir);
-    try c.git.exec(io, &.{ "update-index", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",vendor/lib" });
+    try c.git.exec(io, &.{ "update-index", "--cacheinfo", "160000," ++ @as([40]u8, @splat('1')) ++ ",vendor/lib" });
     try testing.expectError(error.CommitMissing, submodule.update(gpa, io, &repo, .{ .refusal = &refusal }));
-    try testing.expectEqualStrings("1" ** 40, refusal.setting());
+    try testing.expectEqualStrings(&@as([40]u8, @splat('1')), refusal.setting());
 }
 
 test "a !command update runs only with the permission to run programs" {
@@ -970,9 +970,9 @@ test "a !command update runs only with the permission to run programs" {
     defer lib.dir.close(io);
     try lib.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "moved on" });
 
-    const command = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "touch ran-");
+    const command = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "touch ran-");
     defer gpa.free(command);
-    const update = try std.fmt.allocPrint(gpa, "!{s}", .{command});
+    const update = try gpa.print("!{s}", .{command});
     defer gpa.free(update);
     try c.git.exec(io, &.{ "config", "submodule.vendor/lib.update", update });
     try reopen(gpa, io, &repo, c.git.dir);
@@ -1104,7 +1104,7 @@ test "a linked worktree of the superproject clones its submodules into its own g
     try expectSameFile(gpa, io, ours_linked.dir, theirs_linked.dir, "vendor/lib/.git");
     try expectSameFile(gpa, io, ours_linked.dir, theirs_linked.dir, "vendor/lib/deep/inner/.git");
     for ([_][]const u8{ "worktrees/linked/modules/vendor/lib", "worktrees/linked/modules/vendor/lib/modules/deep/inner" }) |module| {
-        const path = try std.fmt.allocPrint(gpa, ".git/{s}/config", .{module});
+        const path = try gpa.print(".git/{s}/config", .{module});
         defer gpa.free(path);
         const ours_value = try ours.git.line(io, &.{ "config", "-f", path, "core.worktree" });
         defer gpa.free(ours_value);
@@ -1141,7 +1141,7 @@ test "the walk visits what git submodule foreach --recursive visits, in its orde
     while (try w.next()) |visit| {
         visits += 1;
         var hex: [hash.max_hex_len]u8 = undefined;
-        const line = try std.fmt.allocPrint(gpa, "{s} {s} {s} {s}\n", .{ visit.path, visit.local_path, visit.name, visit.recorded.?.hex(&hex) });
+        const line = try gpa.print("{s} {s} {s} {s}\n", .{ visit.path, visit.local_path, visit.name, visit.recorded.?.hex(&hex) });
         defer gpa.free(line);
         try out.appendSlice(gpa, line);
         // The repository handed over is the submodule's.

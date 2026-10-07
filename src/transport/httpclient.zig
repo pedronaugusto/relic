@@ -35,6 +35,7 @@
 const httpclient = @This();
 
 const std = @import("std");
+const allocation = @import("../testing/allocation.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -189,7 +190,7 @@ pub const Proxy = struct {
     /// Parse HTTP(S) and SOCKS proxy URLs. Every string belongs to `arena`.
     /// Callers retain their HTTP default port; every SOCKS scheme uses 1080.
     pub fn parse(arena: Allocator, raw: []const u8, http_port: u16) (Allocator.Error || error{InvalidProxy})!Proxy {
-        const text = if (std.mem.find(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else try arena.dupe(u8, raw);
+        const text = if (std.mem.find(u8, raw, "://") == null) try arena.print("http://{s}", .{raw}) else try arena.dupe(u8, raw);
         const uri = std.Uri.parse(text) catch return error.InvalidProxy;
         const version: ?socks.Version = if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4")) .socks4 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4a")) .socks4a else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5")) .socks5 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5h")) .socks5h else null;
         const secure = std.ascii.eqlIgnoreCase(uri.scheme, "https");
@@ -637,7 +638,7 @@ pub const Head = struct {
         var head: Head = .{
             .bytes = bytes,
             .version = version,
-            .status = @enumFromInt(std.fmt.parseUnsigned(u10, first[9..12], 10) catch return error.MalformedHead),
+            .status = @fromBackingInt(@intCast(std.fmt.parseUnsigned(u10, first[9..12], 10) catch return error.MalformedHead)),
             .reason = std.mem.trimStart(u8, first[12..], " "),
             .keep_alive = version == .@"HTTP/1.1",
         };
@@ -1160,7 +1161,7 @@ pub const Connection = struct {
     }
 
     fn missingCertificateReset(conn: *Connection) bool {
-        if (builtin.os.tag != .windows or conn.client.client_auth != null) return false;
+        if (builtin.target.os.tag != .windows or conn.client.client_auth != null) return false;
         // Windows can report the server's TLS certificate refusal as a
         // socket reset before the TLS alert reaches the reader.
         for (conn.layers) |slot| if (slot) |layer| {
@@ -1301,7 +1302,11 @@ pub const Connection = struct {
         const name = Io.net.HostName.init(host) catch return error.ProxyHostUnreachable;
         var buffer: [32]Io.net.HostName.LookupResult = undefined;
         var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buffer);
-        var future = io.async(Io.net.HostName.lookup, .{ name, io, &queue, .{ .port = port, .family = if (ipv4) .ip4 else null } });
+        const lookup = .{ name, io, &queue, Io.net.HostName.LookupOptions{ .port = port, .family = if (ipv4) .ip4 else null } };
+        // The lookup fills the queue this task drains, so it runs beside it
+        // where it can; without a spare task it runs first, as std's own
+        // `HostName.connect` has it.
+        var future = io.concurrent(Io.net.HostName.lookup, lookup) catch io.async(Io.net.HostName.lookup, lookup);
         defer future.cancel(io) catch {};
         var address: ?Io.net.IpAddress = null;
         while (true) {
@@ -1342,7 +1347,7 @@ pub const Connection = struct {
         var authority_buf: [300]u8 = undefined;
         var host_buffer: [260]u8 = undefined;
         const host = try authorityHost(target.host, &host_buffer);
-        const authority = std.fmt.bufPrint(&authority_buf, "{s}:{d}", .{ host, target.port }) catch return error.HttpProtocolError;
+        const authority = std.mem.print(&authority_buf, "{s}:{d}", .{ host, target.port }) catch return error.HttpProtocolError;
         const answer = try c.proxyAuthorization("CONNECT", authority);
         defer if (answer) |a| c.gpa.free(a);
         w.print("CONNECT {s} HTTP/1.1\r\nHost: {s}\r\n", .{ authority, authority }) catch return conn.writeFailed();
@@ -1363,7 +1368,7 @@ pub const Connection = struct {
             else => error.HttpProtocolError,
         };
         const head = Head.parse(bytes) catch return error.HttpProtocolError;
-        const status = @intFromEnum(head.status);
+        const status = @backingInt(head.status);
         if (status / 100 == 2) return;
         if (conn.diagnostic) |d| d.proxy_status = status;
         if (status != 407) return error.ProxyRefused;
@@ -1376,7 +1381,7 @@ pub const Connection = struct {
     /// URL authorities bracket IPv6; the SOCKS wire uses its address bytes.
     fn authorityHost(host: []const u8, buffer: []u8) Error![]const u8 {
         if (std.mem.findScalar(u8, host, ':') != null and host[0] != '[') {
-            return std.fmt.bufPrint(buffer, "[{s}]", .{host}) catch error.HttpProtocolError;
+            return std.mem.print(buffer, "[{s}]", .{host}) catch error.HttpProtocolError;
         }
         return host;
     }
@@ -1443,7 +1448,7 @@ pub const Connection = struct {
         const head = Head.parse(head_bytes) catch return error.HttpProtocolError;
         body.transfer_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(body.transfer_buffer);
-        const status = @intFromEnum(head.status);
+        const status = @backingInt(head.status);
         const no_body = method == .HEAD or status == 204 or status == 304 or status / 100 == 1;
         const content_length: ?u64 = if (no_body) 0 else head.content_length;
         const transfer: http.TransferEncoding = if (no_body) .none else head.transfer_encoding;
@@ -1629,7 +1634,7 @@ test "proxy challenges retain offered schemes when replacement allocation fails"
             return error.TestUnexpectedResult;
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
 }
 
 test "tasks sending at once through one client share the connections it keeps" {
@@ -1658,7 +1663,7 @@ test "tasks sending at once through one client share the connections it keeps" {
                     return failure;
                 };
                 if (!std.mem.eql(u8, body[0..n], "ok")) {
-                    std.debug.print("worker {d}, request {d}: expected ok, got {any} (status {d})\n", .{ worker, request, body[0..n], @intFromEnum(response.head.status) });
+                    std.debug.print("worker {d}, request {d}: expected ok, got {any} (status {d})\n", .{ worker, request, body[0..n], @backingInt(response.head.status) });
                     return error.HttpProtocolError;
                 }
             }
@@ -1955,7 +1960,7 @@ test "every TLS connection is relic's own client: nothing outside src/tls names 
     var files: usize = 0;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
-        if (std.mem.startsWith(u8, entry.path, "transport" ++ std.fs.path.sep_str ++ "tls" ++ std.fs.path.sep_str)) continue;
+        if (std.mem.startsWith(u8, entry.path, "transport" ++ std.Io.Dir.path.sep_str ++ "tls" ++ std.Io.Dir.path.sep_str)) continue;
         const text = try entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(16 << 20));
         defer gpa.free(text);
         files += 1;
@@ -1970,7 +1975,7 @@ test "every TLS connection is relic's own client: nothing outside src/tls names 
 test "a response head longer than the connection's buffer is refused by name, never read past it" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const answer = "HTTP/1.1 200 OK\r\nX-Pad: " ++ ("a" ** (40 * 1024)) ++ "\r\nContent-Length: 0\r\n\r\n";
+    const answer = "HTTP/1.1 200 OK\r\nX-Pad: " ++ (&@as([40 * 1024]u8, @splat('a'))) ++ "\r\nContent-Length: 0\r\n\r\n";
     const server = try TestServer.startAnswer(gpa, io, false, answer);
     defer server.stop(gpa);
     var client: Client = .init(gpa, io);
@@ -2037,7 +2042,7 @@ test "trust refresh samples certificate time even after a failed read" {
     defer tmp.cleanup();
     const path = try testremote.absolutePath(std.testing.allocator, std.testing.io, tmp.dir);
     defer std.testing.allocator.free(path);
-    const absent = try std.fs.path.join(std.testing.allocator, &.{ path, "absent.pem" });
+    const absent = try std.Io.Dir.path.join(std.testing.allocator, &.{ path, "absent.pem" });
     defer std.testing.allocator.free(absent);
     CertificateClock.current = Io.Clock.real.now(std.testing.io);
     CertificateClock.reads = 0;
@@ -2202,9 +2207,9 @@ fn checkStreamingFinishFailure(stage: enum { body_flush, body_end, connection_fl
     const Closed = struct {
         threadlocal var count: usize = 0;
 
-        fn close(context: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
-            count += handles.len;
-            std.testing.io.vtable.netClose(context, handles);
+        fn close(context: ?*anyopaque, sockets: []const Io.net.Socket) void {
+            count += sockets.len;
+            std.testing.io.vtable.netClose(context, sockets);
         }
 
         fn fail(_: *Io.Writer, _: []const []const u8, _: usize) Io.Writer.Error!usize {
@@ -2288,7 +2293,7 @@ test "parsed proxy strings outlive the URL buffer" {
     defer arena.deinit();
     for ([_][]const u8{ "http", "https", "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         var buffer: [128]u8 = undefined;
-        const raw = try std.fmt.bufPrint(&buffer, "{s}://user:secret@[::1]:3128", .{scheme});
+        const raw = try std.mem.print(&buffer, "{s}://user:secret@[::1]:3128", .{scheme});
         const proxy = try Proxy.parse(arena.allocator(), raw, 80);
         // Reuse the scratch storage before the cached transport reads it.
         @memset(buffer[0..raw.len], 'x');

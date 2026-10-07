@@ -390,7 +390,7 @@ test "an empty v0 repository advertises capabilities and no refs" {
     const gpa = testing.allocator;
     var wire: Io.Writer.Allocating = .init(gpa);
     defer wire.deinit();
-    try pktline.print("{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{"0" ** 40}, &wire.writer);
+    try pktline.print("{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{&@as([40]u8, @splat('0'))}, &wire.writer);
     try pktline.flush(&wire.writer);
     var fake: Fake = .init(wire.written());
     var adv = try readAdvertisement(gpa, &fake.connection, .sha1);

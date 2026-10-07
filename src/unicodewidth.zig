@@ -622,7 +622,7 @@ test "string columns ignore controls and fall back to bytes for invalid UTF-8" {
     }) |invalid| {
         try std.testing.expect(decode(invalid) == null);
         var buf: [16]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buf, "中{s}", .{invalid});
+        const text = try std.mem.print(&buf, "中{s}", .{invalid});
         try std.testing.expectEqual(text.len, strWidth(text));
     }
 }

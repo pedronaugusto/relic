@@ -598,7 +598,7 @@ const Exporter = struct {
             try out.put(ex.gpa, e.value_ptr.*, e.key_ptr.*);
         }
         const dir = ex.marksDir();
-        if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(ex.io, parent);
+        if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(ex.io, parent);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(ex.gpa, ex.io, dir, path, &buffer, .{});
         defer lock.deinit(ex.io);

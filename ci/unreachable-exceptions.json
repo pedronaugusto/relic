@@ -2,20 +2,6 @@
   {
     "rule": "catch-unreachable",
     "path": "src/transport/tls/Client.zig",
-    "source": "const record_ct = input.takeEnumNonexhaustive(tls.ContentType, .big) catch unreachable; // already peeked",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/transport/tls/Client.zig",
-    "source": "const record_len = input.takeInt(u16, .big) catch unreachable; // already peeked",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/transport/tls/Client.zig",
     "source": "const ad = input.take(tls.record_header_len) catch unreachable; // already peeked",
     "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
     "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."

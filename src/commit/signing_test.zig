@@ -59,9 +59,9 @@ const Keyed = struct {
         k.repo = try testgit.Repo.init(gpa, io, init_args);
         errdefer k.repo.deinit();
         try k.repo.dir.createDir(io, "keys", .default_dir);
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const top = buf[0..try k.repo.dir.realPath(io, &buf)];
-        k.home = try std.fs.path.join(gpa, &.{ top, "keys" });
+        k.home = try std.Io.Dir.path.join(gpa, &.{ top, "keys" });
         errdefer gpa.free(k.home);
 
         // Nothing from this process's environment but `PATH`, isolated as
@@ -132,15 +132,15 @@ const Keyed = struct {
     fn makeKey(k: *Keyed, io: Io) !void {
         switch (k.format) {
             .ssh => {
-                const key = try std.fs.path.join(k.gpa, &.{ k.home, "id" });
+                const key = try std.Io.Dir.path.join(k.gpa, &.{ k.home, "id" });
                 defer k.gpa.free(key);
                 k.gpa.free(try k.run(io, &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f", key }));
                 const public = try k.repo.readFile(io, "keys/id.pub");
                 defer k.gpa.free(public);
-                const allowed = try std.fmt.allocPrint(k.gpa, "fixture@example.com namespaces=\"git\" {s}", .{public});
+                const allowed = try k.gpa.print("fixture@example.com namespaces=\"git\" {s}", .{public});
                 defer k.gpa.free(allowed);
                 try k.repo.writeFile(io, "keys/allowed", allowed);
-                const allowed_path = try std.fs.path.join(k.gpa, &.{ k.home, "allowed" });
+                const allowed_path = try std.Io.Dir.path.join(k.gpa, &.{ k.home, "allowed" });
                 defer k.gpa.free(allowed_path);
                 try k.config(io, "gpg.format", "ssh");
                 try k.config(io, "user.signingKey", key);
@@ -328,7 +328,7 @@ test "export-subst's signature placeholders check the commit as git archive does
 }
 
 test "openpgp signatures made here verify in git, and git's verify here" {
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         std.debug.print("GnuPG agent unavailable on Windows runner: ", .{});
         return error.SkipZigTest;
     }
@@ -345,12 +345,12 @@ test "a key no allowed signer names is untrusted to both, and not verified" {
     try k.repo.exec(io, &.{ "add", "a.txt" });
     try k.repo.exec(io, &.{ "-c", "commit.gpgSign=true", "commit", "-q", "-m", "signed" });
     // Only someone else's key is allowed now.
-    const other = try std.fs.path.join(gpa, &.{ k.home, "other" });
+    const other = try std.Io.Dir.path.join(gpa, &.{ k.home, "other" });
     defer gpa.free(other);
     gpa.free(try k.run(io, &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "other", "-f", other }));
     const public = try k.repo.readFile(io, "keys/other.pub");
     defer gpa.free(public);
-    const allowed = try std.fmt.allocPrint(gpa, "someone@example.com {s}", .{public});
+    const allowed = try gpa.print("someone@example.com {s}", .{public});
     defer gpa.free(allowed);
     try k.repo.writeFile(io, "keys/allowed", allowed);
     var verdict = try verifyHere(k, io, "HEAD", false);
@@ -421,7 +421,7 @@ test "a signing program is one path, spaces and all, as git runs it" {
     try k.makeKey(io);
     // A native wrapper in a directory whose name a shell would split in two.
     try testgit.fixtureHook(gpa, io, k.repo.dir, "keys/my tools/keygen", "signing_wrapper", "");
-    const wrapper = try std.fs.path.join(gpa, &.{ k.home, "my tools", if (builtin.os.tag == .windows) "keygen.exe" else "keygen" });
+    const wrapper = try std.Io.Dir.path.join(gpa, &.{ k.home, "my tools", if (builtin.target.os.tag == .windows) "keygen.exe" else "keygen" });
     defer gpa.free(wrapper);
     try k.config(io, "gpg.ssh.program", wrapper);
 
@@ -449,7 +449,7 @@ test "a signature verifies through its own format's program, a relative revocati
     defer k.destroy(io);
     try k.makeKey(io);
     try testgit.fixtureHook(gpa, io, k.repo.dir, "keys/tools/keygen", "signing_wrapper", "");
-    const wrapper = try std.fs.path.join(gpa, &.{ k.home, "tools", if (builtin.os.tag == .windows) "keygen.exe" else "keygen" });
+    const wrapper = try std.Io.Dir.path.join(gpa, &.{ k.home, "tools", if (builtin.target.os.tag == .windows) "keygen.exe" else "keygen" });
     defer gpa.free(wrapper);
     try k.config(io, "gpg.ssh.program", wrapper);
     try k.repo.writeFile(io, "a.txt", "a\n");
@@ -463,10 +463,10 @@ test "a signature verifies through its own format's program, a relative revocati
     try k.config(io, "gpg.ssh.revocationFile", "revoked-keys");
     try testing.expectEqual(@as(u8, 'G'), try k.letter(io, "HEAD"));
     // A temporary directory named from where this process runs.
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         const cwd = try Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
         defer gpa.free(cwd);
-        const relative = try std.fs.path.relative(gpa, cwd, null, cwd, k.home);
+        const relative = try std.Io.Dir.path.relativeAlloc(gpa, cwd, null, cwd, k.home);
         defer gpa.free(relative);
         try k.environ.put("TMPDIR", relative);
     }
@@ -540,9 +540,9 @@ test "a failed signing program leaves its stderr after the repository closes" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try testgit.fixtureHook(gpa, io, tmp.dir, "failed-signer", "reject", "1\nsigner refused this key\n");
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
-    const executable = try std.fs.path.join(gpa, &.{ root, if (builtin.os.tag == .windows) "failed-signer.exe" else "failed-signer" });
+    const executable = try std.Io.Dir.path.join(gpa, &.{ root, if (builtin.target.os.tag == .windows) "failed-signer.exe" else "failed-signer" });
     defer gpa.free(executable);
     var environ: std.process.Environ.Map = .init(gpa);
     defer environ.deinit();

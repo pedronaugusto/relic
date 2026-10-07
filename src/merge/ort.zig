@@ -545,7 +545,7 @@ const Merge = struct {
         if (other1) |p| try paths.append(m.arena, p);
         if (other2) |p| try paths.append(m.arena, p);
         try paths.appendSlice(m.arena, others);
-        var text: []const u8 = try std.fmt.allocPrint(m.arena, fmt, args);
+        var text: []const u8 = try m.arena.print(fmt, args);
         if (m.call_depth > 0) {
             const indent = try m.arena.alloc(u8, 2 * m.call_depth);
             @memset(indent, ' ');
@@ -646,7 +646,7 @@ const Merge = struct {
 
     fn fullPath(m: *Merge, dir: []const u8, name: []const u8) Allocator.Error![]const u8 {
         if (dir.len == 0) return m.arena.dupe(u8, name);
-        return std.fmt.allocPrint(m.arena, "{s}/{s}", .{ dir, name });
+        return m.arena.print("{s}/{s}", .{ dir, name });
     }
 
     fn baseOffset(dir: []const u8) usize {
@@ -1022,9 +1022,9 @@ const Merge = struct {
         extra_marker_size: u32,
     ) Error!struct { bytes: []const u8, status: LlStatus } {
         const same = std.mem.eql(u8, pathnames[0], pathnames[1]) and std.mem.eql(u8, pathnames[1], pathnames[2]);
-        const base_label = if (same) m.ancestor else try std.fmt.allocPrint(m.arena, "{s}:{s}", .{ m.ancestor, pathnames[0] });
-        const name1 = if (same) m.branch1 else try std.fmt.allocPrint(m.arena, "{s}:{s}", .{ m.branch1, pathnames[1] });
-        const name2 = if (same) m.branch2 else try std.fmt.allocPrint(m.arena, "{s}:{s}", .{ m.branch2, pathnames[2] });
+        const base_label = if (same) m.ancestor else try m.arena.print("{s}:{s}", .{ m.ancestor, pathnames[0] });
+        const name1 = if (same) m.branch1 else try m.arena.print("{s}:{s}", .{ m.branch1, pathnames[1] });
+        const name2 = if (same) m.branch2 else try m.arena.print("{s}:{s}", .{ m.branch2, pathnames[2] });
 
         // `ll_merge` renormalizes all three first, when asked to.
         const orig = try m.renormalized(path, try m.readBlob(o));

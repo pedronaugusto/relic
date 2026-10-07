@@ -19,6 +19,7 @@ pub const filter = @import("refs/filter.zig");
 const stack_engine = @import("refs/reftablestack/transaction.zig");
 
 const std = @import("std");
+const allocation = @import("testing/allocation.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -427,7 +428,7 @@ pub const Store = struct {
             // than read, and a caller that wants to know one is there asks
             // `fs.staleReport`.
             if (std.mem.endsWith(u8, entry.name, ".lock")) continue;
-            const child_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, entry.name });
+            const child_path = try arena.print("{s}/{s}", .{ path, entry.name });
             if (entry.kind == .directory) {
                 var sub = dir.openDir(io, entry.name, .{ .iterate = true }) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir => continue,
@@ -774,7 +775,7 @@ pub const Transaction = struct {
         for (tx.edits.items) |*edit| {
             const dir = tx.store.dirFor(edit.name);
             if (edit.via == null and edit.new != null) try tx.checkAvailable(io, edit.name);
-            if (std.fs.path.dirnamePosix(edit.name)) |parent| {
+            if (std.Io.Dir.path.dirnamePosix(edit.name)) |parent| {
                 fs.makeDirs(io, dir, parent, tx.store.sharedPermissions()) catch |err| switch (err) {
                     error.PathAlreadyExists => {},
                     else => |e| return e,
@@ -912,8 +913,8 @@ pub const Transaction = struct {
     /// refuses to process both at once.
     fn checkAvailable(tx: *Transaction, io: Io, name: []const u8) TransactionError!void {
         const dir = tx.store.dirFor(name);
-        var parent = std.fs.path.dirnamePosix(name);
-        while (parent) |p| : (parent = std.fs.path.dirnamePosix(p)) {
+        var parent = std.Io.Dir.path.dirnamePosix(name);
+        while (parent) |p| : (parent = std.Io.Dir.path.dirnamePosix(p)) {
             if (std.mem.findScalar(u8, p, '/') == null) break;
             if (try isLooseFile(io, dir, p)) return error.RefNameConflict;
             if (try tx.store.readPackedOne(io, p) != null) return error.RefNameConflict;
@@ -1273,7 +1274,7 @@ fn hasLooseBelow(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) Transact
 fn removeEmptyParents(io: Io, dir: Io.Dir, path: []const u8) void {
     const keep: usize = if (std.mem.startsWith(u8, path, "logs/")) 3 else 2;
     var current = path;
-    while (std.fs.path.dirnamePosix(current)) |parent| {
+    while (std.Io.Dir.path.dirnamePosix(current)) |parent| {
         if (std.mem.count(u8, parent, "/") < keep) return;
         dir.deleteDir(io, parent) catch return;
         current = parent;
@@ -1295,7 +1296,7 @@ test "a loose ref is written, read and resolved" {
 
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
-    const oid = try Oid.parse(.sha1, "1" ** 40);
+    const oid = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
 
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -1333,10 +1334,10 @@ test "preparing an existing symbolic ref releases every parsed target" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "refs/heads");
     try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "1" ** 40 ++ "\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = @as([40]u8, @splat('1')) ++ "\n" });
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    const gpa = debug_allocator.allocator();
+    var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    const gpa = safe_allocator.allocator();
     {
         var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
         defer store.deinit();
@@ -1345,7 +1346,7 @@ test "preparing an existing symbolic ref releases every parsed target" {
         try tx.update("HEAD", .{ .symbolic = "refs/heads/next" }, .any);
         try tx.prepare(io);
     }
-    try std.testing.expectEqual(std.heap.Check.ok, debug_allocator.deinit());
+    try std.testing.expectEqual(0, safe_allocator.deinit());
 }
 
 test "an expected value that does not hold changes nothing" {
@@ -1356,9 +1357,9 @@ test "an expected value that does not hold changes nothing" {
 
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
-    const one = try Oid.parse(.sha1, "1" ** 40);
-    const two = try Oid.parse(.sha1, "2" ** 40);
-    const three = try Oid.parse(.sha1, "3" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
+    const three = try Oid.parse(.sha1, &@as([40]u8, @splat('3')));
 
     {
         var tx = store.begin(gpa);
@@ -1392,7 +1393,7 @@ test "a whole transaction rolls back when one lock is held" {
 
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
-    const one = try Oid.parse(.sha1, "1" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
 
     try tmp.dir.createDirPath(io, "refs/heads");
     // A lock exactly where a running git would leave one.
@@ -1420,9 +1421,9 @@ test "packed refs read, shadow and write" {
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
 
-    const one = try Oid.parse(.sha1, "1" ** 40);
-    const two = try Oid.parse(.sha1, "2" ** 40);
-    const peeled = try Oid.parse(.sha1, "3" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
+    const peeled = try Oid.parse(.sha1, &@as([40]u8, @splat('3')));
     try store.writePacked(io, &.{
         .{ .name = "refs/heads/main", .oid = one, .peeled = null },
         .{ .name = "refs/tags/v1", .oid = two, .peeled = peeled },
@@ -1437,7 +1438,7 @@ test "packed refs read, shadow and write" {
     try std.testing.expect(found.direct.eql(two));
 
     // A loose ref of the same name wins.
-    const three = try Oid.parse(.sha1, "4" ** 40);
+    const three = try Oid.parse(.sha1, &@as([40]u8, @splat('4')));
     {
         var tx = store.begin(gpa);
         defer tx.deinit(io);
@@ -1467,8 +1468,8 @@ test "a store parses packed-refs once, and again when the file is replaced" {
     defer other.deinit();
     const loads = &state_mod.get(store._state).packed_refs.?.loads;
 
-    const one = try Oid.parse(.sha1, "1" ** 40);
-    const two = try Oid.parse(.sha1, "2" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     try std.testing.expect((try store.read(gpa, io, "refs/tags/v1")) == null);
     try other.writePacked(io, &.{
         .{ .name = "refs/heads/main", .oid = one, .peeled = null },
@@ -1518,7 +1519,7 @@ test "a listing takes the packed refs under its prefix and no others" {
     var all = try store.list(gpa, io, "");
     defer all.deinit();
     try std.testing.expectEqual(@as(usize, 4), all.entries.len);
-    try std.testing.expect((try store.read(gpa, io, "refs/tagsx")).?.direct.eql(try Oid.parse(.sha1, "4" ** 40)));
+    try std.testing.expect((try store.read(gpa, io, "refs/tagsx")).?.direct.eql(try Oid.parse(.sha1, &@as([40]u8, @splat('4')))));
 }
 
 test "deleting a packed ref removes it from the packed file" {
@@ -1529,8 +1530,8 @@ test "deleting a packed ref removes it from the packed file" {
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
 
-    const one = try Oid.parse(.sha1, "1" ** 40);
-    const two = try Oid.parse(.sha1, "2" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     try store.writePacked(io, &.{
         .{ .name = "refs/heads/keep", .oid = one, .peeled = null },
         .{ .name = "refs/heads/gone", .oid = two, .peeled = null },
@@ -1658,7 +1659,7 @@ test "FETCH_HEAD and a merge's MERGE_HEAD read as their first object name, as gi
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     try repo.exec(io, &.{ "fetch", "-q", source_path, "main", "other" });
-    try repo.writeFile(io, ".git/MERGE_HEAD", "1" ** 40 ++ "\n" ++ "2" ** 40 ++ "\n");
+    try repo.writeFile(io, ".git/MERGE_HEAD", @as([40]u8, @splat('1')) ++ "\n" ++ @as([40]u8, @splat('2')) ++ "\n");
 
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
@@ -1672,7 +1673,7 @@ test "FETCH_HEAD and a merge's MERGE_HEAD read as their first object name, as gi
         try std.testing.expectEqualStrings(std.mem.trim(u8, theirs, "\r\n"), ours.direct.hex(&hex));
     }
     // An object name run into more text is not one.
-    try repo.writeFile(io, ".git/ORIG_HEAD", "1" ** 41 ++ "\n");
+    try repo.writeFile(io, ".git/ORIG_HEAD", @as([41]u8, @splat('1')) ++ "\n");
     try std.testing.expectError(error.MalformedRef, store.read(gpa, io, "ORIG_HEAD"));
 }
 
@@ -1699,19 +1700,19 @@ test "an update through HEAD is refused when HEAD moves between the split and th
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "refs/heads");
     try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "1" ** 40 ++ "\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/other", .data = "1" ** 40 ++ "\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = @as([40]u8, @splat('1')) ++ "\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/other", .data = @as([40]u8, @splat('1')) ++ "\n" });
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
-    try tx.update("HEAD", .{ .direct = try Oid.parse(.sha1, "2" ** 40) }, .any);
+    try tx.update("HEAD", .{ .direct = try Oid.parse(.sha1, &@as([40]u8, @splat('2'))) }, .any);
     try tx.splitSymbolic(io);
     // A checkout elsewhere moves HEAD to another branch.
     try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/other\n" });
     try std.testing.expectError(error.ExpectedValueMismatch, tx.lockAndCheck(io));
     const main = (try store.read(gpa, io, "refs/heads/main")).?;
-    try std.testing.expect(main.direct.eql(try Oid.parse(.sha1, "1" ** 40)));
+    try std.testing.expect(main.direct.eql(try Oid.parse(.sha1, &@as([40]u8, @splat('1')))));
 }
 
 test "a ref name ending in .lock is refused" {
@@ -1738,7 +1739,7 @@ test "nesting names in one transaction is refused" {
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
-    const one = try Oid.parse(.sha1, "1" ** 40);
+    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     try tx.create("refs/heads/a", .{ .direct = one });
     try tx.create("refs/heads/a/b", .{ .direct = one });
     try std.testing.expectError(error.RefNameConflict, tx.commit(io, null));
@@ -1967,16 +1968,16 @@ test "an edit named twice, once through HEAD, is refused before anything moves" 
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "refs/heads");
     try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "1" ** 40 ++ "\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = @as([40]u8, @splat('1')) ++ "\n" });
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
-    try tx.update("HEAD", .{ .direct = try Oid.parse(.sha1, "2" ** 40) }, .any);
-    try tx.update("refs/heads/main", .{ .direct = try Oid.parse(.sha1, "3" ** 40) }, .any);
+    try tx.update("HEAD", .{ .direct = try Oid.parse(.sha1, &@as([40]u8, @splat('2'))) }, .any);
+    try tx.update("refs/heads/main", .{ .direct = try Oid.parse(.sha1, &@as([40]u8, @splat('3'))) }, .any);
     try std.testing.expectError(error.DuplicateEdit, tx.commit(io, null));
     const main = (try store.read(gpa, io, "refs/heads/main")).?;
-    try std.testing.expect(main.direct.eql(try Oid.parse(.sha1, "1" ** 40)));
+    try std.testing.expect(main.direct.eql(try Oid.parse(.sha1, &@as([40]u8, @splat('1')))));
     try std.testing.expect(!fs.lockHeld(io, tmp.dir, "HEAD"));
 }
 
@@ -1988,7 +1989,7 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
     try testgit.requireGitVersion(gpa, io, 2, 54);
     for ([_][]const u8{ "preparing", "prepared" }) |state| {
         var body_buf: [160]u8 = undefined;
-        const body = try std.fmt.bufPrint(&body_buf, ".git/rt.log\n{s}", .{state});
+        const body = try std.mem.print(&body_buf, ".git/rt.log\n{s}", .{state});
         var twin = try HookTwin.init(gpa, io, "record_stdin", body);
         defer twin.deinit();
         const head_text = try twin.git.line(io, &.{ "rev-parse", "HEAD" });
@@ -2152,7 +2153,7 @@ fn listTree(gpa: Allocator, io: Io, top: Io.Dir) ![]u8 {
         var walker = try dir.walk(gpa);
         defer walker.deinit();
         while (try walker.next(io)) |entry| {
-            try paths.append(gpa, try std.fmt.allocPrint(gpa, "{s}/{s}", .{ root, entry.path }));
+            try paths.append(gpa, try gpa.print("{s}/{s}", .{ root, entry.path }));
         }
     }
     std.mem.sort([]u8, paths.items, {}, struct {
@@ -2190,8 +2191,8 @@ test "reading packed refs has one owner when parsing stops" {
     defer tmp.cleanup();
     var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
     defer store.deinit();
-    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_header ++ "1" ** 40 ++ " refs/heads/main\n" });
-    try std.testing.checkAllAllocationFailures(gpa, readPackedForAllocation, .{ io, tmp.dir });
+    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_header ++ @as([40]u8, @splat('1')) ++ " refs/heads/main\n" });
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, readPackedForAllocation, .{ io, tmp.dir });
     try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = "not a ref\n" });
     try std.testing.expectError(error.MalformedPackedRefs, store.readPacked(gpa, io));
 }
@@ -2212,9 +2213,9 @@ test "listing loose refs preserves allocation resource failures" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "refs/heads");
     // A packed ref stays present when an unreadable loose shadow is skipped.
-    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_header ++ "1" ** 40 ++ " refs/heads/main\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "ref: refs/heads/" ++ "a" ** 2000 ++ "\n" });
-    try std.testing.checkAllAllocationFailures(gpa, listLooseRefsForAllocation, .{ io, tmp.dir });
+    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_header ++ @as([40]u8, @splat('1')) ++ " refs/heads/main\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "ref: refs/heads/" ++ @as([2000]u8, @splat('a')) ++ "\n" });
+    try std.testing.checkAllAllocationFailures(allocation.no_resize, listLooseRefsForAllocation, .{ io, tmp.dir });
     var counting = std.testing.FailingAllocator.init(gpa, .{});
     try listLooseRefsForAllocation(counting.allocator(), io, tmp.dir);
     for (0..counting.alloc_index) |fail_index| {
@@ -2241,7 +2242,7 @@ fn listLooseRefsForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
     defer listed.deinit();
     try std.testing.expectEqual(@as(usize, 1), listed.entries.len);
     try std.testing.expect(listed.entries[0].loose);
-    try std.testing.expectEqualStrings("refs/heads/" ++ "a" ** 2000, listed.entries[0].target.symbolic);
+    try std.testing.expectEqualStrings("refs/heads/" ++ @as([2000]u8, @splat('a')), listed.entries[0].target.symbolic);
 }
 
 /// Every file below `dir` but objects and logs, by its `/`-separated path,

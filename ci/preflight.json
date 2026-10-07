@@ -6,7 +6,7 @@
     "src/tests.zig"
   ],
   "test_support": [
-    "src/testing/*"
+    "src/testing/**"
   ],
   "function_exceptions": {
     "src/hash/sha1.zig:compressAarch64": {
@@ -37,11 +37,6 @@
     "src/transport/tls/Client.zig": "Zig standard-library TLS client fork, held byte for byte to its recorded patch by src/testing/tls_fork.zig and zig build check-tls-fork."
   },
   "extra_checks": [
-    [
-      "zig",
-      "build",
-      "check-cases"
-    ],
     [
       "zig",
       "build",

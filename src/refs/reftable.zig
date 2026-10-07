@@ -268,8 +268,8 @@ pub const Table = struct {
             .obj_index_offset = obj_index,
             .log_offset = log_offset,
             .log_index_offset = log_index,
-            .has_refs = first_type == @intFromEnum(BlockType.ref),
-            .has_logs = first_type == @intFromEnum(BlockType.log) or log_offset > 0,
+            .has_refs = first_type == @backingInt(BlockType.ref),
+            .has_logs = first_type == @backingInt(BlockType.log) or log_offset > 0,
             .has_objs = has_objs,
         };
     }
@@ -319,8 +319,8 @@ pub const Table = struct {
                 if (levels > 64) return error.CorruptBlock;
                 var block = (try t.loadBlock(gpa, at)) orelse return it;
                 defer block.deinit(gpa);
-                if (block.typ != @intFromEnum(BlockType.index)) {
-                    if (block.typ != @intFromEnum(typ)) return error.CorruptBlock;
+                if (block.typ != @backingInt(BlockType.index)) {
+                    if (block.typ != @backingInt(typ)) return error.CorruptBlock;
                     break;
                 }
                 var cursor: Iterator = .{ .gpa = gpa, .table = t, .typ = .index };
@@ -340,7 +340,7 @@ pub const Table = struct {
             while (true) {
                 const next_at = it.block_at + it.block.?.full_size;
                 var next = (try t.loadBlock(gpa, next_at)) orelse break;
-                if (next.typ != @intFromEnum(typ)) {
+                if (next.typ != @backingInt(typ)) {
                     next.deinit(gpa);
                     break;
                 }
@@ -399,7 +399,7 @@ pub const Table = struct {
         const skip = header_off + 4;
         if (len < skip + 2) return error.CorruptBlock;
         if (t.source == .file) {
-            const want = if (typ == @intFromEnum(BlockType.log)) len + len / 256 + 64 else len + 1;
+            const want = if (typ == @backingInt(BlockType.log)) len + len / 256 + 64 else len + 1;
             if (want > data.len and data.len < t.size - off) {
                 gpa.free(raw.?);
                 raw = null;
@@ -417,7 +417,7 @@ pub const Table = struct {
             .restart_count = 0,
             .full_size = 0,
         };
-        if (typ == @intFromEnum(BlockType.log)) {
+        if (typ == @backingInt(BlockType.log)) {
             const out = try gpa.alloc(u8, len);
             errdefer gpa.free(out);
             @memcpy(out[0..skip], data[0..skip]);
@@ -488,7 +488,7 @@ pub const Table = struct {
             if (at == 0) continue;
             var block = (try t.loadBlock(gpa, at)) orelse return error.CorruptBlock;
             defer block.deinit(gpa);
-            if (block.typ != @intFromEnum(BlockType.index)) return error.CorruptBlock;
+            if (block.typ != @backingInt(BlockType.index)) return error.CorruptBlock;
             var it: Iterator = .{ .gpa = gpa, .table = t, .typ = .index };
             defer it.deinit();
             it.block = block;
@@ -576,7 +576,7 @@ pub const Iterator = struct {
 
     fn enter(it: *Iterator, at: u64) Error!void {
         const block = (try it.table.loadBlock(it.gpa, at)) orelse return;
-        if (block.typ != @intFromEnum(it.typ)) {
+        if (block.typ != @backingInt(it.typ)) {
             var b = block;
             b.deinit(it.gpa);
             return;
@@ -918,7 +918,7 @@ const Writer = struct {
     indexes: SectionStats = .{},
     object_id_len: u8 = 0,
     /// Object names to the ref blocks naming them, for the object index.
-    objects: std.AutoArrayHashMapUnmanaged([hash.max_raw_len]u8, std.ArrayList(u64)) = .empty,
+    objects: std.array_hash_map.Auto([hash.max_raw_len]u8, std.ArrayList(u64)) = .empty,
     scratch: std.ArrayList(u8) = .empty,
 
     const OpenBlock = struct {
@@ -988,7 +988,7 @@ const Writer = struct {
         w.last_key.clearRetainingCapacity();
         w.dropOpen();
         @memset(w.block, 0);
-        w.block[header_off] = @intFromEnum(typ);
+        w.block[header_off] = @backingInt(typ);
         w.open = .{ .typ = typ, .header_off = header_off, .next = header_off + 4 };
     }
 
@@ -1337,7 +1337,7 @@ test "a table written is a table read, record for record" {
     defer refs.deinit(gpa);
     // Enough refs for several blocks, an index and an object index.
     for (0..800) |i| {
-        const name = try std.fmt.allocPrint(gpa, "refs/heads/branch-{d:0>4}", .{i});
+        const name = try gpa.print("refs/heads/branch-{d:0>4}", .{i});
         try names.append(gpa, name);
         try refs.append(gpa, .{
             .name = name,
@@ -1420,7 +1420,7 @@ test "a table read from its file a block at a time reads what its bytes read" {
     var names: [300][32]u8 = undefined;
     for (&refs, 0..) |*r, i| {
         r.* = .{
-            .name = try std.fmt.bufPrint(&names[i], "refs/tags/t{d:0>4}", .{i}),
+            .name = try std.mem.print(&names[i], "refs/tags/t{d:0>4}", .{i}),
             .update_index = 1,
             .value = if (i % 5 == 0) .{ .symbolic = "refs/heads/main" } else .{ .direct = oidOf(@truncate(i)) },
         };
@@ -1520,7 +1520,7 @@ fn fuzzBase() ![]const u8 {
     var names: [60][32]u8 = undefined;
     for (&refs, 0..) |*r, i| {
         r.* = .{
-            .name = try std.fmt.bufPrint(&names[i], "refs/heads/b{d:0>3}", .{i}),
+            .name = try std.mem.print(&names[i], "refs/heads/b{d:0>3}", .{i}),
             .update_index = 1 + i % 3,
             .value = switch (i % 4) {
                 0 => .{ .direct = oidOf(@intCast(i)) },
@@ -1620,7 +1620,7 @@ test "a table git wrote is read record for record, and written back byte for byt
     defer gpa.free(parent);
     for (0..10) |i| {
         var name_buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "annotated-{d}", .{i});
+        const name = try std.mem.print(&name_buf, "annotated-{d}", .{i});
         try repo.exec(io, &.{ "tag", "-a", "-m", "a tag", name, if (i % 2 == 0) head else parent });
     }
     var script: std.ArrayList(u8) = .empty;
@@ -1642,7 +1642,7 @@ test "a table git wrote is read record for record, and written back byte for byt
     const table_name = std.mem.trimEnd(u8, list, "\n");
     try std.testing.expect(std.mem.findScalar(u8, table_name, '\n') == null);
     var path_buf: [128]u8 = undefined;
-    const bytes = try repo.readFile(io, try std.fmt.bufPrint(&path_buf, ".git/reftable/{s}", .{table_name}));
+    const bytes = try repo.readFile(io, try std.mem.print(&path_buf, ".git/reftable/{s}", .{table_name}));
     defer gpa.free(bytes);
 
     const table = try Table.parse(bytes, .sha1);

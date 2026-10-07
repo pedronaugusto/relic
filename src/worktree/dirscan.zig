@@ -30,7 +30,7 @@ const fs = @import("../repo/fs.zig");
 /// Whether this platform has a call that reads a batch of entries with their
 /// stats. A run-time `ENOTSUP` from the volume is still possible, and is a
 /// fallback rather than a failure.
-pub const bulk_supported = builtin.os.tag == .macos and builtin.link_libc;
+pub const bulk_supported = builtin.target.os.tag == .macos and builtin.link_libc;
 
 /// One directory entry.
 ///
@@ -442,7 +442,7 @@ test "both arms describe a directory the same way" {
     if (Io.File.Permissions.has_executable_bit) {
         const runnable = try dir.openFile(io, "runnable", .{});
         defer runnable.close(io);
-        try runnable.setPermissions(io, @enumFromInt(@as(std.posix.mode_t, 0o755)));
+        try runnable.setPermissions(io, @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o755))));
     }
     var has_link = true;
     dir.symLink(io, "plain.txt", "link", .{}) catch {
@@ -521,7 +521,7 @@ test "a scan reads a directory larger than one batch" {
     const count = 900;
     for (0..count) |i| {
         var name: [128]u8 = undefined;
-        const n = try std.fmt.bufPrint(&name, "entry-{d:0>4}-with-a-name-long-enough-to-fill-the-batch-buffer", .{i});
+        const n = try std.mem.print(&name, "entry-{d:0>4}-with-a-name-long-enough-to-fill-the-batch-buffer", .{i});
         try tmp.dir.writeFile(io, .{ .sub_path = n, .data = "x" });
     }
 
@@ -557,7 +557,7 @@ test "a scan can be taken twice over the same handle" {
     defer tmp.cleanup();
     for (0..5) |i| {
         var name: [16]u8 = undefined;
-        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "f{d}", .{i}), .data = "x" });
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.mem.print(&name, "f{d}", .{i}), .data = "x" });
     }
     // A batch read walks the handle's own offset forward, so a second scan
     // over the same handle would see an empty directory if it did not put

@@ -65,7 +65,7 @@ fn safeDirectory(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) ![]u8 {
     defer gpa.free(path);
     const normal = try safe.normalize(gpa, path);
     defer gpa.free(normal);
-    return std.fmt.allocPrint(gpa, "[safe]\n\tdirectory = {s}\n", .{normal});
+    return gpa.print("[safe]\n\tdirectory = {s}\n", .{normal});
 }
 
 test "CVE-2022-24765, t0033-safe-directory: a repository another user owns is used only where protected configuration names it" {

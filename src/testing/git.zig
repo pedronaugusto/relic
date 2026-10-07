@@ -23,6 +23,7 @@
 //! test, is one forgotten line from doing all of it.
 
 const std = @import("std");
+const suite = @import("helpers.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const Io = std.Io;
@@ -44,7 +45,7 @@ pub const default_settings = [_][]const u8{
     "-c", "advice.detachedHead=false",
     "-c", "protocol.file.allow=always",
     "-c", "feature.manyFiles=false",
-} ++ (if (builtin.os.tag == .windows) [_][]const u8{
+} ++ (if (builtin.target.os.tag == .windows) [_][]const u8{
     // Git for Windows defaults to Schannel, which uses the machine trust
     // store even when these fixtures provide a PEM through sslCAInfo.
     "-c", "http.sslBackend=openssl",
@@ -236,7 +237,7 @@ pub const Repo = struct {
 
     /// Write a file in the working tree, making the directories it needs.
     pub fn writeFile(r: *Repo, io: Io, path: []const u8, bytes: []const u8) !void {
-        if (std.fs.path.dirname(path)) |parent| try r.dir.createDirPath(io, parent);
+        if (std.Io.Dir.path.dirname(path)) |parent| try r.dir.createDirPath(io, parent);
         try r.dir.writeFile(io, .{ .sub_path = path, .data = bytes });
     }
 
@@ -269,7 +270,7 @@ pub const Captured = struct {
 /// A home that does not exist, for an environment built where there is no
 /// directory to spare. git reads nothing from it and can write nothing to
 /// it, which is what isolation asks.
-pub const no_home = if (builtin.os.tag == .windows) "C:\\relic-test-no-home" else "/nonexistent/relic-test-home";
+pub const no_home = if (builtin.target.os.tag == .windows) "C:\\relic-test-no-home" else "/nonexistent/relic-test-home";
 
 /// The variables `isolate` removes besides every `GIT_*` one: the agents
 /// that hold a person's keys, the programs that would ask them for a
@@ -315,8 +316,8 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     }
     try map.put("HOME", home);
     var global_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-    const sep = if (builtin.os.tag == .windows) "\\" else "/";
-    try map.put("GIT_CONFIG_GLOBAL", try std.fmt.bufPrint(&global_buf, "{s}" ++ sep ++ ".gitconfig", .{home}));
+    const sep = if (builtin.target.os.tag == .windows) "\\" else "/";
+    try map.put("GIT_CONFIG_GLOBAL", try std.mem.print(&global_buf, "{s}" ++ sep ++ ".gitconfig", .{home}));
     try map.put("GIT_CONFIG_NOSYSTEM", "1");
     try map.put("GIT_TERMINAL_PROMPT", "0");
     try setDate(map, fixture_date);
@@ -342,10 +343,10 @@ pub const GnupgHome = struct {
         try Io.Dir.cwd().createDirPath(io, fixture_root);
         const root = try Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa);
         defer gpa.free(root);
-        const home_path = try std.fs.path.join(gpa, &.{ root, &suffix });
-        std.debug.assert(std.fs.path.isAbsolute(home_path));
+        const home_path = try std.Io.Dir.path.join(gpa, &.{ root, &suffix });
+        std.debug.assert(std.Io.Dir.path.isAbsolute(home_path));
         errdefer gpa.free(home_path);
-        try Io.Dir.createDirAbsolute(io, home_path, if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700));
+        try Io.Dir.createDirAbsolute(io, home_path, if (builtin.target.os.tag == .windows) .default_dir else .fromMode(0o700));
         return .{ .gpa = gpa, .name = home_path };
     }
 
@@ -373,7 +374,7 @@ const windows_system_variables = [_][]const u8{ "SystemRoot", "ProgramData" };
 /// Carry `windows_system_variables` over from the test's own environment
 /// into `map`, on Windows. Elsewhere there are none.
 pub fn keepSystemVariables(gpa: Allocator, map: *Environ.Map) !void {
-    if (builtin.os.tag != .windows) return;
+    if (builtin.target.os.tag != .windows) return;
     for (windows_system_variables) |name| {
         const value = std.testing.environ.getAlloc(gpa, name) catch continue;
         defer gpa.free(value);
@@ -387,7 +388,7 @@ pub fn keepSystemVariables(gpa: Allocator, map: *Environ.Map) !void {
 /// upwards from one finds that checkout: its configuration, or, where the
 /// checkout is a linked worktree or belongs to another user, a refusal.
 pub fn noRepositoryAbove(map: *Environ.Map, dir: []const u8) !void {
-    try map.put("GIT_CEILING_DIRECTORIES", std.fs.path.dirname(dir) orelse dir);
+    try map.put("GIT_CEILING_DIRECTORIES", std.Io.Dir.path.dirname(dir) orelse dir);
 }
 
 /// The test process's environment, isolated: see `isolate`.
@@ -416,18 +417,18 @@ pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
 /// Install a native hook fixture with `action` and `data` as its sidecar
 /// description. Git and relic run the same executable under the hook name.
 pub fn fixtureHook(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, action: []const u8, data: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(io, parent);
-    const executable = if (builtin.os.tag == .windows) try std.fmt.allocPrint(gpa, "{s}.exe", .{path}) else try gpa.dupe(u8, path);
+    if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(io, parent);
+    const executable = if (builtin.target.os.tag == .windows) try gpa.print("{s}.exe", .{path}) else try gpa.dupe(u8, path);
     defer gpa.free(executable);
-    try Io.Dir.cwd().copyFile(build_options.hook_fixture_path, dir, executable, io, .{});
-    if (builtin.os.tag != .windows) {
+    try Io.Dir.cwd().copyFile(suite.path(.hook_fixture), dir, executable, io, .{});
+    if (builtin.target.os.tag != .windows) {
         const file = try dir.openFile(io, executable, .{});
         defer file.close(io);
         try file.setPermissions(io, .fromMode(0o755));
     }
-    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{executable});
+    const sidecar = try gpa.print("{s}.fixture", .{executable});
     defer gpa.free(sidecar);
-    const description = try std.fmt.allocPrint(gpa, "{s}\n{s}", .{ action, data });
+    const description = try gpa.print("{s}\n{s}", .{ action, data });
     defer gpa.free(description);
     try dir.writeFile(io, .{ .sub_path = sidecar, .data = description });
 }
@@ -437,7 +438,7 @@ pub fn fixtureHook(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, action
 pub fn fixtureCommand(gpa: Allocator, executable: []const u8, arguments: []const u8) ![]u8 {
     const path = try gpa.dupe(u8, executable);
     defer gpa.free(path);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
     var command: std.ArrayList(u8) = .empty;
     errdefer command.deinit(gpa);
     try command.append(gpa, '\'');
@@ -465,7 +466,7 @@ pub fn datedEnv(gpa: Allocator, secs: i64) !Environ.Map {
 /// `isolate`.
 pub fn setDate(map: *Environ.Map, secs: i64) !void {
     var buf: [64]u8 = undefined;
-    const text = try std.fmt.bufPrint(&buf, "{d} +0000", .{secs});
+    const text = try std.mem.print(&buf, "{d} +0000", .{secs});
     try map.put("GIT_AUTHOR_DATE", text);
     try map.put("GIT_COMMITTER_DATE", text);
 }
@@ -566,7 +567,7 @@ test "a git the harness runs reads no configuration but the harness's own" {
     defer gpa.free(home);
     const scratch = try gpa.dupe(u8, repo.isolated.?.get("HOME").?);
     defer gpa.free(scratch);
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         std.mem.replaceScalar(u8, home, '\\', '/');
         std.mem.replaceScalar(u8, scratch, '\\', '/');
     }
@@ -643,8 +644,8 @@ test "GnuPG test homes use the selected root and clean up independently" {
     defer gpa.free(removed);
     const resolved = try Io.Dir.cwd().realPathFileAlloc(io, root, gpa);
     defer gpa.free(resolved);
-    try std.testing.expectEqualStrings(resolved, std.fs.path.dirname(first.path()).?);
-    try std.testing.expectEqualStrings(resolved, std.fs.path.dirname(removed).?);
+    try std.testing.expectEqualStrings(resolved, std.Io.Dir.path.dirname(first.path()).?);
+    try std.testing.expectEqualStrings(resolved, std.Io.Dir.path.dirname(removed).?);
     try std.testing.expect(!std.mem.eql(u8, first.path(), removed));
     try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, removed, .{}));
     try Io.Dir.cwd().access(io, first.path(), .{});

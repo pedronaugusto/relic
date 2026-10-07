@@ -7,8 +7,7 @@
 //! lock file is removed on the way out; a kill leaves it behind, which is the
 //! stale lock the suite also tests.
 //!
-//! `zig build test` builds this and hands the test binary its path in
-//! `RELIC_LOCK_HELPER`; the tests that need it are skipped without that.
+//! `zig build test` builds this and compiles its path into the suite.
 
 const std = @import("std");
 

@@ -80,7 +80,7 @@ pub const Command = enum {
 
     /// Whether it names a commit to apply.
     pub fn picksCommit(c: Command) bool {
-        return @intFromEnum(c) <= @intFromEnum(Command.squash);
+        return @backingInt(c) <= @backingInt(Command.squash);
     }
 };
 
@@ -221,8 +221,8 @@ fn parseLine(line_in: []const u8, number: usize, resolver: Resolver, options: Pa
     }
     var command: ?Command = null;
     var rest: []const u8 = undefined;
-    inline for (std.meta.fields(Command)) |field| {
-        const c: Command = @enumFromInt(field.value);
+    inline for (@typeInfo(Command).@"enum".field_names) |name| {
+        const c = @field(Command, name);
         if (command == null and c != .comment) {
             if (matchCommand(c, line)) |after| {
                 command = c;

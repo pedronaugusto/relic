@@ -39,7 +39,7 @@ fn served(gpa: Allocator, io: Io, root: Io.Dir) !void {
     defer gpa.free(root_path);
     const source_path = try testremote.absolutePath(gpa, io, source.dir);
     defer gpa.free(source_path);
-    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
     try source.exec(io, &.{ "--git-dir", bare, "config", "uploadpack.allowFilter", "true" });
@@ -140,7 +140,7 @@ const Twins = struct {
             .tmp = tmp,
             .by_git = try tmp.dir.openDir(io, "by-git", .{ .iterate = true }),
             .by_relic = try tmp.dir.openDir(io, "by-relic", .{ .iterate = true }),
-            .git_path = try std.fs.path.join(gpa, &.{ base, "by-git" }),
+            .git_path = try std.Io.Dir.path.join(gpa, &.{ base, "by-git" }),
         };
     }
 
@@ -169,7 +169,7 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit, t
     for ([_][]const u8{ "blob:none", "blob:limit=1k", "tree:0", "combine:blob:none+tree:1", "sparse:oid=main:big.txt", "object:type=tree" }) |spec| {
         var twins = try Twins.init(gpa, io);
         defer twins.deinit(gpa, io);
-        const filter_arg = try std.fmt.allocPrint(gpa, "--filter={s}", .{spec});
+        const filter_arg = try gpa.print("--filter={s}", .{spec});
         defer gpa.free(filter_arg);
         const out = try testremote.gitInputEnv(gpa, io, twins.tmp.dir, &env, &.{ "clone", "-q", filter_arg, url, twins.git_path }, "", true);
         gpa.free(out);
@@ -190,7 +190,7 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit, t
     defer local.deinit(gpa, io);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const path = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    const path = try gpa.print("{s}/repo.git", .{root_path});
     defer gpa.free(path);
     const cloned = try testremote.gitInputEnv(gpa, io, local.tmp.dir, &env, &.{ "clone", "-q", "--filter=blob:none", path, local.git_path }, "", true);
     gpa.free(cloned);
@@ -287,7 +287,7 @@ test "a fetch into a partial clone is filtered, and its pack is a promisor's, as
         try maker.exec(io, &.{ "commit", "-q", "-m", "new" });
         const root_path = try testremote.absolutePath(gpa, io, root.dir);
         defer gpa.free(root_path);
-        const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+        const bare = try gpa.print("{s}/repo.git", .{root_path});
         defer gpa.free(bare);
         try maker.exec(io, &.{ "push", "-q", bare, "HEAD:main" });
     }
@@ -327,11 +327,11 @@ test "a filter the server does not know is left off with a warning and everythin
     for ([_][]const u8{ "2", "0" }) |version| {
         var twins = try Twins.init(gpa, io);
         defer twins.deinit(gpa, io);
-        const setting = try std.fmt.allocPrint(gpa, "protocol.version={s}", .{version});
+        const setting = try gpa.print("protocol.version={s}", .{version});
         defer gpa.free(setting);
         const out = try testremote.gitInputEnv(gpa, io, twins.tmp.dir, &env, &.{ "-c", setting, "clone", "-q", "--filter=blob:none", url, twins.git_path }, "", true);
         gpa.free(out);
-        const text = try std.fmt.allocPrint(gpa, "[protocol]\n\tversion = {s}\n", .{version});
+        const text = try gpa.print("[protocol]\n\tversion = {s}\n", .{version});
         defer gpa.free(text);
         var settings = try config_mod.Config.parseText(gpa, text, .command);
         defer settings.deinit();
@@ -360,11 +360,11 @@ test "a promised object is fetched from the next promisor remote when one fails,
     try served(gpa, io, root.dir);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const origin = try std.fmt.allocPrint(gpa, "file://{s}/repo.git", .{root_path});
+    const origin = try gpa.print("file://{s}/repo.git", .{root_path});
     defer gpa.free(origin);
-    const mirror = try std.fmt.allocPrint(gpa, "file://{s}/mirror.git", .{root_path});
+    const mirror = try gpa.print("file://{s}/mirror.git", .{root_path});
     defer gpa.free(mirror);
-    const mirror_path = try std.fmt.allocPrint(gpa, "{s}/mirror.git", .{root_path});
+    const mirror_path = try gpa.print("{s}/mirror.git", .{root_path});
     defer gpa.free(mirror_path);
     {
         const out = try git(gpa, io, root.dir, &.{ "clone", "-q", "--mirror", origin, mirror_path });

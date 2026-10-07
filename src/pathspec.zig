@@ -87,7 +87,7 @@ pub const Pathspec = struct {
         for (p.items) |item| {
             if (item.exclude) continue;
             const h = howItem(item, path, flags, false);
-            if (@intFromEnum(h) > @intFromEnum(best)) best = h;
+            if (@backingInt(h) > @backingInt(best)) best = h;
         }
         if (best == .none or !p.has_exclude) return best;
         for (p.items) |item| {

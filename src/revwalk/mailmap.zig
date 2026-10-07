@@ -253,7 +253,7 @@ pub const Mailmap = struct {
     /// git for Windows has no such open and follows it, and so does this
     /// there.
     pub fn addFileAt(m: *Mailmap, io: Io, dir: Io.Dir, path: []const u8, follow_symlinks: bool) (Allocator.Error || Io.File.Reader.Error)!void {
-        if (!follow_symlinks and builtin.os.tag != .windows) {
+        if (!follow_symlinks and builtin.target.os.tag != .windows) {
             const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
             if (st.kind == .sym_link) return;
         }
@@ -390,9 +390,9 @@ fn compareWithGit(gpa: Allocator, io: Io, seed: u64) !void {
     for (names) |n| for (emails) |e| {
         // git cannot be asked about an empty name with a space before `<`.
         if (n.len == 0) {
-            try args.append(gpa, try std.fmt.allocPrint(gpa, "<{s}>", .{e}));
+            try args.append(gpa, try gpa.print("<{s}>", .{e}));
         } else {
-            try args.append(gpa, try std.fmt.allocPrint(gpa, "{s} <{s}>", .{ std.mem.trim(u8, n, " \t"), e }));
+            try args.append(gpa, try gpa.print("{s} <{s}>", .{ std.mem.trim(u8, n, " \t"), e }));
         }
     };
     const expected = try r.run(io, args.items);
@@ -452,7 +452,7 @@ test "mailmap.blob and mailmap.file override the working tree's .mailmap in git'
 }
 
 test "a .mailmap that is a symbolic link is not read, as git does not read one" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var r = try testgit.Repo.init(gpa, io, &.{});

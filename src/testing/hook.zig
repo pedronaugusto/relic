@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     if (args.len == 0) return error.MissingProgramName;
     const executable = try std.process.executablePathAlloc(io, arena);
-    const sidecar = try std.fmt.allocPrint(arena, "{s}.fixture", .{executable});
+    const sidecar = try arena.print("{s}.fixture", .{executable});
     const description = try Io.Dir.cwd().readFileAlloc(io, sidecar, arena, .limited(4096));
     const newline = std.mem.findScalar(u8, description, '\n') orelse return error.InvalidFixture;
     const action = actions.get(description[0..newline]) orelse return error.InvalidFixture;
@@ -52,7 +52,7 @@ const Hook = struct {
 
     /// The name git ran this hook as, without a Windows `.exe`.
     fn name(h: *const Hook) []const u8 {
-        const raw_name = std.fs.path.basename(h.args[0]);
+        const raw_name = std.Io.Dir.path.basename(h.args[0]);
         return if (std.ascii.endsWithIgnoreCase(raw_name, ".exe")) raw_name[0 .. raw_name.len - 4] else raw_name;
     }
 
@@ -153,7 +153,7 @@ fn commitRecord(h: *const Hook) !u8 {
     for (h.args[1..]) |argument| {
         if (Io.Dir.cwd().openFile(io, argument, .{})) |file| {
             file.close(io);
-            try entry.print(arena, " [{s}]", .{std.fs.path.basename(argument)});
+            try entry.print(arena, " [{s}]", .{std.Io.Dir.path.basename(argument)});
         } else |_| try entry.print(arena, " {s}", .{argument});
     }
     if (try atGitTop(arena, io, h.environ)) try entry.appendSlice(arena, " top");
@@ -209,8 +209,8 @@ fn rewriteLog(h: *const Hook) !u8 {
 /// Note the use in `log` beside this program, then run ssh-keygen with the
 /// arguments and end with its status.
 fn signingWrapper(h: *const Hook) !u8 {
-    const parent = std.fs.path.dirname(h.args[0]) orelse return error.InvalidFixture;
-    const log = try std.fs.path.join(h.arena, &.{ parent, "log" });
+    const parent = std.Io.Dir.path.dirname(h.args[0]) orelse return error.InvalidFixture;
+    const log = try std.Io.Dir.path.join(h.arena, &.{ parent, "log" });
     try appendFile(h.io, log, "used\n");
     var command: std.ArrayList([]const u8) = .empty;
     try command.append(h.arena, try testprogram.path(h.arena, h.io, h.environ, "ssh-keygen"));
@@ -244,7 +244,7 @@ fn historyRecord(h: *const Hook) !u8 {
         h.environ.get("GIT_AUTHOR_DATE") orelse "",
     });
     for ([_][]const u8{ "MERGE_HEAD", "MERGE_MSG", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "COMMIT_EDITMSG" }) |state| {
-        const path = try std.fmt.allocPrint(arena, ".git/{s}", .{state});
+        const path = try arena.print(".git/{s}", .{state});
         if (Io.Dir.cwd().openFile(io, path, .{})) |file| {
             file.close(io);
             try entry.print(arena, " {s}", .{state});

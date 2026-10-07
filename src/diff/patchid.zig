@@ -103,7 +103,7 @@ fn addPath(h: *hash.Hasher, path: []const u8) void {
 fn addMode(h: *hash.Hasher, mode: object.Mode) void {
     var buf: [16]u8 = undefined;
     // unreachable: a u32 is at most 11 octal digits
-    h.update(std.fmt.bufPrint(&buf, "{o:0>6}", .{mode.raw()}) catch unreachable);
+    h.update(std.mem.print(&buf, "{o:0>6}", .{mode.raw()}) catch unreachable);
 }
 
 /// Read a side of a change: a blob's bytes, a symlink's target, or what git
@@ -112,7 +112,7 @@ fn sideBytes(gpa: Allocator, io: Io, db: *odb_mod.Odb, entry: ?diff.Entry) Error
     const e = entry orelse return gpa.alloc(u8, 0);
     if (e.mode == .gitlink) {
         var hex: [hash.max_hex_len]u8 = undefined;
-        return std.fmt.allocPrint(gpa, "Subproject commit {s}\n", .{e.oid.hex(&hex)});
+        return gpa.print("Subproject commit {s}\n", .{e.oid.hex(&hex)});
     }
     const found = try db.read(io, e.oid);
     defer db.allocator().free(found.bytes);
@@ -269,7 +269,7 @@ test "a file the attributes call binary is hashed by its names, so git cherry an
         var repo = try testgit.Repo.init(gpa, io, &.{});
         defer repo.deinit();
         var lines: [20][]const u8 = undefined;
-        for (&lines, 0..) |*l, i| l.* = try std.fmt.allocPrint(gpa, "line {d}\n", .{i});
+        for (&lines, 0..) |*l, i| l.* = try gpa.print("line {d}\n", .{i});
         defer for (lines) |l| gpa.free(l);
         const base_text = try std.mem.concat(gpa, u8, &lines);
         defer gpa.free(base_text);

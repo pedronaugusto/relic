@@ -14,7 +14,7 @@ const warning = @import("../../repo/warning.zig");
 /// into `warnings`. No programs are granted, so an ssh URL that passes the
 /// gate ends at `ProgramsNotGranted` without a connection.
 fn open(gpa: std.mem.Allocator, url: []const u8, value: []const u8, warnings: *warning.Warnings) anyerror!void {
-    const text = try std.fmt.allocPrint(gpa, "[transfer]\n\tcredentialsInUrl = {s}\n", .{value});
+    const text = try gpa.print("[transfer]\n\tcredentialsInUrl = {s}\n", .{value});
     defer gpa.free(text);
     var config = try config_mod.Config.parseText(gpa, text, .local);
     defer config.deinit();

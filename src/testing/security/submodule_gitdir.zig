@@ -21,7 +21,7 @@ test "CVE-2019-1349, t7450-bad-git-dotfiles 'prevent git~1 squatting on Windows'
     const io = std.testing.io;
     // On Windows the squatting paths themselves are refused: `d\a` is a
     // path and `d.` is `d`.
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         try std.testing.expectEqual(safepath.Reason.separator_inside_component, safepath.check("d\\a", .worktree).?.reason);
         try std.testing.expectEqual(safepath.Reason.trailing_dot_or_space, safepath.check("d./a/x", .worktree).?.reason);
     }

@@ -7,19 +7,19 @@
 //! Windows' own places first.
 
 const std = @import("std");
+const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const Io = std.Io;
 
 const program = @import("../../repo/program.zig");
 const testgit = @import("../git.zig");
 
-const exe = if (builtin.os.tag == .windows) ".exe" else "";
+const exe = if (builtin.target.os.tag == .windows) ".exe" else "";
 
 /// Put a copy of the process fixture at `name` in `dir`, executable.
 fn plant(io: Io, dir: Io.Dir, name: []const u8) !void {
-    try Io.Dir.cwd().copyFile(build_options.process_fixture_path, dir, name, io, .{});
-    if (builtin.os.tag != .windows) {
+    try Io.Dir.cwd().copyFile(suite.path(.process_fixture), dir, name, io, .{});
+    if (builtin.target.os.tag != .windows) {
         const file = try dir.openFile(io, name, .{});
         defer file.close(io);
         try file.setPermissions(io, .fromMode(0o755));
@@ -54,7 +54,7 @@ test "CVE-2018-19486, t0061-run-command 'run_command is restricted to PATH': a p
     const io = std.testing.io;
     // Windows looks in the directory of the running executable before
     // `PATH`; git for Windows does not, and neither does relic.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const own = buf[0..try std.process.executableDirPath(io, &buf)];
     var own_dir = try Io.Dir.cwd().openDir(io, own, .{});
     defer own_dir.close(io);
@@ -82,13 +82,13 @@ test "CVE-2018-19486, git for Windows' path_lookup: a bare name is found in PATH
     defer gpa.free(first_path);
     const second_path = try second.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(second_path);
-    const sep = std.fs.path.delimiter;
-    const path = try std.fmt.allocPrint(gpa, "{c}{s}{c}{s}", .{ sep, first_path, sep, second_path });
+    const sep = std.Io.Dir.path.delimiter;
+    const path = try gpa.print("{c}{s}{c}{s}", .{ sep, first_path, sep, second_path });
     defer gpa.free(path);
     // An empty entry, then a directory named like the program, then it.
     const found = (try program.lookupOnPath(gpa, io, path, "tool")).?;
     defer gpa.free(found);
-    const expected = try std.fmt.allocPrint(gpa, "{s}{c}tool{s}", .{ second_path, std.fs.path.sep, exe });
+    const expected = try gpa.print("{s}{c}tool{s}", .{ second_path, std.Io.Dir.path.sep, exe });
     defer gpa.free(expected);
     try std.testing.expectEqualStrings(expected, found);
     try std.testing.expectEqual(null, try program.lookupOnPath(gpa, io, path, "absent"));

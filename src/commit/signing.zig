@@ -110,8 +110,8 @@ pub const Trust = enum {
     ultimate,
 
     fn parse(text: []const u8) ?Trust {
-        inline for (@typeInfo(Trust).@"enum".fields) |f| {
-            if (std.ascii.eqlIgnoreCase(text, f.name)) return @enumFromInt(f.value);
+        inline for (@typeInfo(Trust).@"enum".field_names) |name| {
+            if (std.ascii.eqlIgnoreCase(text, name)) return @field(Trust, name);
         }
         return null;
     }
@@ -197,7 +197,7 @@ pub const Verdict = struct {
             .good, .good_untrusted, .expired_key => true,
             else => false,
         };
-        return v.accepted and good and @intFromEnum(v.trust) >= @intFromEnum(minimum);
+        return v.accepted and good and @backingInt(v.trust) >= @backingInt(minimum);
     }
 };
 
@@ -327,7 +327,7 @@ pub const Signer = struct {
         return switch (signer.format) {
             .openpgp, .x509 => signer.signGpg(io, payload, chosen orelse blk: {
                 const who = identity orelse return error.NoSigningKey;
-                break :blk try std.fmt.allocPrint(arena, "{s} <{s}>", .{ who.name, who.email });
+                break :blk try arena.print("{s} <{s}>", .{ who.name, who.email });
             }),
             .ssh => signer.signSsh(arena, io, payload, chosen orelse try signer.defaultSshKey(arena, io)),
         };
@@ -511,7 +511,7 @@ fn verifyTime(arena: Allocator, secs: i64) Allocator.Error![]const u8 {
     const day = epoch.getEpochDay().calculateYearDay();
     const month_day = day.calculateMonthDay();
     const clock = epoch.getDaySeconds();
-    return std.fmt.allocPrint(arena, "-Overify-time={d:0>4}{d:0>2}{d:0>2}{d:0>2}{d:0>2}{d:0>2}Z", .{
+    return arena.print("-Overify-time={d:0>4}{d:0>2}{d:0>2}{d:0>2}{d:0>2}{d:0>2}Z", .{
         day.year,
         month_day.month.numeric(),
         month_day.day_index + 1,
@@ -792,7 +792,7 @@ fn unquote(arena: Allocator, value: []const u8) (Allocator.Error || error{Malfor
 
 fn expandPath(arena: Allocator, config: *const config_mod.Config, text: []const u8) Allocator.Error![]const u8 {
     if (std.mem.startsWith(u8, text, "~/")) {
-        if (config.context.home) |home| return std.fmt.allocPrint(arena, "{s}/{s}", .{ home, text[2..] });
+        if (config.context.home) |home| return arena.print("{s}/{s}", .{ home, text[2..] });
     }
     return text;
 }
@@ -871,13 +871,13 @@ const TempFile = struct {
         const dir_path = programs.environ.get("TMPDIR") orelse
             programs.environ.get("TEMP") orelse
             programs.environ.get("TMP") orelse
-            (if (builtin.os.tag == .windows) return error.NoTemporaryDirectory else "/tmp");
+            (if (builtin.target.os.tag == .windows) return error.NoTemporaryDirectory else "/tmp");
         var name_buf: [96]u8 = undefined;
         const name = fs.tempName(io, &name_buf, prefix);
         // A relative `TMPDIR` is taken from where the process runs, made
         // absolute so the program reading the file finds it from anywhere.
-        const dir_abs = if (std.fs.path.isAbsolute(dir_path)) dir_path else try Io.Dir.cwd().realPathFileAlloc(io, dir_path, arena);
-        const path = try std.fs.path.join(arena, &.{ dir_abs, name });
+        const dir_abs = if (std.Io.Dir.path.isAbsolute(dir_path)) dir_path else try Io.Dir.cwd().realPathFileAlloc(io, dir_path, arena);
+        const path = try std.Io.Dir.path.join(arena, &.{ dir_abs, name });
         const file = try Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
         defer file.close(io);
         errdefer Io.Dir.deleteFileAbsolute(io, path) catch {};
@@ -902,7 +902,7 @@ test "a signer whose settings outgrow the arena's first block frees every one of
     // state was taken before the last four were allocated, so those blocks
     // were not in it and leaked; a long path in a test's home was enough.
     const gpa = std.testing.allocator;
-    const long = "/" ++ "k" ** 5000;
+    const long = "/" ++ @as([5000]u8, @splat('k'));
     var config = try config_mod.Config.parseText(gpa, "[gpg]\n\tformat = ssh\n" ++
         "[user]\n\tsigningKey = " ++ long ++ "/id\n" ++
         "[gpg \"ssh\"]\n" ++

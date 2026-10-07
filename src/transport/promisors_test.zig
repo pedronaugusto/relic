@@ -163,7 +163,7 @@ test "a clone with the filter auto takes it from the promisor remotes taken, as 
     defer server.deinit();
     const path = try testremote.absolutePath(gpa, io, server.dir);
     defer gpa.free(path);
-    const url = try std.fmt.allocPrint(gpa, "file://{s}", .{path});
+    const url = try gpa.print("file://{s}", .{path});
     defer gpa.free(url);
     // The promisor remote is the served repository itself, so that what
     // the checkout lacks is fetched from it and not from the network. An
@@ -179,7 +179,7 @@ test "a clone with the filter auto takes it from the promisor remotes taken, as 
 
     var ws = try testgit.Repo.init(gpa, io, &.{});
     defer ws.deinit();
-    const lop_url = try std.fmt.allocPrint(gpa, "remote.lop.url={s}", .{url});
+    const lop_url = try gpa.print("remote.lop.url={s}", .{url});
     defer gpa.free(lop_url);
     try ws.exec(io, &.{ "-c", "protocol.version=2", "-c", "promisor.acceptFromServer=All", "-c", lop_url, "-c", "remote.lop.promisor=true", "clone", "-q", "--filter=auto", url, "by-git" });
 

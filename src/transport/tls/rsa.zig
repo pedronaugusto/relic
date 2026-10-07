@@ -91,7 +91,7 @@ pub fn signPss(comptime Hash: type, k: Key, msg: []const u8, salt: *const [Hash.
     var h: [h_len]u8 = undefined;
     {
         var hasher = Hash.init(.{});
-        hasher.update(&([_]u8{0} ** 8));
+        hasher.update(&(@as([8]u8, @splat(0))));
         hasher.update(&m_hash);
         hasher.update(salt);
         hasher.final(&h);

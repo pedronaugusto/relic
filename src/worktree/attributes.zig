@@ -188,7 +188,7 @@ pub const Attrs = struct {
     /// caller loaded itself is not read again. `leave` gives back what this
     /// loaded.
     pub fn enter(attrs: *Attrs, io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
-        const dir = std.fs.path.dirnamePosix(path) orelse "";
+        const dir = std.Io.Dir.path.dirnamePosix(path) orelse "";
         if (attrs.entered_any and std.mem.eql(u8, attrs.entered_dir.items, dir)) return;
         // How many leading directories this shares with the last one, and
         // how long they are.
@@ -287,7 +287,7 @@ pub const Attrs = struct {
         const path = if (base.len == 0)
             ".gitattributes"
         else
-            std.fmt.bufPrint(&path_buf, "{s}/.gitattributes", .{base}) catch return;
+            std.mem.print(&path_buf, "{s}/.gitattributes", .{base}) catch return;
         try attrs.addFileIfPresent(io, wt, path, base, path, depth + 1, .no_follow);
     }
 
@@ -568,7 +568,7 @@ pub const CoreSettings = struct {
     pub const SafeCrlf = enum { false, true, warn };
 
     /// The native line ending, which is CRLF on Windows and LF elsewhere.
-    pub const native_is_crlf = builtin.os.tag == .windows;
+    pub const native_is_crlf = builtin.target.os.tag == .windows;
 };
 
 /// A setting this release does not implement, named so the caller is refused

@@ -80,7 +80,7 @@ pub fn parse(arena: Allocator, text: []const u8) Self.Error!Spec {
 pub fn sendForm(arena: Allocator, text: []const u8) Self.Error![]const u8 {
     const spec = try parse(arena, text);
     return switch (spec) {
-        .blob_limit => |n| std.fmt.allocPrint(arena, "blob:limit={d}", .{n}),
+        .blob_limit => |n| arena.print("blob:limit={d}", .{n}),
         else => text,
     };
 }
@@ -191,7 +191,7 @@ test "a filter is read, and refused, where git's own reading reads and refuses i
         // How git reads these is 2.54's: an older git refuses a combine:
         // with an empty last part, which 2.54 reads.
         if (!try testgit.gitAtLeast(gpa, io, 2, 54)) break;
-        const arg = try std.fmt.allocPrint(arena, "--filter={s}", .{text});
+        const arg = try arena.print("--filter={s}", .{text});
         // Quietly: most of these git refuses, as it should.
         const theirs = if (testremote.gitInputEnv(gpa, io, repo.dir, &env, &.{ "rev-list", "--objects", arg, "-n0", "HEAD" }, "", false)) |out| blk: {
             gpa.free(out);

@@ -102,13 +102,13 @@ test "a repository another user owns is used only where safe.directory names it,
     defer gpa.free(top);
     const top_slash = try safe.normalize(gpa, top);
     defer gpa.free(top_slash);
-    const linked = try std.fmt.allocPrint(gpa, "{s}/linked", .{top_slash});
+    const linked = try gpa.print("{s}/linked", .{top_slash});
     defer gpa.free(linked);
-    const parent_star = try std.fmt.allocPrint(gpa, "{s}/*", .{std.fs.path.dirname(top_slash).?});
+    const parent_star = try gpa.print("{s}/*", .{std.Io.Dir.path.dirname(top_slash).?});
     defer gpa.free(parent_star);
-    const own_star = try std.fmt.allocPrint(gpa, "{s}/*", .{top_slash});
+    const own_star = try gpa.print("{s}/*", .{top_slash});
     defer gpa.free(own_star);
-    const elsewhere = try std.fmt.allocPrint(gpa, "{s}-elsewhere", .{top_slash});
+    const elsewhere = try gpa.print("{s}-elsewhere", .{top_slash});
     defer gpa.free(elsewhere);
     var linked_dir = try git.dir.openDir(io, "linked", .{ .iterate = true });
     defer linked_dir.close(io);
@@ -117,20 +117,20 @@ test "a repository another user owns is used only where safe.directory names it,
         // the current user's own repository needs no exception
         try expectSame(gpa, io, &home, dir, false, &.{});
         for ([_]?[]const u8{ null, "*", top_slash, linked, parent_star, own_star, elsewhere }) |value| {
-            const global = if (value) |v| try std.fmt.allocPrint(gpa, "[safe]\n\tdirectory = {s}\n", .{v}) else try gpa.dupe(u8, "");
+            const global = if (value) |v| try gpa.print("[safe]\n\tdirectory = {s}\n", .{v}) else try gpa.dupe(u8, "");
             defer gpa.free(global);
             try home.setGlobal(io, global);
             try expectSame(gpa, io, &home, dir, true, &.{});
             // an empty value forgets what came before it
             if (value) |v| {
-                const reset = try std.fmt.allocPrint(gpa, "[safe]\n\tdirectory = {s}\n\tdirectory =\n", .{v});
+                const reset = try gpa.print("[safe]\n\tdirectory = {s}\n\tdirectory =\n", .{v});
                 defer gpa.free(reset);
                 try home.setGlobal(io, reset);
                 try expectSame(gpa, io, &home, dir, true, &.{});
             }
         }
         try home.setGlobal(io, "");
-        const on_command_line = try std.fmt.allocPrint(gpa, "safe.directory={s}", .{top_slash});
+        const on_command_line = try gpa.print("safe.directory={s}", .{top_slash});
         defer gpa.free(on_command_line);
         try expectSame(gpa, io, &home, dir, true, &.{on_command_line});
         try expectSame(gpa, io, &home, dir, true, &.{"safe.directory=*"});

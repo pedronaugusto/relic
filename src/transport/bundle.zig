@@ -405,7 +405,7 @@ pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundl
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [96]u8 = undefined;
         // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
-        const promisor = std.fmt.bufPrint(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
+        const promisor = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
         if (pack_dir.createFile(io, promisor, .{ .exclusive = true })) |file| {
             defer file.close(io);
             try file.writeStreamingAll(io, "from-bundle\n");
@@ -484,7 +484,7 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     }
     const min: Version = if (kind != .sha1 or request.filter != null) .v3 else .v2;
     const version = request.version orelse min;
-    if (@intFromEnum(version) < @intFromEnum(min)) return error.VersionTooLow;
+    if (@backingInt(version) < @backingInt(min)) return error.VersionTooLow;
     // A v2 header cannot say its format or filter: `read` takes SHA-1 and none.
     assert(version == .v3 or (kind == .sha1 and filter_text == null));
 

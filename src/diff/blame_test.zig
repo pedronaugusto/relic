@@ -223,7 +223,7 @@ test "blame of random histories with merges, renames and repeated lines agrees w
                 const which = random.uintLessThan(usize, next.count());
                 const bytes = next.values()[which];
                 next.orderedRemoveAt(which);
-                const name = try std.fmt.allocPrint(a, "{s}m{d}", .{ if (random.boolean()) "dir/" else "", n });
+                const name = try a.print("{s}m{d}", .{ if (random.boolean()) "dir/" else "", n });
                 try next.put(a, name, bytes);
             }
             // Committer dates out of order now and then, as clocks are.

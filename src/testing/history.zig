@@ -9,8 +9,8 @@
 //! the other started.
 
 const std = @import("std");
+const suite = @import("helpers.zig");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -57,7 +57,7 @@ pub const Pair = struct {
         errdefer pair.env.deinit();
         // An editor that accepts what it is given, for a `git commit` or a
         // `git rebase --continue` that would open one.
-        const editor = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "silent");
+        const editor = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "silent");
         defer gpa.free(editor);
         try pair.env.put("GIT_EDITOR", editor);
         pair.git = try testgit.Repo.init(gpa, io, &.{});
@@ -167,7 +167,7 @@ pub fn expectSameState(
         };
     }
     for (state) |name| {
-        const path = try std.fmt.allocPrint(gpa, ".git/{s}", .{name});
+        const path = try gpa.print(".git/{s}", .{name});
         defer gpa.free(path);
         const left = try readOrMissing(gpa, io, &pair.git, path);
         defer gpa.free(left);
@@ -179,7 +179,7 @@ pub fn expectSameState(
         };
     }
     for (logs) |name| {
-        const path = try std.fmt.allocPrint(gpa, ".git/logs/{s}", .{name});
+        const path = try gpa.print(".git/logs/{s}", .{name});
         defer gpa.free(path);
         const left = try readOrMissing(gpa, io, &pair.git, path);
         defer gpa.free(left);
@@ -661,7 +661,7 @@ fn trailersScript(io: Io, repo: *testgit.Repo) anyerror!void {
     };
     for (messages, 0..) |msg, i| {
         var name_buf: [16]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "f{d}", .{i});
+        const name = try std.mem.print(&name_buf, "f{d}", .{i});
         try repo.writeFile(io, name, name);
         try repo.exec(io, &.{ "add", "-A" });
         try repo.exec(io, &.{ "commit", "-q", "--cleanup=verbatim", "-m", msg });
@@ -1099,7 +1099,7 @@ test "a clean rebase, an up-to-date one, and one onto another base land where gi
 fn gitRebaseInteractive(io: Io, repo: *testgit.Repo, sheet: []const u8, args: []const []const u8) !void {
     try repo.writeFile(io, ".git/relic-todo", sheet);
     const env = @constCast(repo.environ.?); // safe: the fixture owns a mutable environment map, borrowed for this synchronous git command.
-    const editor = try testgit.fixtureCommand(repo.gpa, build_options.process_fixture_path, "copy-file .git/relic-todo");
+    const editor = try testgit.fixtureCommand(repo.gpa, suite.path(.process_fixture), "copy-file .git/relic-todo");
     defer repo.gpa.free(editor);
     try env.put("GIT_SEQUENCE_EDITOR", editor);
     defer _ = env.swapRemove("GIT_SEQUENCE_EDITOR");
@@ -1111,7 +1111,7 @@ fn gitRebaseInteractive(io: Io, repo: *testgit.Repo, sheet: []const u8, args: []
 }
 
 fn useFixtureEditor(pair: *Pair, name: []const u8, arguments: []const u8) !void {
-    const command = try testgit.fixtureCommand(pair.gpa, build_options.process_fixture_path, arguments);
+    const command = try testgit.fixtureCommand(pair.gpa, suite.path(.process_fixture), arguments);
     defer pair.gpa.free(command);
     try pair.env.put(name, command);
 }
@@ -1126,7 +1126,7 @@ fn sheetScript(io: Io, repo: *testgit.Repo) anyerror!void {
     const subjects = [_][]const u8{ "first", "second", "third", "fixup! first", "squash! first" };
     for (subjects, 0..) |subject, i| {
         var name_buf: [16]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "file{d}", .{i});
+        const name = try std.mem.print(&name_buf, "file{d}", .{i});
         try repo.writeFile(io, name, subject);
         try repo.exec(io, &.{ "add", "-A" });
         try repo.exec(io, &.{ "commit", "-q", "-m", subject });
@@ -1490,7 +1490,7 @@ test "an octopus merge line merges as git's sequencer does, and an unchanged one
     defer gpa.free(ahead);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const with_message = try std.fmt.allocPrint(arena.allocator(), "merge -C {s} lb1 lb4 # Merge branches 'b1' and 'b4' into side\n", .{octo});
+    const with_message = try arena.allocator().print("merge -C {s} lb1 lb4 # Merge branches 'b1' and 'b4' into side\n", .{octo});
 
     // Rebuilt on `main`, without and then with the original's message, and
     // then replayed where it stands, which reuses it, with a commit after.
@@ -1794,7 +1794,7 @@ fn shapesScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "rm", "-q", "kind" });
     const link = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "somewhere");
     defer repo.gpa.free(link);
-    const cacheinfo = try std.fmt.allocPrint(repo.gpa, "120000,{s},kind", .{std.mem.trimEnd(u8, link, "\n")});
+    const cacheinfo = try repo.gpa.print("120000,{s},kind", .{std.mem.trimEnd(u8, link, "\n")});
     defer repo.gpa.free(cacheinfo);
     try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", cacheinfo });
     try repo.exec(io, &.{ "mv", "twice", "twice-main" });
@@ -1806,7 +1806,7 @@ test "a file meeting a directory, a symlink meeting a file and a double rename s
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // Git for Windows may check out the symbolic link as a plain file.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, shapesScript);
@@ -2062,7 +2062,7 @@ fn expectSameRerere(pair: *Pair, io: Io) !void {
             }
         }.less);
         for (names.items) |name| {
-            const sub = try std.fmt.allocPrint(gpa, ".git/rr-cache/{s}", .{name});
+            const sub = try gpa.print(".git/rr-cache/{s}", .{name});
             defer gpa.free(sub);
             const bytes = try readOrMissing(gpa, io, r, sub);
             defer gpa.free(bytes);
@@ -2512,7 +2512,7 @@ test "rerere refuses a forged MERGE_RR and variant, and a replay keeps its resol
     // takes the first for an index and the second, cut to an int, for a
     // list it then walks a billion entries of, so only relic is given them.
     for ([_][]const u8{ "preimage.-1", "postimage.-1", "postimage.99999999999", "preimage.70000" }) |name| {
-        const forged_variant = try std.fmt.allocPrint(gpa, ".git/rr-cache/{s}/{s}", .{ id, name });
+        const forged_variant = try gpa.print(".git/rr-cache/{s}/{s}", .{ id, name });
         defer gpa.free(forged_variant);
         try pair.ours.writeFile(io, forged_variant, "x\n");
         try expectSameRerereReport(&pair, io);
@@ -2521,8 +2521,8 @@ test "rerere refuses a forged MERGE_RR and variant, and a replay keeps its resol
 
     // A conflict name that climbs out of rr-cache is a corrupt MERGE_RR,
     // and nothing it names is removed.
-    const victim = "victim/" ++ "a" ** 27 ++ "/preimage";
-    const forged = "../../victim/" ++ "a" ** 27 ++ "\tf\x00";
+    const victim = "victim/" ++ @as([27]u8, @splat('a')) ++ "/preimage";
+    const forged = "../../victim/" ++ @as([27]u8, @splat('a')) ++ "\tf\x00";
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         try r.writeFile(io, victim, "kept\n");
         try r.writeFile(io, ".git/MERGE_RR", forged);
@@ -2545,7 +2545,7 @@ test "rerere refuses a forged MERGE_RR and variant, and a replay keeps its resol
 
     // Resolved and committed, the resolution is recorded; recorded long
     // ago, a replay marks it used and gc keeps it.
-    const postimage = try std.fmt.allocPrint(gpa, ".git/rr-cache/{s}/postimage", .{id});
+    const postimage = try gpa.print(".git/rr-cache/{s}/postimage", .{id});
     defer gpa.free(postimage);
     const long_ago: Io.File.SetTimestampsOptions = .{
         .access_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } },
@@ -2779,7 +2779,7 @@ const recorded_hooks = [_][]const u8{
 fn installRecorders(pair: *Pair, io: Io) !void {
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         for (recorded_hooks) |name| {
-            const path = try std.fmt.allocPrint(pair.gpa, ".git/hooks/{s}", .{name});
+            const path = try pair.gpa.print(".git/hooks/{s}", .{name});
             defer pair.gpa.free(path);
             try testgit.fixtureHook(pair.gpa, io, r.dir, path, "history_record", "");
         }
@@ -3095,7 +3095,7 @@ test "a rebase's squash and reword run the hooks of the commits git makes for th
     const squash = try oidOf(gpa, io, &pair.ours, "topic~1");
     const two = try oidOf(gpa, io, &pair.ours, "topic");
     var hex: [3][hash.max_hex_len]u8 = undefined;
-    const sheet = try std.fmt.allocPrint(gpa, "pick {s} one\npick {s} squash! one\nreword {s} two\n", .{ one.hex(&hex[0]), squash.hex(&hex[1]), two.hex(&hex[2]) });
+    const sheet = try gpa.print("pick {s} one\npick {s} squash! one\nreword {s} two\n", .{ one.hex(&hex[0]), squash.hex(&hex[1]), two.hex(&hex[2]) });
     defer gpa.free(sheet);
     try pair.git.writeFile(io, ".git/relic-sheet", sheet);
     try useFixtureEditor(&pair, "GIT_SEQUENCE_EDITOR", "copy-file .git/relic-sheet");
@@ -3135,18 +3135,18 @@ fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, gnupg_home: []const u8, 
     try pair.env.put("HOME", dir);
     switch (format) {
         .ssh => {
-            const key = try std.fs.path.join(gpa, &.{ dir, "id" });
+            const key = try std.Io.Dir.path.join(gpa, &.{ dir, "id" });
             defer gpa.free(key);
             const made = std.process.run(gpa, io, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f", key }, .environ_map = &pair.env }) catch return false;
             gpa.free(made.stdout);
             gpa.free(made.stderr);
-            const public_path = try std.fmt.allocPrint(gpa, "{s}.pub", .{key});
+            const public_path = try gpa.print("{s}.pub", .{key});
             defer gpa.free(public_path);
             const public = try Io.Dir.cwd().readFileAlloc(io, public_path, gpa, .limited(4096));
             defer gpa.free(public);
-            const allowed = try std.fmt.allocPrint(gpa, "fixture@example.com namespaces=\"git\" {s}", .{public});
+            const allowed = try gpa.print("fixture@example.com namespaces=\"git\" {s}", .{public});
             defer gpa.free(allowed);
-            const allowed_path = try std.fs.path.join(gpa, &.{ dir, "allowed" });
+            const allowed_path = try std.Io.Dir.path.join(gpa, &.{ dir, "allowed" });
             defer gpa.free(allowed_path);
             try Io.Dir.cwd().writeFile(io, .{ .sub_path = allowed_path, .data = allowed });
             for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
@@ -3185,7 +3185,7 @@ fn unsigned(pair: *Pair, io: Io, repo: *testgit.Repo, rev: []const u8) ![]u8 {
     // A revert names the commit it reverts, its parent here, whose own
     // signature -- an OpenPGP one carries the second it was made -- is
     // not the other repository's: the name is compared as that parent's.
-    const parent_rev = try std.fmt.allocPrint(pair.gpa, "{s}^", .{rev});
+    const parent_rev = try pair.gpa.print("{s}^", .{rev});
     defer pair.gpa.free(parent_rev);
     const parent = try repo.line(io, &.{ "rev-parse", parent_rev });
     defer pair.gpa.free(parent);
@@ -3236,7 +3236,7 @@ fn signedHistory(format: signing.Format) !void {
     defer pair.deinit();
     var keys = std.testing.tmpDir(.{});
     defer keys.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = try gpa.dupe(u8, buf[0..try keys.dir.realPath(io, &buf)]);
     defer gpa.free(dir);
     // gpg's own short home, where Unix sockets' paths fit; see
@@ -3390,7 +3390,7 @@ test "merges, picks, reverts and rebases are signed with an ssh key as git signs
 }
 
 test "merges, picks, reverts and rebases are signed with an OpenPGP key as git signs them" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // GnuPG agent is unavailable on the Windows runner.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // GnuPG agent is unavailable on the Windows runner.
     try signedHistory(.openpgp);
 }
 
