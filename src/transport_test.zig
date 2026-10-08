@@ -668,6 +668,7 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
     for ([_]Case{
         .{ .url = plain, .env = &.{.{ "http_proxy", proxy_url }}, .through = true },
         .{ .url = plain, .config = &.{.{ "http.proxy", proxy_url }}, .through = true },
+        .{ .url = plain, .config = &.{.{ "http.proxy", proxy_url }}, .env = &.{ .{ "no_proxy", "" }, .{ "NO_PROXY", "127.0.0.1" } }, .through = builtin.target.os.tag != .windows },
         .{ .url = secure, .env = &.{.{ "https_proxy", proxy_url }}, .through = true },
         .{ .url = secure, .config = &.{.{ "http.proxy", proxy_url }}, .through = true },
         // On Windows environment names are case-insensitive, so asking for
