@@ -842,7 +842,9 @@ pub const WriteOptions = struct {
     index_objects: bool = true,
 };
 
-/// Write one table holding `refs`, sorted by name, and `logs`, sorted by
+pub const WriteInputs = struct { min_update_index: u64, max_update_index: u64, refs: []const RefRecord, logs: []const LogRecord };
+
+/// Write one table holding `inputs.refs`, sorted by name, and `inputs.logs`, sorted by
 /// name and then newest first. Every ref's update index must lie in
 /// `[min_update_index, max_update_index]` and no log's above the latter.
 /// The result is the caller's.
@@ -852,12 +854,13 @@ pub const WriteOptions = struct {
 pub fn write(
     gpa: Allocator,
     kind: Kind,
+    inputs: WriteInputs,
     options: WriteOptions,
-    min_update_index: u64,
-    max_update_index: u64,
-    refs: []const RefRecord,
-    logs: []const LogRecord,
 ) Self.Error![]u8 {
+    const min_update_index = inputs.min_update_index;
+    const max_update_index = inputs.max_update_index;
+    const refs = inputs.refs;
+    const logs = inputs.logs;
     if (options.block_size < 64 or options.block_size >= (1 << 24)) return error.RecordTooLarge;
     var w: Writer = try .init(gpa, kind, options, min_update_index, max_update_index);
     defer w.deinit();
@@ -1375,7 +1378,7 @@ test "a table written is a table read, record for record" {
             .message = "branch: Created from HEAD\n",
         } } },
     };
-    const bytes = try write(gpa, .sha1, .{}, 3, 7, refs.items, &logs);
+    const bytes = try write(gpa, .sha1, .{ .min_update_index = 3, .max_update_index = 7, .refs = refs.items, .logs = &logs }, .{});
     defer gpa.free(bytes);
 
     const table = try Table.parse(bytes, .sha1);
@@ -1438,7 +1441,7 @@ test "a table read from its file a block at a time reads what its bytes read" {
         .tz_offset = 0,
         .message = "m\n",
     } } }};
-    const bytes = try write(gpa, .sha1, .{ .block_size = 512 }, 1, 1, &refs, &logs);
+    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &refs, .logs = &logs }, .{ .block_size = 512 });
     defer gpa.free(bytes);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1467,7 +1470,7 @@ test "a table read from its file a block at a time reads what its bytes read" {
 
 test "an empty table is a header and a footer" {
     const gpa = std.testing.allocator;
-    const bytes = try write(gpa, .sha1, .{}, 1, 1, &.{}, &.{});
+    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{}, .logs = &.{} }, .{});
     defer gpa.free(bytes);
     try std.testing.expectEqual(headerSize(1) + footerSize(1), bytes.len);
     const table = try Table.parse(bytes, .sha1);
@@ -1476,7 +1479,7 @@ test "an empty table is a header and a footer" {
     defer it.deinit();
     try std.testing.expect(try it.nextRef() == null);
 
-    const wide = try write(gpa, .sha256, .{}, 1, 1, &.{}, &.{});
+    const wide = try write(gpa, .sha256, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{}, .logs = &.{} }, .{});
     defer gpa.free(wide);
     try std.testing.expectEqual(headerSize(2) + footerSize(2), wide.len);
     _ = try Table.parse(wide, .sha256);
@@ -1485,20 +1488,20 @@ test "an empty table is a header and a footer" {
 
 test "records out of order are refused" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.UnsortedRecords, write(gpa, .sha1, .{}, 1, 1, &.{
+    try std.testing.expectError(error.UnsortedRecords, write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{
         .{ .name = "refs/heads/b", .update_index = 1, .value = .deletion },
         .{ .name = "refs/heads/a", .update_index = 1, .value = .deletion },
-    }, &.{}));
-    try std.testing.expectError(error.UpdateIndexOutOfRange, write(gpa, .sha1, .{}, 2, 2, &.{
+    }, .logs = &.{} }, .{}));
+    try std.testing.expectError(error.UpdateIndexOutOfRange, write(gpa, .sha1, .{ .min_update_index = 2, .max_update_index = 2, .refs = &.{
         .{ .name = "refs/heads/a", .update_index = 1, .value = .deletion },
-    }, &.{}));
+    }, .logs = &.{} }, .{}));
 }
 
 test "a damaged footer is a named error" {
     const gpa = std.testing.allocator;
-    const bytes = try write(gpa, .sha1, .{}, 1, 1, &.{
+    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{
         .{ .name = "HEAD", .update_index = 1, .value = .{ .symbolic = "refs/heads/main" } },
-    }, &.{});
+    }, .logs = &.{} }, .{});
     defer gpa.free(bytes);
     bytes[bytes.len - 1] ^= 1;
     try std.testing.expectError(error.FooterChecksumMismatch, Table.parse(bytes, .sha1));
@@ -1546,7 +1549,7 @@ fn fuzzBase() ![]const u8 {
         } } },
         .{ .name = "HEAD", .update_index = 2, .value = .deletion },
     };
-    fuzz_base = try write(gpa, .sha1, .{ .block_size = 256, .restart_interval = 4 }, 1, 3, &refs, &logs);
+    fuzz_base = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 3, .refs = &refs, .logs = &logs }, .{ .block_size = 256, .restart_interval = 4 });
     return fuzz_base.?;
 }
 
@@ -1728,7 +1731,7 @@ test "a table git wrote is read record for record, and written back byte for byt
 
     // Written again from the same records, the table is git's table up to
     // the logs, and the logs inflate to git's.
-    const ours = try write(gpa, .sha1, .{}, table.min_update_index, table.max_update_index, refs.items, logs.items);
+    const ours = try write(gpa, .sha1, .{ .min_update_index = table.min_update_index, .max_update_index = table.max_update_index, .refs = refs.items, .logs = logs.items }, .{});
     defer gpa.free(ours);
     const mine = try Table.parse(ours, .sha1);
     try std.testing.expectEqual(table.log_offset, mine.log_offset);

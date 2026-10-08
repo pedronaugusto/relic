@@ -136,7 +136,7 @@ pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, expected: refs_
 }
 
 fn appendHeadLog(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error!void {
-    try repo.refStore().appendLog(repo.allocator(), io, "HEAD", old orelse Oid.zero(repo.objectFormat()), new, .{
+    try repo.refStore().appendLog(repo.allocator(), io, .{ .name = "HEAD", .old = old orelse Oid.zero(repo.objectFormat()), .new = new }, .{
         .who = log.who,
         .message = log.message,
         .policy = repo.reflogPolicy(),

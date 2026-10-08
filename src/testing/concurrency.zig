@@ -263,7 +263,7 @@ test "concurrent reflog appends preserve every complete line" {
                 return;
             };
             for (0..100) |_| {
-                ctx.store.appendLog(std.heap.page_allocator, ctx.io, "refs/heads/main", ctx.old, ctx.new, .{
+                ctx.store.appendLog(std.heap.page_allocator, ctx.io, .{ .name = "refs/heads/main", .old = ctx.old, .new = ctx.new }, .{
                     .who = .{ .name = "Writer", .email = "writer@example.com", .when_secs = 1, .offset_minutes = 0 },
                     .message = "update",
                     .policy = .existing_only,

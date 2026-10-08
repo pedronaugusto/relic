@@ -653,15 +653,20 @@ pub const Store = struct {
         };
     }
 
+    pub const AppendInputs = value_mod.AppendInputs;
+
     /// Append one entry to a ref's log without moving the ref, where
     /// `log.policy` asks for one: a line of `logs/<ref>`, or in a reftable
     /// repository a table of its own, which is where git would look for
     /// it. The message is collapsed as a transaction's is.
-    pub fn appendLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8, old: Oid, new: Oid, log: LogMessage) TransactionError!void {
+    pub fn appendLog(store: *const Store, gpa: Allocator, io: Io, inputs: AppendInputs, log: LogMessage) TransactionError!void {
+        const name = inputs.name;
+        const old = inputs.old;
+        const new = inputs.new;
         if (!isRefName(name)) return error.InvalidRefName;
         try ownWorktree(name);
         if (!reflog.shouldLog(log.policy, name, try store.logExists(gpa, io, name))) return;
-        if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, name, old, new, log.who, log.message);
+        if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, .{ .name = name, .old = old, .new = new }, .{ .who = log.who, .message = log.message });
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, log.message);
         defer gpa.free(text);
@@ -698,16 +703,7 @@ pub const Store = struct {
     }
 
     /// How `expireLog` treats the entries it keeps.
-    pub const ExpireOptions = struct {
-        /// git's `--rewrite`: each kept entry's old value becomes the new
-        /// value of the entry kept before it, so the log still reads as a
-        /// chain once entries between them are gone.
-        rewrite: bool = false,
-        /// git's `--updateref`: the ref is set to the newest kept entry's
-        /// new value. A symbolic ref, or a log nothing of which is kept,
-        /// leaves the ref as it is.
-        update_ref: bool = false,
-    };
+    pub const ExpireOptions = value_mod.ExpireOptions;
 
     /// Errors from `expireLog`.
     pub const ExpireLogError = TransactionError || LogReadError;
@@ -726,13 +722,13 @@ pub const Store = struct {
         store: *const Store,
         gpa: Allocator,
         io: Io,
-        name: []const u8,
-        options: ExpireOptions,
         keeper: anytype,
+        options: ExpireOptions,
     ) ExpireLogError!void {
+        const name = options.name;
         if (!isRefName(name)) return error.InvalidRefName;
         try ownWorktree(name);
-        if (store.refFormat() == .reftable) return stack_engine.expireLog(gpa, io, store, name, options, keeper);
+        if (store.refFormat() == .reftable) return stack_engine.expireLog(gpa, io, store, keeper, options);
         const dir = store.dirFor(name);
         if (std.Io.Dir.path.dirnamePosix(name)) |parent| {
             fs.makeDirs(io, dir, parent, store.sharedPermissions()) catch |err| switch (err) {
@@ -745,7 +741,7 @@ pub const Store = struct {
         var buffer: [max_loose_ref]u8 = undefined;
         var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions() });
         defer lock.deinit(io);
-        const newest = try reflog.expire(gpa, io, dir, name, store.objectFormat(), store.sharedPermissions(), options.rewrite, keeper);
+        const newest = try reflog.expire(gpa, io, dir, keeper, .{ .ref = name, .kind = store.objectFormat(), .shared = store.sharedPermissions(), .rewrite = options.rewrite });
         if (!options.update_ref) return;
         const oid = newest orelse return;
         if (try store.readLoose(gpa, io, name)) |own| switch (own) {

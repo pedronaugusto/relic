@@ -255,16 +255,19 @@ pub const ExpireError = errors: {
 /// Returns the newest kept entry's new value, or `null` when none was kept
 /// or there is no log, which is left as it is. The caller holds the ref's
 /// own lock, as git holds it, so the log and the ref move together.
+pub const ExpireOptions = struct { ref: []const u8, kind: hash.Kind, shared: fs.Shared = .umask, rewrite: bool = false };
+
 pub fn expire(
     gpa: Allocator,
     io: Io,
     git_dir: Io.Dir,
-    ref: []const u8,
-    kind: hash.Kind,
-    shared: fs.Shared,
-    rewrite: bool,
     keeper: anytype,
+    options: ExpireOptions,
 ) ExpireError!?Oid {
+    const ref = options.ref;
+    const kind = options.kind;
+    const shared = options.shared;
+    const rewrite = options.rewrite;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     if (!try exists(gpa, io, git_dir, ref)) return null;

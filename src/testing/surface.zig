@@ -174,3 +174,9 @@ test "phase2 working tree requests stay within five positional inputs" {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
+
+test "phase2 ref log and table requests stay within five positional inputs" {
+    inline for (.{ relic.refs.Store.appendLog, relic.refs.Store.expireLog, relic.refs.reftablestack.appendLog, relic.refs.reftablestack.compactIn, relic.refs.reftable.write, @import("../refs/reflog.zig").expire }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}

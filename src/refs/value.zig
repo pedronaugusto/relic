@@ -227,3 +227,20 @@ pub const Edit = struct {
 
 /// All errors reported by this namespace.
 pub const Error = ReadError || TransactionError || CreateError;
+
+/// One ref-log entry's name and old/new object names, borrowed for the write.
+pub const AppendInputs = struct { name: []const u8, old: Oid, new: Oid };
+
+/// How a caller-owned keeper filters a named ref log.
+pub const ExpireOptions = struct {
+    /// The ref whose log is filtered by the supplied keeper.
+    name: []const u8,
+    /// git's `--rewrite`: each kept entry's old value becomes the new
+    /// value of the entry kept before it, so the log still reads as a
+    /// chain once entries between them are gone.
+    rewrite: bool = false,
+    /// git's `--updateref`: the ref is set to the newest kept entry's
+    /// new value. A symbolic ref, or a log nothing of which is kept,
+    /// leaves the ref as it is.
+    update_ref: bool = false,
+};

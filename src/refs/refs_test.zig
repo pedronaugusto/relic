@@ -297,9 +297,9 @@ test "another worktree's log is not written from here, as its refs are not" {
             const keep_all: KeepAll = .{};
             for ([_][]const u8{ "main-worktree/HEAD", "worktrees/linked/HEAD" }) |name| {
                 const before = try gitLogCount(gpa, io, &r, name);
-                try std.testing.expectError(error.OtherWorktreeRef, store.appendLog(gpa, io, name, tip, tip, .{ .who = who, .message = "from elsewhere" }));
+                try std.testing.expectError(error.OtherWorktreeRef, store.appendLog(gpa, io, .{ .name = name, .old = tip, .new = tip }, .{ .who = who, .message = "from elsewhere" }));
                 try std.testing.expectError(error.OtherWorktreeRef, store.createLog(gpa, io, name));
-                try std.testing.expectError(error.OtherWorktreeRef, store.expireLog(gpa, io, name, .{ .rewrite = true }, &keep_all));
+                try std.testing.expectError(error.OtherWorktreeRef, store.expireLog(gpa, io, &keep_all, .{ .name = name, .rewrite = true  }));
                 try std.testing.expectError(error.OtherWorktreeRef, store.deleteLog(gpa, io, name));
                 try std.testing.expectEqual(before, try gitLogCount(gpa, io, &r, name));
             }

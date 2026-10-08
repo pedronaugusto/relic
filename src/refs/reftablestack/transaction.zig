@@ -456,14 +456,14 @@ pub fn commit(io: Io, tx: anytype, log: ?refs.LogMessage) refs.TransactionError!
     const compact_worktree = pending.worktree != null;
     releasePending(io, tx);
     if (!options.auto_compact) return;
-    compactIn(tx.gpa, io, store.commonDir(), store.objectFormat(), options, .auto) catch |err| switch (err) {
+    compactIn(tx.gpa, io, store.commonDir(), .{ .kind = store.objectFormat(), .which = .auto }, options) catch |err| switch (err) {
         // Compaction is housekeeping: someone else holding a lock, or
         // compacting already, is not a failure of this transaction.
         error.LockHeld => {},
         else => |e| return e,
     };
     if (compact_worktree) {
-        compactIn(tx.gpa, io, store.gitDir(), store.objectFormat(), options, .auto) catch |err| switch (err) {
+        compactIn(tx.gpa, io, store.gitDir(), .{ .kind = store.objectFormat(), .which = .auto }, options) catch |err| switch (err) {
             error.LockHeld => {},
             else => |e| return e,
         };
@@ -477,12 +477,14 @@ pub fn appendLog(
     gpa: Allocator,
     io: Io,
     store: anytype,
-    name: []const u8,
-    old: Oid,
-    new: Oid,
-    who: object.Signature,
-    message: []const u8,
+    inputs: refs.AppendInputs,
+    log: refs.LogMessage,
 ) refs.TransactionError!void {
+    const name = inputs.name;
+    const old = inputs.old;
+    const new = inputs.new;
+    const who = log.who;
+    const message = log.message;
     if (std.mem.findAny(u8, who.name, "<>\n") != null or
         std.mem.findAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
     const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
@@ -502,7 +504,7 @@ pub fn appendLog(
         .tz_offset = zoneFromMinutes(who.offset_minutes),
         .message = try logMessage(arena_instance.allocator(), try reflog.normalizeMessage(arena_instance.allocator(), message), store.reftableOptions().write.block_size),
     } } };
-    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, &.{record});
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = &.{record} }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -517,10 +519,10 @@ pub fn expireLog(
     gpa: Allocator,
     io: Io,
     store: anytype,
-    name: []const u8,
-    options: anytype,
     keeper: anytype,
+    options: refs.ExpireOptions,
 ) refs.TransactionError!void {
+    const name = options.name;
     const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer releaseLocked(gpa, io, &locked);
@@ -575,7 +577,7 @@ pub fn expireLog(
         }
     };
 
-    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, ref_records[0..ref_count], logs.items);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = ref_records[0..ref_count], .logs = logs.items }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -594,7 +596,7 @@ pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     if ((try stack.logsFor(gpa, name, .{ .arena = arena_instance.allocator() })).len != 0) return;
     const update_index = stack.maxUpdateIndex() + 1;
     const logs = [_]reftable.LogRecord{marker(store.objectFormat(), name, update_index)};
-    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, &logs);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = &logs }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -618,7 +620,7 @@ pub fn deleteLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     const logs = try arena.alloc(reftable.LogRecord, records.len);
     for (records, logs) |r, *out| out.* = .{ .name = name, .update_index = r.update_index, .value = .deletion };
     std.mem.sort(reftable.LogRecord, logs, {}, logOrder);
-    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, logs);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = logs }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -674,7 +676,7 @@ fn releaseLocked(gpa: Allocator, io: Io, locked: *Pending.Locked) void {
 fn compactAfter(gpa: Allocator, io: Io, parent: Io.Dir, store: anytype) refs.TransactionError!void {
     const options = store.reftableOptions();
     if (!options.auto_compact) return;
-    compactIn(gpa, io, parent, store.objectFormat(), options, .auto) catch |err| switch (err) {
+    compactIn(gpa, io, parent, .{ .kind = store.objectFormat(), .which = .auto }, options) catch |err| switch (err) {
         error.LockHeld => {},
         else => |e| return e,
     };
@@ -786,7 +788,7 @@ fn addTable(
     std.mem.sort(reftable.RefRecord, records.items, {}, lessThanRef);
     std.mem.sort(reftable.LogRecord, logs.items, {}, logOrder);
 
-    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, records.items, logs.items);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = records.items, .logs = logs.items }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, locked, stack, bytes, update_index);
 }
@@ -836,7 +838,11 @@ pub const Compaction = enum {
 /// waiting past its `reftable.lockTimeout` for it, and taken again to put
 /// the merged table in the place of the ones it replaces, wherever the
 /// stack has them by then.
-pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options, which: Compaction) refs.TransactionError!void {
+pub const CompactInputs = struct { kind: Kind, which: Compaction };
+
+pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, options: Options) refs.TransactionError!void {
+    const kind = inputs.kind;
+    const which = inputs.which;
     var dir = parent.openDir(io, "reftable", .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
@@ -913,7 +919,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     if (merged_refs.len != 0 or merged_logs.len != 0) {
         const min = tables[0].min_update_index;
         const max = tables[tables.len - 1].max_update_index;
-        const bytes = try reftable.write(gpa, kind, options.write, min, max, merged_refs, merged_logs);
+        const bytes = try reftable.write(gpa, kind, .{ .min_update_index = min, .max_update_index = max, .refs = merged_refs, .logs = merged_logs }, options.write);
         defer gpa.free(bytes);
         const name = tableName(io, &name_buf, min, max);
         try writeTable(gpa, io, dir, name, bytes, options.shared);
@@ -1039,11 +1045,11 @@ pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) re
             .{ .direct = ref.oid } };
     }
     if (records.len == 0) return;
-    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, records, &.{});
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = records, .logs = &.{} }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
     if (!store.reftableOptions().auto_compact) return;
-    compactIn(gpa, io, store.commonDir(), store.objectFormat(), store.reftableOptions(), .auto) catch |err| switch (err) {
+    compactIn(gpa, io, store.commonDir(), .{ .kind = store.objectFormat(), .which = .auto }, store.reftableOptions()) catch |err| switch (err) {
         error.LockHeld => {},
         else => |e| return e,
     };

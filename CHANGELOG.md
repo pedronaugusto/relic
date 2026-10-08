@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: ref-log append takes AppendInputs before LogMessage; expiration
+  takes its generic keeper before named options containing the ref name.
+  Reftable writes take WriteInputs before WriteOptions, and compaction takes
+  CompactInputs. Keeper order, rewrite/update-ref policy and record bytes
+  are preserved across files and reftable.
+
 - Breaking: working-tree staging/status, checkout, path writes, verification,
   comparisons and sparse application take named input groups after the working
   directory. The index and object database stay borrowed; path selection,

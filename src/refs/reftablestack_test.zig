@@ -549,7 +549,7 @@ test "a log entry goes into the stack, where git looks for it, and no file is wr
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    try repo.refStore().appendLog(gpa, io, "refs/heads/main", tip, tip, .{ .who = fixtureWho(1_700_000_000), .message = "reset: moving to HEAD" });
+    try repo.refStore().appendLog(gpa, io, .{ .name = "refs/heads/main", .old = tip, .new = tip }, .{ .who = fixtureWho(1_700_000_000), .message = "reset: moving to HEAD" });
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/logs/refs/heads/main", .{}));
     const shown = try gitReflog(io, &git, "refs/heads/main");
     defer gpa.free(shown);

@@ -175,7 +175,7 @@ test "a log is started, expired and deleted through the store as git's reflog re
         const tip = try r.line(io, &.{ "rev-parse", "main" });
         defer gpa.free(tip);
         var drop: DropOne = .{ .nth = 1 };
-        try store.expireLog(gpa, io, "refs/heads/main", .{}, &drop);
+        try store.expireLog(gpa, io, &drop, .{ .name = "refs/heads/main" });
         const after = try r.run(io, &.{ "reflog", "show", "--format=%gs", "refs/heads/main" });
         defer gpa.free(after);
         try std.testing.expectEqualStrings("commit: three\ncommit (initial): one\n", after);

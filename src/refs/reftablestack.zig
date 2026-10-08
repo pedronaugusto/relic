@@ -28,10 +28,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const hash = @import("../hash/hash.zig");
-const Oid = hash.Oid;
-const Kind = hash.Kind;
-const object = @import("../object/object.zig");
 const reflog = @import("reflog.zig");
 const refs = @import("refs.zig");
 const engine = @import("reftablestack/transaction.zig");
@@ -110,13 +106,10 @@ pub fn appendLog(
     gpa: Allocator,
     io: Io,
     store: *const refs.Store,
-    name: []const u8,
-    old: Oid,
-    new: Oid,
-    who: object.Signature,
-    message: []const u8,
+    inputs: refs.Store.AppendInputs,
+    log: refs.LogMessage,
 ) refs.TransactionError!void {
-    return engine.appendLog(gpa, io, store, name, old, new, who, message);
+    return engine.appendLog(gpa, io, store, inputs, log);
 }
 /// Give up whatever `prepare` took.
 pub fn releasePending(io: Io, tx: *refs.Transaction) void {
@@ -130,6 +123,8 @@ pub const Compaction = engine.Compaction;
 /// locked as git locks it, by `<table>.lock`; a table another process has
 /// locked -- a git compacting it already -- ends the run there, and only
 /// the newer tables past it are merged, as git's best-effort rule does.
-pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options, which: Compaction) refs.TransactionError!void {
-    return engine.compactIn(gpa, io, parent, kind, options, which);
+pub const CompactInputs = engine.CompactInputs;
+
+pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, options: Options) refs.TransactionError!void {
+    return engine.compactIn(gpa, io, parent, inputs, options);
 }
