@@ -235,4 +235,6 @@ test {
     _ = @import("testing/surface.zig");
 }
 
-test { _ = @import("testing/public_calls.zig"); }
+test {
+    _ = @import("testing/public_calls.zig");
+}

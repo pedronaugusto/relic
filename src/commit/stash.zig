@@ -1076,7 +1076,7 @@ pub fn drop(io: Io, repo: *Repository, n: usize, options: DropOptions) Self.Erro
         if (n >= l.entries.len) return error.NoSuchStash;
     }
     var dropping: Dropping = .{ .n = n };
-    try repo.refStore().expireLog(gpa, io, &dropping, .{ .name = ref_name, .rewrite = true, .update_ref = true  });
+    try repo.refStore().expireLog(gpa, io, &dropping, .{ .name = ref_name, .rewrite = true, .update_ref = true });
     // Another process may have dropped it first.
     const dropped = dropping.dropped orelse return error.NoSuchStash;
     if (dropping.remaining == 0) try clear(io, repo, options);
