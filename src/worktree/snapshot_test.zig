@@ -546,7 +546,7 @@ test "durable checkout covers unchanged files and surviving parents of deletions
     const result = try store.restore(io, after.snapshot, dest.dir, .{ .from = before.snapshot, .checkout = .{ .durability = .durable } });
     try testing.expectEqual(@as(u32, 1), result.removed);
     try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
-    try testing.expectEqual(@as(usize, 1), h.count(.sync_dir));
+    try expectDirectorySyncs(h, 1);
     try expectSyncOrder(h);
     try testing.expectError(error.FileNotFound, dest.dir.access(base, "old", .{}));
 }

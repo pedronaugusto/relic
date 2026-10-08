@@ -119,7 +119,7 @@ test "phase2 native LFS clone fetches content and skip-smudge leaves pointers" {
     for ([_]bool{ false, true }) |skip| {
         const name = if (skip) "skip" else "native";
         try fx.tmp.dir.createDir(io, name, .default_dir);
-        var target = try fx.tmp.dir.openDir(io, name, .{});
+        var target = try fx.tmp.dir.openDir(io, name, .{ .iterate = true });
         defer target.close(io);
         var env = try fx.env.clone(gpa);
         defer env.deinit();
