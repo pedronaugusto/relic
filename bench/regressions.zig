@@ -845,7 +845,7 @@ fn row8() !void {
         repo: *repo_mod.Repository,
         commit: hash.Oid,
         fn blame(p: @This()) void {
-            var b = relic.diff.blame.file(std.heap.smp_allocator, benchmark_io, p.repo.objectDatabase(), p.commit, "file.zig", .{}) catch unreachable;
+            var b = relic.diff.blame.file(std.heap.smp_allocator, benchmark_io, p.repo.objectDatabase(), .{ .commit = p.commit, .path = "file.zig" }, .{}) catch unreachable;
             std.mem.doNotOptimizeAway(b.hunks.len);
             b.deinit();
         }

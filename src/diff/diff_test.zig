@@ -217,7 +217,7 @@ test "an object's bytes go back to the object database's allocator, whatever the
     _ = try diff.numstat(other, io, &pair.db, changes.items, .{});
     for (changes.items) |change| {
         var out: std.Io.Writer.Allocating = .init(other);
-        try diff.unified(other, io, &out.writer, &pair.db, change, .{});
+        try diff.unified(other, io, .{ .db = &pair.db, .change = change }, &out.writer, .{});
     }
 }
 
@@ -233,7 +233,7 @@ test "the unified patch is byte for byte what git prints" {
     for (changes.items) |change| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unified(gpa, io, &out.writer, &pair.db, change, .{});
+        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &out.writer, .{});
 
         const expected = try pair.repo.run(io, &.{
             "diff",         "--no-color",  "-U3",
@@ -268,7 +268,7 @@ test "gitlink counts and patch text agree with git" {
 
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try diff.unified(gpa, io, &out.writer, &pair.db, changes.items[0], .{});
+    try diff.unified(gpa, io, .{ .db = &pair.db, .change = changes.items[0] }, &out.writer, .{});
     const expected = try pair.repo.run(io, &.{ "diff", "--no-color", "-U3", pair.old_text, pair.new_text, "--", "vendor/lib" });
     defer gpa.free(expected);
     try std.testing.expectEqualStrings(expected, out.written());
@@ -333,7 +333,7 @@ test "the hunk header carries the enclosing line git puts there" {
     for ([_]u32{ 0, 1, 3, 5 }) |context| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unified(gpa, io, &out.writer, &pair.db, changes.items[0], .{ .context = context });
+        try diff.unified(gpa, io, .{ .db = &pair.db, .change = changes.items[0] }, &out.writer, .{ .context = context });
 
         var arg_buf: [8]u8 = undefined;
         const context_arg = try std.mem.print(&arg_buf, "-U{d}", .{context});
@@ -562,7 +562,7 @@ fn expectPatches(pair: *Pair, io: Io, options: diff.Options, flags: []const []co
     for (changes.items) |change| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unified(gpa, io, &out.writer, &pair.db, change, options);
+        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &out.writer, options);
 
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
@@ -698,10 +698,10 @@ test "the patience patch is byte for byte what git diff --patience prints" {
     for (changes.items) |change| {
         var mine: std.Io.Writer.Allocating = .init(gpa);
         defer mine.deinit();
-        try diff.unified(gpa, io, &mine.writer, &pair.db, change, .{ .algorithm = .patience });
+        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &mine.writer, .{ .algorithm = .patience });
         var plain: std.Io.Writer.Allocating = .init(gpa);
         defer plain.deinit();
-        try diff.unified(gpa, io, &plain.writer, &pair.db, change, .{});
+        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &plain.writer, .{});
         if (!std.mem.eql(u8, mine.written(), plain.written())) differing += 1;
     }
     try std.testing.expect(differing >= 5);

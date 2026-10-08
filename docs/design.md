@@ -100,3 +100,9 @@ index/tree and overwrite policy in Options. Neither operation moves HEAD;
 sequencer.resetMerge owns HEAD/ORIG_HEAD publication and its ResetOptions carry
 the ref identity and optional refusal diagnostics. The same merge and reset
 engines preserve unrelated working-tree edits and refuse destructive overwrites.
+
+Unified diff borrows its object database and one Change through UnifiedInputs,
+then receives the output writer and formatting options. Blame identifies a file
+with Inputs (commit and path); patch-id tree comparisons use the same TreeInputs
+as diff.tree. These input groups leave formatting and attribution policy in
+the existing engines and preserve the writer-before-options call order.

@@ -50,14 +50,14 @@ pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid, binar
         defer parsed.deinit();
         parent_tree = parsed.tree;
     }
-    const id = try ofTrees(gpa, io, db, parent_tree, commit.tree, binary);
+    const id = try ofTrees(gpa, io, db, .{ .old = parent_tree, .new = commit.tree }, binary);
     return id;
 }
 
 /// The patch id of the change from `old` to `new`, either of which may be
 /// the empty tree.
-pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, old: ?Oid, new: ?Oid, binary: diff.BinaryRule) Self.Error!Oid {
-    var changes = try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{});
+pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: diff.TreeInputs, binary: diff.BinaryRule) Self.Error!Oid {
+    var changes = try diff.tree(gpa, io, db, inputs, .{});
     defer changes.deinit();
     var result: [hash.max_raw_len]u8 = @splat(0);
     const raw_len = db.objectFormat().rawLen();

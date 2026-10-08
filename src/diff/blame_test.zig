@@ -45,7 +45,7 @@ fn expectSameAsGit(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *repo_mod.R
         }
     }
 
-    var got = try blame.file(gpa, io, repo.objectDatabase(), commit, path, options);
+    var got = try blame.file(gpa, io, repo.objectDatabase(), .{ .commit = commit, .path = path }, options);
     defer got.deinit();
     var actual: std.Io.Writer.Allocating = .init(gpa);
     defer actual.deinit();
@@ -144,7 +144,7 @@ test "blame gives each line the commit git gives it, across edits, a rename and 
     try expectSameAsGit(gpa, io, &git, &repo, merged, "dir/b.txt", .{ .follow_renames = false });
     try expectSameAsGit(gpa, io, &git, &repo, merged, "other", .{});
     try expectSameAsGit(gpa, io, &git, &repo, edit, "a.txt", .{});
-    try std.testing.expectError(error.PathNotFound, blame.file(gpa, io, repo.objectDatabase(), merged, "a.txt", .{}));
+    try std.testing.expectError(error.PathNotFound, blame.file(gpa, io, repo.objectDatabase(), .{ .commit = merged, .path = "a.txt" }, .{}));
 }
 
 test "blame of random histories with merges, renames and repeated lines agrees with git" {

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: unified diff takes UnifiedInputs before its output writer; blame
+  groups commit/path in Inputs; patch ids take the shared diff.TreeInputs.
+  Output formatting, attribution and patch-id semantics are unchanged.
+
 - Breaking: working-tree merges take TreeInputs, CommitInputs or OctopusInputs,
   including their mutable index. Reset takes Options for its index, target tree
   and overwrite policy; sequencer.resetMerge takes ResetOptions for ref identity

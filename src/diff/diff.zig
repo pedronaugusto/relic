@@ -632,15 +632,22 @@ pub fn numstat(
 /// Errors from `unified`.
 pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error;
 
+/// The borrowed object store and one change whose patch is written.
+pub const UnifiedInputs = struct {
+    db: *odb_mod.Odb,
+    change: Change,
+};
+
 /// Append a unified diff for one change to `w`, with git's headers.
 pub fn unified(
     gpa: Allocator,
     io: Io,
+    inputs: UnifiedInputs,
     w: *Io.Writer,
-    db: *odb_mod.Odb,
-    change: Change,
     options: Options,
 ) UnifiedError!void {
+    const db = inputs.db;
+    const change = inputs.change;
     const old_path = if (change.old) |e| e.path else change.new.?.path;
     const new_path = if (change.new) |e| e.path else change.old.?.path;
 

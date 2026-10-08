@@ -117,7 +117,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
     // And as the patch git prints, when text is what you want.
     var patch: std.Io.Writer.Allocating = .init(gpa);
     defer patch.deinit();
-    try relic.diff.unified(gpa, io, &patch.writer, repo.objectDatabase(), changes.items[0], .{});
+    try relic.diff.unified(gpa, io, .{ .db = repo.objectDatabase(), .change = changes.items[0] }, &patch.writer, .{});
     std.debug.assert(std.mem.startsWith(u8, patch.written(), "diff --git a/src/main.zig b/src/main.zig\n"));
 
     // Put the first tree back: files the tree lacks go, changed ones are

@@ -78,8 +78,16 @@ pub const Blame = struct {
     }
 };
 
+/// The file identity within the commit being blamed.
+pub const Inputs = struct {
+    commit: Oid,
+    path: []const u8,
+};
+
 /// Blame `path` as `commit` has it.
-pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit: Oid, path: []const u8, options: Options) Self.Error!Blame {
+pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: Options) Self.Error!Blame {
+    const commit = inputs.commit;
+    const path = inputs.path;
     var out_arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer out_arena.deinit();
     var work: std.heap.ArenaAllocator = .init(gpa);

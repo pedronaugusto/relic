@@ -137,3 +137,9 @@ test "phase2 worktree merge and reset requests stay within five positional input
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
+
+test "phase2 diff output and attribution requests stay within five positional inputs" {
+    inline for (.{ relic.diff.unified, relic.diff.blame.file, relic.diff.patchid.ofTrees }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}
