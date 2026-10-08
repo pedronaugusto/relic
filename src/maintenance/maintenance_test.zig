@@ -259,7 +259,7 @@ test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree
         try std.testing.expectEqual(@as(u64, 7), try objectwalk.countCommits(gpa, io, &db, &.{head}, &.{old}));
         const counts = try objectwalk.countObjects(gpa, io, &db, &.{head}, &.{old});
         try std.testing.expectEqual(@as(u64, 21), counts.total());
-        var missing = try objectwalk.missing(gpa, io, &db, &.{head}, &.{old});
+        var missing = try objectwalk.missing(gpa, io, &db, &.{head}, .{ .exclude = &.{old} });
         defer missing.deinit();
         try std.testing.expectEqual(@as(usize, 21), missing.entries.len);
         const expected_objects = try repo.run(io, &.{ "rev-list", "--objects", "HEAD", "^HEAD~7" });

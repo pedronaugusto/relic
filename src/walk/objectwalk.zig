@@ -63,15 +63,12 @@ const Queued = struct {
 /// each with the path it was found at as its delta hint. A name in
 /// `exclude` that `db` does not hold is passed over: it is the other
 /// side's, and says nothing about this one.
-pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!Odb.Collected {
-    return missingWith(gpa, io, db, include, exclude, .{});
-}
-
 /// What a server's pack leaves out: git's `--filter` specs.
 pub const Filter = @import("objectwalk/filter.zig").Filter;
 
-/// How `missingWith` walks.
+/// How `missing` walks.
 pub const MissingOptions = struct {
+    exclude: []const Oid = &.{},
     /// Disable the optional accelerator for a traversal that supplies writer hints.
     use_bitmaps: bool = true,
     /// Commits whose parents are not followed: a shallow clone's boundary,
@@ -83,7 +80,8 @@ pub const MissingOptions = struct {
 };
 
 /// `missing`, walked with `options`.
-pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid, options: MissingOptions) Error!Odb.Collected {
+pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, options: MissingOptions) Error!Odb.Collected {
+    const exclude = options.exclude;
     if (options.use_bitmaps and options.boundary == null and options.filter == .none) {
         if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
             defer gpa.free(result.words);
@@ -412,19 +410,10 @@ const Walk = struct {
 ///
 /// The first object that is not there is `error.MissingObject`, and is
 /// written to `missing_out` when one is given.
-pub fn checkConnected(
-    gpa: Allocator,
-    io: Io,
-    db: *Odb,
-    tips: []const Oid,
-    fresh: ?*const pack.Index,
-    missing_out: ?*Oid,
-) Error!void {
-    return checkConnectedWith(gpa, io, db, tips, fresh, missing_out, .{});
-}
-
-/// What `checkConnectedWith` allows.
+/// What `checkConnected` allows.
 pub const ConnectedOptions = struct {
+    fresh: ?*const pack.Index = null,
+    missing_out: ?*Oid = null,
     /// The pack came from a partial clone's promisor remote, whose filter
     /// left objects out on purpose: an object the pack's objects name and
     /// the repository lacks is one the remote promises, as git's
@@ -432,23 +421,23 @@ pub const ConnectedOptions = struct {
     promisor: bool = false,
 };
 
-/// `checkConnectedWith` for a pack just received, whose `links` were
+/// `checkConnected` for a pack just received, whose `links` were
 /// collected as it was indexed. When they read whole and the pack is not a
 /// promisor's, nothing is walked: every name the pack holds is looked up in
 /// the pack and the database, and every tip, which is what git's index-pack
 /// `--check-self-contained-and-connected` lets git's fetch skip its walk
-/// for. Otherwise it walks, as `checkConnectedWith` does.
-pub fn checkReceived(
-    gpa: Allocator,
-    io: Io,
-    db: *Odb,
-    tips: []const Oid,
+/// for. Otherwise it walks, as `checkConnected` does.
+pub const ReceivedOptions = struct {
     fresh: *const pack.Index,
     links: *const indexpack.Links,
-    missing_out: ?*Oid,
-    options: ConnectedOptions,
-) Error!void {
-    if (options.promisor or links.unreadable) return checkConnectedWith(gpa, io, db, tips, fresh, missing_out, options);
+    missing_out: ?*Oid = null,
+    promisor: bool = false,
+};
+pub fn checkReceived(gpa: Allocator, io: Io, db: *Odb, tips: []const Oid, options: ReceivedOptions) Error!void {
+    const fresh = options.fresh;
+    const links = options.links;
+    const missing_out = options.missing_out;
+    if (options.promisor or links.unreadable) return checkConnected(gpa, io, db, tips, .{ .fresh = fresh, .missing_out = missing_out, .promisor = options.promisor });
     if (try links.firstMissing(io, db, fresh)) |oid| {
         if (missing_out) |out| out.* = oid;
         return error.MissingObject;
@@ -462,15 +451,9 @@ pub fn checkReceived(
 }
 
 /// `checkConnected`, with `options`.
-pub fn checkConnectedWith(
-    gpa: Allocator,
-    io: Io,
-    db: *Odb,
-    tips: []const Oid,
-    fresh: ?*const pack.Index,
-    missing_out: ?*Oid,
-    options: ConnectedOptions,
-) Error!void {
+pub fn checkConnected(gpa: Allocator, io: Io, db: *Odb, tips: []const Oid, options: ConnectedOptions) Error!void {
+    const fresh = options.fresh;
+    const missing_out = options.missing_out;
     var seen: Oid.Set = .empty;
     defer seen.deinit(gpa);
     // A tree names its blobs as blobs: one is only looked for, never read,
@@ -591,7 +574,7 @@ pub fn countObjects(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, excl
         db.stats.bitmap_hits += 1;
         return .{ .commits = bitmap.count(result.words, result.store.bitmap.types[0]), .trees = bitmap.count(result.words, result.store.bitmap.types[1]), .blobs = bitmap.count(result.words, result.store.bitmap.types[2]), .tags = bitmap.count(result.words, result.store.bitmap.types[3]) };
     }
-    var collected = try missingWith(gpa, io, db, include, exclude, .{ .use_bitmaps = false });
+    var collected = try missing(gpa, io, db, include, .{ .exclude = exclude, .use_bitmaps = false });
     defer collected.deinit();
     var counts: Counts = .{};
     for (collected.entries) |entry| switch ((try db.readHeader(io, entry.oid)).type) {

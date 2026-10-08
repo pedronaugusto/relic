@@ -72,7 +72,7 @@ test "what is missing is what git rev-list --objects lists" {
         var lines = std.mem.tokenizeScalar(u8, listed, '\n');
         while (lines.next()) |line| try theirs.put(gpa, try Oid.parse(.sha1, line[0..40]), {});
 
-        var ours = try objectwalk.missing(gpa, io, opened.objectDatabase(), include.items, exclude.items);
+        var ours = try objectwalk.missing(gpa, io, opened.objectDatabase(), include.items, .{ .exclude = exclude.items });
         defer ours.deinit();
         try testing.expectEqual(theirs.count(), ours.entries.len);
         for (ours.entries) |entry| try testing.expect(theirs.contains(entry.oid));
@@ -95,12 +95,12 @@ test "a tip with an object missing below it is refused, and names the object" {
     var opened = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer opened.deinit(io);
     const head = try Oid.parse(.sha1, head_hex);
-    try objectwalk.checkConnected(gpa, io, opened.objectDatabase(), &.{head}, null, null);
+    try objectwalk.checkConnected(gpa, io, opened.objectDatabase(), &.{head}, .{ .fresh = null, .missing_out = null });
 
     const path = try gpa.print(".git/objects/{s}/{s}", .{ blob_hex[0..2], blob_hex[2..] });
     defer gpa.free(path);
     try repo.dir.deleteFile(io, path);
     var gone: Oid = undefined;
-    try testing.expectError(error.MissingObject, objectwalk.checkConnected(gpa, io, opened.objectDatabase(), &.{head}, null, &gone));
+    try testing.expectError(error.MissingObject, objectwalk.checkConnected(gpa, io, opened.objectDatabase(), &.{head}, .{ .fresh = null, .missing_out = &gone }));
     try testing.expect(gone.eql(try Oid.parse(.sha1, blob_hex)));
 }

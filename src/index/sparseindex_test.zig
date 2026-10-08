@@ -166,7 +166,7 @@ test "patterns that are not a cone, or an unmerged entry, leave the index full" 
     defer git_dir.close(io);
     var db = try Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var index = try Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
 
     var plain = try sparse.Patterns.fromText(gpa, "/A/\n", .{});

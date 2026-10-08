@@ -242,7 +242,7 @@ fn expectIndexRoundTrip(
     const later: i96 = (std.Io.Clock.real.now(io).toSeconds() + 60) * std.time.ns_per_s;
     try fs.setTimestamps(io, git_dir, "index", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = later } } });
 
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, kind);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = kind });
     defer index.deinit();
 
     const written = try index.toBytes(.{ .version = version, .skip_hash = skip_hash });
@@ -270,7 +270,7 @@ test "an index git wrote with the offset caches is written back byte for byte" {
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
     {
-        var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+        var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
         defer index.deinit();
         try std.testing.expect(index.had_end_of_index_entries);
         try std.testing.expectEqual(@as(u32, 4), index.entry_offset_blocks);
@@ -283,7 +283,7 @@ test "an index git wrote with the offset caches is written back byte for byte" {
     try repo.writeFile(io, "dir0/file0.txt", "changed\n");
     try repo.exec(io, threaded ++ [_][]const u8{ "add", "-A" });
     {
-        var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+        var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
         defer index.deinit();
         try std.testing.expect(index.cache_tree != null);
         try std.testing.expect(index.had_end_of_index_entries);
@@ -320,7 +320,7 @@ test "a version 2 index git wrote is written back byte for byte" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     try std.testing.expect(index.cache_tree != null);
     const root = index.cache_tree.?.get("").?;
@@ -348,7 +348,7 @@ test "a version 3 index git wrote is written back byte for byte" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     try std.testing.expectEqual(@as(u32, 3), index.version);
     try std.testing.expect(index.find("b.txt").?.skip_worktree);
@@ -371,7 +371,7 @@ test "a version 4 index git wrote is written back byte for byte" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     try std.testing.expectEqual(@as(u32, 4), index.version);
     try expectIndexRoundTrip(gpa, io, &repo, .sha1, .v4, false);
@@ -407,7 +407,7 @@ test "an index written with index.skipHash round trips" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     try std.testing.expect(index.hash_was_skipped);
     try expectIndexRoundTrip(gpa, io, &repo, .sha1, .auto, true);
@@ -431,7 +431,7 @@ test "a split index is read whole and loses no entry" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     try std.testing.expect(index.was_split);
 
@@ -491,7 +491,7 @@ test "fsmonitor and untracked-cache extensions survive a round trip" {
     const original = try repo.readFile(io, ".git/index");
     defer gpa.free(original);
 
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
 
     var saw_untracked_cache = false;
@@ -665,7 +665,7 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
     defer git_dir.close(io);
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
 
     try git_dir.createDirPath(io, "info");
@@ -911,7 +911,7 @@ test "a conflicting three-way merge leaves stages 1, 2 and 3" {
     repo.report_failures = false;
     try std.testing.expectError(error.GitFailed, repo.run(io, &.{ "merge", "--no-edit", theirs_text }));
     repo.report_failures = true;
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     if (index.findStage("both.txt", 2)) |ours_entry| {
         try std.testing.expect(ours_entry.oid.eql(result.index.findStage("both.txt", 2).?.oid));

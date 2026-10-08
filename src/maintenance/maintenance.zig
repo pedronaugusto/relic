@@ -649,7 +649,7 @@ fn nameHashes(gpa: Allocator, arena: Allocator, io: Io, db: *odb.Odb, count: usi
             };
         }
     } else {
-        var collected = try objectwalk.missingWith(gpa, io, db, tips, &.{}, .{ .use_bitmaps = false });
+        var collected = try objectwalk.missing(gpa, io, db, tips, .{ .exclude = &.{}, .use_bitmaps = false });
         defer collected.deinit();
         for (collected.entries) |entry| if (name_positions.get(entry.oid)) |pos| {
             hashes[pos] = bitmap_mod.nameHash(entry.hint);

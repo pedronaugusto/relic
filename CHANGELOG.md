@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: index reads take ReadOptions, including optional measured timestamp
+  resolution. Object walks use MissingOptions, ConnectedOptions and ReceivedOptions
+  in their canonical operations; the With variants are removed. Top-level note copy
+  takes CopyRefOptions; trailer processing and amendment take named request options.
+
 - Native LFS filtering and clone/push composition live at `lfs.filter`,
   `lfs.clone` and `lfs.push`. Lower operations accept neutral owner callbacks;
   native LFS selection is explicit. Checkout's missing-content diagnostics use

@@ -115,7 +115,7 @@ const Fixture = struct {
         if (input.len != 0 and input[input.len - 1] != '\n') try completed.append(arena, '\n');
         var ours: std.ArrayList(u8) = .empty;
         defer ours.deinit(gpa);
-        try trailer.process(gpa, io, settings, .{ .programs = .{ .environ = &f.environ }, .cwd = .{ .dir = f.git.dir } }, parsed.options, parsed.new, completed.items, &ours);
+        try trailer.process(gpa, io, completed.items, &ours, .{ .settings = settings, .commands = .{ .programs = .{ .environ = &f.environ }, .cwd = .{ .dir = f.git.dir } }, .formatting = parsed.options, .new = parsed.new });
         std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
             std.debug.print("interpret-trailers", .{});
             for (args) |arg| std.debug.print(" {s}", .{arg});
@@ -219,7 +219,7 @@ test "in-place editing replaces the file as git's does, and keeps it as it was o
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(theirs, ours);
     // a command needs the programs to run it
-    try std.testing.expectError(error.TrailerCommandNeedsPrograms, trailer.process(gpa, io, .{ .rules = &.{.{ .name = "x", .command = "true", .where = .end, .if_exists = .add, .if_missing = .add }} }, null, .{}, &.{}, "s\n", &out));
+    try std.testing.expectError(error.TrailerCommandNeedsPrograms, trailer.process(gpa, io, "s\n", &out, .{ .settings = .{ .rules = &.{.{ .name = "x", .command = "true", .where = .end, .if_exists = .add, .if_missing = .add }} }, .commands = null, .formatting = .{}, .new = &.{} }));
 }
 
 /// A repository whose commits carry trailers of every shape.

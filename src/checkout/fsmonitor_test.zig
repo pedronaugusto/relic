@@ -161,7 +161,7 @@ fn versionsAsked(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
 fn tokenOf(gpa: Allocator, io: Io, r: *testgit.Repo) !?[]u8 {
     const git_dir = try r.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     const t = index.fsmonitor_token orelse return null;
     const token = try gpa.dupe(u8, t);
@@ -263,7 +263,7 @@ test "an index git wrote with FSMN is written back byte for byte" {
     defer gpa.free(original);
     const git_dir = try pair.git.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     // The second answer changed nothing git writes the index for.
     try std.testing.expectEqualStrings("token", index.fsmonitor_token.?);

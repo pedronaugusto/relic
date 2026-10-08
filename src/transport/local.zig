@@ -194,7 +194,7 @@ pub const Remote = struct {
         const haves = with.haves;
         const include_tags = with.include_tags;
         const options = with.pack;
-        var collected = try objectwalk.missing(r.gpa, io, r.repo.objectDatabase(), wants, haves);
+        var collected = try objectwalk.missing(r.gpa, io, r.repo.objectDatabase(), wants, .{ .exclude = haves });
         defer collected.deinit();
         if (collected.entries.len == 0) return null;
 

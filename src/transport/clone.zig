@@ -637,9 +637,9 @@ fn checkCloned(gpa: Allocator, io: Io, repo: *Repository, pack_dir: Io.Dir, pack
         fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     }
     const connected = if (fresh) |*index|
-        objectwalk.checkReceived(gpa, io, repo.objectDatabase(), wants, index, links, null, .{ .promisor = promisor })
+        objectwalk.checkReceived(gpa, io, repo.objectDatabase(), wants, .{ .fresh = index, .links = links, .missing_out = null, .promisor = promisor })
     else
-        objectwalk.checkConnectedWith(gpa, io, repo.objectDatabase(), wants, null, null, .{ .promisor = promisor });
+        objectwalk.checkConnected(gpa, io, repo.objectDatabase(), wants, .{ .fresh = null, .missing_out = null, .promisor = promisor });
     connected catch |err| switch (err) {
         error.MissingObject => return error.MissingObject,
         else => |e| return e,

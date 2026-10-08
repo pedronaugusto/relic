@@ -281,7 +281,7 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
             if (text.len == 0) return error.InvalidTrailer;
             if (trailer.findSeparator(text, cl_separators)) |at| if (at == 0) return error.InvalidTrailer;
         }
-        first_message = try trailer.amend(arena, io, settings, options.trailer_commands, first_message, options.trailers);
+        first_message = try trailer.amend(arena, io, first_message, .{ .settings = settings, .commands = options.trailer_commands, .trailers = options.trailers });
     }
     return first_message;
 }

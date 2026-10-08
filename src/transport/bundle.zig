@@ -343,7 +343,7 @@ pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header, r
 
 /// Whether every object `tips` reach and `refs` do not is in `db`.
 fn connectedBelow(gpa: Allocator, io: Io, db: *odb_mod.Odb, tips: []const Oid, refs: []const Oid) Error!bool {
-    var collected = objectwalk.missing(gpa, io, db, tips, refs) catch |err| switch (err) {
+    var collected = objectwalk.missing(gpa, io, db, tips, .{ .exclude = refs }) catch |err| switch (err) {
         error.MissingObject, error.ObjectNotFound => return false,
         else => |e| return e,
     };
@@ -582,7 +582,7 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     try w.writeByte('\n');
     if (ref_count == 0) return error.EmptyBundle;
 
-    var collected = try objectwalk.missingWith(gpa, io, repo.objectDatabase(), wants.items, haves.items, .{ .filter = filter });
+    var collected = try objectwalk.missing(gpa, io, repo.objectDatabase(), wants.items, .{ .exclude = haves.items, .filter = filter });
     defer collected.deinit();
     _ = try repo.objectDatabase().writePackTo(io, w, collected.entries, request.pack);
     try w.flush();

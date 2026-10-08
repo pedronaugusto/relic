@@ -789,7 +789,12 @@ fn ruleFor(settings: Settings, parsed: Parsed) Rule {
 /// left out, as git reports and leaves it. `commands` runs
 /// `trailer.<name>.command` and `.cmd`; without it, one that applies is
 /// `error.TrailerCommandNeedsPrograms`.
-pub fn process(gpa: Allocator, io: Io, settings: Settings, commands: ?Commands, options: Options, new: []const New, input: []const u8, out: *std.ArrayList(u8)) Error!void {
+pub const ProcessOptions = struct { settings: Settings = .{}, commands: ?Commands = null, formatting: Options = .{}, new: []const New = &.{} };
+pub fn process(gpa: Allocator, io: Io, input: []const u8, out: *std.ArrayList(u8), request: ProcessOptions) Error!void {
+    const settings = request.settings;
+    const commands = request.commands;
+    const options = request.formatting;
+    const new = request.new;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -842,10 +847,10 @@ pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_o
     var input: std.ArrayList(u8) = .fromOwnedSlice(try dir.readFileAlloc(io, path, gpa, .unlimited));
     defer input.deinit(gpa);
     try completeLine(gpa, &input);
-    if (!in_place) return process(gpa, io, settings, commands, options, new, input.items, out);
+    if (!in_place) return process(gpa, io, input.items, out, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });
     var result: std.ArrayList(u8) = .empty;
     defer result.deinit(gpa);
-    try process(gpa, io, settings, commands, options, new, input.items, &result);
+    try process(gpa, io, input.items, &result, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });
     const slash = std.mem.findLastAny(u8, path, "/\\");
     var parent = if (slash) |at| try dir.openDir(io, path[0..at], .{}) else dir;
     defer if (slash != null) parent.close(io);
@@ -879,13 +884,17 @@ fn completeLine(gpa: Allocator, buf: *std.ArrayList(u8)) Allocator.Error!void {
 /// What `git commit --trailer` does to a message: git's
 /// `amend_strbuf_with_trailers`, which reads no `---` divider. The result
 /// is `gpa`'s.
-pub fn amend(gpa: Allocator, io: Io, settings: Settings, commands: ?Commands, message: []const u8, trailers: []const []const u8) Error![]u8 {
+pub const AmendOptions = struct { settings: Settings = .{}, commands: ?Commands = null, trailers: []const []const u8 = &.{} };
+pub fn amend(gpa: Allocator, io: Io, message: []const u8, request: AmendOptions) Error![]u8 {
+    const settings = request.settings;
+    const commands = request.commands;
+    const trailers = request.trailers;
     var new: std.ArrayList(New) = .empty;
     defer new.deinit(gpa);
     for (trailers) |text| try new.append(gpa, .{ .text = text });
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    try process(gpa, io, settings, commands, .{ .no_divider = true }, new.items, message, &out);
+    try process(gpa, io, message, &out, .{ .settings = settings, .commands = commands, .formatting = .{ .no_divider = true }, .new = new.items });
     return out.toOwnedSlice(gpa);
 }
 

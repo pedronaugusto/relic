@@ -57,7 +57,7 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
             var result = try fetchpack.fetch(gpa, io, conn, &adv, repo.objectDatabase(), .{ .wants = &.{want}, .tips = &.{} }, .{});
             defer result.deinit(io);
             try testing.expect(result.objects > 0);
-            try objectwalk.checkConnected(gpa, io, repo.objectDatabase(), &.{want}, null, null);
+            try objectwalk.checkConnected(gpa, io, repo.objectDatabase(), &.{want}, .{ .fresh = null, .missing_out = null });
             try target_git.exec(io, &.{ "update-ref", "refs/heads/main", old });
         }
         // Then the rest, offering what is here: only what is new comes.
@@ -85,7 +85,7 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
             const tag_hex = try source.line(io, &.{ "rev-parse", "v1" });
             defer gpa.free(tag_hex);
             try testing.expect(try repo.objectDatabase().exists(io, try Oid.parse(.sha1, tag_hex)));
-            try objectwalk.checkConnected(gpa, io, repo.objectDatabase(), &.{want}, null, null);
+            try objectwalk.checkConnected(gpa, io, repo.objectDatabase(), &.{want}, .{ .fresh = null, .missing_out = null });
         }
         try target_git.exec(io, &.{ "update-ref", "refs/heads/main", head });
         try target_git.exec(io, &.{ "fsck", "--strict", "--no-dangling" });

@@ -573,6 +573,14 @@ pub const ResolveUndo = struct {
 const ieot_version: u32 = 1;
 
 /// How an index is written.
+/// Where split-index files live, the object format and an optional measured
+/// filesystem timestamp resolution. Without a measurement, read probes it.
+pub const ReadOptions = struct {
+    git_dir: ?Io.Dir = null,
+    kind: Kind,
+    timestamp_resolution: ?fs.Resolution = null,
+};
+
 pub const WriteOptions = struct {
     /// Which version to write. `auto` is version 2, or version 3 when an
     /// entry needs an extended flag — which is git's own rule.
@@ -708,44 +716,10 @@ pub const Index = struct {
     /// A missing file is an empty index, which is what git does: a repository
     /// with no `.git/index` has nothing staged. `git_dir` is where a split
     /// index's shared file is looked for, and may be the same directory.
-    pub fn read(
-        gpa: Allocator,
-        io: Io,
-        dir: Io.Dir,
-        sub_path: []const u8,
-        git_dir: Io.Dir,
-        kind: Kind,
-    ) Self.ReadError!Index {
-        return readImpl(gpa, io, dir, sub_path, git_dir, kind, null);
-    }
-
-    /// Read an index using a timestamp resolution already measured for
-    /// `dir`'s filesystem.
-    ///
-    /// A repository uses this after its object database measured the same
-    /// filesystem at open. A caller without such a measurement uses `read`,
-    /// which takes one itself.
-    pub fn readWithResolution(
-        gpa: Allocator,
-        io: Io,
-        dir: Io.Dir,
-        sub_path: []const u8,
-        git_dir: Io.Dir,
-        kind: Kind,
-        timestamp_resolution: fs.Resolution,
-    ) Self.ReadError!Index {
-        return readImpl(gpa, io, dir, sub_path, git_dir, kind, timestamp_resolution);
-    }
-
-    fn readImpl(
-        gpa: Allocator,
-        io: Io,
-        dir: Io.Dir,
-        sub_path: []const u8,
-        git_dir: Io.Dir,
-        kind: Kind,
-        timestamp_resolution: ?fs.Resolution,
-    ) ReadError!Index {
+    pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, options: ReadOptions) Self.ReadError!Index {
+        const git_dir = options.git_dir orelse dir;
+        const kind = options.kind;
+        const timestamp_resolution = options.timestamp_resolution;
         const bytes = (try fs.readFileAlloc(gpa, io, dir, sub_path, 1 << 31)) orelse
             return initEmpty(gpa, kind);
         defer gpa.free(bytes);
@@ -2097,11 +2071,29 @@ test "an index read from a disk measures the filesystem it was read from" {
     defer written.deinit();
     try written.write(io, tmp.dir, "index", .{});
 
-    var index = try Index.read(gpa, io, tmp.dir, "index", tmp.dir, .sha1);
+    var index = try Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 });
     defer index.deinit();
     try std.testing.expect(index.timestamp_resolution.measured);
     try std.testing.expect(index.timestamp_resolution.ns >= 1);
     try std.testing.expect(index.timestamp_resolution.ns <= std.time.ns_per_s);
+}
+
+test "phase2 index read options preserve a measured resolution for both object formats" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (.{ Kind.sha1, Kind.sha256 }) |kind| {
+        var written: Index = .initEmpty(gpa, kind);
+        defer written.deinit();
+        try written.write(io, tmp.dir, "index", .{});
+        const measured: fs.Resolution = .{ .ns = 100_000_000, .measured = true };
+        var loaded = try Index.read(gpa, io, tmp.dir, "index", .{ .kind = kind, .timestamp_resolution = measured });
+        defer loaded.deinit();
+        try std.testing.expectEqual(kind, loaded.kind);
+        try std.testing.expectEqual(measured, loaded.timestamp_resolution);
+        try std.testing.expectEqual(@as(usize, 0), loaded.entries.items.len);
+    }
 }
 
 test "the racy rule marks an entry whose time is not older than the index" {
@@ -2133,7 +2125,7 @@ test "an index git writes with names only Windows refuses is read, as git reads 
     defer gpa.free(listed);
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
     var ours: std.ArrayList(u8) = .empty;
     defer ours.deinit(gpa);
@@ -2193,7 +2185,7 @@ test "a split index is checked once merged: no empty name, no name twice, and th
         const linked = try withLink(gpa, plain, base);
         defer gpa.free(linked);
         try tmp.dir.writeFile(io, .{ .sub_path = "index", .data = linked });
-        try std.testing.expectError(case.err, Index.read(gpa, io, tmp.dir, "index", tmp.dir, .sha1));
+        try std.testing.expectError(case.err, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 }));
     }
 
     // A shared file under a name its checksum is not.
@@ -2208,7 +2200,7 @@ test "a split index is checked once merged: no empty name, no name twice, and th
     const linked = try withLink(gpa, plain, other);
     defer gpa.free(linked);
     try tmp.dir.writeFile(io, .{ .sub_path = "index", .data = linked });
-    try std.testing.expectError(error.ChecksumMismatch, Index.read(gpa, io, tmp.dir, "index", tmp.dir, .sha1));
+    try std.testing.expectError(error.ChecksumMismatch, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 }));
 }
 
 test "entries out of order are refused on the way out, not asserted" {

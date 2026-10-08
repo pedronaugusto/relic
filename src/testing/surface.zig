@@ -111,3 +111,17 @@ test "phase2 every public namespace and owned type names its errors" {
     @setEvalBranchQuota(500000);
     try checkErrors(relic, 3);
 }
+
+const index = relic.index;
+const objectwalk = relic.revwalk.objectwalk;
+const notes = relic.commit.notes;
+const trailer = relic.commit.trailer;
+
+test "phase2 public options signatures stay within five positional inputs" {
+    inline for (.{ index.Index.read, objectwalk.missing, objectwalk.checkConnected, objectwalk.checkReceived, notes.copy, trailer.process, trailer.amend }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+    try std.testing.expect(!@hasDecl(index.Index, "readWithResolution"));
+    try std.testing.expect(!@hasDecl(objectwalk, "missingWith"));
+    try std.testing.expect(!@hasDecl(objectwalk, "checkConnectedWith"));
+}

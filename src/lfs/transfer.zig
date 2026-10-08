@@ -2245,7 +2245,7 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
     if (options.history) {
         var exclude: std.ArrayList(Oid) = .empty;
         for (options.exclude) |name| try exclude.append(arena, (try resolve(arena, io, repo, name)).oid);
-        var collected = try objectwalk.missing(arena, io, repo.objectDatabase(), tips.items, exclude.items);
+        var collected = try objectwalk.missing(arena, io, repo.objectDatabase(), tips.items, .{ .exclude = exclude.items });
         defer collected.deinit();
         for (collected.entries) |e| {
             if (e.hint.len == 0) continue;

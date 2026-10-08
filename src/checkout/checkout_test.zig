@@ -58,7 +58,7 @@ const Harness = struct {
 
     fn reload(h: *Harness, gpa: std.mem.Allocator, io: Io) !void {
         h.index.deinit();
-        h.index = try index_mod.Index.read(gpa, io, h.git_dir, "index", h.git_dir, .sha1);
+        h.index = try index_mod.Index.read(gpa, io, h.git_dir, "index", .{ .git_dir = h.git_dir, .kind = .sha1 });
     }
 
     fn worktreeRules(h: *Harness) worktree.Rules {
@@ -305,7 +305,7 @@ test "a racily clean entry is smudged on the way out only when its file changed,
 
     var check: worktree.RacyCheck = .{ .gpa = gpa, .io = io, .wt = h.repo.dir, .rules = h.worktreeRules() };
     try h.index.write(io, h.git_dir, "index", .{ .racy = check.racy() });
-    var back = try index_mod.Index.read(gpa, io, h.git_dir, "index", h.git_dir, .sha1);
+    var back = try index_mod.Index.read(gpa, io, h.git_dir, "index", .{ .git_dir = h.git_dir, .kind = .sha1 });
     defer back.deinit();
     try std.testing.expectEqual(@as(u64, 5), back.find("same.txt").?.stat.size);
     try std.testing.expectEqual(@as(u64, 0), back.find("other.txt").?.stat.size);
@@ -317,7 +317,7 @@ test "a racily clean entry is smudged on the way out only when its file changed,
     h.index.racy_cutoff_sec = same.mtime_sec;
     h.index.racy_cutoff_nsec = same.mtime_nsec;
     try h.index.write(io, h.git_dir, "index", .{});
-    var all = try index_mod.Index.read(gpa, io, h.git_dir, "index", h.git_dir, .sha1);
+    var all = try index_mod.Index.read(gpa, io, h.git_dir, "index", .{ .git_dir = h.git_dir, .kind = .sha1 });
     defer all.deinit();
     try std.testing.expectEqual(@as(u64, 0), all.find("same.txt").?.stat.size);
 }

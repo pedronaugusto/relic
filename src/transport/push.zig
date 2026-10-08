@@ -451,7 +451,7 @@ fn send(
         if (r.unborn) continue;
         if (try repo.objectDatabase().exists(io, r.oid)) try exclude.append(arena, r.oid);
     }
-    var objects = try objectwalk.missing(gpa, io, repo.objectDatabase(), include.items, exclude.items);
+    var objects = try objectwalk.missing(gpa, io, repo.objectDatabase(), include.items, .{ .exclude = exclude.items });
     defer objects.deinit();
 
     var remote_refs_pushed: std.ArrayList([]const u8) = .empty;

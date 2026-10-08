@@ -959,7 +959,10 @@ pub const RefOptions = struct {
 };
 
 /// `git notes copy`: `from`'s note onto `to`.
-pub fn copy(gpa: Allocator, io: Io, repo: *Repository, from: Oid, to: Oid, options: RefOptions) Self.Error!void {
+pub const CopyRefOptions = struct { from: Oid, to: Oid, ref: ?[]const u8 = null, who: object.Signature, force: bool = false };
+pub fn copy(gpa: Allocator, io: Io, repo: *Repository, options: CopyRefOptions) Self.Error!void {
+    const from = options.from;
+    const to = options.to;
     const ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(ref);
     var t = try Notes.open(gpa, io, repo, ref, .concatenate);
@@ -1590,11 +1593,11 @@ test "notes added, appended, copied and removed are git's commits, trees and log
 
             // Copy, onto a note and not.
             try t.git.exec(io, &.{ "notes", "copy", "-f", hexOf(objects[1], &hex2), hexOf(objects[2], &hex) });
-            try copy(gpa, io, &repo, objects[1], objects[2], .{ .who = fixture_who, .force = true });
+            try copy(gpa, io, &repo, .{ .from = objects[1], .to = objects[2], .who = fixture_who, .force = true });
             const commit_hex = try t.git.line(io, &.{ "rev-parse", "HEAD" });
             defer gpa.free(commit_hex);
             try t.git.exec(io, &.{ "notes", "copy", hexOf(objects[1], &hex), "HEAD" });
-            try copy(gpa, io, &repo, objects[1], try Oid.parse(.sha1, commit_hex), .{ .who = fixture_who });
+            try copy(gpa, io, &repo, .{ .from = objects[1], .to = try Oid.parse(.sha1, commit_hex), .who = fixture_who });
             try t.expectSameState(io, &.{"refs/notes/commits"});
 
             // Remove most of them again, a missing one ignored, so the fanout

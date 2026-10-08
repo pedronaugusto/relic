@@ -157,7 +157,7 @@ fn relicUpload(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
     defer repo.deinit(fx.io);
     const head = (try repo.head(fx.io)).?;
     defer fx.gpa.free(head.name);
-    var collected = try objectwalk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, &.{});
+    var collected = try objectwalk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, .{ .exclude = &.{} });
     defer collected.deinit();
     const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
     defer server.deinit(fx.io);

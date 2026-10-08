@@ -17,7 +17,10 @@ Publishing facades expose the public vocabulary without executing operations or
 owning mutable state. Production implementation imports point downward rather
 than through publishing facades. Test fixtures live in testing modules and do not
 create production dependencies upward. Stateful owners release their resources
-through deinit. Public functions name error sets and distinguish refusal from an
+through deinit. Public functions group policy and optional inputs in named options, with one
+canonical operation instead of parallel With variants. Index read options carry
+a premeasured timestamp resolution when a repository already has one. Public
+functions name error sets and distinguish refusal from an
 empty successful result.
 
 LFS owns its pointer format, object store, commands, transfer policy and lock

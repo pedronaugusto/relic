@@ -70,7 +70,7 @@ test "a lock a second process holds is refused, and left exactly as it was" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
 
     var holder = Holder.start(gpa, io, git_dir, "index.lock") catch return error.SkipZigTest;
@@ -149,7 +149,7 @@ test "writing the index while git reads the same repository" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
 
     // A reader never blocks and never sees half a file: every one of these

@@ -933,10 +933,7 @@ const Negotiation = struct {
         var exclude: std.ArrayList(Oid) = .empty;
         try exclude.appendSlice(n.arena, n.have_obj.items);
         try exclude.appendSlice(n.arena, n.edges.items);
-        var collected = try objectwalk.missingWith(s.gpa, s.io, n.db(), include.items, exclude.items, .{
-            .boundary = &n.boundary,
-            .filter = n.filter,
-        });
+        var collected = try objectwalk.missing(s.gpa, s.io, n.db(), include.items, .{ .exclude = exclude.items, .boundary = &n.boundary, .filter = n.filter });
         defer collected.deinit();
         var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
         try entries.appendSlice(n.arena, collected.entries);
