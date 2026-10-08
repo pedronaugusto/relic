@@ -17,7 +17,7 @@ const crc32 = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
-const inflate_mod = @import("inflate.zig");
+const warp = @import("warp");
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -442,7 +442,7 @@ pub const Pack = struct {
     /// window — for a head read part way — and one decoder — for an entry
     /// read whole — do.
     window: []u8,
-    decoder: *inflate_mod.Decoder,
+    decoder: *warp.Decompressor,
     /// The blocks positional reads keep, direct-mapped: block `b` of the
     /// file can only be in slot `b % slots`, and there are never more slots
     /// than the file has blocks. A slot's `block_stride` bytes are allocated
@@ -539,7 +539,7 @@ pub const Pack = struct {
 
         const window = try gpa.alloc(u8, flate.max_window_len);
         errdefer gpa.free(window);
-        const decoder = try gpa.create(inflate_mod.Decoder);
+        const decoder = try gpa.create(warp.Decompressor);
         errdefer gpa.destroy(decoder);
         decoder.* = .{};
 
@@ -845,7 +845,7 @@ pub const Pack = struct {
 
     /// Leave one longest match and its word-copy slack after the result, so
     /// the fast decoder can also handle the last bytes of an entry.
-    const decode_slack = 258 + 8;
+    const decode_slack = warp.inflate_margin;
 
     fn inflatedLen(size: u64) ErrorNamespace.Error!usize {
         if (size > delta.max_result_bytes) return error.StreamTooLong;
@@ -868,22 +868,22 @@ pub const Pack = struct {
             try p.blockReaderAt(io, at);
 
         // The whole entry in one pass, with bounded scratch past the result:
-        // no window or streaming state (`inflate.zig`).
-        const n = p.decoder.zlib(input, out) catch |err| switch (err) {
+        // Warp keeps only reusable decoding tables, with no copied history.
+        const n = p.decoder.inflateReader(input, out, .{}) catch |err| switch (err) {
             error.ReadFailed => return if (streamed)
                 p.stream_reader.err orelse error.ReadFailed
             else
                 p.read_err orelse error.ReadFailed,
-            error.EndOfStream, error.CorruptStream, error.OutputTooLong => return error.CorruptPackEntry,
+            error.Truncated, error.InvalidStream, error.ChecksumMismatch, error.DictionaryMismatch, error.OutputTooSmall => return error.CorruptPackEntry,
         };
-        if (n != result_len) return error.CorruptPackEntry;
+        if (n.out_len != result_len) return error.CorruptPackEntry;
     }
 
     /// What one task inflates pack entries with, apart from the pack's own
     /// decoder and blocks, so that several tasks read one pack at once:
     /// `inflateWith`.
     pub const EntryReader = struct {
-        decoder: inflate_mod.Decoder = .{},
+        decoder: warp.Decompressor = .{},
         buffer: [stream_buffer_bytes]u8 = undefined,
     };
 
@@ -925,11 +925,11 @@ pub const Pack = struct {
             };
             break :blk &file_reader.interface;
         };
-        const n = reader.decoder.zlib(input, out[0 .. result_len + decode_slack]) catch |err| switch (err) {
+        const n = reader.decoder.inflateReader(input, out[0 .. result_len + decode_slack], .{}) catch |err| switch (err) {
             error.ReadFailed => return if (p.memory == null) file_reader.err orelse error.ReadFailed else error.ReadFailed,
-            error.EndOfStream, error.CorruptStream, error.OutputTooLong => return error.CorruptPackEntry,
+            error.Truncated, error.InvalidStream, error.ChecksumMismatch, error.DictionaryMismatch, error.OutputTooSmall => return error.CorruptPackEntry,
         };
-        if (n != result_len) return error.CorruptPackEntry;
+        if (n.out_len != result_len) return error.CorruptPackEntry;
     }
 
     /// The object at `offset`, with its delta chain resolved.

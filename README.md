@@ -209,8 +209,9 @@ One module, with [conduit](https://github.com/pedronaugusto/conduit) for
 running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's globs,
 [parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges and
 [uplink](https://github.com/pedronaugusto/uplink) for HTTP and TLS. Conduit carries its libc linkage on POSIX; Windows needs
-no C runtime. SHA-256 comes from `std.crypto`; SHA-1 and inflate are in the
-package. There is no build option to
+no C runtime. SHA-256 comes from `std.crypto`; SHA-1 is in the
+package. Warp supplies checksums and the adopted object decoder. Codec adoption
+is still in progress. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — reading
 objects and deflating entries while a pack is written
@@ -258,7 +259,6 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `odb.indexpack` | Module within `odb`. |
 | `odb.pack` | Module within `odb`. |
 | `odb.delta` | Module within `odb`. |
-| `odb.inflate` | Module within `odb`. |
 | `odb.midx` | Module within `odb`. |
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. `Store.root` and `Store.special` own the root refs (`ORIG_HEAD`, `CHERRY_PICK_HEAD`, ...) and the special refs (`FETCH_HEAD`, `MERGE_HEAD`) in either ref format; `deleteRefs` removes refs by any safe name; `writeInitial` writes a new repository's first refs; `list` keeps what is no ref apart in `broken`; `main-worktree/` and `worktrees/<id>/` read another worktree's refs; `create` lays down a new ref store. Logs in either format through the store: `readLog` (`Log.at` for `HEAD@{n}`), `logExists`, `appendLog` under a `LogPolicy` (`core.logAllRefUpdates`), `createLog`, `expireLog` (git's `reflog expire` and `reflog delete`, `--rewrite` and `--updateref`), `deleteLog`. |
 | `refs.reftablestack` | Module within `refs`. |
@@ -514,11 +514,10 @@ uplink keeps connections, goes through proxies with TLS to the server inside
 the tunnel, and answers client-certificate requests, which the standard
 library's client cannot. relic's API names no uplink type.
 
-**inflate is relic's own**, because std's zlib decoder reads the Adler-32 at
-the end of a stream and does not check it, so a corrupt object would be
-taken as it came; relic's checks it and refuses what zlib refuses. It
-decodes a pack entry into one buffer of known size and is fuzzed against
-std's decoder and compressor.
+**Warp decodes packs and binary patches.** Its decoder checks the zlib
+checksum, decodes into caller-owned output, and leaves the following stream in
+the input reader. Large received entries use its bounded streaming reader.
+Phase 2 is still adopting Warp at the remaining codec sites.
 
 HTTP(S) remotes and LFS accept `socks4://`, `socks4a://`, `socks5://` and
 `socks5h://` proxies, with port 1080 when none is given. SOCKS4 and SOCKS5
@@ -644,7 +643,7 @@ of its own instead. Where a read lands therefore depends only on what is
 wanted, never on the reads before it, and a pass whose delta-base cache holds
 at least what an earlier pass's held reads no more calls and no more bytes
 than it did. I/O failures are still returned to the caller.
-An inflate uses at most 266 bytes of temporary slack for its fast loop, then
+An inflate uses Warp's published temporary slack for its fast loop, then
 returns an owned result of the exact checked size.
 `Odb.Options.map_packs` asks for a memory map instead, which is faster on a
 cold cache and costs two things: on macOS a pack replaced underneath a mapping
@@ -761,8 +760,8 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 
 Planned, in the order they are likely to come; none is promised for a date.
 
-- **Loose object reads through relic's own inflate.** Packed object reads
-  and received packs already use it; loose reads still use the standard library.
+- **Warp at every codec site.** Packed object reads and received packs
+  use Warp; loose reads and remaining compression sites are being migrated.
 - **`-s subtree`** as a strategy name, beside the `-X subtree` forms.
 
 ## Platforms

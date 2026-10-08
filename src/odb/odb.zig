@@ -1407,8 +1407,8 @@ pub const Odb = struct {
             if (item.body.len == 0) return;
             const len: usize = @intCast(item.header.size);
             var stream: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
-            const got = c.readers[worker].decoder.zlib(&stream, item.body) catch return error.CorruptPackEntry;
-            if (got != len) return error.CorruptPackEntry;
+            const got = c.readers[worker].decoder.inflateReader(&stream, item.body, .{}) catch return error.CorruptPackEntry;
+            if (got.out_len != len) return error.CorruptPackEntry;
             const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..len]);
             if (!name.eql(c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
         }

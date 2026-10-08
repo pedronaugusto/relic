@@ -32,7 +32,7 @@ const crc32 = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
-const inflate_mod = @import("inflate.zig");
+const warp = @import("warp");
 const config_mod = @import("../config/config.zig");
 
 const hash = @import("../hash/hash.zig");
@@ -1294,7 +1294,7 @@ const Source = union(enum) {
 const Inflater = struct {
     gpa: Allocator,
     /// relic's own decoder, for every entry that fits in memory whole.
-    decoder: *inflate_mod.Decoder,
+    decoder: *warp.Decompressor,
     /// Where an entry whose bytes are not kept is decoded: a blob being
     /// named, a delta being measured.
     scratch: std.ArrayList(u8) = .empty,
@@ -1303,11 +1303,11 @@ const Inflater = struct {
     window: ?[]u8 = null,
 
     /// The most bytes an entry whose bytes are not kept is decoded whole
-    /// for; a larger one streams through the standard library's decoder.
+    /// for; a larger one streams through Warp's bounded reader.
     const scratch_limit = 16 << 20;
 
     fn init(gpa: Allocator) Allocator.Error!Inflater {
-        const decoder = try gpa.create(inflate_mod.Decoder);
+        const decoder = try gpa.create(warp.Decompressor);
         decoder.* = .{};
         return .{ .gpa = gpa, .decoder = decoder };
     }
@@ -1330,13 +1330,13 @@ const Inflater = struct {
             } else null,
         };
         const whole = out orelse return f.streaming(source, size, sink, hasher);
-        const n = f.decoder.zlib(source.reader(), whole) catch |err| return switch (err) {
-            error.CorruptStream => error.CorruptPackEntry,
-            error.OutputTooLong => error.PackEntrySizeMismatch,
-            error.EndOfStream => source.err() orelse error.TruncatedPack,
+        const n = f.decoder.inflateReader(source.reader(), whole, .{}) catch |err| return switch (err) {
+            error.InvalidStream, error.ChecksumMismatch, error.DictionaryMismatch => error.CorruptPackEntry,
+            error.OutputTooSmall => error.PackEntrySizeMismatch,
+            error.Truncated => source.err() orelse error.TruncatedPack,
             error.ReadFailed => source.err() orelse error.ReadFailed,
         };
-        if (n != size) return error.PackEntrySizeMismatch;
+        if (n.out_len != size) return error.PackEntrySizeMismatch;
         switch (sink) {
             .hash => |h| h.update(whole),
             .discard, .buffer => {},
@@ -1347,20 +1347,20 @@ const Inflater = struct {
     /// `run` for an entry too large to hold whole.
     fn streaming(f: *Inflater, source: Source, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
         const window = f.window orelse blk: {
-            const w = try f.gpa.alloc(u8, flate.max_window_len);
+            const w = try f.gpa.alloc(u8, (1 << 15) + 4096);
             f.window = w;
             break :blk w;
         };
-        var d: flate.Decompress = .init(source.reader(), .zlib, window);
+        var d: warp.Inflate.Reader = .init(source.reader(), window, .{});
         var chunk: [16 * 1024]u8 = undefined;
         var done: u64 = 0;
         while (true) {
             const remaining = size - done;
             const want: usize = @intCast(@min(@as(u64, chunk.len), remaining + 1));
-            const n = d.reader.readSliceShort(chunk[0..want]) catch {
+            const n = d.interface.readSliceShort(chunk[0..want]) catch {
                 if (source.err()) |err| return err;
-                return if (d.err) |err| switch (err) {
-                    error.EndOfStream => error.TruncatedPack,
+                return if (d.err()) |err| switch (err) {
+                    error.Truncated => error.TruncatedPack,
                     else => error.CorruptPackEntry,
                 } else error.CorruptPackEntry;
             };

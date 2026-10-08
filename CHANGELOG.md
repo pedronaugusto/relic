@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Breaking:** object and binary-patch decoding use Warp directly; the internal `odb.inflate` namespace and copied decoder are removed. Pack resource failures retain their I/O causes.
+
 - **Breaking:** object validation, conversion, hook preparation, identity, branch movement and pretty formatting group related inputs and defaulted options. Every exported function and method takes at most five positional inputs.
 
 - Both ERE adapters refuse reversed and out-of-range numeric intervals;

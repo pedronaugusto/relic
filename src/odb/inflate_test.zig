@@ -6,7 +6,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const program = @import("../process/program.zig");
-const inflate = @import("inflate.zig");
+const warp = @import("warp");
 const testremote = @import("../testing/remote.zig");
 
 const script =
@@ -45,7 +45,7 @@ test "every stream zlib makes, at every level, strategy and window, decodes to w
     defer made.deinit(gpa);
     if (!made.succeeded()) return error.SkipZigTest;
 
-    const d = try gpa.create(inflate.Decoder);
+    const d = try gpa.create(warp.Decompressor);
     defer gpa.destroy(d);
     d.* = .{};
     var rest = made.stdout;
@@ -59,8 +59,8 @@ test "every stream zlib makes, at every level, strategy and window, decodes to w
         const out = try gpa.alloc(u8, n);
         defer gpa.free(out);
         var r: std.Io.Reader = .fixed(z);
-        const got = try d.zlib(&r, out);
-        try testing.expectEqual(n, got);
+        const got = try d.inflateReader(&r, out, .{});
+        try testing.expectEqual(n, got.out_len);
         try testing.expectEqualSlices(u8, data, out);
         try testing.expectEqual(@as(usize, 0), r.bufferedLen());
         cases += 1;

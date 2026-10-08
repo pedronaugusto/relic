@@ -7,7 +7,6 @@ pub const revindex = @import("odb/revindex.zig");
 pub const indexpack = @import("odb/indexpack.zig");
 pub const pack = @import("odb/pack.zig");
 pub const delta = @import("codec/delta.zig");
-pub const inflate = @import("odb/inflate.zig");
 pub const midx = @import("odb/midx.zig");
 pub const Options = @import("odb/odb.zig").Options;
 pub const Error = @import("odb/odb.zig").Error;

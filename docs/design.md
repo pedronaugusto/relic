@@ -71,7 +71,8 @@ and cache costs. Long includeIf patterns use checked sizing and an allocated
 fallback instead of truncating bounded scratch. Shared pathspec consumers and
 line-diff parsing use one grammar each.
 
-Warp owns the adopted checksum implementation. Remaining codec and hunk-grammar
+Warp owns checksums and the adopted pack and binary-patch decoder. Whole-entry
+reads reuse its decoding tables; large received entries use its bounded reader. Remaining codec and hunk-grammar
 adoption must use published dependency APIs; Relic does not copy dependency
 implementations or publish compatibility wrappers. Conduit owns child termination
 states. Allocation contracts exercise lifecycle failures using Shakedown's

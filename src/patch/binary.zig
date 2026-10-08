@@ -25,7 +25,7 @@ const Io = std.Io;
 const flate = std.compress.flate;
 
 const delta = @import("../codec/delta.zig");
-const inflate_mod = @import("../odb/inflate.zig");
+const warp = @import("warp");
 
 /// Which kind a hunk is.
 pub const Method = enum { literal, delta };
@@ -114,15 +114,15 @@ pub const InflateError = error{CorruptBinaryPatch} || Allocator.Error;
 /// what a delta may produce is refused before anything is allocated.
 pub fn inflate(gpa: Allocator, data: []const u8, size: usize) Self.InflateError![]u8 {
     if (size > delta.max_result_bytes) return error.CorruptBinaryPatch;
-    const decoder = try gpa.create(inflate_mod.Decoder);
+    const decoder = try gpa.create(warp.Decompressor);
     defer gpa.destroy(decoder);
     decoder.* = .{};
     // one byte more than wanted, so a stream that runs long is caught
     const out = try gpa.alloc(u8, size + 1);
     errdefer gpa.free(out);
     var reader: Io.Reader = .fixed(data);
-    const got = decoder.zlib(&reader, out) catch return error.CorruptBinaryPatch;
-    if (got != size) return error.CorruptBinaryPatch;
+    const got = decoder.inflateReader(&reader, out, .{}) catch return error.CorruptBinaryPatch;
+    if (got.out_len != size) return error.CorruptBinaryPatch;
     return gpa.realloc(out, size);
 }
 
