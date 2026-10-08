@@ -326,7 +326,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     const target = reduced.heads[0];
-    const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), ours, target.oid, .{});
+    const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = target.oid }, .{});
     defer gpa.free(bases);
 
     if (bases.len == 0 and !options.allow_unrelated_histories) return error.UnrelatedHistories;
@@ -418,7 +418,7 @@ fn reduceHeads(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, oids
     var kept: std.ArrayList(Oid) = .empty;
     for (unique.items, 0..) |one, i| {
         const redundant = for (unique.items, 0..) |other, j| {
-            if (i != j and try revwalk.isAncestor(gpa, io, repo.objectDatabase(), one, other, .{})) break true;
+            if (i != j and try revwalk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = one, .descendant = other }, .{})) break true;
         } else false;
         if (!redundant) try kept.append(arena, one);
     }
@@ -446,7 +446,7 @@ fn octopus(
     if (!options.allow_unrelated_histories and !try shareHistory(gpa, arena, io, repo, ours, heads)) return error.UnrelatedHistories;
     // Up to date when `HEAD` reaches every head.
     for (heads) |one| {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), ours, one, .{});
+        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = one }, .{});
         defer gpa.free(bases);
         if (bases.len == 0 or !bases[0].eql(one)) break;
     } else return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
@@ -482,7 +482,7 @@ fn shareHistory(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, our
     for (heads) |one| {
         var next: std.ArrayList(Oid) = .empty;
         for (bases.items) |base| {
-            const found = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), one, base, .{});
+            const found = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = one, .b = base }, .{});
             defer gpa.free(found);
             try next.appendSlice(arena, found);
         }

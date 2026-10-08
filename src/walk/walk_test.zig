@@ -93,8 +93,8 @@ test "ancestry answers what git merge-base --is-ancestor answers, for every pair
             gpa.free(out);
             break :blk true;
         } else |_| false;
-        try testing.expectEqual(theirs, try revwalk.isAncestor(gpa, io, &db, a, d, .{}));
-        try testing.expectEqual(theirs, try revwalk.isAncestor(gpa, io, &db, a, d, .{ .graph = &graph }));
+        try testing.expectEqual(theirs, try revwalk.isAncestor(gpa, io, &db, .{ .ancestor = a, .descendant = d }, .{}));
+        try testing.expectEqual(theirs, try revwalk.isAncestor(gpa, io, &db, .{ .ancestor = a, .descendant = d }, .{ .graph = &graph }));
     };
 }
 

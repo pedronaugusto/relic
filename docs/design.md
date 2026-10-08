@@ -21,7 +21,9 @@ through deinit. Public functions group policy and optional inputs in named optio
 canonical operation instead of parallel With variants. Index.read is the
 constructor exception: reading describes its creation operation. Index read options carry
 a premeasured timestamp resolution when a repository already has one. Public
-functions name error sets and distinguish refusal from an
+Tree, commit and ancestry inputs group the participating object names, keeping
+operation policy in a separate options value. Public functions name error sets
+and distinguish refusal from an
 empty successful result.
 
 LFS owns its pointer format, object store, commands, transfer policy and lock

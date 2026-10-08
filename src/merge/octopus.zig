@@ -76,7 +76,11 @@ pub const Result = struct {
 /// Merge `heads`, in order, into the commit `head`, as `git merge-octopus`
 /// does: the heads are those `git merge` keeps once it has dropped every
 /// one another reaches.
-pub fn commits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, options: Options) Self.Error!Result {
+pub const CommitInputs = struct { head: Oid, heads: []const Oid };
+pub fn commits(gpa: Allocator, io: Io, db: *Odb, inputs: CommitInputs, options: Options) Self.Error!Result {
+    const head = inputs.head;
+    const heads = inputs.heads;
+
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -93,7 +97,7 @@ pub fn commits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, 
             // Only the last head may leave a conflict.
             if (step.failed) return error.OctopusFailed;
         }
-        const common = try revwalk.mergeBasesMany(gpa, io, db, one, merged_commits.items, .{});
+        const common = try revwalk.mergeBasesMany(gpa, io, db, .{ .one = one, .others = merged_commits.items }, .{});
         defer gpa.free(common);
         if (common.len == 0) return error.OctopusFailed;
         if (contains(common, one)) continue;

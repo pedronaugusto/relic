@@ -20,6 +20,7 @@ pub const Blocked = @import("merge/merge.zig").Blocked;
 pub const Side = @import("merge/merge.zig").Side;
 pub const Conflict = @import("merge/merge.zig").Conflict;
 pub const Result = @import("merge/merge.zig").Result;
+pub const TreeInputs = @import("merge/merge.zig").TreeInputs;
 pub const TreeOptions = @import("merge/merge.zig").TreeOptions;
 pub const trees = @import("merge/merge.zig").trees;
 pub const fromOrt = @import("merge/merge.zig").fromOrt;

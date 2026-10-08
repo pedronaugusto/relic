@@ -84,7 +84,7 @@ _ = try relic.worktree.addAll(gpa, io, dir, &index, repo.objectDatabase(), .{ .r
 const second = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
 
 // What changed, as values rather than as text.
-var changes = try relic.diff.tree(gpa, io, repo.objectDatabase(), tree, second, .{});
+var changes = try relic.diff.tree(gpa, io, repo.objectDatabase(), .{ .old = tree, .new = second }, .{});
 defer changes.deinit();
 std.debug.assert(changes.items.len == 1);
 std.debug.assert(changes.items[0].status == .modified);
@@ -287,7 +287,7 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `diff.patchid` | Patch ids: a name for what a commit changes. |
 | `diff.rename` | Module within `diff`. |
 | `diff.similarity` | Module within `diff`. |
-| `revwalk` | `count`, `countObjects` (bitmap-backed counts, ordinary walks on a miss), `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `mergeBasesMany`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary, and history simplified by paths (`Walk.paths`) as git simplifies it by default. |
+| `revwalk` | `Walk` and `Walk.count`, `mergeBase`, `mergeBases`, `mergeBasesMany`, `isAncestor`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary, and history simplified by paths (`Walk.paths`) as git simplifies it by default. |
 | `revwalk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found`, terms and pathspecs. |
 | `revwalk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
 | `revwalk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |

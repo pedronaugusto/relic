@@ -97,7 +97,7 @@ pub const Native = struct {
     fn changed(n: *Native, arena: Allocator, io: Io, old: Oid, new: Oid) ![]const []const u8 {
         const old_tree = try treeOf(arena, io, n.repo, old);
         const new_tree = try treeOf(arena, io, n.repo, new);
-        var changes = try diff.tree(n.gpa, io, n.repo.objectDatabase(), old_tree, new_tree, .{});
+        var changes = try diff.tree(n.gpa, io, n.repo.objectDatabase(), .{ .old = old_tree, .new = new_tree }, .{});
         defer changes.deinit();
         const out = try arena.alloc([]const u8, changes.items.len);
         for (changes.items, out) |c, *p| p.* = try arena.dupe(u8, c.path());

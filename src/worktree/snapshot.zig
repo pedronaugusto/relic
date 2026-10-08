@@ -266,6 +266,6 @@ pub const Store = struct {
     pub fn diff(store: *Store, io: Io, before: ?Snapshot, after: ?Snapshot, options: diff_mod.TreeOptions) Self.Error!diff_mod.Changes {
         if (before) |s| if (s.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         if (after) |s| if (s.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
-        return diff_mod.tree(store.gpa, io, &store.db, if (before) |s| s.tree else null, if (after) |s| s.tree else null, options);
+        return diff_mod.tree(store.gpa, io, &store.db, .{ .old = if (before) |s| s.tree else null, .new = if (after) |s| s.tree else null }, options);
     }
 };

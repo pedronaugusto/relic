@@ -149,6 +149,7 @@ pub const Result = struct {
 const Entries = std.StringHashMapUnmanaged(Side);
 
 /// Options for a tree merge.
+pub const TreeInputs = ort.TreeInputs;
 pub const TreeOptions = struct {
     /// Merge as git's merge machinery does (`ort.zig`): renames followed,
     /// files content-merged, and every conflict -- file against directory,
@@ -221,21 +222,17 @@ fn contentMerge(
     ort_options.attributes = options.attributes;
     ort_options.attributes_dir = options.attributes_dir;
     ort_options.configured_drivers = options.configured_drivers;
-    var merged = try ort.trees(gpa, io, db, base, ours, theirs, ort_options);
+    var merged = try ort.trees(gpa, io, db, .{ .base = base, .ours = ours, .theirs = theirs }, ort_options);
     defer merged.deinit();
     return fromOrt(gpa, io, db, &merged);
 }
 
 /// The index and conflicts of an `ort.Result`.
-pub fn trees(
-    gpa: Allocator,
-    io: Io,
-    db: *odb_mod.Odb,
-    base: ?Oid,
-    ours: Oid,
-    theirs: Oid,
-    options: TreeOptions,
-) Self.Error!Result {
+pub fn trees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, options: TreeOptions) Self.Error!Result {
+    const base = inputs.base;
+    const ours = inputs.ours;
+    const theirs = inputs.theirs;
+
     if (options.content_merge) return contentMerge(gpa, io, db, base, ours, theirs, options);
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -856,15 +853,7 @@ test "the content-merging tree merge writes the tree and the stages git merge-tr
             return Oid.parse(.sha1, text);
         }
     }.get;
-    var result = try trees(
-        gpa,
-        io,
-        &db,
-        try tree_of(gpa, io, &repo, "main~1^{tree}"),
-        try tree_of(gpa, io, &repo, "main^{tree}"),
-        try tree_of(gpa, io, &repo, "theirs^{tree}"),
-        .{ .content_merge = true, .blob = .{ .labels = .{ .ours = "main", .theirs = "theirs" }, .algorithm = .histogram } },
-    );
+    var result = try trees(gpa, io, &db, .{ .base = try tree_of(gpa, io, &repo, "main~1^{tree}"), .ours = try tree_of(gpa, io, &repo, "main^{tree}"), .theirs = try tree_of(gpa, io, &repo, "theirs^{tree}") }, .{ .content_merge = true, .blob = .{ .labels = .{ .ours = "main", .theirs = "theirs" }, .algorithm = .histogram } });
     defer result.deinit();
 
     // The first line is the tree, then one line per conflicted stage.
@@ -928,7 +917,7 @@ test "the content merge takes blob.whitespace, and reads a file 66 directories d
         defer gpa.free(text);
         oid.* = try Oid.parse(.sha1, text);
     }
-    var result = try trees(gpa, io, &db, sides[0], sides[1], sides[2], .{
+    var result = try trees(gpa, io, &db, .{ .base = sides[0], .ours = sides[1], .theirs = sides[2] }, .{
         .content_merge = true,
         .blob = .{ .algorithm = .histogram, .whitespace = .{ .change = true } },
     });

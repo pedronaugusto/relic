@@ -108,7 +108,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
     const second = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
 
     // What changed, as values rather than as text.
-    var changes = try relic.diff.tree(gpa, io, repo.objectDatabase(), tree, second, .{});
+    var changes = try relic.diff.tree(gpa, io, repo.objectDatabase(), .{ .old = tree, .new = second }, .{});
     defer changes.deinit();
     std.debug.assert(changes.items.len == 1);
     std.debug.assert(changes.items[0].status == .modified);

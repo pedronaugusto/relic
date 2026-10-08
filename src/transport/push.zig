@@ -717,7 +717,7 @@ fn judge(
             const new_commit = commitOf(io, repo, result.new);
             if (old_commit == null or new_commit == null) {
                 reject = .rejected_needs_force;
-            } else if (!try revwalk.isAncestor(gpa, io, repo.objectDatabase(), old_commit.?, new_commit.?, .{})) {
+            } else if (!try revwalk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
                 reject = .rejected_non_fast_forward;
             }
         }

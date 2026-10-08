@@ -83,7 +83,7 @@ test "name-status agrees with git diff-tree" {
     var pair = try buildPair(setupMixed, gpa, io);
     defer pair.deinit(gpa, io);
 
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
 
     const expected = try pair.repo.run(io, &.{ "diff-tree", "--name-status", "-r", pair.old_text, pair.new_text });
@@ -154,7 +154,7 @@ test "a walk of two random trees lists what git diff-tree lists, with and withou
         var old_hex: [hash.max_hex_len]u8 = undefined;
         var new_hex: [hash.max_hex_len]u8 = undefined;
         for ([_][]const u8{ "", "a", "a.b", "a/a" }) |prefix| {
-            var changes = try diff.tree(gpa, io, &db, old, new, .{ .prefix = prefix });
+            var changes = try diff.tree(gpa, io, &db, .{ .old = old, .new = new }, .{ .prefix = prefix });
             defer changes.deinit();
             var args: std.ArrayList([]const u8) = .empty;
             defer args.deinit(gpa);
@@ -179,7 +179,7 @@ test "numstat agrees with git, including the binary marker" {
     var pair = try buildPair(setupMixed, gpa, io);
     defer pair.deinit(gpa, io);
 
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
     const counts = try diff.numstat(gpa, io, &pair.db, changes.items, .{});
     defer gpa.free(counts);
@@ -208,7 +208,7 @@ test "an object's bytes go back to the object database's allocator, whatever the
     const gpa = std.testing.allocator;
     var pair = try buildPair(setupMixed, gpa, io);
     defer pair.deinit(gpa, io);
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -227,7 +227,7 @@ test "the unified patch is byte for byte what git prints" {
     var pair = try buildPair(setupMixed, gpa, io);
     defer pair.deinit(gpa, io);
 
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
 
     for (changes.items) |change| {
@@ -257,7 +257,7 @@ test "gitlink counts and patch text agree with git" {
     const gpa = std.testing.allocator;
     var pair = try buildPair(setupGitlink, gpa, io);
     defer pair.deinit(gpa, io);
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
     try std.testing.expectEqual(@as(usize, 1), changes.items.len);
 
@@ -326,7 +326,7 @@ test "the hunk header carries the enclosing line git puts there" {
     var pair = try buildPair(setupSource, gpa, io);
     defer pair.deinit(gpa, io);
 
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
     try std.testing.expectEqual(@as(usize, 1), changes.items.len);
 
@@ -371,7 +371,7 @@ test "rename detection finds what git -M finds" {
     defer pair.deinit(gpa, io);
 
     // Without detection, the same thing git shows without -M.
-    var plain = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var plain = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer plain.deinit();
     const plain_expected = try pair.repo.run(io, &.{
         "diff-tree", "--name-status", "-r", "--no-renames", pair.old_text, pair.new_text,
@@ -385,7 +385,7 @@ test "rename detection finds what git -M finds" {
     try std.testing.expectEqualStrings(plain_expected, plain_out.written());
 
     // With detection, both moves are renames and git agrees which is which.
-    var renamed = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{ .renames = .{} });
+    var renamed = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{ .renames = .{} });
     defer renamed.deinit();
     try std.testing.expectEqual(@as(usize, 2), renamed.items.len);
     for (renamed.items) |change| {
@@ -413,7 +413,7 @@ test "a diff against the empty tree is every file added" {
     var pair = try buildPair(setupMixed, gpa, io);
     defer pair.deinit(gpa, io);
 
-    var changes = try diff.tree(gpa, io, &pair.db, null, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = null, .new = pair.new }, .{});
     defer changes.deinit();
     for (changes.items) |change| {
         try std.testing.expectEqual(diff.Status.added, change.status);
@@ -555,7 +555,7 @@ fn setupAlgorithms(io: Io, repo: *testgit.Repo) anyerror!void {
 /// `flags` for the same two trees.
 fn expectPatches(pair: *Pair, io: Io, options: diff.Options, flags: []const []const u8) !void {
     const gpa = std.testing.allocator;
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
     try std.testing.expect(changes.items.len > 20);
 
@@ -692,7 +692,7 @@ test "the patience patch is byte for byte what git diff --patience prints" {
 
     // The fixtures are ones where the choice shows: on some of them the
     // patience patch is not the Myers patch.
-    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
     var differing: usize = 0;
     for (changes.items) |change| {

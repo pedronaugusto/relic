@@ -859,7 +859,7 @@ pub const Listing = struct {
 
     fn containsAny(l: *Listing, commit: Oid, wanted: []const Oid) ErrorNamespace.Error!bool {
         for (wanted) |w| {
-            if (try revwalk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), w, commit, .{})) return true;
+            if (try revwalk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), .{ .ancestor = w, .descendant = commit }, .{})) return true;
         }
         return false;
     }
@@ -872,7 +872,7 @@ pub const Listing = struct {
         for (l.items.items) |item| {
             var reached = false;
             for (bases) |base| {
-                if (try revwalk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), item.commit.?, base, .{})) {
+                if (try revwalk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), .{ .ancestor = item.commit.?, .descendant = base }, .{})) {
                     reached = true;
                     break;
                 }

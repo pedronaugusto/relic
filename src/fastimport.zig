@@ -1675,7 +1675,7 @@ const Importer = struct {
                     try imp.rejected.append(imp.gpa, .{ .name = b.name, .new = new, .old = o, .reason = .missing_commits });
                     continue;
                 }
-                if (!try revwalk.isAncestor(imp.gpa, imp.io, db, old_commit.?, new_commit.?, .{})) {
+                if (!try revwalk.isAncestor(imp.gpa, imp.io, db, .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
                     try imp.rejected.append(imp.gpa, .{ .name = b.name, .new = new, .old = o, .reason = .not_fast_forward });
                     continue;
                 }

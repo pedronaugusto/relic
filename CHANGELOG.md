@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: merge trees/commits and diff tree pairs take named input groups;
+  ancestry and merge-base walks take Pair, Many or Ancestry plus BaseOptions.
+  Options and all semantic outcomes are preserved in their canonical operations.
+
 - Native LFS operations use the supplied Io for cached process pipe reads and
   writes, including failures and cancellation. Breaking: SSH connection stream
   operations take Io per call. Process.streams borrows native buffered streams

@@ -172,14 +172,11 @@ const Flat = std.array_hash_map.String(Entry);
 ///
 /// Either side may be `null`, which compares against the empty tree — what
 /// the first commit's diff is.
-pub fn tree(
-    gpa: Allocator,
-    io: Io,
-    db: *odb_mod.Odb,
-    old: ?Oid,
-    new: ?Oid,
-    options: TreeOptions,
-) Self.Error!Changes {
+pub const TreeInputs = struct { old: ?Oid = null, new: ?Oid = null };
+pub fn tree(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, options: TreeOptions) Self.Error!Changes {
+    const old = inputs.old;
+    const new = inputs.new;
+
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();

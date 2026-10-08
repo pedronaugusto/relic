@@ -893,7 +893,7 @@ fn checkGoodAncestors(c: *Ctx, t: Terms, revs: *const Revs, no_checkout: bool) E
     try walk.hide(bad);
     for (revs.good.items) |g| try walk.push(g);
     if (try walk.count(c.io) != 0) {
-        const bases = try revwalk.mergeBasesMany(c.gpa, c.io, c.repo.objectDatabase(), bad, revs.good.items, .{});
+        const bases = try revwalk.mergeBasesMany(c.gpa, c.io, c.repo.objectDatabase(), .{ .one = bad, .others = revs.good.items }, .{});
         defer c.gpa.free(bases);
         for (bases) |mb| {
             if (mb.eql(bad)) return badMergeBase(c, t, revs);

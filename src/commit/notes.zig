@@ -1206,7 +1206,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     } else if (remote == null) {
         result = local.?;
     } else {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), local.?, remote.?, .{});
+        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = local.?, .b = remote.? }, .{});
         defer gpa.free(bases);
         const base: ?Oid = if (bases.len == 0) null else bases[0];
         if (base != null and remote.?.eql(base.?)) {
@@ -1253,7 +1253,7 @@ fn mergeFromDiffs(
 
     // `diff_tree_remote`.
     {
-        var changes = try diff.tree(gpa, io, repo.objectDatabase(), base, remote, .{});
+        var changes = try diff.tree(gpa, io, repo.objectDatabase(), .{ .old = base, .new = remote }, .{});
         defer changes.deinit();
         for (changes.items) |c| {
             if (c.status != .added and c.status != .deleted and c.status != .modified) continue;
@@ -1271,7 +1271,7 @@ fn mergeFromDiffs(
     }
     // `diff_tree_local`.
     {
-        var changes = try diff.tree(gpa, io, repo.objectDatabase(), base, local, .{});
+        var changes = try diff.tree(gpa, io, repo.objectDatabase(), .{ .old = base, .new = local }, .{});
         defer changes.deinit();
         for (changes.items) |c| {
             if (c.status != .added and c.status != .deleted and c.status != .modified) continue;

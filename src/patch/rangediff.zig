@@ -237,7 +237,7 @@ const Reader = struct {
                 defer parent.deinit();
                 break :blk parent.tree;
             };
-            var changes = try diff.tree(r.gpa, r.io, db, parent_tree, commit.tree, .{ .renames = r.renames });
+            var changes = try diff.tree(r.gpa, r.io, db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = r.renames });
             defer changes.deinit();
             for (changes.items) |change| {
                 const old = if (change.old) |e| try r.loadSide(e) else null;

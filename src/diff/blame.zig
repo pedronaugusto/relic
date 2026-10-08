@@ -322,7 +322,7 @@ const Scoreboard = struct {
         if (try s.entryAt(parent.tree, o.path)) |entry| {
             if (!entry.mode.isTree()) return null;
         }
-        var changes = try diff.tree(s.gpa, s.io, s.db, parent.tree, n.tree, .{});
+        var changes = try diff.tree(s.gpa, s.io, s.db, .{ .old = parent.tree, .new = n.tree }, .{});
         defer changes.deinit();
         var queue: std.ArrayList(*rename.Pair) = .empty;
         var target: ?*rename.Pair = null;

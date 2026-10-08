@@ -316,15 +316,14 @@ pub const Result = struct {
 /// Merge the trees `ours` and `theirs` against `base`, which is `null` for
 /// two histories with nothing in common: `merge_incore_nonrecursive`, as a
 /// cherry-pick, a revert and `merge-tree --merge-base` use it.
-pub fn trees(
-    gpa: Allocator,
-    io: Io,
-    db: *odb_mod.Odb,
-    base: ?Oid,
-    ours: Oid,
-    theirs: Oid,
-    options: Options,
-) Self.Error!Result {
+pub const TreeInputs = struct { base: ?Oid = null, ours: Oid, theirs: Oid };
+pub const CommitInputs = struct { ours: Oid, theirs: Oid, bases: ?[]const Oid = null };
+
+pub fn trees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, options: Options) Self.Error!Result {
+    const base = inputs.base;
+    const ours = inputs.ours;
+    const theirs = inputs.theirs;
+
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var m: Merge = .{ .arena = arena_instance.allocator(), .io = io, .db = db, .options = options };
@@ -339,15 +338,11 @@ pub fn trees(
 /// first: `merge_incore_recursive`, as `git merge` and a rebase's `merge`
 /// use it. `bases` is in the order git passes them, the oldest first, or
 /// `null` to find them.
-pub fn commits(
-    gpa: Allocator,
-    io: Io,
-    db: *odb_mod.Odb,
-    ours: Oid,
-    theirs: Oid,
-    bases: ?[]const Oid,
-    options: Options,
-) Self.Error!Result {
+pub fn commits(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: CommitInputs, options: Options) Self.Error!Result {
+    const ours = inputs.ours;
+    const theirs = inputs.theirs;
+    const bases = inputs.bases;
+
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var m: Merge = .{ .arena = arena_instance.allocator(), .io = io, .db = db, .options = options };
@@ -1187,17 +1182,17 @@ const Merge = struct {
             }
         }
         const gpa = m.db.allocator();
-        if (!try revwalk.isAncestor(gpa, m.io, sdb, o, a, .{}) or !try revwalk.isAncestor(gpa, m.io, sdb, o, b, .{})) {
+        if (!try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = o, .descendant = a }, .{}) or !try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = o, .descendant = b }, .{})) {
             try m.pathMsg("Failed to merge submodule {s} (commits don't follow merge-base)", .submodule_may_have_rewinds, path, null, null, &.{}, .{path});
             return false;
         }
         var hex: [hash.max_hex_len]u8 = undefined;
-        if (try revwalk.isAncestor(gpa, m.io, sdb, a, b, .{})) {
+        if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = a, .descendant = b }, .{})) {
             result.* = b;
             try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, b.hex(&hex) });
             return true;
         }
-        if (try revwalk.isAncestor(gpa, m.io, sdb, b, a, .{})) {
+        if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = b, .descendant = a }, .{})) {
             result.* = a;
             try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, a.hex(&hex) });
             return true;
@@ -1241,15 +1236,15 @@ const Merge = struct {
         while (try walk.next(m.io)) |commit| {
             if (commit.parents.len < 2) continue;
             // `--ancestry-path`: descendants of `a` only.
-            if (!try revwalk.isAncestor(gpa, m.io, sdb, a, commit.oid, .{})) continue;
-            if (try revwalk.isAncestor(gpa, m.io, sdb, b, commit.oid, .{})) try candidates.append(m.arena, commit.oid);
+            if (!try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = a, .descendant = commit.oid }, .{})) continue;
+            if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = b, .descendant = commit.oid }, .{})) try candidates.append(m.arena, commit.oid);
         }
         var out: std.ArrayList(Oid) = .empty;
         for (candidates.items, 0..) |m1, i| {
             var contains_another = false;
             for (candidates.items, 0..) |m2, j| {
                 if (i == j) continue;
-                if (try revwalk.isAncestor(gpa, m.io, sdb, m2, m1, .{})) {
+                if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = m2, .descendant = m1 }, .{})) {
                     contains_another = true;
                     break;
                 }
@@ -2119,7 +2114,7 @@ const Merge = struct {
             try virtuals.append(m.arena, .{ .oid = v.fake, .parents = parents });
         }
         const gpa = m.db.allocator();
-        const found = try revwalk.mergeBases(gpa, m.io, m.db, m.oidOf(a), m.oidOf(b), .{ .virtuals = virtuals.items });
+        const found = try revwalk.mergeBases(gpa, m.io, m.db, .{ .a = m.oidOf(a), .b = m.oidOf(b) }, .{ .virtuals = virtuals.items });
         defer gpa.free(found);
         return m.arena.dupe(Oid, found);
     }

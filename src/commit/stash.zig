@@ -275,7 +275,7 @@ pub fn inspect(io: Io, repo: *Repository, commit: Oid) Self.Error!Stash {
 /// tree it recorded: `git stash show`.
 pub fn show(io: Io, repo: *Repository, n: usize, options: diff.TreeOptions) Self.Error!diff.Changes {
     const stash = try get(io, repo, n);
-    return diff.tree(repo.allocator(), io, repo.objectDatabase(), stash.base_tree, stash.tree, options);
+    return diff.tree(repo.allocator(), io, repo.objectDatabase(), .{ .old = stash.base_tree, .new = stash.tree }, options);
 }
 
 /// Everything a stash operation carries around: the rules the working tree
@@ -823,7 +823,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         .base = "Stash base",
         .theirs = "Stashed changes",
     };
-    var result = try merge.trees(gpa, io, db, stash.base_tree, current_tree, stash.tree, .{
+    var result = try merge.trees(gpa, io, db, .{ .base = stash.base_tree, .ours = current_tree, .theirs = stash.tree }, .{
         .content_merge = true,
         .blob = .{ .labels = labels },
     });
@@ -908,7 +908,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
 fn stagedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, stash: Stash, current_tree: Oid) Error!?Oid {
     if (stash.base_tree.eql(stash.index_tree) or current_tree.eql(stash.index_tree)) return null;
     if (!try patchApplies(gpa, io, db, stash.base_tree, current_tree, stash.index_tree)) return error.IndexConflict;
-    var staged = try merge.trees(gpa, io, db, stash.base_tree, current_tree, stash.index_tree, .{ .content_merge = true });
+    var staged = try merge.trees(gpa, io, db, .{ .base = stash.base_tree, .ours = current_tree, .theirs = stash.index_tree }, .{ .content_merge = true });
     defer staged.deinit();
     if (!staged.isClean()) return error.IndexConflict;
     // unreachable: a clean merge has no conflict to refuse

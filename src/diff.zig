@@ -12,6 +12,7 @@ pub const Entry = @import("diff/diff.zig").Entry;
 pub const Change = @import("diff/diff.zig").Change;
 pub const Changes = @import("diff/diff.zig").Changes;
 pub const RenameOptions = @import("diff/diff.zig").RenameOptions;
+pub const TreeInputs = @import("diff/diff.zig").TreeInputs;
 pub const TreeOptions = @import("diff/diff.zig").TreeOptions;
 pub const tree = @import("diff/diff.zig").tree;
 pub const NumStat = @import("diff/diff.zig").NumStat;

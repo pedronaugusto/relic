@@ -456,7 +456,7 @@ pub const Server = struct {
                 if (ref.unborn) continue;
                 const tip = ref.peeled orelse ref.oid;
                 if ((try s.db().readHeader(s.io, tip)).type != .commit) continue;
-                if (revwalk.isAncestor(s.gpa, s.io, s.db(), oid, tip, .{}) catch false) return true;
+                if (revwalk.isAncestor(s.gpa, s.io, s.db(), .{ .ancestor = oid, .descendant = tip }, .{}) catch false) return true;
             }
         }
         return false;

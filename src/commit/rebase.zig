@@ -819,14 +819,14 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
 
     // Already on top of `onto`, with a straight line from it: nothing to do.
     const branch_base = blk: {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), onto, tip.orig_head, .{});
+        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = onto, .b = tip.orig_head }, .{});
         defer gpa.free(bases);
         break :blk if (bases.len == 1) bases[0] else null;
     };
     const preemptive = !options.interactive and options.todo == null and options.exec.len == 0 and
         !options.autosquash and !options.force;
     if (preemptive and branch_base != null and branch_base.?.eql(onto)) up_to_date: {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), upstream, tip.orig_head, .{});
+        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = upstream, .b = tip.orig_head }, .{});
         defer gpa.free(bases);
         if (bases.len != 1 or !bases[0].eql(onto)) break :up_to_date;
         if (!try isLinear(&r, onto, tip.orig_head)) break :up_to_date;
@@ -1347,7 +1347,7 @@ fn writePatch(r: *Run, commit_oid: Oid) Error!void {
     // is empty.
     if (commit.parents.len > 1) return r.state("patch", "");
     const parent_tree: ?Oid = if (commit.parents.len != 0) try r.repo.commitTree(r.io, commit.parents[0]) else null;
-    var changes = try diff.tree(r.gpa, r.io, r.repo.objectDatabase(), parent_tree, commit.tree, .{ .renames = .{} });
+    var changes = try diff.tree(r.gpa, r.io, r.repo.objectDatabase(), .{ .old = parent_tree, .new = commit.tree }, .{ .renames = .{} });
     defer changes.deinit();
     var out: std.Io.Writer.Allocating = .init(r.arena);
     for (changes.items) |change| {
@@ -2252,7 +2252,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     // the heads, named by their object names.
     if (merge_heads.items.len > 1) return mergeAsGitMerge(r, item, merge_heads.items, author);
 
-    const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), head_oid, merge_head, .{});
+    const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = head_oid, .b = merge_head }, .{});
     defer gpa.free(bases);
     if (bases.len != 0 and bases[0].eql(merge_head)) return null;
 

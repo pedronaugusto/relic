@@ -338,7 +338,7 @@ pub const Remote = struct {
                     }
                 }
                 if (reason == null and deny_non_ff and !command.old.isZero()) {
-                    const ok = revwalk.isAncestor(gpa, io, r.repo.objectDatabase(), command.old, command.new, .{}) catch false;
+                    const ok = revwalk.isAncestor(gpa, io, r.repo.objectDatabase(), .{ .ancestor = command.old, .descendant = command.new }, .{}) catch false;
                     if (!ok) reason = "non-fast-forward";
                 }
             }

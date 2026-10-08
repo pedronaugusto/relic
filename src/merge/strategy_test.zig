@@ -112,7 +112,7 @@ fn expectSameMerges(
     for (cases, expected) |c, want| {
         const ours = tips.get(c.ours) orelse return error.MissingBranch;
         const theirs = tips.get(c.theirs) orelse return error.MissingBranch;
-        var result = try ort.commits(gpa, io, &db, ours, theirs, null, .{
+        var result = try ort.commits(gpa, io, &db, .{ .ours = ours, .theirs = theirs, .bases = null }, .{
             .labels = .{ .ours = c.ours, .theirs = c.theirs },
             .conflict_style = style,
             .resolve = settings.resolve,

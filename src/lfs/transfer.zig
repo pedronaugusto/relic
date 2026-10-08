@@ -2196,7 +2196,7 @@ fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repos
                 if (c.parents.len != 1) continue;
                 const old_tree = try treeOfCommit(arena, io, repo, c.parents[0]);
                 const new_tree = try treeOfCommit(arena, io, repo, c.oid);
-                var changes = try diff_mod.tree(server.gpa, io, repo.objectDatabase(), old_tree, new_tree, .{});
+                var changes = try diff_mod.tree(server.gpa, io, repo.objectDatabase(), .{ .old = old_tree, .new = new_tree }, .{});
                 defer changes.deinit();
                 for (changes.items) |change| {
                     const old = change.old orelse continue;

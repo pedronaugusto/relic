@@ -833,7 +833,7 @@ test "a three-way tree merge agrees with git merge-tree" {
     defer gpa.free(merge_base_text);
     try std.testing.expectEqualStrings(merge_base_text, base.hex(&hex));
 
-    var result = try merge_mod.trees(gpa, io, &db, try treeOf(gpa, io, &db, base), try treeOf(gpa, io, &db, ours), try treeOf(gpa, io, &db, theirs), .{});
+    var result = try merge_mod.trees(gpa, io, &db, .{ .base = try treeOf(gpa, io, &db, base), .ours = try treeOf(gpa, io, &db, ours), .theirs = try treeOf(gpa, io, &db, theirs) }, .{});
     defer result.deinit();
     try std.testing.expect(result.isClean());
 
@@ -882,7 +882,7 @@ test "a conflicting three-way merge leaves stages 1, 2 and 3" {
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
 
-    var result = try merge_mod.trees(gpa, io, &db, try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)), try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)), try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)), .{});
+    var result = try merge_mod.trees(gpa, io, &db, .{ .base = try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)), .ours = try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)), .theirs = try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)) }, .{});
     defer result.deinit();
 
     try std.testing.expect(!result.isClean());
@@ -961,15 +961,7 @@ test "a tree merge resolves independent text edits when asked" {
     defer git_dir.close(io);
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var result = try merge_mod.trees(
-        gpa,
-        io,
-        &db,
-        try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)),
-        try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)),
-        try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)),
-        .{ .content_merge = true },
-    );
+    var result = try merge_mod.trees(gpa, io, &db, .{ .base = try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)), .ours = try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)), .theirs = try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)) }, .{ .content_merge = true });
     defer result.deinit();
     try std.testing.expect(result.isClean());
     const entry = result.index.find("both.txt").?;

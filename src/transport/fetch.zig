@@ -1436,7 +1436,7 @@ fn decide(
             "storing ref";
         return .{ .old = old, .result = .created, .message = message };
     }
-    if (try revwalk.isAncestor(gpa, io, repo.objectDatabase(), old_commit.?, new_commit.?, .{})) {
+    if (try revwalk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
         return .{ .old = old, .result = .fast_forward, .message = "fast-forward" };
     }
     if (force or entry.force) return .{ .old = old, .result = .forced, .message = "forced-update" };

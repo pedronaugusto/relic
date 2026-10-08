@@ -347,7 +347,7 @@ const Exporter = struct {
         const first_parent_known = parents.len > 0 and
             (ex.marks.contains(parents[0]) or ex.options.reference_excluded_parents) and !ex.options.full_tree;
         const base: ?Oid = if (first_parent_known) try ex.commitTree(parents[0]) else null;
-        var changes = try diff.tree(ex.gpa, ex.io, ex.repo.objectDatabase(), base, tree, .{ .renames = ex.options.renames });
+        var changes = try diff.tree(ex.gpa, ex.io, ex.repo.objectDatabase(), .{ .old = base, .new = tree }, .{ .renames = ex.options.renames });
         defer changes.deinit();
         for (changes.items) |c| {
             const new = c.new orelse continue;

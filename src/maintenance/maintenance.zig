@@ -139,7 +139,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         var changed: []const u8 = &.{};
         if (options.changed_paths) |settings| {
             const parent_tree: ?Oid = if (node.parents.len == 0) null else nodes.items[by_name.get(node.parents[0]).?].tree;
-            var changes = try diff.tree(gpa, io, db, parent_tree, node.tree, .{});
+            var changes = try diff.tree(gpa, io, db, .{ .old = parent_tree, .new = node.tree }, .{});
             defer changes.deinit();
             const paths = try arena.alloc([]const u8, changes.items.len);
             for (changes.items, paths) |change, *path| path.* = change.path();

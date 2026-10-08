@@ -471,11 +471,21 @@ pub fn parentsOf(db: *const odb_mod.Odb, oid: Oid, parents: []const Oid) []const
 /// The result is the caller's. An empty result means the two commits share
 /// no history, which is what an unrelated-histories merge looks like.
 /// What else a merge-base computation may read from.
-pub fn mergeBases(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid, options: BaseOptions) Self.Error![]Oid {
-    return mergeBasesMany(gpa, io, db, a, &.{b}, options);
+pub const Pair = struct { a: Oid, b: Oid };
+pub const Many = struct { one: Oid, others: []const Oid };
+pub const Ancestry = struct { ancestor: Oid, descendant: Oid };
+
+pub fn mergeBases(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Pair, options: BaseOptions) Self.Error![]Oid {
+    const a = inputs.a;
+    const b = inputs.b;
+
+    return mergeBasesMany(gpa, io, db, .{ .one = a, .others = &.{b} }, options);
 }
 
-pub fn isAncestor(gpa: Allocator, io: Io, db: *odb_mod.Odb, ancestor: Oid, descendant: Oid, options: BaseOptions) Self.Error!bool {
+pub fn isAncestor(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Ancestry, options: BaseOptions) Self.Error!bool {
+    const ancestor = inputs.ancestor;
+    const descendant = inputs.descendant;
+
     if (ancestor.eql(descendant)) return true;
     var painter: Painter = .{ .gpa = gpa, .io = io, .db = db, .virtuals = options.virtuals, .graph = options.graph };
     defer painter.deinit();
@@ -514,7 +524,10 @@ pub const Virtual = struct {
 /// ancestor of `one` and any of `twos` that no other one reaches -- newest
 /// first. The result is the caller's.
 /// `mergeBasesMany`, reading commits as `options` says.
-pub fn mergeBasesMany(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, twos: []const Oid, options: BaseOptions) Self.Error![]Oid {
+pub fn mergeBasesMany(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Many, options: BaseOptions) Self.Error![]Oid {
+    const a = inputs.one;
+    const twos = inputs.others;
+
     for (twos) |b| if (a.eql(b)) {
         const out = try gpa.alloc(Oid, 1);
         out[0] = a;
@@ -757,7 +770,7 @@ const Painter = struct {
 /// The first merge base of `a` and `b`, or `null` when they share no
 /// history.
 pub fn mergeBase(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Self.Error!?Oid {
-    const bases = try mergeBases(gpa, io, db, a, b, .{});
+    const bases = try mergeBases(gpa, io, db, .{ .a = a, .b = b }, .{});
     defer gpa.free(bases);
     if (bases.len == 0) return null;
     return bases[0];
@@ -776,7 +789,7 @@ test "ancestry reports a missing commit instead of a negative answer" {
 
     const ancestor = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     const missing = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
-    try std.testing.expectError(error.ObjectNotFound, isAncestor(gpa, io, &db, ancestor, missing, .{}));
+    try std.testing.expectError(error.ObjectNotFound, isAncestor(gpa, io, &db, .{ .ancestor = ancestor, .descendant = missing }, .{}));
 }
 
 const testgit = @import("../testing/git.zig");
@@ -849,7 +862,7 @@ test "first-parent walks and merge bases of many are git's" {
         defer gpa.free(expected);
         var twos: [2]Oid = undefined;
         for (revs[1..], &twos) |rev, *o| o.* = try resolve(io, &repo, rev);
-        const bases = try mergeBasesMany(gpa, io, &db, try resolve(io, &repo, revs[0]), &twos, .{});
+        const bases = try mergeBasesMany(gpa, io, &db, .{ .one = try resolve(io, &repo, revs[0]), .others = &twos }, .{});
         defer gpa.free(bases);
         var got: std.ArrayList(u8) = .empty;
         defer got.deinit(gpa);
@@ -899,7 +912,7 @@ test "merge bases are git's, in git's order, through a criss-cross" {
         defer gpa.free(a_text);
         const b_text = try repo.line(io, &.{ "rev-parse", pair[1] });
         defer gpa.free(b_text);
-        const bases = try mergeBases(gpa, io, &db, try Oid.parse(.sha1, a_text), try Oid.parse(.sha1, b_text), .{});
+        const bases = try mergeBases(gpa, io, &db, .{ .a = try Oid.parse(.sha1, a_text), .b = try Oid.parse(.sha1, b_text) }, .{});
         defer gpa.free(bases);
         var got: std.ArrayList(u8) = .empty;
         defer got.deinit(gpa);
@@ -1084,7 +1097,7 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
             const expected = try repo.runInput(io, &.{ "merge-base", "--all", x, y }, "");
             defer gpa.free(expected);
             for ([_]?*const commitgraph.Graph{ null, &graph }) |g| {
-                const bases = try mergeBases(gpa, io, &db, xo, yo, .{ .graph = g });
+                const bases = try mergeBases(gpa, io, &db, .{ .a = xo, .b = yo }, .{ .graph = g });
                 defer gpa.free(bases);
                 var got: std.ArrayList(u8) = .empty;
                 defer got.deinit(gpa);
@@ -1095,7 +1108,7 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
                 }
                 try std.testing.expectEqualStrings(expected, got.items);
                 const ancestor = if (repo.exec(io, &.{ "merge-base", "--is-ancestor", x, y })) |_| true else |_| false;
-                try std.testing.expectEqual(ancestor, try isAncestor(gpa, io, &db, xo, yo, .{ .graph = g }));
+                try std.testing.expectEqual(ancestor, try isAncestor(gpa, io, &db, .{ .ancestor = xo, .descendant = yo }, .{ .graph = g }));
             }
         }
     }

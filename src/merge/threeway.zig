@@ -250,10 +250,10 @@ fn run(
         .inner_messages = options.inner_messages or (repo.configuration().getInt("merge.verbosity", 2) catch 2) >= 5,
     };
     var merged = switch (sides) {
-        .trees => |t| try ort.trees(gpa, io, db, t.base, t.ours, t.theirs, ort_options),
+        .trees => |t| try ort.trees(gpa, io, db, .{ .base = t.base, .ours = t.ours, .theirs = t.theirs }, ort_options),
         .commits => |c| blk: {
             ort_options.labels.base = "";
-            break :blk try ort.commits(gpa, io, db, c.ours, c.theirs, c.bases, ort_options);
+            break :blk try ort.commits(gpa, io, db, .{ .ours = c.ours, .theirs = c.theirs, .bases = c.bases }, ort_options);
         },
     };
     defer merged.deinit();
@@ -299,7 +299,7 @@ pub fn applyOctopus(
     defer attrs.deinit();
     rules.attrs = &attrs;
     rules.filters = options.filters;
-    var merged = try octopus.commits(gpa, io, db, head, heads, .{ .conflict_style = options.blob.conflict_style });
+    var merged = try octopus.commits(gpa, io, db, .{ .head = head, .heads = heads }, .{ .conflict_style = options.blob.conflict_style });
     defer merged.deinit();
     return carry(gpa, io, repo, index, &arena_instance, ours, rules, .{
         .tree = merged.worktree_tree,
@@ -347,7 +347,7 @@ fn carry(
     const db = repo.objectDatabase();
     // What the merge changes: the merged tree against ours, a walk past
     // every subtree the two share, so a pick costs what it changes.
-    var tree_changes = try diff.tree(gpa, io, db, ours, merged.tree, .{});
+    var tree_changes = try diff.tree(gpa, io, db, .{ .old = ours, .new = merged.tree }, .{});
     defer tree_changes.deinit();
     var desired: Desired = .empty;
     for (tree_changes.items) |change| {

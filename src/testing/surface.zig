@@ -125,3 +125,9 @@ test "phase2 public options signatures stay within five positional inputs" {
     try std.testing.expect(!@hasDecl(objectwalk, "missingWith"));
     try std.testing.expect(!@hasDecl(objectwalk, "checkConnectedWith"));
 }
+
+test "phase2 tree and ancestry requests stay within five positional inputs" {
+    inline for (.{ relic.merge.trees, relic.merge.ort.trees, relic.merge.ort.commits, relic.merge.octopus.commits, relic.revwalk.mergeBases, relic.revwalk.mergeBasesMany, relic.revwalk.isAncestor, relic.diff.tree }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}

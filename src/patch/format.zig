@@ -539,7 +539,7 @@ fn prepareBases(ctx: *Ctx, base: Oid, list: []const Oid) Error!Bases {
     for (list[1..]) |c| {
         common = (try revwalk.mergeBase(gpa, ctx.io, ctx.db, common, c)) orelse return error.BaseNotAncestor;
     }
-    if (!try revwalk.isAncestor(gpa, ctx.io, ctx.db, base, common, .{})) return error.BaseNotAncestor;
+    if (!try revwalk.isAncestor(gpa, ctx.io, ctx.db, .{ .ancestor = base, .descendant = common }, .{})) return error.BaseNotAncestor;
     var walk = revwalk.Walk.init(gpa, ctx.db);
     defer walk.deinit();
     walk.sort = .topological;
@@ -888,7 +888,7 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
         defer parent.deinit();
         break :blk parent.tree;
     };
-    var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, parent_tree, commit.tree, .{ .renames = ctx.renames });
+    var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = ctx.renames });
     defer changes.deinit();
     if (changes.items.len == 0) return;
     if (ctx.options.stat) try out.appendSlice(a, "---");
@@ -1419,7 +1419,7 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?O
     if (origin) |o| {
         const origin_commit = try readCommit(ctx, o);
         const head_commit = try readCommit(ctx, list[0]);
-        var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, origin_commit.tree, head_commit.tree, .{ .renames = ctx.renames });
+        var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, .{ .old = origin_commit.tree, .new = head_commit.tree }, .{ .renames = ctx.renames });
         defer changes.deinit();
         const saved = ctx.options.stat;
         ctx.options.stat = true;

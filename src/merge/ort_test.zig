@@ -109,7 +109,7 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
     var opts = options;
     opts.labels.ours = ours;
     opts.labels.theirs = theirs;
-    const merged = ort.commits(gpa, io, &db, try revParse(gpa, io, repo, ours), try revParse(gpa, io, repo, theirs), null, opts);
+    const merged = ort.commits(gpa, io, &db, .{ .ours = try revParse(gpa, io, repo, ours), .theirs = try revParse(gpa, io, repo, theirs), .bases = null }, opts);
     // On a few histories git's merge stops on one of its own assertions and
     // prints nothing. There the merge has to stop the same way, on the same
     // checks, and nowhere else.
@@ -215,7 +215,7 @@ test "a directory rename split is unclean with no path conflicted, as git's merg
     defer git_dir.close(io);
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var result = try ort.commits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
+    var result = try ort.commits(gpa, io, &db, .{ .ours = try revParse(gpa, io, &repo, "main"), .theirs = try revParse(gpa, io, &repo, "topic"), .bases = null }, .{});
     defer result.deinit();
     try std.testing.expectEqual(0, result.conflicted.len);
     try std.testing.expect(!result.isClean());
@@ -256,7 +256,7 @@ test "trees nested to git's depth limit merge, and deeper ones are refused by na
         defer git_dir.close(io);
         var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
         defer db.deinit(io);
-        const merged = ort.commits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
+        const merged = ort.commits(gpa, io, &db, .{ .ours = try revParse(gpa, io, &repo, "main"), .theirs = try revParse(gpa, io, &repo, "topic"), .bases = null }, .{});
         if (depth > ort.max_tree_depth) {
             try std.testing.expectError(error.TreeTooDeep, merged);
         } else {
@@ -1205,7 +1205,7 @@ fn expectSameDiff(gpa: Allocator, io: Io, repo: *testgit.Repo, flags: []const []
     defer db.deinit(io);
     const old_tree = try revParse(gpa, io, repo, "main~1^{tree}");
     const new_tree = try revParse(gpa, io, repo, "main^{tree}");
-    var changes = try diff.tree(gpa, io, &db, old_tree, new_tree, .{ .renames = options });
+    var changes = try diff.tree(gpa, io, &db, .{ .old = old_tree, .new = new_tree }, .{ .renames = options });
     defer changes.deinit();
     const got = try renderNameStatus(gpa, &changes);
     defer gpa.free(got);
