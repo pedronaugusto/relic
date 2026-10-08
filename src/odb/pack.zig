@@ -127,6 +127,11 @@ pub const Index = struct {
         crc: u32,
     };
 
+    pub const OpenOptions = struct {
+        kind: Kind,
+        max_bytes: usize = 1 << 30,
+    };
+
     /// Read `sub_path` in `dir` as a version 2 index.
     ///
     /// `max_bytes` bounds the read; an index larger than that is
@@ -136,10 +141,10 @@ pub const Index = struct {
         io: Io,
         dir: Io.Dir,
         sub_path: []const u8,
-        kind: Kind,
-        max_bytes: usize,
+        options: OpenOptions,
     ) Self.IndexError!Index {
-        const bytes = try dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
+        const kind = options.kind;
+        const bytes = try dir.readFileAlloc(io, sub_path, gpa, .limited(options.max_bytes));
         // parse takes ownership on success and failure.
         return parse(gpa, kind, bytes);
     }
@@ -459,29 +464,31 @@ pub const Pack = struct {
     stream_buffer: []u8 = &.{},
     stream_reader: Io.File.Reader = undefined,
 
+    pub const OpenInputs = struct { base: []const u8, kind: Kind };
+    pub const OpenOptions = struct {
+        access: Access = .read,
+        max_depth: u32 = default_max_depth,
+        max_chain_bytes: u64 = default_max_chain_bytes,
+        max_index_bytes: usize = 1 << 30,
+        /// How many bytes of the pack positional reads keep, in aligned
+        /// `read_block_bytes` blocks, at least one and never more than
+        /// the pack has, each allocated when first read. A pass over objects
+        /// an earlier pass read, with the delta-base cache holding at
+        /// each step at least what it held then, reads no more blocks.
+        read_cache_bytes: usize = default_read_cache_bytes,
+    };
+
     /// Open `<base>.pack` and `<base>.idx` in `dir`.
-    ///
-    /// `base` is the pack's name without an extension, which is what the
-    /// directory listing gives.
+    /// `base` is the name without an extension; inputs and options are borrowed.
     pub fn open(
         gpa: Allocator,
         io: Io,
         dir: Io.Dir,
-        base: []const u8,
-        kind: Kind,
-        options: struct {
-            access: Access = .read,
-            max_depth: u32 = default_max_depth,
-            max_chain_bytes: u64 = default_max_chain_bytes,
-            max_index_bytes: usize = 1 << 30,
-            /// How many bytes of the pack positional reads keep, in aligned
-            /// `read_block_bytes` blocks, at least one and never more than
-            /// the pack has, each allocated when first read. A pass over objects
-            /// an earlier pass read, with the delta-base cache holding at
-            /// each step at least what it held then, reads no more blocks.
-            read_cache_bytes: usize = default_read_cache_bytes,
-        },
+        inputs: OpenInputs,
+        options: OpenOptions,
     ) Self.Error!Pack {
+        const base = inputs.base;
+        const kind = inputs.kind;
         // The pack first: an index with no pack beside it is one being
         // written, or left behind, and is `FileNotFound` whatever it holds.
         var pack_buf: [512]u8 = undefined;
@@ -491,7 +498,7 @@ pub const Pack = struct {
 
         var name_buf: [512]u8 = undefined;
         const idx_name = std.mem.print(&name_buf, "{s}.idx", .{base}) catch return error.NameTooLong;
-        var index = try Index.open(gpa, io, dir, idx_name, kind, options.max_index_bytes);
+        var index = try Index.open(gpa, io, dir, idx_name, .{ .kind = kind, .max_bytes = options.max_index_bytes });
         errdefer index.deinit();
 
         const stat = try file.stat(io);
@@ -892,7 +899,12 @@ pub const Pack = struct {
     /// reads use — so tasks call it at once on one pack, each with a reader
     /// of its own. A delta has no whole object to inflate here: its base is
     /// `readAt`'s, with the delta-base cache.
-    pub fn inflateWith(p: *const Pack, io: Io, reader: *EntryReader, at: u64, size: u64, out: []u8) Self.Error!void {
+    pub const InflateInputs = struct { reader: *EntryReader, at: u64, size: u64 };
+
+    pub fn inflateWith(p: *const Pack, io: Io, inputs: InflateInputs, out: []u8) Self.Error!void {
+        const reader = inputs.reader;
+        const at = inputs.at;
+        const size = inputs.size;
         const result_len = try inflatedLen(size);
         if (out.len < result_len +| decode_slack) return error.StreamTooLong;
         var fixed_reader: Io.Reader = undefined;
@@ -933,8 +945,10 @@ pub const Pack = struct {
     /// of its own: `out` is cleared, grows with this pack's allocator as
     /// needed, and then holds exactly the object. A whole object is
     /// inflated straight into it.
-    pub fn readAtInto(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, out: *std.ArrayList(u8)) Self.Error!object.Type {
-        return (try p.resolve(io, offset, cache, pack_id, out)).type;
+    pub const ReadOptions = struct { cache: ?*Cache = null, pack_id: u32 = 0 };
+
+    pub fn readAtInto(p: *Pack, io: Io, offset: u64, out: *std.ArrayList(u8), options: ReadOptions) Self.Error!object.Type {
+        return (try p.resolve(io, offset, options.cache, options.pack_id, out)).type;
     }
 
     /// The object at `offset`, in an allocation of its own or, given `into`,
@@ -1616,7 +1630,7 @@ test "two reference deltas naming each other are a named error, not a hang" {
     _ = try builder.addRefDelta(b, a, patch);
     try builder.write(io, tmp.dir, "cycle");
 
-    var p = try Pack.open(gpa, io, tmp.dir, "cycle", .sha1, .{});
+    var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "cycle", .kind = .sha1 }, .{});
     defer p.deinit(io);
     try std.testing.expectError(error.DeltaCycle, p.readAt(io, a_at, null, 0));
 }
@@ -1647,7 +1661,7 @@ test "a chain deeper than the cap is refused, and one inside it resolves" {
     {
         // Inside the format's own limit, so it resolves — iteratively, with
         // no recursion to overflow.
-        var p = try Pack.open(gpa, io, tmp.dir, "deep", .sha1, .{});
+        var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "deep", .kind = .sha1 }, .{});
         defer p.deinit(io);
         const found = try p.readAt(io, last, null, 0);
         defer gpa.free(found.bytes);
@@ -1656,7 +1670,7 @@ test "a chain deeper than the cap is refused, and one inside it resolves" {
     {
         // And a caller that sets a smaller cap gets the refusal rather than
         // the work.
-        var p = try Pack.open(gpa, io, tmp.dir, "deep", .sha1, .{ .max_depth = 16 });
+        var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "deep", .kind = .sha1 }, .{ .max_depth = 16 });
         defer p.deinit(io);
         try std.testing.expectError(error.DeltaChainTooDeep, p.readAt(io, last, null, 0));
     }
@@ -1677,7 +1691,7 @@ test "an offset delta pointing forwards is refused" {
     const at = try builder.addOfsDelta(testName(7), 1 << 20, patch);
     try builder.write(io, tmp.dir, "forward");
 
-    var p = try Pack.open(gpa, io, tmp.dir, "forward", .sha1, .{});
+    var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "forward", .kind = .sha1 }, .{});
     defer p.deinit(io);
     try std.testing.expectError(error.BadDeltaOffset, p.readAt(io, at, null, 0));
 }
@@ -1913,51 +1927,22 @@ pub const Writer = struct {
         }
     };
 
-    /// Begin a pack in `dir` holding exactly `object_count` objects.
-    ///
-    /// `dir` is where `pack-<name>.pack` and `pack-<name>.idx` will land,
-    /// which in a repository is `objects/pack`. Nothing is visible under
-    /// either name until `finish`.
-    pub fn init(
-        gpa: Allocator,
-        io: Io,
-        dir: Io.Dir,
-        kind: Kind,
-        object_count: u32,
-        options: WriteOptions,
-    ) Self.WriteError!*Writer {
-        return initMaybeCounted(gpa, io, dir, kind, object_count, options);
+    /// The hash format and optional count; null counts entries while writing.
+    pub const OpenInputs = struct { kind: Kind, object_count: ?u32 = null };
+    /// A streamed pack must know its count before emitting its header.
+    pub const StreamInputs = struct { kind: Kind, object_count: u32 };
+
+    /// Begin a pack in `dir`. Nothing is published until finish.
+    /// An unknown count is patched into the header at finish before checksumming.
+    pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, inputs: OpenInputs, options: WriteOptions) Self.WriteError!*Writer {
+        return initMaybeCounted(gpa, io, dir, inputs.kind, inputs.object_count, options);
     }
 
-    /// Begin a pack whose object count is not known yet.
-    ///
-    /// The count goes in the header and the header goes first, so a pack
-    /// written this way has its header patched when it is finished and its
-    /// checksum taken over a second pass across the file. That pass is
-    /// sequential and one read per buffer, and it is what a caller pays for
-    /// not knowing how many objects it is about to write. `init` is the one
-    /// to use when it does.
-    pub fn initCounting(
-        gpa: Allocator,
-        io: Io,
-        dir: Io.Dir,
-        kind: Kind,
-        options: WriteOptions,
-    ) Self.WriteError!*Writer {
-        return initMaybeCounted(gpa, io, dir, kind, null, options);
-    }
-
-    /// Begin a pack of exactly `object_count` objects written to `out` as
-    /// it goes — a push's pack, on its way to the other side — with no
-    /// index and no file. `finish` writes the trailing checksum to `out`;
-    /// flushing `out` is the caller's.
-    pub fn initStream(
-        gpa: Allocator,
-        kind: Kind,
-        out: *Io.Writer,
-        object_count: u32,
-        options: WriteOptions,
-    ) Self.WriteError!*Writer {
+    /// Begin a pack of a known count streamed to out, without a file or index.
+    /// finish emits the checksum; flushing out belongs to the caller.
+    pub fn openStream(gpa: Allocator, inputs: StreamInputs, out: *Io.Writer, options: WriteOptions) Self.WriteError!*Writer {
+        const kind = inputs.kind;
+        const object_count = inputs.object_count;
         const w = try gpa.create(Writer);
         errdefer gpa.destroy(w);
         var deflater: Deflater = try .init(gpa);
@@ -2259,7 +2244,7 @@ pub const Writer = struct {
         errdefer w.dir.deleteFile(io, idx_temp) catch {};
         var rev_temp_buf: [64]u8 = undefined;
         const rev_temp: ?[]const u8 = if (w.options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
-        if (rev_temp) |t| try revindex.write(w.gpa, io, w.dir, t, w.kind, w.entries.items, checksum, w.options.sync);
+        if (rev_temp) |t| try revindex.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.sync });
         errdefer if (rev_temp) |t| w.dir.deleteFile(io, t) catch {};
 
         // read-only, as git leaves a pack and its indexes
@@ -2322,7 +2307,7 @@ pub const Writer = struct {
     }
 
     fn writeIndex(w: *Writer, io: Io, pack_checksum: Oid, idx_name: []const u8) WriteError!u64 {
-        return writeIndexFile(w.gpa, io, w.dir, idx_name, w.kind, w.entries.items, pack_checksum, w.options.sync);
+        return writeIndexFile(w.gpa, io, w.dir, idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.sync });
     }
 };
 
@@ -2335,16 +2320,24 @@ pub const Writer = struct {
 /// What goes in is exactly what `git index-pack` writes for the same pack,
 /// byte for byte, which is why a received pack's index and a written one's
 /// come from here.
+pub const IndexWriteOptions = struct {
+    kind: Kind,
+    entries: []IndexEntry,
+    pack_checksum: Oid,
+    sync: fs.Sync = .none,
+};
+
 pub fn writeIndexFile(
     gpa: Allocator,
     io: Io,
     dir: Io.Dir,
     sub_path: []const u8,
-    kind: Kind,
-    entries: []IndexEntry,
-    pack_checksum: Oid,
-    sync: fs.Sync,
+    options: IndexWriteOptions,
 ) Self.WriteError!u64 {
+    const kind = options.kind;
+    const entries = options.entries;
+    const pack_checksum = options.pack_checksum;
+    const sync = options.sync;
     std.mem.sort(WrittenEntry, entries, {}, lessThanWritten);
     // The names rise, each once: what `Index.parse` checks before anything
     // is looked up.
@@ -2463,7 +2456,7 @@ test "a written pack and its index read back, entry kind for entry kind" {
     const ref_delta_bytes = try copyThenInsert(gpa, blob_bytes.len, "two\n");
     defer gpa.free(ref_delta_bytes);
 
-    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 5, .{});
+    var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 5 }, .{});
     defer w.deinit(io);
     const blob_at = try w.add(blob_oid, .blob, blob_bytes);
     _ = try w.add(tree_oid, .tree, tree_bytes);
@@ -2479,7 +2472,7 @@ test "a written pack and its index read back, entry kind for entry kind" {
     var base_buf: [64]u8 = undefined;
     const base = try std.mem.print(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
 
-    var p = try Pack.open(gpa, io, tmp.dir, base, .sha1, .{});
+    var p = try Pack.open(gpa, io, tmp.dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
     try std.testing.expectEqual(@as(u32, 5), p.index.count);
     try std.testing.expectEqual(@as(u32, 5), p.count);
@@ -2525,7 +2518,7 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
     var written: usize = 0;
     defer for (bodies[0..written]) |b| gpa.free(b);
 
-    var w = try Writer.initCounting(gpa, io, tmp.dir, .sha1, .{});
+    var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1 }, .{});
     defer w.deinit(io);
     // The body the newest entry holds: what an offset delta against that
     // entry is a delta from. Not the body generated before this one, which
@@ -2566,7 +2559,7 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
     var hex: [hash.max_hex_len]u8 = undefined;
     var base_buf: [64]u8 = undefined;
     const base = try std.mem.print(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
-    var p = try Pack.open(gpa, io, tmp.dir, base, .sha1, .{});
+    var p = try Pack.open(gpa, io, tmp.dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
     // Rehashes every object against the name the index gives it, deltas
     // resolved, and checks every CRC and the trailer.
@@ -2587,7 +2580,7 @@ test "a pack written to a stream is byte for byte the pack written to a file" {
     const patch = try copyThenInsert(gpa, base_bytes.len, "and a line more\n");
     defer gpa.free(patch);
 
-    var file_writer = try Writer.init(gpa, io, tmp.dir, .sha1, 2, .{});
+    var file_writer = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 2 }, .{});
     defer file_writer.deinit(io);
     const at = try file_writer.add(base_oid, .blob, base_bytes);
     _ = try file_writer.addOfsDelta(target_oid, at, patch);
@@ -2595,7 +2588,7 @@ test "a pack written to a stream is byte for byte the pack written to a file" {
 
     var stream: Io.Writer.Allocating = .init(gpa);
     defer stream.deinit();
-    var stream_writer = try Writer.initStream(gpa, .sha1, &stream.writer, 2, .{});
+    var stream_writer = try Writer.openStream(gpa, .{ .kind = .sha1, .object_count = 2 }, &stream.writer, .{});
     defer stream_writer.deinit(io);
     const stream_at = try stream_writer.add(base_oid, .blob, base_bytes);
     _ = try stream_writer.addOfsDelta(target_oid, stream_at, patch);
@@ -2617,7 +2610,7 @@ test "a pack with no objects is still a pack, under either name format" {
     defer tmp.cleanup();
 
     for ([_]Kind{ .sha1, .sha256 }) |kind| {
-        var w = try Writer.init(gpa, io, tmp.dir, kind, 0, .{});
+        var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = kind, .object_count = 0 }, .{});
         defer w.deinit(io);
         const report = try w.finish(io);
         try std.testing.expectEqual(@as(u32, 0), report.objects);
@@ -2625,7 +2618,7 @@ test "a pack with no objects is still a pack, under either name format" {
 
         var hex: [hash.max_hex_len]u8 = undefined;
         var base_buf: [hash.max_hex_len + 8]u8 = undefined;
-        var p = try Pack.open(gpa, io, tmp.dir, try std.mem.print(&base_buf, "pack-{s}", .{report.name.hex(&hex)}), kind, .{});
+        var p = try Pack.open(gpa, io, tmp.dir, .{ .base = try std.mem.print(&base_buf, "pack-{s}", .{report.name.hex(&hex)}), .kind = kind }, .{});
         defer p.deinit(io);
         try std.testing.expectEqual(@as(u32, 0), p.index.count);
     }
@@ -2637,14 +2630,14 @@ test "a writer that is given the wrong count refuses rather than lying in the he
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 1, .{});
+    var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 1 }, .{});
     defer w.deinit(io);
     try std.testing.expectError(error.ObjectCountMismatch, w.finish(io));
     _ = try w.add(testName(1), .blob, "x");
     try std.testing.expectError(error.ObjectCountMismatch, w.add(testName(2), .blob, "y"));
 
     // An offset delta may only point backwards.
-    var w2 = try Writer.init(gpa, io, tmp.dir, .sha1, 1, .{});
+    var w2 = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 1 }, .{});
     defer w2.deinit(io);
     const identity = try identityDelta(gpa, 1);
     defer gpa.free(identity);
@@ -2658,7 +2651,7 @@ test "an aborted pack leaves the directory as it was" {
     defer tmp.cleanup();
 
     {
-        var w = try Writer.init(gpa, io, tmp.dir, .sha1, 2, .{});
+        var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 2 }, .{});
         defer w.deinit(io);
         _ = try w.add(testName(7), .blob, "abandoned");
     }
@@ -2764,7 +2757,7 @@ const FailurePack = struct {
         defer gpa.free(noise);
         var prng: std.Random.DefaultPrng = .init(0xfa11);
         prng.random().bytes(noise);
-        var w = try Writer.init(gpa, io, f.tmp.dir, .sha1, 3, .{});
+        var w = try Writer.open(gpa, io, f.tmp.dir, .{ .kind = .sha1, .object_count = 3 }, .{});
         defer w.deinit(io);
         f.small = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('1'))), .blob, "small");
         f.spanning = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('2'))), .blob, noise[0 .. 3 * read_block_bytes]);
@@ -2796,7 +2789,7 @@ test "pack inflates preserve I/O and cancellation resource failures" {
     const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     for ([_]Io.File.ReadPositionalError{ error.InputOutput, error.Canceled }) |failure| {
         Fault.failure = failure;
-        var p = try Pack.open(gpa, io, fixture.tmp.dir, fixture.name(), .sha1, .{});
+        var p = try Pack.open(gpa, io, fixture.tmp.dir, .{ .base = fixture.name(), .kind = .sha1 }, .{});
         defer p.deinit(io);
         // The header's block is read; the rest of the body, through the
         // blocks or streamed, fails.
@@ -2805,7 +2798,7 @@ test "pack inflates preserve I/O and cancellation resource failures" {
         const large = try p.entryHeaderAt(io, fixture.large);
         try std.testing.expectError(failure, p.inflateAt(failing_io, large.data_at, large.size));
         // And with nothing read yet, the first block fails.
-        var fresh = try Pack.open(gpa, io, fixture.tmp.dir, fixture.name(), .sha1, .{});
+        var fresh = try Pack.open(gpa, io, fixture.tmp.dir, .{ .base = fixture.name(), .kind = .sha1 }, .{});
         defer fresh.deinit(io);
         try std.testing.expectError(failure, fresh.inflateAt(failing_io, spanning.data_at, spanning.size));
         try std.testing.expectError(failure, fresh.inflateHead(failing_io, spanning.data_at, spanning.size));
@@ -2820,7 +2813,7 @@ test "the block reader serves every std reader call across block boundaries" {
     const gpa = std.testing.allocator;
     var fixture = try FailurePack.init(gpa, io);
     defer fixture.tmp.cleanup();
-    var p = try Pack.open(gpa, io, fixture.tmp.dir, fixture.name(), .sha1, .{ .read_cache_bytes = 2 * read_block_bytes });
+    var p = try Pack.open(gpa, io, fixture.tmp.dir, .{ .base = fixture.name(), .kind = .sha1 }, .{ .read_cache_bytes = 2 * read_block_bytes });
     defer p.deinit(io);
     const file = try fixture.tmp.dir.readFileAlloc(io, try std.mem.print(&fixture.name_buf2, "{s}.pack", .{fixture.name()}), gpa, .limited(1 << 20));
     defer gpa.free(file);
@@ -2872,7 +2865,7 @@ test "pack header reads preserve I/O and cancellation resource failures" {
     const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     for ([_]Io.File.ReadPositionalError{ error.AccessDenied, error.InputOutput, error.Canceled }) |failure| {
         Fault.failure = failure;
-        var p = try Pack.open(gpa, io, fixture.tmp.dir, fixture.name(), .sha1, .{});
+        var p = try Pack.open(gpa, io, fixture.tmp.dir, .{ .base = fixture.name(), .kind = .sha1 }, .{});
         defer p.deinit(io);
         try std.testing.expectError(failure, p.entryHeaderAt(failing_io, fixture.small));
         try std.testing.expectError(failure, p.headerAt(failing_io, fixture.small));
@@ -2886,7 +2879,7 @@ test "a refused on-disk pack index releases its bytes once" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "bad.idx", .data = "x" });
-    try std.testing.expectError(error.TruncatedIndex, Index.open(gpa, io, tmp.dir, "bad.idx", .sha1, 1024));
+    try std.testing.expectError(error.TruncatedIndex, Index.open(gpa, io, tmp.dir, "bad.idx", .{ .kind = .sha1, .max_bytes = 1024 }));
 }
 
 test "a pass whose delta-base cache holds more reads no more of the pack" {
@@ -2964,7 +2957,7 @@ test "a pass whose delta-base cache holds more reads no more of the pack" {
             3 => default_read_cache_bytes,
             else => 1 << 20,
         };
-        var p = try Pack.open(gpa, counted, tmp.dir, base_name, .sha1, .{ .read_cache_bytes = cache_bytes });
+        var p = try Pack.open(gpa, counted, tmp.dir, .{ .base = base_name, .kind = .sha1 }, .{ .read_cache_bytes = cache_bytes });
         defer p.deinit(io);
         const order = try gpa.alloc(usize, offsets.items.len);
         defer gpa.free(order);
@@ -3045,7 +3038,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     const random = prng.random();
     var contents: [count][1500]u8 = undefined;
     var offsets: [count]u64 = undefined;
-    var w = try Writer.init(gpa, io, tmp.dir, .sha1, count, .{});
+    var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = count }, .{});
     defer w.deinit(io);
     for (&contents, &offsets, 0..) |*bytes, *at, i| {
         random.bytes(bytes);
@@ -3062,7 +3055,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     vtable.fileReadPositional = Counter.read;
     const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     var live: LiveAllocator = .{ .child = gpa };
-    var p = try Pack.open(live.allocator(), counted, tmp.dir, base, .sha1, .{});
+    var p = try Pack.open(live.allocator(), counted, tmp.dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
     const blocks = std.math.divCeil(u64, p.size, read_block_bytes) catch unreachable;
     try std.testing.expect(blocks * read_block_bytes > 2 * 256 * 1024);
@@ -3166,7 +3159,7 @@ test "small random packed reads keep large sequential reads buffered" {
     defer gpa.free(large);
     var prng: std.Random.DefaultPrng = .init(1951);
     prng.random().bytes(large);
-    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 3, .{});
+    var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 3 }, .{});
     defer w.deinit(io);
     const first = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('1'))), .blob, "first");
     const middle = try w.add(try Oid.parse(.sha1, &@as([40]u8, @splat('2'))), .blob, large);
@@ -3175,7 +3168,7 @@ test "small random packed reads keep large sequential reads buffered" {
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [64]u8 = undefined;
     const name = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
-    var p = try Pack.open(gpa, io, tmp.dir, name, .sha1, .{});
+    var p = try Pack.open(gpa, io, tmp.dir, .{ .base = name, .kind = .sha1 }, .{});
     defer p.deinit(io);
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Counter.read;
@@ -3215,14 +3208,14 @@ test "a packed entry header survives a short positional read" {
     defer tmp.cleanup();
     const bytes = &@as([1000]u8, @splat('b'));
     const oid = hash.Hasher.nameObject(.sha1, .{}, "blob", bytes).oid;
-    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 1, .{});
+    var w = try Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 1 }, .{});
     defer w.deinit(io);
     const at = try w.add(oid, .blob, bytes);
     const report = try w.finish(io);
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [64]u8 = undefined;
     const name = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
-    var p = try Pack.open(gpa, io, tmp.dir, name, .sha1, .{});
+    var p = try Pack.open(gpa, io, tmp.dir, .{ .base = name, .kind = .sha1 }, .{});
     defer p.deinit(io);
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Short.read;
@@ -3244,7 +3237,7 @@ test "pack decode scratch does not relax the stated object size" {
     // Only the claimed size changes. The stream and its checksum are valid.
     builder.body.items[@intCast(at)] = 0x35;
     try builder.write(io, tmp.dir, "short");
-    var p = try Pack.open(gpa, io, tmp.dir, "short", .sha1, .{});
+    var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "short", .kind = .sha1 }, .{});
     defer p.deinit(io);
     try std.testing.expectError(error.CorruptPackEntry, p.readAt(io, at, null, 0));
 }

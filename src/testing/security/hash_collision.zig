@@ -70,7 +70,7 @@ test "git 2.13.0 SHAttered, t5300-pack-object 'make sure index-pack detects the 
     defer pack_dir.close(io);
     var in: Io.Reader = .fixed(pack);
     var diagnostic: indexpack.Diagnostic = .{};
-    try std.testing.expectError(error.HashCollision, indexpack.receive(gpa, io, &db, pack_dir, &in, .{ .diagnostic = &diagnostic }));
+    try std.testing.expectError(error.HashCollision, indexpack.receive(gpa, io, &db, .{ .pack_dir = pack_dir, .in = &in }, .{ .diagnostic = &diagnostic }));
     var hex: [hash.max_hex_len]u8 = undefined;
     try std.testing.expectEqualStrings(b, diagnostic.oid.?.hex(&hex));
     var it = pack_dir.iterate();

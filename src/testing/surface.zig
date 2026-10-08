@@ -143,3 +143,11 @@ test "phase2 diff output and attribution requests stay within five positional in
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
+
+test "phase2 pack storage requests stay within five positional inputs" {
+    inline for (.{ relic.odb.pack.Index.open, relic.odb.pack.Pack.open, relic.odb.pack.Pack.inflateWith, relic.odb.pack.Pack.readAtInto, relic.odb.pack.Writer.open, relic.odb.pack.Writer.openStream, relic.odb.pack.writeIndexFile, relic.odb.revindex.write, relic.odb.indexpack.receive, relic.odb.bitmap.encode }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+    try std.testing.expect(!@hasDecl(relic.odb.pack.Writer, "init"));
+    try std.testing.expect(!@hasDecl(relic.odb.pack.Writer, "initCounting"));
+}

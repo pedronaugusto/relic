@@ -688,7 +688,7 @@ const Entries = struct {
     map: hash.Oid.Map(Entry) = .empty,
 
     fn read(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, base: []const u8) !Entries {
-        var p = try pack_mod.Pack.open(gpa, io, dir, base, .sha1, .{});
+        var p = try pack_mod.Pack.open(gpa, io, dir, .{ .base = base, .kind = .sha1 }, .{});
         defer p.deinit(io);
         var name: [128]u8 = undefined;
         var e: Entries = .{ .bytes = try dir.readFileAlloc(io, try std.mem.print(&name, "{s}.pack", .{base}), gpa, .unlimited) };
@@ -876,7 +876,7 @@ test "verifying a database checks its packs' entries on several tasks" {
     defer pack_dir.close(io);
     const base = try onlyPack(gpa, io, pack_dir);
     defer gpa.free(base);
-    var p = try pack_mod.Pack.open(gpa, io, pack_dir, base, .sha1, .{});
+    var p = try pack_mod.Pack.open(gpa, io, pack_dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
     const serial = try p.verify(Tasks.wrap(io), null, 0);
     try Tasks.expect(0, 0);

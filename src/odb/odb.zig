@@ -453,7 +453,7 @@ pub const Odb = struct {
     /// The pack named `base` in `pack_dir`, or `null` when its `.idx` or
     /// its `.pack` is not there.
     fn openPack(odb: *Odb, io: Io, pack_dir: Io.Dir, base: []const u8) pack.Error!?pack.Pack {
-        return pack.Pack.open(odb.backendData().gpa, io, pack_dir, base, odb.backendData().kind, .{
+        return pack.Pack.open(odb.backendData().gpa, io, pack_dir, .{ .base = base, .kind = odb.backendData().kind }, .{
             .access = if (odb.backendData().options.map_packs) .map else .read,
             .max_depth = odb.backendData().options.max_delta_depth,
             .read_cache_bytes = odb.backendData().options.pack_read_cache_bytes,
@@ -622,7 +622,7 @@ pub const Odb = struct {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const named = &source.packs.items[located.at];
-            const t = try named.pack.readAtInto(io, located.offset, &odb.backendData().cache, named.id, buffer);
+            const t = try named.pack.readAtInto(io, located.offset, buffer, .{ .cache = &odb.backendData().cache, .pack_id = named.id });
             return .{ .type = t, .bytes = buffer.items };
         }
         const found = (try odb.readLooseFor(io, oid, .{ .list = buffer })) orelse return null;
@@ -1152,7 +1152,7 @@ pub const Odb = struct {
         defer dir.close(io);
         var receiving = options;
         receiving.keep = true;
-        return @import("indexpack.zig").receive(db.allocator(), io, db, dir, input, receiving);
+        return @import("indexpack.zig").receive(db.allocator(), io, db, .{ .pack_dir = dir, .in = input }, receiving);
     }
 
     pub fn sharedPermissions(odb: *const Odb) fs.Shared {
@@ -1698,8 +1698,8 @@ pub const Odb = struct {
             .shared = odb.backendData().options.shared,
         };
         var writer = switch (target) {
-            .dir => |pack_dir| try pack.Writer.init(gpa, io, pack_dir, odb.backendData().kind, @intCast(entries.len), write_options),
-            .stream => |out| try pack.Writer.initStream(gpa, odb.backendData().kind, out, @intCast(entries.len), write_options),
+            .dir => |pack_dir| try pack.Writer.open(gpa, io, pack_dir, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
+            .stream => |out| try pack.Writer.openStream(gpa, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, out, write_options),
         };
         defer writer.deinit(io);
 
@@ -2456,7 +2456,7 @@ pub const Odb = struct {
         }
         const dir = try source.dir.openDir(io, "pack", .{ .iterate = true });
         errdefer dir.close(io);
-        const writer = try pack.Writer.initCounting(odb.backendData().gpa, io, dir, odb.backendData().kind, .{
+        const writer = try pack.Writer.open(odb.backendData().gpa, io, dir, .{ .kind = odb.backendData().kind }, .{
             .sync = options.sync,
             .compression = options.compression,
             .shared = odb.backendData().options.shared,
@@ -3496,7 +3496,7 @@ const Build = struct {
             fn read(c: Self, task_io: Io, worker: usize, oid: Oid, p: *Pending) Error!void {
                 const into = p.bytes orelse return;
                 if (p.packed_at) |at| {
-                    at.pack.inflateWith(task_io, &c.readers[worker], at.at, at.size, into) catch |err| switch (err) {
+                    at.pack.inflateWith(task_io, .{ .reader = &c.readers[worker], .at = at.at, .size = at.size }, into) catch |err| switch (err) {
                         // Read again on the calling task, which says why.
                         error.CorruptPackEntry => return,
                         else => |e| return e,
@@ -4176,7 +4176,7 @@ test "a pack and an index that are not a pair are refused, as git refuses them" 
         defer pack_dir.deleteFile(io, "mixed.pack") catch {};
         try pack_dir.copyFile(idx_name, pack_dir, "mixed.idx", io, .{});
         defer pack_dir.deleteFile(io, "mixed.idx") catch {};
-        try std.testing.expectError(error.PackIndexMismatch, pack.Pack.open(gpa, io, pack_dir, "mixed", .sha1, .{}));
+        try std.testing.expectError(error.PackIndexMismatch, pack.Pack.open(gpa, io, pack_dir, .{ .base = "mixed", .kind = .sha1 }, .{}));
     }
 }
 
@@ -4205,7 +4205,7 @@ test "an index offset past its pack is refused by verify, not read as another en
     defer gpa.free(idx_name);
     const pack_name = try gpa.print("{s}.pack", .{base.?});
     defer gpa.free(pack_name);
-    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, .sha1, 1 << 20);
+    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, .{ .kind = .sha1, .max_bytes = 1 << 20 });
     defer index.deinit();
     const entries = try gpa.alloc(pack.IndexEntry, index.count);
     defer gpa.free(entries);
@@ -4216,7 +4216,7 @@ test "an index offset past its pack is refused by verify, not read as another en
         e.offset += 1 << 32;
     };
     try pack_dir.copyFile(pack_name, pack_dir, "pack-far.pack", io, .{});
-    _ = try pack.writeIndexFile(gpa, io, pack_dir, "pack-far.idx", .sha1, entries, index.pack_checksum, .none);
+    _ = try pack.writeIndexFile(gpa, io, pack_dir, "pack-far.idx", .{ .kind = .sha1, .entries = entries, .pack_checksum = index.pack_checksum, .sync = .none });
     try pack_dir.deleteFile(io, idx_name);
     try pack_dir.deleteFile(io, pack_name);
 

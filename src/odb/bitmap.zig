@@ -193,7 +193,12 @@ pub const EncodeError = Allocator.Error || error{InvalidBitmapInput};
 
 /// Encode type maps, Git's ten-row XOR search, lookup table and name hash cache.
 /// `types` and commit reachability use pack order; positions and hashes use name order.
-pub fn encode(gpa: Allocator, kind: hash.Kind, checksum: Oid, types: [4][]const u64, commits: []const WriteCommit, options: WriteOptions) EncodeError![]u8 {
+pub const WriteInputs = struct { checksum: Oid, types: [4][]const u64, commits: []const WriteCommit };
+
+pub fn encode(gpa: Allocator, kind: hash.Kind, inputs: WriteInputs, options: WriteOptions) EncodeError![]u8 {
+    const checksum = inputs.checksum;
+    const types = inputs.types;
+    const commits = inputs.commits;
     if (checksum.kind != kind or commits.len > std.math.maxInt(u32)) return error.InvalidBitmapInput;
     var out: format.Buffer = .{ .gpa = gpa };
     defer out.deinit();

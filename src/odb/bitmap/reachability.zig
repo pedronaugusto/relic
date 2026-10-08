@@ -75,7 +75,7 @@ pub const Store = struct {
             const base = entry.name[0 .. entry.name.len - 7];
             const index_path = try gpa.print("{s}.idx", .{base});
             defer gpa.free(index_path);
-            var index = try pack.Index.open(gpa, io, dir, index_path, kind, 1 << 30);
+            var index = try pack.Index.open(gpa, io, dir, index_path, .{ .kind = kind, .max_bytes = 1 << 30 });
             defer index.deinit();
             const pack_path = try gpa.print("{s}.pack", .{base});
             defer gpa.free(pack_path);

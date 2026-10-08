@@ -894,7 +894,7 @@ fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r
         var hex: [hash.max_hex_len]u8 = undefined;
         var idx_buf: [96]u8 = undefined;
         const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
-        fresh = try pack.Index.open(gpa, io, r.pack_dir, idx_name, repo.objectFormat(), 1 << 30);
+        fresh = try pack.Index.open(gpa, io, r.pack_dir, idx_name, .{ .kind = repo.objectFormat(), .max_bytes = 1 << 30 });
     }
     if (fresh) |*index| {
         objectwalk.checkReceived(gpa, io, repo.objectDatabase(), all_tips.items, .{ .fresh = index, .links = r.links, .missing_out = r.missing, .promisor = r.promisor }) catch |err| switch (err) {

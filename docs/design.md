@@ -106,3 +106,10 @@ then receives the output writer and formatting options. Blame identifies a file
 with Inputs (commit and path); patch-id tree comparisons use the same TreeInputs
 as diff.tree. These input groups leave formatting and attribution policy in
 the existing engines and preserve the writer-before-options call order.
+
+Pack storage operations group borrowed input identities and policy separately
+from output writers. Writer.open owns file handles until deinit(io); a nullable
+OpenInputs count selects header patching at finish, while openStream requires a
+known count before output begins. Index/reverse-index options retain the same
+checksums, entry order and durability policy. Indexpack Inputs borrow the receive
+directory and input reader; Result still owns its keep token through publication.

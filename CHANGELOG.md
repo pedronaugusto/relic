@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: pack/index opening and pack decode requests take named inputs and
+  options. Pack Writer.open replaces init and initCounting, with a nullable count
+  in OpenInputs; openStream takes StreamInputs before its output writer. Index
+  and reverse-index writes take write options; indexpack and bitmap encoding take
+  input groups. Pack publication, retention and format bytes keep their contracts.
+
 - Breaking: unified diff takes UnifiedInputs before its output writer; blame
   groups commit/path in Inputs; patch ids take the shared diff.TreeInputs.
   Output formatting, attribution and patch-id semantics are unchanged.

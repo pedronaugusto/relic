@@ -338,14 +338,17 @@ const OfsBase = struct {
 /// `db` is where a thin pack's missing bases are read from and where the
 /// received objects' names are checked for a collision attack when it asks
 /// for that. On any error nothing is left in `pack_dir`.
+pub const Inputs = struct { pack_dir: Io.Dir, in: *Io.Reader };
+
 pub fn receive(
     gpa: Allocator,
     io: Io,
     db: anytype,
-    pack_dir: Io.Dir,
-    in: *Io.Reader,
+    inputs: Inputs,
     options: Options,
 ) Self.Error!Result {
+    const pack_dir = inputs.pack_dir;
+    const in = inputs.in;
     const kind = db.objectFormat();
 
     var temp_buf: [64]u8 = undefined;
@@ -422,11 +425,11 @@ pub fn receive(
 
     var idx_temp_buf: [64]u8 = undefined;
     const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
-    _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, kind, index_entries, name, options.sync);
+    _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = options.sync });
     errdefer pack_dir.deleteFile(io, idx_temp) catch {};
     var rev_temp_buf: [64]u8 = undefined;
     const rev_temp: ?[]const u8 = if (options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
-    if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, kind, index_entries, name, options.sync);
+    if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = options.sync });
     errdefer if (rev_temp) |t| pack_dir.deleteFile(io, t) catch {};
 
     // read-only, as git leaves a pack and its indexes
@@ -1783,7 +1786,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         defer pack_dir.close(io);
 
         var in: Io.Reader = .fixed(pack_bytes);
-        const result = try receive(gpa, io, &repo, pack_dir, &in, .{ .threads = threads });
+        const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads });
         try testing.expect(result.deltas > 0);
         try testing.expectEqual(@as(u32, 0), result.appended);
 
@@ -1836,7 +1839,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
                 defer pack_dir.close(io);
                 var in: Io.Reader = .fixed(bytes);
                 const counted = if (executor == 0) Tasks.wrap(each_io) else Tasks.wrapInline(each_io);
-                const result = try receive(gpa, counted, &repo, pack_dir, &in, .{ .threads = threads });
+                const result = try receive(gpa, counted, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads });
                 // The caller resolves too, and there are only four roots.
                 try Tasks.expect(0, @min(threads, 4) - 1);
                 try testing.expectEqual(@as(u32, 8), result.objects);
@@ -1883,7 +1886,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     const first = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--stdout", "-q" }, first_input);
     defer gpa.free(first);
     var first_in: Io.Reader = .fixed(first);
-    _ = try receive(gpa, io, &repo, pack_dir, &first_in, .{});
+    _ = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &first_in }, .{});
     const packs_before = try countEntries(io, pack_dir);
 
     // Then a thin pack of what is new, its deltas against what is not in it.
@@ -1895,7 +1898,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     // Refused whole when completing it is not allowed, and nothing is left.
     var diagnostic: Diagnostic = .{};
     var refused_in: Io.Reader = .fixed(thin);
-    try testing.expectError(error.DeltaBaseMissing, receive(gpa, io, &repo, pack_dir, &refused_in, .{
+    try testing.expectError(error.DeltaBaseMissing, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &refused_in }, .{
         .fix_thin = false,
         .diagnostic = &diagnostic,
     }));
@@ -1903,7 +1906,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     try testing.expectEqual(packs_before, try countEntries(io, pack_dir));
 
     var thin_in: Io.Reader = .fixed(thin);
-    const result = try receive(gpa, io, &repo, pack_dir, &thin_in, .{});
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &thin_in }, .{});
     try testing.expect(result.appended > 0);
 
     var hex: [hash.max_hex_len]u8 = undefined;
@@ -1954,14 +1957,14 @@ test "a malformed tree is refused by name, and nothing is kept" {
     defer gpa.free(bytes);
     var diagnostic: Diagnostic = .{};
     var in: Io.Reader = .fixed(bytes);
-    try testing.expectError(error.MalformedTree, receive(gpa, io, &repo, pack_dir, &in, .{ .diagnostic = &diagnostic }));
+    try testing.expectError(error.MalformedTree, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .diagnostic = &diagnostic }));
     try testing.expectEqual(fsck.Problem.tree_not_sorted, diagnostic.problem.?);
     try testing.expect(diagnostic.oid.?.eql(hash.Hasher.object(.sha1, "tree", tree.items)));
     try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
 
     // Asked not to check, the same pack is kept.
     var unchecked: Io.Reader = .fixed(bytes);
-    const kept = try receive(gpa, io, &repo, pack_dir, &unchecked, .{ .fsck = null });
+    const kept = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &unchecked }, .{ .fsck = null });
     try testing.expectEqual(@as(u32, 2), kept.objects);
 }
 
@@ -2055,7 +2058,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
         }
         var diagnostic: Diagnostic = .{};
         var in: Io.Reader = .fixed(bytes);
-        const refused = if (receive(gpa, io, &repo, pack_dir, &in, .{ .fsck = &rules, .diagnostic = &diagnostic })) |_| false else |err| switch (err) {
+        const refused = if (receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .fsck = &rules, .diagnostic = &diagnostic })) |_| false else |err| switch (err) {
             error.MalformedCommit, error.MalformedTree, error.MalformedTag, error.MalformedBlob => true,
             else => return err,
         };
@@ -2090,12 +2093,12 @@ test "a .gitmodules a tree names and nobody has is refused unless promised" {
     const strict: fsck.Rules = .{ .strict = true };
     var diagnostic: Diagnostic = .{};
     var in: Io.Reader = .fixed(bytes);
-    try testing.expectError(error.MalformedBlob, receive(gpa, io, &repo, pack_dir, &in, .{ .fsck = &strict, .diagnostic = &diagnostic }));
+    try testing.expectError(error.MalformedBlob, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .fsck = &strict, .diagnostic = &diagnostic }));
     try testing.expectEqual(fsck.Problem.gitmodules_missing, diagnostic.problem.?);
     var promised: Io.Reader = .fixed(bytes);
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    _ = try receive(gpa, io, &repo, pack_dir, &promised, .{ .fsck = &strict, .promised = true, .warnings = &warnings });
+    _ = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &promised }, .{ .fsck = &strict, .promised = true, .warnings = &warnings });
     try testing.expectEqual(@as(usize, 0), warnings.items.items.len);
 }
 
@@ -2137,12 +2140,12 @@ test "a damaged stream is a named error and leaves nothing behind" {
     };
     for (cases) |case| {
         var in: Io.Reader = .fixed(case.bytes);
-        try testing.expectError(case.err, receive(gpa, io, &repo, pack_dir, &in, .{}));
+        try testing.expectError(case.err, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{}));
         try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
     }
 
     var in: Io.Reader = .fixed(good);
-    const result = try receive(gpa, io, &repo, pack_dir, &in, .{});
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{});
     try testing.expectEqual(@as(u32, 2), result.objects);
     const found = try repo.read(io, hash.Hasher.object(.sha1, "blob", "basemore\n"));
     defer gpa.free(found.bytes);
@@ -2239,7 +2242,7 @@ fn receiveChain(chain: usize, seed: u8) !usize {
 
     var in: Io.Reader = .fixed(bytes);
     var peak: Peak = .{ .child = gpa };
-    const result = try receive(peak.allocator(), io, &repo, pack_dir, &in, .{ .delta_base_cache_limit = 100 * 1024, .threads = 1 });
+    const result = try receive(peak.allocator(), io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .delta_base_cache_limit = 100 * 1024, .threads = 1 });
     try testing.expectEqual(@as(u32, @intCast(chain + 2)), result.objects);
     const expected = try gpa.alloc(u8, base_len + chain + "side".len);
     defer gpa.free(expected);
@@ -2298,7 +2301,7 @@ test "an object the database holds under the same name with other bytes is refus
         defer gpa.free(bytes);
         var diagnostic: Diagnostic = .{};
         var in: Io.Reader = .fixed(bytes);
-        try testing.expectError(error.HashCollision, receive(gpa, io, &repo, pack_dir, &in, .{ .diagnostic = &diagnostic }));
+        try testing.expectError(error.HashCollision, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .diagnostic = &diagnostic }));
         try testing.expect(diagnostic.oid.?.eql(oid));
         try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
     }
@@ -2309,7 +2312,7 @@ test "an object the database holds under the same name with other bytes is refus
     var in: Io.Reader = .fixed(same);
     const evil = hash.Hasher.object(.sha1, "blob", "evil");
     _ = try repo.write(io, .blob, "evil");
-    _ = try receive(gpa, io, &repo, pack_dir, &in, .{});
+    _ = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{});
     try testing.expect(try repo.exists(io, evil));
 }
 
@@ -2343,7 +2346,7 @@ test "a pack added in front of an alternate's never reads that pack's cached del
         var pack_dir = try theirs_dir.openDir(io, "objects/pack", .{ .iterate = true });
         defer pack_dir.close(io);
         var in: Io.Reader = .fixed(packs[0]);
-        _ = try receive(gpa, io, &theirs, pack_dir, &in, .{});
+        _ = try receive(gpa, io, &theirs, .{ .pack_dir = pack_dir, .in = &in }, .{});
     }
     const their_objects = try theirs_dir.realPathFileAlloc(io, "objects", gpa);
     defer gpa.free(their_objects);
@@ -2357,7 +2360,7 @@ test "a pack added in front of an alternate's never reads that pack's cached del
     var pack_dir = try ours_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     var in: Io.Reader = .fixed(packs[1]);
-    _ = try receive(gpa, io, &ours, pack_dir, &in, .{});
+    _ = try receive(gpa, io, &ours, .{ .pack_dir = pack_dir, .in = &in }, .{});
     const b = try ours.read(io, hash.Hasher.object(.sha1, "blob", "BBBB1"));
     defer gpa.free(b.bytes);
     try testing.expectEqualStrings("BBBB1", b.bytes);
@@ -2405,7 +2408,7 @@ const Park = struct {
         armed.store(true, .release);
         defer armed.store(false, .release);
         var in: Io.Reader = .fixed(bytes);
-        return receive(gpa, io, db, pack_dir, &in, .{ .threads = 3 });
+        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3 });
     }
 };
 
@@ -2475,7 +2478,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
 
     // Unarmed, the same stream is received whole.
     var in: Io.Reader = .fixed(bytes);
-    const result = try receive(gpa, io, &repo, pack_dir, &in, .{ .threads = 3 });
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3 });
     try testing.expectEqual(@as(u32, 3 * pairs), result.objects);
 }
 
@@ -2536,7 +2539,7 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
     }
 
     var in: Io.Reader = .fixed(stream);
-    const result = receive(gpa, io, &db, pack_dir, &in, .{}) catch {
+    const result = receive(gpa, io, &db, .{ .pack_dir = pack_dir, .in = &in }, .{}) catch {
         // Whatever the refusal, nothing is left behind.
         if (try countEntries(io, pack_dir) != 0) return error.TemporaryLeftBehind;
         return;
@@ -2545,7 +2548,7 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
     var hex: [hash.max_hex_len]u8 = undefined;
     var base_buf: [64]u8 = undefined;
     const base = try std.mem.print(&base_buf, "pack-{s}", .{name.hex(&hex)});
-    var p = try pack.Pack.open(gpa, io, pack_dir, base, .sha1, .{});
+    var p = try pack.Pack.open(gpa, io, pack_dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
     const checked = try p.verify(io, null, 0);
     if (checked.objects != result.objects) return error.PackDidNotVerify;
@@ -2575,11 +2578,11 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     var links: Links = .init(gpa);
     defer links.deinit();
     var in: Io.Reader = .fixed(bytes);
-    const result = try receive(gpa, io, &repo, pack_dir, &in, .{ .fsck = null, .links = &links });
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .fsck = null, .links = &links });
     var hex: [hash.max_hex_len]u8 = undefined;
     var idx_buf: [96]u8 = undefined;
     const idx_name = try std.mem.print(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
-    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
+    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, .{ .kind = repo.objectFormat(), .max_bytes = 1 << 30 });
     defer index.deinit();
     try testing.expect(!links.unreadable);
     // The commit's parent is not there either; what the tree names is

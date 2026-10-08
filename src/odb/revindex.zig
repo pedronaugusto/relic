@@ -34,16 +34,24 @@ pub fn wanted(config: ?*const config_mod.Config) bool {
 
 /// Write the reverse index of a pack whose `.idx` holds `entries`, sorted
 /// by name as `pack.writeIndexFile` leaves them, to `sub_path` in `dir`.
+pub const WriteOptions = struct {
+    kind: hash.Kind,
+    entries: []const pack.IndexEntry,
+    pack_checksum: Oid,
+    sync: fs.Sync = .none,
+};
+
 pub fn write(
     gpa: Allocator,
     io: Io,
     dir: Io.Dir,
     sub_path: []const u8,
-    kind: hash.Kind,
-    entries: []const pack.IndexEntry,
-    pack_checksum: Oid,
-    sync: fs.Sync,
+    options: WriteOptions,
 ) Self.Error!void {
+    const kind = options.kind;
+    const entries = options.entries;
+    const pack_checksum = options.pack_checksum;
+    const sync = options.sync;
     const positions = try gpa.alloc(u32, entries.len);
     defer gpa.free(positions);
     for (positions, 0..) |*p, i| p.* = @intCast(i);

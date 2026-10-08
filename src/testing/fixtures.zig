@@ -1314,7 +1314,7 @@ test "a pack this wrote is a pack git verifies, object for object" {
     var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
 
-    var w = try pack.Writer.init(gpa, io, pack_dir, .sha1, @intCast(names.count()), .{});
+    var w = try pack.Writer.open(gpa, io, pack_dir, .{ .kind = .sha1, .object_count = @intCast(names.count()) }, .{});
     defer w.deinit(io);
     var it = names.keyIterator();
     while (it.next()) |oid| {
@@ -1457,7 +1457,7 @@ test "a deltified pack is read back by git and by this, object for object" {
     // against the name the index gives it, which is the whole delta chain
     // reconstructed and checked.
     {
-        var p = try pack.Pack.open(gpa, io, pack_dir, base, .sha1, .{});
+        var p = try pack.Pack.open(gpa, io, pack_dir, .{ .base = base, .kind = .sha1 }, .{});
         defer p.deinit(io);
         const checked = try p.verify(io, null, 0);
         try std.testing.expectEqual(report.objects, checked.objects);
@@ -1470,7 +1470,7 @@ test "a deltified pack is read back by git and by this, object for object" {
     const ref_base = try std.mem.print(&ref_base_buf, "pack-{s}", .{ref_report.name.hex(&hex)});
     try repo.exec(io, &.{ "index-pack", "--verify", try std.mem.print(&path_buf, ".git/objects/pack/{s}.pack", .{ref_base}) });
     {
-        var p = try pack.Pack.open(gpa, io, pack_dir, ref_base, .sha1, .{});
+        var p = try pack.Pack.open(gpa, io, pack_dir, .{ .base = ref_base, .kind = .sha1 }, .{});
         defer p.deinit(io);
         const checked = try p.verify(io, null, 0);
         try std.testing.expectEqual(ref_report.objects, checked.objects);

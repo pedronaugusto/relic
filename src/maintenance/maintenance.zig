@@ -308,7 +308,7 @@ fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind) MidxErro
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "pack-") or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
-        var index = try pack_mod.Index.open(gpa, io, dir, entry.name, kind, 1 << 30);
+        var index = try pack_mod.Index.open(gpa, io, dir, entry.name, .{ .kind = kind, .max_bytes = 1 << 30 });
         defer index.deinit();
         const base = entry.name[0 .. entry.name.len - 4];
         const pack_path = try arena.print("{s}.pack", .{base});
@@ -591,7 +591,7 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
         try entries.append(arena, .{ .position = candidate.position, .words = words });
     }
     const hashes: ?[]u32 = if (options.hash_cache) try nameHashes(gpa, arena, io, db, names.len, &name_positions, tips, midx_bitmap, previous_bitmap) else null;
-    return bitmap_mod.encode(gpa, db.objectFormat(), checksum, .{ types[0], types[1], types[2], types[3] }, entries.items, .{ .hash_cache = hashes, .lookup_table = options.lookup_table });
+    return bitmap_mod.encode(gpa, db.objectFormat(), .{ .checksum = checksum, .types = .{ types[0], types[1], types[2], types[3] }, .commits = entries.items }, .{ .hash_cache = hashes, .lookup_table = options.lookup_table });
 }
 
 /// Set in `words` every object `pending` reaches that is not set yet, a
@@ -681,7 +681,7 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const 
     defer dir.close(io);
     const path = try gpa.print("{s}.idx", .{base});
     defer gpa.free(path);
-    var index = try pack_mod.Index.open(gpa, io, dir, path, db.objectFormat(), 1 << 30);
+    var index = try pack_mod.Index.open(gpa, io, dir, path, .{ .kind = db.objectFormat(), .max_bytes = 1 << 30 });
     defer index.deinit();
     const names = try gpa.alloc(Oid, index.count);
     defer gpa.free(names);
