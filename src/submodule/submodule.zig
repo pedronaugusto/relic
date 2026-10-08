@@ -27,6 +27,7 @@
 //! starts a process unless the caller hands in `program.Programs` and the
 //! repository's own configuration names a `!command` update.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.submodule.<name>`.
@@ -209,6 +210,8 @@ pub const Entry = struct {
 
 /// Every gitlink in an index, in index order, each path once.
 pub const Listing = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     entries: []Entry,
@@ -559,6 +562,8 @@ pub const StatusEntry = struct {
 
 /// What `status` found, in the order git prints it.
 pub const Statuses = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     entries: []StatusEntry,
@@ -678,6 +683,8 @@ fn statusInto(
 /// change is untracked files counts as untracked content, not as modified,
 /// which is git's rule too.
 pub const StatusProbe = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     repo: *Repository,
     modules: Gitmodules,
@@ -702,7 +709,7 @@ pub const StatusProbe = struct {
         path_buffer: [512]u8 = undefined,
         path_len: usize = 0,
         /// The error its repository gave.
-        err: Error,
+        err: ErrorNamespace.Error,
 
         /// The submodule's path, from the superproject the probe serves.
         pub fn path(f: *const Failure) []const u8 {
@@ -716,7 +723,7 @@ pub const StatusProbe = struct {
         return initAt(gpa, io, repo, index, options, 0);
     }
 
-    fn initAt(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, options: ProbeOptions, depth: u32) Error!StatusProbe {
+    fn initAt(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, options: ProbeOptions, depth: u32) ErrorNamespace.Error!StatusProbe {
         return .{
             .gpa = gpa,
             .repo = repo,
@@ -743,7 +750,7 @@ pub const StatusProbe = struct {
         return p.inspectPath(io, path, recorded) catch |err| return p.fail(path, err);
     }
 
-    fn fail(p: *StatusProbe, path: []const u8, err: Error) worktree.Error {
+    fn fail(p: *StatusProbe, path: []const u8, err: ErrorNamespace.Error) worktree.Error {
         if (err == error.SubmoduleUnreadable) return error.SubmoduleUnreadable;
         if (err == error.OutOfMemory) return error.OutOfMemory;
         if (err == error.Canceled) return error.Canceled;
@@ -754,7 +761,7 @@ pub const StatusProbe = struct {
         return error.SubmoduleUnreadable;
     }
 
-    fn inspectPath(p: *StatusProbe, io: Io, path: []const u8, recorded: Oid) Error!worktree.SubmoduleState {
+    fn inspectPath(p: *StatusProbe, io: Io, path: []const u8, recorded: Oid) ErrorNamespace.Error!worktree.SubmoduleState {
         var arena_instance: std.heap.ArenaAllocator = .init(p.gpa);
         defer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -783,7 +790,7 @@ pub const StatusProbe = struct {
         return state;
     }
 
-    fn ignoreFor(p: *StatusProbe, arena: Allocator, path: []const u8) Error!gitmodules.Ignore {
+    fn ignoreFor(p: *StatusProbe, arena: Allocator, path: []const u8) ErrorNamespace.Error!gitmodules.Ignore {
         if (p.options.ignore) |forced| return forced;
         if (p.modules.byPath(path)) |module| {
             if (try configString(arena, p.repo.configuration(), try configKey(arena, module.name, "ignore"))) |text| {
@@ -1705,6 +1712,8 @@ const WalkFrame = struct {
 /// depth first. Nothing is run; the caller does what it likes with each
 /// repository.
 pub const Walk = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     io: Io,
     options: WalkOptions,

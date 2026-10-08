@@ -21,6 +21,7 @@
 //! diff-index HEAD` does after a refresh; the index file itself is read and
 //! not rewritten with fresher stat data, which git's refresh would do.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -152,6 +153,8 @@ const seen_flag: u32 = 1;
 /// Describes commits and blobs of one repository with one set of options,
 /// reading its refs once.
 pub const Describer = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     repo: *Repository,
@@ -192,7 +195,7 @@ pub const Describer = struct {
     }
 
     /// `get_name`, over every ref git's `for_each_ref` would hand it.
-    fn loadNames(d: *Describer, io: Io) Error!void {
+    fn loadNames(d: *Describer, io: Io) ErrorNamespace.Error!void {
         const a = d.arena.allocator();
         const exclude = try compileAll(a, d.options.exclude);
         const match = try compileAll(a, d.options.match);
@@ -238,7 +241,7 @@ pub const Describer = struct {
     }
 
     /// `add_to_known_names` with `replace_name`.
-    fn addKnownName(d: *Describer, a: Allocator, io: Io, path: []const u8, peeled: Oid, prio: u2, oid: Oid) Error!void {
+    fn addKnownName(d: *Describer, a: Allocator, io: Io, path: []const u8, peeled: Oid, prio: u2, oid: Oid) ErrorNamespace.Error!void {
         const slot = try d.names.getOrPut(d.gpa, peeled);
         var tag: ?TagInfo = null;
         if (slot.found_existing) {
@@ -262,7 +265,7 @@ pub const Describer = struct {
         };
     }
 
-    fn appendName(d: *Describer, io: Io, n: *Name, out: *std.ArrayList(u8)) Error!void {
+    fn appendName(d: *Describer, io: Io, n: *Name, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         const a = d.arena.allocator();
         if (n.prio == prio_annotated and n.tag == null) {
             n.tag = readTag(a, io, d.repo, n.oid) catch return error.TagUnavailable;
@@ -283,7 +286,7 @@ pub const Describer = struct {
         }
     }
 
-    fn appendSuffix(d: *Describer, io: Io, depth: u32, oid: Oid, out: *std.ArrayList(u8)) Error!void {
+    fn appendSuffix(d: *Describer, io: Io, depth: u32, oid: Oid, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         var buf: [hash.max_hex_len]u8 = undefined;
         const short = try d.shortName(io, oid, &buf);
         try out.print(d.gpa, "-{d}-g{s}", .{ depth, short });
@@ -291,7 +294,7 @@ pub const Describer = struct {
 
     /// `repo_find_unique_abbrev` at the length asked for: zero is the
     /// whole name.
-    fn shortName(d: *Describer, io: Io, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
+    fn shortName(d: *Describer, io: Io, oid: Oid, buf: *[hash.max_hex_len]u8) ErrorNamespace.Error![]const u8 {
         const len: usize = if (d.abbrev) |n| (if (n == 0) oid.kind.hexLen() else n) else abbrev_mod.defaultLength(d.repo.configuration(), d.repo.objectDatabase());
         return abbrev_mod.unique(io, d.repo.objectDatabase(), oid, len, buf);
     }
@@ -302,7 +305,7 @@ pub const Describer = struct {
         return d.describeWithSuffix(io, oid, null);
     }
 
-    fn describeWithSuffix(d: *Describer, io: Io, oid: Oid, suffix: ?[]const u8) Error![]u8 {
+    fn describeWithSuffix(d: *Describer, io: Io, oid: Oid, suffix: ?[]const u8) ErrorNamespace.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(d.gpa);
         const commit = peelToCommit(io, d.repo, oid) catch |err| switch (err) {
@@ -325,7 +328,7 @@ pub const Describer = struct {
     }
 
     /// `describe_commit`.
-    fn describeCommit(d: *Describer, io: Io, cmit: Oid, suffix: ?[]const u8, out: *std.ArrayList(u8)) Error!void {
+    fn describeCommit(d: *Describer, io: Io, cmit: Oid, suffix: ?[]const u8, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         if (d.names.getPtr(cmit)) |n| {
             if (d.options.tags or d.options.all or n.prio == prio_annotated) {
                 try d.appendName(io, n, out);
@@ -435,7 +438,7 @@ pub const Describer = struct {
 
     /// `describe_blob`: the first commit, oldest first along `HEAD`'s
     /// history, whose tree holds the blob, and the path it is at there.
-    fn describeBlob(d: *Describer, io: Io, blob: Oid, out: *std.ArrayList(u8)) Error!void {
+    fn describeBlob(d: *Describer, io: Io, blob: Oid, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         const tip = (try d.repo.head(io)) orelse return error.UnbornBranch;
         defer d.gpa.free(tip.name);
         var walk: revwalk.Walk = .init(d.gpa, d.repo.objectDatabase());
@@ -460,7 +463,7 @@ pub const Describer = struct {
     }
 
     /// git's `name_rev` over the tip table, then `get_rev_name` for `cmit`.
-    fn nameRev(d: *Describer, io: Io, cmit: Oid, out: *std.ArrayList(u8)) Error!void {
+    fn nameRev(d: *Describer, io: Io, cmit: Oid, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         var nr: NameRev = .{ .gpa = d.gpa, .arena = .init(d.gpa), .repo = d.repo };
         defer nr.deinit();
         try nr.setCutoff(io, cmit);

@@ -18,6 +18,7 @@
 //! `%(color:...)` git accepts writes nothing. Trailers are read as the
 //! repository's `trailer.*` settings say.
 
+const ErrorNamespace = @This();
 const unicodewidth = @import("../text/unicodewidth.zig");
 const builtin = @import("builtin");
 const std = @import("std");
@@ -655,6 +656,8 @@ pub const Format = struct {
 /// Refs gathered by a filter, sorted and formatted: git's `ref_array` and
 /// the atoms its format and sort keys use.
 pub const Listing = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     io: Io,
@@ -695,7 +698,7 @@ pub const Listing = struct {
     /// Gather the refs `filter` lets through, in the order a ref iteration
     /// gives them: by name, a detached `HEAD` last. The reachability
     /// filters are applied once every ref is in.
-    pub fn collect(l: *Listing, filter: Filter) Error!void {
+    pub fn collect(l: *Listing, filter: Filter) ErrorNamespace.Error!void {
         const gpa = l.gpa;
         const io = l.io;
         // Every ref is asked of the same globs, so they are compiled once.
@@ -757,7 +760,7 @@ pub const Listing = struct {
     }
 
     /// git's `apply_ref_filter` for one ref.
-    fn consider(l: *Listing, filter: Filter, patterns: *const Patterns, name: []const u8, target: refs_mod.Ref, peeled: ?Oid, is_packed: bool, show_target: bool) Error!void {
+    fn consider(l: *Listing, filter: Filter, patterns: *const Patterns, name: []const u8, target: refs_mod.Ref, peeled: ?Oid, is_packed: bool, show_target: bool) ErrorNamespace.Error!void {
         const gpa = l.gpa;
         const io = l.io;
         const store = l.repo.refStore();
@@ -814,7 +817,7 @@ pub const Listing = struct {
         try l.items.append(l.a(), item);
     }
 
-    fn pointsAt(l: *Listing, wanted: []const Oid, oid: Oid) Error!bool {
+    fn pointsAt(l: *Listing, wanted: []const Oid, oid: Oid) ErrorNamespace.Error!bool {
         for (wanted) |w| if (w.eql(oid)) return true;
         var current = oid;
         var depth: usize = 0;
@@ -831,7 +834,7 @@ pub const Listing = struct {
     }
 
     /// The commit `oid` peels to, or `null` when it is not commit-ish.
-    fn peelToCommit(l: *Listing, oid: Oid) Error!?Oid {
+    fn peelToCommit(l: *Listing, oid: Oid) ErrorNamespace.Error!?Oid {
         var current = oid;
         var depth: usize = 0;
         while (depth < 64) : (depth += 1) {
@@ -854,7 +857,7 @@ pub const Listing = struct {
         return null;
     }
 
-    fn containsAny(l: *Listing, commit: Oid, wanted: []const Oid) Error!bool {
+    fn containsAny(l: *Listing, commit: Oid, wanted: []const Oid) ErrorNamespace.Error!bool {
         for (wanted) |w| {
             if (try revwalk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), w, commit, .{})) return true;
         }
@@ -863,7 +866,7 @@ pub const Listing = struct {
 
     /// git's `reach_filter`: keep the refs one of `bases` reaches, or
     /// those none does.
-    fn reachFilter(l: *Listing, bases: []const Oid, include_reached: bool) Error!void {
+    fn reachFilter(l: *Listing, bases: []const Oid, include_reached: bool) ErrorNamespace.Error!void {
         if (bases.len == 0) return;
         var kept: usize = 0;
         for (l.items.items) |item| {
@@ -885,7 +888,7 @@ pub const Listing = struct {
     // -- atoms ------------------------------------------------------------
 
     /// git's `parse_ref_filter_atom`: the atom `text` names, added once.
-    fn atomIndex(l: *Listing, text: []const u8) Error!usize {
+    fn atomIndex(l: *Listing, text: []const u8) ErrorNamespace.Error!usize {
         for (l.atoms.items, 0..) |atom, i| {
             if (std.mem.eql(u8, atom.name, text)) return i;
         }
@@ -909,7 +912,7 @@ pub const Listing = struct {
         return l.atoms.items.len - 1;
     }
 
-    fn parseArgument(l: *Listing, atom: *Atom, arg: ?[]const u8) Error!void {
+    fn parseArgument(l: *Listing, atom: *Atom, arg: ?[]const u8) ErrorNamespace.Error!void {
         switch (atom.kind) {
             .refname, .symref => atom.refname = try parseRefnameOption(arg),
             .upstream, .push => try parseRemoteArgument(atom, arg),
@@ -1024,7 +1027,7 @@ pub const Listing = struct {
         }
     }
 
-    fn parseRemoteArgument(atom: *Atom, arg: ?[]const u8) Error!void {
+    fn parseRemoteArgument(atom: *Atom, arg: ?[]const u8) ErrorNamespace.Error!void {
         atom.push_remote = false;
         const text = arg orelse return;
         var params = std.mem.splitScalar(u8, text, ',');
@@ -1049,7 +1052,7 @@ pub const Listing = struct {
         }
     }
 
-    fn parseDescribeArgument(l: *Listing, atom: *Atom, arg: ?[]const u8) Error!void {
+    fn parseDescribeArgument(l: *Listing, atom: *Atom, arg: ?[]const u8) ErrorNamespace.Error!void {
         var rest = arg orelse "";
         var matches: std.ArrayList([]const u8) = .empty;
         var excludes: std.ArrayList([]const u8) = .empty;
@@ -1079,7 +1082,7 @@ pub const Listing = struct {
         atom.describe.exclude = excludes.items;
     }
 
-    fn parseAlignArgument(atom: *Atom, arg: ?[]const u8) Error!void {
+    fn parseAlignArgument(atom: *Atom, arg: ?[]const u8) ErrorNamespace.Error!void {
         const text = arg orelse return error.BadFieldArgument;
         var width: ?u32 = null;
         var params = std.mem.splitScalar(u8, text, ',');
@@ -1105,7 +1108,7 @@ pub const Listing = struct {
     }
 
     /// git's `verify_ref_format`: compile `text`, every atom checked.
-    pub fn parseFormat(l: *Listing, text: []const u8, quote: Quote) Error!Format {
+    pub fn parseFormat(l: *Listing, text: []const u8, quote: Quote) ErrorNamespace.Error!Format {
         var parts: std.ArrayList(Format.Part) = .empty;
         var cp: usize = 0;
         while (cp < text.len) {
@@ -1140,7 +1143,7 @@ pub const Listing = struct {
 
     /// Sort by `keys`, the last the first compared, then by name: git's
     /// `ref_array_sort`. No keys leaves the order as it is.
-    pub fn sort(l: *Listing, keys: []const SortKey, options: SortOptions) Error!void {
+    pub fn sort(l: *Listing, keys: []const SortKey, options: SortOptions) ErrorNamespace.Error!void {
         if (keys.len == 0) return;
         var indexes = try l.a().alloc(usize, keys.len);
         for (keys, 0..) |key, i| indexes[i] = try l.atomIndex(key.atom);
@@ -1205,7 +1208,7 @@ pub const Listing = struct {
 
     /// Batch work some atoms need over the whole listing: `ahead-behind`
     /// and `is-base`. git does it after filtering and before sorting.
-    fn prepare(l: *Listing) Error!void {
+    fn prepare(l: *Listing) ErrorNamespace.Error!void {
         var bases: usize = 0;
         var is_bases: usize = 0;
         for (l.atoms.items) |atom| {
@@ -1250,13 +1253,13 @@ pub const Listing = struct {
     }
 
     /// The commit `name` names, as git's `lookup_commit_reference_by_name`.
-    fn commitByName(l: *Listing, name: []const u8) Error!?Oid {
+    fn commitByName(l: *Listing, name: []const u8) ErrorNamespace.Error!?Oid {
         const resolved = @import("../revwalk/revparse.zig").resolve(l.gpa, l.io, l.repo, name) catch return null;
         return l.peelToCommit(resolved);
     }
 
     /// How many commits `tip` reaches that `base` does not.
-    fn countOnly(l: *Listing, tip: Oid, base: Oid) Error!usize {
+    fn countOnly(l: *Listing, tip: Oid, base: Oid) ErrorNamespace.Error!usize {
         var walk = revwalk.Walk.init(l.gpa, l.repo.objectDatabase());
         defer walk.deinit();
         try walk.push(tip);
@@ -1266,7 +1269,7 @@ pub const Listing = struct {
 
     /// git's `get_branch_base_for_tip`: of `bases`, the one whose
     /// first-parent history meets `tip`'s first, ties to the earliest.
-    fn branchBaseForTip(l: *Listing, tip: Oid, bases: []const Oid) Error!?usize {
+    fn branchBaseForTip(l: *Listing, tip: Oid, bases: []const Oid) ErrorNamespace.Error!?usize {
         if (bases.len == 0) return null;
         const gpa = l.gpa;
         var generations: Oid.Map(u64) = .empty;
@@ -1331,7 +1334,7 @@ pub const Listing = struct {
         return if (best_index > 0) @intCast(best_index - 1) else null;
     }
 
-    fn commitNode(l: *Listing, oid: Oid) Error!CommitNode {
+    fn commitNode(l: *Listing, oid: Oid) ErrorNamespace.Error!CommitNode {
         if (l.commits.get(oid)) |node| return node;
         const found = try l.repo.objectDatabase().read(l.io, oid);
         defer l.repo.objectDatabase().allocator().free(found.bytes);
@@ -1343,17 +1346,17 @@ pub const Listing = struct {
         return node;
     }
 
-    fn parentsOf(l: *Listing, oid: Oid) Error![]const Oid {
+    fn parentsOf(l: *Listing, oid: Oid) ErrorNamespace.Error![]const Oid {
         return (try l.commitNode(oid)).parents;
     }
 
-    fn commitDate(l: *Listing, oid: Oid) Error!i64 {
+    fn commitDate(l: *Listing, oid: Oid) ErrorNamespace.Error!i64 {
         return (try l.commitNode(oid)).date;
     }
 
     /// A commit's topological level, as git computes one where no
     /// commit-graph gives it.
-    fn generation(l: *Listing, cache: *Oid.Map(u64), oid: Oid) Error!u64 {
+    fn generation(l: *Listing, cache: *Oid.Map(u64), oid: Oid) ErrorNamespace.Error!u64 {
         if (cache.get(oid)) |g| return g;
         var stack: std.ArrayList(Oid) = .empty;
         defer stack.deinit(l.gpa);
@@ -1383,7 +1386,7 @@ pub const Listing = struct {
         return cache.get(oid).?;
     }
 
-    fn atomValue(l: *Listing, item: *Item, index: usize) Error!Value {
+    fn atomValue(l: *Listing, item: *Item, index: usize) ErrorNamespace.Error!Value {
         while (item.values.items.len < l.atoms.items.len) try item.values.append(l.a(), null);
         if (item.values.items[index]) |v| return v;
         const v = try l.compute(item, l.atoms.items[index]);
@@ -1391,7 +1394,7 @@ pub const Listing = struct {
         return v;
     }
 
-    fn compute(l: *Listing, item: *Item, atom: Atom) Error!Value {
+    fn compute(l: *Listing, item: *Item, atom: Atom) ErrorNamespace.Error!Value {
         const ar = l.a();
         switch (atom.kind) {
             .refname => {
@@ -1462,7 +1465,7 @@ pub const Listing = struct {
         return n;
     }
 
-    fn itemObject(l: *Listing, item: *Item) Error!ObjectData {
+    fn itemObject(l: *Listing, item: *Item) ErrorNamespace.Error!ObjectData {
         if (item.object) |data| return data;
         const found = l.repo.objectDatabase().read(l.io, item.oid) catch |err| switch (err) {
             error.ObjectNotFound => return error.MissingObject,
@@ -1473,7 +1476,7 @@ pub const Listing = struct {
         return item.object.?;
     }
 
-    fn derefObject(l: *Listing, item: *Item) Error!?ObjectData {
+    fn derefObject(l: *Listing, item: *Item) ErrorNamespace.Error!?ObjectData {
         if (item.deref_done) return item.deref;
         item.deref_done = true;
         const own = try l.itemObject(item);
@@ -1505,7 +1508,7 @@ pub const Listing = struct {
         return item.deref;
     }
 
-    fn objectValue(l: *Listing, atom: Atom, data: ObjectData) Error!Value {
+    fn objectValue(l: *Listing, atom: Atom, data: ObjectData) ErrorNamespace.Error!Value {
         const ar = l.a();
         switch (atom.kind) {
             .objecttype => return .{ .s = data.type.name() },
@@ -1580,7 +1583,7 @@ pub const Listing = struct {
         return false;
     }
 
-    fn showOid(l: *Listing, option: OidOption, oid: Oid) Error![]const u8 {
+    fn showOid(l: *Listing, option: OidOption, oid: Oid) ErrorNamespace.Error![]const u8 {
         var buf: [hash.max_hex_len]u8 = undefined;
         const len: usize = switch (option) {
             .full => return l.a().dupe(u8, oid.hex(&buf)),
@@ -1591,7 +1594,7 @@ pub const Listing = struct {
     }
 
     /// git's `grab_person`: `who`'s line, or a part of it.
-    fn person(l: *Listing, atom: Atom, buf: []const u8, who: []const u8) Error!Value {
+    fn person(l: *Listing, atom: Atom, buf: []const u8, who: []const u8) ErrorNamespace.Error!Value {
         const ar = l.a();
         const name = atom.name[@intFromBool(atom.deref)..];
         const creator = atom.kind == .creator or atom.kind == .creatordate;
@@ -1635,7 +1638,7 @@ pub const Listing = struct {
     }
 
     /// git's `apply_mailmap_to_header` over a whole object's headers.
-    fn mailmapHeader(l: *Listing, buf: []const u8) Error![]const u8 {
+    fn mailmapHeader(l: *Listing, buf: []const u8) ErrorNamespace.Error![]const u8 {
         if (l.mailmap == null) l.mailmap = try mailmap_mod.Mailmap.load(l.gpa, l.io, l.repo);
         const ar = l.a();
         var out: std.ArrayList(u8) = .empty;
@@ -1674,7 +1677,7 @@ pub const Listing = struct {
         return out.items;
     }
 
-    fn signatureValue(l: *Listing, atom: Atom, data: ObjectData) Error!Value {
+    fn signatureValue(l: *Listing, atom: Atom, data: ObjectData) ErrorNamespace.Error!Value {
         const kind = l.repo.objectFormat();
         var split = try signing.splitCommit(l.gpa, kind, data.bytes);
         var verdict: signing.Verdict = if (split) |*s| blk: {
@@ -1703,7 +1706,7 @@ pub const Listing = struct {
         };
     }
 
-    fn describeValue(l: *Listing, atom: Atom, oid: Oid) Error!Value {
+    fn describeValue(l: *Listing, atom: Atom, oid: Oid) ErrorNamespace.Error!Value {
         const index = l.ordinalDescribe(atom);
         while (l.describers.items.len <= index) {
             const options = l.atoms.items[l.describeAtomIndex(l.describers.items.len)].describe;
@@ -1749,7 +1752,7 @@ pub const Listing = struct {
     }
 
     /// git's `grab_sub_body_contents` for a tag or a commit.
-    fn contentsValue(l: *Listing, atom: Atom, buf: []const u8) Error!Value {
+    fn contentsValue(l: *Listing, atom: Atom, buf: []const u8) ErrorNamespace.Error!Value {
         const ar = l.a();
         const pos = findSubpos(buf);
         const option: ContentsOption = switch (atom.kind) {
@@ -1801,7 +1804,7 @@ pub const Listing = struct {
         }
     }
 
-    fn showRef(l: *Listing, option: RefnameOption, name: []const u8) Error![]const u8 {
+    fn showRef(l: *Listing, option: RefnameOption, name: []const u8) ErrorNamespace.Error![]const u8 {
         return switch (option) {
             .normal => name,
             .short => try l.shortenUnambiguous(name),
@@ -1812,7 +1815,7 @@ pub const Listing = struct {
 
     /// git's `refs_shorten_unambiguous_ref`, strict as
     /// `core.warnAmbiguousRefs` (on unless set off) makes it.
-    pub fn shortenUnambiguous(l: *Listing, name: []const u8) Error![]const u8 {
+    pub fn shortenUnambiguous(l: *Listing, name: []const u8) ErrorNamespace.Error![]const u8 {
         const strict = l.repo.configuration().getBool("core.warnambiguousrefs", true) catch true;
         var i: usize = rev_parse_rules.len - 1;
         while (i > 0) : (i -= 1) {
@@ -1829,7 +1832,7 @@ pub const Listing = struct {
         return name;
     }
 
-    fn refExists(l: *Listing, name: []const u8) Error!bool {
+    fn refExists(l: *Listing, name: []const u8) ErrorNamespace.Error!bool {
         const resolved = l.repo.refStore().resolve(l.gpa, l.io, name) catch |err| switch (err) {
             error.InvalidRefName, error.MalformedRef, error.SymbolicRefLoop => return false,
             else => |e| return e,
@@ -1843,7 +1846,7 @@ pub const Listing = struct {
 
     /// git's `repo_dwim_ref`: how many of the rules find `name`, and the
     /// first one's resolved name and object.
-    fn dwimRef(l: *Listing, name: []const u8) Error!struct { count: usize, ref: []const u8 = "", oid: ?Oid = null } {
+    fn dwimRef(l: *Listing, name: []const u8) ErrorNamespace.Error!struct { count: usize, ref: []const u8 = "", oid: ?Oid = null } {
         var count: usize = 0;
         var first: []const u8 = "";
         var first_oid: ?Oid = null;
@@ -1864,7 +1867,7 @@ pub const Listing = struct {
         return .{ .count = count, .ref = first, .oid = first_oid };
     }
 
-    fn worktreePath(l: *Listing, name: []const u8) Error![]const u8 {
+    fn worktreePath(l: *Listing, name: []const u8) ErrorNamespace.Error![]const u8 {
         if (l.worktree_map == null) {
             var map: std.StringHashMapUnmanaged([]const u8) = .empty;
             // the main worktree
@@ -1883,7 +1886,7 @@ pub const Listing = struct {
 
     /// The branch the main worktree's `HEAD` names, followed through
     /// symbolic refs whether or not it exists, or `null` when detached.
-    fn mainHeadRef(l: *Listing) Error!?[]const u8 {
+    fn mainHeadRef(l: *Listing) ErrorNamespace.Error!?[]const u8 {
         const store = l.repo.refStore();
         // The main worktree's own `HEAD` from any worktree, through the
         // store: a reftable keeps it in the shared stack, behind a `HEAD`
@@ -1904,7 +1907,7 @@ pub const Listing = struct {
         return null;
     }
 
-    fn mainWorktreePath(l: *Listing) Error![]const u8 {
+    fn mainWorktreePath(l: *Listing) ErrorNamespace.Error![]const u8 {
         const real = l.repo.commonDirectory().realPathFileAlloc(l.io, ".", l.a()) catch return "";
         var path = try normalizePath(l.a(), real);
         if (std.mem.endsWith(u8, path, "/.git")) path = path[0 .. path.len - "/.git".len];
@@ -1914,7 +1917,7 @@ pub const Listing = struct {
     // -- upstream and push ------------------------------------------------
 
     /// git's `branch_get_upstream` for the branch `short`, or `null`.
-    pub fn upstreamOf(l: *Listing, short: []const u8) Error!?[]const u8 {
+    pub fn upstreamOf(l: *Listing, short: []const u8) ErrorNamespace.Error!?[]const u8 {
         const config = l.repo.configuration();
         var branch = try remote_mod.Branch.get(l.gpa, config, short);
         defer branch.deinit();
@@ -1963,7 +1966,7 @@ pub const Listing = struct {
     }
 
     /// git's `branch_get_push` for the branch `short`, or `null`.
-    pub fn pushOf(l: *Listing, short: []const u8) Error!?[]const u8 {
+    pub fn pushOf(l: *Listing, short: []const u8) ErrorNamespace.Error!?[]const u8 {
         const config = l.repo.configuration();
         var branch = try remote_mod.Branch.get(l.gpa, config, short);
         defer branch.deinit();
@@ -1989,12 +1992,12 @@ pub const Listing = struct {
         }
     }
 
-    fn trackingForPushDest(l: *Listing, remote: *const remote_mod.Remote, name: []const u8) Error!?[]const u8 {
+    fn trackingForPushDest(l: *Listing, remote: *const remote_mod.Remote, name: []const u8) ErrorNamespace.Error!?[]const u8 {
         return applyRefspecs(l.a(), remote.fetch, name);
     }
 
     /// git's `fill_remote_ref_details`.
-    fn remoteDetails(l: *Listing, atom: Atom, target: []const u8, short: []const u8, for_push: bool) Error![]const u8 {
+    fn remoteDetails(l: *Listing, atom: Atom, target: []const u8, short: []const u8, for_push: bool) ErrorNamespace.Error![]const u8 {
         const ar = l.a();
         switch (atom.remote) {
             .ref => return l.showRef(atom.refname, target),
@@ -2041,7 +2044,7 @@ pub const Listing = struct {
 
     /// git's `stat_tracking_info`: commits ahead and behind, or `null`
     /// when there is nothing to compare with.
-    fn trackingCounts(l: *Listing, short: []const u8, for_push: bool) Error!?[2]usize {
+    fn trackingCounts(l: *Listing, short: []const u8, for_push: bool) ErrorNamespace.Error!?[2]usize {
         const base = (if (for_push) try l.pushOf(short) else try l.upstreamOf(short)) orelse return null;
         const theirs_ref = (l.repo.refStore().resolve(l.gpa, l.io, base) catch return null) orelse return null;
         defer l.gpa.free(theirs_ref.name);
@@ -2058,7 +2061,7 @@ pub const Listing = struct {
 
     /// git's `get_head_description`: what `git branch` calls a detached
     /// `HEAD`.
-    pub fn headDescription(l: *Listing) Error![]const u8 {
+    pub fn headDescription(l: *Listing) ErrorNamespace.Error![]const u8 {
         if (l.head_description) |d| return d;
         const ar = l.a();
         const io = l.io;
@@ -2093,7 +2096,7 @@ pub const Listing = struct {
     }
 
     /// git's `get_branch` for a state file.
-    fn stateBranch(l: *Listing, path: []const u8) Error!?[]const u8 {
+    fn stateBranch(l: *Listing, path: []const u8) ErrorNamespace.Error!?[]const u8 {
         const bytes = l.repo.gitDirectory().readFileAlloc(l.io, path, l.a(), .limited(1 << 20)) catch return null;
         const trimmed = std.mem.trimEnd(u8, bytes, "\n");
         if (trimmed.len == 0) return null;
@@ -2109,7 +2112,7 @@ pub const Listing = struct {
 
     /// git's `wt_status_get_detached_from`: where the last checkout that
     /// detached `HEAD` came from, and whether `HEAD` is still there.
-    fn detachedFrom(l: *Listing) Error!?struct { from: []const u8, at: bool } {
+    fn detachedFrom(l: *Listing) ErrorNamespace.Error!?struct { from: []const u8, at: bool } {
         var log = l.repo.readLog(l.io, "HEAD") catch return null;
         defer log.deinit();
         var i = log.entries.len;
@@ -2157,7 +2160,7 @@ pub const Listing = struct {
 
     /// git's `format_ref_array_item`: the item at `index` in `format`,
     /// appended to `out`.
-    pub fn formatItem(l: *Listing, gpa: Allocator, index: usize, format: Format, out: *std.ArrayList(u8)) Error!void {
+    pub fn formatItem(l: *Listing, gpa: Allocator, index: usize, format: Format, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         const item = l.items.items[index];
         try l.prepareFor(format);
         var stack: std.ArrayList(Frame) = .empty;
@@ -2178,7 +2181,7 @@ pub const Listing = struct {
         try out.appendSlice(gpa, stack.items[0].output.items);
     }
 
-    fn prepareFor(l: *Listing, format: Format) Error!void {
+    fn prepareFor(l: *Listing, format: Format) ErrorNamespace.Error!void {
         for (format.parts) |part| switch (part) {
             .atom => |at| switch (l.atoms.items[at].kind) {
                 .@"ahead-behind", .@"is-base" => return l.prepare(),
@@ -2189,7 +2192,7 @@ pub const Listing = struct {
     }
 
     /// Errors from `write`.
-    pub const WriteError = Error || Io.Writer.Error;
+    pub const WriteError = ErrorNamespace.Error || Io.Writer.Error;
 
     /// git's `print_formatted_ref_array`: every item (or the first
     /// `count`), each followed by a newline, an empty one left out under

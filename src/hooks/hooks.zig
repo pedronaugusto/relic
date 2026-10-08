@@ -27,6 +27,7 @@
 //! commit hooks, `GIT_EDITOR=:` when no editor runs — is set here the same
 //! way.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -267,6 +268,8 @@ pub const Configured = struct {
 /// A runner is one task's: `failure` and `captured` record what the last
 /// call did.
 pub const Runner = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     programs: program.Programs,
     options: Options,
@@ -446,7 +449,7 @@ pub const Runner = struct {
         request: Request,
         command: []const u8,
         shell: bool,
-    ) Error!void {
+    ) ErrorNamespace.Error!void {
         const gpa = runner.gpa;
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);

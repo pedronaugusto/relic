@@ -17,6 +17,7 @@
 //! `trailer.*` settings say. A message in an encoding other than UTF-8,
 //! which git would convert first, is refused by name.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -109,6 +110,8 @@ const RecordOrder = struct {
 
 /// Commits being grouped.
 pub const Shortlog = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     options: Options,
@@ -189,7 +192,7 @@ pub const Shortlog = struct {
 
     const Named = struct { io: Io, db: *odb_mod.Odb, oid: Oid };
 
-    fn addParsed(s: *Shortlog, commit: *const object.Commit, named: ?Named) Error!void {
+    fn addParsed(s: *Shortlog, commit: *const object.Commit, named: ?Named) ErrorNamespace.Error!void {
         if (commit.encoding) |enc| {
             if (!std.ascii.eqlIgnoreCase(enc, "utf-8") and !std.ascii.eqlIgnoreCase(enc, "utf8"))
                 return error.EncodingUnsupported;
@@ -233,7 +236,7 @@ pub const Shortlog = struct {
         return false;
     }
 
-    fn insertPerson(s: *Shortlog, a: Allocator, seen: *std.StringHashMapUnmanaged(void), who: object.Signature, oneline: []const u8) Error!void {
+    fn insertPerson(s: *Shortlog, a: Allocator, seen: *std.StringHashMapUnmanaged(void), who: object.Signature, oneline: []const u8) ErrorNamespace.Error!void {
         const text = try s.formatPerson(a, trimName(who.name), who.email);
         if (s.dedup and (try seen.getOrPut(a, text)).found_existing) return;
         try s.insert(text, oneline);
@@ -256,7 +259,7 @@ pub const Shortlog = struct {
     }
 
     /// `insert_one_record`.
-    fn insert(s: *Shortlog, ident: []const u8, oneline_in: []const u8) Error!void {
+    fn insert(s: *Shortlog, ident: []const u8, oneline_in: []const u8) ErrorNamespace.Error!void {
         const slot = try s.records.getOrPut(s.gpa, ident);
         if (!slot.found_existing) {
             slot.key_ptr.* = try s.arena.allocator().dupe(u8, ident);

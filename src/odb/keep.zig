@@ -1,5 +1,6 @@
 //! Received-pack retention. Git honours the marker while relic's tokens
 //! share it under the marker's lock. A foreign marker is never removed.
+const ErrorNamespace = @This();
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -9,6 +10,8 @@ const fs = @import("../fs/fs.zig");
 pub const Error = fs.LockError || fs.CommitError || Io.Dir.OpenError || Io.Dir.ReadFileAllocError || Io.Dir.DeleteFileError || Allocator.Error;
 
 pub const Token = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     dir: Io.Dir,
     name: [hash.max_hex_len + 10]u8,
@@ -20,7 +23,7 @@ pub const Token = struct {
 
     /// The directory handle is owned by this token, independent of the
     /// receiver's handle. Acquiring precedes publication of the pack index.
-    pub fn open(gpa: Allocator, io: Io, pack_dir: Io.Dir, oid: hash.Oid) Error!Token {
+    pub fn open(gpa: Allocator, io: Io, pack_dir: Io.Dir, oid: hash.Oid) ErrorNamespace.Error!Token {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         const dir = try pack_dir.openDir(io, ".", .{});
@@ -60,7 +63,7 @@ pub const Token = struct {
         if (t.managed) t.release(io) catch {};
     }
 
-    fn release(t: *Token, io: Io) Error!void {
+    fn release(t: *Token, io: Io) ErrorNamespace.Error!void {
         const name = t.name[0..t.name_len];
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(t.gpa, io, t.dir, name, &buffer, .{ .sync = .none, .on_contention = .{ .wait_ms = 1000 } });

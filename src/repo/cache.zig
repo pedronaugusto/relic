@@ -9,6 +9,7 @@
 //! It holds at most `capacity` commits and starts over when full, so a
 //! handle kept for days holds a bounded amount however much it walks.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -35,6 +36,8 @@ pub const Error = odb_mod.Error || object.ParseError || error{
 };
 
 pub const Cache = struct {
+    pub const Error = ErrorNamespace.Error;
+
     mutex: Io.Mutex = .init,
     arena: std.heap.ArenaAllocator.State = .{},
     map: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, Entry) = .empty,
@@ -66,7 +69,7 @@ pub const Cache = struct {
         };
     }
 
-    fn load(c: *Cache, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error!Entry {
+    fn load(c: *Cache, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) ErrorNamespace.Error!Entry {
         const found = try db.read(io, oid);
         defer db.allocator().free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;

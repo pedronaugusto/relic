@@ -3,6 +3,7 @@
 //! driver of that name, else git's default — a line starting with a
 //! letter, `_` or `$`. What `git grep -p` and `-W` look for.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -55,6 +56,8 @@ const builtins = [_]Builtin{
 
 /// How one file's function lines are found.
 pub const Rule = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// Empty for git's default.
     regs: []Reg,
@@ -93,7 +96,7 @@ pub const Rule = struct {
         return rule;
     }
 
-    fn compile(a: Allocator, gpa: Allocator, text: []const u8, flags: ere.Flags) Error![]Reg {
+    fn compile(a: Allocator, gpa: Allocator, text: []const u8, flags: ere.Flags) ErrorNamespace.Error![]Reg {
         var regs: std.ArrayList(Reg) = .empty;
         errdefer for (regs.items) |*r| r.re.deinit();
         var lines = std.mem.splitScalar(u8, text, '\n');

@@ -20,6 +20,7 @@
 //! repository, with the permission to run them. Without one a read of a
 //! promised object is `error.ObjectNotFound`, as in any other repository.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -142,11 +143,13 @@ pub fn writePromisor(io: Io, pack_dir: Io.Dir, name: Oid, refs: []const Promisor
 /// the promisor remote through. Install it on the repository with
 /// `install`; it must outlive the installation.
 pub const Lazy = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     repo: *Repository,
     options: Options,
     /// The error behind the last `error.PromisorFetchFailed`.
-    failure: ?Error = null,
+    failure: ?ErrorNamespace.Error = null,
     /// A refused credential, described.
     auth_failure: auth.Failure = .{},
     /// How many fetches it made, and for how many objects.
@@ -207,7 +210,7 @@ pub const Lazy = struct {
     /// git's lazy fetch asks them: in `promisorRemotes`' order, the next one
     /// asked only when a request fails, and then for what is still missing.
     /// The last failure is the one returned when none gives everything.
-    pub fn fetch(l: *Lazy, io: Io, oids: []const Oid) Error!void {
+    pub fn fetch(l: *Lazy, io: Io, oids: []const Oid) ErrorNamespace.Error!void {
         if (oids.len == 0) return;
         const repo = l.repo;
         // Nothing the fetch itself reads may ask again.
@@ -236,7 +239,7 @@ pub const Lazy = struct {
         }
         if (names.len == 0) return error.NotAPartialClone;
         var remaining = try arena.dupe(Oid, oids);
-        var last_error: Error = error.NotAPartialClone;
+        var last_error: ErrorNamespace.Error = error.NotAPartialClone;
         for (names) |name| {
             if (l.fetchFrom(io, name, remaining)) |_| {
                 l.fetches += 1;
@@ -265,7 +268,7 @@ pub const Lazy = struct {
     /// One request to the promisor remote `name`. A promisor remote with no
     /// `partialclonefilter` is given `blob:none` first, in the repository's
     /// configuration, as git's lazy fetch registers it.
-    fn fetchFrom(l: *Lazy, io: Io, name: []const u8, oids: []const Oid) Error!void {
+    fn fetchFrom(l: *Lazy, io: Io, name: []const u8, oids: []const Oid) ErrorNamespace.Error!void {
         const repo = l.repo;
         {
             var buf: [256]u8 = undefined;
@@ -304,7 +307,7 @@ pub const Lazy = struct {
     /// Fetch, in one request, every blob below `tree` that the repository
     /// lacks — what a checkout of `tree` will read — as git fetches them
     /// before it checks out rather than one at a time.
-    pub fn prefetchTree(l: *Lazy, io: Io, tree: Oid) Error!void {
+    pub fn prefetchTree(l: *Lazy, io: Io, tree: Oid) ErrorNamespace.Error!void {
         var missing: std.ArrayList(Oid) = .empty;
         defer missing.deinit(l.gpa);
         var seen: Oid.Set = .empty;

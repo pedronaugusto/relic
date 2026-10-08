@@ -8,6 +8,7 @@
 //! way, and `writeIndexFile` makes the `.idx`, byte for byte git's, for it
 //! and for a pack received by `indexpack.zig`.
 
+const ErrorNamespace = @This();
 const Self = @This();
 const retention = @import("keep.zig");
 
@@ -99,6 +100,8 @@ pub const IndexError = error{
 /// and every lookup is a bisection inside it, so there is nothing to gain by
 /// leaving it on the disk.
 pub const Index = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     kind: Kind,
     bytes: []const u8,
@@ -415,6 +418,8 @@ pub const Access = enum {
 
 /// A packfile, open for reading.
 pub const Pack = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     kind: Kind,
     file: Io.File,
@@ -449,7 +454,7 @@ pub const Pack = struct {
     reader_io: Io = undefined,
     reader_block: u64 = 0,
     /// Why the reader in progress failed, when it says `ReadFailed`.
-    read_err: ?Error = null,
+    read_err: ?ErrorNamespace.Error = null,
     /// A large entry's own buffer and reader, made afresh for each one.
     stream_buffer: []u8 = &.{},
     stream_reader: Io.File.Reader = undefined,
@@ -555,7 +560,7 @@ pub const Pack = struct {
     /// block is wanted, and a slot only ever changes to the block wanted.
     /// That is what makes the cache monotone: a sequence of reads that is
     /// part of another, block for block, never costs more than it.
-    fn loadBlock(p: *Pack, io: Io, id: u64) Error!usize {
+    fn loadBlock(p: *Pack, io: Io, id: u64) ErrorNamespace.Error!usize {
         if (p.slot_memory.len == 0) {
             const memory = try p.gpa.alloc(?[*]u8, p.slots);
             errdefer p.gpa.free(memory);
@@ -593,7 +598,7 @@ pub const Pack = struct {
     }
 
     /// The pack's bytes from `offset` to the end of the block it is in.
-    fn blockBytesAt(p: *Pack, io: Io, offset: u64) Error![]const u8 {
+    fn blockBytesAt(p: *Pack, io: Io, offset: u64) ErrorNamespace.Error![]const u8 {
         const id = offset / read_block_bytes;
         const slot = try p.loadBlock(io, id);
         const from: usize = @intCast(offset - id * read_block_bytes);
@@ -607,7 +612,7 @@ pub const Pack = struct {
     };
 
     /// A reader over the pack from `at`, through the blocks.
-    fn blockReaderAt(p: *Pack, io: Io, at: u64) Error!*Io.Reader {
+    fn blockReaderAt(p: *Pack, io: Io, at: u64) ErrorNamespace.Error!*Io.Reader {
         const id = at / read_block_bytes;
         const slot = try p.loadBlock(io, id);
         p.reader_io = io;
@@ -670,7 +675,7 @@ pub const Pack = struct {
     /// A reader over the pack from `at` with a buffer of its own, made
     /// afresh: what it reads depends on the entry alone, and it leaves the
     /// blocks as they were.
-    fn streamReaderAt(p: *Pack, io: Io, at: u64) Error!*Io.Reader {
+    fn streamReaderAt(p: *Pack, io: Io, at: u64) ErrorNamespace.Error!*Io.Reader {
         if (p.stream_buffer.len == 0) p.stream_buffer = try p.gpa.alloc(u8, stream_buffer_bytes);
         p.stream_reader = p.file.reader(io, p.stream_buffer);
         p.stream_reader.seekTo(at) catch |err| return switch (err) {
@@ -703,7 +708,7 @@ pub const Pack = struct {
         return p.size - p.kind.rawLen();
     }
 
-    fn readAtExact(p: *Pack, io: Io, offset: u64, out: []u8) Error!void {
+    fn readAtExact(p: *Pack, io: Io, offset: u64, out: []u8) ErrorNamespace.Error!void {
         if (p.memory) |mem| {
             if (offset + out.len > mem.len) return error.TruncatedPack;
             @memcpy(out, mem[@intCast(offset)..][0..out.len]);
@@ -813,7 +818,7 @@ pub const Pack = struct {
 
     /// Inflate `size` bytes of the zlib stream at `at`. The result is the
     /// caller's.
-    fn inflateAt(p: *Pack, io: Io, at: u64, size: u64) Error![]u8 {
+    fn inflateAt(p: *Pack, io: Io, at: u64, size: u64) ErrorNamespace.Error![]u8 {
         const result_len = try inflatedLen(size);
         const out = try p.gpa.alloc(u8, result_len +| decode_slack);
         errdefer p.gpa.free(out);
@@ -823,7 +828,7 @@ pub const Pack = struct {
 
     /// `inflateAt` into `out`, which is cleared, grows as needed and then
     /// holds exactly the entry.
-    fn inflateInto(p: *Pack, io: Io, at: u64, size: u64, out: *std.ArrayList(u8)) Error!void {
+    fn inflateInto(p: *Pack, io: Io, at: u64, size: u64, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         const result_len = try inflatedLen(size);
         out.clearRetainingCapacity();
         try out.ensureTotalCapacity(p.gpa, result_len +| decode_slack);
@@ -835,14 +840,14 @@ pub const Pack = struct {
     /// the fast decoder can also handle the last bytes of an entry.
     const decode_slack = 258 + 8;
 
-    fn inflatedLen(size: u64) Error!usize {
+    fn inflatedLen(size: u64) ErrorNamespace.Error!usize {
         if (size > delta.max_result_bytes) return error.StreamTooLong;
         return std.math.cast(usize, size) orelse error.StreamTooLong;
     }
 
     /// Decode the `size`-byte entry at `at` into the front of `out`, which
     /// has `decode_slack` bytes of room past it.
-    fn decodeAt(p: *Pack, io: Io, at: u64, size: u64, out: []u8) Error!void {
+    fn decodeAt(p: *Pack, io: Io, at: u64, size: u64, out: []u8) ErrorNamespace.Error!void {
         const result_len: usize = @intCast(size);
         var fixed_reader: Io.Reader = undefined;
         const streamed = p.memory == null and size >= stream_entry_bytes;
@@ -934,7 +939,7 @@ pub const Pack = struct {
 
     /// The object at `offset`, in an allocation of its own or, given `into`,
     /// there, when the returned bytes are `into.items`.
-    fn resolve(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, into: ?*std.ArrayList(u8)) Error!Object {
+    fn resolve(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, into: ?*std.ArrayList(u8)) ErrorNamespace.Error!Object {
         var chain: std.ArrayList(u64) = .empty;
         defer chain.deinit(p.gpa);
         var visited: std.ArrayList(u64) = .empty;
@@ -1112,7 +1117,7 @@ pub const Pack = struct {
     /// That is enough for a delta's two size varints — ten bytes each at the
     /// widest — so the type and the true expanded size of a deltified object
     /// come back with nothing materialised.
-    fn inflateHead(p: *Pack, io: Io, at: u64, size: u64) Error![20]u8 {
+    fn inflateHead(p: *Pack, io: Io, at: u64, size: u64) ErrorNamespace.Error![20]u8 {
         var out: [20]u8 = @splat(0);
         const want: usize = @intCast(@min(size, out.len));
         var fixed_reader: Io.Reader = undefined;
@@ -1213,6 +1218,8 @@ pub const Pack = struct {
 /// decides how many small bases survive. This is the only cache in the package
 /// apart from the pack indexes themselves.
 pub const Cache = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     limit_bytes: usize,
     bytes: usize = 0,
@@ -1776,6 +1783,8 @@ const WrittenEntry = IndexEntry;
 /// of. The stream it makes depends only on the payload and the level, never
 /// on what it deflated before or where the stream goes.
 pub const Deflater = struct {
+    pub const Error = ErrorNamespace.Error;
+
     window: []u8,
     compress: *flate.Compress,
 
@@ -1833,6 +1842,8 @@ pub const Deflater = struct {
 /// to the file; `finish` writes the index and renames both into place under
 /// the name the pack's checksum gives it.
 pub const Writer = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     kind: Kind,
     dir: Io.Dir,

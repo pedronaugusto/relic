@@ -10,6 +10,7 @@
 //! protocol above writes each request whole for that reason. Nothing above
 //! this interface knows which it is talking to.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -58,6 +59,8 @@ pub const Error = error{
 
 /// A conversation, open.
 pub const Connection = struct {
+    pub const Error = ErrorNamespace.Error;
+
     context: *anyopaque,
     vtable: *const VTable,
     /// Whether the server forgets everything between two requests.
@@ -70,14 +73,14 @@ pub const Connection = struct {
     /// What each transport supplies.
     pub const VTable = struct {
         /// The server's first message. Called once, first.
-        advertisement: *const fn (context: *anyopaque, connection: *Connection) Error!*Io.Reader,
+        advertisement: *const fn (context: *anyopaque, connection: *Connection) ErrorNamespace.Error!*Io.Reader,
         /// Where the next request is written.
-        request: *const fn (context: *anyopaque, connection: *Connection) Error!*Io.Writer,
+        request: *const fn (context: *anyopaque, connection: *Connection) ErrorNamespace.Error!*Io.Writer,
         /// Send the request written so far and hand back its response.
-        response: *const fn (context: *anyopaque, connection: *Connection) Error!*Io.Reader,
+        response: *const fn (context: *anyopaque, connection: *Connection) ErrorNamespace.Error!*Io.Reader,
         /// Why the last read or write through this connection failed, when
         /// the reader or writer it handed out said only that it did.
-        failure: *const fn (context: *anyopaque, connection: *Connection) Error,
+        failure: *const fn (context: *anyopaque, connection: *Connection) ErrorNamespace.Error,
         /// End the conversation and release everything. After a failure it
         /// is still called, and still releases everything.
         close: *const fn (io: Io, context: *anyopaque) void,

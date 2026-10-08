@@ -30,6 +30,7 @@
 //! standard input. The file is made in the temporary directory the
 //! caller's environment names, as git's is, and removed afterwards.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -154,6 +155,8 @@ pub const Result = enum {
 
 /// A signature check's answer.
 pub const Verdict = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     result: Result = .none,
@@ -223,6 +226,8 @@ pub const Request = struct {
 
 /// The signing settings of a repository, and permission to run them.
 pub const Signer = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     programs: program.Programs,
@@ -333,7 +338,7 @@ pub const Signer = struct {
         };
     }
 
-    fn signGpg(signer: *Signer, io: Io, payload: []const u8, key: []const u8) Error![]u8 {
+    fn signGpg(signer: *Signer, io: Io, payload: []const u8, key: []const u8) ErrorNamespace.Error![]u8 {
         var outcome = try program.run(signer.gpa, io, signer.programs, .{
             .argv = &.{ signer.program, "--status-fd=2", "-bsau", key },
         }, .{
@@ -350,7 +355,7 @@ pub const Signer = struct {
         return withoutCarriageReturns(signer.gpa, outcome.stdout);
     }
 
-    fn signSsh(signer: *Signer, arena: Allocator, io: Io, payload: []const u8, key: []const u8) Error![]u8 {
+    fn signSsh(signer: *Signer, arena: Allocator, io: Io, payload: []const u8, key: []const u8) ErrorNamespace.Error![]u8 {
         // A key given as text rather than as a file goes through a file, and
         // `-U` says its private half is in the agent.
         var key_file: ?TempFile = null;
@@ -377,7 +382,7 @@ pub const Signer = struct {
     }
 
     /// The first line `gpg.ssh.defaultKeyCommand` prints, when it is a key.
-    fn defaultSshKey(signer: *Signer, arena: Allocator, io: Io) Error![]const u8 {
+    fn defaultSshKey(signer: *Signer, arena: Allocator, io: Io) ErrorNamespace.Error![]const u8 {
         const command = signer.default_key_command orelse return error.NoSigningKey;
         const argv = try splitCommandLine(arena, command);
         if (argv.len == 0) return error.NoSigningKey;
@@ -418,7 +423,7 @@ pub const Signer = struct {
         payload: []const u8,
         signature: []const u8,
         verdict: *Verdict,
-    ) Error!void {
+    ) ErrorNamespace.Error!void {
         var sig_file = try TempFile.create(arena, io, signer.programs, ".git_vtag_tmp", signature);
         defer sig_file.remove(io);
         var argv: std.ArrayList([]const u8) = .empty;
@@ -446,7 +451,7 @@ pub const Signer = struct {
         signature: []const u8,
         signed_at: ?i64,
         verdict: *Verdict,
-    ) Error!void {
+    ) ErrorNamespace.Error!void {
         const allowed = signer.allowed_signers orelse return error.AllowedSignersFileMissing;
         var sig_file = try TempFile.create(arena, io, signer.programs, ".git_vtag_tmp", signature);
         defer sig_file.remove(io);
@@ -623,6 +628,8 @@ fn parseSshOutput(v: *Verdict) void {
 /// A signed object taken apart: what the signature covers, and the
 /// signature. Both are the caller's.
 pub const Signed = struct {
+    pub const Error = ErrorNamespace.Error;
+
     payload: []u8,
     signature: []u8,
 

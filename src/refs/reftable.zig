@@ -22,6 +22,7 @@
 //! repository's refs, and the transactions that add to it, are
 //! `reftablestack`.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -558,6 +559,8 @@ pub const Raw = struct {
 /// A walk over one section of a table. What it hands back borrows the
 /// iterator and is valid until the next call.
 pub const Iterator = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     table: *const Table,
     typ: BlockType,
@@ -575,7 +578,7 @@ pub const Iterator = struct {
         it.* = undefined;
     }
 
-    fn enter(it: *Iterator, at: u64) Error!void {
+    fn enter(it: *Iterator, at: u64) ErrorNamespace.Error!void {
         const block = (try it.table.loadBlock(it.gpa, at)) orelse return;
         if (block.typ != @backingInt(it.typ)) {
             var b = block;
@@ -592,7 +595,7 @@ pub const Iterator = struct {
     /// Put the cursor on the first record of this block whose key is at
     /// least `want`, or at the block's end. Bisects the restart points,
     /// whose keys are stored whole, then walks.
-    fn seekInBlock(it: *Iterator, want: []const u8) Error!void {
+    fn seekInBlock(it: *Iterator, want: []const u8) ErrorNamespace.Error!void {
         const block = if (it.block) |*b| b else return;
         var scratch: std.ArrayList(u8) = .empty;
         defer scratch.deinit(it.gpa);
@@ -629,7 +632,7 @@ pub const Iterator = struct {
     const IndexRecord = struct { key: []const u8, index_offset: u64 };
 
     /// The next record of an index block, without moving to another block.
-    fn nextInBlock(it: *Iterator) Error!?IndexRecord {
+    fn nextInBlock(it: *Iterator) ErrorNamespace.Error!?IndexRecord {
         const block = if (it.block) |*b| b else return null;
         if (it.pos >= block.restart_off) return null;
         const decoded = try decodeKey(it.gpa, block.data[0..block.restart_off], it.pos, &it.key);

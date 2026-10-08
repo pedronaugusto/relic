@@ -4,6 +4,7 @@
 //! through a uniquely-named temporary and a rename, so two writers of the same
 //! object never meet and a reader never sees half of one.
 
+const ErrorNamespace = @This();
 const durability = @import("../fs/fs.zig");
 const crc32 = @import("warp");
 const fs = @import("../fs/fs.zig");
@@ -39,6 +40,8 @@ pub const Error = @import("policy.zig").Error;
 /// decoded names, and `text` holds the original file; release both with
 /// `deinit` when finished.
 pub const Alternates = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     text: []u8,
     paths: [][]u8,
@@ -149,6 +152,8 @@ const testgit = @import("../testing/git.zig");
 
 /// The object database.
 pub const Odb = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// Owned format and storage state; never reassigned piecemeal.
     _state: *storage.State,
     /// How lookups resolved. Read it; nothing in the package does.
@@ -197,7 +202,7 @@ pub const Odb = struct {
 
     /// The optional reachability bitmap, opened on first use and kept until refresh.
     /// Malformed or unsupported optional data falls back to object traversal.
-    pub fn reachabilityBitmap(db: *Odb, io: Io) Error!?*const reachability.Store {
+    pub fn reachabilityBitmap(db: *Odb, io: Io) ErrorNamespace.Error!?*const reachability.Store {
         const data = db.backendData();
         if (!data.options.use_bitmaps or db.shallow.count() != 0) return null;
         if (!data.bitmap_checked) {
@@ -227,7 +232,7 @@ pub const Odb = struct {
     };
 
     /// Ask the promisor remote for `oids`, then look again.
-    pub fn fetchMissing(odb: *Odb, io: Io, oids: []const Oid) Error!void {
+    pub fn fetchMissing(odb: *Odb, io: Io, oids: []const Oid) ErrorNamespace.Error!void {
         const lazy = odb.lazy orelse return error.ObjectNotFound;
         odb.lazy = null;
         defer odb.lazy = lazy;
@@ -246,7 +251,7 @@ pub const Odb = struct {
         git_dir: Io.Dir,
         kind: Kind,
         options: Options,
-    ) Error!Odb {
+    ) ErrorNamespace.Error!Odb {
         var odb = try opening.empty(Odb, gpa, io, kind, options);
         errdefer odb.deinit(io);
 
@@ -270,7 +275,7 @@ pub const Odb = struct {
         objects_dir: Io.Dir,
         kind: Kind,
         options: Options,
-    ) Error!Odb {
+    ) ErrorNamespace.Error!Odb {
         var odb = try opening.empty(Odb, gpa, io, kind, options);
         errdefer odb.deinit(io);
         const owned = try objects_dir.openDir(io, ".", .{ .iterate = true });
@@ -286,7 +291,7 @@ pub const Odb = struct {
     /// Relative paths are relative to its `objects` directory, as in git.
     /// Comments and empty lines are omitted, quoted names are decoded, and
     /// the caller owns the result.
-    pub fn listAlternates(odb: *Odb, gpa: Allocator, io: Io) Error!Alternates {
+    pub fn listAlternates(odb: *Odb, gpa: Allocator, io: Io) ErrorNamespace.Error!Alternates {
         const file = (try fs.readFileAlloc(gpa, io, odb.backendData().sources.items[0].dir, "info/alternates", 1 << 20)) orelse try gpa.alloc(u8, 0);
         errdefer gpa.free(file);
         var paths: std.ArrayList([]u8) = .empty;
@@ -306,7 +311,7 @@ pub const Odb = struct {
 
     /// Append one object-directory path if it is not already named. The
     /// newly named objects are available through this open database at once.
-    pub fn addAlternate(odb: *Odb, io: Io, path: []const u8) Error!void {
+    pub fn addAlternate(odb: *Odb, io: Io, path: []const u8) ErrorNamespace.Error!void {
         if (path.len == 0 or std.mem.findScalar(u8, path, 0) != null) return error.InvalidAlternatePath;
         var listed = try odb.listAlternates(odb.backendData().gpa, io);
         defer listed.deinit();
@@ -322,7 +327,7 @@ pub const Odb = struct {
 
     /// Remove every direct line naming `path`, preserving other paths and
     /// comments. A path absent from the file changes nothing.
-    pub fn removeAlternate(odb: *Odb, io: Io, path: []const u8) Error!void {
+    pub fn removeAlternate(odb: *Odb, io: Io, path: []const u8) ErrorNamespace.Error!void {
         var listed = try odb.listAlternates(odb.backendData().gpa, io);
         defer listed.deinit();
         var content: std.ArrayList(u8) = .empty;
@@ -347,7 +352,7 @@ pub const Odb = struct {
         if (changed) try odb.writeAlternates(io, content.items);
     }
 
-    fn writeAlternates(odb: *Odb, io: Io, content: []const u8) Error!void {
+    fn writeAlternates(odb: *Odb, io: Io, content: []const u8) ErrorNamespace.Error!void {
         if (content.len > 1 << 20) return error.AlternatesTooLarge;
         const dir = odb.backendData().sources.items[0].dir;
         try dir.createDirPath(io, "info");
@@ -361,7 +366,7 @@ pub const Odb = struct {
         odb.backendData().generation += 1;
     }
 
-    fn addSource(odb: *Odb, io: Io, dir: Io.Dir, writable: bool, depth: u8) Error!void {
+    fn addSource(odb: *Odb, io: Io, dir: Io.Dir, writable: bool, depth: u8) ErrorNamespace.Error!void {
         try opening.register(io, odb, dir, writable);
         try odb.scanPacks(io, odb.backendData().sources.items.len - 1);
         try odb.readAlternates(io, dir, depth);
@@ -371,7 +376,7 @@ pub const Odb = struct {
     /// does: one already in the chain, this database's own directory
     /// included, is skipped, and a file deeper than
     /// `Options.max_alternate_depth` is not read, which git only logs.
-    fn readAlternates(odb: *Odb, io: Io, dir: Io.Dir, depth: u8) Error!void {
+    fn readAlternates(odb: *Odb, io: Io, dir: Io.Dir, depth: u8) ErrorNamespace.Error!void {
         if (depth > odb.backendData().options.max_alternate_depth) return;
         const text = (try fs.readFileAlloc(odb.backendData().gpa, io, dir, "info/alternates", 1 << 20)) orelse return;
         defer odb.backendData().gpa.free(text);
@@ -401,7 +406,7 @@ pub const Odb = struct {
     }
 
     /// Whether `dir` is a directory the chain already reads.
-    fn alreadySource(odb: *Odb, io: Io, dir: Io.Dir) Error!bool {
+    fn alreadySource(odb: *Odb, io: Io, dir: Io.Dir) ErrorNamespace.Error!bool {
         const gpa = odb.backendData().gpa;
         const path = try opening.realPath(gpa, io, dir);
         defer gpa.free(path);
@@ -412,7 +417,7 @@ pub const Odb = struct {
         return false;
     }
 
-    fn scanPacks(odb: *Odb, io: Io, source_index: usize) Error!void {
+    fn scanPacks(odb: *Odb, io: Io, source_index: usize) ErrorNamespace.Error!void {
         const source = &odb.backendData().sources.items[source_index];
         const pack_dir = source.pack_dir orelse return;
         var it = pack_dir.iterate();
@@ -460,7 +465,7 @@ pub const Odb = struct {
 
     /// Every pack `scanPacks` left out because it did not read as one,
     /// opened again for its error.
-    fn verifyUnopened(odb: *Odb, io: Io, source: *Source) Error!void {
+    fn verifyUnopened(odb: *Odb, io: Io, source: *Source) ErrorNamespace.Error!void {
         const pack_dir = source.pack_dir orelse return;
         var it = pack_dir.iterate();
         while (try it.next(io)) |entry| {
@@ -481,7 +486,7 @@ pub const Odb = struct {
     /// Re-read on every scan, because a `gc` replaces it along with the packs
     /// it names. An index that does not parse is left out: it is an
     /// accelerator, and a repository reads the same without one.
-    fn loadMidx(odb: *Odb, io: Io, source_index: usize) Error!void {
+    fn loadMidx(odb: *Odb, io: Io, source_index: usize) ErrorNamespace.Error!void {
         const source = &odb.backendData().sources.items[source_index];
         if (source.midx) |*old| old.deinit();
         source.midx = null;
@@ -514,7 +519,7 @@ pub const Odb = struct {
     /// Re-scan every pack directory, picking up packs written since the last
     /// scan. `read` does this once on a miss; a caller watching a repository
     /// a `gc` runs in may call it.
-    pub fn refresh(odb: *Odb, io: Io) Error!void {
+    pub fn refresh(odb: *Odb, io: Io) ErrorNamespace.Error!void {
         odb.clearBitmap();
         for (0..odb.backendData().sources.items.len) |i| try odb.scanPacks(io, i);
         odb.backendData().generation += 1;
@@ -571,7 +576,7 @@ pub const Odb = struct {
     /// On a miss the pack directories are re-scanned once and the lookup is
     /// tried again, because a concurrent `git gc` may have just packed the
     /// object away; then it is `error.ObjectNotFound`.
-    pub fn read(odb: *Odb, io: Io, oid: Oid) Error!Read {
+    pub fn read(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Read {
         if (try odb.tryRead(io, oid)) |found| return found;
         try odb.refresh(io);
         if (try odb.tryRead(io, oid)) |found| return found;
@@ -602,7 +607,7 @@ pub const Odb = struct {
     /// them. A packed whole object needs no other allocation once `buffer`
     /// is large enough; a loose object still allocates its read buffer, and
     /// a delta its chain.
-    pub fn readInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) Error!Borrowed {
+    pub fn readInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) ErrorNamespace.Error!Borrowed {
         if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
         try odb.refresh(io);
         if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
@@ -613,7 +618,7 @@ pub const Odb = struct {
         return error.ObjectNotFound;
     }
 
-    fn tryReadInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) Error!?Borrowed {
+    fn tryReadInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) ErrorNamespace.Error!?Borrowed {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const named = &source.packs.items[located.at];
@@ -628,7 +633,7 @@ pub const Odb = struct {
     /// content, so where it is found does not change what is read, and in a
     /// packed repository a loose lookup first is a failed `open` for every
     /// object.
-    fn tryRead(odb: *Odb, io: Io, oid: Oid) Error!?Read {
+    fn tryRead(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Read {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const named = &source.packs.items[located.at];
@@ -638,7 +643,7 @@ pub const Odb = struct {
         return odb.readLoose(io, oid);
     }
 
-    fn readLoose(odb: *Odb, io: Io, oid: Oid) Error!?Read {
+    fn readLoose(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Read {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |*source| {
@@ -661,7 +666,7 @@ pub const Odb = struct {
         return null;
     }
 
-    fn inflateWhole(odb: *Odb, io: Io, file: Io.File) Error![]u8 {
+    fn inflateWhole(odb: *Odb, io: Io, file: Io.File) ErrorNamespace.Error![]u8 {
         const input_buffer = try odb.backendData().gpa.alloc(u8, odb.backendData().options.read_buffer_size);
         defer odb.backendData().gpa.free(input_buffer);
         var file_reader = file.reader(io, input_buffer);
@@ -679,7 +684,7 @@ pub const Odb = struct {
     /// Refuse bytes after a loose object's zlib stream, as git does
     /// ("garbage at end of loose object"). The inflater reads its input to
     /// the end of the stream's checksum and no further.
-    fn looseEnd(file_reader: *Io.File.Reader) Error!void {
+    fn looseEnd(file_reader: *Io.File.Reader) ErrorNamespace.Error!void {
         _ = file_reader.interface.peekByte() catch |err| switch (err) {
             error.EndOfStream => return,
             error.ReadFailed => return file_reader.err orelse error.ReadFailed,
@@ -689,7 +694,7 @@ pub const Odb = struct {
 
     // The inflater's ReadFailed can mean bad zlib or a failed file read.
     // Only the latter has a cause on the file reader.
-    fn looseInflateError(decompress: *const flate.Decompress, reader: *const Io.File.Reader) Error {
+    fn looseInflateError(decompress: *const flate.Decompress, reader: *const Io.File.Reader) ErrorNamespace.Error {
         if (decompress.err) |cause| {
             if (cause == error.ReadFailed) return reader.err orelse error.ReadFailed;
         }
@@ -698,7 +703,7 @@ pub const Odb = struct {
 
     /// The type and length of `oid`, with no body inflated where the object
     /// is packed and with only its header inflated where it is loose.
-    pub fn readHeader(odb: *Odb, io: Io, oid: Oid) Error!object.Header {
+    pub fn readHeader(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!object.Header {
         return (try odb.readHeaderForPack(io, oid, 0)).header;
     }
 
@@ -714,7 +719,7 @@ pub const Odb = struct {
     };
 
     /// Where `oid` is kept, looking in the packs first, as git does.
-    pub fn placement(odb: *Odb, io: Io, oid: Oid) Error!Placement {
+    pub fn placement(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Placement {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const p = &source.packs.items[located.at].pack;
@@ -755,7 +760,7 @@ pub const Odb = struct {
 
     /// The header of `oid` from the first pack that holds it, or `null`
     /// when none does; no loose copy is looked for.
-    fn packedHeader(odb: *Odb, io: Io, oid: Oid) Error!?object.Header {
+    fn packedHeader(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?object.Header {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const value = try source.packs.items[located.at].pack.headerAt(io, located.offset);
@@ -767,7 +772,7 @@ pub const Odb = struct {
     /// Where `oid`'s whole object is in the first pack that holds it, for
     /// `Pack.inflateWith`; `null` when no pack holds it or it is a delta
     /// there, which `read` resolves.
-    fn locateWhole(odb: *Odb, io: Io, oid: Oid) Error!?PackedAt {
+    fn locateWhole(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?PackedAt {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const p = &source.packs.items[located.at].pack;
@@ -793,7 +798,7 @@ pub const Odb = struct {
     /// The pack ordering pass has already opened a loose object. When its
     /// body fits `cache_available`, finish that inflate and hand the body to
     /// the write pass rather than opening and inflating it again.
-    fn readHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) Error!PackHeader {
+    fn readHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) ErrorNamespace.Error!PackHeader {
         if (try odb.tryReadHeaderForPack(io, oid, cache_available)) |found| return found;
         try odb.refresh(io);
         if (try odb.tryReadHeaderForPack(io, oid, cache_available)) |found| return found;
@@ -804,7 +809,7 @@ pub const Odb = struct {
         return error.ObjectNotFound;
     }
 
-    fn tryReadHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) Error!?PackHeader {
+    fn tryReadHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) ErrorNamespace.Error!?PackHeader {
         const want: LooseWant = if (cache_available == 0) .header else .{ .cache = cache_available };
         if (try odb.readLooseFor(io, oid, want)) |found| return .{ .header = found.header, .bytes = found.bytes, .loose = true };
         for (odb.backendData().sources.items) |*source| {
@@ -840,7 +845,7 @@ pub const Odb = struct {
     /// of the database but its sources' directory handles, so pack-writing
     /// tasks call it concurrently; `.cache` and `.list` allocate, and are
     /// the calling task's.
-    fn readLooseFor(odb: *const Odb, io: Io, oid: Oid, want: LooseWant) Error!?LooseFound {
+    fn readLooseFor(odb: *const Odb, io: Io, oid: Oid, want: LooseWant) ErrorNamespace.Error!?LooseFound {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |*source| {
@@ -917,7 +922,7 @@ pub const Odb = struct {
     /// header's own bytes and what decodes with them: the decoder writes
     /// straight into a buffer the size of the longest header, rather than
     /// filling its window.
-    fn looseHeader(file_reader: *Io.File.Reader) Error!object.Header {
+    fn looseHeader(file_reader: *Io.File.Reader) ErrorNamespace.Error!object.Header {
         var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &.{});
         var head: [64]u8 = undefined;
         var out: Io.Writer = .fixed(&head);
@@ -939,7 +944,7 @@ pub const Odb = struct {
     ///
     /// Does not refresh: a caller asking whether an object is present before
     /// writing it wants an answer, not a directory scan.
-    pub fn exists(odb: *Odb, io: Io, oid: Oid) Error!bool {
+    pub fn exists(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!bool {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |*source| {
@@ -957,7 +962,7 @@ pub const Odb = struct {
         AmbiguousPrefix,
         /// None do.
         ObjectNotFound,
-    } || Error;
+    } || ErrorNamespace.Error;
 
     /// The one object whose name begins with `prefix`.
     ///
@@ -1006,7 +1011,7 @@ pub const Odb = struct {
     ///
     /// An object already in the database is not written again, which is what
     /// git does and what keeps `addAll` from rewriting a tree every frame.
-    pub fn write(odb: *Odb, io: Io, t: object.Type, bytes: []const u8) Error!Oid {
+    pub fn write(odb: *Odb, io: Io, t: object.Type, bytes: []const u8) ErrorNamespace.Error!Oid {
         const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), t.name(), bytes);
         if (named.collision_attack) return error.CollisionAttack;
         const oid = named.oid;
@@ -1020,7 +1025,7 @@ pub const Odb = struct {
 
     /// Whether `oid` is in this database's own objects, loose or packed,
     /// and not only in an alternate.
-    pub fn existsOwn(odb: *Odb, io: Io, oid: Oid) Error!bool {
+    pub fn existsOwn(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!bool {
         const source = odb.writableSource();
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
@@ -1032,7 +1037,7 @@ pub const Odb = struct {
     /// holds it, so that it stays readable here whatever becomes of the
     /// alternate: a repository that borrows another's objects owns what it
     /// cannot afford to lose. An object already here is left as it is.
-    pub fn own(odb: *Odb, io: Io, oid: Oid) Error!void {
+    pub fn own(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!void {
         if (try odb.existsOwn(io, oid)) return;
         const found = try odb.read(io, oid);
         defer odb.backendData().gpa.free(found.bytes);
@@ -1041,7 +1046,7 @@ pub const Odb = struct {
 
     /// Writes `bytes`, named `oid`, as a loose object in this database's own
     /// objects, whatever an alternate holds.
-    fn writeLoose(odb: *Odb, io: Io, t: object.Type, bytes: []const u8, oid: Oid) Error!void {
+    fn writeLoose(odb: *Odb, io: Io, t: object.Type, bytes: []const u8, oid: Oid) ErrorNamespace.Error!void {
         const source = odb.writableSource();
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
@@ -1193,7 +1198,7 @@ pub const Odb = struct {
     /// `ObjectStream`, which `writeStream` begins.
     /// Begin writing an object of `size` bytes. The result must be `finish`ed
     /// or `abort`ed, and lives at a stable address until then.
-    pub fn writeStream(odb: *Odb, io: Io, t: object.Type, size: u64, out: *ObjectStream) Error!void {
+    pub fn writeStream(odb: *Odb, io: Io, t: object.Type, size: u64, out: *ObjectStream) ErrorNamespace.Error!void {
         const source = odb.writableSource();
         var name_buf: [128]u8 = undefined;
         const temp = fs.tempName(io, &name_buf, "tmp_obj_");
@@ -1245,7 +1250,7 @@ pub const Odb = struct {
     /// Loose objects are inflated and named; every pack is checked against
     /// its trailing checksum, every entry against the CRC its index carries,
     /// and every object against the name the index gives it.
-    pub fn verify(odb: *Odb, io: Io) Error!Report {
+    pub fn verify(odb: *Odb, io: Io) ErrorNamespace.Error!Report {
         var report: Report = .{};
         for (odb.backendData().sources.items) |*source| {
             var top = source.dir.iterate();
@@ -1293,7 +1298,7 @@ pub const Odb = struct {
     /// are resolved here afterwards, through the delta-base cache, as
     /// `verify` resolves them. The first failure in file order is the one
     /// returned.
-    fn verifyPack(odb: *Odb, io: Io, p: *pack.Pack, pack_id: u32) Error!pack.Pack.Report {
+    fn verifyPack(odb: *Odb, io: Io, p: *pack.Pack, pack_id: u32) ErrorNamespace.Error!pack.Pack.Report {
         const gpa = odb.backendData().gpa;
         const workers = taskCount(0);
         if (workers == 1 or p.count != p.index.count) return p.verify(io, &odb.backendData().cache, pack_id);
@@ -1304,7 +1309,7 @@ pub const Odb = struct {
         const readers = try gpa.alloc(pack.Pack.EntryReader, workers);
         defer gpa.free(readers);
         for (readers) |*r| r.* = .{};
-        var failures: std.ArrayList(?Error) = .empty;
+        var failures: std.ArrayList(?ErrorNamespace.Error) = .empty;
         defer failures.deinit(gpa);
 
         // The pack's own checksum, over the header and then each batch.
@@ -1395,7 +1400,7 @@ pub const Odb = struct {
         checksum: *hash.Hasher,
         readers: []pack.Pack.EntryReader,
 
-        fn work(_: Io, c: VerifyBatch, worker: usize, i: usize) Error!void {
+        fn work(_: Io, c: VerifyBatch, worker: usize, i: usize) ErrorNamespace.Error!void {
             if (i == c.items.len) return c.checksum.update(c.span);
             const item = &c.items[i];
             const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
@@ -1412,7 +1417,7 @@ pub const Odb = struct {
 
     /// The entries of `p` in file order, each running to the next or to the
     /// trailer, the first right after the header. The caller frees them.
-    fn verifyItems(gpa: Allocator, p: *const pack.Pack) Error![]VerifyItem {
+    fn verifyItems(gpa: Allocator, p: *const pack.Pack) ErrorNamespace.Error![]VerifyItem {
         std.debug.assert(p.size < 1 << 32);
         const n = p.index.count;
         // Sorted as offsets and positions together, which move cheaply.
@@ -1440,7 +1445,7 @@ pub const Odb = struct {
 
     /// The pack's trailer is the checksum `checksum` ran to, and the one
     /// its index was made for.
-    fn verifyTrailer(io: Io, p: *pack.Pack, checksum: *hash.Hasher) Error!void {
+    fn verifyTrailer(io: Io, p: *pack.Pack, checksum: *hash.Hasher) ErrorNamespace.Error!void {
         const computed = checksum.final();
         var trailer: [hash.max_raw_len]u8 = undefined;
         const raw_len = p.kind.rawLen();
@@ -1455,7 +1460,7 @@ pub const Odb = struct {
     ///
     /// This is what a fsck-shaped tool walks; nothing inside the package uses
     /// it, so a repository with a million objects pays for it only on demand.
-    pub fn listObjects(odb: *Odb, io: Io) Error!Oid.Set {
+    pub fn listObjects(odb: *Odb, io: Io) ErrorNamespace.Error!Oid.Set {
         var set: Oid.Set = .empty;
         errdefer set.deinit(odb.backendData().gpa);
         for (odb.backendData().sources.items) |*source| {
@@ -1491,7 +1496,7 @@ pub const Odb = struct {
     /// This reads the closure and opens/syncs each loose object or used pack
     /// and index, then their directories. The supplied store directory's own
     /// parent entry remains the caller's responsibility.
-    pub fn makeDurable(odb: *Odb, io: Io, roots: []const Oid) Error!void {
+    pub fn makeDurable(odb: *Odb, io: Io, roots: []const Oid) ErrorNamespace.Error!void {
         var seen: Oid.Set = .empty;
         defer seen.deinit(odb.backendData().gpa);
         var pending: std.ArrayList(Oid) = .empty;
@@ -1568,7 +1573,7 @@ pub const Odb = struct {
     /// since the last barrier durable, for the cost of one sync rather than
     /// one per object. Under the other two policies it is a no-op that costs
     /// a file creation, so a caller may always call it.
-    pub fn syncBatch(odb: *Odb, io: Io) Error!void {
+    pub fn syncBatch(odb: *Odb, io: Io) ErrorNamespace.Error!void {
         if (odb.backendData().options.sync != .batch) return;
         const source = odb.writableSource();
         try fs.syncBarrier(io, source.dir);
@@ -1597,7 +1602,7 @@ pub const Odb = struct {
         pack_dir: Io.Dir,
         entries: []const PackEntry,
         options: PackOptions,
-    ) Error!pack.WriteReport {
+    ) ErrorNamespace.Error!pack.WriteReport {
         return odb.writePackInto(io, .{ .dir = pack_dir }, entries, options);
     }
 
@@ -1610,7 +1615,7 @@ pub const Odb = struct {
         out: *Io.Writer,
         entries: []const PackEntry,
         options: PackOptions,
-    ) Error!pack.WriteReport {
+    ) ErrorNamespace.Error!pack.WriteReport {
         return odb.writePackInto(io, .{ .stream = out }, entries, options);
     }
 
@@ -1625,7 +1630,7 @@ pub const Odb = struct {
         target: PackTarget,
         entries: []const PackEntry,
         options: PackOptions,
-    ) Error!pack.WriteReport {
+    ) ErrorNamespace.Error!pack.WriteReport {
         const gpa = odb.backendData().gpa;
         // No more tasks than objects: a task with nothing to take still
         // costs the Io one, and its deflate state.
@@ -1733,7 +1738,7 @@ pub const Odb = struct {
     /// pack's index gives. The choices depend on the objects and the packs
     /// alone, and are made here on the calling task, so every task count
     /// makes the same.
-    fn planReuse(odb: *Odb, io: Io, ordered: []const Ordered, options: PackOptions) Error!Reuse {
+    fn planReuse(odb: *Odb, io: Io, ordered: []const Ordered, options: PackOptions) ErrorNamespace.Error!Reuse {
         const gpa = odb.backendData().gpa;
         if (!options.reuse_packed) return .{};
         for (ordered) |item| {
@@ -1804,7 +1809,7 @@ pub const Odb = struct {
     }
 
     /// Where `oid` is in this database's packs, with its CRC.
-    fn locatePacked(odb: *Odb, oid: Oid) Error!?struct { pack: *pack.Pack, offset: u64, crc: u32 } {
+    fn locatePacked(odb: *Odb, oid: Oid) ErrorNamespace.Error!?struct { pack: *pack.Pack, offset: u64, crc: u32 } {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const p = &source.packs.items[located.at].pack;
@@ -1818,9 +1823,9 @@ pub const Odb = struct {
     /// ones read concurrently, the rest — packed, or fetched from a
     /// promisor, which may re-scan the pack directories — on this task once
     /// the others are done.
-    fn readHeadersConcurrently(odb: *Odb, io: Io, workers: usize, ordered: []Ordered) Error!void {
+    fn readHeadersConcurrently(odb: *Odb, io: Io, workers: usize, ordered: []Ordered) ErrorNamespace.Error!void {
         const gpa = odb.backendData().gpa;
-        const failures = try gpa.alloc(?Error, ordered.len);
+        const failures = try gpa.alloc(?ErrorNamespace.Error, ordered.len);
         defer gpa.free(failures);
         const found = try gpa.alloc(bool, ordered.len);
         defer gpa.free(found);
@@ -1830,7 +1835,7 @@ pub const Odb = struct {
             odb: *const Odb,
             ordered: []Ordered,
             found: []bool,
-            fn work(task_io: Io, c: Self, _: usize, i: usize) Error!void {
+            fn work(task_io: Io, c: Self, _: usize, i: usize) ErrorNamespace.Error!void {
                 const item = &c.ordered[i];
                 if (item.known) {
                     c.found[i] = true;
@@ -1856,7 +1861,7 @@ pub const Odb = struct {
     /// The body of an object to pack, from where its header was found: the
     /// loose file when it was loose, so that an object stored twice is
     /// always packed from the same copy, and `read` otherwise.
-    fn readForPack(odb: *Odb, io: Io, item: *const Ordered) Error!Read {
+    fn readForPack(odb: *Odb, io: Io, item: *const Ordered) ErrorNamespace.Error!Read {
         if (item.loose) {
             if (try odb.readLoose(io, item.oid)) |found| return found;
         }
@@ -1884,6 +1889,8 @@ pub const Odb = struct {
     ///
     /// Everything is owned by the arena, so releasing it is one call.
     pub const Collected = struct {
+        pub const Error = ErrorNamespace.Error;
+
         arena: std.heap.ArenaAllocator,
         entries: []PackEntry,
 
@@ -1904,7 +1911,7 @@ pub const Odb = struct {
         io: Io,
         tips: []const Oid,
         options: CollectOptions,
-    ) Error!Collected {
+    ) ErrorNamespace.Error!Collected {
         var collected: Collected = .{ .arena = .init(odb.backendData().gpa), .entries = &.{} };
         errdefer collected.arena.deinit();
         const arena = collected.arena.allocator();
@@ -2005,7 +2012,7 @@ pub const Odb = struct {
     ///
     /// No hints: a loose object on its own says nothing about where it came
     /// from. `collectReachable` is the one that knows.
-    pub fn collectLoose(odb: *Odb, io: Io, options: CollectOptions) Error!Collected {
+    pub fn collectLoose(odb: *Odb, io: Io, options: CollectOptions) ErrorNamespace.Error!Collected {
         return odb.collectWritable(io, options, false);
     }
 
@@ -2014,11 +2021,11 @@ pub const Odb = struct {
     /// An alternate's objects are not here: they belong to the repository
     /// that holds them, and packing them into this one would make a second
     /// copy rather than move anything.
-    pub fn collectAll(odb: *Odb, io: Io, options: CollectOptions) Error!Collected {
+    pub fn collectAll(odb: *Odb, io: Io, options: CollectOptions) ErrorNamespace.Error!Collected {
         return odb.collectWritable(io, options, true);
     }
 
-    fn collectWritable(odb: *Odb, io: Io, options: CollectOptions, packed_too: bool) Error!Collected {
+    fn collectWritable(odb: *Odb, io: Io, options: CollectOptions, packed_too: bool) ErrorNamespace.Error!Collected {
         var collected: Collected = .{ .arena = .init(odb.backendData().gpa), .entries = &.{} };
         errdefer collected.arena.deinit();
         const arena = collected.arena.allocator();
@@ -2091,7 +2098,7 @@ pub const Odb = struct {
     /// of one file sort next to two versions of a different file of the same
     /// length, and the window looks at the wrong base. One read per tree
     /// buys the whole ordering.
-    fn assignHints(odb: *Odb, arena: Allocator, io: Io, entries: []PackEntry, threads: u16) Error!void {
+    fn assignHints(odb: *Odb, arena: Allocator, io: Io, entries: []PackEntry, threads: u16) ErrorNamespace.Error!void {
         const gpa = odb.backendData().gpa;
         const workers = taskCount(threads);
         try odb.assignHeaders(io, entries, workers);
@@ -2106,7 +2113,7 @@ pub const Odb = struct {
         var trees: std.ArrayList(TreeRead) = .empty;
         defer trees.deinit(gpa);
         defer for (trees.items) |t| if (t.bytes) |bytes| gpa.free(bytes);
-        var failures: std.ArrayList(?Error) = .empty;
+        var failures: std.ArrayList(?ErrorNamespace.Error) = .empty;
         defer failures.deinit(gpa);
         var start: usize = 0;
         while (start < entries.len) {
@@ -2162,10 +2169,10 @@ pub const Odb = struct {
     /// the loose ones on `workers` tasks, the rest here after them. A
     /// header that does not read leaves its entry without a hint, as
     /// before; only a refusal to read stops the collection.
-    fn assignHeaders(odb: *Odb, io: Io, entries: []PackEntry, workers: usize) Error!void {
+    fn assignHeaders(odb: *Odb, io: Io, entries: []PackEntry, workers: usize) ErrorNamespace.Error!void {
         if (workers > 1) {
             const gpa = odb.backendData().gpa;
-            const failures = try gpa.alloc(?Error, entries.len);
+            const failures = try gpa.alloc(?ErrorNamespace.Error, entries.len);
             defer gpa.free(failures);
             try runTasks(HeaderReads, HeaderReads.work, io, readTaskCount(workers), failures, .{ .odb = odb, .entries = entries });
         }
@@ -2192,7 +2199,7 @@ pub const Odb = struct {
         odb: *const Odb,
         entries: []PackEntry,
 
-        fn work(task_io: Io, c: HeaderReads, _: usize, i: usize) Error!void {
+        fn work(task_io: Io, c: HeaderReads, _: usize, i: usize) ErrorNamespace.Error!void {
             if (c.entries[i].in_pack) return;
             const found = c.odb.readLooseFor(task_io, c.entries[i].oid, .header) catch |err| {
                 if (opening.readRefusal(err)) return err;
@@ -2215,7 +2222,7 @@ pub const Odb = struct {
         odb: *const Odb,
         trees: []TreeRead,
 
-        fn work(task_io: Io, c: TreeReads, _: usize, i: usize) Error!void {
+        fn work(task_io: Io, c: TreeReads, _: usize, i: usize) ErrorNamespace.Error!void {
             const t = &c.trees[i];
             const into = t.bytes orelse return;
             const found = c.odb.readLooseFor(task_io, t.oid, .{ .into = into }) catch |err| {
@@ -2273,7 +2280,7 @@ pub const Odb = struct {
     /// it gives up, which is what closes the remaining window: a git that
     /// listed the packs before this ran and looked for a loose object after
     /// it finished finds the pack on its second look.
-    pub fn packLoose(odb: *Odb, io: Io, options: RepackOptions) Error!RepackReport {
+    pub fn packLoose(odb: *Odb, io: Io, options: RepackOptions) ErrorNamespace.Error!RepackReport {
         var collected = try odb.collectLoose(io, .{ .threads = options.pack.threads });
         defer collected.deinit();
         return odb.packCollected(io, collected.entries, options, false);
@@ -2284,7 +2291,7 @@ pub const Odb = struct {
     ///
     /// The same order as `packLoose`, and the same rule: nothing is taken
     /// away until the new pack is written, durable and readable here.
-    pub fn repack(odb: *Odb, io: Io, options: RepackOptions) Error!RepackReport {
+    pub fn repack(odb: *Odb, io: Io, options: RepackOptions) ErrorNamespace.Error!RepackReport {
         var collected = try odb.collectAll(io, .{ .threads = options.pack.threads });
         defer collected.deinit();
         return odb.packCollected(io, collected.entries, options, options.remove_packs);
@@ -2296,7 +2303,7 @@ pub const Odb = struct {
         entries: []const PackEntry,
         options: RepackOptions,
         remove_packs: bool,
-    ) Error!RepackReport {
+    ) ErrorNamespace.Error!RepackReport {
         if (entries.len == 0) return .{};
         const collected: struct { entries: []const PackEntry } = .{ .entries = entries };
 
@@ -2355,7 +2362,7 @@ pub const Odb = struct {
             }
             // On the reading tasks: a removal waits on the file system, and
             // they wait together.
-            const failures = try odb.backendData().gpa.alloc(?Error, doomed.items.len);
+            const failures = try odb.backendData().gpa.alloc(?ErrorNamespace.Error, doomed.items.len);
             defer odb.backendData().gpa.free(failures);
             var removed: std.atomic.Value(u32) = .init(0);
             const Remove = struct {
@@ -2364,7 +2371,7 @@ pub const Odb = struct {
                 dir: Io.Dir,
                 doomed: []const Oid,
                 removed: *std.atomic.Value(u32),
-                fn work(task_io: Io, c: Self, _: usize, i: usize) Error!void {
+                fn work(task_io: Io, c: Self, _: usize, i: usize) ErrorNamespace.Error!void {
                     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
                     const path = c.odb.loosePath(c.doomed[i], &path_buf);
                     c.dir.deleteFile(task_io, path) catch return;
@@ -2411,7 +2418,7 @@ pub const Odb = struct {
 
     /// Close and re-open every pack of one source, so that a pack removed
     /// from the disk is gone from here too.
-    fn reopenPacks(odb: *Odb, io: Io, source_index: usize) Error!void {
+    fn reopenPacks(odb: *Odb, io: Io, source_index: usize) ErrorNamespace.Error!void {
         const source = &odb.backendData().sources.items[source_index];
         for (source.packs.items) |*named| named.deinit(odb.backendData().gpa, io);
         source.packs.clearRetainingCapacity();
@@ -2439,7 +2446,7 @@ pub const Odb = struct {
     /// The count is not stated, because the caller that wants this -- one
     /// staging a working tree -- does not know it until the walk is over.
     /// `finishPack` is what closes it; `abortPack` leaves nothing behind.
-    pub fn beginPack(odb: *Odb, io: Io, options: PackOptions) Error!OpenPack {
+    pub fn beginPack(odb: *Odb, io: Io, options: PackOptions) ErrorNamespace.Error!OpenPack {
         const source = odb.writableSource();
         if (source.dir.createDir(io, "pack", .default_dir)) |_| {
             fs.adjustShared(io, source.dir, "pack", odb.backendData().options.shared);
@@ -2462,7 +2469,7 @@ pub const Odb = struct {
     /// An object the database already holds, or that this pack already
     /// holds, is not written again -- which is the same rule `write`
     /// follows, and what keeps a tree staged twice from being two entries.
-    pub fn writeInto(odb: *Odb, io: Io, filling: OpenPack, t: object.Type, bytes: []const u8) Error!Oid {
+    pub fn writeInto(odb: *Odb, io: Io, filling: OpenPack, t: object.Type, bytes: []const u8) ErrorNamespace.Error!Oid {
         const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), t.name(), bytes);
         if (named.collision_attack) return error.CollisionAttack;
         const oid = named.oid;
@@ -2480,7 +2487,7 @@ pub const Odb = struct {
     ///
     /// A pack with nothing in it is not written at all: `null` comes back
     /// and the directory is as it was.
-    pub fn finishPack(odb: *Odb, io: Io, filling: OpenPack) Error!?pack.WriteReport {
+    pub fn finishPack(odb: *Odb, io: Io, filling: OpenPack) ErrorNamespace.Error!?pack.WriteReport {
         defer {
             filling.writer.deinit(io);
             filling.dir.close(io);
@@ -2525,6 +2532,8 @@ pub const Odb = struct {
 /// database, and `abort` leaves the database as it was. The stated size
 /// must be right: it goes into the header the name is taken over.
 pub const ObjectStream = struct {
+    pub const Error = ErrorNamespace.Error;
+
     odb: *Odb,
     dir: Io.Dir,
     temp: [128]u8,
@@ -2562,7 +2571,7 @@ pub const ObjectStream = struct {
     }
 
     /// Feed bytes, hashing as they go.
-    pub fn write(s: *ObjectStream, bytes: []const u8) Error!void {
+    pub fn write(s: *ObjectStream, bytes: []const u8) ErrorNamespace.Error!void {
         std.debug.assert(!s.finished);
         std.debug.assert(s.file_open);
         if (bytes.len > s.remaining) return error.CorruptLooseObject;
@@ -2572,7 +2581,7 @@ pub const ObjectStream = struct {
     }
 
     /// Close the object and put it in the database. Returns its name.
-    pub fn finish(s: *ObjectStream, io: Io) Error!Oid {
+    pub fn finish(s: *ObjectStream, io: Io) ErrorNamespace.Error!Oid {
         std.debug.assert(!s.finished);
         std.debug.assert(s.file_open);
         if (s.remaining != 0) return error.CorruptLooseObject;

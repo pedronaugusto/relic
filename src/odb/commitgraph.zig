@@ -11,6 +11,7 @@
 //! same name; a graph that carries only those is read for its parents and
 //! reports no generations rather than pretending the two are the same.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -59,6 +60,8 @@ pub const Commit = struct {
 
 /// A commit-graph file, held in memory.
 pub const Graph = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     kind: hash.Kind,
     bytes: []const u8,
@@ -148,7 +151,7 @@ pub const Graph = struct {
         return parseBase(gpa, kind, bytes, null);
     }
 
-    fn parseBase(gpa: Allocator, kind: hash.Kind, bytes: []const u8, base: ?*Graph) Error!Graph {
+    fn parseBase(gpa: Allocator, kind: hash.Kind, bytes: []const u8, base: ?*Graph) ErrorNamespace.Error!Graph {
         errdefer gpa.free(bytes);
         if (bytes.len < 8) return error.NotACommitGraph;
         if (!std.mem.eql(u8, bytes[0..4], magic)) return error.NotACommitGraph;

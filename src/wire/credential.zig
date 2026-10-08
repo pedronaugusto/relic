@@ -24,6 +24,7 @@
 //! before it, which is how `gh auth setup-git` puts itself first for one
 //! host.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -101,6 +102,8 @@ pub const Options = struct {
 /// `oauth_refresh_token` and `password_expiry_utc` are handed back to the
 /// helpers with `store` and `erase`, as git hands them back.
 pub const Session = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     url: url_mod.Url,
     username: ?[]u8 = null,
@@ -516,7 +519,7 @@ pub const Session = struct {
         helper: []const u8,
         operation: Operation,
         settings: Settings,
-    ) Error!Outcome {
+    ) ErrorNamespace.Error!Outcome {
         const command = if (helper[0] == '!')
             try arena.print("{s} {t}", .{ helper[1..], operation })
         else if (std.Io.Dir.path.isAbsolute(helper))
@@ -548,7 +551,7 @@ pub const Session = struct {
     }
 
     /// Take a helper's answer to `get`, as git's `credential_read` does.
-    fn readAnswer(s: *Session, text: []const u8) Error!Outcome {
+    fn readAnswer(s: *Session, text: []const u8) ErrorNamespace.Error!Outcome {
         var any = false;
         var quit = false;
         var multistage = false;
@@ -604,7 +607,7 @@ pub const Session = struct {
     /// Ask for one field. With the caller's leave, the person's askpass
     /// first — `GIT_ASKPASS`, then `core.askPass`, then `SSH_ASKPASS`, as
     /// git's `git_prompt` — and then the caller's own prompt.
-    fn ask(s: *Session, io: Io, opts: Options, field: Field, prompt: []const u8) Error!?[]u8 {
+    fn ask(s: *Session, io: Io, opts: Options, field: Field, prompt: []const u8) ErrorNamespace.Error!?[]u8 {
         const p = opts.prompt orelse return error.CredentialsUnavailable;
         if (p.askpass) {
             if (try s.askpass(io, opts, prompt)) |answer| return answer;
@@ -618,7 +621,7 @@ pub const Session = struct {
         return copy;
     }
 
-    fn askpass(s: *Session, io: Io, opts: Options, prompt: []const u8) Error!?[]u8 {
+    fn askpass(s: *Session, io: Io, opts: Options, prompt: []const u8) ErrorNamespace.Error!?[]u8 {
         var command: ?[]const u8 = null;
         if (opts.programs) |programs| command = programs.environ.get("GIT_ASKPASS");
         var config_value: ?[]u8 = null;

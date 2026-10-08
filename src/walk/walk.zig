@@ -14,6 +14,7 @@
 //! repository's boundary commits have no parents here, and its commit-graph,
 //! which knows parents the repository lacks, is not read.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.revwalk.<name>`.
@@ -83,6 +84,8 @@ pub const Commit = struct {
 /// topological order is git's `sort_in_topological_order` in graph order
 /// over what that walk found.
 pub const Walk = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     db: *odb_mod.Odb,
     sort: Sort = .date,
@@ -175,7 +178,7 @@ pub const Walk = struct {
         try walk.pending.append(walk.gpa, .{ .oid = oid, .hidden = true });
     }
 
-    fn nodeOf(walk: *Walk, oid: Oid) Error!*Node {
+    fn nodeOf(walk: *Walk, oid: Oid) ErrorNamespace.Error!*Node {
         const slot = try walk.nodes.getOrPut(walk.gpa, OidKey.of(oid));
         if (!slot.found_existing) {
             errdefer _ = walk.nodes.remove(OidKey.of(oid));
@@ -188,7 +191,7 @@ pub const Walk = struct {
     }
 
     /// `repo_parse_commit`: the parents and the date.
-    fn parse(walk: *Walk, io: Io, n: *Node) Error!void {
+    fn parse(walk: *Walk, io: Io, n: *Node) ErrorNamespace.Error!void {
         if (n.parsed) return;
         // A commit-graph knows the parents a shallow repository does not
         // have, so a shallow walk reads the commits themselves.
@@ -217,7 +220,7 @@ pub const Walk = struct {
     }
 
     /// `mark_parents_uninteresting`: through what has been read already.
-    fn markParentsUninteresting(walk: *Walk, n: *Node) Error!void {
+    fn markParentsUninteresting(walk: *Walk, n: *Node) ErrorNamespace.Error!void {
         var stack: std.ArrayList(*Node) = .empty;
         defer stack.deinit(walk.gpa);
         for (n.parents) |parent| try stack.append(walk.gpa, try walk.nodeOf(parent));
@@ -229,7 +232,7 @@ pub const Walk = struct {
     }
 
     /// `process_parents`, into the date queue.
-    fn processParents(walk: *Walk, io: Io, n: *Node, queue: anytype, seq: *u64) Error!void {
+    fn processParents(walk: *Walk, io: Io, n: *Node, queue: anytype, seq: *u64) ErrorNamespace.Error!void {
         if (n.added) return;
         n.added = true;
         if (!n.uninteresting) try walk.simplifyCommit(io, n);
@@ -249,7 +252,7 @@ pub const Walk = struct {
 
     /// `try_to_simplify_commit` with git's default simplification, for
     /// `paths`.
-    fn simplifyCommit(walk: *Walk, io: Io, n: *Node) Error!void {
+    fn simplifyCommit(walk: *Walk, io: Io, n: *Node) ErrorNamespace.Error!void {
         const paths = walk.paths orelse return;
         if (n.parents.len == 0) {
             n.treesame = try simplify.sameWithin(walk.gpa, io, walk.db, null, n.tree, paths);
@@ -362,7 +365,7 @@ pub const Walk = struct {
     /// is out. In graph order the ready commits are a stack, the tips on it
     /// in the order the walk found them; in date order they are a queue by
     /// committer date, ties first in first out.
-    fn sortTopologically(walk: *Walk, list: *std.ArrayList(*Node)) Error!void {
+    fn sortTopologically(walk: *Walk, list: *std.ArrayList(*Node)) ErrorNamespace.Error!void {
         var indegree: std.AutoHashMapUnmanaged(*Node, u32) = .empty;
         defer indegree.deinit(walk.gpa);
         for (list.items) |n| try indegree.put(walk.gpa, n, 1);
