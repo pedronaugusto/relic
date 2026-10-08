@@ -137,7 +137,7 @@ pub fn toTree(
         // Validate before `enter` consults a directory in the working tree.
         if (@import("../names/path.zig").checkEntry(path, .worktree, want.mode == .symlink) != null) return error.UnsafePath;
         try write_attrs.enter(io, wt, path);
-        const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, rules);
+        const written = try worktree.writeEntry(gpa, io, wt, .{ .db = db, .conv = &conv, .path = path, .mode = want.mode, .oid = want.oid, .rules = rules });
         try stats.put(arena, path, written.stat);
     }
 

@@ -552,8 +552,8 @@ test "a stash goes through the clean and smudge filters as git's does" {
         try twin.git.exec(io, &.{ "stash", "push", "-q", "-u" });
         var repo = try twin.open(gpa, io);
         defer repo.deinit(io);
-        var drivers = try repo.loadFilters(io, .{});
-        defer drivers.deinit();
+        var drivers = try @import("../lfs/filter.zig").load(gpa, io, &repo, .{});
+        defer drivers.deinit(io);
         const programs: program.Programs = .{ .environ = &twin.environ };
         // Without the permission to run the required filter, nothing is stashed.
         try testing.expectError(error.UnsupportedAttribute, stash.push(io, &repo, .{ .who = who, .untracked = .include }));

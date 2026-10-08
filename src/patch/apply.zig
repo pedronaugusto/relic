@@ -21,6 +21,7 @@
 //! matching when the content does, where git says "does not match index"
 //! until the index is refreshed.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -244,6 +245,8 @@ pub const Failure = struct {
 
 /// Where a refusal is described. Caller-owned; `apply` clears it.
 pub const Diagnostic = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State = .{},
     failures: std.ArrayList(Failure) = .empty,
@@ -318,6 +321,8 @@ pub const File = struct {
 
 /// What `apply` did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// Every file of the patch the limits kept, in the order applied.
@@ -629,6 +634,8 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
 /// The files of a patch as `apply` takes them under `options`: read under
 /// its directory, strip count and reversal, and kept by its limits.
 pub const Kept = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     patch: patchparse.Patch,
@@ -1638,7 +1645,7 @@ fn modeFromStat(st: *State, found: fs.Entry, ce: ?index_mod.Entry) Mode {
 
 fn checkoutTarget(st: *State, ce: index_mod.Entry) Error!?fs.Entry {
     const wt = st.wt.?;
-    var written = try worktree.writeEntry(st.gpa, st.io, wt, st.repo.objectDatabase(), &st.conv, ce.path, ce.mode, ce.oid, st.rules);
+    var written = try worktree.writeEntry(st.gpa, st.io, wt, .{ .db = st.repo.objectDatabase(), .conv = &st.conv, .path = ce.path, .mode = ce.mode, .oid = ce.oid, .rules = st.rules });
     if (st.index.?.find(ce.path)) |e| e.stat = written.stat;
     _ = &written;
     return fs.statAt(st.io, wt, ce.path);
@@ -1876,7 +1883,7 @@ fn createFile(st: *State, entry: *Entry) Error!void {
     var stat: fs.Stat = .none;
     if (!st.cached) {
         if (try pathIsBeyondSymlink(st, path)) return error.UnsafePath;
-        const written = try worktree.writeBytes(st.gpa, st.io, st.wt.?, &st.conv, path, objectMode(mode), buf, st.rules);
+        const written = try worktree.writeBytes(st.gpa, st.io, st.wt.?, .{ .conv = &st.conv, .path = path, .mode = objectMode(mode), .bytes = buf, .rules = st.rules });
         stat = written.stat;
     }
     if (entry.conflicted_threeway) return addConflictedStages(st, entry);

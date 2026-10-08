@@ -161,3 +161,6 @@ test "no progress is heard and nothing breaks" {
     Progress.emit(p, .{ .received = 1 });
     try std.testing.expectEqual(@as(u64, 42), seen);
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

@@ -11,6 +11,7 @@
 //! `reftablestack` is the other side. There a transaction is one table added
 //! under one lock, so its commit is all or nothing.
 
+const ErrorNamespace = @This();
 // The modules relic's API puts under this one, as `relic.refs.<name>`.
 const reftable = @import("reftable.zig");
 /// What a ref may be named, and the names git treats apart.
@@ -122,6 +123,8 @@ pub const WatchScopes = struct {
 /// `refs/bisect`, `refs/worktree` and `refs/rewritten` are per-worktree and
 /// everything else is shared, which is the fixed list git uses.
 pub const Store = struct {
+    pub const Error = ErrorNamespace.Error;
+
     _state: *state_mod.State,
     /// Open over an already-opened pair of directories, which the store borrows.
     /// The returned owner must be released with `deinit`.
@@ -662,7 +665,7 @@ pub const Store = struct {
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, log.message);
         defer gpa.free(text);
-        return reflog.append(gpa, io, store.dirFor(name), name, old, new, log.who, text, store.sharedPermissions());
+        return reflog.append(gpa, io, store.dirFor(name), .{ .ref = name, .old = old, .new = new, .who = log.who, .message = text, .shared = store.sharedPermissions() });
     }
 
     /// Errors from `readLog`.
@@ -1164,6 +1167,8 @@ const config_mod = @import("../config/config.zig");
 /// or `aborted`. A hook that fails in either of the first two refuses the
 /// transaction, which then rolls back as it would for a held lock.
 pub const Transaction = struct {
+    pub const Error = ErrorNamespace.Error;
+
     store: *Store,
     gpa: Allocator,
     edits: std.ArrayList(Edit),
@@ -1686,17 +1691,7 @@ pub const Transaction = struct {
                 // An edit's own words, or the transaction's.
                 const own = if (source.message) |m| try reflog.normalizeMessage(tx.gpa, m) else null;
                 defer if (own) |t| tx.gpa.free(t);
-                try reflog.append(
-                    tx.gpa,
-                    io,
-                    tx.store.dirFor(edit.name),
-                    edit.name,
-                    old,
-                    new,
-                    message.who,
-                    own orelse shared,
-                    tx.store.sharedPermissions(),
-                );
+                try reflog.append(tx.gpa, io, tx.store.dirFor(edit.name), .{ .ref = edit.name, .old = old, .new = new, .who = message.who, .message = own orelse shared, .shared = tx.store.sharedPermissions() });
             }
         }
 
@@ -2903,3 +2898,6 @@ test "the watch scopes cover every ref and HEAD move, in a linked worktree too" 
         }
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = ReadError || TransactionError || LogReadError || Store.ReadLogError || Store.ExpireLogError || CreateError || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.DeleteFileError;

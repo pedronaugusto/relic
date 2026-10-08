@@ -181,3 +181,52 @@ test "phase2 canceled publication releases ref locks before its received pack ke
         try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
     }
 }
+
+test "phase2 local receive owns a keep token with default receive options" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    for (try testgit.refFormats(gpa, io)) |ref_format| {
+        for ([_][]const u8{ "sha1", "sha256" }) |format| {
+            const fmtarg = try gpa.print("--object-format={s}", .{format});
+            defer gpa.free(fmtarg);
+            var source = try testgit.Repo.init(gpa, io, &.{fmtarg});
+            defer source.deinit();
+            try source.writeFile(io, "a", "local receipt\n");
+            try source.exec(io, &.{ "add", "a" });
+            try source.exec(io, &.{ "commit", "-qm", "received" });
+            const head = try source.line(io, &.{ "rev-parse", "HEAD" });
+            defer gpa.free(head);
+            const args = try std.mem.concat(gpa, []const u8, &.{ &.{ "--bare", fmtarg }, ref_format.initArgs() });
+            defer gpa.free(args);
+            var target = try testgit.Repo.init(gpa, io, args);
+            defer target.deinit();
+            var repository = try repo_mod.Repository.open(gpa, io, target.dir, .{});
+            defer repository.deinit(io);
+            const path = try source.dir.realPathFileAlloc(io, ".", gpa);
+            defer gpa.free(path);
+            var session = try @import("../transport/transport.zig").Session.open(gpa, io, path, .upload_pack, repository.objectFormat(), .{ .local_copy = true });
+            defer session.deinit(io);
+            var pack_dir = try repository.objectDatabase().objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+            defer pack_dir.close(io);
+            const oid = try Oid.parse(repository.objectFormat(), head);
+            var fetched = try session.fetch(gpa, io, repository.objectDatabase(), pack_dir, .{ .wants = &.{oid}, .tips = &.{} }, .{});
+            defer fetched.deinit(io);
+            try testing.expect(fetched.keep != null);
+            var hex: [hash.max_hex_len]u8 = undefined;
+            const marker = try gpa.print("pack-{s}.keep", .{fetched.pack.?.hex(&hex)});
+            defer gpa.free(marker);
+            try pack_dir.access(io, marker, .{});
+            var tx = repository.refStore().begin(gpa);
+            defer tx.deinit(io);
+            try tx.create("refs/heads/main", .{ .direct = oid });
+            try tx.prepare(io);
+            try target.exec(io, &.{ "repack", "-ad" });
+            try target.exec(io, &.{ "prune", "--expire=now" });
+            try target.exec(io, &.{ "cat-file", "-e", head });
+            try tx.commit(io, null);
+            fetched.deinit(io);
+            try testing.expectError(error.FileNotFound, pack_dir.access(io, marker, .{}));
+            try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
+        }
+    }
+}

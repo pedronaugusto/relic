@@ -307,3 +307,6 @@ test "rules parse as git's do and errors are found and fixed" {
     defer gpa.free(msg);
     try std.testing.expectEqualStrings("trailing whitespace, space before tab in indent", msg);
 }
+
+/// All errors reported by this namespace.
+pub const Error = ParseError || Allocator.Error;

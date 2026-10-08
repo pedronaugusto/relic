@@ -831,7 +831,14 @@ pub const FileError = errors: {
 /// with a newline as git ends it, and processed; with `in_place` the result
 /// replaces the file, keeping its permissions, through a new file beside it,
 /// and otherwise it is appended to `out`.
-pub fn processFile(gpa: Allocator, io: Io, settings: Settings, commands: ?Commands, options: Options, new: []const New, dir: Io.Dir, path: []const u8, in_place: bool, out: *std.ArrayList(u8)) FileError!void {
+pub const FileOptions = struct { settings: Settings = .{}, commands: ?Commands = null, processing: Options = .{}, new: []const New = &.{}, in_place: bool = false, out: *std.ArrayList(u8) };
+pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_options: FileOptions) FileError!void {
+    const settings = file_options.settings;
+    const commands = file_options.commands;
+    const options = file_options.processing;
+    const new = file_options.new;
+    const in_place = file_options.in_place;
+    const out = file_options.out;
     var input: std.ArrayList(u8) = .fromOwnedSlice(try dir.readFileAlloc(io, path, gpa, .unlimited));
     defer input.deinit(gpa);
     try completeLine(gpa, &input);

@@ -1,3 +1,4 @@
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -171,6 +172,8 @@ pub const Broken = struct {
 
 /// A list of refs, loose entries shadowing packed ones.
 pub const Listing = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     entries: []Named,
@@ -221,3 +224,6 @@ pub const Edit = struct {
     /// This edit's own log text, owned: `EditOptions.message`.
     message: ?[]const u8 = null,
 };
+
+/// All errors reported by this namespace.
+pub const Error = ReadError || TransactionError || CreateError;

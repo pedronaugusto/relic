@@ -25,6 +25,7 @@
 //! `stateless-connect` and `get` are not used: a helper offering nothing
 //! else cannot fetch here, `error.HelperCannotFetch`.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -127,7 +128,7 @@ pub const Capabilities = struct {
 };
 
 /// How a helper is started.
-pub const StartOptions = struct {
+pub const OpenOptions = struct {
     programs: program.Programs,
     /// The repository's git directory, the helper's `GIT_DIR`.
     git_dir: ?[]const u8 = null,
@@ -181,6 +182,8 @@ pub const PushOptions = struct {
 
 /// A helper, running.
 pub const Helper = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     io: Io,
     arena_state: std.heap.ArenaAllocator,
@@ -205,7 +208,7 @@ pub const Helper = struct {
     line: Io.Writer.Allocating,
 
     /// Start the helper `spec` names and read its capabilities.
-    pub fn start(gpa: Allocator, io: Io, spec: Spec, options: StartOptions) Self.Error!*Helper {
+    pub fn open(gpa: Allocator, io: Io, spec: Spec, options: OpenOptions) Self.Error!*Helper {
         const h = try gpa.create(Helper);
         errdefer gpa.destroy(h);
         h.* = .{ .gpa = gpa, .io = io, .arena_state = .init(gpa), .name = "", .conn = null, .line = .init(gpa) };
@@ -248,8 +251,7 @@ pub const Helper = struct {
 
     /// End the conversation: a blank line, as git's disconnect writes it,
     /// and the helper waited for.
-    pub fn deinit(h: *Helper) void {
-        const io = h.io;
+    pub fn deinit(h: *Helper, io: Io) void {
         if (h.conn) |conn| {
             // ziglint-ignore: Z026 the blank line is a courtesy; the helper is waited for whether or not it heard it
             sayGoodbye(conn) catch {};
@@ -268,10 +270,10 @@ pub const Helper = struct {
 
     /// Give the conversation to whoever speaks the git protocol over it
     /// after a `connect`, and release the rest.
-    pub fn takeOver(h: *Helper) *Connection {
+    pub fn takeOver(h: *Helper, io: Io) *Connection {
         const conn = h.conn.?;
         h.conn = null;
-        h.deinit();
+        h.deinit(io);
         return conn;
     }
 
@@ -279,7 +281,7 @@ pub const Helper = struct {
     // Lines
     //=================================================================
 
-    fn send(h: *Helper, text: []const u8) Error!void {
+    fn send(h: *Helper, text: []const u8) ErrorNamespace.Error!void {
         const conn = h.conn.?;
         const w = try conn.request();
         w.writeAll(text) catch return conn.failure();
@@ -288,7 +290,7 @@ pub const Helper = struct {
 
     /// The helper's next line, without its line ending. At the end of its
     /// output, `error.HelperAborted`, with what it said as the message.
-    fn readLine(h: *Helper) Error![]const u8 {
+    fn readLine(h: *Helper) ErrorNamespace.Error![]const u8 {
         const conn = h.conn.?;
         const r = try conn.advertisement();
         h.line.clearRetainingCapacity();
@@ -301,7 +303,7 @@ pub const Helper = struct {
         return std.mem.trimEnd(u8, h.line.written(), "\r");
     }
 
-    fn aborted(h: *Helper) Error {
+    fn aborted(h: *Helper) ErrorNamespace.Error {
         const conn = h.conn.?;
         const ended = connection.Process.diagnose(conn, h.io) catch return error.Canceled;
         const said = std.mem.trim(u8, ended.stderr, " \t\r\n");
@@ -309,7 +311,7 @@ pub const Helper = struct {
         return error.HelperAborted;
     }
 
-    fn capabilities(h: *Helper) Error!void {
+    fn capabilities(h: *Helper) ErrorNamespace.Error!void {
         const arena = h.arena_state.allocator();
         try h.send("capabilities\n");
         while (true) {
@@ -376,7 +378,7 @@ pub const Helper = struct {
         return .unsupported;
     }
 
-    fn requireOption(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) Error!void {
+    fn requireOption(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) ErrorNamespace.Error!void {
         if (try h.option(name, value, form) != .ok) return error.HelperOptionUnsupported;
     }
 
@@ -503,7 +505,7 @@ pub const Helper = struct {
         return h.fetchWithImport(repo, wants.items, options.who orelse return error.RepositoryNeeded);
     }
 
-    fn fetchWithFetch(h: *Helper, repo: *Repository, wants: []const Want) Error!void {
+    fn fetchWithFetch(h: *Helper, repo: *Repository, wants: []const Want) ErrorNamespace.Error!void {
         var buf: Io.Writer.Allocating = .init(h.gpa);
         defer buf.deinit();
         for (wants) |w| buf.writer.print("fetch {f} {s}\n", .{ w.oid, w.name }) catch return error.OutOfMemory;
@@ -521,7 +523,7 @@ pub const Helper = struct {
         try repo.objectDatabase().refresh(h.io);
     }
 
-    fn fetchWithImport(h: *Helper, repo: *Repository, wants: []const Want, who: object.Signature) Error!void {
+    fn fetchWithImport(h: *Helper, repo: *Repository, wants: []const Want, who: object.Signature) ErrorNamespace.Error!void {
         const conn = h.conn.?;
         var buf: Io.Writer.Allocating = .init(h.gpa);
         defer buf.deinit();
@@ -575,12 +577,12 @@ pub const Helper = struct {
         return report;
     }
 
-    fn commonPushOptions(h: *Helper, options: PushOptions) Error!void {
+    fn commonPushOptions(h: *Helper, options: PushOptions) ErrorNamespace.Error!void {
         if (options.atomic) try h.requireOption("atomic", "true", .raw);
         for (options.push_options) |o| try h.requireOption("push-option", o, .quoted);
     }
 
-    fn pushWithPush(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) Error!sendpack.Report {
+    fn pushWithPush(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) ErrorNamespace.Error!sendpack.Report {
         var buf: Io.Writer.Allocating = .init(h.gpa);
         defer buf.deinit();
         const w = &buf.writer;
@@ -599,7 +601,7 @@ pub const Helper = struct {
         return h.readStatus(gpa);
     }
 
-    fn pushWithExport(h: *Helper, gpa: Allocator, repo: *Repository, commands: []const PushCommand, options: PushOptions) Error!sendpack.Report {
+    fn pushWithExport(h: *Helper, gpa: Allocator, repo: *Repository, commands: []const PushCommand, options: PushOptions) ErrorNamespace.Error!sendpack.Report {
         if (h.refspecs.items.len == 0) return error.RefspecNeeded;
         try h.commonPushOptions(options);
         for (commands) |c| if (c.force) {
@@ -658,7 +660,7 @@ pub const Helper = struct {
 
     /// The `ok <ref>` and `error <ref> <why>` lines up to a blank one:
     /// git's `push_update_refs_status`.
-    fn readStatus(h: *Helper, gpa: Allocator) Error!sendpack.Report {
+    fn readStatus(h: *Helper, gpa: Allocator) ErrorNamespace.Error!sendpack.Report {
         var report: sendpack.Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
         errdefer report.arena.deinit();
         const a = report.arena.allocator();
@@ -699,7 +701,7 @@ pub const Helper = struct {
     }
 
     /// What the helper took moves its private ref, as git moves it.
-    fn updatePrivate(h: *Helper, repo: *Repository, commands: []const PushCommand, report: *const sendpack.Report, who: ?object.Signature) Error!void {
+    fn updatePrivate(h: *Helper, repo: *Repository, commands: []const PushCommand, report: *const sendpack.Report, who: ?object.Signature) ErrorNamespace.Error!void {
         if (h.refspecs.items.len == 0 or h.caps.no_private_update) return;
         for (commands) |c| {
             const said = report.find(c.dst) orelse continue;

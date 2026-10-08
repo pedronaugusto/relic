@@ -18,6 +18,7 @@
 //! failures are reported. `worktree.addAll`, `status`, `checkout` and
 //! `applySparse` each run one.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -30,7 +31,7 @@ const attributes = @import("../patterns/attributes.zig");
 const fs = @import("../fs/fs.zig");
 const program = @import("../process/program.zig");
 const filter = @import("filter.zig");
-const lfs = @import("../lfs/lfs.zig");
+const native = @import("native.zig");
 const index_mod = @import("../index/index.zig");
 const odb_mod = @import("../odb/odb.zig");
 const encoding = @import("../text/encoding.zig");
@@ -58,13 +59,7 @@ pub const Error = error{
     FilterCapability,
     /// A process filter wrote something that is not a pkt-line.
     FilterReply,
-    /// An LFS pointer names an extension, or `lfs.extension.<name>` is
-    /// configured: a program git-lfs would run around the content, which
-    /// relic does not.
-    LfsExtensionUnsupported,
-} || Allocator.Error || Io.Cancelable || fs.ReadSizedError || Io.File.Reader.Error ||
-    lfs.Store.InstallError || lfs.Store.OpenError || Io.File.Writer.Error || lfs.FetchError ||
-    odb_mod.Error;
+} || native.Error || odb_mod.Error;
 
 /// What a conversion into the repository gave.
 pub const ToGit = struct {
@@ -74,23 +69,6 @@ pub const ToGit = struct {
     /// The line-ending conversion would not round-trip, which
     /// `core.safecrlf` reports.
     irreversible: bool = false,
-};
-
-/// Whether a native LFS clean puts the content in the store or only names
-/// it: `status` asks what a file would be stored as, and stores nothing.
-pub const Storing = enum { store, hash_only };
-
-/// What a conversion out to the working tree gave.
-pub const Smudged = union(enum) {
-    /// The bytes to write, allocated from the allocator passed in or
-    /// borrowed from the input.
-    bytes: []const u8,
-    /// An LFS object, opened, to be copied to the working tree. The caller
-    /// closes it.
-    file: Io.File,
-    /// A filter will hand this file over later; `Session.nextReady` gives it
-    /// back.
-    delayed,
 };
 
 /// What a checkout knows about the file it is writing, for a process
@@ -103,16 +81,10 @@ pub const Meta = struct {
     can_delay: bool = false,
 };
 
-/// A file handed over late.
-pub const Ready = struct {
-    /// The path, as it was given to `toWorktree`.
-    path: []const u8,
-    /// `.bytes` or `.file`, never `.delayed`.
-    content: Smudged,
-};
-
 /// One operation's conversions.
 pub const Session = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     io: Io,
     options: Options,
@@ -124,9 +96,7 @@ pub const Session = struct {
     /// The filter commands that delayed a file, each asked what is
     /// available until it says nothing is.
     delaying: std.ArrayList(Delaying) = .empty,
-    deferred: std.ArrayList(Deferred) = .empty,
-    fetched: bool = false,
-    next_deferred: usize = 0,
+    native_session: ?native.Session = null,
     /// Paths a filter has said are available, not yet asked for, as
     /// indexes into `delayed`.
     available: std.ArrayList(usize) = .empty,
@@ -134,10 +104,6 @@ pub const Session = struct {
     /// A delayed file went wrong somewhere; the operation fails once
     /// everything else is written, as git's does.
     delay_failed: bool = false,
-    /// LFS files given back as their pointer because the object is not in
-    /// the store.
-    lfs_pointers: u32 = 0,
-
     /// What a session is given.
     pub const Options = struct {
         /// The working tree, which a filter program runs in.
@@ -153,8 +119,6 @@ pub const Session = struct {
         drivers: ?*const filter.Drivers = null,
         programs: ?program.Programs = null,
         report: ?*filter.Report = null,
-        /// Where a checkout's missing LFS objects are fetched from.
-        fetch: ?lfs.Fetcher = null,
         /// The index the working tree is compared with, and the objects it
         /// names. Where the content decides whether a file is text, a file
         /// whose indexed version already has CRLF endings keeps them, as it
@@ -176,13 +140,6 @@ pub const Session = struct {
         done: bool = false,
     };
 
-    const Deferred = struct {
-        path: []const u8,
-        pointer: lfs.Pointer,
-        /// What is written if the object still is not there: the pointer.
-        pointer_bytes: []const u8,
-    };
-
     /// A session with nothing started. Nothing runs until a file needs it.
     pub fn init(gpa: Allocator, io: Io, options: Options) Session {
         return .{ .gpa = gpa, .io = io, .options = options, .arena = .init(gpa) };
@@ -191,23 +148,34 @@ pub const Session = struct {
     /// Finish every filter process — close its input and wait for it, which
     /// is how git ends one — and release everything.
     pub fn deinit(s: *Session) void {
-        for (s.processes.items) |p| p.stop(s.io, .finish);
+        for (s.processes.items) |p| p.deinit(s.io);
         s.processes.deinit(s.gpa);
         s.delayed.deinit(s.gpa);
         s.delaying.deinit(s.gpa);
-        s.deferred.deinit(s.gpa);
+        if (s.native_session) |implementation| implementation.deinit(s.io);
         s.available.deinit(s.gpa);
         s.arena.deinit();
         s.* = undefined;
     }
 
-    /// relic's own LFS, when the drivers carry it.
-    fn lfsOf(s: *const Session) ?*const lfs.Lfs {
-        const drivers = s.options.drivers orelse return null;
-        return if (drivers.lfs) |*l| l else null;
+    fn nativeOf(s: *Session) ErrorNamespace.Error!native.Session {
+        if (s.native_session) |implementation| return implementation;
+        const driver = s.options.drivers.?.native_driver.?;
+        s.native_session = try driver.open(s.gpa, s.io, .{
+            .wt = s.options.wt,
+            .observer = if (s.options.report) |r| .{ .context = r, .missing_fn = observeMissing } else null,
+        });
+        return s.native_session.?;
+    }
+    fn observeMissing(context: *anyopaque, path: []const u8, object: native.Object, declined: bool) Allocator.Error!void {
+        const r: *filter.Report = @ptrCast(@alignCast(context));
+        return r.missing(path, object, declined);
+    }
+    pub fn fallbackCount(s: *const Session) u32 {
+        return if (s.native_session) |implementation| implementation.fallbacks() else 0;
     }
 
-    fn resolve(s: *Session, path: []const u8, applied: attributes.Attributes) Error!filter.Drivers.Resolved {
+    fn resolve(s: *Session, path: []const u8, applied: attributes.Attributes) ErrorNamespace.Error!filter.Drivers.Resolved {
         const name = applied.value("filter") orelse return .none;
         if (s.options.drivers) |drivers| return drivers.resolve(name);
         for (s.options.required_filters) |required| {
@@ -228,12 +196,12 @@ pub const Session = struct {
         path: []const u8,
         size: u64,
         applied: attributes.Attributes,
-        storing: Storing,
+        storing: native.Storing,
     ) Self.Error!ToGit {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
-        if (resolved == .native_lfs) {
-            const pointer_bytes = try s.lfsCleanFile(a, path, storing);
+        if (resolved == .native) {
+            const pointer_bytes = try (try s.nativeOf()).cleanFile(a, s.io, .{ .path = path, .storing = storing });
             return s.afterFilter(a, path, pointer_bytes, applied, storing);
         }
         const bytes = try fs.readFileSized(a, s.io, s.options.wt, path, size, 1 << 31);
@@ -247,7 +215,7 @@ pub const Session = struct {
         path: []const u8,
         bytes: []const u8,
         applied: attributes.Attributes,
-        storing: Storing,
+        storing: native.Storing,
     ) Self.Error!ToGit {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
@@ -261,12 +229,12 @@ pub const Session = struct {
         bytes: []const u8,
         applied: attributes.Attributes,
         resolved: filter.Drivers.Resolved,
-        storing: Storing,
-    ) Error!ToGit {
+        storing: native.Storing,
+    ) ErrorNamespace.Error!ToGit {
         var cleaned = bytes;
         switch (resolved) {
             .none => {},
-            .native_lfs => cleaned = try s.lfsClean(a, bytes, storing),
+            .native => cleaned = try (try s.nativeOf()).clean(a, s.io, .{ .bytes = bytes, .storing = storing }),
             .program => |driver| {
                 if (try s.clean(a, path, driver, bytes)) |out| cleaned = out;
             },
@@ -274,7 +242,7 @@ pub const Session = struct {
         return s.afterFilter(a, path, cleaned, applied, storing);
     }
 
-    fn afterFilter(s: *Session, a: Allocator, path: []const u8, filtered: []const u8, applied: attributes.Attributes, storing: Storing) Error!ToGit {
+    fn afterFilter(s: *Session, a: Allocator, path: []const u8, filtered: []const u8, applied: attributes.Attributes, storing: native.Storing) ErrorNamespace.Error!ToGit {
         var bytes = filtered;
         if (try encodingOf(applied)) |e| {
             bytes = encoding.toUtf8(a, e, filtered) catch |err| switch (err) {
@@ -296,7 +264,7 @@ pub const Session = struct {
     /// Whether the index's version of `path` is text with CRLF endings:
     /// stage 0, or in the middle of a merge the stage that is ours, as git
     /// reads it.
-    fn storedHasCrlf(s: *Session, path: []const u8) Error!bool {
+    fn storedHasCrlf(s: *Session, path: []const u8) ErrorNamespace.Error!bool {
         const index = s.options.index orelse return false;
         const db = s.options.db orelse return false;
         const entry = index.find(path) orelse index.findStage(path, 2) orelse return false;
@@ -315,7 +283,7 @@ pub const Session = struct {
         blob: []const u8,
         applied: attributes.Attributes,
         meta: Meta,
-    ) Self.Error!Smudged {
+    ) Self.Error!native.Content {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         const ident = if (identOn(applied)) try identToWorktree(a, s.options.kind, blob) else null;
@@ -323,7 +291,7 @@ pub const Session = struct {
         const bytes = try encodeForWorktree(a, crlf.bytes, applied);
         switch (resolved) {
             .none => return .{ .bytes = bytes },
-            .native_lfs => return s.lfsSmudge(a, path, bytes, meta.can_delay),
+            .native => return (try s.nativeOf()).smudge(a, s.io, .{ .path = path, .bytes = bytes, .can_delay = meta.can_delay }),
             .program => |driver| return s.smudge(a, path, driver, bytes, meta),
         }
     }
@@ -345,15 +313,11 @@ pub const Session = struct {
             if (try identToWorktree(a, s.options.kind, out)) |expanded| out = expanded;
         }
         if (resolved == .program) out = (try attributes.toWorktree(a, out, applied, s.options.core)).bytes;
-        if (resolved != .native_lfs) out = try encodeForWorktree(a, out, applied);
+        if (resolved != .native) out = try encodeForWorktree(a, out, applied);
         switch (resolved) {
             .none => {},
-            .native_lfs => {
-                if (lfs.Pointer.decode(out)) |pointer| {
-                    if (pointer.extension_count != 0) return error.LfsExtensionUnsupported;
-                    out = try encodePointer(a, &pointer);
-                    return out;
-                } else |_| {}
+            .native => {
+                if (try (try s.nativeOf()).canonical(a, out)) |canonical_bytes| return canonical_bytes;
             },
             .program => |driver| {
                 switch (try s.smudge(a, path, driver, out, .{})) {
@@ -379,7 +343,7 @@ pub const Session = struct {
     /// The encoding `working-tree-encoding` names, or `null` for none or
     /// UTF-8: git's `git_path_check_encoding`. A name this does not convert
     /// was refused before.
-    fn encodingOf(applied: attributes.Attributes) Error!?encoding.Encoding {
+    fn encodingOf(applied: attributes.Attributes) ErrorNamespace.Error!?encoding.Encoding {
         const state = applied.get("working-tree-encoding") orelse return null;
         const name = switch (state) {
             .unspecified => return null,
@@ -392,7 +356,7 @@ pub const Session = struct {
 
     /// git's `encode_to_worktree`: UTF-8 out in the file's encoding, and
     /// left as it is where it is not UTF-8.
-    fn encodeForWorktree(a: Allocator, bytes: []const u8, applied: attributes.Attributes) Error![]const u8 {
+    fn encodeForWorktree(a: Allocator, bytes: []const u8, applied: attributes.Attributes) ErrorNamespace.Error![]const u8 {
         const e = (try encodingOf(applied)) orelse return bytes;
         return encoding.fromUtf8(a, e, bytes) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -416,7 +380,7 @@ pub const Session = struct {
         driver: *const filter.Driver,
         reason: filter.Reason,
         detail: []const u8,
-    ) Error!?[]const u8 {
+    ) ErrorNamespace.Error!?[]const u8 {
         if (s.options.report) |r| try r.fail(path, driver.name, reason, detail);
         if (driver.required) {
             return if (reason == .needs_program) error.UnsupportedAttribute else error.FilterFailed;
@@ -425,7 +389,7 @@ pub const Session = struct {
         return null;
     }
 
-    fn clean(s: *Session, a: Allocator, path: []const u8, driver: *const filter.Driver, bytes: []const u8) Error!?[]const u8 {
+    fn clean(s: *Session, a: Allocator, path: []const u8, driver: *const filter.Driver, bytes: []const u8) ErrorNamespace.Error!?[]const u8 {
         const programs = s.options.programs orelse return s.passOver(path, driver, .needs_program, "");
         if (driver.process) |command| {
             return switch (try s.processRequest(a, path, driver, command, .clean, bytes, .{})) {
@@ -448,7 +412,7 @@ pub const Session = struct {
         driver: *const filter.Driver,
         bytes: []const u8,
         meta: Meta,
-    ) Error!Smudged {
+    ) ErrorNamespace.Error!native.Content {
         const programs = s.options.programs orelse
             return .{ .bytes = (try s.passOver(path, driver, .needs_program, "")) orelse bytes };
         if (driver.process) |command| {
@@ -473,8 +437,8 @@ pub const Session = struct {
         driver: *const filter.Driver,
         line: []const u8,
         bytes: []const u8,
-    ) Error!?[]const u8 {
-        return switch (try filter.runCommand(a, s.io, programs, s.options.wt, line, path, bytes)) {
+    ) ErrorNamespace.Error!?[]const u8 {
+        return switch (try filter.runCommand(a, s.io, programs, line, .{ .cwd = s.options.wt, .path = path, .input = bytes })) {
             .output => |out| out,
             .failed => |stderr| s.passOver(path, driver, .exited, stderr),
             .not_started => s.passOver(path, driver, .not_started, ""),
@@ -487,12 +451,12 @@ pub const Session = struct {
         delayed,
     };
 
-    fn processFor(s: *Session, command: []const u8) filter.Process.StartError!*filter.Process {
+    fn processFor(s: *Session, command: []const u8) filter.Process.OpenError!*filter.Process {
         for (s.processes.items) |p| {
             if (std.mem.eql(u8, p.command, command)) return p;
         }
         try s.processes.ensureUnusedCapacity(s.gpa, 1);
-        const p = try filter.Process.start(s.gpa, s.io, s.options.programs.?, command, s.options.wt);
+        const p = try filter.Process.open(s.gpa, s.io, s.options.programs.?, command, s.options.wt);
         s.processes.appendAssumeCapacity(p);
         return p;
     }
@@ -513,7 +477,8 @@ pub const Session = struct {
                 break;
             }
         }
-        p.stop(s.io, .kill);
+        p.kill(s.io);
+        p.deinit(s.io);
     }
 
     fn processRequest(
@@ -525,7 +490,7 @@ pub const Session = struct {
         which: filter.Protocol.Command,
         bytes: []const u8,
         meta: Meta,
-    ) Error!ProcessOutcome {
+    ) ErrorNamespace.Error!ProcessOutcome {
         const p = s.processFor(command) catch |err| switch (err) {
             error.FilterNotStarted => {
                 _ = try s.passOver(path, driver, .not_started, "");
@@ -603,84 +568,6 @@ pub const Session = struct {
     }
 
     // ---------------------------------------------------------------
-    // relic's own LFS
-
-    /// A file already a pointer is stored as it is, which is git-lfs's rule:
-    /// cleaning twice changes nothing.
-    fn lfsClean(s: *Session, a: Allocator, bytes: []const u8, storing: Storing) Error![]const u8 {
-        if (lfs.Pointer.decode(bytes)) |_| return bytes else |_| {}
-        const l = s.lfsOf().?;
-        if (l.extensions) return error.LfsExtensionUnsupported;
-        var source: Io.Reader = .fixed(bytes);
-        const pointer = switch (storing) {
-            .store => try l.store.install(s.io, &source, null),
-            // unreachable: a fixed reader over bytes in memory does not fail to read
-            .hash_only => lfs.hashOnly(&source) catch unreachable,
-        };
-        return encodePointer(a, &pointer);
-    }
-
-    fn lfsCleanFile(s: *Session, a: Allocator, path: []const u8, storing: Storing) Error![]const u8 {
-        const l = s.lfsOf().?;
-        if (l.extensions) return error.LfsExtensionUnsupported;
-        const file = try s.options.wt.openFile(s.io, path, .{});
-        defer file.close(s.io);
-        var head: [lfs.pointer_size_cutoff]u8 = undefined;
-        const n = try file.readPositionalAll(s.io, &head, 0);
-        if (lfs.Pointer.decode(head[0..n])) |_| {
-            if (n < head.len) return a.dupe(u8, head[0..n]);
-            return s.options.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
-        } else |_| {}
-
-        var buf: [64 * 1024]u8 = undefined;
-        var reader = file.reader(s.io, &buf);
-        const pointer = switch (storing) {
-            .store => l.store.install(s.io, &reader.interface, null) catch |err| switch (err) {
-                error.ReadFailed => return reader.err.?,
-                else => |e| return e,
-            },
-            .hash_only => lfs.hashOnly(&reader.interface) catch return reader.err.?,
-        };
-        return encodePointer(a, &pointer);
-    }
-
-    fn encodePointer(a: Allocator, pointer: *const lfs.Pointer) Allocator.Error![]const u8 {
-        var buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
-        return a.dupe(u8, pointer.encodeBuf(&buf));
-    }
-
-    /// Content that is not a pointer is passed through, and a pointer to
-    /// nothing is the empty file. A pointer whose object is here is the
-    /// object; one whose object is not is written as the canonical pointer,
-    /// which is git-lfs's own fallback.
-    fn lfsSmudge(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, can_delay: bool) Error!Smudged {
-        const pointer = lfs.Pointer.decode(bytes) catch return .{ .bytes = bytes };
-        if (pointer.size == 0) return .{ .bytes = "" };
-        if (pointer.extension_count != 0) return error.LfsExtensionUnsupported;
-        const l = s.lfsOf().?;
-        if (try l.store.open(s.io, &pointer)) |file| return .{ .file = file };
-
-        const canonical = try encodePointer(a, &pointer);
-        if (!l.settings.fetchAllowed(path)) {
-            if (s.options.report) |r| try r.missing(path, pointer, true);
-            s.lfs_pointers += 1;
-            return .{ .bytes = canonical };
-        }
-        if (s.options.fetch != null and can_delay) {
-            const arena = s.arena.allocator();
-            try s.deferred.append(s.gpa, .{
-                .path = try arena.dupe(u8, path),
-                .pointer = pointer,
-                .pointer_bytes = try arena.dupe(u8, canonical),
-            });
-            return .delayed;
-        }
-        if (s.options.report) |r| try r.missing(path, pointer, false);
-        s.lfs_pointers += 1;
-        return .{ .bytes = canonical };
-    }
-
-    // ---------------------------------------------------------------
     // Files handed over late
 
     /// The next file handed over late, or null when there are none left.
@@ -692,8 +579,10 @@ pub const Session = struct {
     /// file it names is asked for again. A delayed file never handed over,
     /// or one handed over that was never delayed, is `error.FilterFailed`
     /// once every other file has been given back.
-    pub fn nextReady(s: *Session, a: Allocator) Self.Error!?Ready {
-        if (try s.nextDeferred()) |ready| return ready;
+    pub fn nextReady(s: *Session, a: Allocator) Self.Error!?native.Ready {
+        if (s.native_session) |implementation| {
+            if (try implementation.nextReady(a, s.io)) |ready| return ready;
+        }
         while (true) {
             assert(s.next_available <= s.available.items.len);
             if (s.next_available < s.available.items.len) {
@@ -715,29 +604,10 @@ pub const Session = struct {
         return null;
     }
 
-    fn nextDeferred(s: *Session) Error!?Ready {
-        if (s.deferred.items.len == 0) return null;
-        const l = s.lfsOf().?;
-        if (!s.fetched) {
-            s.fetched = true;
-            const wanted = try s.arena.allocator().alloc(lfs.Wanted, s.deferred.items.len);
-            for (s.deferred.items, wanted) |d, *w| w.* = .{ .path = d.path, .pointer = d.pointer };
-            try s.options.fetch.?.fetch(s.io, &l.store, &l.settings, wanted);
-        }
-        assert(s.next_deferred <= s.deferred.items.len);
-        if (s.next_deferred == s.deferred.items.len) return null;
-        const d = s.deferred.items[s.next_deferred];
-        s.next_deferred += 1;
-        if (try l.store.open(s.io, &d.pointer)) |file| return .{ .path = d.path, .content = .{ .file = file } };
-        if (s.options.report) |r| try r.missing(d.path, d.pointer, false);
-        s.lfs_pointers += 1;
-        return .{ .path = d.path, .content = .{ .bytes = d.pointer_bytes } };
-    }
-
     /// Ask every filter that delayed a file what is available, until each
     /// answers with nothing, as git does. False when none has anything more
     /// to say.
-    fn askAvailable(s: *Session, a: Allocator) Error!bool {
+    fn askAvailable(s: *Session, a: Allocator) ErrorNamespace.Error!bool {
         var asked = false;
         for (s.delaying.items) |*delaying| {
             if (delaying.done) continue;
@@ -795,7 +665,7 @@ pub const Session = struct {
     /// Ask again for a file the filter says is ready. No content goes with
     /// the request, since the filter has it; a failure here writes an empty
     /// file for a driver that is not required, which is what git writes.
-    fn redeliver(s: *Session, a: Allocator, d: *Delayed) Error!Ready {
+    fn redeliver(s: *Session, a: Allocator, d: *Delayed) ErrorNamespace.Error!native.Ready {
         const command = d.driver.process.?;
         const p = s.findProcess(command) orelse {
             _ = try s.passOver(d.path, d.driver, .broken, "");

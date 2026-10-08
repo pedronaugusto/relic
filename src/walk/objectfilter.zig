@@ -305,3 +305,6 @@ const Traversal = struct {
         return if (m.by != null) m.excluded else inherited;
     }
 };
+
+/// All errors reported by this namespace.
+pub const Error = objectwalk.Error;

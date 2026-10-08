@@ -15,6 +15,7 @@
 //! imports, pushes or exports is spoken to in its own commands. A `Session`
 //! hides which it is from the operations above.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const httpsettings = @import("../wire/httpsettings.zig");
@@ -159,6 +160,8 @@ pub fn wantsV2(config: ?*const config_mod.Config) bool {
 
 /// An open remote.
 pub const Session = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     service: Service,
     impl: union(enum) {
@@ -247,7 +250,7 @@ pub const Session = struct {
         service: Service,
         kind: ?hash.Kind,
         options: Options,
-    ) Error!Session {
+    ) ErrorNamespace.Error!Session {
         if (try openHelper(gpa, io, remote_url, service, kind, options)) |session| return session;
         const parsed = try url.Url.parse(remote_url);
         // Every transport is checked, as git's `transport_get` checks it,
@@ -277,7 +280,7 @@ pub const Session = struct {
                 // The connection owns the repository once it is made.
                 var owned = true;
                 errdefer if (owned) gpa.destroy(here);
-                here.* = try local.Remote.open(gpa, io, remote_url);
+                here.* = try local.Remote.open(gpa, io, remote_url, .{});
                 errdefer if (owned) here.deinit(io);
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 const v2 = options.protocol_v2 orelse wantsV2(options.config);
@@ -288,7 +291,7 @@ pub const Session = struct {
             } else {
                 const here = try gpa.create(local.Remote);
                 errdefer gpa.destroy(here);
-                here.* = try local.Remote.open(gpa, io, remote_url);
+                here.* = try local.Remote.open(gpa, io, remote_url, .{});
                 errdefer here.deinit(io);
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 if (service == .receive_pack) try here.serve(.receive_pack);
@@ -330,7 +333,7 @@ pub const Session = struct {
         }
     }
 
-    fn checkAllowed(options: Options, name: []const u8) Error!void {
+    fn checkAllowed(options: Options, name: []const u8) ErrorNamespace.Error!void {
         const environ = if (options.programs) |p| p.environ else null;
         if (!policy.allowed(options.config, environ, name, options.from_user)) return error.TransportNotAllowed;
     }
@@ -344,7 +347,7 @@ pub const Session = struct {
         service: Service,
         kind: ?hash.Kind,
         options: Options,
-    ) Error!?Session {
+    ) ErrorNamespace.Error!?Session {
         const vcs: ?[]const u8 = if (options.remote_name) |name| if (options.config) |c| blk: {
             var key_buf: [256]u8 = undefined;
             const key = std.mem.print(&key_buf, "remote.{s}.vcs", .{name}) catch break :blk null;
@@ -355,14 +358,14 @@ pub const Session = struct {
         const programs = options.programs orelse return error.ProgramsNotGranted;
         const git_dir: ?[:0]u8 = if (options.repository) |r| try r.gitDirectory().realPathFileAlloc(io, ".", gpa) else null;
         defer if (git_dir) |d| gpa.free(d);
-        const h = try remotehelper.Helper.start(gpa, io, spec, .{
+        const h = try remotehelper.Helper.open(gpa, io, spec, .{
             .programs = programs,
             .git_dir = git_dir,
             .progress = options.progress != null,
         });
-        errdefer h.deinit();
+        errdefer h.deinit(io);
         if (try h.connect(service, options.service_program)) {
-            const conn = h.takeOver();
+            const conn = h.takeOver(io);
             errdefer conn.deinit(io);
             const session = try fromConnection(gpa, conn, service, kind);
             return session;
@@ -396,7 +399,7 @@ pub const Session = struct {
                 s.gpa.destroy(here);
             },
             .bundle => |f| f.deinit(io),
-            .helper => |helper| helper.h.deinit(),
+            .helper => |helper| helper.h.deinit(io),
             .smart => |*smart| {
                 // A conversation over a pipe that the server still waits on
                 // ends with a flush, which it reads as nothing more wanted,
@@ -559,6 +562,8 @@ pub const Session = struct {
 
     /// What a fetch brought.
     pub const Fetched = struct {
+        pub const Error = ErrorNamespace.Error;
+
         keep: ?@import("../odb/keep.zig").Token = null,
         /// The new pack's name, or `null` when nothing new came.
         pack: ?Oid,
@@ -589,11 +594,11 @@ pub const Session = struct {
             .local => |here| {
                 // A local copy writes the pack the receive would index, so
                 // `pack.threads` sizes it, as git's pack-objects reads it.
-                const report = try here.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{
-                    .keep = options.receive.keep,
+                const report = try here.copyObjects(io, db, request.wants, .{ .pack_dir = pack_dir, .haves = request.tips, .include_tags = request.include_tag, .pack = .{
+                    .keep = true,
                     .reverse_index = options.receive.reverse_index,
                     .threads = std.math.lossyCast(u16, options.receive.threads),
-                });
+                } });
                 const written = report orelse return .{ .pack = null, .objects = 0 };
                 return .{ .pack = written.name, .objects = written.objects, .keep = written.keep };
             },

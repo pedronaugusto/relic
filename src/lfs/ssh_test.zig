@@ -201,8 +201,8 @@ test "objects go up and come down over git-lfs-transfer, asked for as git-lfs as
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try t.openServer(s.fx, &repo);
-            defer server.deinit();
-            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer server.deinit(io);
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
             try t.expectNoFailures(&fetched);
         }
@@ -240,8 +240,8 @@ test "without git-lfs-transfer, or with one that will not speak version 1, git-l
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try t.openServer(s.fx, &repo);
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 try t.expectNoFailures(&fetched);
             }
@@ -283,12 +283,12 @@ test "lfs.sshtransfer=always is the pure-ssh protocol or nothing, and never is g
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try t.openServer(s.fx, &repo);
-                defer server.deinit();
+                defer server.deinit(io);
                 if (refused) {
-                    try testing.expectError(error.LfsAuthenticateDisabled, lfstransfer.fetch(server, &repo, .{}));
+                    try testing.expectError(error.LfsAuthenticateDisabled, lfstransfer.fetch(io, server, &repo, .{}));
                     try testing.expect(std.mem.startsWith(u8, server.client.message(), "git-lfs-authenticate has been disabled by request (lfs.sshtransfer=always)"));
                 } else {
-                    var fetched = try lfstransfer.fetch(server, &repo, .{});
+                    var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                     defer fetched.deinit();
                     try t.expectNoFailures(&fetched);
                 }
@@ -329,35 +329,35 @@ test "locks are taken, listed, verified and given back over git-lfs-transfer, as
             defer repo.deinit(io);
             {
                 const server = try t.openServer(s.fx, &repo);
-                defer server.deinit();
-                const got = try lfslocks.lock(arena, server, &repo, "a.bin", .{});
+                defer server.deinit(io);
+                const got = try lfslocks.lock(arena, io, server, &repo, .{ .path = "a.bin", .request = .{} });
                 try testing.expectEqualStrings("ada", got.locked.owner.?);
             }
             {
                 const server = try t.openServer(s.fx, &repo);
-                defer server.deinit();
-                var listed = try lfslocks.list(server, &repo, .{}, .{});
+                defer server.deinit(io);
+                var listed = try lfslocks.list(io, server, &repo, .{}, .{});
                 defer listed.deinit();
                 try testing.expectEqual(@as(usize, 2), listed.locks.len);
             }
             {
                 const server = try t.openServer(s.fx, &repo);
-                defer server.deinit();
-                var verified = try lfslocks.verify(server, &repo, .{});
+                defer server.deinit(io);
+                var verified = try lfslocks.verify(io, server, &repo, .{});
                 defer verified.deinit();
                 try testing.expectEqual(@as(usize, 1), verified.ours.len);
                 try testing.expectEqualStrings("b.bin", verified.theirs[0].path);
             }
             {
                 const server = try t.openServer(s.fx, &repo);
-                defer server.deinit();
-                const held = try lfslocks.lock(arena, server, &repo, "b.bin", .{});
+                defer server.deinit(io);
+                const held = try lfslocks.lock(arena, io, server, &repo, .{ .path = "b.bin", .request = .{} });
                 try testing.expectEqualStrings("bob", held.held.owner.?);
             }
             {
                 const server = try t.openServer(s.fx, &repo);
-                defer server.deinit();
-                const released = try lfslocks.unlockPath(arena, server, &repo, "a.bin", false, .{});
+                defer server.deinit(io);
+                const released = try lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "a.bin", .request = .{ .force = false } });
                 try testing.expectEqualStrings("a.bin", released.path);
             }
         }
@@ -404,8 +404,8 @@ test "each transfer worker has its own git-lfs-transfer, sharing the first's ssh
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try t.openServer(s.fx, &repo);
-            defer server.deinit();
-            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer server.deinit(io);
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
             try t.expectNoFailures(&fetched);
             try testing.expectEqual(@as(usize, 6), fetched.results.len);
@@ -464,11 +464,11 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
         defer repo.deinit(io);
         const server = try t.openServer(fx, &repo);
         defer server.close();
-        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        var fetched = try lfstransfer.fetch(io, server, &repo, .{});
         defer fetched.deinit();
         try t.expectNoFailures(&fetched);
         // Over the pure-ssh protocol, not a fallback.
-        try testing.expect(try server.client.sshTransfer(.download) != null);
+        try testing.expect(try server.client.sshTransfer(io, .download) != null);
         for ([_][]const u8{ first, second }) |c| try testing.expect((try server.store().contains(io, &.{ .oid = testlfs.sha256Hex(c), .size = c.len })));
     }
 
@@ -504,7 +504,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     {
         const server = try t.openServer(fx, &repo);
         defer server.close();
-        _ = (try lfslocks.lock(arena, server, &repo, "a.bin", .{})).locked;
+        _ = (try lfslocks.lock(arena, io, server, &repo, .{ .path = "a.bin", .request = .{} })).locked;
     }
     const listed = try fx.gitOut(d, &.{ "lfs", "locks" });
     defer gpa.free(listed);
@@ -513,20 +513,20 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     {
         const server = try t.openServer(fx, &repo);
         defer server.close();
-        var verified = try lfslocks.verify(server, &repo, .{});
+        var verified = try lfslocks.verify(io, server, &repo, .{});
         defer verified.deinit();
         try testing.expectEqual(@as(usize, 2), verified.ours.len);
     }
     {
         const server = try t.openServer(fx, &repo);
         defer server.close();
-        _ = try lfslocks.unlockPath(arena, server, &repo, "b.bin", false, .{});
+        _ = try lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "b.bin", .request = .{ .force = false } });
     }
     try fx.gitIn(d, &.{ "lfs", "unlock", "a.bin" });
     {
         const server = try t.openServer(fx, &repo);
         defer server.close();
-        var none = try lfslocks.list(server, &repo, .{}, .{});
+        var none = try lfslocks.list(io, server, &repo, .{}, .{});
         defer none.deinit();
         try testing.expectEqual(@as(usize, 0), none.locks.len);
     }
@@ -544,23 +544,31 @@ test "phase2 LFS SSH pagination ends or explicitly refuses a repeated cursor" {
             var repo = try repo_mod.Repository.open(testing.allocator, testing.io, d, .{});
             defer repo.deinit(testing.io);
             const server = try t.openServer(s.fx, &repo);
-            defer server.deinit();
+            defer server.deinit(testing.io);
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
-            _ = try lfslocks.lock(arena.allocator(), server, &repo, "a.bin", .{ .ref = "refs/heads/main" });
+            _ = try lfslocks.lock(arena.allocator(), std.testing.io, server, &repo, .{ .path = "a.bin", .request = .{ .ref = "refs/heads/main" } });
             try repo.commonDirectory().deleteTree(testing.io, "lfs/cache/locks");
+            const cache_path = "lfs/cache/locks/refs/heads/main";
+            const remote_bytes = "[{\"id\":\"old\",\"path\":\"old.bin\"}]\n";
+            const verify_bytes = "{\"ours\":[{\"id\":\"old\",\"path\":\"old.bin\"}],\"theirs\":[]}\n";
+            if (i >= 4) {
+                try repo.commonDirectory().createDirPath(testing.io, cache_path);
+                try repo.commonDirectory().writeFile(testing.io, .{ .sub_path = cache_path ++ "/remote", .data = remote_bytes });
+                try repo.commonDirectory().writeFile(testing.io, .{ .sub_path = cache_path ++ "/verifiable", .data = verify_bytes });
+            }
             if (verify) {
                 if (i >= 4) {
-                    try testing.expectError(error.MalformedResponse, lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" }));
+                    try testing.expectError(error.MalformedResponse, lfslocks.verify(std.testing.io, server, &repo, .{ .ref = "refs/heads/main" }));
                 } else {
-                    var result = try lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" });
+                    var result = try lfslocks.verify(std.testing.io, server, &repo, .{ .ref = "refs/heads/main" });
                     result.deinit();
                 }
             } else {
                 if (i >= 4) {
-                    try testing.expectError(error.MalformedResponse, lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" }));
+                    try testing.expectError(error.MalformedResponse, lfslocks.list(std.testing.io, server, &repo, .{}, .{ .ref = "refs/heads/main" }));
                 } else {
-                    var result = try lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" });
+                    var result = try lfslocks.list(std.testing.io, server, &repo, .{}, .{ .ref = "refs/heads/main" });
                     result.deinit();
                 }
             }
@@ -568,6 +576,16 @@ test "phase2 LFS SSH pagination ends or explicitly refuses a repeated cursor" {
             var cached = try lfslocks.Table.cached(testing.allocator, testing.io, &store, "refs/heads/main");
             defer cached.deinit();
             try testing.expectEqual(i < 4, cached.find("a.bin") != null);
+            if (i >= 4) {
+                try testing.expect(cached.find("old.bin") != null);
+                for ([_][2][]const u8{ .{ "remote", remote_bytes }, .{ "verifiable", verify_bytes } }) |file| {
+                    const path = try testing.allocator.print("{s}/{s}", .{ cache_path, file[0] });
+                    defer testing.allocator.free(path);
+                    const actual = try repo.commonDirectory().readFileAlloc(testing.io, path, testing.allocator, .limited(1024));
+                    defer testing.allocator.free(actual);
+                    try testing.expectEqualStrings(file[1], actual);
+                }
+            }
         }
     }
 }

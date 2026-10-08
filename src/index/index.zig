@@ -11,6 +11,7 @@
 //! written back as it is; `sparseindex` is what expands one into the files
 //! under it and collapses them again.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.index.<name>`.
@@ -189,6 +190,8 @@ pub const CacheTreeNode = struct {
 /// An invalidated node carries an entry count of -1 and no object name, which
 /// is what an edit under it leaves behind.
 pub const CacheTree = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     root: CacheTreeNode,
 
@@ -502,6 +505,8 @@ pub const CacheTree = struct {
 /// `rerere forget` can put it back. Read and written back; a stage is added
 /// to it with `Index.recordResolveUndo`.
 pub const ResolveUndo = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     entries: std.ArrayList(Item),
 
@@ -618,6 +623,8 @@ pub const WriteOptions = struct {
 
 /// The index.
 pub const Index = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     kind: Kind,
     /// The version the file on the disk carried, or 2 for one made here.
@@ -2326,3 +2333,6 @@ test "an entry added many at once replaces the one already there, whatever the c
     try std.testing.expectEqual(@as(usize, 300), index.entries.items.len);
     for (index.entries.items) |entry| try std.testing.expect(entry.oid.eql(new));
 }
+
+/// All errors reported by this namespace.
+pub const Error = ReadError || WriteError || CacheTree.RebuildError || CacheTree.RebuildIntoError || Index.WriteToError || Index.ToBytesError || Allocator.Error || Self.ReadError || Self.WriteError;

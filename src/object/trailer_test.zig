@@ -211,7 +211,7 @@ test "in-place editing replaces the file as git's does, and keeps it as it was o
     try f.git.exec(io, &.{ "interpret-trailers", "--in-place", "--trailer", "Acked-by: Ann", "msg-git" });
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    try trailer.processFile(gpa, io, .{}, null, .{}, &.{.{ .text = "Acked-by: Ann" }}, f.git.dir, "msg-relic", true, &out);
+    try trailer.processFile(gpa, io, f.git.dir, "msg-relic", .{ .new = &.{.{ .text = "Acked-by: Ann" }}, .in_place = true, .out = &out });
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     const theirs = try f.git.readFile(io, "msg-git");
     defer gpa.free(theirs);

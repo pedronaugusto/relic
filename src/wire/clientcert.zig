@@ -134,19 +134,19 @@ test "a certificate and key are read from one file or two, and each refusal has 
         }
     }.f;
 
-    var two = try load(gpa, arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "key.pem") }, null);
+    var two = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "key.pem") }, .{ .arena = arena });
     two.deinit();
-    var one = try load(gpa, arena, io, .{ .cert = at(arena, base, "both.pem") }, null);
+    var one = try load(gpa, io, .{ .cert = at(arena, base, "both.pem") }, .{ .arena = arena, .passphrase = null });
     one.deinit();
-    var opened = try load(gpa, arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, "correct-horse");
+    var opened = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = "correct-horse" });
     opened.deinit();
     try testing.expect(keyIsEncrypted(arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }));
 
-    try testing.expectError(error.SslClientKeyPassphraseRequired, load(gpa, arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, null));
-    try testing.expectError(error.SslClientKeyPassphraseWrong, load(gpa, arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, "nope"));
-    try testing.expectError(error.SslClientKeyMismatch, load(gpa, arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "other.pem") }, null));
-    try testing.expectError(error.SslClientKeyUnreadable, load(gpa, arena, io, .{ .cert = at(arena, base, "cert.pem") }, null));
-    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, arena, io, .{ .cert = at(arena, base, "nothere.pem") }, null));
-    try testing.expectError(error.SslCertTypeUnsupported, load(gpa, arena, io, .{ .cert = at(arena, base, "both.pem"), .cert_type = "P12" }, null));
-    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, arena, io, .{ .cert = at(arena, base, "both.pem"), .cert_type = "der" }, null));
+    try testing.expectError(error.SslClientKeyPassphraseRequired, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslClientKeyPassphraseWrong, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = "nope" }));
+    try testing.expectError(error.SslClientKeyMismatch, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "other.pem") }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslClientKeyUnreadable, load(gpa, io, .{ .cert = at(arena, base, "cert.pem") }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "nothere.pem") }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslCertTypeUnsupported, load(gpa, io, .{ .cert = at(arena, base, "both.pem"), .cert_type = "P12" }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "both.pem"), .cert_type = "der" }, .{ .arena = arena, .passphrase = null }));
 }

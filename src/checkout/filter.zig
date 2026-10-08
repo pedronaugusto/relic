@@ -20,14 +20,9 @@
 //! a named refusal, which is what relic did before it ran anything, and any
 //! other driver is passed over.
 //!
-//! One driver is not a program at all. `lfs` is handled in process by
-//! `lfs.zig` when every command configured for it is one git-lfs itself
-//! writes, or when none is configured: the bytes are the same bytes, and a
-//! repository keeping its large files that way is then read and written with
-//! no git-lfs installed and no `Programs` handed in. A command git-lfs did
-//! not write is the person's own and runs like any other filter, and
-//! `Drivers.Options.native_lfs` set to false makes `lfs` an ordinary driver
-//! throughout.
+//! Native filters are supplied by the operation owner. This layer owns
+//! conversion and process protocols; the provider owns content formats,
+//! storage, fetching and command recognition.
 
 const Self = @This();
 
@@ -39,7 +34,8 @@ const Io = std.Io;
 const config_mod = @import("../config/config.zig");
 const program = @import("../process/program.zig");
 const pktline = @import("../codec/pktline.zig");
-const lfs = @import("../lfs/lfs.zig");
+pub const native = @import("native.zig");
+pub const Error = Drivers.LoadError || RunCommandError || ProtocolError || Process.OpenError;
 
 /// One `filter.<name>` section.
 pub const Driver = struct {
@@ -52,75 +48,25 @@ pub const Driver = struct {
     process: ?[]const u8 = null,
     /// `filter.<name>.required`.
     required: bool = false,
-
-    /// Whether every command this driver names is one git-lfs itself writes
-    /// into a configuration: `git-lfs clean -- %f`, `git-lfs smudge -- %f`,
-    /// `git-lfs filter-process`, or their `--skip` forms.
-    pub fn isGitLfs(d: *const Driver) bool {
-        if (d.clean) |line| if (!isGitLfsCommand(line, "clean")) return false;
-        if (d.smudge) |line| if (!isGitLfsCommand(line, "smudge")) return false;
-        if (d.process) |line| if (!isGitLfsCommand(line, "filter-process")) return false;
-        return true;
-    }
-
-    /// Whether the smudge git-lfs was configured with is its `--skip` form,
-    /// which leaves every pointer as it is.
-    pub fn skipsSmudge(d: *const Driver) bool {
-        for ([_]?[]const u8{ d.smudge, d.process }) |maybe| {
-            const line = maybe orelse continue;
-            var words = std.mem.tokenizeAny(u8, line, " \t");
-            while (words.next()) |word| {
-                if (std.mem.eql(u8, word, "--skip")) return true;
-            }
-        }
-        return false;
-    }
 };
 
-/// Whether `line` is git-lfs run with `subcommand` and nothing else but the
-/// arguments git-lfs itself puts there.
-pub fn isGitLfsCommand(line: []const u8, subcommand: []const u8) bool {
-    var words = std.mem.tokenizeAny(u8, line, " \t");
-    const first = words.next() orelse return false;
-    const base = std.Io.Dir.path.basenamePosix(first);
-    if (std.mem.eql(u8, base, "git")) {
-        const second = words.next() orelse return false;
-        if (!std.mem.eql(u8, second, "lfs")) return false;
-    } else if (!std.mem.eql(u8, base, "git-lfs") and !std.mem.eql(u8, base, "git-lfs.exe")) {
-        return false;
-    }
-    const sub = words.next() orelse return false;
-    if (!std.mem.eql(u8, sub, subcommand)) return false;
-    while (words.next()) |word| {
-        if (std.mem.eql(u8, word, "--") or std.mem.eql(u8, word, "%f") or std.mem.eql(u8, word, "--skip")) continue;
-        return false;
-    }
-    return true;
-}
-
-/// Every driver the configuration defines, and relic's own LFS.
+/// Configured program filters and an optional caller-selected native driver.
 pub const Drivers = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     items: []const Driver,
-    /// relic's own LFS, which stands in for the driver named `lfs`; null
-    /// when `Options.native_lfs` turned it off or it was not loaded.
-    lfs: ?lfs.Lfs = null,
+    native_driver: ?native.Driver = null,
 
-    /// How the drivers are read.
     pub const Options = struct {
-        /// Handle `filter=lfs` in process rather than through a program.
-        native_lfs: bool = true,
-        /// Leave every LFS pointer as it is on checkout, as
-        /// `GIT_LFS_SKIP_SMUDGE` does.
-        lfs_skip_smudge: bool = false,
-        /// `.lfsconfig` from the index or `HEAD`, for a working tree that
-        /// has none: `lfs.Lfs.Options.lfsconfig`.
-        lfsconfig: ?[]const u8 = null,
+        /// The operation owner selects a native format implementation.
+        native_provider: ?native.Provider = null,
+        skip_smudge: bool = false,
+        /// Format configuration found by the repository owner.
+        config_text: ?[]const u8 = null,
     };
-
-    /// Errors from reading the drivers.
-    pub const LoadError = lfs.Lfs.LoadError || config_mod.ValueError;
+    pub const LoadError = native.Error || config_mod.ValueError;
+    pub const Error = LoadError;
+    pub const Directories = struct { common: Io.Dir, work: ?Io.Dir = null };
 
     /// The drivers `config` defines, with no LFS of relic's own. Every
     /// string is copied, so the result does not borrow the configuration.
@@ -161,31 +107,31 @@ pub const Drivers = struct {
         return .{ .gpa = gpa, .arena = arena_instance.state, .items = list.items };
     }
 
-    /// The drivers, and relic's own LFS unless `options` turns it off: its
-    /// store under `common_dir`, which is borrowed for as long as the result
-    /// lives, and its settings from the configuration and from `.lfsconfig`
-    /// at the root of `work_dir`.
+    /// Configured drivers and the optional native provider. Directory
+    /// handles remain borrowed for the collection's lifetime.
     pub fn load(
         gpa: Allocator,
         io: Io,
         config: *const config_mod.Config,
-        common_dir: Io.Dir,
-        work_dir: ?Io.Dir,
+        directories: Directories,
         options: Options,
     ) LoadError!Drivers {
         var drivers = try fromConfig(gpa, config);
-        errdefer drivers.deinit();
-        if (options.native_lfs) {
-            const skip = options.lfs_skip_smudge or
-                (if (drivers.find("lfs")) |d| d.isGitLfs() and d.skipsSmudge() else false);
-            drivers.lfs = try lfs.Lfs.load(gpa, io, config, common_dir, work_dir, .{ .skip_smudge = skip, .lfsconfig = options.lfsconfig });
+        errdefer drivers.deinit(io);
+        if (options.native_provider) |provider| {
+            drivers.native_driver = try provider.load(gpa, io, config, .{
+                .common_dir = directories.common,
+                .work_dir = directories.work,
+                .skip_smudge = options.skip_smudge,
+                .config_text = options.config_text,
+            });
         }
         return drivers;
     }
 
     /// Release everything.
-    pub fn deinit(d: *Drivers) void {
-        if (d.lfs) |*l| l.deinit();
+    pub fn deinit(d: *Drivers, io: Io) void {
+        if (d.native_driver) |driver| driver.deinit(io);
         var arena = d.arena.promote(d.gpa);
         arena.deinit();
         d.* = undefined;
@@ -201,11 +147,14 @@ pub const Drivers = struct {
 
     /// What a `filter=<name>` attribute comes to.
     pub fn resolve(d: *const Drivers, name: []const u8) Resolved {
-        if (d.lfs != null and std.mem.eql(u8, name, "lfs")) {
-            if (d.find(name)) |driver| {
-                if (!driver.isGitLfs()) return .{ .program = driver };
+        if (d.native_driver) |implementation| {
+            if (std.mem.eql(u8, name, implementation.name)) {
+                const commands: native.Commands = if (d.find(name)) |driver|
+                    .{ .clean = driver.clean, .smudge = driver.smudge, .process = driver.process }
+                else
+                    .{};
+                if (implementation.accepts(commands)) return .native;
             }
-            return .native_lfs;
         }
         if (d.find(name)) |driver| return .{ .program = driver };
         // An attribute naming a driver the configuration does not define is
@@ -217,7 +166,7 @@ pub const Drivers = struct {
     pub const Resolved = union(enum) {
         none,
         /// relic's own LFS.
-        native_lfs,
+        native,
         program: *const Driver,
     };
 };
@@ -254,23 +203,22 @@ pub const Failure = struct {
     detail: []u8,
 };
 
-/// An LFS file a checkout left as a pointer.
+/// Native content unavailable during checkout.
 pub const Missing = struct {
     path: []u8,
-    pointer: lfs.Pointer,
-    /// The settings said not to fetch it (`lfs.fetchexclude`,
-    /// `lfs.fetchinclude`, a skipped smudge), as opposed to a fetch that was
-    /// not possible or did not bring it.
+    object: native.Object,
+    /// The provider declined it by policy, rather than failing to obtain it.
     declined: bool,
 };
 
 /// What filtering did that is not in the bytes: files passed over and why,
-/// and LFS files left as pointers. The caller owns it and hands it to an
+/// and unavailable native content. The caller owns it and hands it to an
 /// operation through its options.
 pub const Report = struct {
+    pub const Error = Allocator.Error;
     gpa: Allocator,
     /// LFS files left as pointers, in the order they were met.
-    lfs_missing: std.ArrayList(Missing) = .empty,
+    native_missing: std.ArrayList(Missing) = .empty,
     /// Files a filter failed on whose content was then used unfiltered,
     /// because the driver is not required.
     passed_over: u32 = 0,
@@ -286,8 +234,11 @@ pub const Report = struct {
 
     /// Release everything.
     pub fn deinit(r: *Report) void {
-        for (r.lfs_missing.items) |m| r.gpa.free(m.path);
-        r.lfs_missing.deinit(r.gpa);
+        for (r.native_missing.items) |m| {
+            r.gpa.free(m.path);
+            r.gpa.free(m.object.id);
+        }
+        r.native_missing.deinit(r.gpa);
         r.clearFailure();
         r.* = undefined;
     }
@@ -312,15 +263,13 @@ pub const Report = struct {
         r.failure = .{ .path = owned_path, .driver = owned_driver, .reason = reason, .detail = owned_detail };
     }
 
-    /// Record an LFS file left as a pointer.
-    pub fn missing(r: *Report, path: []const u8, pointer: lfs.Pointer, declined: bool) Allocator.Error!void {
+    /// Record unavailable content, copying its provider-owned identity.
+    pub fn missing(r: *Report, path: []const u8, object: native.Object, declined: bool) Allocator.Error!void {
         const owned = try r.gpa.dupe(u8, path);
         errdefer r.gpa.free(owned);
-        var kept = pointer;
-        // A pointer with extensions is refused before it gets here; the
-        // names would otherwise borrow bytes the report does not own.
-        kept.extension_count = 0;
-        try r.lfs_missing.append(r.gpa, .{ .path = owned, .pointer = kept, .declined = declined });
+        const id = try r.gpa.dupe(u8, object.id);
+        errdefer r.gpa.free(id);
+        try r.native_missing.append(r.gpa, .{ .path = owned, .object = .{ .id = id, .size = object.size }, .declined = declined });
     }
 };
 
@@ -382,15 +331,11 @@ pub const RunCommandError = Allocator.Error || Io.Cancelable;
 /// Run one `filter.<driver>.clean` or `.smudge` over `input`, from `cwd`,
 /// with the repository's own variables removed from the environment so the
 /// program finds the repository from where it stands.
-pub fn runCommand(
-    a: Allocator,
-    io: Io,
-    programs: program.Programs,
-    cwd: Io.Dir,
-    line: []const u8,
-    path: []const u8,
-    input: []const u8,
-) RunCommandError!Ran {
+pub const RunCommandOptions = struct { cwd: Io.Dir, path: []const u8, input: []const u8 };
+pub fn runCommand(a: Allocator, io: Io, programs: program.Programs, line: []const u8, options: RunCommandOptions) RunCommandError!Ran {
+    const cwd = options.cwd;
+    const path = options.path;
+    const input = options.input;
     const expanded = try expandCommand(a, line, path);
     var outcome = program.run(a, io, programs, .{
         .argv = &.{expanded},
@@ -443,6 +388,7 @@ pub const ProtocolError = error{
 /// any reader and writer. The reader's buffer holds `pktline.max_line`
 /// bytes.
 pub const Protocol = struct {
+    pub const Error = Self.ProtocolError;
     /// What the filter writes.
     in: *Io.Reader,
     /// What the filter reads.
@@ -658,6 +604,7 @@ pub const Protocol = struct {
 /// A running `filter.<driver>.process`, with its pipes and what it said it
 /// can do.
 pub const Process = struct {
+    pub const Error = OpenError || Self.ProtocolError;
     gpa: Allocator,
     /// The command line it was started from, which is what names it: two
     /// drivers with the same `process` share one.
@@ -670,7 +617,7 @@ pub const Process = struct {
     protocol: Protocol,
 
     /// Errors from starting one.
-    pub const StartError = error{
+    pub const OpenError = error{
         /// The program would not start, or its handshake failed.
         FilterNotStarted,
         FilterCapability,
@@ -680,7 +627,7 @@ pub const Process = struct {
     /// Start `command` from `cwd` and shake hands. Its diagnostics are not
     /// kept: a long-running program's standard error is not something a
     /// caller can be made to drain.
-    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, command: []const u8, cwd: Io.Dir) StartError!*Process {
+    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, command: []const u8, cwd: Io.Dir) OpenError!*Process {
         const p = try gpa.create(Process);
         errdefer gpa.destroy(p);
         p.gpa = gpa;
@@ -723,18 +670,18 @@ pub const Process = struct {
         return false;
     }
 
-    /// How a process is stopped.
-    pub const Stop = enum {
-        /// Close its input, which tells it to finish, and wait for it.
-        finish,
-        /// End it now: it broke the protocol.
-        kill,
-    };
+    /// End a process that broke its protocol. Cleanup still belongs to
+    /// `deinit(io)`, which is used for graceful completion as well.
+    pub fn kill(p: *Process, io: Io) void {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        p.running.kill(io);
+    }
 
-    /// Stop it and release everything.
-    pub fn stop(p: *Process, io: Io, how: Stop) void {
-        // ziglint-ignore: Z026 as git's stop_multi_file_filter: every reply is already read, so how the program exits changes nothing
-        if (how == .finish) _ = p.running.wait(io) catch {};
+    /// Close its input, wait for completion and release everything.
+    pub fn deinit(p: *Process, io: Io) void {
+        // ziglint-ignore: Z026 each reply was already read, so its exit status changes nothing
+        if (!p.running.terminated) _ = p.running.wait(io) catch {};
         p.running.deinit(io);
         const gpa = p.gpa;
         gpa.free(p.command);
@@ -762,20 +709,6 @@ test "the path in a command line is quoted for sh, and %% is a percent sign" {
     }
 }
 
-test "git-lfs's own commands are recognised and a person's own are not" {
-    try testing.expect(isGitLfsCommand("git-lfs clean -- %f", "clean"));
-    try testing.expect(isGitLfsCommand("git-lfs smudge --skip -- %f", "smudge"));
-    try testing.expect(isGitLfsCommand("git-lfs filter-process", "filter-process"));
-    try testing.expect(isGitLfsCommand("/opt/bin/git-lfs filter-process --skip", "filter-process"));
-    try testing.expect(isGitLfsCommand("git lfs clean -- %f", "clean"));
-    try testing.expect(!isGitLfsCommand("git-lfs smudge -- %f", "clean"));
-    try testing.expect(!isGitLfsCommand("git-lfs clean -- %f | tee log", "clean"));
-    try testing.expect(!isGitLfsCommand("my-lfs clean %f", "clean"));
-    const skipping: Driver = .{ .name = "lfs", .smudge = "git-lfs smudge --skip -- %f", .process = "git-lfs filter-process --skip" };
-    try testing.expect(skipping.isGitLfs());
-    try testing.expect(skipping.skipsSmudge());
-}
-
 test "drivers are read from the configuration, the last value winning" {
     const gpa = testing.allocator;
     var config = try config_mod.Config.parseText(gpa,
@@ -793,7 +726,7 @@ test "drivers are read from the configuration, the last value winning" {
     , .local);
     defer config.deinit();
     var drivers = try Drivers.fromConfig(gpa, &config);
-    defer drivers.deinit();
+    defer drivers.deinit(testing.io);
     const a = drivers.find("a").?;
     try testing.expectEqualStrings("sed -e \"s/x/y/\"", a.clean.?);
     try testing.expectEqualStrings("cat -u", a.smudge.?);

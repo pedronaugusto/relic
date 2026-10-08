@@ -133,3 +133,6 @@ fn fuzzTimes(_: void, smith: *testing.Smith) anyerror!void {
     _ = parseRfc3339(scratch[0..len]);
     _ = parseHttpDate(scratch[0..len]);
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

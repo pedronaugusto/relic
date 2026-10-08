@@ -65,3 +65,6 @@ pub const Database = struct {
         return db.exists_fn(db.context, io, oid);
     }
 };
+
+/// All errors reported by this namespace.
+pub const Error = policy.Error;

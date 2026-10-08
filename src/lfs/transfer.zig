@@ -45,6 +45,7 @@
 //! uploads the objects the commits a push sends point at, as git-lfs's
 //! pre-push hook does.
 
+const ErrorNamespace = @This();
 const transfer = @This();
 
 const std = @import("std");
@@ -144,6 +145,8 @@ pub const Result = struct {
 
 /// What a transfer did, object by object.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     results: []Result,
     /// The name of the error the sweep of `lfs/tmp` ended in, when it
@@ -407,14 +410,14 @@ pub fn writeBatchRequestOffering(w: *Io.Writer, operation: lfsapi.Operation, obj
 
 /// Download `objects` into the repository's store. An object already there
 /// is not asked for.
-pub fn download(server: *lfsapi.Server, objects: []const Object, options: Options) transfer.Error!Outcome {
-    return run(server, .download, objects, options);
+pub fn download(io: Io, server: *lfsapi.Server, objects: []const Object, options: Options) transfer.Error!Outcome {
+    return run(io, server, .download, objects, options);
 }
 
 /// Upload `objects` from the repository's store. An object the server
 /// already has is not sent.
-pub fn upload(server: *lfsapi.Server, objects: []const Object, options: Options) transfer.Error!Outcome {
-    return run(server, .upload, objects, options);
+pub fn upload(io: Io, server: *lfsapi.Server, objects: []const Object, options: Options) transfer.Error!Outcome {
+    return run(io, server, .upload, objects, options);
 }
 
 /// One object's transfer, for a worker.
@@ -439,6 +442,7 @@ const Event = union(enum) {
 };
 
 const Run = struct {
+    operation_io: Io,
     server: *lfsapi.Server,
     operation: lfsapi.Operation,
     /// git-lfs's pure-ssh protocol, when the remote speaks it.
@@ -462,7 +466,7 @@ const Run = struct {
     total_objects: u64 = 0,
 
     fn io(r: *const Run) Io {
-        return r.server.io;
+        return r.operation_io;
     }
 
     fn setFatal(r: *Run, err: Error) void {
@@ -584,11 +588,11 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
     return false;
 }
 
-fn run(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
-    var outcome = try runTransfers(server, operation, objects, given);
+fn run(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
+    var outcome = try runTransfers(io, server, operation, objects, given);
     // git-lfs sweeps its temporary files when a command ends.
     if (server.client.options.now) |now| {
-        sweepTmp(server.gpa, server.io, server.store(), now) catch |err| {
+        sweepTmp(server.gpa, io, server.store(), now) catch |err| {
             outcome.sweep_failed = @errorName(err);
         };
     }
@@ -641,12 +645,11 @@ fn epochSeconds(t: Io.Timestamp) i64 {
     return @intCast(@divFloor(t.nanoseconds, std.time.ns_per_s));
 }
 
-fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
+fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
     const gpa = server.gpa;
     // A download names the ref git-lfs names, whatever it is for.
     var options = given;
     if (options.ref == null and operation == .download) options.ref = server.download_ref;
-    const io = server.io;
     var outcome: Outcome = .{ .arena = .init(gpa), .results = &.{} };
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
@@ -685,13 +688,13 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     if (pending.items.len == 0) return outcome;
 
     var limits = Limits.read(&server.settings, options);
-    const endpoint = try server.client.endpoint(operation);
+    const endpoint = try server.client.endpoint(io, operation);
     const adapters = try custom.configured(arena, server.settings.config);
     // A standalone agent moves everything with no API at all; git-lfs's own
     // for a remote on this machine is the store-to-store copy below.
     if (try standaloneAgent(arena, server, endpoint)) |name| {
         if (custom.find(adapters, name, operation)) |adapter| {
-            try runStandalone(server, operation, adapter, &outcome, pending.items, missing_here.items, limits, options);
+            try runStandalone(io, server, operation, adapter, &outcome, pending.items, missing_here.items, limits, options);
             return outcome;
         }
     }
@@ -701,14 +704,15 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
         limits.transfers = offered.items;
     }
     if (endpoint.isLocal()) {
-        try copyLocal(server, endpoint, operation, &outcome, pending.items, missing_here.items, limits, options);
+        try copyLocal(io, server, endpoint, operation, &outcome, pending.items, missing_here.items, limits, options);
         return outcome;
     }
 
     var state: Run = .{
+        .operation_io = io,
         .server = server,
         .operation = operation,
-        .ssh = try server.client.sshTransfer(operation),
+        .ssh = try server.client.sshTransfer(io, operation),
         .options = options,
         .limits = limits,
         .arena = arena,
@@ -760,7 +764,7 @@ fn batchChunk(
         const r = results[i];
         try wanted.append(gpa, .{ .oid = r.oid, .size = r.size, .name = r.name });
     }
-    const answer = batchRequest(server, operation, wanted.items, state.options.ref, state.limits, arena) catch |err| switch (err) {
+    const answer = batchRequest(state.io(), server, operation, wanted.items, state.options.ref, state.limits, arena) catch |err| switch (err) {
         error.LfsBatchFailed => {
             const why = try arena.dupe(u8, server.client.message());
             for (chunk) |i| {
@@ -844,6 +848,7 @@ fn standaloneAgent(arena: Allocator, server: *lfsapi.Server, endpoint: lfsapi.En
 /// Every object through a standalone agent, which asks no server: a
 /// download of each the store lacks, an upload of each it has.
 fn runStandalone(
+    io: Io,
     server: *lfsapi.Server,
     operation: lfsapi.Operation,
     adapter: custom.Adapter,
@@ -855,6 +860,7 @@ fn runStandalone(
 ) Error!void {
     const arena = outcome.arena.allocator();
     var state: Run = .{
+        .operation_io = io,
         .server = server,
         .operation = operation,
         .options = options,
@@ -890,31 +896,31 @@ fn startAgents(state: *Run, adapter: custom.Adapter) Error!void {
     const count: u32 = if (adapter.concurrent) state.limits.concurrency else 1;
     const agents = try state.arena.alloc(*custom.Agent, count);
     var started: usize = 0;
-    errdefer for (agents[0..started]) |a| a.deinit();
+    errdefer for (agents[0..started]) |a| a.deinit(state.io());
     while (started < count) : (started += 1) {
-        agents[started] = try custom.Agent.start(server.gpa, server.io, programs, server.base_path, adapter, .{
+        agents[started] = try custom.Agent.open(server.gpa, state.io(), programs, .{ .cwd = server.base_path, .adapter = adapter, .init = .{
             .operation = state.operation,
             .remote = server.remote,
             .concurrent = adapter.concurrent,
             .concurrent_transfers = state.limits.concurrency,
-        });
+        } });
     }
     state.agents = agents;
     state.limits.concurrency = count;
-    const base = try server.store().base.realPathFileAlloc(server.io, ".", server.gpa);
+    const base = try server.store().base.realPathFileAlloc(state.io(), ".", server.gpa);
     defer server.gpa.free(base);
     state.store_base = try state.arena.dupe(u8, base);
 }
 
 fn stopAgents(state: *Run) void {
-    for (state.agents) |a| a.deinit();
+    for (state.agents) |a| a.deinit(state.io());
     state.agents = &.{};
 }
 
 /// One transfer through the worker's own process.
 fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify: ?Action, authenticated: bool) Error!Attempt {
     const server = state.server;
-    const io = server.io;
+    const io = state.io();
     const store = server.store();
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
@@ -941,7 +947,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
             p.state.say(.{ .bytes = n });
         }
     };
-    const ended = try state.agents[worker].transfer(.{
+    const ended = try state.agents[worker].transfer(io, .{
         .operation = state.operation,
         .oid = &r.oid,
         .size = r.size,
@@ -1040,6 +1046,7 @@ test "a transfer worker observes a fatal error under its publication lock" {
     };
     var server: lfsapi.Server = undefined;
     var state: Run = .{
+        .operation_io = std.testing.io,
         .server = &server,
         .operation = .download,
         .options = .{},
@@ -1051,7 +1058,7 @@ test "a transfer worker observes a fatal error under its publication lock" {
     var vtable = std.testing.io.vtable.*;
     vtable.futexWaitUncancelable = Controlled.wait;
     vtable.futexWake = Controlled.wake;
-    server.io = .{ .userdata = &control, .vtable = &vtable };
+    state.operation_io = .{ .userdata = &control, .vtable = &vtable };
     state.fatal_mutex.state.store(.locked_once, .release);
     work(&state, 0);
     try std.testing.expect(control.waited);
@@ -1140,7 +1147,7 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
                 if (delay_ms != 0) try state.io().sleep(.fromMilliseconds(@intCast(delay_ms)), .awake);
                 // A fresh batch for the object, as git-lfs retries it: the
                 // action may have expired, or pointed somewhere that failed.
-                const again = batchRequest(state.server, state.operation, &.{.{ .oid = r.oid, .size = r.size, .name = r.name }}, state.options.ref, state.limits, null) catch |err| switch (err) {
+                const again = batchRequest(state.io(), state.server, state.operation, &.{.{ .oid = r.oid, .size = r.size, .name = r.name }}, state.options.ref, state.limits, null) catch |err| switch (err) {
                     error.LfsBatchFailed => {
                         r.status = .failed;
                         r.message = try state.dupe(state.server.client.message());
@@ -1220,7 +1227,7 @@ fn accessUrl(href: []const u8, oid: []const u8) []const u8 {
 
 fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool) Error!Attempt {
     const server = state.server;
-    const io = server.io;
+    const io = state.io();
     const store = server.store();
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
@@ -1276,7 +1283,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         .exchange => |ex| ex,
         .done => |attempt| return attempt,
     };
-    defer ex.deinit();
+    defer ex.deinit(io);
     if (try partial.receive(scratch, state, ex, r.size, action.href)) |attempt| return attempt;
 
     var digest: [32]u8 = undefined;
@@ -1348,7 +1355,7 @@ const Partial = struct {
     /// there: `null` once the whole object has come, else why the attempt
     /// ends.
     fn receive(p: *Partial, scratch: Allocator, state: *Run, ex: *lfsapi.Exchange, size: u64, href: []const u8) Error!?Attempt {
-        const io = state.server.io;
+        const io = state.io();
         const status = ex.status();
         if (status.class() != .success) {
             p.keep = p.from > 0;
@@ -1357,7 +1364,7 @@ const Partial = struct {
             return .{ .retry = .{ .message = try state.dupe(why) } };
         }
         if (p.from > 0) state.say(.{ .bytes = p.from });
-        const body = ex.reader() catch |err| switch (err) {
+        const body = ex.reader(io) catch |err| switch (err) {
             error.LfsZstdWindowTooLarge => return .{ .fail = "the server's zstd frame asks for a window wider than 512 MiB" },
             else => |e| return e,
         };
@@ -1425,7 +1432,7 @@ const Requested = union(enum) { exchange: *lfsapi.Exchange, done: Attempt };
 /// that passed the Range over sends it whole.
 fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: DownloadRequest) Error!Requested {
     const server = state.server;
-    const io = server.io;
+    const io = state.io();
     var range_buf: [64]u8 = undefined;
     var attempt_range = partial.from > 0;
     while (true) {
@@ -1434,7 +1441,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
         // `hashResumed` starts again from a file as long as the object.
         if (attempt_range) assert(partial.from < req.size);
         if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.mem.print(&range_buf, "bytes={d}-{d}", .{ partial.from, req.size - 1 }) });
-        const sent = server.client.send(.{
+        const sent = server.client.send(io, .{
             .method = .GET,
             .url = req.href,
             .headers = all.items,
@@ -1458,7 +1465,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
         const status = sent.status();
         if (status == .range_not_satisfiable) {
             // The server will not go on from there: from the start.
-            sent.deinit();
+            sent.deinit(io);
             try partial.restart(io);
             attempt_range = false;
             continue;
@@ -1468,7 +1475,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
             var want_buf: [32]u8 = undefined;
             const want = std.mem.print(&want_buf, "bytes {d}-", .{partial.from}) catch unreachable; // unreachable: a u64 is at most 20 digits, 27 bytes with the words around it
             if (!std.mem.startsWith(u8, content_range, want)) {
-                sent.deinit();
+                sent.deinit(io);
                 try partial.restart(io);
                 attempt_range = false;
                 continue;
@@ -1492,7 +1499,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
         error.OutOfMemory => return error.OutOfMemory,
     };
     var sent: u64 = 0;
-    const ex = server.client.send(.{
+    const ex = server.client.send(state.io(), .{
         .method = .PUT,
         .url = href,
         .headers = headers,
@@ -1513,7 +1520,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
         else => |e| return .{ .fail = @errorName(e) },
     };
     const status = ex.status();
-    ex.deinit();
+    ex.deinit(state.io());
     if (status.class() != .success) {
         state.say(.{ .unsent = sent });
         const why = try state.dupe(try scratch.print("HTTP {d} from {s}", .{ @backingInt(status), lfsapi.stripQuery(action.href) }));
@@ -1541,7 +1548,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
     var last: []const u8 = "";
     var attempt: u32 = 0;
     while (attempt < state.limits.max_verifies) : (attempt += 1) {
-        const ex = server.client.send(.{
+        const ex = server.client.send(state.io(), .{
             .method = .POST,
             .url = href,
             .headers = headers,
@@ -1557,7 +1564,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
             },
         };
         const status = ex.status();
-        ex.deinit();
+        ex.deinit(state.io());
         if (status.class() == .success) return .ok;
         last = try scratch.print("verify: HTTP {d}", .{@backingInt(status)});
     }
@@ -1614,6 +1621,7 @@ const Answered = struct {
 /// With `into`, the answer is allocated there; without, in an arena of its
 /// own the caller releases.
 fn batchRequest(
+    io: Io,
     server: *lfsapi.Server,
     operation: lfsapi.Operation,
     objects: []const Object,
@@ -1627,8 +1635,8 @@ fn batchRequest(
     const a = if (own) arena_state.allocator() else comptime_into;
     if (!own) arena_state.deinit();
 
-    if (try server.client.sshTransfer(operation)) |t| {
-        const response = try sshBatch(a, server, t, objects, ref);
+    if (try server.client.sshTransfer(io, operation)) |t| {
+        const response = try sshBatch(a, io, server, t, objects, ref);
         if (own) return .{ .arena = arena_state, .response = response };
         return response;
     }
@@ -1639,30 +1647,30 @@ fn batchRequest(
 
     var retries: u32 = 0;
     while (true) {
-        const ex = server.client.api(operation, .POST, "objects/batch", body.written(), limits.max_retries) catch |err| switch (err) {
+        const ex = server.client.api(io, .{ .operation = operation, .method = .POST, .suffix = "objects/batch", .body = body.written(), .network_retries = limits.max_retries }) catch |err| switch (err) {
             error.ConnectionFailed, error.HttpStatus, error.AuthenticationFailed, error.TooManyRedirects, error.InsecureRedirect => return error.LfsBatchFailed,
             else => |e| return e,
         };
-        defer ex.deinit();
+        defer ex.deinit(io);
         const status = ex.status();
         if (status == .too_many_requests and retries < limits.max_retries) {
             retries += 1;
             var delay_ms = limits.backoffMs(retries);
             if (ex.retryAfter()) |seconds| {
                 if (seconds > limits.max_retry_time_s) {
-                    server.client.noteStatus(ex, "batch");
+                    server.client.noteStatus(io, ex, "batch");
                     return error.LfsBatchFailed;
                 }
                 delay_ms = seconds * 1000;
             }
-            if (delay_ms != 0) try server.io.sleep(.fromMilliseconds(@intCast(delay_ms)), .awake);
+            if (delay_ms != 0) try io.sleep(.fromMilliseconds(@intCast(delay_ms)), .awake);
             continue;
         }
         if (status != .ok) {
-            server.client.noteStatus(ex, "batch");
+            server.client.noteStatus(io, ex, "batch");
             return error.LfsBatchFailed;
         }
-        const bytes = try ex.readAll(64 << 20);
+        const bytes = try ex.readAll(io, 64 << 20);
         const response = try parseBatch(a, bytes);
         if (own) return .{ .arena = arena_state, .response = response };
         return response;
@@ -1678,9 +1686,8 @@ fn batchRequest(
 /// `<oid> <size>` lines; the answer's lines are `<oid> <size> <action>`
 /// with the action's `id`, `token` and expiry, `noop` for an object with
 /// nothing to do.
-fn sshBatch(a: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8) Error!BatchResponse {
-    const io = server.io;
-    const conn = t.connection(0) catch |err| return sshBatchFailed(server, err, t.message.items);
+fn sshBatch(a: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8) Error!BatchResponse {
+    const conn = t.connection(io, 0) catch |err| return sshBatchFailed(io, server, err, t.message.items);
     try conn.mutex.lock(io);
     defer conn.mutex.unlock(io);
     var args: std.ArrayList([]const u8) = .empty;
@@ -1688,11 +1695,11 @@ fn sshBatch(a: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, objects: 
     if (ref) |r| try args.append(a, try a.print("refname={s}", .{r}));
     var lines: std.ArrayList([]const u8) = .empty;
     for (objects) |o| try lines.append(a, try a.print("{s} {d}", .{ &o.oid, o.size }));
-    conn.sendLines("batch", args.items, lines.items) catch |err| return sshBatchFailed(server, err, "");
-    const status = conn.readStatus(a) catch |err| return sshBatchFailed(server, err, "");
+    conn.sendLines("batch", args.items, lines.items) catch |err| return sshBatchFailed(io, server, err, "");
+    const status = conn.readStatus(a) catch |err| return sshBatchFailed(io, server, err, "");
     if (status.code != 200) {
         var buf: [512]u8 = undefined;
-        server.client.setMessage(std.mem.print(&buf, "batch response: status {d} from server ({s})", .{
+        server.client.setMessage(io, std.mem.print(&buf, "batch response: status {d} from server ({s})", .{
             status.code,
             if (status.lines.len != 0) status.lines[0] else "no message provided",
         }) catch "batch response");
@@ -1757,14 +1764,14 @@ pub fn parseSshBatch(a: Allocator, lines: []const []const u8) ParseSshBatchError
     return .{ .transfer = "ssh", .objects = out.items, .hash_algo = "sha256" };
 }
 
-fn sshBatchFailed(server: *lfsapi.Server, err: lfsssh.Error, said: []const u8) Error {
+fn sshBatchFailed(io: Io, server: *lfsapi.Server, err: lfsssh.Error, said: []const u8) Error {
     switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => {},
     }
     var buf: [512]u8 = undefined;
-    server.client.setMessage(std.mem.print(&buf, "batch request: {s}{s}{s}", .{ @errorName(err), if (said.len != 0) ": " else "", said }) catch "batch request");
+    server.client.setMessage(io, std.mem.print(&buf, "batch request: {s}{s}{s}", .{ @errorName(err), if (said.len != 0) ": " else "", said }) catch "batch request");
     return error.LfsBatchFailed;
 }
 
@@ -1794,7 +1801,7 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
     var scratch_state: std.heap.ArenaAllocator = .init(state.server.gpa);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
-    const conn = t.connection(worker) catch |err| return sshRetry(state, err);
+    const conn = t.connection(io, worker) catch |err| return sshRetry(state, err);
     try conn.mutex.lock(io);
     defer conn.mutex.unlock(io);
     const command = try scratch.print("get-object {s}", .{&r.oid});
@@ -1839,7 +1846,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
     const file = (try store.open(io, &pointer)) orelse return .{ .fail = "the object is not in the store" };
     defer file.close(io);
-    const conn = t.connection(worker) catch |err| return sshRetry(state, err);
+    const conn = t.connection(io, worker) catch |err| return sshRetry(state, err);
     try conn.mutex.lock(io);
     defer conn.mutex.unlock(io);
     const args = try sshObjectArgs(scratch, r, action);
@@ -1941,6 +1948,7 @@ const SshData = struct {
 /// Copy objects between this store and the store of the repository a
 /// `file://` endpoint names.
 fn copyLocal(
+    io: Io,
     server: *lfsapi.Server,
     endpoint: lfsapi.Endpoint,
     operation: lfsapi.Operation,
@@ -1951,13 +1959,15 @@ fn copyLocal(
     options: Options,
 ) Error!void {
     const gpa = server.gpa;
-    const io = server.io;
     const path = endpoint.localPath().?;
     var dir = Io.Dir.cwd().openDir(io, path, .{}) catch return error.LfsLocalRemoteUnreadable;
     defer dir.close(io);
     var remote = Repository.open(gpa, io, dir, .{ .discover = false }) catch return error.LfsLocalRemoteUnreadable;
     defer remote.deinit(io);
-    var remote_lfs = lfs.Lfs.load(gpa, io, remote.configuration(), remote.commonDirectory(), null, .{}) catch return error.LfsLocalRemoteUnreadable;
+    var remote_lfs = lfs.Lfs.load(gpa, io, remote.configuration(), .{
+        .common_dir = remote.commonDirectory(),
+        .work_dir = null,
+    }) catch return error.LfsLocalRemoteUnreadable;
     defer remote_lfs.deinit();
     const here = server.store();
     const there = &remote_lfs.store;
@@ -2016,6 +2026,8 @@ fn copyLocal(
 /// download errors are skipped: then it is left as its pointer and the
 /// checkout goes on.
 pub const Fetcher = struct {
+    pub const Error = ErrorNamespace.Error;
+
     server: *lfsapi.Server,
     options: Options = .{},
     /// Leave an object that did not come as its pointer. `null` asks
@@ -2038,14 +2050,13 @@ pub const Fetcher = struct {
     }
 
     fn fetchFn(io: Io, context: *anyopaque, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
-        _ = io;
         _ = store;
         _ = settings;
         const f: *Fetcher = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Fetcher
         var objects: std.ArrayList(Object) = .empty;
         defer objects.deinit(f.server.gpa);
         for (wanted) |w| objects.append(f.server.gpa, .of(w.pointer, w.path)) catch return error.OutOfMemory;
-        const outcome = download(f.server, objects.items, f.options) catch |err| switch (err) {
+        const outcome = download(io, f.server, objects.items, f.options) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.LfsFetchFailed,
@@ -2110,30 +2121,29 @@ pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
 /// store, as `git lfs fetch <remote> <refs>` does. A path
 /// `lfs.fetchinclude` leaves out, or `lfs.fetchexclude` names, is not
 /// fetched unless `all_paths` says so.
-pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!Outcome {
+pub fn fetch(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!Outcome {
     const gpa = server.gpa;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var tips: std.ArrayList(Oid) = .empty;
     var pointers: std.ArrayList(Object) = .empty;
-    try pointers.appendSlice(arena, try scan(arena, server.io, repo, options, &tips));
+    try pointers.appendSlice(arena, try scan(arena, io, repo, options, &tips));
     const recent = options.recent orelse server.settings.getBool("lfs.fetchrecentalways", false);
     if (recent and !options.history) {
-        try pointers.appendSlice(arena, try recentPointers(arena, server, repo, tips.items, options.now orelse server.client.options.now));
+        try pointers.appendSlice(arena, try recentPointers(arena, io, server, repo, tips.items, options.now orelse server.client.options.now));
     }
     var objects: std.ArrayList(Object) = .empty;
     for (pointers.items) |p| {
         if (!options.all_paths and !server.lfs.settings.fetchAllowed(p.name)) continue;
         try objects.append(arena, p);
     }
-    return download(server, objects.items, options.transfer);
+    return download(io, server, objects.items, options.transfer);
 }
 
 /// What `git lfs fetch --recent` adds: the tips of the recent refs, and the
 /// versions the recent commits before each tip replaced.
-fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, tips: []const Oid, now: ?i64) FetchError![]Object {
-    const io = server.io;
+fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository, tips: []const Oid, now: ?i64) FetchError![]Object {
     const settings = &server.settings;
     const refs_days = settings.getInt("lfs.fetchrecentrefsdays", 7);
     const commits_days = settings.getInt("lfs.fetchrecentcommitsdays", 0);
@@ -2314,6 +2324,8 @@ fn resolve(arena: Allocator, io: Io, repo: *Repository, name: []const u8) FetchE
 
 /// What `pull` did.
 pub const PullOutcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     fetched: Outcome,
     /// Pointer files in the working tree replaced by their content.
     replaced: u32 = 0,
@@ -2332,11 +2344,11 @@ pub const PullOutcome = struct {
 /// and put their content in place of every pointer in the working tree
 /// whose object is now in the store. A file that is not its pointer any
 /// more is somebody's work and is left alone.
-pub fn pull(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!PullOutcome {
-    var fetched = try fetch(server, repo, options);
+pub fn pull(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!PullOutcome {
+    var fetched = try fetch(io, server, repo, options);
     errdefer fetched.deinit();
     var out: PullOutcome = .{ .fetched = fetched };
-    const counts = try checkoutPointers(server.gpa, server.io, repo, server.store());
+    const counts = try checkoutPointers(server.gpa, io, repo, server.store());
     out.replaced = counts.replaced;
     out.left = counts.left;
     return out;
@@ -2419,9 +2431,8 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
 /// send, each with the path it was found at — that the server does not
 /// have, as git-lfs's pre-push hook uploads them. A blob that is not a
 /// pointer is not looked at twice.
-pub fn pushObjects(server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb_mod.PackEntry, options: Options) transfer.FetchError!Outcome {
+pub fn pushObjects(io: Io, server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb_mod.PackEntry, options: Options) transfer.FetchError!Outcome {
     const gpa = server.gpa;
-    const io = server.io;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -2436,7 +2447,7 @@ pub fn pushObjects(server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         try objects.append(arena, .of(pointer, e.hint));
     }
-    return upload(server, objects.items, options);
+    return upload(io, server, objects.items, options);
 }
 
 const testing = std.testing;

@@ -21,6 +21,7 @@
 //! `filter.lfs` setting, no LFS directory — is not asked about at all, so a
 //! push to a plain git host costs nothing more than it did.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -37,6 +38,7 @@ const lfsapi = @import("api.zig");
 const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
 const auth = @import("../wire/auth.zig");
+const push_mod = @import("../transport/push.zig");
 const config_mod = @import("../config/config.zig");
 
 const Repository = repo_mod.Repository;
@@ -92,6 +94,8 @@ pub const LockCheck = enum {
 
 /// What the LFS half of a push did.
 pub const Report = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// Whether anything was done at all.
     ran: bool = false,
@@ -151,21 +155,21 @@ pub fn beforePush(
     report.ran = true;
 
     const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure, .now = options.now });
-    defer server.deinit();
+    defer server.deinit(io);
     defer if (options.remember) server.client.remember(io, repo) catch {};
 
     // Other people's locks first: a push refused for one uploads nothing.
-    const endpoint = try server.client.endpoint(.upload);
+    const endpoint = try server.client.endpoint(io, .upload);
     const state = try verifyState(a, &server.settings, endpoint.url);
     if (state != .disabled and remote_refs.len != 0) {
         var ours: std.StringHashMapUnmanaged(lfslocks.Lock) = .empty;
         var theirs: std.StringHashMapUnmanaged(lfslocks.Lock) = .empty;
         report.locks = .verified;
         for (remote_refs) |ref| {
-            var split = lfslocks.verify(server, repo, .{ .ref = ref }) catch |err| switch (err) {
+            var split = lfslocks.verify(io, server, repo, .{ .ref = ref }) catch |err| switch (err) {
                 error.LockingUnsupported => {
                     report.locks = .unsupported;
-                    try server.client.learnLocksVerify(endpoint.url, false);
+                    try server.client.learnLocksVerify(io, endpoint.url, false);
                     break;
                 },
                 error.OutOfMemory, error.Canceled => |e| return e,
@@ -196,7 +200,7 @@ pub fn beforePush(
     }
 
     if (pointers.len == 0) return;
-    var outcome = try lfstransfer.upload(server, pointers, .{
+    var outcome = try lfstransfer.upload(io, server, pointers, .{
         .ref = if (remote_refs.len != 0) remote_refs[0] else null,
         .progress = reach.progress,
     });
@@ -260,3 +264,35 @@ fn verifyState(a: Allocator, settings: *const lfsapi.Settings, url: []const u8) 
     const enabled = config_mod.parseBool(value) catch false;
     return if (enabled) .enabled else .disabled;
 }
+
+/// Push with native LFS lock verification and uploads before sending refs.
+/// Other content preparation, when supplied, runs before the LFS step.
+pub const PushError = Error || push_mod.Error;
+pub const PushOptions = struct { transport: push_mod.Options, lfs: Options = .{} };
+pub fn push(gpa: Allocator, io: Io, repository: *Repository, remote: []const u8, options: PushOptions) PushError!push_mod.Outcome {
+    var context: PushContext = .{
+        .reach = .{ .programs = options.transport.programs, .prompt = options.transport.prompt, .progress = options.transport.progress, .auth_failure = options.transport.auth_failure },
+        .options = options.lfs,
+        .previous = options.transport.before_send,
+    };
+    var with = options.transport;
+    with.before_send = .{ .context = &context, .run = PushContext.run };
+    return push_mod.push(gpa, io, repository, remote, with) catch |err| {
+        if (context.failure) |failure| return failure;
+        return err;
+    };
+}
+const PushContext = struct {
+    reach: Reach,
+    options: Options,
+    previous: ?push_mod.BeforeSend,
+    failure: ?Error = null,
+    fn run(context: *anyopaque, gpa: Allocator, io: Io, repository: *Repository, input: push_mod.BeforeSendInput) push_mod.BeforeSendError!void {
+        const c: *PushContext = @ptrCast(@alignCast(context));
+        if (c.previous) |previous| try previous.run(previous.context, gpa, io, repository, input);
+        beforePush(gpa, io, repository, input.remote, input.refs, input.objects, c.reach, c.options) catch |err| {
+            c.failure = err;
+            return error.BeforeSendFailed;
+        };
+    }
+};

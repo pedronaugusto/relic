@@ -12,6 +12,7 @@
 //! a file git leaves alone, which produces a different blob and therefore a
 //! different tree.
 
+const ErrorNamespace = @This();
 const cquote = @import("../text/cquote.zig");
 const Self = @This();
 
@@ -124,6 +125,8 @@ pub const Attributes = struct {
 
 /// The loaded attributes for a working tree.
 pub const Attrs = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: *std.heap.ArenaAllocator,
     levels: std.ArrayList(Level),
@@ -181,6 +184,20 @@ pub const Attrs = struct {
         attrs.macros.deinit(attrs.gpa);
         attrs.entered_dir.deinit(attrs.gpa);
         attrs.* = undefined;
+    }
+
+    /// Position before an operation adds transient tree attributes.
+    pub const Checkpoint = struct { levels: usize, macros: usize };
+    pub fn checkpoint(attrs: *const Attrs) Checkpoint {
+        return .{ .levels = attrs.levels.items.len, .macros = attrs.macros.items.len };
+    }
+    /// Release matchers added since the checkpoint before dropping levels.
+    pub fn restore(attrs: *Attrs, before: Checkpoint) void {
+        std.debug.assert(before.levels <= attrs.levels.items.len);
+        std.debug.assert(before.macros <= attrs.macros.items.len);
+        for (attrs.levels.items[before.levels..]) |level| levelMatcher(level).deinit();
+        attrs.levels.shrinkRetainingCapacity(before.levels);
+        attrs.macros.shrinkRetainingCapacity(before.macros);
     }
 
     /// Load the `.gitattributes` of every directory from the root of the
@@ -243,7 +260,7 @@ pub const Attrs = struct {
         if (std.mem.eql(u8, name, ".gitattributes")) attrs.leave();
     }
 
-    fn enterOne(attrs: *Attrs, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Error!void {
+    fn enterOne(attrs: *Attrs, io: Io, wt: Io.Dir, base: []const u8, depth: u32) ErrorNamespace.Error!void {
         for (attrs.levels.items) |level| {
             if (level.precedence == depth + 1 and std.mem.eql(u8, level.base, base)) return;
         }
@@ -313,7 +330,7 @@ pub const Attrs = struct {
         source: []const u8,
         precedence: u32,
         links: enum { follow, no_follow },
-    ) Error!void {
+    ) ErrorNamespace.Error!void {
         // A `.gitattributes` in the working tree is read only as a file,
         // never through a symbolic link, as git's `READ_ATTR_NOFOLLOW` reads
         // it: a link would have the tree's attributes come from anywhere.
@@ -374,7 +391,7 @@ pub const Attrs = struct {
             });
         }
         if (rules.items.len == 0) return;
-        const compiled = try sets.Matcher.build(attrs.gpa, &builder);
+        const compiled = try sets.Matcher.build(&builder);
         errdefer compiled.deinit();
         try attrs.levels.append(attrs.gpa, .{
             .base = base,
@@ -695,6 +712,8 @@ fn statsAreBinary(stat: TextStat) bool {
 
 /// What a conversion decided.
 pub const Conversion = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// The converted bytes, or the original slice when nothing changed.
     bytes: []const u8,
     /// Whether `bytes` was allocated and must be freed by the caller.

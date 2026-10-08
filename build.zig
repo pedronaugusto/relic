@@ -216,7 +216,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .name = "relic-tests",
         .root_module = test_module,
-        .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else &.{},
+        .filters = b.option([]const []const u8, "test-filter", "Select tests by name; repeat for multiple families") orelse &.{},
     });
 
     const run_tests = b.addRunArtifact(tests);
@@ -286,7 +286,7 @@ pub fn build(b: *std.Build) void {
     //
     // relic's own measurements of its own work, in bench/: `zig build bench
     // -Doptimize=ReleaseFast` installs them under zig-out/bench, and `zig
-    // build check` compiles them, so they keep up with the API. They run on a
+    // build bench` compiles them, so they keep up with the API. They run on a
     // quiet machine, never in CI; bench/README.md says how. Only in relic's
     // own tree: a package fetched by a consumer has no bench/.
     //=====================================================================

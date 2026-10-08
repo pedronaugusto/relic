@@ -5,6 +5,7 @@
 //! becomes a filesystem path, because a tree entry's name is written by
 //! whoever wrote the tree.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.worktree.<name>`.
@@ -35,7 +36,7 @@ const durability = @import("../fs/fs.zig");
 const sparseindex = @import("../index/sparseindex.zig");
 const pack_mod = @import("../odb/pack.zig");
 const gitlink = @import("../discover/gitlink.zig");
-const lfs = @import("../lfs/lfs.zig");
+const native = @import("native.zig");
 const program = @import("../process/program.zig");
 
 const Oid = hash.Oid;
@@ -216,6 +217,8 @@ pub const AddOptions = struct {
 /// Files a staging pass skipped under `AddOptions.ignore_errors`.
 /// The caller owns this report and hands it in through `error_report`.
 pub const AddErrorReport = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// Paths and errors in the order the walk met them. Paths are owned by
     /// this report and remain valid after `addAll` returns.
@@ -223,7 +226,7 @@ pub const AddErrorReport = struct {
 
     pub const Failure = struct {
         path: []u8,
-        err: Error,
+        err: ErrorNamespace.Error,
     };
 
     /// An empty report allocated from `gpa`.
@@ -238,7 +241,7 @@ pub const AddErrorReport = struct {
         r.* = undefined;
     }
 
-    fn record(r: *AddErrorReport, path: []const u8, err: Error) Allocator.Error!void {
+    fn record(r: *AddErrorReport, path: []const u8, err: ErrorNamespace.Error) Allocator.Error!void {
         const owned = try r.gpa.dupe(u8, path);
         errdefer r.gpa.free(owned);
         try r.failures.append(r.gpa, .{ .path = owned, .err = err });
@@ -755,6 +758,8 @@ pub const SubmoduleProbe = struct {
 
 /// What `status` found, sorted by path.
 pub const Status = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     entries: []StatusEntry,
@@ -1629,9 +1634,9 @@ pub const CheckoutOutcome = struct {
     /// Gitlinks: a directory is made and nothing is put in it, because the
     /// submodule's own repository is the caller's business.
     gitlinks: u32 = 0,
-    /// LFS files written as their pointer, because the object was not in
-    /// the store. `CheckoutOptions.filter_report` names them.
-    lfs_pointers: u32 = 0,
+    /// Native content written using its provider fallback.
+    /// `CheckoutOptions.filter_report` names the unavailable objects.
+    native_fallbacks: u32 = 0,
 };
 
 /// Where a refusal is written, so `error.UnsafePath` can say which path and
@@ -1682,9 +1687,6 @@ pub const CheckoutOptions = struct {
     /// Where filters passed over, and LFS files left as pointers, are
     /// reported.
     filter_report: ?*filter.Report = null,
-    /// What fetches LFS objects the store does not have. It is called once,
-    /// with all of them, after every other file is written.
-    lfs_fetch: ?lfs.Fetcher = null,
     /// How many tasks of the caller's `Io` write the files, as git's
     /// `checkout.workers`; zero is four, or the processors there are when
     /// fewer. The files written, the index and the error returned are the
@@ -1724,12 +1726,8 @@ pub fn checkout(
     try sparseindex.expand(gpa, io, index, db, null);
     var wanted = try flatten(arena, io, db, tree_oid);
 
-    const attrs_before = if (options.rules.attrs) |attrs| attrs.levels.items.len else 0;
-    const macros_before = if (options.rules.attrs) |attrs| attrs.macros.items.len else 0;
-    defer if (options.rules.attrs) |attrs| {
-        attrs.levels.shrinkRetainingCapacity(attrs_before);
-        attrs.macros.shrinkRetainingCapacity(macros_before);
-    };
+    const attrs_before = if (options.rules.attrs) |attrs| attrs.checkpoint() else null;
+    defer if (options.rules.attrs) |attrs| attrs.restore(attrs_before.?);
     if (options.rules.attrs) |attrs| try addTreeAttributes(arena, io, db, attrs, &wanted);
 
     var conv: convert.Session = .init(gpa, io, .{
@@ -1740,7 +1738,6 @@ pub fn checkout(
         .drivers = options.rules.filters,
         .programs = options.programs,
         .report = options.filter_report,
-        .fetch = options.lfs_fetch,
     });
     defer conv.deinit();
 
@@ -1775,7 +1772,7 @@ pub fn checkout(
     };
     try writing.all(paths);
     try writing.late();
-    outcome.lfs_pointers = conv.lfs_pointers;
+    outcome.native_fallbacks = conv.fallbackCount();
 
     if (options.remove_empty_directories) {
         var dir_it = removed_dirs.keyIterator();
@@ -2048,7 +2045,7 @@ const CheckoutWrite = struct {
                 const found = try c.db.read(c.io, want.oid);
                 defer c.gpa.free(found.bytes);
                 const executable = want.mode == .exec and c.options.rules.file_mode;
-                const smudged: convert.Smudged = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, path, found.bytes, try attrs.lookup(a, path, false), .{
+                const smudged: native.Content = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, path, found.bytes, try attrs.lookup(a, path, false), .{
                     .blob = want.oid,
                     .treeish = c.tree_oid,
                     .can_delay = true,
@@ -2418,7 +2415,7 @@ pub fn addTreeAttributes(
     }
 }
 
-fn writeSmudged(io: Io, wt: Io.Dir, path: []const u8, smudged: convert.Smudged, executable: bool) Error!void {
+fn writeSmudged(io: Io, wt: Io.Dir, path: []const u8, smudged: native.Content, executable: bool) Error!void {
     switch (smudged) {
         .bytes => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
         .file => |file| {
@@ -2479,7 +2476,6 @@ pub fn writePaths(
         .drivers = options.rules.filters,
         .programs = options.programs,
         .report = options.filter_report,
-        .fetch = options.lfs_fetch,
     });
     defer conv.deinit();
 
@@ -2530,7 +2526,7 @@ pub fn writePaths(
         outcome.written += 1;
         if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid });
     }
-    outcome.lfs_pointers = conv.lfs_pointers;
+    outcome.native_fallbacks = conv.fallbackCount();
     return outcome;
 }
 
@@ -2615,17 +2611,14 @@ pub const Written = struct {
 /// holding its target, a gitlink made as an empty directory. Whatever is at
 /// `path` is replaced; the directories above it are made. `conv` must not
 /// be one that may hand a file over late.
-pub fn writeEntry(
-    gpa: Allocator,
-    io: Io,
-    wt: Io.Dir,
-    db: *Odb,
-    conv: *convert.Session,
-    path: []const u8,
-    mode: object.Mode,
-    oid: Oid,
-    rules: Rules,
-) Self.Error!Written {
+pub const WriteEntryOptions = struct { db: *Odb, conv: *convert.Session, path: []const u8, mode: object.Mode, oid: Oid, rules: Rules };
+pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions) Self.Error!Written {
+    const db = options.db;
+    const conv = options.conv;
+    const path = options.path;
+    const mode = options.mode;
+    const oid = options.oid;
+    const rules = options.rules;
     if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path);
     var written: Written = .{ .stat = .none };
@@ -2660,16 +2653,13 @@ pub fn writeEntry(
 /// link for a symlink, as an empty directory for a gitlink. For a caller
 /// that made the contents itself and stores no object for them, which is
 /// what `git apply` without `--index` does.
-pub fn writeBytes(
-    gpa: Allocator,
-    io: Io,
-    wt: Io.Dir,
-    conv: *convert.Session,
-    path: []const u8,
-    mode: object.Mode,
-    bytes: []const u8,
-    rules: Rules,
-) Self.Error!Written {
+pub const WriteBytesOptions = struct { conv: *convert.Session, path: []const u8, mode: object.Mode, bytes: []const u8, rules: Rules };
+pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions) Self.Error!Written {
+    const conv = options.conv;
+    const path = options.path;
+    const mode = options.mode;
+    const bytes = options.bytes;
+    const rules = options.rules;
     if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path);
     if (try fs.statAt(io, wt, path)) |found| {
@@ -2720,6 +2710,8 @@ pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
 
 /// The paths an update would lose work at, as git lists them.
 pub const Obstructions = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// Tracked paths with changes of their own that the update would
     /// overwrite or remove, sorted.
@@ -3202,6 +3194,8 @@ fn restoreSparse(
 
 /// What `list` found.
 pub const Listing = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// Paths in the index, then untracked ones, each group sorted.

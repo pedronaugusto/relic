@@ -10,6 +10,7 @@
 //! as it was, because git writes it back. A sheet is written as git writes
 //! it, with full object names or short ones.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -101,6 +102,8 @@ pub const Item = struct {
 
 /// A parsed sheet. Every slice in it is the list's.
 pub const List = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// The bytes the items' arguments point into.
     buf: []u8,
@@ -564,3 +567,6 @@ fn fuzzTodo(_: void, smith: *std.testing.Smith) anyerror!void {
         try std.testing.expectEqual(a.commit, b.commit);
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = ParseError || Self.ParseError || std.Io.Writer.Error || Allocator.Error;

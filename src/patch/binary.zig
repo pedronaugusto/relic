@@ -254,3 +254,6 @@ test "fuzz: any base 85 line and any deflated hunk decode or are refused by name
         }
     }.one, .{});
 }
+
+/// All errors reported by this namespace.
+pub const Error = Decode85Error || InflateError || WriteError || ApplyHunkError || Io.Writer.Error || Self.InflateError || Allocator.Error;

@@ -234,3 +234,6 @@ test "a missing path is zeros, not an error" {
     const extra = statAt(tmp.dir, "not-there");
     try std.testing.expectEqual(@as(u32, 0), extra.dev);
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

@@ -486,3 +486,6 @@ fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
     _ = check(input, .worktree);
     _ = check(input, .stored);
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

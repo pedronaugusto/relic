@@ -92,9 +92,9 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.deinit();
+    defer server.deinit(io);
 
-    const taken = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
+    const taken = try lfslocks.lock(arena, io, server, &repo, .{ .path = "x.bin", .request = .{} });
     try testing.expectEqualStrings("ada", taken.locked.owner.?);
     try fx.gitIn(pair.theirs, &.{ "lfs", "lock", "y.bin" });
 
@@ -105,10 +105,10 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
     try testing.expect(std.mem.find(u8, listed, "y.bin\tbob\tID:2") != null);
 
     // relic lists both, and the server's split says whose is whose.
-    var all = try lfslocks.list(server, &repo, .{}, .{});
+    var all = try lfslocks.list(io, server, &repo, .{}, .{});
     defer all.deinit();
     try testing.expectEqual(@as(usize, 2), all.locks.len);
-    var split = try lfslocks.verify(server, &repo, .{});
+    var split = try lfslocks.verify(io, server, &repo, .{});
     defer split.deinit();
     var table = try lfslocks.Table.fromVerified(gpa, split.ours, split.theirs);
     defer table.deinit();
@@ -119,21 +119,21 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
 
     // A lock someone holds is theirs: taking it says who, and giving it
     // back is refused unless forced.
-    const held = try lfslocks.lock(arena, server, &repo, "y.bin", .{});
+    const held = try lfslocks.lock(arena, io, server, &repo, .{ .path = "y.bin", .request = .{} });
     try testing.expectEqualStrings("bob", held.held.owner.?);
-    try testing.expectError(error.LockOwnedByOther, lfslocks.unlockPath(arena, server, &repo, "y.bin", false, .{}));
+    try testing.expectError(error.LockOwnedByOther, lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "y.bin", .request = .{ .force = false } }));
     if (testlfs.git(gpa, io, pair.theirs, &fx.env, &.{ "lfs", "unlock", "x.bin" }, false)) |out| {
         gpa.free(out);
         return error.TestUnexpectedResult;
     } else |_| {}
 
-    const broken = try lfslocks.unlockPath(arena, server, &repo, "y.bin", true, .{});
+    const broken = try lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "y.bin", .request = .{ .force = true } });
     try testing.expectEqualStrings("y.bin", broken.path);
     try fx.gitIn(pair.theirs, &.{ "lfs", "unlock", "--force", "x.bin" });
     const after = try fx.server.lockListing(gpa);
     defer gpa.free(after);
     try testing.expectEqualStrings("", after);
-    try testing.expectError(error.LockNotFound, lfslocks.unlockPath(arena, server, &repo, "x.bin", false, .{}));
+    try testing.expectError(error.LockNotFound, lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "x.bin", .request = .{ .force = false } }));
 }
 
 test "the lock cache is where git-lfs keeps it and what git-lfs writes, read both ways" {
@@ -150,11 +150,11 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.deinit();
-    _ = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
-    var all = try lfslocks.list(server, &repo, .{}, .{});
+    defer server.deinit(io);
+    _ = try lfslocks.lock(arena, io, server, &repo, .{ .path = "x.bin", .request = .{} });
+    var all = try lfslocks.list(io, server, &repo, .{}, .{});
     all.deinit();
-    var split = try lfslocks.verify(server, &repo, .{});
+    var split = try lfslocks.verify(io, server, &repo, .{});
     split.deinit();
 
     // git-lfs reads relic's cache, and says what it says live.
@@ -199,7 +199,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.deinit();
+    defer server.deinit(io);
 
     // After a checkout, with no locks: every lockable file read-only.
     _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
@@ -211,14 +211,14 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
 
     // Each takes a lock on a different file: the holder's file writable,
     // the other's still read-only.
-    _ = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
+    _ = try lfslocks.lock(arena, io, server, &repo, .{ .path = "x.bin", .request = .{} });
     try fx.gitIn(pair.theirs, &.{ "lfs", "lock", "y.bin" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
     try testing.expectEqual(try mode(io, pair.theirs, "x.bin"), try mode(io, pair.ours, "y.bin"));
     try testing.expect(try mode(io, pair.ours, "x.bin") & 0o200 != 0);
 
     // A checkout keeps it so, from the cache alone.
-    var split = try lfslocks.verify(server, &repo, .{});
+    var split = try lfslocks.verify(io, server, &repo, .{});
     split.deinit();
     _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
     try fx.gitIn(pair.theirs, &.{ "lfs", "post-checkout", zero, "HEAD", "1" });
@@ -226,7 +226,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     try testing.expectEqual(try mode(io, pair.theirs, "x.bin"), try mode(io, pair.ours, "y.bin"));
 
     // Giving the lock back makes the file read-only again.
-    _ = try lfslocks.unlockPath(arena, server, &repo, "x.bin", false, .{});
+    _ = try lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "x.bin", .request = .{ .force = false } });
     try fx.gitIn(pair.theirs, &.{ "lfs", "unlock", "y.bin" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
     try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "x.bin") & 0o222);
@@ -247,14 +247,14 @@ test "a lock's file is the one asked about, and a path the server answers with o
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.deinit();
+    defer server.deinit(io);
     _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
     try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
 
     // The server says the lock is on y.bin: x.bin, asked for, is the one
     // made writable, as git-lfs makes the path it asked about writable.
     fx.server.answerLocksWith("y.bin");
-    const taken = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
+    const taken = try lfslocks.lock(arena, io, server, &repo, .{ .path = "x.bin", .request = .{} });
     try testing.expect(try mode(io, pair.ours, "x.bin") & 0o200 != 0);
     try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
 
@@ -264,7 +264,7 @@ test "a lock's file is the one asked about, and a path the server answers with o
     const outside_before = try mode(io, pair.theirs, "outside.bin");
     try testing.expect(outside_before & 0o200 != 0);
     fx.server.answerLocksWith("../theirs/outside.bin");
-    _ = try lfslocks.unlock(arena, server, &repo, taken.locked.id, false, .{});
+    _ = try lfslocks.unlock(arena, io, server, &repo, .{ .id = taken.locked.id, .request = .{ .force = false } });
     try testing.expectEqual(outside_before, try mode(io, pair.theirs, "outside.bin"));
     fx.server.answerLocksWith(null);
 }
@@ -281,12 +281,12 @@ test "a server with no locking API is named" {
     var repo = try repo_mod.Repository.open(gpa, io, d, .{});
     defer repo.deinit(io);
     const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
-    defer server.deinit();
+    defer server.deinit(io);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    try testing.expectError(error.LockingUnsupported, lfslocks.lock(arena_state.allocator(), server, &repo, "a.bin", .{ .ref = "refs/heads/main" }));
-    try testing.expectError(error.LockingUnsupported, lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" }));
-    try testing.expectError(error.LockingUnsupported, lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" }));
+    try testing.expectError(error.LockingUnsupported, lfslocks.lock(arena_state.allocator(), io, server, &repo, .{ .path = "a.bin", .request = .{ .ref = "refs/heads/main" } }));
+    try testing.expectError(error.LockingUnsupported, lfslocks.verify(io, server, &repo, .{ .ref = "refs/heads/main" }));
+    try testing.expectError(error.LockingUnsupported, lfslocks.list(io, server, &repo, .{}, .{ .ref = "refs/heads/main" }));
 }
 
 test "a repository with git-lfs's hooks works on a machine without git-lfs" {
@@ -384,21 +384,29 @@ test "phase2 LFS HTTP pagination ends or fails without publishing partial caches
             var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
             defer repo.deinit(fx.io);
             const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = fx.programs() });
-            defer server.deinit();
+            defer server.deinit(fx.io);
             try fx.server.addLock("a.bin", "anonymous");
+            const cache_path = "lfs/cache/locks/refs/heads/main";
+            const remote_bytes = "[{\"id\":\"old\",\"path\":\"old.bin\"}]\n";
+            const verify_bytes = "{\"ours\":[{\"id\":\"old\",\"path\":\"old.bin\"}],\"theirs\":[]}\n";
+            if (i >= 4) {
+                try repo.commonDirectory().createDirPath(fx.io, cache_path);
+                try repo.commonDirectory().writeFile(fx.io, .{ .sub_path = cache_path ++ "/remote", .data = remote_bytes });
+                try repo.commonDirectory().writeFile(fx.io, .{ .sub_path = cache_path ++ "/verifiable", .data = verify_bytes });
+            }
             if (verify) {
                 if (i >= 4) {
-                    try testing.expectError(error.MalformedResponse, lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" }));
+                    try testing.expectError(error.MalformedResponse, lfslocks.verify(std.testing.io, server, &repo, .{ .ref = "refs/heads/main" }));
                 } else {
-                    var result = try lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" });
+                    var result = try lfslocks.verify(std.testing.io, server, &repo, .{ .ref = "refs/heads/main" });
                     defer result.deinit();
                     try testing.expect(result.ours.len + result.theirs.len != 0);
                 }
             } else {
                 if (i >= 4) {
-                    try testing.expectError(error.MalformedResponse, lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" }));
+                    try testing.expectError(error.MalformedResponse, lfslocks.list(std.testing.io, server, &repo, .{}, .{ .ref = "refs/heads/main" }));
                 } else {
-                    var result = try lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" });
+                    var result = try lfslocks.list(std.testing.io, server, &repo, .{}, .{ .ref = "refs/heads/main" });
                     defer result.deinit();
                     try testing.expect(result.locks.len != 0);
                 }
@@ -407,6 +415,17 @@ test "phase2 LFS HTTP pagination ends or fails without publishing partial caches
             var cached = try lfslocks.Table.cached(fx.gpa, fx.io, &store, "refs/heads/main");
             defer cached.deinit();
             try testing.expectEqual(i < 4, cached.find("a.bin") != null);
+            if (i >= 4) {
+                try testing.expect(cached.find("old.bin") != null);
+                for ([_][2][]const u8{ .{ "remote", remote_bytes }, .{ "verifiable", verify_bytes } }) |file| {
+                    const path = try fx.gpa.print("{s}/{s}", .{ cache_path, file[0] });
+                    defer fx.gpa.free(path);
+                    const actual = try repo.commonDirectory().readFileAlloc(fx.io, path, fx.gpa, .limited(1024));
+                    defer fx.gpa.free(actual);
+                    try testing.expectEqualStrings(file[1], actual);
+                }
+            }
+
             try testing.expectEqual(cursors.len, fx.server.lock_page);
         }
     }

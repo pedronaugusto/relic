@@ -37,9 +37,9 @@ pub fn main(init: std.process.Init) !void {
     const protocol_env = init.environ_map.get("GIT_PROTOCOL") orelse "";
     const version: protocol.Version = if (std.mem.find(u8, protocol_env, "version=2") != null) .v2 else .v0;
 
-    var remote = try local.Remote.open(gpa, io, path orelse return error.NoRepository);
+    var remote = try local.Remote.open(gpa, io, path orelse return error.NoRepository, .{});
     defer remote.deinit(io);
-    var server: uploadpack.Server = .init(gpa, io, &remote, version, stateless, .{});
+    var server: uploadpack.Server = .init(gpa, io, &remote, version, .{ .stateless = stateless });
 
     const in_buffer = try arena.alloc(u8, pktline.max_line);
     var in = Io.File.stdin().readerStreaming(io, in_buffer);

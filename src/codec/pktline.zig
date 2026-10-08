@@ -243,3 +243,6 @@ fn fuzzRead(_: void, smith: *testing.Smith) anyerror!void {
         if (packet == .data) try testing.expect(packet.data.len <= max_data);
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = ReadError || WriteError || Self.ReadError || Self.WriteError || Io.Writer.Error;

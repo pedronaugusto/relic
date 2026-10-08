@@ -223,3 +223,6 @@ fn fuzzSniff(_: void, smith: *testing.Smith) anyerror!void {
     const len = smith.slice(&scratch);
     try testing.expect(contentType(scratch[0..len]).len != 0);
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

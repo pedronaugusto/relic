@@ -11,6 +11,7 @@
 //! so no caller can read the files of a repository whose logs are in its
 //! tables.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -124,17 +125,14 @@ pub fn exists(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) Allocato
 /// The log is opened for appending rather than replaced: several processes
 /// appending a line each interleave lines, never halves of one, because a
 /// line is written in a single call.
-pub fn append(
-    gpa: Allocator,
-    io: Io,
-    git_dir: Io.Dir,
-    ref: []const u8,
-    old: Oid,
-    new: Oid,
-    who: object.Signature,
-    message: []const u8,
-    shared: fs.Shared,
-) AppendError!void {
+pub const AppendOptions = struct { ref: []const u8, old: Oid, new: Oid, who: object.Signature, message: []const u8 = "", shared: fs.Shared = .umask };
+pub fn append(gpa: Allocator, io: Io, git_dir: Io.Dir, options: AppendOptions) AppendError!void {
+    const ref = options.ref;
+    const old = options.old;
+    const new = options.new;
+    const who = options.who;
+    const message = options.message;
+    const shared = options.shared;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     if (std.Io.Dir.path.dirnamePosix(path)) |parent| {
@@ -190,6 +188,8 @@ pub fn append(
 /// The returned entries borrow `bytes`, which is the caller's and must
 /// outlive them.
 pub const Log = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     bytes: []u8,
     entries: []Entry,
@@ -381,8 +381,8 @@ test "an appended entry reads back" {
         .when_secs = 1_700_000_000,
         .offset_minutes = 0,
     };
-    try append(gpa, io, tmp.dir, "refs/heads/main", zero, one, who, "commit (initial): first", .umask);
-    try append(gpa, io, tmp.dir, "refs/heads/main", one, two, who, "commit: second", .umask);
+    try append(gpa, io, tmp.dir, .{ .ref = "refs/heads/main", .old = zero, .new = one, .who = who, .message = "commit (initial): first", .shared = .umask });
+    try append(gpa, io, tmp.dir, .{ .ref = "refs/heads/main", .old = one, .new = two, .who = who, .message = "commit: second", .shared = .umask });
 
     var raw: [512]u8 = undefined;
     const text = try tmp.dir.readFile(io, "logs/refs/heads/main", &raw);
@@ -452,3 +452,6 @@ test "a log message is collapsed the way git collapses it" {
     defer gpa.free(out);
     try std.testing.expectEqualStrings("commit: first line more", out);
 }
+
+/// All errors reported by this namespace.
+pub const Error = AppendError || ReadError || ExpireError || CreateError || DeleteError || Allocator.Error || Self.ReadError;

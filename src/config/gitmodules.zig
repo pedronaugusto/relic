@@ -19,6 +19,7 @@
 //! against the superproject's own, including the colon a `host:path` url
 //! turns into when its last directory is taken away.
 
+const ErrorNamespace = @This();
 const testgit = @import("../testing/git.zig");
 const Self = @This();
 
@@ -141,6 +142,8 @@ pub const Refused = struct {
 
 /// A parsed `.gitmodules`.
 pub const Gitmodules = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// In the order their sections first appear.
@@ -766,3 +769,6 @@ fn fuzzGitmodules(_: void, smith: *std.testing.Smith) anyerror!void {
         try testing.expect(g.byName(sub.name) != null);
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = ParseError || ResolveError || Self.ParseError || Self.ResolveError;

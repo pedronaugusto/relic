@@ -85,3 +85,29 @@ test "phase2 publishing facades cover every implementation declaration" {
     try covers(relic.pretty, @import("../pretty/pretty.zig"));
     try covers(relic.maintenance, @import("../maintenance/maintenance.zig"));
 }
+
+fn checkErrors(comptime ns: type, comptime depth: usize) !void {
+    inline for (@typeInfo(ns).@"struct".decl_names) |name| {
+        const value = @field(ns, name);
+        if (@TypeOf(value) == type) switch (@typeInfo(value)) {
+            .@"struct" => {
+                if (comptime isNamespace(ns, name) or @hasDecl(value, "deinit")) {
+                    if (comptime @hasDecl(value, "Error")) {
+                        try std.testing.expect(@typeInfo(value.Error) == .error_set);
+                        try std.testing.expect(@typeInfo(value.Error).error_set.error_names != null);
+                    } else {
+                        std.debug.print("missing public Error: {s}\n", .{@typeName(value)});
+                        return error.TestExpectedError;
+                    }
+                }
+                if (comptime isNamespace(ns, name) and depth > 1) try checkErrors(value, depth - 1);
+            },
+            else => {},
+        };
+    }
+}
+
+test "phase2 every public namespace and owned type names its errors" {
+    @setEvalBranchQuota(500000);
+    try checkErrors(relic, 3);
+}

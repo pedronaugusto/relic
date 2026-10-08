@@ -483,3 +483,6 @@ test "a client takes what promisor.acceptFromServer and checkFields allow, and s
     try testing.expectEqualStrings("blob:limit=1k", r.stores[0].new);
     try testing.expectEqualStrings("blob:limit=1024", (try autoFilter(arena, &config, r.accepted)).?);
 }
+
+/// All errors reported by this namespace.
+pub const Error = AutoFilterError || Allocator.Error;

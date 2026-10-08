@@ -180,8 +180,8 @@ pub fn relicUploadHead(fx: *Fixture, d: Io.Dir, options: lfstransfer.Options) !l
     var collected = try objectwalk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, &.{});
     defer collected.deinit();
     const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = fx.programs() });
-    defer server.deinit();
-    return lfstransfer.pushObjects(server, repo.objectDatabase(), collected.entries, options);
+    defer server.deinit(fx.io);
+    return lfstransfer.pushObjects(std.testing.io, server, repo.objectDatabase(), collected.entries, options);
 }
 
 /// Fail with every failure's message printed.
@@ -268,8 +268,8 @@ test "what relic uploads git lfs pull downloads, what git-lfs pushes relic pulls
         var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
         defer repo.deinit(io);
         const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
-        defer server.deinit();
-        var pulled = try lfstransfer.pull(server, &repo, .{});
+        defer server.deinit(io);
+        var pulled = try lfstransfer.pull(io, server, &repo, .{});
         defer pulled.deinit();
         try testing.expectEqual(@as(usize, 0), pulled.fetched.failures());
         try testing.expectEqual(@as(u32, 1), pulled.replaced);
@@ -357,8 +357,8 @@ test "ssh is started for git-lfs-authenticate as git-lfs starts it, and its toke
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try openServer(fx, &repo);
-            defer server.deinit();
-            var pulled = try lfstransfer.pull(server, &repo, .{});
+            defer server.deinit(io);
+            var pulled = try lfstransfer.pull(io, server, &repo, .{});
             defer pulled.deinit();
             try testing.expectEqual(@as(usize, 0), pulled.fetched.failures());
         }
@@ -410,8 +410,8 @@ test "a failed transfer is retried with a fresh batch, a 429 is waited out, and 
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
-    defer server.deinit();
-    var fetched = try lfstransfer.fetch(server, &repo, .{ .transfer = .{ .concurrency = 1 } });
+    defer server.deinit(io);
+    var fetched = try lfstransfer.fetch(io, server, &repo, .{ .transfer = .{ .concurrency = 1 } });
     defer fetched.deinit();
     try testing.expectEqual(@as(usize, 1), fetched.failures());
     var failed: ?lfstransfer.Result = null;
@@ -423,7 +423,7 @@ test "a failed transfer is retried with a fresh batch, a 429 is waited out, and 
 
     // An object the server does not have is refused by the server's words.
     try fx.server.putObject(&testlfs.sha256Hex("x"), "y");
-    var missing = try lfstransfer.download(server, &.{.{ .oid = testlfs.sha256Hex("absent"), .size = 6, .name = "absent.bin" }}, .{});
+    var missing = try lfstransfer.download(io, server, &.{.{ .oid = testlfs.sha256Hex("absent"), .size = 6, .name = "absent.bin" }}, .{});
     defer missing.deinit();
     try testing.expectEqual(lfstransfer.Result.Status.refused, missing.results[0].status);
     try testing.expectEqualStrings("[404] Object does not exist", missing.results[0].message.?);
@@ -478,8 +478,8 @@ test "a remote on this machine has its objects copied store to store, and git-lf
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
-    defer server.deinit();
-    var pulled = try lfstransfer.pull(server, &repo, .{});
+    defer server.deinit(io);
+    var pulled = try lfstransfer.pull(io, server, &repo, .{});
     defer pulled.deinit();
     try testing.expectEqual(@as(usize, 0), pulled.fetched.failures());
     try expectFile(fx, ours, "more.bin", more);
@@ -514,7 +514,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
-    defer server.deinit();
+    defer server.deinit(io);
     const Heard = struct {
         const Self = @This();
         objects: u64 = 0,
@@ -546,8 +546,8 @@ test "checkout fetches what the store lacks through the server, many at once, an
 
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try repo.loadFilters(io, .{});
-    defer drivers.deinit();
+    var drivers = try @import("filter.zig").load(gpa, io, &repo, .{ .fetch = fetcher.fetcher() });
+    defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -555,8 +555,8 @@ test "checkout fetches what the store lacks through the server, many at once, an
     defer index.deinit();
     const tree = (try repo.headTree(io)).?;
     // Every file is written again, as `git checkout -f` writes it.
-    const outcome = try worktree.checkout(gpa, io, ours, &index, repo.objectDatabase(), tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
-    try testing.expectEqual(@as(u32, 0), outcome.lfs_pointers);
+    const outcome = try worktree.checkout(gpa, io, ours, &index, repo.objectDatabase(), tree, .{ .rules = rules, .force = true });
+    try testing.expectEqual(@as(u32, 0), outcome.native_fallbacks);
     for (files) |f| try expectFile(fx, ours, f[0], f[1]);
     try testing.expectEqual(@as(u64, files.len), heard.objects);
     try testing.expectEqual(total, heard.bytes);
@@ -598,8 +598,8 @@ test "the endpoint and its access are the ones git lfs env names" {
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
         const server = try openServer(fx, &repo);
-        defer server.deinit();
-        const e = try server.client.endpoint(.download);
+        defer server.deinit(io);
+        const e = try server.client.endpoint(io, .download);
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
         const access = try server.settings.urlGet(arena_state.allocator(), "lfs", e.url, "access");
@@ -642,8 +642,8 @@ test "a refused credential is erased, as git-lfs erases it, and the transfer say
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
-    defer server.deinit();
-    var fetched = try lfstransfer.fetch(server, &repo, .{});
+    defer server.deinit(io);
+    var fetched = try lfstransfer.fetch(io, server, &repo, .{});
     defer fetched.deinit();
     try testing.expectEqual(@as(usize, 1), fetched.failures());
     try testing.expectEqual(lfstransfer.Result.Status.failed, fetched.results[0].status);
@@ -683,8 +683,8 @@ test "an action's URL is rewritten by insteadOf when git-lfs's setting asks, and
         var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
         defer repo.deinit(io);
         const server = try openServer(fx, &repo);
-        defer server.deinit();
-        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        defer server.deinit(io);
+        var fetched = try lfstransfer.fetch(io, server, &repo, .{});
         defer fetched.deinit();
         try testing.expectEqual(@as(usize, if (rewrite) 0 else 1), fetched.failures());
     }
@@ -694,8 +694,8 @@ test "an action's URL is rewritten by insteadOf when git-lfs's setting asks, and
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
-    defer server.deinit();
-    try testing.expectError(error.LfsTransferUnsupported, lfstransfer.fetch(server, &repo, .{}));
+    defer server.deinit(io);
+    try testing.expectError(error.LfsTransferUnsupported, lfstransfer.fetch(io, server, &repo, .{}));
 }
 
 test "an .lfsconfig missing from the working tree is read from the index, then from HEAD, as git-lfs reads it, by the server and by checkout" {
@@ -731,13 +731,13 @@ test "an .lfsconfig missing from the working tree is read from the index, then f
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
         const server = try openServer(fx, &repo);
-        defer server.deinit();
-        try testing.expectEqualStrings(stage.want, (try server.client.endpoint(.download)).url);
+        defer server.deinit(io);
+        try testing.expectEqualStrings(stage.want, (try server.client.endpoint(io, .download)).url);
         // Checkout's own LFS, which smudges with `lfs.fetchinclude` and
         // `lfs.fetchexclude` from there, finds the same file.
-        var drivers = try repo.loadFilters(io, .{});
-        defer drivers.deinit();
-        try testing.expectEqualStrings(stage.want, drivers.lfs.?.settings.url.?);
+        var drivers = try @import("filter.zig").load(gpa, io, &repo, .{});
+        defer drivers.deinit(io);
+        try testing.expectEqualStrings(stage.want, @import("filter.zig").settings(&drivers).url.?);
     }
 }
 
@@ -793,9 +793,9 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
         const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .programs = fx.programs() });
-        defer server.deinit();
+        defer server.deinit(io);
         try testing.expectEqualStrings(case.picked, server.remote);
-        try testing.expectEqualStrings(served_lfs, (try server.client.endpoint(.download)).url);
+        try testing.expectEqualStrings(served_lfs, (try server.client.endpoint(io, .download)).url);
     }
 
     // With no branch yet, and with no remote at all but a FETCH_HEAD, the
@@ -823,8 +823,8 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
         const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .programs = fx.programs() });
-        defer server.deinit();
-        try testing.expectEqualStrings(line, (try server.client.endpoint(.download)).url);
+        defer server.deinit(io);
+        try testing.expectEqualStrings(line, (try server.client.endpoint(io, .download)).url);
     }
 }
 
@@ -853,8 +853,8 @@ test "a .netrc in the home directory is used before any helper, as git-lfs uses 
     var repo = try repo_mod.Repository.open(gpa, io, files[1], .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
-    defer server.deinit();
-    var fetched = try lfstransfer.fetch(server, &repo, .{});
+    defer server.deinit(io);
+    var fetched = try lfstransfer.fetch(io, server, &repo, .{});
     defer fetched.deinit();
     try expectNoFailures(&fetched);
     // Neither asked its helper, whose password is wrong.
@@ -872,8 +872,8 @@ test "a .netrc in the home directory is used before any helper, as git-lfs uses 
     for (files) |d| try emptyStore(fx, d);
     try fx.gitIn(files[0], &.{ "lfs", "fetch" });
     const server2 = try openServer(fx, &repo);
-    defer server2.deinit();
-    var again = try lfstransfer.fetch(server2, &repo, .{});
+    defer server2.deinit(io);
+    var again = try lfstransfer.fetch(io, server2, &repo, .{});
     defer again.deinit();
     try expectNoFailures(&again);
     const theirs = try fx.tools.readFileAlloc(io, "by-git-helper.log", gpa, .unlimited);
@@ -913,8 +913,8 @@ test "a download that breaks off goes on from where it stopped, as git-lfs's doe
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try openServer(fx, &repo);
-            defer server.deinit();
-            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer server.deinit(io);
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
             try expectNoFailures(&fetched);
         }
@@ -941,8 +941,8 @@ test "a download that breaks off goes on from where it stopped, as git-lfs's doe
         var repo = try repo_mod.Repository.open(gpa, io, dirs[1], .{});
         defer repo.deinit(io);
         const server = try openServer(fx, &repo);
-        defer server.deinit();
-        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        defer server.deinit(io);
+        var fetched = try lfstransfer.fetch(io, server, &repo, .{});
         defer fetched.deinit();
         try expectNoFailures(&fetched);
         try testing.expectError(error.FileNotFound, dirs[1].access(io, part, .{}));
@@ -1024,9 +1024,9 @@ test "a recent fetch brings what git lfs fetch --recent brings, counted from the
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try openServer(fx, &repo);
-            defer server.deinit();
-            try testing.expectError(error.LfsRecentNeedsTime, lfstransfer.fetch(server, &repo, .{ .recent = true }));
-            var fetched = try lfstransfer.fetch(server, &repo, .{ .recent = true, .now = now });
+            defer server.deinit(io);
+            try testing.expectError(error.LfsRecentNeedsTime, lfstransfer.fetch(io, server, &repo, .{ .recent = true }));
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{ .recent = true, .now = now });
             defer fetched.deinit();
             try expectNoFailures(&fetched);
         }
@@ -1082,8 +1082,8 @@ test "a clone made with --shared takes its objects from the other repository's s
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try openServer(fx, &repo);
-            defer server.deinit();
-            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer server.deinit(io);
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
             try expectNoFailures(&fetched);
         }
@@ -1178,8 +1178,8 @@ test "a download asks for gzip, or for zstd when lfs.transfer.httpDownloadEncodi
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try openServer(fx, &repo);
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 if (refused) {
                     try testing.expectEqual(@as(usize, 1), fetched.failures());
@@ -1227,13 +1227,13 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try openServer(fx, &repo);
-                defer server.deinit();
+                defer server.deinit(io);
                 var fetcher: lfstransfer.Fetcher = .{ .server = server };
                 defer fetcher.deinit();
                 var attrs = try repo.loadAttrs(io);
                 defer attrs.deinit();
-                var drivers = try repo.loadFilters(io, .{});
-                defer drivers.deinit();
+                var drivers = try @import("filter.zig").load(gpa, io, &repo, .{ .fetch = fetcher.fetcher() });
+                defer drivers.deinit(io);
                 var rules = try repo.worktreeRules();
                 rules.attrs = &attrs;
                 rules.filters = &drivers;
@@ -1241,11 +1241,11 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 defer index.deinit();
                 const tree = (try repo.headTree(io)).?;
                 // Every file is written again, as `git checkout -f` writes it.
-                const done = worktree.checkout(gpa, io, d, &index, repo.objectDatabase(), tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
+                const done = worktree.checkout(gpa, io, d, &index, repo.objectDatabase(), tree, .{ .rules = rules, .force = true });
                 if (skip) {
-                    try testing.expectEqual(@as(u32, 1), (try done).lfs_pointers);
+                    try testing.expectEqual(@as(u32, 1), (try done).native_fallbacks);
                 } else {
-                    try testing.expectError(error.LfsFetchFailed, done);
+                    try testing.expectError(error.NativeFilterFetchFailed, done);
                 }
                 try testing.expectEqual(@as(usize, 1), fetcher.last.?.failures());
             }
@@ -1294,8 +1294,8 @@ test "every download's batch names the current branch's ref, as git-lfs's do, wh
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try openServer(fx, &repo);
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, if (stage.refs.len != 0) .{ .refs = stage.refs } else .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, if (stage.refs.len != 0) .{ .refs = stage.refs } else .{});
                 defer fetched.deinit();
                 try expectNoFailures(&fetched);
             }
@@ -1367,8 +1367,8 @@ test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
-            defer server.deinit();
-            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer server.deinit(io);
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
             try expectNoFailures(&fetched);
         }
@@ -1406,8 +1406,8 @@ test "an unreadable client certificate, unreadable authorities and an unsupporte
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
         const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
-        defer server.deinit();
-        try testing.expectError(case.want, lfstransfer.fetch(server, &repo, .{}));
+        defer server.deinit(io);
+        try testing.expectError(case.want, lfstransfer.fetch(io, server, &repo, .{}));
     }
     // A plain http URL through a proxy with an unsupported scheme.
     try fx.gitIn(d, &.{ "config", "lfs.url", "http://lfs.example.invalid/repo.git/info/lfs" });
@@ -1415,8 +1415,8 @@ test "an unreadable client certificate, unreadable authorities and an unsupporte
     var repo = try repo_mod.Repository.open(gpa, io, d, .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
-    defer server.deinit();
-    try testing.expectError(error.InvalidProxy, lfstransfer.fetch(server, &repo, .{}));
+    defer server.deinit(io);
+    try testing.expectError(error.InvalidProxy, lfstransfer.fetch(io, server, &repo, .{}));
 }
 
 /// Have `front` answer the download of `content` where the LFS test
@@ -1487,8 +1487,8 @@ test "an https object is reached through a proxy's tunnel, and unchecked where t
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 try expectNoFailures(&fetched);
             }
@@ -1583,11 +1583,11 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
-                defer server.deinit();
+                defer server.deinit(io);
                 if (case.refused) |refused| switch (refused) {
-                    .request => |want| try testing.expectError(want, lfstransfer.fetch(server, &repo, .{})),
+                    .request => |want| try testing.expectError(want, lfstransfer.fetch(io, server, &repo, .{})),
                     .download => |said| {
-                        var fetched = try lfstransfer.fetch(server, &repo, .{});
+                        var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                         defer fetched.deinit();
                         try testing.expectEqual(@as(usize, 1), fetched.results.len);
                         try testing.expectEqual(lfstransfer.Result.Status.failed, fetched.results[0].status);
@@ -1598,7 +1598,7 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
                         };
                     },
                 } else {
-                    var fetched = try lfstransfer.fetch(server, &repo, .{});
+                    var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                     defer fetched.deinit();
                     try expectNoFailures(&fetched);
                 }
@@ -1649,8 +1649,8 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .auth_failure = &failure });
-            defer server.deinit();
-            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer server.deinit(io);
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
             try testing.expectEqual(@as(usize, 1), fetched.failures());
             try testing.expectEqual(.refused, failure.reason);
@@ -1717,8 +1717,8 @@ test "a zstd body is decoded with the window its frame asks for, up to git-lfs's
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try openServer(fx, &repo);
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 if (case.ok) try expectNoFailures(&fetched) else {
                     try testing.expectEqual(@as(usize, 1), fetched.failures());
@@ -1760,8 +1760,8 @@ test "an action that expires within five seconds of the time given is not used, 
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) nowSeconds(io) else null });
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 try expectNoFailures(&fetched);
             }
@@ -1818,8 +1818,8 @@ test "a git-lfs-authenticate token is asked for again when it expires, lfs.defau
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = nowSeconds(io) });
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 try expectNoFailures(&fetched);
             }
@@ -1871,8 +1871,8 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
             const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) now else null });
-            defer server.deinit();
-            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer server.deinit(io);
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
             try expectNoFailures(&fetched);
             try testing.expect(fetched.sweep_failed == null);
@@ -1996,8 +1996,8 @@ test "LFS uploads and downloads through each SOCKS scheme, and downloads with TL
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try openServer(fx, &repo);
-                defer server.deinit();
-                var uploaded = try lfstransfer.upload(server, &.{object}, .{});
+                defer server.deinit(io);
+                var uploaded = try lfstransfer.upload(io, server, &.{object}, .{});
                 defer uploaded.deinit();
                 try expectNoFailures(&uploaded);
             }
@@ -2006,8 +2006,8 @@ test "LFS uploads and downloads through each SOCKS scheme, and downloads with TL
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try openServer(fx, &repo);
-                defer server.deinit();
-                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer server.deinit(io);
+                var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 try expectNoFailures(&fetched);
                 const file = (try server.store().open(io, &.{ .oid = object.oid, .size = object.size })).?;
@@ -2095,8 +2095,8 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
         var repo = try repo_mod.Repository.open(gpa, io, dirs[1], .{});
         defer repo.deinit(io);
         const server = try openServer(fx, &repo);
-        defer server.deinit();
-        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        defer server.deinit(io);
+        var fetched = try lfstransfer.fetch(io, server, &repo, .{});
         defer fetched.deinit();
         try expectNoFailures(&fetched);
         try testing.expectEqual(lfstransfer.Result.Status.transferred, fetched.results[0].status);
@@ -2126,7 +2126,7 @@ test "a redirect to another host leaves the request's own Authorization behind, 
     var repo = try repo_mod.Repository.open(gpa, io, work, .{});
     defer repo.deinit(io);
     const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
-    defer server.deinit();
+    defer server.deinit(io);
 
     const route = try gpa.print("repo.git/info/lfs/objects/{s}", .{&oid});
     defer gpa.free(route);
@@ -2137,8 +2137,8 @@ test "a redirect to another host leaves the request's own Authorization behind, 
         const location = try to.url(gpa, route);
         defer gpa.free(location);
         try fx.server.fail(.{ .route = .download, .status = 307, .location = location });
-        if (server.client.send(.{ .method = .GET, .url = from, .headers = headers, .authenticated = true })) |ex| {
-            ex.deinit();
+        if (server.client.send(io, .{ .method = .GET, .url = from, .headers = headers, .authenticated = true })) |ex| {
+            ex.deinit(io);
         } else |_| {}
     }
     const here = try fx.server.requests(gpa);

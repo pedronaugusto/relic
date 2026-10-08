@@ -184,8 +184,8 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
             defer repo.deinit(io);
             var attrs = try repo.loadAttrs(io);
             defer attrs.deinit();
-            var drivers = try repo.loadFilters(io, .{});
-            defer drivers.deinit();
+            var drivers = try @import("../../lfs/filter.zig").load(gpa, io, &repo, .{});
+            defer drivers.deinit(io);
             var rules = try repo.worktreeRules();
             rules.attrs = &attrs;
             rules.filters = &drivers;
@@ -280,7 +280,7 @@ test "CVE-2023-22490, t5604-clone-reference 'clone repo with symlinked objects d
     try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git", .upload_pack, .sha1, .{
         .programs = .{ .environ = &only_file },
     }));
-    try std.testing.expectError(error.NotARepository, local.Remote.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git"));
+    try std.testing.expectError(error.NotARepository, local.Remote.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git", .{}));
     if (!links) return;
 
     var sensitive = std.testing.tmpDir(.{});

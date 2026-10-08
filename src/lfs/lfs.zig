@@ -30,6 +30,7 @@
 //! the content, and a pointer that names one is refused by name rather than
 //! smudged without it.
 
+const ErrorNamespace = @This();
 const glob_mod = @import("../text/glob.zig");
 const fs = @import("../fs/fs.zig");
 const Self = @This();
@@ -572,6 +573,8 @@ pub const Fetcher = struct {
 /// A repository's LFS: its store and its settings, from the configuration
 /// and `.lfsconfig`.
 pub const Lfs = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     store: Store,
@@ -586,6 +589,8 @@ pub const Lfs = struct {
 
     /// How `load` behaves.
     pub const Options = struct {
+        common_dir: Io.Dir,
+        work_dir: ?Io.Dir = null,
         /// Leave every pointer as it is on checkout.
         skip_smudge: bool = false,
         /// `.lfsconfig` as git-lfs finds it when the working tree has none —
@@ -604,10 +609,10 @@ pub const Lfs = struct {
         gpa: Allocator,
         io: Io,
         config: *const config_mod.Config,
-        common_dir: Io.Dir,
-        work_dir: ?Io.Dir,
         options: Options,
     ) LoadError!Lfs {
+        const common_dir = options.common_dir;
+        const work_dir = options.work_dir;
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const a = arena_instance.allocator();
@@ -697,7 +702,10 @@ test "settings that outgrow the arena's first block are all freed with it" {
     defer config.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var lfs = try Lfs.load(gpa, io, &config, tmp.dir, null, .{});
+    var lfs = try Lfs.load(gpa, io, &config, .{
+        .common_dir = tmp.dir,
+        .work_dir = null,
+    });
     defer lfs.deinit();
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_include.len);
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_exclude.len);
@@ -875,7 +883,10 @@ test "settings come from the configuration first and .lfsconfig second" {
     });
     var config = try config_mod.Config.parseText(gpa, "[lfs]\n\tfetchexclude = y,z\n\tstorage = /elsewhere/lfs\n", .local);
     defer config.deinit();
-    var l = try Lfs.load(gpa, io, &config, tmp.dir, tmp.dir, .{});
+    var l = try Lfs.load(gpa, io, &config, .{
+        .common_dir = tmp.dir,
+        .work_dir = tmp.dir,
+    });
     defer l.deinit();
     try testing.expectEqual(@as(usize, 2), l.settings.fetch_include.len);
     try testing.expectEqualStrings("b/c", l.settings.fetch_include[1].text);
@@ -907,3 +918,6 @@ fn fuzzPointer(_: void, smith: *testing.Smith) anyerror!void {
     try testing.expectEqual(p.size, again.size);
     try testing.expectEqual(p.extension_count, again.extension_count);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Pointer.DecodeError || Store.ObjectPathError || Store.OpenError || Store.InstallError || FetchError || Lfs.LoadError || Io.Writer.Error || Io.Reader.ShortError || Allocator.Error || Self.FetchError;

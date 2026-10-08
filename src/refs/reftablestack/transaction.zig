@@ -71,7 +71,7 @@ fn readIn(gpa: Allocator, stacks: *const Stacks, name: []const u8) refs.ReadErro
 
 /// `name`'s value in one stack, or `null`.
 fn refFrom(gpa: Allocator, stack: *const Stack, name: []const u8) refs.ReadError!?refs.Ref {
-    const record = (try stack.lookup(gpa, gpa, name)) orelse return null;
+    const record = (try stack.lookup(gpa, name, .{ .out = gpa })) orelse return null;
     return switch (record.value) {
         .deletion => null,
         .direct => |oid| .{ .direct = oid },
@@ -124,13 +124,13 @@ fn logRecords(gpa: Allocator, arena: Allocator, io: Io, store: anytype, name: []
         if (where.bare.len == 0) return &.{};
         var stack = (try loadWorktree(gpa, io, store, where.id)) orelse return &.{};
         defer stack.deinit();
-        return stack.logsFor(gpa, arena, where.bare);
+        return stack.logsFor(gpa, where.bare, .{ .arena = arena });
     }
     var owned: ?Stacks = null;
     var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
-    if (where.owner == .main) return view.stacks.main.logsFor(gpa, arena, where.bare);
-    return cache.internal.forName(view.stacks, name).logsFor(gpa, arena, name);
+    if (where.owner == .main) return view.stacks.main.logsFor(gpa, where.bare, .{ .arena = arena });
+    return cache.internal.forName(view.stacks, name).logsFor(gpa, name, .{ .arena = arena });
 }
 
 /// Follow symbolic refs through the stacks until an object name, with the
@@ -190,7 +190,7 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
     const sources = [_]?*const Stack{ &stacks.main, if (stacks.worktree) |*w| w else null };
     for (sources, 0..) |maybe, which| {
         const stack = maybe orelse continue;
-        const records = try stack.refsWithPrefix(gpa, arena, prefix, false);
+        const records = try stack.refsWithPrefix(gpa, prefix, .{ .arena = arena, .include_deletions = false });
         for (records) |record| {
             // In a linked worktree the shared stack's per-worktree refs are
             // the main worktree's, and the worktree's own stack holds only
@@ -426,12 +426,12 @@ fn checkNames(tx: anytype, stacks: *const Stacks) refs.TransactionError!void {
             end = slash;
             const ancestor = edit.name[0..end];
             if (deletedHere(tx, ancestor)) continue;
-            const record = (try stack.lookup(gpa, arena, ancestor)) orelse continue;
+            const record = (try stack.lookup(gpa, ancestor, .{ .out = arena })) orelse continue;
             if (record.value != .deletion) return error.RefNameConflict;
         }
         // Refs where this one's directory would be.
         const below = try arena.print("{s}/", .{edit.name});
-        for (try stack.refsWithPrefix(gpa, arena, below, false)) |record| {
+        for (try stack.refsWithPrefix(gpa, below, .{ .arena = arena, .include_deletions = false })) |record| {
             if (!deletedHere(tx, record.name)) return error.RefNameConflict;
         }
     }
@@ -531,7 +531,7 @@ pub fn expireLog(
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     // Newest first, as git's iterator hands them over.
-    const records = try stack.logsFor(gpa, arena, name);
+    const records = try stack.logsFor(gpa, name, .{ .arena = arena });
     if (records.len == 0) return;
 
     var live: usize = 0;
@@ -568,7 +568,7 @@ pub fn expireLog(
     var ref_count: usize = 0;
     if (options.update_ref) if (last_kept) |at| {
         // A symbolic ref is left as it is, as git leaves it.
-        const current = try stack.lookup(gpa, arena, name);
+        const current = try stack.lookup(gpa, name, .{ .out = arena });
         const direct = if (current) |r| r.value == .direct or r.value == .peeled else false;
         if (direct) {
             ref_records[0] = .{ .name = name, .update_index = update_index, .value = .{ .direct = rewritten[at].value.update.new } };
@@ -592,7 +592,7 @@ pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    if ((try stack.logsFor(gpa, arena_instance.allocator(), name)).len != 0) return;
+    if ((try stack.logsFor(gpa, name, .{ .arena = arena_instance.allocator() })).len != 0) return;
     const update_index = stack.maxUpdateIndex() + 1;
     const logs = [_]reftable.LogRecord{marker(store.objectFormat(), name, update_index)};
     const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, &logs);
@@ -613,7 +613,7 @@ pub fn deleteLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const records = try stack.logsFor(gpa, arena, name);
+    const records = try stack.logsFor(gpa, name, .{ .arena = arena });
     if (records.len == 0) return;
     const update_index = stack.maxUpdateIndex() + 1;
     const logs = try arena.alloc(reftable.LogRecord, records.len);
@@ -747,13 +747,13 @@ fn addTable(
             // A deleted ref's log goes with it, as it does in git, whether
             // or not the transaction logs anything: one tombstone for each
             // entry it had.
-            for (try stack.logsFor(gpa, arena, edit.name)) |entry| {
+            for (try stack.logsFor(gpa, edit.name, .{ .arena = arena })) |entry| {
                 try logs.append(arena, .{ .name = edit.name, .update_index = entry.update_index, .value = .deletion });
             }
             continue;
         }
         const message = log orelse continue;
-        const exists = (try stack.logsFor(gpa, arena, edit.name)).len != 0;
+        const exists = (try stack.logsFor(gpa, edit.name, .{ .arena = arena })).len != 0;
         if (!reflog.shouldLog(message.policy, edit.name, exists)) continue;
         const new_oid = if (source.new) |new| switch (new) {
             .direct => |oid| oid,
@@ -1033,7 +1033,7 @@ pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) re
     const update_index = stack.maxUpdateIndex() + 1;
     const records = try arena.alloc(reftable.RefRecord, refs_in.len);
     for (refs_in, records) |ref, *record| {
-        if (try stack.lookup(gpa, arena, ref.name)) |found| if (found.value != .deletion) return error.RefAlreadyExists;
+        if (try stack.lookup(gpa, ref.name, .{ .out = arena })) |found| if (found.value != .deletion) return error.RefAlreadyExists;
         record.* = .{ .name = ref.name, .update_index = update_index, .value = if (ref.peeled) |target|
             .{ .peeled = .{ .value = ref.oid, .target = target } }
         else

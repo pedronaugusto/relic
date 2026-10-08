@@ -11,6 +11,7 @@
 //! merge puts one. A path the merge does not touch keeps whatever changes it
 //! has, and an ignored file in the way is replaced, both as in git.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -95,6 +96,8 @@ pub const Conflict = struct {
 
 /// What a merge left behind.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// Sorted by path. Empty when the merge was clean.
@@ -547,7 +550,7 @@ fn writeChanged(
             }
         }
         try w.attrs.enter(w.io, w.wt, path);
-        const written = try worktree.writeEntry(w.gpa, w.io, w.wt, w.db, w.conv, path, want.mode, want.oid, w.rules);
+        const written = try worktree.writeEntry(w.gpa, w.io, w.wt, .{ .db = w.db, .conv = w.conv, .path = path, .mode = want.mode, .oid = want.oid, .rules = w.rules });
         try stats.put(w.arena, path, written.stat);
         written_count += 1;
     }

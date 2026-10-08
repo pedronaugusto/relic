@@ -21,6 +21,7 @@
 //!
 //! `formatNote` writes a note the way `git log` shows it under a commit.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -140,6 +141,8 @@ fn nibble(n: usize, key: []const u8) u4 {
 
 /// A notes ref's tree, open: git's `struct notes_tree`.
 pub const Notes = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     repo: *Repository,
     /// The notes ref it was read from. Owned.
@@ -225,7 +228,7 @@ pub const Notes = struct {
     }
 
     /// `note_tree_search`.
-    fn search(t: *Notes, io: Io, tree: **IntNode, n: *usize, key: []const u8) Error!*Ptr {
+    fn search(t: *Notes, io: Io, tree: **IntNode, n: *usize, key: []const u8) ErrorNamespace.Error!*Ptr {
         while (true) {
             const p0 = tree.*.a[0];
             if (p0 == .subtree and t.prefixMatches(key, &p0.subtree.key)) {
@@ -256,7 +259,7 @@ pub const Notes = struct {
     }
 
     /// `note_tree_find`.
-    fn find(t: *Notes, io: Io, key: []const u8) Error!?*Leaf {
+    fn find(t: *Notes, io: Io, key: []const u8) ErrorNamespace.Error!?*Leaf {
         var tree = t.root;
         var n: usize = 0;
         const p = try t.search(io, &tree, &n, key);
@@ -281,7 +284,7 @@ pub const Notes = struct {
 
     /// `note_tree_remove`: the note keyed `key`, if there is one; its value
     /// is returned.
-    fn removeKey(t: *Notes, io: Io, start: *IntNode, start_n: usize, key: []const u8) Error!?Oid {
+    fn removeKey(t: *Notes, io: Io, start: *IntNode, start_n: usize, key: []const u8) ErrorNamespace.Error!?Oid {
         var tree = start;
         var n = start_n;
         const p = try t.search(io, &tree, &n, key);
@@ -301,7 +304,7 @@ pub const Notes = struct {
     }
 
     /// `note_tree_insert`. Takes `entry`.
-    fn insert(t: *Notes, io: Io, start: *IntNode, start_n: usize, entry: *Leaf, kind: std.meta.Tag(Ptr), combine: Combine) Error!void {
+    fn insert(t: *Notes, io: Io, start: *IntNode, start_n: usize, entry: *Leaf, kind: std.meta.Tag(Ptr), combine: Combine) ErrorNamespace.Error!void {
         // `entry` is this call's on every path, an error's too.
         var tree = start;
         var n = start_n;
@@ -369,7 +372,7 @@ pub const Notes = struct {
 
     /// `load_subtree`: read the tree behind `subtree` into `node` at level
     /// `n`.
-    fn loadSubtree(t: *Notes, io: Io, subtree: *const Leaf, node: *IntNode, n: usize) Error!void {
+    fn loadSubtree(t: *Notes, io: Io, subtree: *const Leaf, node: *IntNode, n: usize) ErrorNamespace.Error!void {
         const raw_len = t.rawLen();
         const found = try t.repo.objectDatabase().read(io, subtree.val);
         defer t.repo.objectDatabase().allocator().free(found.bytes);
@@ -460,7 +463,10 @@ pub const Notes = struct {
 
     /// `copy_note`: `from`'s note onto `to`. With `force` false, a note on
     /// `to` is `error.NoteExists`.
-    pub fn copy(t: *Notes, io: Io, from: Oid, to: Oid, force: bool, combine: ?Combine) Self.Error!void {
+    pub const CopyOptions = struct { force: bool = false, combine: ?Combine = null };
+    pub fn copy(t: *Notes, io: Io, from: Oid, to: Oid, options: CopyOptions) Self.Error!void {
+        const force = options.force;
+        const combine = options.combine;
         const note = try t.get(io, from);
         const existing = try t.get(io, to);
         if (!force and existing != null) return error.NoteExists;
@@ -475,7 +481,7 @@ pub const Notes = struct {
     const Collect = struct {
         out: *std.ArrayList(Entry),
         gpa: Allocator,
-        fn each(c: Collect, t2: *Notes, key: []const u8, val: Oid, path: []const u8) Error!void {
+        fn each(c: Collect, t2: *Notes, key: []const u8, val: Oid, path: []const u8) ErrorNamespace.Error!void {
             _ = path;
             try c.out.append(c.gpa, .{ .object = Oid.fromRaw(t2.repo.objectFormat(), key[0..t2.rawLen()]) catch unreachable, .note = val }); // unreachable: the key is cut to the format's raw length
         }
@@ -529,7 +535,7 @@ pub const Notes = struct {
     }
 
     /// `for_each_note_helper`.
-    fn forEach(t: *Notes, io: Io, tree: *IntNode, n: usize, fanout_in: usize, flags: EachFlags, callback: anytype) Error!void {
+    fn forEach(t: *Notes, io: Io, tree: *IntNode, n: usize, fanout_in: usize, flags: EachFlags, callback: anytype) ErrorNamespace.Error!void {
         const fanout = determineFanout(tree, n, fanout_in);
         var buf: [hash.max_hex_len + hash.max_raw_len + 2]u8 = undefined;
         var i: usize = 0;
@@ -568,7 +574,7 @@ pub const Notes = struct {
     const TreeWriter = struct {
         root: *Stack,
         io: Io,
-        fn each(w: TreeWriter, t2: *Notes, key: []const u8, val: Oid, path_in: []const u8) Error!void {
+        fn each(w: TreeWriter, t2: *Notes, key: []const u8, val: Oid, path_in: []const u8) ErrorNamespace.Error!void {
             _ = key;
             var path = path_in;
             var mode: u32 = 0o100644;
@@ -597,7 +603,7 @@ pub const Notes = struct {
     /// `write_each_non_note_until`: the non-notes that sort before
     /// `note_path`, or all that are left; one at `note_path` itself gives
     /// way to the note.
-    fn writeNonNotesUntil(t: *Notes, io: Io, root: *Stack, note_path: ?[]const u8) Error!void {
+    fn writeNonNotesUntil(t: *Notes, io: Io, root: *Stack, note_path: ?[]const u8) ErrorNamespace.Error!void {
         const w = &t.writing.?;
         while (w.next_non_note < t.non_notes.items.len) {
             const nn = t.non_notes.items[w.next_non_note];
@@ -629,7 +635,7 @@ pub const Notes = struct {
     }
 
     /// `create_notes_commit` with the parents given.
-    fn commitWith(t: *Notes, io: Io, parents: []const Oid, msg: []const u8, who: object.Signature) Error!Oid {
+    fn commitWith(t: *Notes, io: Io, parents: []const Oid, msg: []const u8, who: object.Signature) ErrorNamespace.Error!Oid {
         const tree = try t.writeTree(io);
         return t.repo.writeCommit(io, .{
             .tree = tree,
@@ -643,7 +649,9 @@ pub const Notes = struct {
 
     /// `prune_notes`: drop every note on an object the repository does not
     /// have. The objects pruned are returned, the caller's.
-    pub fn prune(t: *Notes, gpa: Allocator, io: Io, dry_run: bool) Self.Error![]Oid {
+    pub const PruneOptions = struct { dry_run: bool = false };
+    pub fn prune(t: *Notes, gpa: Allocator, io: Io, options: Notes.PruneOptions) Self.Error![]Oid {
+        const dry_run = options.dry_run;
         const all = try t.list(gpa, io);
         defer gpa.free(all);
         var gone: std.ArrayList(Oid) = .empty;
@@ -662,7 +670,7 @@ pub const Notes = struct {
     }
 
     /// git's `combine_notes_*` into `cur`.
-    fn combineInto(t: *Notes, io: Io, cur: *Oid, new: Oid, how: Combine) Error!void {
+    fn combineInto(t: *Notes, io: Io, cur: *Oid, new: Oid, how: Combine) ErrorNamespace.Error!void {
         switch (how) {
             .overwrite => cur.* = new,
             .ignore => {},
@@ -724,7 +732,7 @@ pub const Notes = struct {
 
     /// A blob's bytes, owned by the object database's allocator, or `null`
     /// for the zero name, a missing object or one that is not a blob.
-    fn readBlob(t: *Notes, io: Io, oid: Oid) Error!?[]u8 {
+    fn readBlob(t: *Notes, io: Io, oid: Oid) ErrorNamespace.Error!?[]u8 {
         if (oid.isZero()) return null;
         const found = t.repo.objectDatabase().read(io, oid) catch |err| switch (err) {
             error.ObjectNotFound => return null,
@@ -982,12 +990,14 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, objects: []const Oid, o
 
 /// `git notes prune`: drop the notes on objects the repository does not
 /// have. The objects are returned, the caller's.
-pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: RefOptions, dry_run: bool) Self.Error![]Oid {
+pub const PruneOptions = struct { ref: ?[]const u8 = null, who: object.Signature, dry_run: bool = false };
+pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: PruneOptions) Self.Error![]Oid {
+    const dry_run = options.dry_run;
     const ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(ref);
     var t = try Notes.open(gpa, io, repo, ref, .concatenate);
     defer t.deinit();
-    const gone = try t.prune(gpa, io, dry_run);
+    const gone = try t.prune(gpa, io, .{ .dry_run = dry_run });
     errdefer gpa.free(gone);
     if (!dry_run) _ = try t.commit(io, "Notes removed by 'git notes prune'", options.who);
     return gone;
@@ -1003,7 +1013,7 @@ pub fn show(gpa: Allocator, io: Io, repo: *Repository, ref: ?[]const u8, obj: Oi
     const note = (try t.get(io, obj)) orelse return null;
     const found = try repo.objectDatabase().read(io, note);
     defer repo.objectDatabase().allocator().free(found.bytes);
-    return gpa.dupe(u8, found.bytes);
+    return try gpa.dupe(u8, found.bytes);
 }
 
 /// Errors from `formatNote`.
@@ -1082,6 +1092,8 @@ pub const MergeOptions = struct {
 
 /// What a merge did.
 pub const MergeOutcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// The commit the local ref now names: the merge, a fast-forward, or
     /// the local commit when there was nothing to do. With conflicts, the
     /// partial merge `NOTES_MERGE_PARTIAL` names.
@@ -1615,7 +1627,7 @@ test "notes added, appended, copied and removed are git's commits, trees and log
             for ([_][]const u8{ "refs/notes/commits", "refs/notes/other" }) |ref| {
                 var n = try Notes.open(gpa, io, &repo, ref, .concatenate);
                 defer n.deinit();
-                try formatNote(&n, io, try Oid.parse(.sha1, commit_hex), &out.writer, false);
+                try formatNote(io, &n, try Oid.parse(.sha1, commit_hex), &out.writer, .{});
             }
             try std.testing.expect(std.mem.endsWith(u8, shown, out.written()));
         }

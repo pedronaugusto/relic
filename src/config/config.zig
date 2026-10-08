@@ -8,6 +8,7 @@
 //! `includeIf` is not optional. A caller that misses one reads the wrong
 //! `core.autocrlf` and therefore writes a different blob than git would.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.config.<name>`.
@@ -150,6 +151,8 @@ pub const Level = enum {
 
 /// One configuration file, parsed into lines.
 pub const SourceFile = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     level: Level,
     /// The path this was read from, for reporting. Owned.
@@ -308,6 +311,8 @@ pub const max_include_depth: u8 = 10;
 /// again on its own: `isStale` says whether any has changed since, and
 /// `Repository.refreshConfig` is what reads them again.
 pub const Config = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     files: std.ArrayList(SourceFile) = .empty,
     entries: std.ArrayList(Entry) = .empty,
@@ -944,8 +949,15 @@ pub const Config = struct {
     // Common conditions use caller scratch; long conditions allocate rather
     // than silently becoming non-matches.
     inline fn joinCondition(a: Allocator, buffer: []u8, parts: anytype) Allocator.Error![]u8 {
-        var size: usize = 0;
-        inline for (parts.*) |part| size = std.math.add(usize, size, part.len) catch return error.OutOfMemory;
+        const size = if (parts.len == 3)
+            // Prefix and suffix have bounded lengths in the common case.
+            // Add them together before adding the potentially long pattern.
+            std.math.add(usize, std.math.add(usize, parts[0].len, parts[2].len) catch return error.OutOfMemory, parts[1].len) catch return error.OutOfMemory
+        else size: {
+            var total: usize = 0;
+            inline for (parts.*) |part| total = std.math.add(usize, total, part.len) catch return error.OutOfMemory;
+            break :size total;
+        };
         const out = if (size <= buffer.len) buffer[0..size] else try a.alloc(u8, size);
         var at: usize = 0;
         inline for (parts.*) |part| {
@@ -2775,3 +2787,6 @@ test "phase2 extraction long includeIf patterns expand without a fixed buffer" {
     defer gpa.free(branch);
     try std.testing.expect(try config.conditionHolds(branch));
 }
+
+/// All errors reported by this namespace.
+pub const Error = ParseError || ValueError || Config.IsStaleError || Config.SetError || CheckKeyError || UnquoteError || Allocator.Error || Self.ParseError || Self.ValueError;

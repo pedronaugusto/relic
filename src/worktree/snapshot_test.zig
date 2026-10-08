@@ -242,7 +242,7 @@ test "snapshot keeps native LFS writes inside the private store" {
     defer private.cleanup();
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
-    const captured = try store.capture(io, .{ .repository = &r }, .{});
+    const captured = try store.capture(io, .{ .repository = &r }, .{ .native_provider = @import("../lfs/filter.zig").provider(&.{}) });
     try testing.expectError(error.FileNotFound, source.dir.access(io, "external-lfs", .{}));
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
@@ -413,39 +413,30 @@ test "a live snapshot store reads its own objects after source packs are damaged
     try testing.expectEqual(@as(usize, 2), changes.items.len);
 }
 
-const SyncOrder = struct {
-    threadlocal var files: usize = 0;
-    threadlocal var directories: usize = 0;
-    threadlocal var ordered: bool = true;
-    threadlocal var fail: bool = false;
-    threadlocal var fail_directory: bool = false;
+const airlock_testing = @import("airlock.testing");
 
-    fn reset() void {
-        files = 0;
-        directories = 0;
-        ordered = true;
-        fail = false;
-        fail_directory = false;
-    }
-    fn sync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
-        const stat = file.stat(testing.io) catch return error.Unexpected;
-        if (stat.kind == .directory) {
-            directories += 1;
-            if (fail_directory) return error.InputOutput;
-        } else {
-            ordered = ordered and directories == 0;
-            files += 1;
-        }
-        if (fail) return error.InputOutput;
-        return testing.io.vtable.fileSync(userdata, file);
-    }
-};
+fn expectSyncOrder(h: *airlock_testing.Seam) !void {
+    var trace_calls: [256]airlock_testing.Call = undefined;
+    const calls = h.calls(&trace_calls);
+    try testing.expect(calls.len < trace_calls.len);
+    var directories_started = false;
+    for (calls) |call| switch (call) {
+        .sync_dir => directories_started = true,
+        .sync_full, .sync_barrier, .sync_data, .sync_plain, .sync_writeout => try testing.expect(!directories_started),
+        else => {},
+    };
+}
+
+fn resetSyncs(h: *airlock_testing.Seam) void {
+    h.setPlan(&.{});
+    h.reset();
+}
 
 test "durable snapshots sync their closure and restored files before directories and success" {
     const gpa = testing.allocator;
-    var vtable = testing.io.vtable.*;
-    vtable.fileSync = SyncOrder.sync;
-    const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    const h = try airlock_testing.Seam.create(gpa, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
     var folder = testing.tmpDir(.{ .iterate = true });
     defer folder.cleanup();
     try folder.dir.createDirPath(io, "nested/deep");
@@ -456,46 +447,46 @@ test "durable snapshots sync their closure and restored files before directories
     options.durability = .durable;
     var store = try snapshot.Store.open(gpa, io, private.dir, options);
     defer store.deinit(io);
-    SyncOrder.reset();
+    resetSyncs(h);
     const captured = try store.capture(io, .{ .folder = folder.dir }, .{});
     // Three trees and the blob; already present objects must be covered too.
-    try testing.expectEqual(@as(usize, 4), SyncOrder.files);
-    try testing.expect(SyncOrder.directories >= 2);
-    try testing.expect(SyncOrder.ordered);
-    SyncOrder.reset();
+    try testing.expectEqual(@as(usize, 4), h.syncs() - h.count(.sync_dir));
+    try testing.expect(h.count(.sync_dir) >= 2);
+    try expectSyncOrder(h);
+    resetSyncs(h);
     _ = try store.capture(io, .{ .folder = folder.dir }, .{});
-    try testing.expectEqual(@as(usize, 4), SyncOrder.files);
-    try testing.expect(SyncOrder.ordered);
-    SyncOrder.reset();
+    try testing.expectEqual(@as(usize, 4), h.syncs() - h.count(.sync_dir));
+    try expectSyncOrder(h);
+    resetSyncs(h);
     _ = try store.adoptTree(io, &store.db, captured.snapshot.tree);
-    try testing.expectEqual(@as(usize, 4), SyncOrder.files);
-    try testing.expect(SyncOrder.ordered);
-    SyncOrder.reset();
-    SyncOrder.fail = true;
+    try testing.expectEqual(@as(usize, 4), h.syncs() - h.count(.sync_dir));
+    try expectSyncOrder(h);
+    resetSyncs(h);
+    h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.adoptTree(io, &store.db, captured.snapshot.tree));
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
-    SyncOrder.reset();
+    resetSyncs(h);
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
-    try testing.expectEqual(@as(usize, 1), SyncOrder.files);
-    try testing.expectEqual(@as(usize, 3), SyncOrder.directories);
-    try testing.expect(SyncOrder.ordered);
+    try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 3), h.count(.sync_dir));
+    try expectSyncOrder(h);
     try expectFile(dest.dir, "nested/deep/file", "kept");
     // The same barrier covers a stat-shortcut checkout's existing bytes.
-    SyncOrder.reset();
+    resetSyncs(h);
     _ = try store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot });
-    try testing.expectEqual(@as(usize, 1), SyncOrder.files);
-    try testing.expect(SyncOrder.ordered);
-    SyncOrder.reset();
-    SyncOrder.fail = true;
+    try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
+    try expectSyncOrder(h);
+    resetSyncs(h);
+    h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
-    SyncOrder.reset();
-    SyncOrder.fail_directory = true;
+    resetSyncs(h);
+    h.setPlan(&.{airlock_testing.fail(.sync_dir, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
-    SyncOrder.reset();
-    SyncOrder.fail = true;
+    resetSyncs(h);
+    h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.capture(io, .{ .folder = folder.dir }, .{}));
-    SyncOrder.reset();
+    resetSyncs(h);
 }
 
 test "selected object durability syncs a used pack and index once" {
@@ -512,14 +503,14 @@ test "selected object durability syncs a used pack and index once" {
     // This unrelated object is packed too; durable roots need no refs.
     _ = try store.db.write(base, .blob, "unrelated");
     _ = try store.db.repack(base, .{});
-    var vtable = base.vtable.*;
-    vtable.fileSync = SyncOrder.sync;
-    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
-    SyncOrder.reset();
+    const h = try airlock_testing.Seam.create(gpa, base, .{});
+    defer h.destroy();
+    const io = h.io();
+    resetSyncs(h);
     try store.db.makeDurable(io, &.{ saved.snapshot.tree, saved.snapshot.tree });
-    try testing.expectEqual(@as(usize, 2), SyncOrder.files);
-    try testing.expectEqual(@as(usize, 2), SyncOrder.directories);
-    try testing.expect(SyncOrder.ordered);
+    try testing.expectEqual(@as(usize, 2), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 2), h.count(.sync_dir));
+    try expectSyncOrder(h);
 }
 
 test "durable checkout covers unchanged files and surviving parents of deletions" {
@@ -540,15 +531,15 @@ test "durable checkout covers unchanged files and surviving parents of deletions
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
     _ = try store.restore(base, before.snapshot, dest.dir, .{});
-    var vtable = base.vtable.*;
-    vtable.fileSync = SyncOrder.sync;
-    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
-    SyncOrder.reset();
+    const h = try airlock_testing.Seam.create(gpa, base, .{});
+    defer h.destroy();
+    const io = h.io();
+    resetSyncs(h);
     const result = try store.restore(io, after.snapshot, dest.dir, .{ .from = before.snapshot, .checkout = .{ .durability = .durable } });
     try testing.expectEqual(@as(u32, 1), result.removed);
-    try testing.expectEqual(@as(usize, 1), SyncOrder.files);
-    try testing.expectEqual(@as(usize, 1), SyncOrder.directories);
-    try testing.expect(SyncOrder.ordered);
+    try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 1), h.count(.sync_dir));
+    try expectSyncOrder(h);
     try testing.expectError(error.FileNotFound, dest.dir.access(base, "old", .{}));
 }
 

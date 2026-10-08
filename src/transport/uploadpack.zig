@@ -58,6 +58,7 @@ pub const Error = error{
 /// What the server allows, as git's `uploadpack.*` settings say; `null`
 /// takes the served repository's own setting.
 pub const Options = struct {
+    stateless: bool = false,
     /// `uploadpack.allowFilter`.
     allow_filter: ?bool = null,
     /// `uploadpack.allowTipSHA1InWant`: any ref's tip, advertised or not.
@@ -86,7 +87,7 @@ pub const Server = struct {
 
     /// Serve `remote` in `version`; `stateless` for HTTP, where every
     /// request stands alone.
-    pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, stateless: bool, options: Options) Server {
+    pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Server {
         const config = remote.repo.configuration();
         const any = options.allow_any orelse (config.getBool("uploadpack.allowanysha1inwant", false) catch false);
         return .{
@@ -94,7 +95,7 @@ pub const Server = struct {
             .io = io,
             .remote = remote,
             .version = version,
-            .stateless = stateless,
+            .stateless = options.stateless,
             .allow_filter = options.allow_filter orelse (config.getBool("uploadpack.allowfilter", false) catch false),
             .allow_tip = any or (options.allow_tip orelse (config.getBool("uploadpack.allowtipsha1inwant", false) catch false)),
             .allow_reachable = any or (options.allow_reachable orelse (config.getBool("uploadpack.allowreachablesha1inwant", false) catch false)),
@@ -1074,11 +1075,13 @@ fn writeError(err: anyerror) Error {
 /// caller's; closing it closes `remote` too.
 pub fn connect(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Allocator.Error!*Connection {
     const c = try gpa.create(InProcess);
+    var serving = options;
+    serving.stateless = true;
     c.* = .{
         .gpa = gpa,
         .io = io,
         .remote = remote,
-        .server = .init(gpa, io, remote, version, true, options),
+        .server = .init(gpa, io, remote, version, serving),
         .connection = .{ .context = c, .vtable = &InProcess.vtable, .stateless = true },
     };
     return &c.connection;
@@ -1187,7 +1190,7 @@ test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
     repo.deinit(io);
     const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);
-    var remote = try local.Remote.open(gpa, io, path);
+    var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
     try std.testing.fuzz(&remote, fuzzServe, .{});
 }
@@ -1196,7 +1199,7 @@ fn fuzzServe(remote: *local.Remote, smith: *std.testing.Smith) anyerror!void {
     var scratch: [1024]u8 = undefined;
     const input = scratch[0..smith.slice(&scratch)];
     for ([_]protocol.Version{ .v2, .v0 }) |version| {
-        var server: Server = .init(std.testing.allocator, std.testing.io, remote, version, true, .{ .allow_filter = true });
+        var server: Server = .init(std.testing.allocator, std.testing.io, remote, version, .{ .stateless = true, .allow_filter = true });
         var fixed: Io.Reader = .fixed(input);
         var buffer: [pktline.max_line]u8 = undefined;
         var limited = fixed.limited(.unlimited, &buffer);

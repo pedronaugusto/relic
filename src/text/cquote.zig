@@ -188,3 +188,6 @@ test "a quoted name reads back, and a malformed one is refused" {
     try std.testing.expect((try unquote(gpa, "\"open")) == null);
     try std.testing.expect((try unquote(gpa, "bare")) == null);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Io.Writer.Error || Allocator.Error;

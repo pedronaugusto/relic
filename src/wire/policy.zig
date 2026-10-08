@@ -97,3 +97,6 @@ test "a transport is allowed as git's is_transport_allowed allows it" {
     try testing.expect(!allowed(&config, &env, "ext", null));
     try testing.expect(!allowed(&config, &env, "file", true));
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

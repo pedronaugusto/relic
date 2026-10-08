@@ -151,8 +151,8 @@ test "relic checks out what git-lfs stored, from the store, running nothing" {
     var report: filter.Report = .init(gpa);
     defer report.deinit();
     const outcome = try ft.relicCheckout(gpa, io, twin.theirs.dir, tree, .{ .report = &report });
-    try testing.expectEqual(@as(u32, 0), outcome.lfs_pointers);
-    try testing.expectEqual(@as(usize, 0), report.lfs_missing.items.len);
+    try testing.expectEqual(@as(u32, 0), outcome.native_fallbacks);
+    try testing.expectEqual(@as(usize, 0), report.native_missing.items.len);
 
     try ft.emptyWorktree(io, twin.ours.dir);
     try twin.ours.exec(io, &.{ "checkout", "--", "." });
@@ -225,14 +225,14 @@ test "an object the store lacks is left as its pointer and named, and a fetcher 
         var report: filter.Report = .init(gpa);
         defer report.deinit();
         const outcome = try ft.relicCheckout(gpa, io, r.dir, tree, .{ .report = &report });
-        try testing.expectEqual(@as(u32, 1), outcome.lfs_pointers);
+        try testing.expectEqual(@as(u32, 1), outcome.native_fallbacks);
         const left = try r.readFile(io, "big.bin");
         defer gpa.free(left);
         try testing.expectEqualStrings(pointer, left);
-        try testing.expectEqual(@as(usize, 1), report.lfs_missing.items.len);
-        const missing = report.lfs_missing.items[0];
+        try testing.expectEqual(@as(usize, 1), report.native_missing.items.len);
+        const missing = report.native_missing.items[0];
         try testing.expectEqualStrings("big.bin", missing.path);
-        try testing.expectEqualStrings(&oid, &missing.pointer.oid);
+        try testing.expectEqualStrings(&oid, missing.object.id);
         try testing.expect(!missing.declined);
         // A file that is its own pointer compares clean, so git does not
         // call a file relic could not smudge modified.
@@ -244,7 +244,7 @@ test "an object the store lacks is left as its pointer and named, and a fetcher 
         try ft.emptyWorktree(io, r.dir);
         var memory: MemoryFetcher = .{ .content = big };
         const outcome = try ft.relicCheckout(gpa, io, r.dir, tree, .{ .fetch = memory.fetcher() });
-        try testing.expectEqual(@as(u32, 0), outcome.lfs_pointers);
+        try testing.expectEqual(@as(u32, 0), outcome.native_fallbacks);
         try testing.expectEqual(@as(u32, 1), memory.calls);
         try testing.expectEqual(@as(usize, 1), memory.asked);
         const back = try r.readFile(io, "big.bin");
@@ -261,7 +261,7 @@ test "an object the store lacks is left as its pointer and named, and a fetcher 
         defer report.deinit();
         _ = try ft.relicCheckout(gpa, io, r.dir, tree, .{ .fetch = memory.fetcher(), .report = &report });
         try testing.expectEqual(@as(u32, 0), memory.calls);
-        try testing.expect(report.lfs_missing.items[0].declined);
+        try testing.expect(report.native_missing.items[0].declined);
     }
 }
 
@@ -300,7 +300,7 @@ test "git-lfs run by relic as its filter process does what relic's own LFS does"
     defer twin.deinit();
 
     // Ours through git-lfs over the process protocol, theirs in process.
-    const through_git_lfs: ft.Run = .{ .programs = .{ .environ = &env }, .drivers = .{ .native_lfs = false } };
+    const through_git_lfs: ft.Run = .{ .programs = .{ .environ = &env }, .native_lfs = false };
     const ours_tree = try ft.relicAdd(gpa, io, twin.ours.dir, through_git_lfs);
     const theirs_tree = try ft.relicAdd(gpa, io, twin.theirs.dir, .{});
     try testing.expect(ours_tree.eql(theirs_tree));
@@ -336,8 +336,8 @@ test "status names an LFS file by hashing it, and stores nothing" {
     defer repo.deinit(io);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try repo.loadFilters(io, .{});
-    defer drivers.deinit();
+    var drivers = try @import("filter.zig").load(gpa, io, &repo, .{});
+    defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -369,11 +369,11 @@ test "an LFS extension is refused by name rather than skipped" {
     try r.exec(io, &.{ "-c", "filter.lfs.clean=", "add", "-A" });
     const tree = try ft.treeOf(gpa, io, &r);
     try ft.emptyWorktree(io, r.dir);
-    try testing.expectError(error.LfsExtensionUnsupported, ft.relicCheckout(gpa, io, r.dir, tree, .{}));
+    try testing.expectError(error.NativeFilterExtensionUnsupported, ft.relicCheckout(gpa, io, r.dir, tree, .{}));
 
     // A configured extension would change the pointer git-lfs writes, so
     // a clean is refused too.
     try r.exec(io, &.{ "config", "lfs.extension.foo.clean", "foo clean %f" });
     try r.writeFile(io, "y.bin", "large\n");
-    try testing.expectError(error.LfsExtensionUnsupported, ft.relicAdd(gpa, io, r.dir, .{}));
+    try testing.expectError(error.NativeFilterExtensionUnsupported, ft.relicAdd(gpa, io, r.dir, .{}));
 }

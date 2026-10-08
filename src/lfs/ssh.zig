@@ -23,6 +23,7 @@
 //! `connection.Process` keeps it, for the message when a connection does
 //! not start.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -71,8 +72,9 @@ pub fn argValue(args: []const []const u8, key: []const u8) ?[]const u8 {
 /// One conversation with `git-lfs-transfer`. It is used by one task at a
 /// time: `mutex` is held for a request and its answer.
 pub const Connection = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
-    io: Io,
     conn: *connection.Connection,
     reader: *Io.Reader,
     writer: *Io.Writer,
@@ -82,7 +84,7 @@ pub const Connection = struct {
     /// Start `invocation` and agree on version 1. A server that does not
     /// start, or does not speak it, is an error, and `message` holds what
     /// ssh said.
-    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Self.Error!*Connection {
+    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Self.Error!*Connection {
         // `message` belongs to `gpa`.
         const conn = try connection.Process.start(gpa, io, programs, invocation);
         errdefer conn.deinit(io);
@@ -90,7 +92,6 @@ pub const Connection = struct {
         errdefer gpa.destroy(c);
         c.* = .{
             .gpa = gpa,
-            .io = io,
             .conn = conn,
             .reader = try conn.advertisement(),
             .writer = try conn.request(),
@@ -104,7 +105,7 @@ pub const Connection = struct {
         return c;
     }
 
-    fn negotiate(c: *Connection) Error!void {
+    fn negotiate(c: *Connection) ErrorNamespace.Error!void {
         var scratch: std.heap.ArenaAllocator = .init(c.gpa);
         defer scratch.deinit();
         var version = false;
@@ -159,12 +160,12 @@ pub const Connection = struct {
         pktline.flush(c.writer) catch |err| return c.conn.writeFailed(err);
     }
 
-    fn writeHead(c: *Connection, command: []const u8, args: []const []const u8) Error!void {
+    fn writeHead(c: *Connection, command: []const u8, args: []const []const u8) ErrorNamespace.Error!void {
         pktline.print("{s}\n", .{command}, c.writer) catch |err| return c.conn.writeFailed(err);
         for (args) |a| pktline.print("{s}\n", .{a}, c.writer) catch |err| return c.conn.writeFailed(err);
     }
 
-    fn flushOut(c: *Connection) Error!void {
+    fn flushOut(c: *Connection) ErrorNamespace.Error!void {
         _ = try c.conn.response();
     }
 
@@ -234,14 +235,14 @@ pub const Connection = struct {
         while (try c.nextData()) |_| {}
     }
 
-    fn sayQuit(c: *Connection, arena: Allocator) Error!void {
+    fn sayQuit(c: *Connection, arena: Allocator) ErrorNamespace.Error!void {
         try c.send("quit", &.{});
         _ = try c.readStatus(arena);
     }
 
     /// Say `quit`, read its answer, and close the connection. A connection
     /// that already failed is only closed.
-    pub fn deinit(c: *Connection) void {
+    pub fn deinit(c: *Connection, io: Io) void {
         if (!c.ended) {
             c.ended = true;
             var scratch: std.heap.ArenaAllocator = .init(c.gpa);
@@ -249,7 +250,7 @@ pub const Connection = struct {
             // ziglint-ignore: Z026 quit is a courtesy; the connection is closed next whether or not the server answered
             c.sayQuit(scratch.allocator()) catch {};
         }
-        c.conn.deinit(c.io);
+        c.conn.deinit(io);
         c.gpa.destroy(c);
     }
 };
@@ -265,8 +266,9 @@ fn parseStatus(line: []const u8) ?u16 {
 
 /// The connections of one operation to one remote.
 pub const Transfer = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
-    io: Io,
     programs: program.Programs,
     /// How the first connection is started, and how every later one is.
     first: program.Invocation,
@@ -281,12 +283,16 @@ pub const Transfer = struct {
 
     /// Start the first connection. `first`, `rest` and `control_dir` are
     /// copied. When it does not start, `failure` holds what ssh said.
-    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, first: program.Invocation, rest: program.Invocation, control_dir: ?[]const u8, failure: *std.ArrayList(u8)) Self.Error!*Transfer {
+    pub const OpenOptions = struct { first: program.Invocation, rest: program.Invocation, control_dir: ?[]const u8 = null, failure: *std.ArrayList(u8) };
+    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, options: OpenOptions) Self.Error!*Transfer {
+        const first = options.first;
+        const rest = options.rest;
+        const control_dir = options.control_dir;
+        const failure = options.failure;
         const t = try gpa.create(Transfer);
         errdefer gpa.destroy(t);
         t.* = .{
             .gpa = gpa,
-            .io = io,
             .programs = programs,
             .first = undefined,
             .rest = undefined,
@@ -299,9 +305,9 @@ pub const Transfer = struct {
         t.first = try copyInvocation(a, first);
         t.rest = try copyInvocation(a, rest);
         if (control_dir) |d| t.control_dir = try a.dupe(u8, d);
-        errdefer t.removeControlDir();
-        const c0 = try Connection.start(gpa, io, programs, t.first, failure);
-        errdefer c0.deinit();
+        errdefer t.removeControlDir(io);
+        const c0 = try Connection.open(gpa, io, programs, t.first, failure);
+        errdefer c0.deinit(io);
         try t.connections.append(gpa, c0);
         return t;
     }
@@ -315,30 +321,30 @@ pub const Transfer = struct {
     }
 
     /// Connection `n`, started the first time it is asked for.
-    pub fn connection(t: *Transfer, n: usize) Self.Error!*Connection {
-        try t.mutex.lock(t.io);
-        defer t.mutex.unlock(t.io);
+    pub fn connection(t: *Transfer, io: Io, n: usize) Self.Error!*Connection {
+        try t.mutex.lock(io);
+        defer t.mutex.unlock(io);
         while (t.connections.items.len <= n) try t.connections.append(t.gpa, null);
         if (t.connections.items[n]) |c| return c;
-        const c = try Connection.start(t.gpa, t.io, t.programs, if (n == 0) t.first else t.rest, &t.message);
+        const c = try Connection.open(t.gpa, io, t.programs, if (n == 0) t.first else t.rest, &t.message);
         t.connections.items[n] = c;
         return c;
     }
 
     /// Say `quit` on every connection, close them, and release everything.
-    pub fn deinit(t: *Transfer) void {
-        for (t.connections.items) |maybe| if (maybe) |c| c.deinit();
+    pub fn deinit(t: *Transfer, io: Io) void {
+        for (t.connections.items) |maybe| if (maybe) |c| c.deinit(io);
         t.connections.deinit(t.gpa);
-        t.removeControlDir();
+        t.removeControlDir(io);
         t.message.deinit(t.gpa);
         t.arena.deinit();
         t.gpa.destroy(t);
     }
 
-    fn removeControlDir(t: *Transfer) void {
+    fn removeControlDir(t: *Transfer, io: Io) void {
         const dir = t.control_dir orelse return;
         // ziglint-ignore: Z026 a control directory left behind holds only a dead socket, in the system's temporary space
-        Io.Dir.cwd().deleteTree(t.io, dir) catch {};
+        Io.Dir.cwd().deleteTree(io, dir) catch {};
         t.control_dir = null;
     }
 };

@@ -2,24 +2,28 @@
 const std = @import("std");
 const sweep = @import("sweep");
 const Allocator = std.mem.Allocator;
+pub const Error = Allocator.Error;
 
 pub const Builder = struct {
+    pub const Error = Allocator.Error;
     gpa: Allocator,
     arena: *std.heap.ArenaAllocator,
+    owner: *Matcher,
     inner: sweep.Set.Builder,
     transferred: bool = false,
 
     pub fn init(gpa: Allocator) Allocator.Error!Builder {
-        const arena = try gpa.create(std.heap.ArenaAllocator);
-        arena.* = .init(gpa);
-        return .{ .gpa = gpa, .arena = arena, .inner = .init(arena.allocator()) };
+        const owner = try gpa.create(Matcher);
+        owner.* = .{ .gpa = gpa, .arena = .init(gpa), .set = undefined, .cache = undefined };
+        const arena = &owner.arena;
+        return .{ .gpa = gpa, .arena = arena, .owner = owner, .inner = .init(arena.allocator()) };
     }
 
     pub fn deinit(b: *Builder) void {
         if (b.transferred) return;
         b.inner.deinit();
         b.arena.deinit();
-        b.gpa.destroy(b.arena);
+        b.gpa.destroy(b.owner);
     }
 };
 
@@ -36,19 +40,20 @@ pub fn add(builder: *Builder, pattern: []const u8, anchored: bool, dir_only: boo
 }
 
 pub const Matcher = struct {
+    pub const Error = Allocator.Error;
     gpa: Allocator,
-    arena: *std.heap.ArenaAllocator,
+    arena: std.heap.ArenaAllocator,
     set: sweep.Set,
     cache: sweep.Set.Cache,
     turn: std.atomic.Mutex = .unlocked,
     walking: ?sweep.Set.Ancestors = null,
 
-    pub fn build(gpa: Allocator, builder: *Builder) Allocator.Error!*Matcher {
-        const m = try gpa.create(Matcher);
-        errdefer gpa.destroy(m);
+    pub fn build(builder: *Builder) Allocator.Error!*Matcher {
+        const m = builder.owner;
         var compiled = try builder.inner.build();
         errdefer compiled.deinit();
-        m.* = .{ .gpa = gpa, .arena = builder.arena, .set = compiled, .cache = try .init(gpa, &compiled, .{ .capacity = 1 << 16 }) };
+        m.set = compiled;
+        m.cache = try .init(m.gpa, &m.set, .{ .capacity = 1 << 16 });
         builder.inner.deinit();
         builder.transferred = true;
         return m;
@@ -58,7 +63,6 @@ pub const Matcher = struct {
         const gpa = m.gpa;
         m.cache.deinit();
         m.arena.deinit();
-        gpa.destroy(m.arena);
         gpa.destroy(m);
     }
 

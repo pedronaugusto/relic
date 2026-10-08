@@ -26,10 +26,12 @@ const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .wh
 fn relicPush(fx: *Fixture, d: Io.Dir, report: *lfspush.Report) !push_mod.Outcome {
     var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
     defer repo.deinit(fx.io);
-    return push_mod.push(fx.gpa, fx.io, &repo, "origin", .{
-        .refspecs = &.{"refs/heads/main:refs/heads/main"},
-        .who = test_who,
-        .programs = fx.programs(),
+    return lfspush.push(fx.gpa, fx.io, &repo, "origin", .{
+        .transport = .{
+            .refspecs = &.{"refs/heads/main:refs/heads/main"},
+            .who = test_who,
+            .programs = fx.programs(),
+        },
         .lfs = .{ .report = report },
     });
 }

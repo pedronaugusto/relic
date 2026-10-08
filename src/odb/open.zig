@@ -80,3 +80,6 @@ pub fn readRefusal(err: anyerror) bool {
     }
     return false;
 }
+
+/// All errors reported by this namespace.
+pub const Error = odb.Error || Allocator.Error || Io.Dir.OpenError || Io.Dir.AccessError;

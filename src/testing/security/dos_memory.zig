@@ -40,9 +40,9 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
     for (0..repeat) |_| try pktline.print("have {s}\n", .{tree}, w);
     try pktline.flush(w);
 
-    var remote = try local.Remote.open(gpa, io, path);
+    var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    var server = uploadpack.Server.init(gpa, io, &remote, version, true, .{});
+    var server = uploadpack.Server.init(gpa, io, &remote, version, .{ .stateless = true });
     var in_buffer: [pktline.max_line]u8 = undefined;
     var request_reader: Io.Reader = .fixed(request.written());
     var in = request_reader.limited(.unlimited, &in_buffer);

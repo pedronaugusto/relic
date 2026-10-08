@@ -19,6 +19,7 @@
 //! `lfs.<url>.standalonetransferagent` (or `lfs.standalonetransferagent`)
 //! names it.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -168,14 +169,19 @@ pub const Completion = union(enum) {
 
 /// One adapter process.
 pub const Agent = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
-    io: Io,
     conn: *connection.Connection,
     line: Io.Writer.Allocating,
     arena_state: std.heap.ArenaAllocator,
 
     /// Start `adapter` in `cwd` and tell it `init`.
-    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, cwd: ?[]const u8, adapter: Adapter, init: Init) Self.Error!*Agent {
+    pub const OpenOptions = struct { cwd: ?[]const u8 = null, adapter: Adapter, init: Init };
+    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, options: OpenOptions) Self.Error!*Agent {
+        const cwd = options.cwd;
+        const adapter = options.adapter;
+        const init = options.init;
         // git-lfs's `FormatForShell(ShellQuoteSingle(path), args)`.
         var command: std.ArrayList(u8) = .empty;
         defer command.deinit(gpa);
@@ -198,8 +204,8 @@ pub const Agent = struct {
             conn.deinit(io);
             return err;
         };
-        a.* = .{ .gpa = gpa, .io = io, .conn = conn, .line = .init(gpa), .arena_state = .init(gpa) };
-        errdefer a.abort();
+        a.* = .{ .gpa = gpa, .conn = conn, .line = .init(gpa), .arena_state = .init(gpa) };
+        errdefer a.abort(io);
         var msg: Io.Writer.Allocating = .init(gpa);
         defer msg.deinit();
         const w = &msg.writer;
@@ -209,7 +215,7 @@ pub const Agent = struct {
         writeString(w, init.remote) catch return error.OutOfMemory;
         w.print(",\"concurrent\":{},\"concurrenttransfers\":{d}}}\n", .{ init.concurrent, init.concurrent_transfers }) catch return error.OutOfMemory;
         try a.send(msg.written());
-        const answer = try a.receive();
+        const answer = try a.receive(io);
         if (answer.@"error") |e| {
             a.conn.setMessage(e.message);
             return error.LfsAdapterInitFailed;
@@ -224,13 +230,13 @@ pub const Agent = struct {
 
     /// Hand the agent one transfer and wait for it to end. `progress` hears
     /// each `bytesSinceLast`.
-    pub fn transfer(a: *Agent, request: Request, progress: anytype) Self.Error!Completion {
+    pub fn transfer(a: *Agent, io: Io, request: Request, progress: anytype) Self.Error!Completion {
         var msg: Io.Writer.Allocating = .init(a.gpa);
         defer msg.deinit();
         writeRequest(&msg.writer, request) catch return error.OutOfMemory;
         try a.send(msg.written());
         while (true) {
-            const answer = try a.receive();
+            const answer = try a.receive(io);
             if (!std.mem.eql(u8, answer.oid, request.oid)) return error.LfsAdapterProtocolError;
             if (std.mem.eql(u8, answer.event, "progress")) {
                 if (answer.bytesSinceLast > 0) progress.bytes(@intCast(answer.bytesSinceLast)); // safe: positive, checked just above
@@ -243,20 +249,20 @@ pub const Agent = struct {
     }
 
     /// `terminate`, and the process waited for.
-    pub fn deinit(a: *Agent) void {
+    pub fn deinit(a: *Agent, io: Io) void {
         // ziglint-ignore: Z026 terminate is a courtesy; abort, next, ends the agent whether or not it heard it
         a.send("{\"event\":\"terminate\"}\n") catch {};
-        a.abort();
+        a.abort(io);
     }
 
-    fn abort(a: *Agent) void {
-        a.conn.deinit(a.io);
+    fn abort(a: *Agent, io: Io) void {
+        a.conn.deinit(io);
         a.line.deinit();
         a.arena_state.deinit();
         a.gpa.destroy(a);
     }
 
-    fn send(a: *Agent, text: []const u8) Error!void {
+    fn send(a: *Agent, text: []const u8) ErrorNamespace.Error!void {
         const w = try a.conn.request();
         w.writeAll(text) catch return a.conn.failure();
         w.flush() catch return a.conn.failure();
@@ -271,7 +277,7 @@ pub const Agent = struct {
         bytesSinceLast: i64 = 0,
     };
 
-    fn receive(a: *Agent) Error!Answer {
+    fn receive(a: *Agent, io: Io) ErrorNamespace.Error!Answer {
         const r = try a.conn.advertisement();
         a.line.clearRetainingCapacity();
         _ = r.streamDelimiterEnding(&a.line.writer, '\n') catch |err| switch (err) {
@@ -279,7 +285,7 @@ pub const Agent = struct {
             error.ReadFailed => return a.conn.failure(),
         };
         if (r.bufferedLen() == 0) {
-            const ended = connection.Process.diagnose(a.conn, a.io) catch return error.Canceled;
+            const ended = connection.Process.diagnose(a.conn, io) catch return error.Canceled;
             const said = std.mem.trim(u8, ended.stderr, " \t\r\n");
             if (said.len != 0) a.conn.setMessage(said);
             return error.LfsAdapterProtocolError;

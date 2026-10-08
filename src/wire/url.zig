@@ -149,7 +149,7 @@ pub const Identity = struct {
 
     pub const Error = Allocator.Error || Url.ParseError;
 
-    pub fn parse(gpa: Allocator, text: []const u8) Error!Identity {
+    pub fn parse(gpa: Allocator, text: []const u8) Identity.Error!Identity {
         const raw = try gpa.dupe(u8, text);
         errdefer gpa.free(raw);
         var decoded: ?[]u8 = null;
@@ -552,3 +552,6 @@ test "decoded URL identities own their text and follow Git percent rules" {
         try testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{});
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = ParseError || Url.ParseError || Identity.Error || Allocator.Error;

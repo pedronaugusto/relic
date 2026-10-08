@@ -166,3 +166,6 @@ test "a bare repository is implicit inside a .git directory, a worktree's or a s
     try std.testing.expect(!isImplicitBare("/a/b/repo.git"));
     try std.testing.expect(!isImplicitBare("/a/b"));
 }
+
+/// All errors reported by this namespace.
+pub const Error = BareRepositoriesError || Allocator.Error;

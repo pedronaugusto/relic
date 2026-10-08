@@ -295,3 +295,6 @@ test "encoded words, quoting and wrapping come out as git's" {
     try appendWrapped(gpa, &out, "a b c", -9, 1, 78);
     try std.testing.expectEqualStrings("a b c", out.items);
 }
+
+/// All errors reported by this namespace.
+pub const Error = std.Io.Writer.Error || Allocator.Error;

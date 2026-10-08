@@ -227,6 +227,7 @@ fn hexDigit(c: u8) Oid.ParseError!u8 {
 /// in front, which is why a loose object's compressed form is free to differ
 /// from git's and its name is not.
 pub const Hasher = struct {
+    pub const Error = error{};
     state: State,
 
     const State = union(enum) {
@@ -445,3 +446,6 @@ test "the collision check is a hasher option, and the object header moves the me
     try std.testing.expectEqual(Kind.sha256, wide.oid.kind);
     try std.testing.expect(!wide.collision_attack);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Kind.ParseError || Oid.ParseError || Oid.FromRawError || std.Io.Writer.Error;

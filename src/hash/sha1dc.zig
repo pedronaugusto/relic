@@ -43,6 +43,7 @@ const std = @import("std");
 /// near-collision pair. A caller that asked for the check is expected to read
 /// that and refuse, which is what `odb` does.
 pub const Sha1Dc = struct {
+    pub const Error = error{};
     /// The compression function's input width, in bytes.
     pub const block_length = 64;
     /// The digest's width, in bytes, which is SHA-1's.
@@ -984,3 +985,6 @@ fn fuzzSha1Dc(_: void, smith: *std.testing.Smith) anyerror!void {
     // And nothing reached by chance is half of a near-collision pair.
     try testing.expect(!attacked);
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

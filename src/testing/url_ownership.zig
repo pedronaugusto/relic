@@ -28,7 +28,7 @@ test "encoded file URL paths reach the same repository as Git" {
     const text = try gpa.print("file://{s}", .{escaped});
     defer gpa.free(text);
     try fixture.exec(io, &.{ "ls-remote", text });
-    var remote = try local.Remote.open(gpa, io, text);
+    var remote = try local.Remote.open(gpa, io, text, .{});
     defer remote.deinit(io);
     try testing.expect(remote.repo.isBare());
 }

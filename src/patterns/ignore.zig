@@ -10,6 +10,7 @@
 //! excluded by `dir/*` that must still be entered so a later negation can
 //! re-include something inside it, and a bare `!` line.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -74,6 +75,8 @@ pub const Level = struct {
 /// way out, which is how a deeper file comes to override a shallower one
 /// without re-reading anything.
 pub const Rules = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// Everything the rules hold — the text of every file read and the
     /// patterns parsed out of it — comes from here and goes at once.
@@ -145,7 +148,7 @@ pub const Rules = struct {
         base: []const u8,
         source: []const u8,
         depth: u32,
-    ) Error!void {
+    ) ErrorNamespace.Error!void {
         const a = rules.arena.allocator();
         const bytes = (try fs.readFileAlloc(a, io, dir, path, 1 << 24)) orelse return;
         try rules.addText(bytes, base, source, depth);
@@ -175,7 +178,7 @@ pub const Rules = struct {
             try patterns.append(a, pattern);
         }
         if (patterns.items.len == 0) return;
-        const compiled = try sets.Matcher.build(rules.gpa, &builder);
+        const compiled = try sets.Matcher.build(&builder);
         errdefer compiled.deinit();
         try rules.levels.append(rules.gpa, .{
             .base = base,
@@ -262,6 +265,8 @@ pub const Rules = struct {
 /// from rules with a level missing. The checker owns its rules: start it
 /// with the two global levels, as `Repository.loadIgnore` returns them.
 pub const Checker = struct {
+    pub const Error = ErrorNamespace.Error;
+
     rules: Rules,
     /// The working tree the paths are relative to. Borrowed.
     wt: Io.Dir,
@@ -319,7 +324,7 @@ pub const Checker = struct {
         return checker.rules.matchPath(path, is_dir);
     }
 
-    fn readAbove(checker: *Checker, io: Io, path: []const u8) Error!void {
+    fn readAbove(checker: *Checker, io: Io, path: []const u8) ErrorNamespace.Error!void {
         const gpa = checker.rules.gpa;
         var end: usize = 0;
         var depth: u32 = 0;

@@ -19,6 +19,7 @@
 //! brought, and writes the boundary the server drew to `.git/shallow`. A
 //! partial one is refused by name in this release.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -48,7 +49,7 @@ const credential = @import("../wire/credential.zig");
 const auth = @import("../wire/auth.zig");
 const remote_mod = @import("../wire/remote.zig");
 const warning = @import("../report/warning.zig");
-const clonelfs = @import("../lfs/clone.zig");
+
 const progress_mod = @import("../report/progress.zig");
 const config_mod = @import("../config/config.zig");
 const fsck = @import("../object/fsck.zig");
@@ -74,8 +75,36 @@ pub const Error = error{
     worktree.Error || Repository.WriteConfigError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError || fsck.LoadError;
 
+/// Filter resources for a clone checkout. Drivers are released before the
+/// optional operation resource, so fetch contexts remain alive throughout.
+pub const Filters = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    drivers: filter.Drivers,
+    context: ?*anyopaque = null,
+    release_fn: ?*const fn (*anyopaque, Io) void = null,
+    pub fn deinit(f: *Filters, io: Io) void {
+        f.drivers.deinit(io);
+        if (f.release_fn) |release| release(f.context.?, io);
+        f.* = undefined;
+    }
+};
+pub const FilterOptions = struct {
+    remote: []const u8,
+    programs: ?program.Programs,
+    prompt: ?credential.Prompt,
+    auth_failure: ?*auth.Failure,
+    skip_smudge: bool,
+};
+pub const FilterLoader = struct {
+    context: ?*const anyopaque = null,
+    load_fn: *const fn (?*const anyopaque, Allocator, Io, *Repository, FilterOptions) Repository.LoadFiltersError!Filters,
+};
+
 /// How a clone runs.
 pub const Options = struct {
+    /// Optional native filters supplied by the operation owner.
+    native_filters: ?FilterLoader = null,
     /// The remote's name in the new configuration: git's `--origin`.
     origin: []const u8 = "origin",
     /// The branch to check out, or a tag to check out detached, in place of
@@ -766,14 +795,8 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
     return repo;
 }
 
-/// Check out `commit`'s tree into the empty working tree and write the
-/// index. The attributes the tree carries apply, as they do for git, and
-/// its filters run with the caller's `programs`. When the configuration
-/// names the `lfs` filter — `git lfs install` wrote it, here or in the
-/// person's own files — an LFS object the checkout finds missing is fetched
-/// from the remote's LFS server, as git-lfs's smudge fetches it, unless
-/// `GIT_LFS_SKIP_SMUDGE` says to leave pointers. With no such filter the
-/// pointers stay, as git without git-lfs leaves them.
+/// Check out the commit using its attributes and configured filter programs.
+/// The operation owner supplies native formats through `native_filters`.
 fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Options) Error!void {
     const programs = options.programs;
     const tree = try repo.commitTree(io, repo.peel(io, commit) catch commit);
@@ -783,31 +806,30 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
         (if (p.environ.get("GIT_LFS_SKIP_SMUDGE")) |v| config_mod.parseBool(v) catch false else false)
     else
         false;
-    var drivers = try repo.loadFilters(io, .{ .lfs_skip_smudge = skip_smudge });
-    defer drivers.deinit();
-    var lfs_fetch: clonelfs.Fetcher = .{
-        .gpa = gpa,
-        .io = io,
-        .repo = repo,
-        .remote = options.origin,
-        .options = .{ .programs = programs, .prompt = options.prompt, .auth_failure = options.auth_failure },
-    };
-    defer lfs_fetch.deinit();
+    var filters = if (options.native_filters) |loader|
+        try loader.load_fn(loader.context, gpa, io, repo, .{
+            .remote = options.origin,
+            .programs = programs,
+            .prompt = options.prompt,
+            .auth_failure = options.auth_failure,
+            .skip_smudge = skip_smudge,
+        })
+    else
+        Filters{ .drivers = try repo.loadFilters(io, .{}) };
+    defer filters.deinit(io);
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
-    rules.filters = &drivers;
+    rules.filters = &filters.drivers;
     const required = try repo.requiredFilters(gpa);
     defer gpa.free(required);
     rules.required_filters = required;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    const lfs_configured = repo.configuration().get("filter.lfs.process") != null or repo.configuration().get("filter.lfs.smudge") != null;
     // A new clone's working tree has nothing in it to lose, as git's
     // clone takes it.
     _ = try worktree.checkout(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), tree, .{
         .rules = rules,
         .programs = programs,
-        .lfs_fetch = if (lfs_configured) lfs_fetch.fetcher() else null,
         .force = true,
     });
     try repo.writeIndex(io, &index);

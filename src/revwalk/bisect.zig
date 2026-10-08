@@ -26,6 +26,7 @@
 //! simplified to the commits that change them, and a commit that does not
 //! is neither counted nor tested.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -152,6 +153,8 @@ pub const Step = union(enum) {
 /// What a command did: the step it left the bisection at, and what git
 /// prints on its standard output for it.
 pub const Report = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     step: Step,
     /// git's standard output, line for line, less the `git show` of a
@@ -1320,6 +1323,9 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, o
 
 /// How `run` runs the test command.
 pub const RunOptions = struct {
+    who: object.Signature,
+    hooks: ?*hooks.Runner = null,
+    blocked: ?*threeway.Blocked = null,
     /// The permission to run it, through the shell, as git runs it.
     programs: program.Programs,
 };
@@ -1327,11 +1333,11 @@ pub const RunOptions = struct {
 /// `git bisect run <cmd> [<arg>...]`: the command run on each commit to
 /// test, its exit status the verdict -- 0 good, 125 skip, 1 to 127 bad --
 /// until the first bad commit is found or only skipped ones are left.
-pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u8, options: Options, run_options: RunOptions) Self.Error!Report {
+pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u8, options: RunOptions) Self.Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
-    var c = begin(gpa, io, repo, options, &arena, &out);
+    var c = begin(gpa, io, repo, .{ .who = options.who, .hooks = options.hooks, .blocked = options.blocked }, &arena, &out);
     var t = try readTerms(&c);
     if (!try nextCheck(&c, t, null)) return error.NeedGoodAndBad;
     var argv = argv_in;
@@ -1355,11 +1361,11 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u
     const line = std.mem.trimStart(u8, command.items, " \t\n\r");
     var first = true;
     while (true) {
-        const code = try runCommand(&c, line, run_options);
+        const code = try runCommand(&c, line, options);
         if (first and (code == 126 or code == 127)) {
             // The shell's own codes for a command it could not run: tried
             // on a good commit before they are believed.
-            const verified = try verifyGood(&c, t, line, run_options);
+            const verified = try verifyGood(&c, t, line, options);
             if (verified < 0 or verified >= 128 or verified == code) return error.RunFailed;
         }
         first = false;
@@ -1770,7 +1776,7 @@ test "bisect run tests each commit with the command, as git's does" {
             defer env.deinit();
             const script = "n=$(cat n); if [ $n -eq 13 ]; then exit 125; fi; [ $n -lt 12 ]";
             try expectReport(&t, io, &.{ "start", "HEAD", "HEAD~16" }, start(gpa, io, &t.repo, &.{ "HEAD", "HEAD~16" }, .{ .who = test_who }));
-            try expectReport(&t, io, &.{ "run", "sh", "-c", script }, run(gpa, io, &t.repo, &.{ "sh", "-c", script }, .{ .who = test_who }, .{ .programs = .{ .environ = &env } }));
+            try expectReport(&t, io, &.{ "run", "sh", "-c", script }, run(gpa, io, &t.repo, &.{ "sh", "-c", script }, .{ .who = test_who, .programs = .{ .environ = &env } }));
         }
     }.inFormat);
 }

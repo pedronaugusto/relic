@@ -12,6 +12,7 @@
 //! `uploadpack.allowTipSHA1InWant` or `allowReachableSHA1InWant` says, and
 //! a push may not update or delete it.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -32,6 +33,8 @@ pub const Service = enum {
 
 /// The patterns, in the order the configuration sets them.
 pub const Refs = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// Each with its trailing `/` taken off, as git takes them off. Owned.
     patterns: [][]u8 = &.{},
@@ -132,3 +135,6 @@ test "the last pattern that matches decides, by prefix up to a slash" {
     defer bare.deinit();
     try testing.expectError(error.MalformedValue, Refs.load(gpa, &bare, .upload_pack));
 }
+
+/// All errors reported by this namespace.
+pub const Error = Refs.LoadError;

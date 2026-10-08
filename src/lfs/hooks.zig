@@ -114,3 +114,6 @@ fn treeOf(arena: Allocator, io: Io, repo: *Repository, commit_oid: Oid) !Oid {
     defer commit.deinit();
     return commit.tree;
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

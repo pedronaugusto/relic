@@ -3,6 +3,7 @@
 //! whole; data git classifies as binary is refused; anything else is
 //! parallax's three-way line merge, the bytes `git merge-file` writes.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -61,6 +62,8 @@ pub const BlobOptions = struct {
 
 /// The owned bytes produced by a blob merge.
 pub const BlobResult = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     bytes: []u8,
     status: Status,
@@ -125,3 +128,6 @@ pub fn blobs(
 fn ownedBlob(gpa: Allocator, bytes: []const u8, status: BlobResult.Status) Allocator.Error!BlobResult {
     return .{ .gpa = gpa, .bytes = try gpa.dupe(u8, bytes), .status = status };
 }
+
+/// All errors reported by this namespace.
+pub const Error = BlobError || Self.BlobError;

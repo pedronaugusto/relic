@@ -10,6 +10,7 @@
 //! finds it: the first for the host whose login matches when a login is
 //! asked for, else the last `default` entry.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -24,6 +25,8 @@ pub const Machine = struct {
 
 /// A parsed file. Every slice is owned by its arena.
 pub const Netrc = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     machines: []const Machine,
 
@@ -184,3 +187,6 @@ fn fuzzNetrc(_: void, smith: *testing.Smith) anyerror!void {
         if (m.name) |name| _ = n.find(name, m.login);
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = Netrc.ParseError;

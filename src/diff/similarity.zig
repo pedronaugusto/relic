@@ -13,6 +13,7 @@
 //! without being read. Only regular files are scored; git pairs anything
 //! else only when it is identical.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -59,6 +60,8 @@ pub const Span = struct {
 /// up once and not a hundred times. Sorted by bucket, so two are compared
 /// in one pass over both.
 pub const Spans = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// The blob's size.
     size: usize,
     entries: []Span,
@@ -222,3 +225,6 @@ test "sizes too far apart score zero unread, and an empty destination scores zer
     // A carriage return before a newline is not material in text.
     try std.testing.expect(try score(gpa, "one\r\ntwo\r\n", "one\ntwo\n", 0) > default_minimum);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Allocator.Error;

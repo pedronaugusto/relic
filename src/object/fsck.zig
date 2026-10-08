@@ -23,6 +23,7 @@
 //! raised from a warning to an error: `baseline`. A checkout refuses such a
 //! path anyway, and an old repository's style warnings stay warnings.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -294,6 +295,8 @@ pub const LoadError = errors: {
 /// The levels the checks report at, the objects they leave alone, and the
 /// longest name a tree may carry.
 pub const Rules = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// git's strict mode, which a fetch, a clone and a received push use:
     /// every warning is an error unless configured otherwise.
     strict: bool = false,
@@ -369,16 +372,22 @@ pub const Rules = struct {
     /// for a fetch, a clone or a received push, as git checks them.
     /// `fetch.fsck.` and `receive.fsck.` names no message has are left out
     /// and said in `warnings`, as git warns; `fsck.` ones are refused.
-    pub fn load(gpa: Allocator, io: Io, config: *const config_mod.Config, kind: Kind, scope: Scope, strict: bool, sink: ?Sink) LoadError!Rules {
+    pub const LoadOptions = struct { kind: Kind, scope: Scope = .fsck, strict: bool = false, sink: ?Sink = null };
+    pub fn load(gpa: Allocator, io: Io, config: *const config_mod.Config, options: LoadOptions) LoadError!Rules {
+        const strict = options.strict;
         var rules: Rules = .{ .strict = strict };
         errdefer rules.deinit(gpa);
-        try rules.configure(gpa, io, config, kind, scope, sink);
+        try rules.configure(gpa, io, config, .{ .kind = options.kind, .scope = options.scope, .sink = options.sink });
         return rules;
     }
 
     /// `load`, over rules already made: `baseline` takes the
     /// configuration this way.
-    pub fn configure(r: *Rules, gpa: Allocator, io: Io, config: *const config_mod.Config, kind: Kind, scope: Scope, sink: ?Sink) LoadError!void {
+    pub const ConfigureOptions = struct { kind: Kind, scope: Scope = .fsck, sink: ?Sink = null };
+    pub fn configure(r: *Rules, gpa: Allocator, io: Io, config: *const config_mod.Config, options: ConfigureOptions) LoadError!void {
+        const kind = options.kind;
+        const scope = options.scope;
+        const sink = options.sink;
         for (config.entries.items) |entry| {
             if (!entryUnder(entry, scope)) continue;
             const raw = entry.value orelse return error.MissingValue;
@@ -462,7 +471,7 @@ pub fn forTransfer(gpa: Allocator, io: Io, config: ?*const config_mod.Config, ki
         rules = .{ .strict = true };
     }
     errdefer rules.deinit(gpa);
-    if (config) |c| try rules.configure(gpa, io, c, kind, scope, sink);
+    if (config) |c| try rules.configure(gpa, io, c, .{ .kind = kind, .scope = scope, .sink = sink });
     return rules;
 }
 
@@ -524,6 +533,8 @@ pub fn note(to: ?*warning.Warnings, finding: Finding) Allocator.Error!void {
 /// The `.gitmodules` and `.gitattributes` blobs trees name, which git
 /// reads once every object has come.
 pub const Found = struct {
+    pub const Error = ErrorNamespace.Error;
+
     modules: Oid.Set = .empty,
     attributes: Oid.Set = .empty,
 
@@ -1225,7 +1236,7 @@ test "levels and skip lists come from the scope's own settings" {
 
     var collected: Collected = .{ .gpa = gpa };
     defer collected.deinit();
-    var rules = try Rules.load(gpa, io, &config, .sha1, .fetch, true, collected.sink());
+    var rules = try Rules.load(gpa, io, &config, .{ .kind = .sha1, .scope = .fetch, .strict = true, .sink = collected.sink() });
     defer rules.deinit(gpa);
     try testing.expectEqual(Level.warn, rules.level(.bad_timezone));
     try testing.expectEqual(Level.ignore, rules.level(.zero_padded_filemode));
@@ -1247,7 +1258,7 @@ test "levels and skip lists come from the scope's own settings" {
     // fatal problem.
     var fsck_config = try config_mod.Config.parseText(gpa, "[fsck]\n\tnoSuchMessage = ignore\n", .local);
     defer fsck_config.deinit();
-    try testing.expectError(error.UnknownFsckMessage, Rules.load(gpa, io, &fsck_config, .sha1, .fsck, false, null));
+    try testing.expectError(error.UnknownFsckMessage, Rules.load(gpa, io, &fsck_config, .{ .kind = .sha1 }));
     var r: Rules = .{};
     try testing.expectError(error.FsckFatalLowered, r.set("nulinheader", "warn"));
     try r.set("nulinheader", "error");
@@ -1351,3 +1362,6 @@ fn fuzzCheck(_: void, smith: *testing.Smith) anyerror!void {
     _ = try checkBlob(testing.allocator, &strict, .zero(.sha1), .modules, input, null);
     _ = try checkBlob(testing.allocator, &strict, .zero(.sha1), .attributes, input, null);
 }
+
+/// All errors reported by this namespace.
+pub const Error = LoadError || ForTransferError || config_mod.ValueError || Allocator.Error;

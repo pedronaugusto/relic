@@ -626,3 +626,6 @@ test "string columns ignore controls and fall back to bytes for invalid UTF-8" {
         try std.testing.expectEqual(text.len, strWidth(text));
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

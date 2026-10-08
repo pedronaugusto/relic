@@ -15,6 +15,7 @@
 //! after warning about it. The sets are also what a sparse index is built
 //! from: a directory the cone leaves out is what collapses into one entry.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -31,6 +32,8 @@ pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
 
 /// The patterns that decide what is in the working tree.
 pub const Patterns = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: *std.heap.ArenaAllocator,
     items: std.ArrayList(ignore.Pattern),
@@ -120,7 +123,7 @@ pub const Patterns = struct {
             if (!try sets.add(&builder, pattern.glob, pattern.anchored, pattern.dir_only, p.case_fold)) continue;
             try added.append(p.gpa, pattern);
         }
-        const compiled = try sets.Matcher.build(p.gpa, &builder);
+        const compiled = try sets.Matcher.build(&builder);
         errdefer compiled.deinit();
         try p.items.appendSlice(p.gpa, added.items);
         if (p._matcher) |m| matcher(m).deinit();
@@ -166,6 +169,8 @@ pub const ConeMatch = enum {
 /// Directories are named without a leading or trailing slash. Under
 /// `core.ignoreCase` they are compared without case, as git compares them.
 pub const Cone = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// Included with everything under them.
     recursive: DirSet = .empty,
     /// Their ancestors: own files in, subdirectories out.

@@ -1,5 +1,7 @@
 //! Public lfs namespace. Implementation is in `lfs/lfs.zig`.
 
+pub const filter = @import("lfs/filter.zig");
+pub const clone = @import("lfs/clone.zig");
 pub const netrc = @import("lfs/netrc.zig");
 pub const ssh = @import("lfs/ssh.zig");
 pub const hooks = @import("lfs/hooks.zig");
@@ -21,3 +23,4 @@ pub const Wanted = @import("lfs/lfs.zig").Wanted;
 pub const FetchError = @import("lfs/lfs.zig").FetchError;
 pub const Fetcher = @import("lfs/lfs.zig").Fetcher;
 pub const Lfs = @import("lfs/lfs.zig").Lfs;
+pub const Error = @import("lfs/lfs.zig").Error;

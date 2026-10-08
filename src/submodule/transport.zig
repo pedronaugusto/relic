@@ -16,6 +16,7 @@
 //! kept in `failure`, and a refused credential is described in
 //! `auth_failure`, for the caller's message.
 
+const Namespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -35,6 +36,7 @@ const repo_mod = @import("../repo/repo.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
+pub const Error = clone_mod.Error || fetch_mod.Error || @import("../odb/odb.zig").Error;
 
 /// What every clone and fetch is made with.
 pub const Options = struct {
@@ -56,9 +58,10 @@ pub const Options = struct {
 
 /// A `submodule.Transport` over relic's clone and fetch.
 pub const Transport = struct {
+    pub const Error = Namespace.Error;
     options: Options,
     /// The error behind the last `error.TransportFailed`.
-    failure: ?anyerror = null,
+    failure: ?Transport.Error = null,
     /// The last refusal of a credential, described.
     auth_failure: auth.Failure = .{},
     /// How many repositories were cloned and how many fetches made.
@@ -82,7 +85,7 @@ pub const Transport = struct {
         return .{ .context = t, .cloneFn = cloneFn, .fetchFn = fetchFn };
     }
 
-    fn failed(t: *Transport, err: anyerror) submodule.TransportError {
+    fn failed(t: *Transport, err: Transport.Error) submodule.TransportError {
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
@@ -124,7 +127,7 @@ pub const Transport = struct {
         t.fetchOnce(gpa, io, repo, remote, &.{want.hex(&hex)}) catch |err| return t.failed(err);
     }
 
-    fn fetchOnce(t: *Transport, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, refspecs: []const []const u8) !void {
+    fn fetchOnce(t: *Transport, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, refspecs: []const []const u8) Transport.Error!void {
         const o = t.options;
         var outcome = try fetch_mod.fetch(gpa, io, repo, remote, .{
             .refspecs = refspecs,
@@ -310,7 +313,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     var refused: Transport = .init(.{ .who = test_who });
     defer refused.deinit();
     try testing.expectError(error.TransportFailed, Transport.cloneFn(gpa, io, &refused, source_path, refused_dir));
-    try testing.expectEqual(@as(?anyerror, error.TransportNotAllowed), refused.failure);
+    try testing.expectEqual(@as(?Error, error.TransportNotAllowed), refused.failure);
     try testing.expectEqual(@as(u32, 0), refused.clones);
 
     var config = try config_mod.Config.parseText(gpa, "[protocol \"file\"]\n\tallow = always\n", .global);

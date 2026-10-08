@@ -341,3 +341,6 @@ fn fuzzMessage(_: void, smith: *std.testing.Smith) anyerror!void {
     gpa.free(subject);
     _ = commentString("auto", text);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Allocator.Error;

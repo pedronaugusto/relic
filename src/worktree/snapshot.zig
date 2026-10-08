@@ -7,6 +7,7 @@
 //! another repository's commit, and LFS pointers name separate LFS data;
 //! neither is an edge in the Git object closure.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -53,6 +54,7 @@ pub const CaptureOptions = struct {
     /// Permission to run the source's configured filter programs.
     programs: ?program.Programs = null,
     filter_report: ?*filter.Report = null,
+    native_provider: ?filter.native.Provider = null,
     refusal: ?*worktree.Refusal = null,
 };
 
@@ -75,6 +77,8 @@ pub const RestoreOptions = struct {
 /// until every retained snapshot that needs them has been released. Close
 /// the store before pruning its objects, and reopen it afterwards.
 pub const Store = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     dir: Io.Dir,
     db: odb.Odb,
@@ -125,16 +129,16 @@ pub const Store = struct {
         var attrs = if (source_repo) |r| try r.loadAttrs(io) else try @import("../patterns/attributes.zig").Attrs.init(store.gpa, false);
         defer attrs.deinit();
         var drivers: ?filter.Drivers = null;
-        defer if (drivers) |*d| d.deinit();
+        defer if (drivers) |*d| d.deinit(io);
         if (source_repo) |r| {
             const lfsconfig = try r.lfsconfigText(io);
             defer if (lfsconfig) |text| r.allocator().free(text);
             // Native LFS writes to the private store, never to the source.
-            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), store.dir, wt, .{ .lfsconfig = lfsconfig });
+            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), .{ .common = store.dir, .work = wt }, .{ .config_text = lfsconfig, .native_provider = options.native_provider });
             // lfs.storage belongs to the source's storage policy. Its rules
             // still apply, but even an absolute storage path cannot redirect
             // a snapshot write out of the private store.
-            if (drivers.?.lfs) |*lfs| lfs.store = .{ .base = store.dir, .root = "lfs" };
+            if (drivers.?.native_driver) |implementation| implementation.retarget(store.dir);
         }
         var rules = if (source_repo) |r| try r.worktreeRules() else worktree.Rules{};
         rules.ignore = &ignored;
@@ -174,7 +178,7 @@ pub const Store = struct {
     /// Write every tree the index describes into one pack, rather than only
     /// the ones its cache tree says changed: the rest would otherwise be
     /// borrowed from the source and copied in one loose object at a time.
-    fn writeEveryTree(store: *Store, io: Io, staged: *index.Index) Error!hash.Oid {
+    fn writeEveryTree(store: *Store, io: Io, staged: *index.Index) ErrorNamespace.Error!hash.Oid {
         (try staged.cacheTree()).invalidateAll();
         const filling = try store.db.beginPack(io, .{ .delta = .none });
         errdefer store.db.abortPack(io, filling);
@@ -193,7 +197,7 @@ pub const Store = struct {
         return store.recordTree(io, tree, source);
     }
 
-    fn recordTree(store: *Store, io: Io, tree: hash.Oid, source: ?*odb.Odb) Error!Snapshot {
+    fn recordTree(store: *Store, io: Io, tree: hash.Oid, source: ?*odb.Odb) ErrorNamespace.Error!Snapshot {
         try store.ownTree(io, tree, source, 0);
         try store.db.syncBatch(io);
         if (store.durability == .durable) {
@@ -206,7 +210,7 @@ pub const Store = struct {
     // A tree being present is not a certificate for its descendants: writeTree
     // can have just written it while its unchanged children remain borrowed.
     // Only a completed walk may put a tree in the shortcut cache.
-    fn ownTree(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, depth: u32) Error!void {
+    fn ownTree(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, depth: u32) ErrorNamespace.Error!void {
         if (store.complete.contains(oid)) return;
         if (depth > object.max_tree_depth) return error.TreeDepthExceeded;
         try store.ownObject(io, oid, source_db, .tree);
@@ -227,7 +231,7 @@ pub const Store = struct {
 
     // The source is a reader for this capture alone. Attaching it to db
     // would let a live restore prefer a source pack over our own loose copy.
-    fn ownObject(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, expected: object.Type) Error!void {
+    fn ownObject(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, expected: object.Type) ErrorNamespace.Error!void {
         if (try store.db.existsOwn(io, oid)) {
             if ((try store.db.readHeader(io, oid)).type != expected) return error.UnexpectedObjectType;
             return;

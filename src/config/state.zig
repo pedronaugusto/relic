@@ -27,3 +27,6 @@ pub fn destroy(state: *State) void {
     owned.deinit();
     gpa.destroy(owned);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Allocator.Error;

@@ -1028,7 +1028,7 @@ fn row10() !void {
     var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
     defer repo.deinit(io);
     const lfs_server = try relic.lfs.api.Server.open(gpa, io, &repo, "origin", .{});
-    defer lfs_server.deinit();
+    defer lfs_server.deinit(io);
     const Pass = struct {
         server: *relic.lfs.api.Server,
         dir: Io.Dir,
@@ -1036,7 +1036,7 @@ fn row10() !void {
         objects: []const relic.lfs.transfer.Object,
         fn run(p: @This()) void {
             p.dir.deleteTree(p.io, ".git/lfs/objects") catch unreachable;
-            var outcome = relic.lfs.transfer.download(p.server, p.objects, .{ .concurrency = 1 }) catch unreachable;
+            var outcome = relic.lfs.transfer.download(p.io, p.server, p.objects, .{ .concurrency = 1 }) catch unreachable;
             defer outcome.deinit();
             std.debug.assert(outcome.failures() == 0);
             std.debug.assert(outcome.results[0].status == .transferred);

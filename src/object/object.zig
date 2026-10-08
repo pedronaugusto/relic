@@ -4,6 +4,7 @@
 //! given and every `write` appends to a writer the caller owns, so an object
 //! may be built in memory, named, and only then stored.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.object.<name>`.
@@ -274,6 +275,8 @@ pub const Tree = struct {
     /// which is the name for a blob and the name with `/` appended for a
     /// subtree — so `a.c` sorts before the subtree `a` and `a0` after it.
     pub const Builder = struct {
+        pub const Error = ErrorNamespace.Error;
+
         gpa: Allocator,
         kind: Kind,
         entries: std.ArrayList(Owned) = .empty,
@@ -485,6 +488,8 @@ pub const ParseError = error{
 /// `parse` allocates the parent list and the extra headers and borrows
 /// everything else from the object's bytes, so the bytes must outlive it.
 pub const Commit = struct {
+    pub const Error = ErrorNamespace.Error;
+
     kind: Kind,
     tree: Oid,
     /// In the order the object holds them, which is significant: the first is
@@ -691,6 +696,8 @@ fn writeFolded(w: *Io.Writer, h: ExtraHeader) Io.Writer.Error!void {
 ///
 /// A lightweight tag is a ref and no object at all; this is the other kind.
 pub const Tag = struct {
+    pub const Error = ErrorNamespace.Error;
+
     kind: Kind,
     /// What the tag points at.
     target: Oid,
@@ -1065,3 +1072,6 @@ fn fuzzObject(_: void, smith: *std.testing.Smith) anyerror!void {
     // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = Mode.parse(input[0..@min(input.len, 6)]) catch {};
 }
+
+/// All errors reported by this namespace.
+pub const Error = Type.ParseError || HeaderParseError || Mode.ParseError || Mode.FromRawError || TreeParseError || Tree.Builder.AddError || Signature.ParseError || Signature.WriteError || ParseError || Commit.WriteError || Commit.BuildError || Tag.WriteError || Tag.BuildError || Allocator.Error || Self.ParseError;

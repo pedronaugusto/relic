@@ -19,6 +19,7 @@ const filter = @import("filter.zig");
 const program = @import("../process/program.zig");
 const index_mod = @import("../index/index.zig");
 const lfs = @import("../lfs/lfs.zig");
+const lfs_filter = @import("../lfs/filter.zig");
 const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
@@ -34,7 +35,7 @@ pub fn environ(gpa: std.mem.Allocator) !std.process.Environ.Map {
 pub const Run = struct {
     programs: ?program.Programs = null,
     report: ?*filter.Report = null,
-    drivers: filter.Drivers.Options = .{},
+    native_lfs: bool = true,
     fetch: ?lfs.Fetcher = null,
 };
 
@@ -47,8 +48,8 @@ pub fn relicAdd(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !Oid {
     defer ignore_rules.deinit();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try repo.loadFilters(io, run.drivers);
-    defer drivers.deinit();
+    var drivers = if (run.native_lfs) try lfs_filter.load(gpa, io, &repo, .{ .fetch = run.fetch }) else try repo.loadFilters(io, .{});
+    defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
@@ -72,8 +73,8 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
     defer repo.deinit(io);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try repo.loadFilters(io, run.drivers);
-    defer drivers.deinit();
+    var drivers = if (run.native_lfs) try lfs_filter.load(gpa, io, &repo, .{ .fetch = run.fetch }) else try repo.loadFilters(io, .{});
+    defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -83,7 +84,6 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
         .rules = rules,
         .programs = run.programs,
         .filter_report = run.report,
-        .lfs_fetch = run.fetch,
     });
     try index.write(io, repo.gitDirectory(), "index", .{});
     return outcome;
@@ -97,8 +97,8 @@ pub fn relicStatus(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !workt
     defer ignore_rules.deinit();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try repo.loadFilters(io, run.drivers);
-    defer drivers.deinit();
+    var drivers = if (run.native_lfs) try lfs_filter.load(gpa, io, &repo, .{ .fetch = run.fetch }) else try repo.loadFilters(io, .{});
+    defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
@@ -624,7 +624,7 @@ test "status compares a filtered file through what it would be stored as" {
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, .{});
-    defer drivers.deinit();
+    defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;

@@ -160,3 +160,6 @@ test "a packed object is found by any prefix that names it alone" {
         }
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = odb_mod.Error;

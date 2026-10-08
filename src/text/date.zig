@@ -1217,3 +1217,6 @@ test "fuzz: any text is a date or no date, never a crash" {
         }
     }.one, .{});
 }
+
+/// All errors reported by this namespace.
+pub const Error = ShowError || std.mem.Allocator.Error;

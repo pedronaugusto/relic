@@ -27,6 +27,7 @@
 //! This is the one owner of mailmap parsing and lookup in relic: shortlog
 //! asks it, and so does anything else that shows a commit's people.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -96,6 +97,8 @@ const Entry = struct {
 
 /// A parsed mailmap.
 pub const Mailmap = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     entries: FoldedMap(Entry) = .empty,
@@ -471,3 +474,6 @@ test "a .mailmap that is a symbolic link is not read, as git does not read one" 
     try std.testing.expectEqualStrings("n <a@x>\n", expected);
     try std.testing.expect(m.lookup("n", "a@x") == null);
 }
+
+/// All errors reported by this namespace.
+pub const Error = LoadError || Mailmap.AddFileAtError || Allocator.Error || Self.LoadError;

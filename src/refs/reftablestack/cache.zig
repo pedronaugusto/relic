@@ -26,6 +26,7 @@
 //! `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `AUTO_MERGE` -- is a ref in the stack,
 //! which is where git since 2.45 keeps them.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -59,6 +60,8 @@ const max_reload_attempts = 8;
 /// positional reads as a lookup reaches them, through the table's index
 /// where it has one, so a lookup costs a few blocks and not the stack.
 pub const Stack = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     io: Io,
     arena: std.heap.ArenaAllocator,
@@ -85,7 +88,7 @@ pub const Stack = struct {
 
     /// Read the stack in `dir`, the `reftable` directory. A directory with
     /// no `tables.list` is an empty stack.
-    pub fn load(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind) Error!Stack {
+    pub fn load(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind) ErrorNamespace.Error!Stack {
         return loadReusing(gpa, io, dir, kind, null);
     }
 
@@ -93,7 +96,7 @@ pub const Stack = struct {
     /// names -- a table never changes once written -- and closing the rest.
     /// This is git's reload: after a transaction one table is new, and after
     /// a compaction a few are replaced by one.
-    fn loadReusing(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, old: ?*Stack) Error!Stack {
+    fn loadReusing(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, old: ?*Stack) ErrorNamespace.Error!Stack {
         var attempt: usize = 0;
         while (true) : (attempt += 1) {
             if (tryLoad(gpa, io, dir, kind, old)) |stack| {
@@ -105,7 +108,7 @@ pub const Stack = struct {
         }
     }
 
-    fn tryLoad(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, old: ?*Stack) (Error || error{FileNotFound})!Stack {
+    fn tryLoad(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, old: ?*Stack) (ErrorNamespace.Error || error{FileNotFound})!Stack {
         var stack: Stack = .empty(gpa, io, kind);
         errdefer stack.arena.deinit();
         const arena = stack.arena.allocator();
@@ -190,7 +193,9 @@ pub const Stack = struct {
     /// The newest record for `name`, tombstone included, or `null` when no
     /// table mentions it. The name is `name`; a symbolic target is copied
     /// with `out`.
-    pub fn lookup(s: *const Stack, gpa: Allocator, out: Allocator, name: []const u8) Error!?reftable.RefRecord {
+    pub const LookupOptions = struct { out: Allocator };
+    pub fn lookup(s: *const Stack, gpa: Allocator, name: []const u8, options: LookupOptions) ErrorNamespace.Error!?reftable.RefRecord {
+        const out = options.out;
         var i = s.tables.len;
         while (i > 0) {
             i -= 1;
@@ -208,14 +213,19 @@ pub const Stack = struct {
 
     /// Every live ref beginning with `prefix`, newest record for each name,
     /// sorted by name. The records and their names live in `arena`.
-    pub fn refsWithPrefix(s: *const Stack, gpa: Allocator, arena: Allocator, prefix: []const u8, include_deletions: bool) Error![]reftable.RefRecord {
+    pub const RefsOptions = struct { arena: Allocator, include_deletions: bool = false };
+    pub fn refsWithPrefix(s: *const Stack, gpa: Allocator, prefix: []const u8, options: RefsOptions) ErrorNamespace.Error![]reftable.RefRecord {
+        const arena = options.arena;
+        const include_deletions = options.include_deletions;
         return mergedRefs(gpa, arena, s.tables, prefix, include_deletions);
     }
 
     /// The log entries for `name`, newest first, the newest record for each
     /// update index winning and tombstones taken out. The strings live in
     /// `arena`.
-    pub fn logsFor(s: *const Stack, gpa: Allocator, arena: Allocator, name: []const u8) Error![]reftable.LogRecord {
+    pub const LogsOptions = struct { arena: Allocator };
+    pub fn logsFor(s: *const Stack, gpa: Allocator, name: []const u8, options: LogsOptions) ErrorNamespace.Error![]reftable.LogRecord {
+        const arena = options.arena;
         const start = try reftable.logKey(gpa, name, std.math.maxInt(u64));
         defer gpa.free(start);
         var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
@@ -355,6 +365,8 @@ fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) []const u8 {
 /// cache is behind a mutex, since a daemon reads from many tasks; a
 /// transaction reads its own stacks under its lock and does not touch it.
 pub const Cache = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     mutex: Io.Mutex = .init,
     stacks: ?Stacks = null,
@@ -376,7 +388,7 @@ pub const Cache = struct {
     }
 
     /// Bring the stacks up to date with the disk.
-    fn refresh(c: *Cache, io: Io, store: anytype) Error!*const Stacks {
+    fn refresh(c: *Cache, io: Io, store: anytype) ErrorNamespace.Error!*const Stacks {
         const main_now = try Validity.of(io, store.commonDir());
         const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir()) else null;
         if (c.stacks) |*st| {

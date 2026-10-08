@@ -22,6 +22,7 @@
 //! report, the remote-tracking refs of what was pushed are moved, logged
 //! as git logs them, `update by push`.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -41,12 +42,13 @@ const program = @import("../process/program.zig");
 const protocol = @import("../wire/protocol.zig");
 const transport = @import("transport.zig");
 const sendpack = @import("../wire/sendpack.zig");
+const odb_mod = @import("../odb/odb.zig");
 const objectwalk = @import("../walk/objectwalk.zig");
 const credential = @import("../wire/credential.zig");
 const auth = @import("../wire/auth.zig");
 const warning = @import("../report/warning.zig");
 const progress_mod = @import("../report/progress.zig");
-const lfspush = @import("../lfs/push.zig");
+
 const builtin = @import("builtin");
 
 const Oid = hash.Oid;
@@ -74,7 +76,7 @@ pub const Error = error{
     NoPushDestination,
     /// The `pre-push` hook refused the push.
     PrePushRefused,
-} || lfspush.Error || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || revwalk.Error;
+} || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || revwalk.Error;
 
 /// What a `pre-push` hook is shown: one line of its input.
 pub const PrePushUpdate = struct {
@@ -107,6 +109,17 @@ pub const Lease = struct {
     expect: ?Oid = null,
 };
 
+pub const BeforeSendError = Allocator.Error || Io.Cancelable || error{BeforeSendFailed};
+pub const BeforeSend = struct {
+    context: *anyopaque,
+    run: *const fn (*anyopaque, Allocator, Io, *Repository, BeforeSendInput) BeforeSendError!void,
+};
+pub const BeforeSendInput = struct {
+    remote: []const u8,
+    refs: []const []const u8,
+    objects: []const odb_mod.PackEntry,
+};
+
 /// How a push runs.
 pub const Options = struct {
     /// Refspecs, as on git's command line. Empty takes the remote's `push`
@@ -124,10 +137,8 @@ pub const Options = struct {
     /// Who the remote-tracking refs' log entries are written as, and when.
     who: object.Signature,
     pre_push: ?PrePush = null,
-    /// What git-lfs's pre-push hook does, done here: other people's locks
-    /// checked and the LFS objects the pushed commits point at uploaded,
-    /// before any ref is sent. A dry run does neither.
-    lfs: lfspush.Options = .{},
+    /// Content preparation by an operation owner, before any ref is sent.
+    before_send: ?BeforeSend = null,
     programs: ?program.Programs = null,
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
@@ -201,6 +212,8 @@ pub const RefResult = struct {
 
 /// What a push did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     refs: []const RefResult,
     /// Whether the remote took the pack.
@@ -445,12 +458,11 @@ fn send(
     for (request.commands) |c| {
         if (!c.new.isZero()) try remote_refs_pushed.append(arena, c.name);
     }
-    try lfspush.beforePush(gpa, io, repo, remote_name, remote_refs_pushed.items, objects.entries, .{
-        .programs = options.programs,
-        .prompt = options.prompt,
-        .progress = options.progress,
-        .auth_failure = options.auth_failure,
-    }, options.lfs);
+    if (options.before_send) |prepare| try prepare.run(prepare.context, gpa, io, repo, .{
+        .remote = remote_name,
+        .refs = remote_refs_pushed.items,
+        .objects = objects.entries,
+    });
 
     var with_objects = request;
     with_objects.objects = objects.entries;

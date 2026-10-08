@@ -1,5 +1,6 @@
 //! The object format, sources and storage machinery have one owner.
 //! Package plumbing, reached by no public name.
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -11,7 +12,7 @@ const midx = @import("midx.zig");
 const flate = std.compress.flate;
 const odb = @import("policy.zig");
 const reachability = @import("bitmap/reachability.zig");
-const Error = odb.Error;
+pub const Error = odb.Error;
 const Stats = odb.Stats;
 
 pub const State = opaque {};
@@ -48,6 +49,8 @@ pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!
 /// The pack and the name it was opened under have one owner. Registration
 /// transfers both together, never a pack without its name or the reverse.
 pub const NamedPack = struct {
+    pub const Error = ErrorNamespace.Error;
+
     pack: pack.Pack,
     name: []u8,
     /// This pack's key in the delta-base cache, given when it was opened:

@@ -378,3 +378,6 @@ fn fuzzOne(_: void, smith: *testing.Smith) anyerror!void {
 
 /// The ref whose log records the stash stack.
 pub const stash = "refs/stash";
+
+/// All errors reported by this namespace.
+pub const Error = error{};

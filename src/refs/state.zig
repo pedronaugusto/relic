@@ -62,3 +62,6 @@ pub fn destroy(gpa: std.mem.Allocator, state: *State) void {
     }
     gpa.destroy(data);
 }
+
+/// All errors reported by this namespace.
+pub const Error = std.mem.Allocator.Error;

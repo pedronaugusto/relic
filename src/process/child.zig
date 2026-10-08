@@ -80,3 +80,6 @@ pub const Child = struct {
         return n.exchange(gpa, io, input, options);
     }
 };
+
+/// All errors reported by this namespace.
+pub const Error = Child.SpawnError || Child.WaitError || Child.KillWaitError || Child.OutputError || Child.ExchangeError || Child.Error;

@@ -80,9 +80,9 @@ test "a served repository advertises its promisor remotes as git's upload-pack d
     const theirs = (try promisorLine(gpa, result.stdout)).?;
     defer gpa.free(theirs);
 
-    var remote = try local.Remote.open(gpa, io, path);
+    var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    var s: uploadpack.Server = .init(gpa, io, &remote, .v2, false, .{});
+    var s: uploadpack.Server = .init(gpa, io, &remote, .v2, .{});
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try s.advertise(&out.writer);

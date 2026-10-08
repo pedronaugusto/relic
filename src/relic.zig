@@ -47,6 +47,7 @@
 //! | `worktree.encoding` | Module within `worktree`. |
 //! | `worktree.fsmonitor` | Module within `worktree`. |
 //! | `worktree.filter` | Module within `worktree`. |
+//! | `worktree.filter.native` | Native content-filter protocol. |
 //! | `worktree.dirscan` | Module within `worktree`. |
 //! | `worktree.safepath` | Module within `worktree`. |
 //! | `diff` | Public concern. |
@@ -115,6 +116,8 @@
 //! | `submodule.gitmodules` | Module within `submodule`. |
 //! | `submodule.gitlink` | Module within `submodule`. |
 //! | `lfs` | Public concern. |
+//! | `lfs.filter` | Native LFS filters selected by an operation owner. |
+//! | `lfs.clone` | Clone with native LFS checkout and downloads. |
 //! | `lfs.netrc` | Module within `lfs`. |
 //! | `lfs.ssh` | Module within `lfs`. |
 //! | `lfs.hooks` | Module within `lfs`. |

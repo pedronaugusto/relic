@@ -4,6 +4,7 @@
 //! boundaries and backreferences have the same meaning in both. Backreference
 //! searches have bounded work and recursion and fail explicitly at the limit.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -21,9 +22,11 @@ pub const Error = error{
 /// Boolean commit-message adapter over the same git ERE core as `Regex`.
 /// Git compiles revision message searches without REG_NEWLINE.
 pub const Pattern = struct {
+    pub const Error = ErrorNamespace.Error;
+
     regex: Regex,
 
-    pub fn compile(gpa: Allocator, text: []const u8) Error!Pattern {
+    pub fn compile(gpa: Allocator, text: []const u8) ErrorNamespace.Error!Pattern {
         return .{ .regex = try Regex.compile(gpa, text, .{ .newline = false }) };
     }
 
@@ -32,7 +35,7 @@ pub const Pattern = struct {
         p.* = undefined;
     }
 
-    pub fn search(p: *const Pattern, gpa: Allocator, text: []const u8) Error!bool {
+    pub fn search(p: *const Pattern, gpa: Allocator, text: []const u8) ErrorNamespace.Error!bool {
         return (try p.regex.findMode(gpa, text, false, true)) != null;
     }
 };
@@ -160,6 +163,8 @@ const max_program = 1 << 16;
 /// what their groups took, the one ending furthest; a search past a budget
 /// of work is refused as `error.PatternTooComplex`.
 pub const Regex = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     program: []const Inst,
     /// The pattern itself, for one with a back-reference, which the
@@ -170,7 +175,7 @@ pub const Regex = struct {
     first_bytes: [4]u64 = @splat(std.math.maxInt(u64)),
     nullable: bool = true,
 
-    pub const CompileError = Error;
+    pub const CompileError = ErrorNamespace.Error;
     pub const FindWithError = error{PatternTooComplex};
     pub const FindError = Allocator.Error || FindWithError;
 
@@ -356,6 +361,8 @@ const Backtrack = struct {
 /// Scratch space for matching, sized for one program and reused from line
 /// to line.
 pub const Vm = struct {
+    pub const Error = ErrorNamespace.Error;
+
     boolean: bool = false,
     first_bytes: [4]u64 = @splat(std.math.maxInt(u64)),
     nullable: bool = true,
@@ -781,10 +788,6 @@ const RParser = struct {
                     p.at += 1;
                     return p.literal('*');
                 }
-                if (!basic and branch_start) {
-                    p.at += 1;
-                    return p.literal('*');
-                }
                 return error.InvalidPattern;
             },
             '(' => if (!basic) {
@@ -810,10 +813,6 @@ const RParser = struct {
                 return p.literal(')');
             },
             '+', '?' => if (!basic) {
-                if (branch_start) {
-                    p.at += 1;
-                    return p.literal(c);
-                }
                 return error.InvalidPattern;
             } else {
                 p.at += 1;
@@ -1150,4 +1149,22 @@ test "phase2 regex adapters share newline policy and bounded backreferences" {
     defer backref.deinit();
     const text: [1024]u8 = @splat('a');
     try std.testing.expectError(error.PatternTooComplex, backref.search(gpa, &text));
+}
+
+test "phase2 ERE adapters refuse repetition operators with no operand" {
+    for ([_][]const u8{ "*a", "+a", "?a", "a|*b", "(*a)" }) |pattern| {
+        if (Pattern.compile(testing.allocator, pattern)) |compiled| {
+            var p = compiled;
+            defer p.deinit();
+            try testing.expect(false);
+        } else |err| try testing.expectEqual(error.InvalidPattern, err);
+        if (Regex.compile(testing.allocator, pattern, .{})) |compiled| {
+            var r = compiled;
+            defer r.deinit();
+            try testing.expect(false);
+        } else |err| try testing.expectEqual(error.InvalidPattern, err);
+    }
+    var literal = try Regex.compile(testing.allocator, "*a", .{ .syntax = .basic });
+    defer literal.deinit();
+    try testing.expect((try literal.find(testing.allocator, "x*a", false)) != null);
 }

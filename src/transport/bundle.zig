@@ -19,6 +19,7 @@
 //! completing a thin one from the repository. A path or `file://` URL that
 //! names a bundle is fetched and cloned from as git fetches from one.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -82,6 +83,8 @@ pub const Reference = struct {
 
 /// A bundle's header, read.
 pub const Header = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     version: Version,
     object_format: hash.Kind,
@@ -243,6 +246,8 @@ pub const OpenError = ParseError || Io.File.OpenError;
 
 /// A bundle file, open at its pack.
 pub const File = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     file: Io.File,
     buffer: [64 * 1024]u8 = undefined,
@@ -277,7 +282,7 @@ pub const File = struct {
 /// `is_bundle`: whether `path` is a file whose header reads as a bundle's.
 pub fn isBundle(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) bool {
     const f = File.open(gpa, io, dir, path) catch return false;
-    f.close(gpa, io);
+    f.deinit(io);
     return true;
 }
 
@@ -296,6 +301,8 @@ pub const Error = error{
 
 /// What `verify` found.
 pub const Verification = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// The prerequisites the repository lacks, in the header's order.
     missing: []Oid,

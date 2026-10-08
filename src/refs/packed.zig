@@ -14,6 +14,7 @@
 //! its `sorted` trait promises; a file without that order is sorted when
 //! it is read, as git sorts it, so a lookup is a bisection either way.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -41,6 +42,8 @@ pub const Entry = struct {
 
 /// Everything `packed-refs` holds, sorted by name.
 pub const Listing = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     bytes: []u8,
     entries: []Entry,
@@ -193,6 +196,8 @@ const Validity = struct {
 /// holds it from the stat to the end of the bisection; a listing copies
 /// what it needs while it holds it.
 pub const Cache = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     mutex: Io.Mutex = .init,
     current: ?Listing = null,
@@ -247,3 +252,6 @@ test "a listing finds the first of two lines naming one ref, sorted or not" {
     try std.testing.expect(listing.find("refs/tags/a") == null);
     try std.testing.expect(listing.find("refs/tags/c") == null);
 }
+
+/// All errors reported by this namespace.
+pub const Error = ReadError;

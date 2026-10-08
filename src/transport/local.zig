@@ -9,6 +9,7 @@
 //! other's object database. Nothing is spawned, and nothing goes through a
 //! wire format that both ends of the same process would only have to parse.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -47,6 +48,8 @@ pub const Error = errors: {
 
 /// Another repository, open.
 pub const Remote = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     repo: repo_mod.Repository,
     /// The refs not shown: `uploadpack.hideRefs` and `transfer.hideRefs`
@@ -58,16 +61,7 @@ pub const Remote = struct {
     /// directory or absolute, or a `file://` URL. The path is the
     /// repository — its working tree, its `.git`, or a bare repository —
     /// and is not searched above, as git does not search above a remote's.
-    pub fn open(gpa: Allocator, io: Io, location: []const u8) Error!Remote {
-        return openWith(gpa, io, location, .{});
-    }
-
-    /// `open`, the repository opened with `options` -- its ownership
-    /// checked as `options.ownership` says, against the `safe.directory`
-    /// of `options`' configuration, as git checks a local clone's source
-    /// before it reads that repository's configuration. It is never
-    /// searched for, whatever `options.discover` says.
-    pub fn openWith(gpa: Allocator, io: Io, location: []const u8, options: repo_mod.Repository.OpenOptions) Error!Remote {
+    pub fn open(gpa: Allocator, io: Io, location: []const u8, options: repo_mod.Repository.OpenOptions) ErrorNamespace.Error!Remote {
         var identity = url_mod.Identity.parse(gpa, location) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NotARepository,
@@ -99,7 +93,7 @@ pub const Remote = struct {
 
     /// Hide what the repository hides from `service`: a push is shown
     /// what `receive.hideRefs` leaves.
-    pub fn serve(r: *Remote, service: hidden_refs.Service) Error!void {
+    pub fn serve(r: *Remote, service: hidden_refs.Service) ErrorNamespace.Error!void {
         const hidden = try hidden_refs.Refs.load(r.gpa, r.repo.configuration(), service);
         r.hidden.deinit();
         r.hidden = hidden;
@@ -113,17 +107,17 @@ pub const Remote = struct {
     /// The refs the other repository shows, as a server lists them: `HEAD`
     /// first, with its target, then every ref under `refs/` in name order,
     /// each annotated tag with what it peels to. A hidden ref is left out.
-    pub fn listRefs(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {
+    pub fn listRefs(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8) ErrorNamespace.Error!protocol.RefList {
         return r.listWith(gpa, io, prefixes, false);
     }
 
     /// `listRefs`, the hidden refs included: what a server asks of itself
     /// when it decides whether a want is a ref's tip.
-    pub fn listAllRefs(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {
+    pub fn listAllRefs(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8) ErrorNamespace.Error!protocol.RefList {
         return r.listWith(gpa, io, prefixes, true);
     }
 
-    fn listWith(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8, include_hidden: bool) Error!protocol.RefList {
+    fn listWith(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8, include_hidden: bool) ErrorNamespace.Error!protocol.RefList {
         var list: protocol.RefList = .{ .arena = .init(gpa), .refs = &.{} };
         errdefer list.arena.deinit();
         const arena = list.arena.allocator();
@@ -188,16 +182,18 @@ pub const Remote = struct {
     /// every annotated tag that points at something in the pack comes too,
     /// as a server's `include-tag` sends it. `null` when there is nothing to
     /// copy. `into` is refreshed to read the new pack.
+    pub const CopyOptions = struct { pack_dir: Io.Dir, haves: []const Oid = &.{}, include_tags: bool = false, pack: odb_mod.PackOptions = .{} };
     pub fn copyObjects(
         r: *Remote,
         io: Io,
         into: *odb_mod.Odb,
-        pack_dir: Io.Dir,
         wants: []const Oid,
-        haves: []const Oid,
-        include_tags: bool,
-        options: odb_mod.PackOptions,
-    ) Error!?pack.WriteReport {
+        with: CopyOptions,
+    ) ErrorNamespace.Error!?pack.WriteReport {
+        const pack_dir = with.pack_dir;
+        const haves = with.haves;
+        const include_tags = with.include_tags;
+        const options = with.pack;
         var collected = try objectwalk.missing(r.gpa, io, r.repo.objectDatabase(), wants, haves);
         defer collected.deinit();
         if (collected.entries.len == 0) return null;
@@ -245,7 +241,8 @@ pub const Remote = struct {
             }
         }
 
-        const report = try r.repo.objectDatabase().writePack(io, pack_dir, collected.entries, options);
+        var report = try r.repo.objectDatabase().writePack(io, pack_dir, collected.entries, options);
+        errdefer if (report.keep) |*token| token.deinit(io);
         try into.refresh(io);
         return report;
     }
@@ -259,7 +256,7 @@ pub const Remote = struct {
     };
 
     /// Errors from `receivePush`.
-    pub const ReceivePushError = Error || sendpack.Error;
+    pub const ReceivePushError = ErrorNamespace.Error || sendpack.Error;
 
     /// Apply a push to this repository as `git-receive-pack` applies one:
     /// the objects copied from `from` as one pack, then each command under
@@ -389,7 +386,7 @@ pub const Remote = struct {
         return report;
     }
 
-    fn hiddenPushReason(r: *Remote, io: Io, command: sendpack.Command) Error![]const u8 {
+    fn hiddenPushReason(r: *Remote, io: Io, command: sendpack.Command) ErrorNamespace.Error![]const u8 {
         // After the objects are found to be there, before any of
         // receive-pack's own rules, as git rejects it.
         return if (command.new.isZero())
@@ -401,7 +398,7 @@ pub const Remote = struct {
     }
 
     /// The pusher's boundary commits `tip`'s pushed history reaches.
-    fn shallowRootsReached(arena: Allocator, io: Io, from: *odb_mod.Odb, tip: hash.Oid, pushed: *const hash.Oid.Set) (Error || sendpack.Error)![]const hash.Oid {
+    fn shallowRootsReached(arena: Allocator, io: Io, from: *odb_mod.Odb, tip: hash.Oid, pushed: *const hash.Oid.Set) (ErrorNamespace.Error || sendpack.Error)![]const hash.Oid {
         var out: std.ArrayList(hash.Oid) = .empty;
         var seen: hash.Oid.Set = .empty;
         var stack: std.ArrayList(hash.Oid) = .empty;
@@ -433,7 +430,7 @@ pub const Remote = struct {
     }
 
     /// Refuse a repository whose push would run hooks.
-    fn refuseHooks(r: *Remote, io: Io) Error!void {
+    fn refuseHooks(r: *Remote, io: Io) ErrorNamespace.Error!void {
         const hooks_path = r.repo.configuration().get("core.hookspath");
         var dir = (if (hooks_path) |path|
             Io.Dir.cwd().openDir(io, path, .{})

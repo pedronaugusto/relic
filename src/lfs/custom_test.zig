@@ -160,16 +160,16 @@ fn relicUpload(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
     var collected = try objectwalk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, &.{});
     defer collected.deinit();
     const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
-    defer server.deinit();
-    return lfstransfer.pushObjects(server, repo.objectDatabase(), collected.entries, .{});
+    defer server.deinit(fx.io);
+    return lfstransfer.pushObjects(std.testing.io, server, repo.objectDatabase(), collected.entries, .{});
 }
 
 fn relicFetch(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
     var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
     defer repo.deinit(fx.io);
     const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
-    defer server.deinit();
-    return lfstransfer.fetch(server, &repo, .{});
+    defer server.deinit(fx.io);
+    return lfstransfer.fetch(std.testing.io, server, &repo, .{});
 }
 
 test "a standalone agent is sent what git-lfs sends it, an upload and a download, and the objects arrive" {
@@ -226,7 +226,10 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
     try testing.expectEqualStrings(a, b);
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
-    var store = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.commonDirectory(), null, .{});
+    var store = try lfs.Lfs.load(gpa, io, repo.configuration(), .{
+        .common_dir = repo.commonDirectory(),
+        .work_dir = null,
+    });
     defer store.deinit();
     const content = testbytes.repeat("the first object\n", 64);
     const pointer: lfs.Pointer = .{ .oid = testlfs.sha256Hex(content), .size = content.len };

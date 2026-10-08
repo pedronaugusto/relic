@@ -3,6 +3,7 @@
 //! A repository is a local directory. Nothing here talks to a network or
 //! reads a clock. Signing a write needs the caller's `program.Programs`.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.repo.<name>`.
@@ -216,6 +217,8 @@ const Discovered = struct {
 /// beside the working tree's own `.gitignore` files. Neither file need
 /// exist.
 pub const IgnoreSources = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// `core.excludesFile`, a relative one taken from the process's
     /// current directory as `loadIgnore` reads it; `null` when unset.
     excludes_file: ?[]u8,
@@ -266,6 +269,8 @@ const RepositoryData = struct {
 };
 
 pub const Repository = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// Private ownership; handles, caches and live configuration stay together.
     _state: *anyopaque,
 
@@ -377,7 +382,7 @@ pub const Repository = struct {
         across_filesystems: bool = false,
     };
 
-    fn discover(gpa: Allocator, io: Io, start: Io.Dir, options: OpenOptions) Error!Discovered {
+    fn discover(gpa: Allocator, io: Io, start: Io.Dir, options: OpenOptions) ErrorNamespace.Error!Discovered {
         var current = start;
         var current_owned = false;
         defer if (current_owned) current.close(io);
@@ -461,7 +466,7 @@ pub const Repository = struct {
     /// unreadable, malformed, naming nothing -- is `error.BrokenGitFile`,
     /// where git dies rather than look further up, as a submodule's damaged
     /// `.git` must never be taken for its superproject.
-    fn dotGit(gpa: Allocator, io: Io, dir: Io.Dir) Error!?Io.Dir {
+    fn dotGit(gpa: Allocator, io: Io, dir: Io.Dir) ErrorNamespace.Error!?Io.Dir {
         const st = dir.statFile(io, ".git", .{}) catch return null;
         if (st.kind != .file) {
             if (st.kind != .directory) return null;
@@ -489,7 +494,7 @@ pub const Repository = struct {
 
     /// The settings a repository cannot write itself: the system, global
     /// and command-line ones, which git's `git_protected_config` reads.
-    fn protectedConfig(gpa: Allocator, io: Io, options: OpenOptions) Error!config_mod.Config {
+    fn protectedConfig(gpa: Allocator, io: Io, options: OpenOptions) ErrorNamespace.Error!config_mod.Config {
         return config_mod.Config.open(gpa, io, .{
             .system = options.system_config,
             .xdg = options.xdg_config,
@@ -503,7 +508,7 @@ pub const Repository = struct {
     /// the `.git` file's directory (`gitfile_in`), the working tree and the
     /// git directory are the current user's, or `safe.directory` names the
     /// working tree, or the git directory where there is none.
-    fn checkOwnership(gpa: Allocator, io: Io, options: OpenOptions, gitfile_in: ?Io.Dir, work: ?Io.Dir, git_dir: Io.Dir) Error!void {
+    fn checkOwnership(gpa: Allocator, io: Io, options: OpenOptions, gitfile_in: ?Io.Dir, work: ?Io.Dir, git_dir: Io.Dir) ErrorNamespace.Error!void {
         if (options.explicit or options.ownership == .trust) return;
         if (options.ownership == .check) {
             const owned = (if (gitfile_in) |d| fs.ownedByCurrentUser(io, d, ".git", options.home) else true) and
@@ -525,7 +530,7 @@ pub const Repository = struct {
 
     /// git's refusal of a bare repository found by discovery under
     /// `safe.bareRepository=explicit`.
-    fn checkBare(gpa: Allocator, io: Io, options: OpenOptions, git_dir: Io.Dir) Error!void {
+    fn checkBare(gpa: Allocator, io: Io, options: OpenOptions, git_dir: Io.Dir) ErrorNamespace.Error!void {
         if (options.explicit) return;
         var protected = try protectedConfig(gpa, io, options);
         defer protected.deinit();
@@ -542,7 +547,7 @@ pub const Repository = struct {
         }
     }
 
-    fn withCommon(gpa: Allocator, io: Io, git_dir: Io.Dir, work_dir: ?Io.Dir) Error!Discovered {
+    fn withCommon(gpa: Allocator, io: Io, git_dir: Io.Dir, work_dir: ?Io.Dir) ErrorNamespace.Error!Discovered {
         // `commondir` makes this a linked worktree: everything shared lives
         // where it points.
         if (try fs.readFileAlloc(gpa, io, git_dir, "commondir", 4096)) |text| {
@@ -592,7 +597,7 @@ pub const Repository = struct {
         return sa.stat.ino == sb.stat.ino and sa.stat.dev == sb.stat.dev;
     }
 
-    fn finish(gpa: Allocator, io: Io, discovered: Discovered, options: OpenOptions) Error!Repository {
+    fn finish(gpa: Allocator, io: Io, discovered: Discovered, options: OpenOptions) ErrorNamespace.Error!Repository {
         const owned = try gpa.create(RepositoryData);
         errdefer gpa.destroy(owned);
         owned.* = .{
@@ -656,7 +661,7 @@ pub const Repository = struct {
     /// `extensions.worktreeConfig` on and none otherwise: the file has no
     /// say in the format. `worktree_contents`, when given, is read as that
     /// file's bytes: a write about to land there.
-    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, format: RepositoryFormat, worktree_contents: ?[]const u8) Error!config_mod.Config {
+    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, format: RepositoryFormat, worktree_contents: ?[]const u8) ErrorNamespace.Error!config_mod.Config {
         var read = sources;
         read.worktree = if (format.worktree_config)
             .{ .dir = repo.data().git_dir, .sub_path = "config.worktree", .contents = worktree_contents }
@@ -700,7 +705,7 @@ pub const Repository = struct {
 
     /// The `.git` directory's path as git matches it in a `gitdir:`
     /// condition: absolute, symbolic links resolved, `/`-separated.
-    fn absoluteGitDir(io: Io, git_dir: Io.Dir, buffer: []u8) Error![]const u8 {
+    fn absoluteGitDir(io: Io, git_dir: Io.Dir, buffer: []u8) ErrorNamespace.Error![]const u8 {
         const len = try git_dir.realPath(io, buffer);
         const path = buffer[0..len];
         if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
@@ -711,7 +716,7 @@ pub const Repository = struct {
     /// `null` when it is detached: read through a ref store over the
     /// directories in `format`, before the repository has its own. An
     /// unborn branch counts, as it does for git's `onbranch:`.
-    fn currentBranch(gpa: Allocator, io: Io, git_dir: Io.Dir, common_dir: Io.Dir, format: RepositoryFormat) Error!?[]u8 {
+    fn currentBranch(gpa: Allocator, io: Io, git_dir: Io.Dir, common_dir: Io.Dir, format: RepositoryFormat) ErrorNamespace.Error!?[]u8 {
         var store = try refs_mod.Store.init(gpa, format.kind, git_dir, common_dir, .{ .format = format.ref_storage });
         defer store.deinit();
         return branchOf(gpa, io, &store);
@@ -720,7 +725,7 @@ pub const Repository = struct {
     /// The branch `HEAD` names in `store`, for `onbranch:`: a `HEAD` that
     /// cannot be read names none, as git's `include_by_branch` finds none,
     /// and the repository still opens.
-    fn branchOf(gpa: Allocator, io: Io, store: *const refs_mod.Store) Error!?[]u8 {
+    fn branchOf(gpa: Allocator, io: Io, store: *const refs_mod.Store) ErrorNamespace.Error!?[]u8 {
         return store.currentBranch(gpa, io) catch |err| switch (err) {
             error.MalformedRef, error.SymbolicRefLoop, error.InvalidRefName => null,
             else => |e| e,
@@ -729,13 +734,13 @@ pub const Repository = struct {
 
     /// The `reftable.*` settings, for the stack's writes and compactions.
     /// `core.sharedRepository`, as git reads it.
-    fn sharedOf(config: *const config_mod.Config) Error!fs.Shared {
+    fn sharedOf(config: *const config_mod.Config) ErrorNamespace.Error!fs.Shared {
         const entry = config.find("core.sharedrepository") orelse return .umask;
         const value = entry.value orelse return .group;
         return fs.Shared.parse(value) catch error.InvalidSharedMode;
     }
 
-    fn reftableOptions(config: *const config_mod.Config) Error!reftablestack.Options {
+    fn reftableOptions(config: *const config_mod.Config) ErrorNamespace.Error!reftablestack.Options {
         var options: reftablestack.Options = .{};
         const block_size = try config.getInt("reftable.blocksize", options.write.block_size);
         if (block_size > 0 and block_size < (1 << 24)) options.write.block_size = @intCast(block_size);
@@ -751,7 +756,7 @@ pub const Repository = struct {
     /// A lock timeout in milliseconds, as git reads one: zero means try
     /// once, a negative number means wait for ever, which here is as long
     /// as a wait can be written down.
-    fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: i64) Error!fs.OnContention {
+    fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: i64) ErrorNamespace.Error!fs.OnContention {
         const timeout = try config.getInt(key, default);
         if (timeout == 0) return .fail;
         if (timeout < 0) return .{ .wait_ms = std.math.maxInt(u32) };
@@ -834,7 +839,7 @@ pub const Repository = struct {
     /// The configuration of a new repository: the values git's `init` sets
     /// one by one, as `git config` would, in its order, in the template's
     /// file when there is one and a new one when not.
-    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions, shared: fs.Shared, logs_set: bool) Error!void {
+    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions, shared: fs.Shared, logs_set: bool) ErrorNamespace.Error!void {
         var edits: std.ArrayList(ConfigEdit) = .empty;
         defer edits.deinit(gpa);
         const version = if (options.object_format == .sha1 and options.ref_format == .files) "0" else "1";
@@ -876,7 +881,7 @@ pub const Repository = struct {
     /// Whether a template's own `config`, when it has one, is of a format
     /// git copies from: a `core.repositoryformatversion` of 0 or 1, or
     /// none.
-    fn templateUsable(gpa: Allocator, io: Io, template: Io.Dir) Error!bool {
+    fn templateUsable(gpa: Allocator, io: Io, template: Io.Dir) ErrorNamespace.Error!bool {
         const text = (try fs.readFileAlloc(gpa, io, template, "config", 1 << 20)) orelse return true;
         defer gpa.free(text);
         var config = config_mod.Config.parseText(gpa, text, .local) catch return false;
@@ -889,7 +894,7 @@ pub const Repository = struct {
     /// git's `copy_templates_1`: every entry of `from` but a dotfile, into
     /// `to`, a directory merged, anything already there kept, a symbolic
     /// link copied as one and a file with its executable bit.
-    fn copyTemplate(gpa: Allocator, io: Io, from: Io.Dir, to: Io.Dir, shared: fs.Shared) Error!void {
+    fn copyTemplate(gpa: Allocator, io: Io, from: Io.Dir, to: Io.Dir, shared: fs.Shared) ErrorNamespace.Error!void {
         var it = from.iterate();
         while (try it.next(io)) |entry| {
             if (entry.name.len == 0 or entry.name[0] == '.') continue;
@@ -980,7 +985,7 @@ pub const Repository = struct {
     };
 
     /// Errors from writing a configuration file.
-    pub const WriteConfigError = Error || config_write.Error;
+    pub const WriteConfigError = ErrorNamespace.Error || config_write.Error;
 
     /// What a configuration write did beside setting values.
     pub const WriteOutcome = config_write.Outcome;
@@ -1043,7 +1048,7 @@ pub const Repository = struct {
     }
 
     /// Errors from `editConfig`.
-    pub const EditConfigError = Error || config_mod.Config.SetError;
+    pub const EditConfigError = ErrorNamespace.Error || config_mod.Config.SetError;
 
     /// Set `values` in memory, over every file and every `-c` value given
     /// at open, as later `-c` values are: never written, and kept through
@@ -1101,7 +1106,7 @@ pub const Repository = struct {
     /// Whether `next` may be published, and the policy it sets: the same
     /// hash and ref backend the repository was opened with, and settings
     /// the stores can take.
-    fn checkConfig(repo: *const Repository, next: *const config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) Error!ConfigPolicy {
+    fn checkConfig(repo: *const Repository, next: *const config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) ErrorNamespace.Error!ConfigPolicy {
         if (format.kind != repo.objectFormat()) {
             try refuseSetting(diagnostic, "extensions.objectFormat");
             return error.ObjectFormatChanged;
@@ -1124,7 +1129,7 @@ pub const Repository = struct {
         repo.refStore().configureReftable(policy.ref_options);
     }
 
-    fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) Error!void {
+    fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) ErrorNamespace.Error!void {
         repo.installConfig(next, try repo.checkConfig(&next, format, diagnostic));
     }
 
@@ -1143,7 +1148,7 @@ pub const Repository = struct {
         };
     }
 
-    fn coreChoice(repo: *const Repository, comptime T: type, comptime boolean: bool, setting: []const u8, fallback: T) Error!T {
+    fn coreChoice(repo: *const Repository, comptime T: type, comptime boolean: bool, setting: []const u8, fallback: T) ErrorNamespace.Error!T {
         const text = repo.configuration().get(setting) orelse return fallback;
         if (T == fs.Stat.Check and std.ascii.eqlIgnoreCase(text, "default")) return .full;
         inline for (@typeInfo(T).@"enum".field_names) |name| {
@@ -1241,18 +1246,18 @@ pub const Repository = struct {
         return out.toOwnedSlice(gpa);
     }
 
-    /// The filter drivers the configuration defines and relic's own LFS,
+    /// Configured filters and an optional caller-selected native provider,
     /// for `worktree.Rules.filters`. The result is the caller's, and borrows
     /// the repository's directories for as long as it lives.
     pub fn loadFilters(repo: *Repository, io: Io, options: filter.Drivers.Options) LoadFiltersError!filter.Drivers {
         var with = options;
         var text: ?[]u8 = null;
         defer if (text) |t| repo.data().gpa.free(t);
-        if (with.native_lfs and with.lfsconfig == null) {
+        if (with.native_provider != null and with.config_text == null) {
             text = try repo.lfsconfigText(io);
-            with.lfsconfig = text;
+            with.config_text = text;
         }
-        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), repo.data().common_dir, repo.data().work_dir, with);
+        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), .{ .common = repo.data().common_dir, .work = repo.data().work_dir }, with);
     }
 
     /// Errors from `loadFilters`: the drivers', and those of finding
@@ -1261,7 +1266,7 @@ pub const Repository = struct {
 
     /// Errors from finding `.lfsconfig`.
     pub const LfsconfigError = Allocator.Error || Io.Dir.ReadFileAllocError ||
-        index_mod.ReadError || odb_mod.Error || Error || Io.Dir.StatFileError ||
+        index_mod.ReadError || odb_mod.Error || ErrorNamespace.Error || Io.Dir.StatFileError ||
         Io.File.OpenError || Io.File.StatError || Io.File.ReadPositionalError || Io.Cancelable;
 
     /// `.lfsconfig` as git-lfs finds it: the file at the top of the working
@@ -1354,7 +1359,7 @@ pub const Repository = struct {
     }
 
     /// Errors from `writeIndex`.
-    pub const WriteIndexError = index_mod.WriteError || Error;
+    pub const WriteIndexError = index_mod.WriteError || ErrorNamespace.Error;
 
     /// Open the repository's own index.
     /// Write `index` as this repository's index, as git writes one: a

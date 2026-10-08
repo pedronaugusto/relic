@@ -90,3 +90,6 @@ pub fn mayContain(filter: []const u8, path: []const u8, settings: Settings) bool
     }
     return true;
 }
+
+/// All errors reported by this namespace.
+pub const Error = BuildError;

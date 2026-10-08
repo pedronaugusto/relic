@@ -26,6 +26,7 @@ const builtin = @import("builtin");
 
 /// SHA-1 as FIPS 180-4 defines it.
 pub const Sha1 = struct {
+    pub const Error = error{};
     /// The compression function's input width, in bytes.
     pub const block_length = 64;
     /// The digest's width, in bytes.
@@ -748,3 +749,6 @@ test "the software rounds and the hardware arm agree" {
         try testing.expectEqualSlices(u32, &soft, &fast);
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = error{};

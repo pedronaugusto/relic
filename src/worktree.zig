@@ -53,3 +53,5 @@ pub const SparseOutcome = @import("checkout/checkout.zig").SparseOutcome;
 pub const applySparse = @import("checkout/checkout.zig").applySparse;
 pub const Listing = @import("checkout/checkout.zig").Listing;
 pub const list = @import("checkout/checkout.zig").list;
+pub const WriteEntryOptions = @import("checkout/checkout.zig").WriteEntryOptions;
+pub const WriteBytesOptions = @import("checkout/checkout.zig").WriteBytesOptions;

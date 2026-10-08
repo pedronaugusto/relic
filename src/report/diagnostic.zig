@@ -1,5 +1,6 @@
 //! Caller-owned repository and write output. Only this owner allocates,
 //! clears and releases its copies; each entry point starts a fresh output.
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -8,6 +9,8 @@ const Allocator = std.mem.Allocator;
 /// its text stays valid until the next operation using it or `deinit`, even
 /// after failure or after the repository is closed.
 pub const Diagnostic = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// The full setting that was refused, or an empty string.
     unsupported_setting: []const u8 = "",
@@ -50,3 +53,6 @@ pub fn refuse(output: ?*Diagnostic, setting: []const u8) Allocator.Error!void {
 pub fn signingFailure(output: ?*Diagnostic, stderr: []const u8) Allocator.Error!void {
     if (output) |d| d.signing_stderr = try d.gpa.dupe(u8, stderr);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Allocator.Error;

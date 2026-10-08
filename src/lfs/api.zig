@@ -65,12 +65,13 @@
 //! transfer anyway. Certificates to trust from `http.sslCAInfo` are checked
 //! against the time when they are loaded, as `smarthttp` checks them.
 
+const ErrorNamespace = @This();
 const refs_mod = @import("../refs/refs.zig");
 const config_mod = @import("../config/config.zig");
 const Self = @This();
 
 const std = @import("std");
-test "LFS checks an HTTP host's client certificate before dialing" {
+test "phase2 LFS checks certificates with the request Io before dialing" {
     const gpa = testing.allocator;
     const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
     defer faults.deinit();
@@ -85,9 +86,11 @@ test "LFS checks an HTTP host's client certificate before dialing" {
     defer gpa.free(text);
     const t = try testSettings(text, null);
     defer freeSettings(t);
-    var client = try Client.init(gpa, io, &t.settings, "origin", .{}, .{});
-    defer client.deinit();
-    try testing.expectError(error.SslClientCertificateUnreadable, client.send(.{ .method = .GET, .url = "http://127.0.0.1:1/object" }));
+    var client = try Client.open(gpa, testing.io, &t.settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
+    defer client.deinit(io);
+    const before = faults.count(.dirOpenFile);
+    try testing.expectError(error.SslClientCertificateUnreadable, client.send(io, .{ .method = .GET, .url = "http://127.0.0.1:1/object" }));
+    try testing.expect(faults.count(.dirOpenFile) > before);
     try testing.expectEqual(@as(u64, 0), faults.count(.netConnectIp));
 }
 const builtin = @import("builtin");
@@ -221,6 +224,8 @@ pub const Error = error{
 /// git-lfs's configuration: the repository's, and what `.lfsconfig` adds
 /// where the repository's says nothing.
 pub const Settings = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     config: *const Config,
     /// `.lfsconfig` from the top of the working tree. Only the keys git-lfs
@@ -1077,8 +1082,9 @@ pub const Learned = struct {
 /// operation share it, and what they learn about credentials is held under a
 /// mutex.
 pub const Client = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
-    io: Io,
     settings: *const Settings,
     /// The remote's name, or a URL.
     remote: []const u8,
@@ -1123,10 +1129,13 @@ pub const Client = struct {
     const SshTransferSlot = union(enum) { untried, none, open: *lfsssh.Transfer };
 
     /// Open a client for `remote`. `settings` is borrowed.
-    pub fn init(gpa: Allocator, io: Io, settings: *const Settings, remote: []const u8, where: Where, options: Options) Self.Error!Client {
+    pub const OpenOptions = struct { remote: []const u8, where: Where, reach: Options = .{} };
+    pub fn open(gpa: Allocator, io: Io, settings: *const Settings, with: OpenOptions) Self.Error!Client {
+        const remote = with.remote;
+        const where = with.where;
+        const options = with.reach;
         var c: Client = .{
             .gpa = gpa,
-            .io = io,
             .settings = settings,
             .remote = remote,
             .where = where,
@@ -1134,21 +1143,23 @@ pub const Client = struct {
             .arena = .init(gpa),
         };
         errdefer c.arena.deinit();
-        try c.loadNetrc();
+        try c.loadNetrc(
+            io,
+        );
         return c;
     }
 
     /// `$HOME/.netrc`, or `_netrc` on Windows when there is no `.netrc`, as
     /// git-lfs reads it. One that does not parse is not used, as git-lfs
     /// does not use it.
-    fn loadNetrc(c: *Client) Allocator.Error!void {
+    fn loadNetrc(c: *Client, io: Io) Allocator.Error!void {
         const programs = c.options.programs orelse return;
         const home = programs.environ.get("HOME") orelse return;
         if (home.len == 0) return;
-        var dir = Io.Dir.cwd().openDir(c.io, home, .{}) catch return;
-        defer dir.close(c.io);
-        const text = (fs.readFileAlloc(c.gpa, c.io, dir, ".netrc", 1 << 20) catch null) orelse
-            (if (builtin.target.os.tag == .windows) (fs.readFileAlloc(c.gpa, c.io, dir, "_netrc", 1 << 20) catch null) else null) orelse
+        var dir = Io.Dir.cwd().openDir(io, home, .{}) catch return;
+        defer dir.close(io);
+        const text = (fs.readFileAlloc(c.gpa, io, dir, ".netrc", 1 << 20) catch null) orelse
+            (if (builtin.target.os.tag == .windows) (fs.readFileAlloc(c.gpa, io, dir, "_netrc", 1 << 20) catch null) else null) orelse
             return;
         defer c.gpa.free(text);
         c.netrc = netrc_mod.Netrc.parse(c.gpa, text) catch |err| switch (err) {
@@ -1170,7 +1181,7 @@ pub const Client = struct {
     }
 
     /// Release everything, forgetting every credential.
-    pub fn deinit(c: *Client) void {
+    pub fn deinit(c: *Client, io: Io) void {
         for (c.credentials.items) |cred| {
             cred.session.deinit();
             c.gpa.destroy(cred);
@@ -1181,14 +1192,14 @@ pub const Client = struct {
         c.access.deinit(c.gpa);
         c.learned.deinit(c.gpa);
         for (&c.ssh_transfers) |*slot| switch (slot.*) {
-            .open => |t| t.deinit(),
+            .open => |t| t.deinit(io),
             else => {},
         };
         c.ssh_failure.deinit(c.gpa);
         if (c.transports) |handle| {
             const pool: *TransportPool = @ptrCast(@alignCast(handle)); // safe: transportFor installs a TransportPool
             for (pool.items.items) |t| {
-                t.client.deinit(c.io);
+                t.client.deinit(io);
                 t.free(c.gpa);
             }
             pool.items.deinit(c.gpa);
@@ -1204,16 +1215,16 @@ pub const Client = struct {
     }
 
     /// Keep `text` as what `message` says.
-    pub fn setMessage(c: *Client, text: []const u8) void {
-        c.message_mutex.lockUncancelable(c.io);
-        defer c.message_mutex.unlock(c.io);
+    pub fn setMessage(c: *Client, io: Io, text: []const u8) void {
+        c.message_mutex.lockUncancelable(io);
+        defer c.message_mutex.unlock(io);
         c.message_len = @min(text.len, c.message_buf.len);
         @memcpy(c.message_buf[0..c.message_len], text[0..c.message_len]);
     }
 
-    fn fail(c: *Client, comptime fmt: []const u8, args: anytype, err: Error) Error {
+    fn fail(c: *Client, io: Io, comptime fmt: []const u8, args: anytype, err: ErrorNamespace.Error) ErrorNamespace.Error {
         var buf: [512]u8 = undefined;
-        c.setMessage(std.mem.print(&buf, fmt, args) catch fmt);
+        c.setMessage(io, std.mem.print(&buf, fmt, args) catch fmt);
         return err;
     }
 
@@ -1253,13 +1264,13 @@ pub const Client = struct {
     }
 
     /// The endpoint for `operation`, found once.
-    pub fn endpoint(c: *Client, operation: Operation) Self.Error!Endpoint {
-        try c.mutex.lock(c.io);
-        defer c.mutex.unlock(c.io);
+    pub fn endpoint(c: *Client, io: Io, operation: Operation) Self.Error!Endpoint {
+        try c.mutex.lock(io);
+        defer c.mutex.unlock(io);
         return c.endpointLocked(operation);
     }
 
-    fn endpointLocked(c: *Client, operation: Operation) Error!Endpoint {
+    fn endpointLocked(c: *Client, operation: Operation) ErrorNamespace.Error!Endpoint {
         const i = @backingInt(operation);
         if (c.endpoints[i]) |e| return e;
         const e = try findEndpoint(c.arena.allocator(), c.settings, c.remote, operation, c.where);
@@ -1269,15 +1280,15 @@ pub const Client = struct {
 
     /// The API's URL for `operation`, from `git-lfs-authenticate` when the
     /// remote is an ssh one, and the headers that go with it.
-    pub fn apiBase(c: *Client, operation: Operation) Self.Error!struct { url: []const u8, headers: []const http.Header } {
-        try c.mutex.lock(c.io);
-        defer c.mutex.unlock(c.io);
+    pub fn apiBase(c: *Client, io: Io, operation: Operation) Self.Error!struct { url: []const u8, headers: []const http.Header } {
+        try c.mutex.lock(io);
+        defer c.mutex.unlock(io);
         const e = try c.endpointLocked(operation);
-        const auth = try c.sshAuthLocked(e, operation);
+        const auth = try c.sshAuthLocked(io, e, operation);
         return .{ .url = auth.href orelse e.url, .headers = auth.headers };
     }
 
-    fn sshAuthLocked(c: *Client, e: Endpoint, operation: Operation) Error!SshAuth {
+    fn sshAuthLocked(c: *Client, io: Io, e: Endpoint, operation: Operation) ErrorNamespace.Error!SshAuth {
         const i = @backingInt(operation);
         if (c.ssh_auth[i]) |a| {
             // git-lfs keeps an answer until it is five seconds from expiring.
@@ -1294,7 +1305,7 @@ pub const Client = struct {
             // git-lfs runs git-lfs-authenticate only for `negotiate` and
             // `never`; `always` is the pure-ssh protocol or nothing.
             if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "never")) {
-                return c.fail("git-lfs-authenticate has been disabled by request (lfs.sshtransfer={s}){s}{s}", .{
+                return c.fail(io, "git-lfs-authenticate has been disabled by request (lfs.sshtransfer={s}){s}{s}", .{
                     mode,
                     if (c.ssh_failure.items.len != 0) ": " else "",
                     c.ssh_failure.items,
@@ -1306,7 +1317,7 @@ pub const Client = struct {
         const retries: usize = @intCast(@max(0, c.settings.getInt("lfs.ssh.retries", 5)));
         var attempt: usize = 0;
         while (true) : (attempt += 1) {
-            var outcome = try program.run(c.gpa, c.io, programs, invocation, .{ .output = .limited(1 << 20) });
+            var outcome = try program.run(c.gpa, io, programs, invocation, .{ .output = .limited(1 << 20) });
             defer outcome.deinit(c.gpa);
             if (outcome.succeeded()) {
                 var auth = try parseAuthenticate(arena, try arena.dupe(u8, outcome.stdout));
@@ -1335,7 +1346,7 @@ pub const Client = struct {
                 return .{};
             }
             if (attempt >= retries) {
-                c.setMessage(said);
+                c.setMessage(io, said);
                 return error.LfsAuthenticateFailed;
             }
         }
@@ -1346,9 +1357,9 @@ pub const Client = struct {
     /// `always`, and `git-lfs-transfer` starts on the server; `null`
     /// otherwise, and the API over HTTP is used, as git-lfs uses it. The
     /// answer is found once per operation.
-    pub fn sshTransfer(c: *Client, operation: Operation) Self.Error!?*lfsssh.Transfer {
-        try c.mutex.lock(c.io);
-        defer c.mutex.unlock(c.io);
+    pub fn sshTransfer(c: *Client, io: Io, operation: Operation) Self.Error!?*lfsssh.Transfer {
+        try c.mutex.lock(io);
+        defer c.mutex.unlock(io);
         const i = @backingInt(operation);
         switch (c.ssh_transfers[i]) {
             .open => |t| return t,
@@ -1369,20 +1380,20 @@ pub const Client = struct {
         var control_dir: ?[]const u8 = null;
         const prog = try sshProgram(arena, programs.environ, c.settings);
         if (prog.variant == .ssh and c.settings.getBool("lfs.ssh.automultiplex", builtin.target.os.tag != .windows)) {
-            if (try controlDir(arena, c.io, programs.environ)) |dir| {
+            if (try controlDir(arena, io, programs.environ)) |dir| {
                 control_dir = dir;
                 const path = try arena.print("{s}/lfs.sock", .{dir});
                 first = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = true, .control_path = path });
                 rest = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = false, .control_path = path });
             }
         }
-        const t = lfsssh.Transfer.open(c.gpa, c.io, programs, first, rest, control_dir, &c.ssh_failure) catch |err| switch (err) {
+        const t = lfsssh.Transfer.open(c.gpa, io, programs, .{ .first = first, .rest = rest, .control_dir = control_dir, .failure = &c.ssh_failure }) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => |e2| return e2,
             else => {
                 // Not there, or not speaking it: git-lfs-authenticate and
                 // HTTP, as git-lfs falls back.
                 // ziglint-ignore: Z026 a control directory left behind holds only a dead socket, in the system's temporary space
-                if (control_dir) |d| Io.Dir.cwd().deleteTree(c.io, d) catch {};
+                if (control_dir) |d| Io.Dir.cwd().deleteTree(io, d) catch {};
                 return null;
             },
         };
@@ -1396,7 +1407,7 @@ pub const Client = struct {
         c.ssh_auth[@backingInt(operation)] = null;
     }
 
-    fn accessFor(c: *Client, url: []const u8) Error!Access {
+    fn accessFor(c: *Client, url: []const u8) ErrorNamespace.Error!Access {
         const plain = try stripUserinfo(c.arena.allocator(), url);
         for (c.access.items) |entry| {
             if (std.mem.startsWith(u8, plain, entry.url)) return entry.mode;
@@ -1407,7 +1418,7 @@ pub const Client = struct {
         return error.LfsAccessUnsupported;
     }
 
-    fn setAccess(c: *Client, url: []const u8, mode: Access) Error!void {
+    fn setAccess(c: *Client, url: []const u8, mode: Access) ErrorNamespace.Error!void {
         const arena = c.arena.allocator();
         const plain = try arena.dupe(u8, try stripUserinfo(arena, url));
         try c.access.insert(c.gpa, 0, .{ .url = plain, .mode = mode });
@@ -1419,9 +1430,9 @@ pub const Client = struct {
 
     /// Record that the server has no locking API, under
     /// `lfs.<url>.locksverify`, as git-lfs records it.
-    pub fn learnLocksVerify(c: *Client, url: []const u8, value: bool) Self.Error!void {
-        try c.mutex.lock(c.io);
-        defer c.mutex.unlock(c.io);
+    pub fn learnLocksVerify(c: *Client, io: Io, url: []const u8, value: bool) Self.Error!void {
+        try c.mutex.lock(io);
+        defer c.mutex.unlock(io);
         const arena = c.arena.allocator();
         try c.learned.append(c.gpa, .{
             .key = try arena.print("lfs.{s}.locksverify", .{try stripUserinfo(arena, url)}),
@@ -1434,7 +1445,7 @@ pub const Client = struct {
     /// API, else the remote's own URL when that is on the API's host, else
     /// the API's. `null` when a URL carries a password, which is then the
     /// credential.
-    fn credentialUrl(c: *Client, request_url: []const u8, operation: Operation) Error!struct { url: ?[]const u8, inline_auth: ?[]const u8 } {
+    fn credentialUrl(c: *Client, request_url: []const u8, operation: Operation) ErrorNamespace.Error!struct { url: ?[]const u8, inline_auth: ?[]const u8 } {
         const arena = c.arena.allocator();
         const e = try c.endpointLocked(operation);
         const api_url = UrlParts.parse(e.url) orelse return .{ .url = request_url, .inline_auth = null };
@@ -1454,7 +1465,7 @@ pub const Client = struct {
         return .{ .url = e.url, .inline_auth = null };
     }
 
-    fn credentialFor(c: *Client, url: []const u8) Error!*Cred {
+    fn credentialFor(c: *Client, url: []const u8) ErrorNamespace.Error!*Cred {
         // One credential per URL for the operation, which is git-lfs's
         // in-memory cache: a helper is asked once, however many requests
         // follow.
@@ -1535,7 +1546,7 @@ pub const Client = struct {
     /// Make `request`, handling a credential the server asks for and the
     /// redirects git-lfs follows. The answer is open for its body and is the
     /// caller's to `close`, whatever its status.
-    pub fn send(c: *Client, request: Request) Self.Error!*Exchange {
+    pub fn send(c: *Client, io: Io, request: Request) Self.Error!*Exchange {
         const operation: Operation = switch (request.method) {
             .POST, .PUT => .upload,
             else => .download,
@@ -1557,12 +1568,12 @@ pub const Client = struct {
         while (true) {
             const access_url = request.access_url orelse url;
             const attempt: Attempt = blk: {
-                try c.mutex.lock(c.io);
-                defer c.mutex.unlock(c.io);
-                break :blk try c.authorize(scratch, url, access_url, operation, request.authenticated or has_auth, refusal);
+                try c.mutex.lock(io);
+                defer c.mutex.unlock(io);
+                break :blk try c.authorize(scratch, io, url, access_url, operation, request.authenticated or has_auth, refusal);
             };
 
-            const ex = c.exchangeOnce(current, url, attempt.header) catch |err| switch (err) {
+            const ex = c.exchangeOnce(io, current, url, attempt.header) catch |err| switch (err) {
                 error.ConnectionFailed => {
                     if (retries_left > 0) {
                         retries_left -= 1;
@@ -1574,26 +1585,26 @@ pub const Client = struct {
             };
             const status = ex.status();
             if (status == .unauthorized) {
-                try c.refused(scratch, ex, url, access_url, operation, has_auth, attempt, &refusal);
+                try c.refused(scratch, io, ex, url, access_url, operation, has_auth, attempt, &refusal);
                 continue;
             }
             if (status.class() == .success) if (attempt.cred) |cr| {
-                try c.mutex.lock(c.io);
-                defer c.mutex.unlock(c.io);
+                try c.mutex.lock(io);
+                defer c.mutex.unlock(io);
                 if (!cr.approved) {
                     cr.approved = true;
                     try cr.session.setChallenges(&.{});
-                    try cr.session.approve(c.io, c.credentialOptions());
+                    try cr.session.approve(io, c.credentialOptions());
                 }
             };
             switch (status) {
                 .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => {
                     const location = ex.location() orelse {
-                        ex.deinit();
-                        return c.fail("redirect with no location from {s}", .{stripQuery(url)}, error.HttpStatus);
+                        ex.deinit(io);
+                        return c.fail(io, "redirect with no location from {s}", .{stripQuery(url)}, error.HttpStatus);
                     };
                     const next = try resolveLocation(scratch, url, location);
-                    ex.deinit();
+                    ex.deinit(io);
                     if (std.ascii.startsWithIgnoreCase(url, "https:") and std.ascii.startsWithIgnoreCase(next, "http:")) {
                         return error.InsecureRedirect;
                     }
@@ -1657,12 +1668,13 @@ pub const Client = struct {
     fn authorize(
         c: *Client,
         scratch: Allocator,
+        io: Io,
         url: []const u8,
         access_url: []const u8,
         operation: Operation,
         carried: bool,
         refusal: Refusal,
-    ) Error!Attempt {
+    ) ErrorNamespace.Error!Attempt {
         var attempt: Attempt = .{ .access = try c.accessFor(access_url) };
         if (carried) return attempt;
         if (attempt.access != .basic) {
@@ -1692,19 +1704,19 @@ pub const Client = struct {
             // unless git-lfs's `credential.<url>.skipwwwauth` says not.
             const skip = gitLfsBool(try c.settings.urlGet(scratch, "credential", cred_url, "skipwwwauth"), false);
             try cr.session.setChallenges(if (skip) &.{} else refusal.challenges);
-            const filled = cr.session.fill(c.io, c.credentialOptions()) catch |err| {
+            const filled = cr.session.fill(io, c.credentialOptions()) catch |err| {
                 c.describeRefusal(switch (err) {
                     error.CredentialHelperQuit => .helper_quit,
                     error.ProgramsNotGranted => .programs_not_granted,
                     else => if (refusal.attempts > 0) .refused else .no_credential,
                 }, 401, url, refusal.said, cr);
                 if (err == error.CredentialsUnavailable)
-                    return c.fail("no credential for {s}", .{stripQuery(cred_url)}, error.AuthenticationFailed);
+                    return c.fail(io, "no credential for {s}", .{stripQuery(cred_url)}, error.AuthenticationFailed);
                 return err;
             };
             if (!filled) {
                 c.describeRefusal(.declined, 401, url, refusal.said, cr);
-                return c.fail("no credential for {s}", .{stripQuery(cred_url)}, error.AuthenticationFailed);
+                return c.fail(io, "no credential for {s}", .{stripQuery(cred_url)}, error.AuthenticationFailed);
             }
         }
         const h = cr.session.authorization() orelse return error.AuthenticationFailed;
@@ -1720,6 +1732,7 @@ pub const Client = struct {
     fn refused(
         c: *Client,
         scratch: Allocator,
+        io: Io,
         ex: *Exchange,
         url: []const u8,
         access_url: []const u8,
@@ -1727,16 +1740,16 @@ pub const Client = struct {
         has_auth: bool,
         attempt: Attempt,
         refusal: *Refusal,
-    ) Error!void {
+    ) ErrorNamespace.Error!void {
         const offers = ex.authenticateOffers();
         refusal.challenges = try ex.challenges(scratch);
-        refusal.said = ex.refusalText(scratch);
-        ex.deinit();
-        try c.mutex.lock(c.io);
-        defer c.mutex.unlock(c.io);
+        refusal.said = ex.refusalText(scratch, io);
+        ex.deinit(io);
+        try c.mutex.lock(io);
+        defer c.mutex.unlock(io);
         if (attempt.cred) |cr| {
             cr.approved = false;
-            try cr.session.reject(c.io, c.credentialOptions());
+            try cr.session.reject(io, c.credentialOptions());
         }
         if (attempt.netrc_host) |h| {
             try c.netrc_refused.append(c.gpa, try c.arena.allocator().dupe(u8, h));
@@ -1747,7 +1760,7 @@ pub const Client = struct {
             // git-lfs-authenticate's — that it no longer takes.
             c.dropSshAuth(operation);
             c.describeRefusal(.refused, 401, url, refusal.said, null);
-            return c.fail("HTTP 401 from {s}", .{stripQuery(url)}, error.AuthenticationFailed);
+            return c.fail(io, "HTTP 401 from {s}", .{stripQuery(url)}, error.AuthenticationFailed);
         }
         if (attempt.access == .none) {
             if (!offers.basic and offers.other) return error.LfsAccessUnsupported;
@@ -1757,11 +1770,11 @@ pub const Client = struct {
         refusal.attempts += 1;
         if (refusal.attempts >= 3) {
             c.describeRefusal(.refused, 401, url, refusal.said, attempt.cred);
-            return c.fail("HTTP 401 from {s}", .{stripQuery(url)}, error.AuthenticationFailed);
+            return c.fail(io, "HTTP 401 from {s}", .{stripQuery(url)}, error.AuthenticationFailed);
         }
     }
 
-    fn exchangeOnce(c: *Client, request: Request, url: []const u8, auth_header: ?[]const u8) Error!*Exchange {
+    fn exchangeOnce(c: *Client, io: Io, request: Request, url: []const u8, auth_header: ?[]const u8) ErrorNamespace.Error!*Exchange {
         const state = try c.gpa.create(ExchangeState);
         errdefer c.gpa.destroy(state);
         state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa), .wire = @ptrCast(state) } }; // safe: the opaque handle points back to its owning ExchangeState
@@ -1770,9 +1783,9 @@ pub const Client = struct {
         const a = ex.arena.allocator();
 
         const request_url = try a.dupe(u8, try stripUserinfo(a, url));
-        const parsed = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
+        const parsed = url_mod.Url.parse(request_url) catch return c.fail(io, "malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
         if ((parsed.scheme != .http and parsed.scheme != .https) or parsed.host.len == 0) {
-            return c.fail("malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
+            return c.fail(io, "malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
         }
 
         // Go's order, as git-lfs's client writes a request: its user
@@ -1789,7 +1802,7 @@ pub const Client = struct {
             try headers.append(a, .{ .name = "Accept", .value = media_type });
             if (request.body != .none) content_type = media_type ++ "; charset=utf-8";
         } else if (request.body == .object and !hasHeader(request.headers, "content-type")) {
-            content_type = try c.objectContentType(a, request_url, request.body.object.store, &request.body.object.pointer);
+            content_type = try c.objectContentType(a, io, request_url, request.body.object.store, &request.body.object.pointer);
         }
         if (hasHeader(request.headers, "content-type")) content_type = null;
         if (content_type) |t| try headers.append(a, .{ .name = "Content-Type", .value = t });
@@ -1813,37 +1826,37 @@ pub const Client = struct {
             .none => {},
         }
 
-        const transport = try c.transportFor(a, request_url, request.accept != .zstd and request.accept != .none);
+        const transport = try c.transportFor(a, io, request_url, request.accept != .zstd and request.accept != .none);
         ex.url = request_url;
         const method: uplink.Method = .{ .name = @tagName(request.method) };
         switch (request.body) {
-            .none => try c.sendWhole(ex, transport, method, headers.items, if (request.method.requestHasBody()) .{ .bytes = "" } else .none),
-            .bytes => |bytes| try c.sendWhole(ex, transport, method, headers.items, .{ .bytes = bytes }),
+            .none => try c.sendWhole(io, ex, transport, method, headers.items, if (request.method.requestHasBody()) .{ .bytes = "" } else .none),
+            .bytes => |bytes| try c.sendWhole(io, ex, transport, method, headers.items, .{ .bytes = bytes }),
             .object => |o| {
-                const file = (o.store.open(c.io, &o.pointer) catch |err| return c.fail("{s}", .{@errorName(err)}, error.ConnectionFailed)) orelse
-                    return c.fail("object {s} is not in the store", .{&o.pointer.oid}, error.HttpStatus);
-                defer file.close(c.io);
-                var outgoing = transport.begin(c.io, .{
+                const file = (o.store.open(io, &o.pointer) catch |err| return c.fail(io, "{s}", .{@errorName(err)}, error.ConnectionFailed)) orelse
+                    return c.fail(io, "object {s} is not in the store", .{&o.pointer.oid}, error.HttpStatus);
+                defer file.close(io);
+                var outgoing = transport.begin(io, .{
                     .method = method,
                     .url = request_url,
                     .headers = headers.items,
                     .body = .{ .streamed = .{ .length = if (chunked) null else o.pointer.size } },
                     .diagnostics = &ex.state().diagnostics,
-                }) catch |err| return c.clientFailed(&ex.state().diagnostics, err, request_url);
-                defer outgoing.deinit(c.io);
+                }) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, request_url);
+                defer outgoing.deinit(io);
                 var chunk: [64 * 1024]u8 = undefined;
-                var fr = file.reader(c.io, &.{});
+                var fr = file.reader(io, &.{});
                 var left = o.pointer.size;
                 while (left > 0) {
                     const want: usize = @intCast(@min(left, chunk.len));
-                    const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail("upload: reading the object", .{}, error.ConnectionFailed);
-                    if (n == 0) return c.fail("upload: the object is shorter than its pointer", .{}, error.ConnectionFailed);
-                    outgoing.writer().writeAll(chunk[0..n]) catch return c.fail("upload: the connection broke", .{}, error.ConnectionFailed);
+                    const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail(io, "upload: reading the object", .{}, error.ConnectionFailed);
+                    if (n == 0) return c.fail(io, "upload: the object is shorter than its pointer", .{}, error.ConnectionFailed);
+                    outgoing.writer().writeAll(chunk[0..n]) catch return c.fail(io, "upload: the connection broke", .{}, error.ConnectionFailed);
                     left -= n;
                     if (request.sent) |count| count.* += n;
                     if (request.on_bytes) |cb| cb.add(cb.context, n);
                 }
-                ex.state().response = outgoing.finish(c.io) catch |err| return c.clientFailed(&ex.state().diagnostics, err, request_url);
+                ex.state().response = outgoing.finish(io) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, request_url);
             },
         }
         ex.in_flight = true;
@@ -1851,14 +1864,14 @@ pub const Client = struct {
     }
 
     /// Send `ex`'s request with a body given whole, and read its answer's head.
-    fn sendWhole(c: *Client, ex: *Exchange, transport: *uplink.Client, method: uplink.Method, headers: []const http.Header, body: uplink.Request.Body) Error!void {
-        ex.state().response = transport.send(c.io, .{
+    fn sendWhole(c: *Client, io: Io, ex: *Exchange, transport: *uplink.Client, method: uplink.Method, headers: []const http.Header, body: uplink.Request.Body) ErrorNamespace.Error!void {
+        ex.state().response = transport.send(io, .{
             .method = method,
             .url = ex.url,
             .headers = headers,
             .body = body,
             .diagnostics = &ex.state().diagnostics,
-        }) catch |err| return c.clientFailed(&ex.state().diagnostics, err, ex.url);
+        }) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, ex.url);
     }
 
     /// What an uplink client can fail with: a request, or the end of one
@@ -1868,31 +1881,31 @@ pub const Client = struct {
     /// An error of the HTTP client's, as this module names it, with why in
     /// the message. A timeout is a connection that failed, which git-lfs
     /// retries as it retries any.
-    fn clientFailed(c: *Client, diagnostics: *const uplink.Diagnostics, err: ClientError, url: []const u8) Error {
+    fn clientFailed(c: *Client, io: Io, diagnostics: *const uplink.Diagnostics, err: ClientError, url: []const u8) ErrorNamespace.Error {
         const where = stripQuery(url);
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
-            error.ConnectionFailed => c.fail("the connection failed ({t}): {s}", .{ diagnostics.stage, where }, error.ConnectionFailed),
-            error.NameNotResolved => c.fail("no such host: {s}", .{where}, error.ConnectionFailed),
-            error.ConcurrencyUnavailable => c.fail("no task to look the host up with: {s}", .{where}, error.ConnectionFailed),
-            error.TimedOut => c.fail("timed out: {s}", .{where}, error.ConnectionFailed),
-            error.BodyIncomplete, error.BodyTooLong => c.fail("upload cut short: {s}", .{where}, error.ConnectionFailed),
-            error.TlsFailed => c.fail("TLS: {s}: {s}", .{ if (diagnostics.tls_error) |e| @errorName(e) else "handshake failed", where }, error.ConnectionFailed),
-            error.ProxyAuthenticationRequired => c.fail("the proxy wants credentials: {s}", .{where}, error.ProxyAuthenticationRequired),
-            error.ProxyRefused => c.fail("the proxy answered {d}: {s}", .{ diagnostics.proxy_status orelse 0, where }, error.ProxyRefused),
-            error.ProxyAuthMethodUnsupported => c.fail("the proxy asks for {s}: {s}", .{ if (diagnostics.proxy_offered.len != 0) diagnostics.proxy_offered.slice() else "?", where }, error.ProxyAuthMethodUnsupported),
-            error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError => |named| c.fail("{s}: {s}", .{ @errorName(named), where }, switch (named) {
+            error.ConnectionFailed => c.fail(io, "the connection failed ({t}): {s}", .{ diagnostics.stage, where }, error.ConnectionFailed),
+            error.NameNotResolved => c.fail(io, "no such host: {s}", .{where}, error.ConnectionFailed),
+            error.ConcurrencyUnavailable => c.fail(io, "no task to look the host up with: {s}", .{where}, error.ConnectionFailed),
+            error.TimedOut => c.fail(io, "timed out: {s}", .{where}, error.ConnectionFailed),
+            error.BodyIncomplete, error.BodyTooLong => c.fail(io, "upload cut short: {s}", .{where}, error.ConnectionFailed),
+            error.TlsFailed => c.fail(io, "TLS: {s}: {s}", .{ if (diagnostics.tls_error) |e| @errorName(e) else "handshake failed", where }, error.ConnectionFailed),
+            error.ProxyAuthenticationRequired => c.fail(io, "the proxy wants credentials: {s}", .{where}, error.ProxyAuthenticationRequired),
+            error.ProxyRefused => c.fail(io, "the proxy answered {d}: {s}", .{ diagnostics.proxy_status orelse 0, where }, error.ProxyRefused),
+            error.ProxyAuthMethodUnsupported => c.fail(io, "the proxy asks for {s}: {s}", .{ if (diagnostics.proxy_offered.len != 0) diagnostics.proxy_offered.slice() else "?", where }, error.ProxyAuthMethodUnsupported),
+            error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError => |named| c.fail(io, "{s}: {s}", .{ @errorName(named), where }, switch (named) {
                 error.ProxyHostUnreachable => error.ProxyHostUnreachable,
                 error.ProxyAddressUnsupported => error.ProxyAddressUnsupported,
                 else => error.ProxyProtocolError,
             }),
-            error.HttpProtocolError => c.fail("not an HTTP answer, or an encoding it cannot read: {s}", .{where}, error.MalformedResponse),
-            error.CertificateBundleUnreadable => c.fail("the system's certificates", .{}, error.SslCertificateUnreadable),
-            error.ClientCertificateRejected => c.fail("the server refused the client certificate ({s}): {s}", .{ if (diagnostics.tls_error) |e| @errorName(e) else "?", where }, error.ClientCertificateRejected),
-            error.ClientCertificateSchemeUnsupported => c.fail("no signature scheme the server takes: {s}", .{where}, error.ClientCertificateSchemeUnsupported),
-            error.InvalidUrl, error.UnsupportedScheme => c.fail("malformed URL {s}", .{where}, error.MalformedUrl),
-            error.InvalidHeader => c.fail("a header no request can carry: {s}", .{where}, error.InvalidHttpHeader),
+            error.HttpProtocolError => c.fail(io, "not an HTTP answer, or an encoding it cannot read: {s}", .{where}, error.MalformedResponse),
+            error.CertificateBundleUnreadable => c.fail(io, "the system's certificates", .{}, error.SslCertificateUnreadable),
+            error.ClientCertificateRejected => c.fail(io, "the server refused the client certificate ({s}): {s}", .{ if (diagnostics.tls_error) |e| @errorName(e) else "?", where }, error.ClientCertificateRejected),
+            error.ClientCertificateSchemeUnsupported => c.fail(io, "no signature scheme the server takes: {s}", .{where}, error.ClientCertificateSchemeUnsupported),
+            error.InvalidUrl, error.UnsupportedScheme => c.fail(io, "malformed URL {s}", .{where}, error.MalformedUrl),
+            error.InvalidHeader => c.fail(io, "a header no request can carry: {s}", .{where}, error.InvalidHttpHeader),
             // unreachable: a whole body is bytes, an object's is written as it comes, `finish` runs once, the proxy is fixed, and no redirect, retry, credential or hook is uplink's
             error.InvalidBody, error.BodyReadFailed, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed => unreachable,
         };
@@ -1901,18 +1914,18 @@ pub const Client = struct {
     /// The type an upload is sent as when its action names none: told from
     /// the object's first bytes, as git-lfs tells it, unless
     /// `lfs.<url>.contenttype` turns that off.
-    fn objectContentType(c: *Client, a: Allocator, url: []const u8, store: *const lfs.Store, pointer: *const lfs.Pointer) Error![]const u8 {
+    fn objectContentType(c: *Client, a: Allocator, io: Io, url: []const u8, store: *const lfs.Store, pointer: *const lfs.Pointer) ErrorNamespace.Error![]const u8 {
         const setting = try c.settings.urlGet(a, "lfs", url, "contenttype");
         if (!gitLfsBool(setting, true)) return "application/octet-stream";
-        const file = (store.open(c.io, pointer) catch |err| return c.fail("{s}", .{@errorName(err)}, error.ConnectionFailed)) orelse
-            return c.fail("object {s} is not in the store", .{&pointer.oid}, error.HttpStatus);
-        defer file.close(c.io);
+        const file = (store.open(io, pointer) catch |err| return c.fail(io, "{s}", .{@errorName(err)}, error.ConnectionFailed)) orelse
+            return c.fail(io, "object {s} is not in the store", .{&pointer.oid}, error.HttpStatus);
+        defer file.close(io);
         var head: [mimesniff.sniff_len]u8 = undefined;
-        const n = file.readPositionalAll(c.io, &head, 0) catch return c.fail("upload: reading the object", .{}, error.ConnectionFailed);
+        const n = file.readPositionalAll(io, &head, 0) catch return c.fail(io, "upload: reading the object", .{}, error.ConnectionFailed);
         return mimesniff.contentType(head[0..n]);
     }
 
-    fn extraHeaders(c: *Client, a: Allocator, url: []const u8) Error![]const http.Header {
+    fn extraHeaders(c: *Client, a: Allocator, url: []const u8) ErrorNamespace.Error![]const http.Header {
         const values = try c.settings.urlGetAll(a, "http", url, "extraheader");
         var out: std.ArrayList(http.Header) = .empty;
         for (values) |text| {
@@ -1931,12 +1944,12 @@ pub const Client = struct {
     /// git-lfs's own rules choose (`proxyFor`), and git-lfs's timeouts
     /// (`timeoutsFor`), and git-lfs's client certificate for the host
     /// (`clientCertificate`).
-    fn transportFor(c: *Client, scratch: Allocator, request_url: []const u8, decompress: bool) Error!*uplink.Client {
-        const url = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
+    fn transportFor(c: *Client, scratch: Allocator, io: Io, request_url: []const u8, decompress: bool) ErrorNamespace.Error!*uplink.Client {
+        const url = url_mod.Url.parse(request_url) catch return c.fail(io, "malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
         const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
         const settings = httpsettings.resolve(scratch, c.settings.config, environ, url) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidHttpSetting => return c.fail("an http.* setting for {s} does not parse", .{stripQuery(request_url)}, error.InvalidHttpSetting),
+            error.InvalidHttpSetting => return c.fail(io, "an http.* setting for {s} does not parse", .{stripQuery(request_url)}, error.InvalidHttpSetting),
         };
         var ca_info: ?[]const u8 = null;
         var ca_path: ?[]const u8 = null;
@@ -1962,8 +1975,8 @@ pub const Client = struct {
             decompress,
         });
 
-        try c.transport_mutex.lock(c.io);
-        defer c.transport_mutex.unlock(c.io);
+        try c.transport_mutex.lock(io);
+        defer c.transport_mutex.unlock(io);
         if (c.transports == null) {
             const pool = try c.gpa.create(TransportPool);
             pool.* = .{};
@@ -1986,16 +1999,16 @@ pub const Client = struct {
         const arena = t.arena.allocator();
         var tls_options: tls.ClientOptions = .{ .verify = if (verify) .full else .none };
         if (cert_files) |files| {
-            t.client_auth = try c.clientCertificate(arena, files);
+            t.client_auth = try c.clientCertificate(arena, io, files);
             tls_options.client_auth = &t.client_auth.?;
         }
         if (verify and (ca_info != null or ca_path != null)) {
-            try c.trust(arena, t, settings, environ);
+            try c.trust(arena, io, t, settings, environ);
             tls_options.trust = &t.trust.?;
         }
         var chosen: ?uplink.Proxy = null;
         if (proxy) |text| {
-            var p = try c.useProxy(arena, text);
+            var p = try c.useProxy(arena, io, text);
             // Go hands an https proxy the same TLS settings as the target,
             // the client certificate included.
             p.tls.client_auth = tls_options.client_auth;
@@ -2016,7 +2029,7 @@ pub const Client = struct {
             .redirects = .none,
             .retries = .none,
         });
-        errdefer t.client.deinit(c.io);
+        errdefer t.client.deinit(io);
         try pool.items.append(c.gpa, t);
         return &t.client;
     }
@@ -2024,7 +2037,7 @@ pub const Client = struct {
     /// git-lfs's client certificate for `url`'s host: `http.sslCert` and
     /// `http.sslKey` for `https://<host>/`, by git-lfs's URL match, both or
     /// neither; `~` expanded, as git-lfs expands it.
-    fn clientCertificateFiles(c: *Client, scratch: Allocator, url: url_mod.Url, environ: ?*const std.process.Environ.Map) Error!?clientcert.Files {
+    fn clientCertificateFiles(c: *Client, scratch: Allocator, url: url_mod.Url, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!?clientcert.Files {
         const host_url = if (url.port) |port|
             try scratch.print("https://{s}:{d}/", .{ url.host, port })
         else
@@ -2043,35 +2056,35 @@ pub const Client = struct {
     /// which relic keeps as `key_passphrases`.
     /// relic opens an encrypted PKCS #8 key the same way, which git-lfs
     /// does not read at all.
-    fn clientCertificate(c: *Client, arena: Allocator, files: clientcert.Files) Error!tls.ClientAuth {
+    fn clientCertificate(c: *Client, arena: Allocator, io: Io, files: clientcert.Files) ErrorNamespace.Error!tls.ClientAuth {
         const key_path = clientcert.keyPath(files);
         var session: ?credential.Session = null;
         defer if (session) |*s| s.deinit();
         var passphrase: ?[]const u8 = null;
-        if (clientcert.keyIsEncrypted(arena, c.io, files)) {
+        if (clientcert.keyIsEncrypted(arena, io, files)) {
             // Git LFS names the key with slashes on Windows, unlike Git's
             // own certificate helper request.
-            if (c.knownPassphrase(key_path)) |known| {
+            if (c.knownPassphrase(io, key_path)) |known| {
                 passphrase = known;
             } else {
                 const helper_path = try arena.dupe(u8, key_path);
                 if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, helper_path, '\\', '/');
                 session = .forCertificate(c.gpa, helper_path);
                 const s = &session.?;
-                if (try s.fill(c.io, c.credentialOptions())) passphrase = s.password;
+                if (try s.fill(io, c.credentialOptions())) passphrase = s.password;
             }
         }
-        const auth = clientcert.load(c.gpa, c.io, files, .{ .arena = arena, .passphrase = passphrase }) catch |err| {
+        const auth = clientcert.load(c.gpa, io, files, .{ .arena = arena, .passphrase = passphrase }) catch |err| {
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Canceled => error.Canceled,
-                error.SslClientCertificateUnreadable => c.fail("error reading client cert file {s}", .{files.cert}, err),
-                else => c.fail("error reading client key file {s}: {s}", .{ key_path, @errorName(err) }, err),
+                error.SslClientCertificateUnreadable => c.fail(io, "error reading client cert file {s}", .{files.cert}, err),
+                else => c.fail(io, "error reading client key file {s}: {s}", .{ key_path, @errorName(err) }, err),
             };
         };
         if (session != null) if (passphrase) |p| {
-            c.mutex.lockUncancelable(c.io);
-            defer c.mutex.unlock(c.io);
+            c.mutex.lockUncancelable(io);
+            defer c.mutex.unlock(io);
             const a = c.arena.allocator();
             try c.key_passphrases.put(a, try a.dupe(u8, key_path), try a.dupe(u8, p));
         };
@@ -2079,37 +2092,37 @@ pub const Client = struct {
     }
 
     /// The passphrase that opened the key at `path` before, if one did.
-    fn knownPassphrase(c: *Client, path: []const u8) ?[]const u8 {
-        c.mutex.lockUncancelable(c.io);
-        defer c.mutex.unlock(c.io);
+    fn knownPassphrase(c: *Client, io: Io, path: []const u8) ?[]const u8 {
+        c.mutex.lockUncancelable(io);
+        defer c.mutex.unlock(io);
         return c.key_passphrases.get(path);
     }
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
     /// `http.sslCAPath` besides them, as `smarthttp` does for git.
-    fn trust(c: *Client, arena: Allocator, t: *Transport, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
+    fn trust(c: *Client, arena: Allocator, io: Io, t: *Transport, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!void {
         t.trust = .init(c.gpa);
         const authorities = &t.trust.?;
         if (settings.ca_info) |raw| {
             const file = try expandHome(arena, raw, environ);
-            authorities.addFile(c.io, Io.Dir.cwd(), file) catch |err| switch (err) {
+            authorities.addFile(io, Io.Dir.cwd(), file) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
-                else => return c.fail("{s}", .{settings.ca_info_from orelse "http.sslCAInfo"}, error.SslCertificateUnreadable),
+                else => return c.fail(io, "{s}", .{settings.ca_info_from orelse "http.sslCAInfo"}, error.SslCertificateUnreadable),
             };
         } else {
-            authorities.addSystem(c.io) catch |err| switch (err) {
+            authorities.addSystem(io) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
-                else => return c.fail("the system's certificates", .{}, error.SslCertificateUnreadable),
+                else => return c.fail(io, "the system's certificates", .{}, error.SslCertificateUnreadable),
             };
         }
         if (settings.ca_path) |raw| {
             const dir_path = try expandHome(arena, raw, environ);
-            authorities.addDir(c.io, Io.Dir.cwd(), dir_path) catch |err| switch (err) {
+            authorities.addDir(io, Io.Dir.cwd(), dir_path) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
-                else => return c.fail("http.sslCAPath", .{}, error.SslCertificateUnreadable),
+                else => return c.fail(io, "http.sslCAPath", .{}, error.SslCertificateUnreadable),
             };
         }
     }
@@ -2118,10 +2131,10 @@ pub const Client = struct {
     /// it: a plain HTTP request whole, with its absolute URL, and an
     /// `https` one through a `CONNECT` tunnel asked for in Go's words, the
     /// proxy's credential from its URL. Its strings are `arena`'s.
-    fn useProxy(c: *Client, arena: Allocator, text: []const u8) Error!uplink.Proxy {
+    fn useProxy(c: *Client, arena: Allocator, io: Io, text: []const u8) ErrorNamespace.Error!uplink.Proxy {
         var proxy = uplink.Proxy.parse(arena, text, .go) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidProxy => c.fail("unsupported proxy URL", .{}, error.InvalidProxy),
+            error.InvalidProxy => c.fail(io, "unsupported proxy URL", .{}, error.InvalidProxy),
         };
         if (proxy.credential) |*cred| cred.method = .basic;
         // Go's CONNECT: its user agent, then the answer.
@@ -2139,7 +2152,7 @@ pub const Client = struct {
     /// URL `HTTP_PROXY`, then `http_proxy`, then `all_proxy` or `ALL_PROXY`. None for a
     /// host `NO_PROXY`, else `no_proxy`, names, or for `localhost` and a
     /// loopback address, by Go's rules (`uplink.Proxy.bypassed`).
-    fn proxyFor(c: *Client, scratch: Allocator, request_url: []const u8, url: url_mod.Url) Error!?[]const u8 {
+    fn proxyFor(c: *Client, scratch: Allocator, request_url: []const u8, url: url_mod.Url) ErrorNamespace.Error!?[]const u8 {
         const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
         var chosen: ?[]const u8 = null;
         if (try c.settings.urlGet(scratch, "http", request_url, "proxy")) |v| {
@@ -2163,14 +2176,20 @@ pub const Client = struct {
     /// A request to the API for `operation`: `<endpoint>/<suffix>`, with
     /// `git-lfs-authenticate`'s headers for an ssh remote and the API's
     /// media type. A token the server refuses is asked for again once.
-    pub fn api(c: *Client, operation: Operation, method: http.Method, suffix: []const u8, body: ?[]const u8, network_retries: u32) Self.Error!*Exchange {
+    pub const ApiRequest = struct { operation: Operation, method: http.Method, suffix: []const u8, body: ?[]const u8 = null, network_retries: u32 = 0 };
+    pub fn api(c: *Client, io: Io, request: ApiRequest) Self.Error!*Exchange {
+        const operation = request.operation;
+        const method = request.method;
+        const suffix = request.suffix;
+        const body = request.body;
+        const network_retries = request.network_retries;
         var asked_again = false;
         while (true) {
-            const base = try c.apiBase(operation);
-            const e = try c.endpoint(operation);
-            if (e.isLocal()) return c.fail("{s} is a repository on this machine and has no LFS API", .{e.url}, error.LfsEndpointUnknown);
+            const base = try c.apiBase(io, operation);
+            const e = try c.endpoint(io, operation);
+            if (e.isLocal()) return c.fail(io, "{s} is a repository on this machine and has no LFS API", .{e.url}, error.LfsEndpointUnknown);
             const url = try joinUrl(c.arena.allocator(), base.url, suffix);
-            const ex = c.send(.{
+            const ex = c.send(io, .{
                 .method = method,
                 .url = url,
                 .headers = base.headers,
@@ -2195,12 +2214,12 @@ pub const Client = struct {
     /// The JSON body of an API answer that is not a success: its `message`,
     /// or the status, kept as the client's message, and the error that
     /// names it.
-    pub fn failStatus(c: *Client, ex: *Exchange, what: []const u8) Self.Error {
+    pub fn failStatus(c: *Client, io: Io, ex: *Exchange, what: []const u8) Self.Error {
         const status = ex.status();
-        const said = c.noteStatusText(ex, what);
+        const said = c.noteStatusText(io, ex, what);
         if (status == .forbidden) {
-            c.mutex.lockUncancelable(c.io);
-            defer c.mutex.unlock(c.io);
+            c.mutex.lockUncancelable(io);
+            defer c.mutex.unlock(io);
             c.describeRefusal(.forbidden, 403, ex.url, said, null);
         }
         return if (status == .unauthorized or status == .forbidden) error.AuthenticationFailed else error.HttpStatus;
@@ -2208,19 +2227,19 @@ pub const Client = struct {
 
     /// Keep an answer's status and the server's reason as the client's
     /// message.
-    pub fn noteStatus(c: *Client, ex: *Exchange, what: []const u8) void {
-        _ = c.noteStatusText(ex, what);
+    pub fn noteStatus(c: *Client, io: Io, ex: *Exchange, what: []const u8) void {
+        _ = c.noteStatusText(io, ex, what);
     }
 
     /// `noteStatus`, returning the server's reason, in the exchange's
     /// arena.
-    fn noteStatusText(c: *Client, ex: *Exchange, what: []const u8) []const u8 {
+    fn noteStatusText(c: *Client, io: Io, ex: *Exchange, what: []const u8) []const u8 {
         const status = ex.status();
-        const body = ex.readAll(64 * 1024) catch "";
+        const body = ex.readAll(io, 64 * 1024) catch "";
         const Reason = struct { message: ?[]const u8 = null };
         const reason = std.json.parseFromSliceLeaky(Reason, ex.arena.allocator(), body, .{ .ignore_unknown_fields = true }) catch Reason{};
         var buf: [512]u8 = undefined;
-        c.setMessage(std.mem.print(&buf, "{s}: HTTP {d}{s}{s}", .{
+        c.setMessage(io, std.mem.print(&buf, "{s}: HTTP {d}{s}{s}", .{
             what,
             @backingInt(status),
             if (reason.message != null) ": " else "",
@@ -2265,6 +2284,8 @@ const ExchangeState = struct {
 
 /// A request made and its answer, open for the body.
 pub const Exchange = struct {
+    pub const Error = ErrorNamespace.Error;
+
     client: *Client,
     /// Private: the network state, owned with this exchange in one allocation.
     wire: *Wire,
@@ -2314,9 +2335,9 @@ pub const Exchange = struct {
     /// What the server said in refusing, into `a`: the API's `message`, or
     /// a `text/plain` body, at most 4 KiB. Empty when it said nothing
     /// readable.
-    fn refusalText(ex: *Exchange, a: Allocator) []const u8 {
+    fn refusalText(ex: *Exchange, a: Allocator, io: Io) []const u8 {
         const content_type = ex.header("content-type") orelse return "";
-        const body = ex.readAll(4096) catch return "";
+        const body = ex.readAll(io, 4096) catch return "";
         if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body) catch "";
         if (std.ascii.findIgnoreCase(content_type, "json") == null) return "";
         const Reason = struct { message: ?[]const u8 = null };
@@ -2345,9 +2366,9 @@ pub const Exchange = struct {
 
     /// The body, read as it arrives, decompressed as its
     /// `Content-Encoding` says.
-    pub fn reader(ex: *Exchange) Self.Error!*Io.Reader {
+    pub fn reader(ex: *Exchange, io: Io) Self.Error!*Io.Reader {
+        const raw = ex.state().response.reader(io);
         if (ex.body) |r| return r;
-        const raw = ex.state().response.reader(ex.client.io);
         // A zstd body is asked for by `Request.Accept.zstd`, whose client
         // leaves content codings undecoded. The window is the one the
         // first frame's header asks for, as git-lfs's decoder gives it, up
@@ -2368,7 +2389,7 @@ pub const Exchange = struct {
     /// The window a zstd body's first frame needs, read from its header
     /// without taking it off the stream: at least the standard's 8 MiB,
     /// and at most `zstd_window_max`, past which the body is refused.
-    fn zstdWindow(raw: *Io.Reader) Error!u32 {
+    fn zstdWindow(raw: *Io.Reader) ErrorNamespace.Error!u32 {
         const Header = std.compress.zstd.Decompress.Frame.Zstandard.Header;
         const head = raw.peek(18) catch raw.buffered();
         const default: u32 = std.compress.zstd.default_window_len;
@@ -2381,12 +2402,12 @@ pub const Exchange = struct {
     }
 
     /// The whole body, up to `limit` bytes, owned by the exchange.
-    pub fn readAll(ex: *Exchange, limit: usize) Self.Error![]const u8 {
-        const r = try ex.reader();
+    pub fn readAll(ex: *Exchange, io: Io, limit: usize) Self.Error![]const u8 {
+        const r = try ex.reader(io);
         return r.allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.StreamTooLong => error.StreamTooLong,
-            error.ReadFailed => ex.client.fail("reading the answer: {s}", .{ex.bodyError()}, error.ConnectionFailed),
+            error.ReadFailed => ex.client.fail(io, "reading the answer: {s}", .{ex.bodyError()}, error.ConnectionFailed),
         };
     }
 
@@ -2399,9 +2420,9 @@ pub const Exchange = struct {
     }
 
     /// Give the connection back and release everything.
-    pub fn deinit(ex: *Exchange) void {
+    pub fn deinit(ex: *Exchange, io: Io) void {
         const c = ex.client;
-        if (ex.in_flight) ex.state().response.deinit(c.io);
+        if (ex.in_flight) ex.state().response.deinit(io);
         ex.arena.deinit();
         c.gpa.destroy(ex.state());
     }
@@ -2411,8 +2432,9 @@ pub const Exchange = struct {
 /// operation: the settings, the client, and the store objects come from and
 /// go to.
 pub const Server = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
-    io: Io,
     settings: Settings,
     client: Client,
     /// The repository's store and its fetch settings.
@@ -2429,7 +2451,7 @@ pub const Server = struct {
     download_ref: []u8 = &.{},
 
     /// Errors from opening a server.
-    pub const OpenError = Error || Settings.LoadError || LfsconfigError || lfs.Lfs.LoadError || Io.Dir.RealPathFileAllocError;
+    pub const OpenError = ErrorNamespace.Error || Settings.LoadError || LfsconfigError || lfs.Lfs.LoadError || Io.Dir.RealPathFileAllocError;
 
     /// Open `remote` — a remote's name or a URL — of `repo`, or with `null`
     /// the remote git-lfs would use for a download: `defaultRemote`. Nothing
@@ -2440,7 +2462,6 @@ pub const Server = struct {
         errdefer gpa.destroy(s);
         s.* = .{
             .gpa = gpa,
-            .io = io,
             .settings = undefined,
             .client = undefined,
             .lfs = undefined,
@@ -2472,16 +2493,16 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.commonDirectory(), null, .{ .lfsconfig = lfsconfig });
+        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .work_dir = null, .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
-        s.client = try Client.init(gpa, io, &s.settings, s.remote, .{ .base = s.base_path, .fetch_head = s.fetch_head }, options);
+        s.client = try Client.open(gpa, io, &s.settings, .{ .remote = s.remote, .where = .{ .base = s.base_path, .fetch_head = s.fetch_head }, .reach = options });
         return s;
     }
 
     /// Close everything.
-    pub fn deinit(s: *Server) void {
+    pub fn deinit(s: *Server, io: Io) void {
         const gpa = s.gpa;
-        s.client.deinit();
+        s.client.deinit(io);
         s.lfs.deinit();
         s.settings.deinit();
         gpa.free(s.base_path);
@@ -2884,22 +2905,20 @@ test "Retry-After is a number of seconds, or a date counted from the time the ca
 
 test "LFS proxy parsing preserves allocation resource failures" {
     var client: Client = undefined;
-    client.io = testing.io;
     client.message_mutex = .init;
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    try testing.expectError(error.OutOfMemory, client.useProxy(failing.allocator(), "http://pro%78y:3128"));
+    try testing.expectError(error.OutOfMemory, client.useProxy(failing.allocator(), testing.io, "http://pro%78y:3128"));
 }
 
 test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var client: Client = undefined;
-    client.io = testing.io;
     client.message_mutex = .init;
     client.message_len = 0;
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         const text = try arena.allocator().print("{s}://us%65r:p%40ss@127.0.0.1", .{scheme});
-        const proxy = try client.useProxy(arena.allocator(), text);
+        const proxy = try client.useProxy(arena.allocator(), testing.io, text);
         try testing.expectEqual(@as(u16, 1080), proxy.port);
         try testing.expectEqualStrings("user", proxy.credential.?.user);
         try testing.expectEqualStrings("p@ss", proxy.credential.?.password);
@@ -2924,9 +2943,9 @@ test "learned LFS policy writes the shared source without replacing worktree con
     var repo = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
     const settings: Settings = .{ .gpa = gpa, .config = repo.configuration() };
-    var client = try Client.init(gpa, io, &settings, "origin", .{}, .{});
-    defer client.deinit();
-    try client.learnLocksVerify("https://example.com/project", false);
+    var client = try Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
+    defer client.deinit(io);
+    try client.learnLocksVerify(io, "https://example.com/project", false);
     try client.remember(io, &repo);
     var shared = try Config.openFile(gpa, io, .{ .dir = repo.commonDirectory(), .sub_path = "config" }, .local, .{});
     defer shared.deinit();

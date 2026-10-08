@@ -8,6 +8,7 @@
 //! A lock another process holds is reported, never broken — with the holder's
 //! process id where it can be found, which is what git itself now writes.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -427,6 +428,8 @@ pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io
 /// blocks. If this process dies the lock stays on the disk, exactly as git's
 /// does, and the next writer reports it rather than removing it.
 pub const LockFile = struct {
+    pub const Error = ErrorNamespace.Error;
+
     dir: Io.Dir,
     /// The name being replaced, relative to `dir`. Borrowed from the caller
     /// for the lifetime of the lock.
@@ -1567,3 +1570,6 @@ test "a read-only file is replaced and removed, as a lockable one nobody holds m
     try deleteFile(io, tmp.dir, "locked.bin");
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "locked.bin", .{}));
 }
+
+/// All errors reported by this namespace.
+pub const Error = SyncError || StatError || BarrierError || LockError || CommitError || LockFile.OpenError || Shared.ParseError || SetTimestampsError || HardLinkError || AtomicWriteError || ReadSizedError || Self.StatError || Self.CommitError || Io.Dir.RenameError || Io.Dir.CreateDirPathError || Io.Dir.SetFilePermissionsError || Io.Dir.DeleteFileError || Self.AtomicWriteError || Self.ReadSizedError || Allocator.Error;

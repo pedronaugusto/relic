@@ -15,6 +15,7 @@
 //! It never holds a password or a token: only a username, which is what a
 //! person needs to recognise which account was refused.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -22,6 +23,8 @@ const url_mod = @import("url.zig");
 
 /// A refused or impossible authentication, described.
 pub const Failure = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: ?std.heap.ArenaAllocator = null,
     /// What went wrong. `.none` while nothing has.
     reason: Reason = .none,
@@ -148,3 +151,6 @@ test "a failure keeps no credential in its URL and releases what it holds" {
     try std.testing.expectEqualStrings("", f.server_message);
     try std.testing.expectEqualStrings("example.com:repo.git", f.url);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Allocator.Error;

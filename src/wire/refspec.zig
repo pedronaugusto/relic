@@ -330,3 +330,6 @@ fn fuzzParse(_: void, smith: *testing.Smith) anyerror!void {
         _ = excluded(&.{spec}, input);
     }
 }
+
+/// All errors reported by this namespace.
+pub const Error = ParseError || Allocator.Error;

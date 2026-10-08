@@ -7,6 +7,7 @@
 //! `Warnings` adds each one there instead, as a value a caller can show,
 //! count or act on; one handed none says nothing and loses nothing.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -77,6 +78,8 @@ pub const Warning = union(enum) {
 
 /// Warnings gathered over one operation.
 pub const Warnings = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     items: std.ArrayList(Warning) = .empty,
 
@@ -130,3 +133,6 @@ test "a warning is kept as a value and read as git words it" {
     const text = try w.items.items[0].message(w.arena.allocator());
     try std.testing.expectEqualStrings("--depth is ignored in local clones; use file:// instead.", text);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Allocator.Error;

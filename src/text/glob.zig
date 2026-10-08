@@ -8,6 +8,7 @@
 //! a set of one entry. A malformed pattern matches nothing, as git's matcher
 //! answers for one.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sweep = @import("sweep");
@@ -50,6 +51,8 @@ pub fn matches(gpa: Allocator, pattern: []const u8, subject: []const u8, options
 /// A pattern compiled once, for one asked about many subjects. Immutable
 /// after `compile`; any number of threads may query it at once.
 pub const Glob = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// Private: what the pattern compiled to.
     compiled: Compiled,
 
@@ -157,3 +160,6 @@ pub fn isSpecial(byte: u8) bool {
 pub fn literalPrefix(pattern: []const u8) usize {
     return sweep.literalPrefix(pattern, .git);
 }
+
+/// All errors reported by this namespace.
+pub const Error = Allocator.Error;

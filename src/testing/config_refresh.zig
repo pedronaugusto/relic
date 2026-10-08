@@ -413,9 +413,9 @@ test "what an LFS server teaches is written without another process's settings l
     try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, null);
     try git.exec(io, &.{ "config", "fixture.external", "yes" });
     const settings: lfsapi.Settings = .{ .gpa = gpa, .config = repo.configuration() };
-    var client = try lfsapi.Client.init(gpa, io, &settings, "origin", .{}, .{});
-    defer client.deinit();
-    try client.learnLocksVerify("https://example.com/project", false);
+    var client = try lfsapi.Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
+    defer client.deinit(io);
+    try client.learnLocksVerify(io, "https://example.com/project", false);
     try client.remember(io, &repo);
     const file = try git.run(io, &.{ "config", "--file", ".git/config", "--get-regexp", "^(fixture|lfs)\\." });
     defer gpa.free(file);

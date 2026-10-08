@@ -153,13 +153,13 @@ test "CVE-2024-32004, t0033-safe-directory 'local clone of unowned repo refused 
     defer gpa.free(path);
     var home = try Home.init(gpa, io);
     defer home.deinit(gpa);
-    try std.testing.expectError(error.DubiousOwnership, local.Remote.openWith(gpa, io, path, home.options(.assume_different)));
+    try std.testing.expectError(error.DubiousOwnership, local.Remote.open(gpa, io, path, home.options(.assume_different)));
     const named = try safeDirectory(gpa, io, source.dir);
     defer gpa.free(named);
     try home.global(io, named);
-    var remote = try local.Remote.openWith(gpa, io, path, home.options(.assume_different));
+    var remote = try local.Remote.open(gpa, io, path, home.options(.assume_different));
     remote.deinit(io);
     // What a plain `open` does: the source is checked as the person's.
-    var plain = try local.Remote.open(gpa, io, path);
+    var plain = try local.Remote.open(gpa, io, path, .{});
     plain.deinit(io);
 }
