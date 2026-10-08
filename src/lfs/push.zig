@@ -27,17 +27,17 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const odb_mod = @import("../odb.zig");
-const repo_mod = @import("../repo.zig");
-const program = @import("../repo/program.zig");
-const credential = @import("../transport/credential.zig");
-const progress_mod = @import("../transport/progress.zig");
-const lfs = @import("../lfs.zig");
+const odb_mod = @import("../odb/odb.zig");
+const repo_mod = @import("../repo/repo.zig");
+const program = @import("../process/program.zig");
+const credential = @import("../wire/credential.zig");
+const progress_mod = @import("../report/progress.zig");
+const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
-const auth = @import("../transport/auth.zig");
-const config_mod = @import("../config.zig");
+const auth = @import("../wire/auth.zig");
+const config_mod = @import("../config/config.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -146,12 +146,12 @@ pub fn beforePush(
     const report = options.report orelse &scratch;
     const a = report.arena.allocator();
 
-    const pointers = try pointersIn(a, io, &repo.odb, pushed);
+    const pointers = try pointersIn(a, io, repo.objectDatabase(), pushed);
     if (options.mode == .auto and pointers.len == 0 and !usesLfs(io, repo)) return;
     report.ran = true;
 
     const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure, .now = options.now });
-    defer server.close();
+    defer server.deinit();
     defer if (options.remember) server.client.remember(io, repo) catch {};
 
     // Other people's locks first: a push refused for one uploads nothing.
@@ -243,7 +243,7 @@ fn usesLfs(io: Io, repo: *Repository) bool {
     for (repo.configuration().entries.items) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.section, "filter") and std.mem.eql(u8, entry.subsection, "lfs")) return true;
     }
-    repo.common_dir.access(io, "lfs", .{}) catch return false;
+    repo.commonDirectory().access(io, "lfs", .{}) catch return false;
     return true;
 }
 

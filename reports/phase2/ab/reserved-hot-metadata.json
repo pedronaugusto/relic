@@ -1,0 +1,8 @@
+{
+  "current_binary": "/Users/gusto/work/tycho/.wt/relic-phase2/.zig-cache/o/8c62d75dd5f3eab9e78b7f4eec0a39d0/relic-phase2",
+  "current_sha256": "f13722e3206f7a85eae1fe65ea072ad204e6506a917aaec80732edd871826591",
+  "baseline_sha256": "8dc8eeb5670c95e7ae30689a34678b31d14f335bcd3f2b152b4169884bb97d0e",
+  "build_log": "reports/phase2/allocation-contracts.txt",
+  "optimization": "ReleaseFast",
+  "order": "ABBA three times; quiet"
+}

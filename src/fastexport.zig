@@ -22,17 +22,17 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
-const repo_mod = @import("repo.zig");
-const revwalk = @import("revwalk.zig");
-const diff = @import("diff.zig");
-const cquote = @import("cquote.zig");
-const signing = @import("commit/signing.zig");
-const refspec_mod = @import("transport/refspec.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const odb_mod = @import("odb/odb.zig");
+const repo_mod = @import("repo/repo.zig");
+const revwalk = @import("walk/walk.zig");
+const diff = @import("diff/diff.zig");
+const cquote = @import("text/cquote.zig");
+const signing = @import("object/signing.zig");
+const refspec_mod = @import("wire/refspec.zig");
 const fastimport = @import("fastimport.zig");
-const fs = @import("repo/fs.zig");
+const fs = @import("fs/fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -60,8 +60,6 @@ pub const Error = error{
 
 /// What becomes of a signature: git's `--signed-tags` and
 /// `--signed-commits`.
-pub const SignMode = fastimport.SignMode;
-
 /// A tag of something the stream leaves out: git's
 /// `--tag-of-filtered-object`.
 pub const TagOfFiltered = enum { abort, drop, rewrite };
@@ -91,8 +89,8 @@ pub const Options = struct {
     tips: []const Tip,
     /// `^<rev>`: commits these reach are left out.
     exclude: []const Oid = &.{},
-    signed_tags: SignMode = .abort,
-    signed_commits: SignMode = .strip,
+    signed_tags: fastimport.SignMode = .abort,
+    signed_commits: fastimport.SignMode = .strip,
     tag_of_filtered: TagOfFiltered = .abort,
     reencode: Reencode = .abort,
     /// `--fake-missing-tagger`.
@@ -198,7 +196,7 @@ const Exporter = struct {
 
         try ex.assignSources(commits.items, exclude.items);
 
-        var walk = revwalk.Walk.init(ex.gpa, &ex.repo.odb);
+        var walk = revwalk.Walk.init(ex.gpa, ex.repo.objectDatabase());
         defer walk.deinit();
         walk.sort = .topological;
         walk.reverse = true;
@@ -270,7 +268,7 @@ const Exporter = struct {
     /// Each commit's name, handed from child to parent in the order the
     /// date walk meets them, as `revision.c` hands its sources down.
     fn assignSources(ex: *Exporter, commits: []const Oid, exclude: []const Oid) Error!void {
-        var walk = revwalk.Walk.init(ex.gpa, &ex.repo.odb);
+        var walk = revwalk.Walk.init(ex.gpa, ex.repo.objectDatabase());
         defer walk.deinit();
         for (commits) |c| try walk.push(c);
         for (exclude) |c| try walk.hide(c);
@@ -298,7 +296,7 @@ const Exporter = struct {
     fn exportBlob(ex: *Exporter, oid: Oid) Error!void {
         if (ex.options.no_data or oid.isZero()) return;
         if (ex.marks.contains(oid)) return;
-        const found = try ex.repo.odb.read(ex.io, oid);
+        const found = try ex.repo.objectDatabase().read(ex.io, oid);
         defer ex.gpa.free(found.bytes);
         const mark = try ex.markNext(oid);
         try ex.w.print("blob\nmark :{d}\n", .{mark});
@@ -311,7 +309,7 @@ const Exporter = struct {
 
     /// git's `handle_commit`.
     fn commit(ex: *Exporter, oid: Oid, parents: []const Oid) Error!void {
-        const found = try ex.repo.odb.read(ex.io, oid);
+        const found = try ex.repo.objectDatabase().read(ex.io, oid);
         defer ex.gpa.free(found.bytes);
         const buf = found.bytes;
         const kind = ex.repo.objectFormat();
@@ -349,7 +347,7 @@ const Exporter = struct {
         const first_parent_known = parents.len > 0 and
             (ex.marks.contains(parents[0]) or ex.options.reference_excluded_parents) and !ex.options.full_tree;
         const base: ?Oid = if (first_parent_known) try ex.commitTree(parents[0]) else null;
-        var changes = try diff.tree(ex.gpa, ex.io, &ex.repo.odb, base, tree, .{ .renames = ex.options.renames });
+        var changes = try diff.tree(ex.gpa, ex.io, ex.repo.objectDatabase(), base, tree, .{ .renames = ex.options.renames });
         defer changes.deinit();
         for (changes.items) |c| {
             const new = c.new orelse continue;
@@ -506,7 +504,7 @@ const Exporter = struct {
         while (try ex.typeOf(tagged_end) == .tag) tagged_end = try ex.tagTarget(tagged_end);
         if (try ex.typeOf(tagged_end) == .tree) return;
 
-        const found = try ex.repo.odb.read(ex.io, oid);
+        const found = try ex.repo.objectDatabase().read(ex.io, oid);
         defer ex.gpa.free(found.bytes);
         const buf = found.bytes;
         var message: ?[]const u8 = null;
@@ -578,7 +576,7 @@ const Exporter = struct {
         while (it.next()) |e| {
             const mark: u32 = std.math.cast(u32, e.key_ptr.*) orelse return error.CorruptMarks;
             if (ex.last_mark < mark) ex.last_mark = mark;
-            const header = ex.repo.odb.readHeader(ex.io, e.value_ptr.*) catch |err| switch (err) {
+            const header = ex.repo.objectDatabase().readHeader(ex.io, e.value_ptr.*) catch |err| switch (err) {
                 error.ObjectNotFound => return error.CorruptMarks,
                 else => |x| return x,
             };
@@ -611,11 +609,11 @@ const Exporter = struct {
     //=================================================================
 
     fn typeOf(ex: *Exporter, oid: Oid) Error!object.Type {
-        return (try ex.repo.odb.readHeader(ex.io, oid)).type;
+        return (try ex.repo.objectDatabase().readHeader(ex.io, oid)).type;
     }
 
     fn tagTarget(ex: *Exporter, oid: Oid) Error!Oid {
-        const found = try ex.repo.odb.read(ex.io, oid);
+        const found = try ex.repo.objectDatabase().read(ex.io, oid);
         defer ex.gpa.free(found.bytes);
         var t = try object.Tag.parse(ex.gpa, ex.repo.objectFormat(), found.bytes);
         defer t.deinit();
@@ -623,7 +621,7 @@ const Exporter = struct {
     }
 
     fn commitTree(ex: *Exporter, oid: Oid) Error!Oid {
-        const found = try ex.repo.odb.read(ex.io, oid);
+        const found = try ex.repo.objectDatabase().read(ex.io, oid);
         defer ex.gpa.free(found.bytes);
         return treeOf(ex.repo.objectFormat(), found.bytes);
     }

@@ -1,0 +1,31 @@
+check
++- compile test relic-tests debug native 3 errors
+src/refs/refs_test.zig:423:42: error: expected 5 argument(s), found 4
+            var store: refs.Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
+                                        ~^~~~
+src/refs/refs.zig:128:9: note: function declared here
+    pub fn init(gpa: Allocator, kind: Kind, git_dir: Io.Dir, common_dir: Io.Dir, options: Options) Allocator.Error!Store {
+    ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    checkAllAllocationFailures__func_14139: /Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:1154:13
+    test.an edit to a symbolic value releases its target when the transaction cannot take it: src/refs/refs_test.zig:432:51
+    1 reference(s) hidden; use '-freference-trace=3' to see all references
+src/testing/fixtures.zig:836:31: error: expected 7 argument(s), found 6
+    var result = try merge_mod.trees(
+                     ~~~~~~~~~^~~~~~
+src/merge/merge.zig:227:5: note: function declared here
+pub fn trees(
+~~~~^~
+src/testing/fixtures.zig:892:31: error: expected 7 argument(s), found 6
+    var result = try merge_mod.trees(
+                     ~~~~~~~~~^~~~~~
+src/merge/merge.zig:227:5: note: function declared here
+pub fn trees(
+~~~~^~
+error: 3 compilation errors
+failed command: /Users/gusto/.local/zig/0.17.0/zig test -Odebug --dep conduit --dep sweep --dep parallax --dep uplink --dep airlock --dep shakedown --dep build_options --dep preflight_timings --dep preflight_order --dep preflight_runner_options --dep preflight_default_test_runner -Mroot=src/tests.zig -Odebug --dep conduit.tty --dep conduit_options -Mconduit=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/conduit.zig -Odebug -Msweep=zig-pkg/sweep-0.1.0-6ErwaUfyCQCOPME4WppYGKV7aBld1LZjPNQIvG-30NBM/src/sweep.zig -Odebug -Mparallax=zig-pkg/parallax-0.1.0-lz9Br1eyBQDfFPWZk-5_xRzpA-3IBIA7YViOv9P_x1KC/src/parallax.zig -Odebug -Muplink=zig-pkg/uplink-0.1.0-0eVSJpb2DABkf8TwlkKWcmLIhxfR4GoInPTIMmuC0ZZ_/src/uplink.zig -Odebug --dep seam -Mairlock=zig-pkg/airlock-0.1.0-rfvu6NtSBQAASbhZxM8kQ4szfgW3YCNvxVXDPMOv-APr/src/airlock.zig -Odebug -Mshakedown=zig-pkg/shakedown-0.1.0-BR8U4wgEDgAy2m7lSRtXgIZd_M19hPZ256UdmaPT_9Nj/src/shakedown.zig -Mbuild_options=.zig-cache/o/8fc2f17efa082fffc8843145926fa567/options.zig -Mpreflight_timings=zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/timings.zig -Mpreflight_order=zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/order.zig -Mpreflight_runner_options=.zig-cache/o/463caaec1b426f72fbe04871c30fadeb/options.zig -Mpreflight_default_test_runner=/Users/gusto/.local/zig/0.17.0/lib/compiler/test_runner.zig -Odebug -Mconduit.tty=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/tty.zig -Mconduit_options=.zig-cache/o/d576ada3f61aecbd22bbc4605333792a/options.zig -Odebug -Mseam=zig-pkg/airlock-0.1.0-rfvu6NtSBQAASbhZxM8kQ4szfgW3YCNvxVXDPMOv-APr/src/seam.zig -lc --test-runner zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/runner.zig --cache-dir .zig-cache --global-cache-dir /Users/gusto/.cache/zig --build-root . --name relic-tests --zig-lib-dir /Users/gusto/.local/zig/0.17.0/lib/ --listen=-
+
+Build Summary: 16/18 steps succeeded (1 failed)
+check transitive failure
++- compile test relic-tests debug native 3 errors
+

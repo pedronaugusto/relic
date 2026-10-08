@@ -1,0 +1,10 @@
+{
+  "time": 1791482023.8156538,
+  "platform": "Darwin-25.2.0-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "zig": "0.17.0",
+  "baseline": "67077cb2293a8ce3489da007186bc2964e4ef3d9",
+  "current_binary": "/Users/gusto/work/tycho/.wt/relic-phase2/.zig-cache/o/ca6fdca961e99cf3896be415769ac41e/relic-phase2",
+  "baseline_binary": "/Users/gusto/work/tycho/.wt/relic-phase2/.phase2/baseline/zig-out/bin/relic-phase2",
+  "note": "Same benchmark source and published dependency pins; baseline production code from original main."
+}

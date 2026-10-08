@@ -4,12 +4,12 @@ const Self = @This();
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const hash = @import("../../hash.zig");
-const fs = @import("../../repo/fs.zig");
+const hash = @import("../../hash/hash.zig");
+const fs = @import("../../fs/fs.zig");
 const pack = @import("../pack.zig");
 const midx = @import("../midx.zig");
 const bitmap = @import("../bitmap.zig");
-const object = @import("../../object.zig");
+const object = @import("../../object/object.zig");
 const Oid = hash.Oid;
 
 pub const Error = bitmap.Error || midx.Error || pack.IndexError || Io.Dir.AccessError || Io.Dir.OpenError || Io.Dir.Iterator.Error || Io.Dir.ReadFileAllocError;

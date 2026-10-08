@@ -6,14 +6,14 @@
 //! being served (`transport/local.zig`, `transport/uploadpack.zig`) are
 //! opened with none.
 
-const std = @import("std");
 const suite = @import("../helpers.zig");
+const object = @import("../../object/object.zig");
+const testgit = @import("../git.zig");
+const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 
 const clone_mod = @import("../../transport/clone.zig");
-const object = @import("../../object.zig");
-const testgit = @import("../git.zig");
 
 test "CVE-2024-32465, t0411-clone-from-partial 'local clone must not fetch from promisor remote and execute script' and 'clone from file://... must not fetch'" {
     const gpa = std.testing.allocator;

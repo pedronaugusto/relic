@@ -15,13 +15,13 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 const lfsapi = @import("api.zig");
 const lfslocks = @import("locks.zig");
 const testlfs = @import("../testing/lfs.zig");
 const lt = @import("transfer_test.zig");
-const lfs = @import("../lfs.zig");
-const hash = @import("../hash.zig");
+const lfs = @import("lfs.zig");
+const hash = @import("../hash/hash.zig");
 
 const Fixture = lt.Fixture;
 
@@ -92,7 +92,7 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.close();
+    defer server.deinit();
 
     const taken = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
     try testing.expectEqualStrings("ada", taken.locked.owner.?);
@@ -150,7 +150,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.close();
+    defer server.deinit();
     _ = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
     var all = try lfslocks.list(server, &repo, .{}, .{});
     all.deinit();
@@ -175,7 +175,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     gpa.free(listed);
     var theirs_repo = try repo_mod.Repository.open(gpa, io, pair.theirs, .{});
     defer theirs_repo.deinit(io);
-    const store: lfs.Store = .{ .base = theirs_repo.common_dir, .root = "lfs" };
+    const store: lfs.Store = .{ .base = theirs_repo.commonDirectory(), .root = "lfs" };
     var table = try lfslocks.Table.cached(gpa, io, &store, "refs/heads/main");
     defer table.deinit();
     try testing.expectEqualStrings("ada", table.find("x.bin").?.owner.?);
@@ -199,7 +199,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.close();
+    defer server.deinit();
 
     // After a checkout, with no locks: every lockable file read-only.
     _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
@@ -247,7 +247,7 @@ test "a lock's file is the one asked about, and a path the server answers with o
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);
     const server = try pair.open(&repo);
-    defer server.close();
+    defer server.deinit();
     _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
     try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
 
@@ -281,7 +281,7 @@ test "a server with no locking API is named" {
     var repo = try repo_mod.Repository.open(gpa, io, d, .{});
     defer repo.deinit(io);
     const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
-    defer server.close();
+    defer server.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     try testing.expectError(error.LockingUnsupported, lfslocks.lock(arena_state.allocator(), server, &repo, "a.bin", .{ .ref = "refs/heads/main" }));
@@ -294,7 +294,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
-    const hooks = @import("../repo/hooks.zig");
+    const hooks = @import("../hooks/hooks.zig");
     const lfshooks = @import("hooks.zig");
     var pair = try Pair.init(gpa, io);
     defer pair.deinit();
@@ -330,14 +330,14 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);
     const zero = hash.Oid.zero(repo.objectFormat());
-    const place: hooks.Place = .{ .config = repo.configuration(), .git_dir = repo.git_dir, .common_dir = repo.common_dir, .work_dir = repo.work_dir };
+    const place: hooks.Place = .{ .config = repo.configuration(), .git_dir = repo.gitDirectory(), .common_dir = repo.commonDirectory(), .work_dir = repo.workDirectory() };
 
     // Run as they are, they stop: git-lfs was not found.
     {
         var runner = try hooks.Runner.init(gpa, io, place, .{ .environ = &bare_env }, .{ .output = .capture });
         defer runner.deinit();
         const ran = try runner.postCheckout(io, zero, head.oid, .branch);
-        try testing.expectEqual(@as(?u8, 2), ran.failure.?.status());
+        try testing.expectEqual(@as(?u32, 2), ran.failure.?.status());
         try testing.expect(std.mem.find(u8, runner.captured.items, "'git-lfs' was not found") != null);
     }
     // Handed to relic, they do git-lfs's work and succeed.
@@ -366,4 +366,48 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     try testing.expect(ran.lfs_native and ran.succeeded());
     try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
     try testing.expectEqualStrings("", runner.captured.items);
+}
+
+test "phase2 LFS HTTP pagination ends or fails without publishing partial caches" {
+    const scripts = [_][]const ?[]const u8{
+        &.{null},       &.{""},              &.{ "a", null }, &.{ "a", "" },
+        &.{ "a", "a" }, &.{ "a", "b", "a" },
+    };
+    for (scripts, 0..) |cursors, i| {
+        for ([_]bool{ false, true }) |verify| {
+            const fx = try Fixture.init(testing.allocator, testing.io, .{ .lock_cursors = cursors });
+            defer fx.deinit();
+            const helper = try testlfs.credentialHelper(fx.gpa, fx.io, fx.tools, "nobody", "no", "no");
+            defer fx.gpa.free(helper);
+            var d = try fx.workRepo("ours", helper);
+            defer d.close(fx.io);
+            var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
+            defer repo.deinit(fx.io);
+            const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = fx.programs() });
+            defer server.deinit();
+            try fx.server.addLock("a.bin", "anonymous");
+            if (verify) {
+                if (i >= 4) {
+                    try testing.expectError(error.MalformedResponse, lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" }));
+                } else {
+                    var result = try lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" });
+                    defer result.deinit();
+                    try testing.expect(result.ours.len + result.theirs.len != 0);
+                }
+            } else {
+                if (i >= 4) {
+                    try testing.expectError(error.MalformedResponse, lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" }));
+                } else {
+                    var result = try lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" });
+                    defer result.deinit();
+                    try testing.expect(result.locks.len != 0);
+                }
+            }
+            const store: lfs.Store = .{ .base = repo.commonDirectory(), .root = "lfs" };
+            var cached = try lfslocks.Table.cached(fx.gpa, fx.io, &store, "refs/heads/main");
+            defer cached.deinit();
+            try testing.expectEqual(i < 4, cached.find("a.bin") != null);
+            try testing.expectEqual(cursors.len, fx.server.lock_page);
+        }
+    }
 }

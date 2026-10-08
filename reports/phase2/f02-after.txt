@@ -1,0 +1,42 @@
+test
++- run exe relic-regressions
+   +- compile exe relic-regressions debug native 1 errors
+src/transport/connection.zig:446:32: error: expected type '?u8', found 'u32'
+            .exited => |value| value,
+                               ^~~~~
+src/transport/connection.zig:446:32: note: unsigned 8-bit int cannot represent all possible unsigned 32-bit values
+referenced by:
+    receive: src/lfs/custom.zig:279:54
+    start: src/lfs/custom.zig:209:37
+    12 reference(s) hidden; use '-freference-trace=14' to see all references
+error: 1 compilation errors
+failed command: /Users/gusto/.local/zig/0.17.0/zig build-exe -Odebug --dep relic -Mroot=bench/regressions.zig -Odebug --dep conduit --dep sweep --dep parallax --dep uplink -Mrelic=src/relic.zig -Odebug --dep conduit.tty --dep conduit_options -Mconduit=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/conduit.zig -Odebug -Msweep=zig-pkg/sweep-0.1.0-6ErwaUfyCQCOPME4WppYGKV7aBld1LZjPNQIvG-30NBM/src/sweep.zig -Odebug -Mparallax=zig-pkg/parallax-0.1.0-lz9Br6KABQBqfKca8mXUfSx1TbUpY7x22wKU1s30_X5_/src/parallax.zig -Odebug -Muplink=zig-pkg/uplink-0.1.0-0eVSJpb2DABkf8TwlkKWcmLIhxfR4GoInPTIMmuC0ZZ_/src/uplink.zig -Odebug -Mconduit.tty=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/tty.zig -Mconduit_options=.zig-cache/o/d576ada3f61aecbd22bbc4605333792a/options.zig -lc --cache-dir .zig-cache --global-cache-dir /Users/gusto/.cache/zig --build-root . --name relic-regressions --zig-lib-dir /Users/gusto/.local/zig/0.17.0/lib/ --listen=-
+
+test
++- examples
+   +- run test w
+preflight: test seed 1478302435 (reproduce with PREFLIGHT_TEST_SEED=1478302435)
+failed command: ./.zig-cache/o/8731d0c9ac1f653e3a04faa5c2f98e71/test --cache-dir=./.zig-cache --seed=0x581d1ae3 --listen=-
+
+test
++- run test relic-tests
+   +- compile test relic-tests debug native 1 errors
+src/odb/indexpack.zig:2608:77: error: expected type '[]u8', found '*const [64]u8'
+        const marker = try gpa.print("pack-{s}.keep", .{received.name.?.hex(&@as([hash.max_hex_len]u8, undefined))});
+                                                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/odb/indexpack.zig:2608:77: note: cast discards const qualifier
+src/hash.zig:153:38: note: parameter type declared here
+    pub fn hex(oid: *const Oid, buf: []u8) []const u8 {
+                                     ^~~~
+referenced by:
+    test_2: src/tests.zig:158:17
+error: 1 compilation errors
+failed command: /Users/gusto/.local/zig/0.17.0/zig test -Odebug --dep conduit --dep sweep --dep parallax --dep uplink --dep shakedown --dep build_options --dep preflight_timings --dep preflight_order --dep preflight_runner_options --dep preflight_default_test_runner -Mroot=src/tests.zig -Odebug --dep conduit.tty --dep conduit_options -Mconduit=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/conduit.zig -Odebug -Msweep=zig-pkg/sweep-0.1.0-6ErwaUfyCQCOPME4WppYGKV7aBld1LZjPNQIvG-30NBM/src/sweep.zig -Odebug -Mparallax=zig-pkg/parallax-0.1.0-lz9Br6KABQBqfKca8mXUfSx1TbUpY7x22wKU1s30_X5_/src/parallax.zig -Odebug -Muplink=zig-pkg/uplink-0.1.0-0eVSJpb2DABkf8TwlkKWcmLIhxfR4GoInPTIMmuC0ZZ_/src/uplink.zig -Odebug -Mshakedown=zig-pkg/shakedown-0.1.0-BR8U4wgEDgAy2m7lSRtXgIZd_M19hPZ256UdmaPT_9Nj/src/shakedown.zig -Mbuild_options=.zig-cache/o/1684ff69a077bcbe1b02828397ef1960/options.zig -Mpreflight_timings=zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/timings.zig -Mpreflight_order=zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/order.zig -Mpreflight_runner_options=.zig-cache/o/463caaec1b426f72fbe04871c30fadeb/options.zig -Mpreflight_default_test_runner=/Users/gusto/.local/zig/0.17.0/lib/compiler/test_runner.zig -Odebug -Mconduit.tty=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/tty.zig -Mconduit_options=.zig-cache/o/d576ada3f61aecbd22bbc4605333792a/options.zig -lc --test-filter "phase2 received pack" --test-runner zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/runner.zig --cache-dir .zig-cache --global-cache-dir /Users/gusto/.cache/zig --build-root . --name relic-tests --zig-lib-dir /Users/gusto/.local/zig/0.17.0/lib/ --listen=-
+
+Build Summary: 22/27 steps succeeded (2 failed); 1/1 tests passed
+test transitive failure
++- run test relic-tests transitive failure
+|  +- compile test relic-tests debug native 1 errors
++- run exe relic-regressions transitive failure
+   +- compile exe relic-regressions debug native 1 errors
+

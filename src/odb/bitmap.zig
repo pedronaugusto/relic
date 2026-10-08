@@ -3,8 +3,8 @@
 const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const hash = @import("../hash.zig");
-const ewah = @import("../ewah.zig");
+const hash = @import("../hash/hash.zig");
+const ewah = @import("../codec/ewah.zig");
 const format = @import("accelerators/chunks.zig");
 const Oid = hash.Oid;
 
@@ -185,9 +185,12 @@ pub fn nameHash(path: []const u8) u32 {
 pub const WriteCommit = struct { position: u32, words: []const u64, flags: u8 = 0 };
 pub const WriteOptions = struct { hash_cache: ?[]const u32 = null, lookup_table: bool = true };
 
+/// Errors from `encode`.
+pub const EncodeError = Allocator.Error || error{InvalidBitmapInput};
+
 /// Encode type maps, Git's ten-row XOR search, lookup table and name hash cache.
 /// `types` and commit reachability use pack order; positions and hashes use name order.
-pub fn encode(gpa: Allocator, kind: hash.Kind, checksum: Oid, types: [4][]const u64, commits: []const WriteCommit, options: WriteOptions) (Allocator.Error || error{InvalidBitmapInput})![]u8 {
+pub fn encode(gpa: Allocator, kind: hash.Kind, checksum: Oid, types: [4][]const u64, commits: []const WriteCommit, options: WriteOptions) EncodeError![]u8 {
     if (checksum.kind != kind or commits.len > std.math.maxInt(u32)) return error.InvalidBitmapInput;
     var out: format.Buffer = .{ .gpa = gpa };
     defer out.deinit();

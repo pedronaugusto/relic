@@ -10,9 +10,9 @@
 const std = @import("std");
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const odb_mod = @import("../odb.zig");
-const config_mod = @import("../config.zig");
+const hash = @import("../hash/hash.zig");
+const odb_mod = @import("odb.zig");
+const config_mod = @import("../config/config.zig");
 const storage = @import("state.zig");
 
 const Oid = hash.Oid;

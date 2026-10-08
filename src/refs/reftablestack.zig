@@ -28,12 +28,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const hash = @import("../hash.zig");
+const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
-const object = @import("../object.zig");
+const object = @import("../object/object.zig");
 const reflog = @import("reflog.zig");
-const refs = @import("../refs.zig");
+const refs = @import("refs.zig");
 const engine = @import("reftablestack/transaction.zig");
 /// How the stack writes and compacts. The defaults are git's, and
 /// `Repository` fills them in from `reftable.*` in the configuration.
@@ -66,10 +66,13 @@ pub fn read(gpa: Allocator, io: Io, store: *const refs.Store, name: []const u8) 
 pub fn list(gpa: Allocator, io: Io, store: *const refs.Store, prefix: []const u8) refs.ReadError!refs.Store.Listing {
     return engine.list(gpa, io, store, prefix);
 }
+/// Errors from `readLog`.
+pub const ReadLogError = refs.ReadError || reflog.ReadError;
+
 /// `Store.readLog` over reftable: the entries oldest first, as the files
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
-pub fn readLog(gpa: Allocator, io: Io, store: *const refs.Store, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
+pub fn readLog(gpa: Allocator, io: Io, store: *const refs.Store, name: []const u8) ReadLogError!reflog.Log {
     return engine.readLog(gpa, io, store, name);
 }
 /// Whether a log for `name` exists: any entry at all, the existence marker

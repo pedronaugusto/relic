@@ -1,0 +1,264 @@
+check
++- compile test relic-tests debug native 32 errors
+src/lfs/api.zig:1590:23: error: no field or member function named 'close' in 'lfs.api.Exchange'
+                    ex.close();
+                    ~~^~~~~~
+src/lfs/api.zig:2261:22: note: struct declared here
+pub const Exchange = struct {
+                     ^~~~~~
+src/lfs/api.zig:1590:23: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/api.zig:1590:23: note: use '.*' to dereference pointer
+referenced by:
+    test.LFS checks an HTTP host's client certificate before dialing: src/lfs/api.zig:90:78
+    test.the plumbing is relic's own: no public name reaches it: src/tests.zig:37:46
+src/lfs/clone.zig:45:28: error: no field or member function named 'close' in 'lfs.api.Server'
+        if (f.server) |s| s.close();
+                          ~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/clone.zig:45:28: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/clone.zig:45:28: note: use '.*' to dereference pointer
+src/lfs/custom.zig:250:15: error: no field or member function named 'close' in 'wire.connection.Connection'
+        a.conn.close(a.io);
+        ~~~~~~^~~~~~
+src/wire/connection.zig:60:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/lfs/custom.zig:250:15: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/custom.zig:250:15: note: use '.*' to dereference pointer
+src/lfs/custom_test.zig:171:17: error: no field or member function named 'close' in 'lfs.api.Server'
+    defer server.close();
+          ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/custom_test.zig:171:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/custom_test.zig:171:17: note: use '.*' to dereference pointer
+src/lfs/locks.zig:333:13: error: no field or member function named 'close' in 'lfs.api.Exchange'
+    defer ex.close();
+          ~~^~~~~~
+src/lfs/api.zig:2261:22: note: struct declared here
+pub const Exchange = struct {
+                     ^~~~~~
+src/lfs/locks.zig:333:13: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/locks.zig:333:13: note: use '.*' to dereference pointer
+src/lfs/locks.zig:460:17: error: no field or member function named 'close' in 'lfs.api.Exchange'
+        defer ex.close();
+              ~~^~~~~~
+src/lfs/api.zig:2261:22: note: struct declared here
+pub const Exchange = struct {
+                     ^~~~~~
+src/lfs/locks.zig:460:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/locks.zig:460:17: note: use '.*' to dereference pointer
+src/lfs/locks.zig:525:17: error: no field or member function named 'close' in 'lfs.api.Exchange'
+        defer ex.close();
+              ~~^~~~~~
+src/lfs/api.zig:2261:22: note: struct declared here
+pub const Exchange = struct {
+                     ^~~~~~
+src/lfs/locks.zig:525:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/locks.zig:525:17: note: use '.*' to dereference pointer
+src/lfs/ssh.zig:252:15: error: no field or member function named 'close' in 'wire.connection.Connection'
+        c.conn.close(c.io);
+        ~~~~~~^~~~~~
+src/wire/connection.zig:60:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/lfs/ssh.zig:252:15: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/ssh.zig:252:15: note: use '.*' to dereference pointer
+src/lfs/ssh.zig:330:59: error: no field or member function named 'end' in 'lfs.ssh.Connection'
+        for (t.connections.items) |maybe| if (maybe) |c| c.end();
+                                                         ~^~~~
+src/lfs/ssh.zig:73:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/lfs/ssh.zig:330:59: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/ssh.zig:330:59: note: use '.*' to dereference pointer
+src/lfs/ssh_test.zig:338:29: error: no field or member function named 'close' in 'lfs.api.Server'
+                defer server.close();
+                      ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/ssh_test.zig:338:29: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/ssh_test.zig:338:29: note: use '.*' to dereference pointer
+src/lfs/transfer.zig:1465:21: error: no field or member function named 'close' in 'lfs.api.Exchange'
+                sent.close();
+                ~~~~^~~~~~
+src/lfs/api.zig:2261:22: note: struct declared here
+pub const Exchange = struct {
+                     ^~~~~~
+src/lfs/transfer.zig:1465:21: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer.zig:1465:21: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:271:21: error: no field or member function named 'close' in 'lfs.api.Server'
+        defer server.close();
+              ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:271:21: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:271:21: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:360:25: error: no field or member function named 'close' in 'lfs.api.Server'
+            defer server.close();
+                  ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:360:25: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:360:25: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:413:17: error: no field or member function named 'close' in 'lfs.api.Server'
+    defer server.close();
+          ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:413:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:413:17: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:481:17: error: no field or member function named 'close' in 'lfs.api.Server'
+    defer server.close();
+          ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:481:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:481:17: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:517:17: error: no field or member function named 'close' in 'lfs.api.Server'
+    defer server.close();
+          ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:517:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:517:17: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:697:17: error: no field or member function named 'close' in 'lfs.api.Server'
+    defer server.close();
+          ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:697:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:697:17: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:826:21: error: no field or member function named 'close' in 'lfs.api.Server'
+        defer server.close();
+              ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:826:21: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:826:21: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:875:18: error: no field or member function named 'close' in 'lfs.api.Server'
+    defer server2.close();
+          ~~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:875:18: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:875:18: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:944:21: error: no field or member function named 'close' in 'lfs.api.Server'
+        defer server.close();
+              ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:944:21: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:944:21: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:1418:17: error: no field or member function named 'close' in 'lfs.api.Server'
+    defer server.close();
+          ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:1418:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:1418:17: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:2009:29: error: no field or member function named 'close' in 'lfs.api.Server'
+                defer server.close();
+                      ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/transfer_test.zig:2009:29: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:2009:29: note: use '.*' to dereference pointer
+src/lfs/transfer_test.zig:2141:15: error: no field or member function named 'close' in 'lfs.api.Exchange'
+            ex.close();
+            ~~^~~~~~
+src/lfs/api.zig:2261:22: note: struct declared here
+pub const Exchange = struct {
+                     ^~~~~~
+src/lfs/transfer_test.zig:2141:15: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/transfer_test.zig:2141:15: note: use '.*' to dereference pointer
+src/testing/fetchpack.zig:66:23: error: no field or member function named 'close' in 'wire.connection.Connection'
+            defer conn.close(io);
+                  ~~~~^~~~~~
+src/wire/connection.zig:60:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/testing/fetchpack.zig:66:23: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/testing/fetchpack.zig:66:23: note: use '.*' to dereference pointer
+src/testing/security/protocol_policy.zig:125:18: error: no field or member function named 'close' in 'transport.transport.Session'
+    defer session.close(io);
+          ~~~~~~~^~~~~~
+src/transport/transport.zig:161:21: note: struct declared here
+pub const Session = struct {
+                    ^~~~~~
+src/transport/bundle_test.zig:285:16: error: no field or member function named 'close' in 'transport.bundle.File'
+        defer f.close(gpa, io);
+              ~^~~~~~
+src/transport/bundle.zig:245:18: note: struct declared here
+pub const File = struct {
+                 ^~~~~~
+src/transport/bundle_test.zig:285:16: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/bundle_test.zig:285:16: note: use '.*' to dereference pointer
+src/transport/remotehelper.zig:256:17: error: no field or member function named 'close' in 'wire.connection.Connection'
+            conn.close(io);
+            ~~~~^~~~~~
+src/wire/connection.zig:60:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/transport/remotehelper.zig:256:17: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/remotehelper.zig:256:17: note: use '.*' to dereference pointer
+src/transport/remotehelper.zig:274:10: error: no field or member function named 'close' in 'transport.remotehelper.Helper'
+        h.close();
+        ~^~~~~~
+src/transport/remotehelper.zig:183:20: note: struct declared here
+pub const Helper = struct {
+                   ^~~~~~
+src/transport/remotehelper.zig:274:10: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/remotehelper.zig:274:10: note: use '.*' to dereference pointer
+src/transport/transport.zig:307:30: error: no field or member function named 'close' in 'wire.connection.Connection'
+                errdefer conn.close(io);
+                         ~~~~^~~~~~
+src/wire/connection.zig:60:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/transport/transport.zig:307:30: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/transport.zig:307:30: note: use '.*' to dereference pointer
+src/transport/transport.zig:366:26: error: no field or member function named 'close' in 'wire.connection.Connection'
+            errdefer conn.close(io);
+                     ~~~~^~~~~~
+src/wire/connection.zig:60:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/transport/transport.zig:366:26: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/transport.zig:366:26: note: use '.*' to dereference pointer
+src/transport/transport.zig:398:29: error: no field or member function named 'close' in 'transport.bundle.File'
+            .bundle => |f| f.close(s.gpa, io),
+                           ~^~~~~~
+src/transport/bundle.zig:245:18: note: struct declared here
+pub const File = struct {
+                 ^~~~~~
+src/transport/transport.zig:398:29: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/transport.zig:398:29: note: use '.*' to dereference pointer
+src/transport/transport_test.zig:373:16: error: no field or member function named 'close' in 'transport.transport.Session'
+        session.close(io);
+        ~~~~~~~^~~~~~
+src/transport/transport.zig:161:21: note: struct declared here
+pub const Session = struct {
+                    ^~~~~~
+error: 32 compilation errors
+failed command: /Users/gusto/.local/zig/0.17.0/zig test -Odebug --dep conduit --dep sweep --dep parallax --dep uplink --dep airlock --dep warp --dep shakedown --dep build_options --dep preflight_timings --dep preflight_order --dep preflight_runner_options --dep preflight_default_test_runner -Mroot=src/tests.zig -Odebug --dep conduit.tty --dep conduit_options -Mconduit=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/conduit.zig -Odebug -Msweep=zig-pkg/sweep-0.1.0-6ErwaUfyCQCOPME4WppYGKV7aBld1LZjPNQIvG-30NBM/src/sweep.zig -Odebug -Mparallax=zig-pkg/parallax-0.1.0-lz9Br1eyBQDfFPWZk-5_xRzpA-3IBIA7YViOv9P_x1KC/src/parallax.zig -Odebug -Muplink=zig-pkg/uplink-0.1.0-0eVSJpb2DABkf8TwlkKWcmLIhxfR4GoInPTIMmuC0ZZ_/src/uplink.zig -Odebug --dep seam -Mairlock=zig-pkg/airlock-0.1.0-rfvu6NtSBQAASbhZxM8kQ4szfgW3YCNvxVXDPMOv-APr/src/airlock.zig -Odebug --dep kernels_arm_crc --dep kernels_arm_pmull --dep kernels_arm_eor3 --dep kernels_arm_dotprod -Mwarp=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/warp.zig -Odebug -Mshakedown=zig-pkg/shakedown-0.1.0-BR8U4wgEDgAy2m7lSRtXgIZd_M19hPZ256UdmaPT_9Nj/src/shakedown.zig -Mbuild_options=.zig-cache/o/385391b3fdbf85d5e3f04455badd4f65/options.zig -Mpreflight_timings=zig-pkg/preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P/src/timings.zig -Mpreflight_order=zig-pkg/preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P/src/order.zig -Mpreflight_runner_options=.zig-cache/o/463caaec1b426f72fbe04871c30fadeb/options.zig -Mpreflight_default_test_runner=/Users/gusto/.local/zig/0.17.0/lib/compiler/test_runner.zig -Odebug -Mconduit.tty=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/tty.zig -Mconduit_options=.zig-cache/o/d576ada3f61aecbd22bbc4605333792a/options.zig -Odebug -Mseam=zig-pkg/airlock-0.1.0-rfvu6NtSBQAASbhZxM8kQ4szfgW3YCNvxVXDPMOv-APr/src/seam.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+crc --dep kernels_fold -Mkernels_arm_crc=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_crc.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+aes+crc --dep kernels_fold -Mkernels_arm_pmull=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_pmull.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+aes+crc+sha3 --dep kernels_fold -Mkernels_arm_eor3=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_eor3.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+dotprod --dep kernels_fold -Mkernels_arm_dotprod=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_dotprod.zig -Odebug -Mkernels_fold=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/fold.zig -lc --test-runner zig-pkg/preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P/src/runner.zig --cache-dir .zig-cache --global-cache-dir /Users/gusto/.cache/zig --build-root . --name relic-tests --zig-lib-dir /Users/gusto/.local/zig/0.17.0/lib/ --listen=-
+
+Build Summary: 16/18 steps succeeded (1 failed)
+check transitive failure
++- compile test relic-tests debug native 32 errors
+

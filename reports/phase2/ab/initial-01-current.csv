@@ -1,0 +1,6 @@
+row,operations,ns_per_operation,result
+ignore_load_32,1000,14063.583,1000
+ignore_match_32,100000,300.184,50000
+includeif_short,100000,51.707,100000
+ere_compile_search,1000,828.667,1000
+attributes_load_match,1000,830.333,1000

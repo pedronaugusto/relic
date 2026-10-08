@@ -7,11 +7,11 @@ const std = @import("std");
 const suite = @import("helpers.zig");
 const Io = std.Io;
 const testgit = @import("git.zig");
-const hash = @import("../hash.zig");
-const fs = @import("../repo/fs.zig");
-const odb_mod = @import("../odb.zig");
-const index_mod = @import("../index.zig");
-const refs_mod = @import("../refs.zig");
+const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
+const odb_mod = @import("../odb/odb.zig");
+const index_mod = @import("../index/index.zig");
+const refs_mod = @import("../refs/refs.zig");
 
 const Oid = hash.Oid;
 
@@ -243,7 +243,7 @@ test "concurrent reflog appends preserve every complete line" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store = try refs_mod.Store.init(gpa, .sha1, tmp.dir, tmp.dir);
+    var store = try refs_mod.Store.init(gpa, .sha1, tmp.dir, tmp.dir, .{});
     defer store.deinit();
     try store.createLog(gpa, io, "refs/heads/main");
 

@@ -12,18 +12,18 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb = @import("../odb.zig");
-const index = @import("../index.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb = @import("../odb/odb.zig");
+const index = @import("../index/index.zig");
 const sparseindex = @import("../index/sparseindex.zig");
-const repo = @import("../repo.zig");
-const worktree = @import("../worktree.zig");
-const diff_mod = @import("../diff.zig");
-const filter = @import("filter.zig");
-const program = @import("../repo/program.zig");
-const fs = @import("../repo/fs.zig");
-const durability = @import("../repo/fs/durability.zig");
+const repo = @import("../repo/repo.zig");
+const worktree = @import("../checkout/checkout.zig");
+const diff_mod = @import("../diff/diff.zig");
+const filter = @import("../checkout/filter.zig");
+const program = @import("../process/program.zig");
+const fs = @import("../fs/fs.zig");
+const durability = @import("../fs/fs.zig");
 const opening = @import("../odb/open.zig");
 
 pub const Error = worktree.Error || repo.Error || repo.Repository.LoadFiltersError ||
@@ -117,18 +117,18 @@ pub const Store = struct {
             if (r.objectFormat() != store.db.objectFormat()) return error.ObjectFormatMismatch;
         }
         const wt = switch (source) {
-            .repository => |r| r.work_dir orelse return error.BareRepository,
+            .repository => |r| r.workDirectory() orelse return error.BareRepository,
             .folder => |dir| dir,
         };
-        var ignored = if (source_repo) |r| try r.loadIgnore(io) else try worktree.ignore.Rules.init(store.gpa, false);
+        var ignored = if (source_repo) |r| try r.loadIgnore(io) else try @import("../patterns/ignore.zig").Rules.init(store.gpa, false);
         defer ignored.deinit();
-        var attrs = if (source_repo) |r| try r.loadAttrs(io) else try worktree.attributes.Attrs.init(store.gpa, false);
+        var attrs = if (source_repo) |r| try r.loadAttrs(io) else try @import("../patterns/attributes.zig").Attrs.init(store.gpa, false);
         defer attrs.deinit();
         var drivers: ?filter.Drivers = null;
         defer if (drivers) |*d| d.deinit();
         if (source_repo) |r| {
             const lfsconfig = try r.lfsconfigText(io);
-            defer if (lfsconfig) |text| r.gpa.free(text);
+            defer if (lfsconfig) |text| r.allocator().free(text);
             // Native LFS writes to the private store, never to the source.
             drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), store.dir, wt, .{ .lfsconfig = lfsconfig });
             // lfs.storage belongs to the source's storage policy. Its rules
@@ -141,13 +141,13 @@ pub const Store = struct {
         rules.attrs = &attrs;
         rules.filters = if (drivers) |*d| d else null;
         var staged = if (source_repo) |r|
-            try index.Index.readWithResolution(store.gpa, io, r.git_dir, "index", r.common_dir, r.objectFormat(), r.odb.timestamp_resolution)
+            try index.Index.readWithResolution(store.gpa, io, r.gitDirectory(), "index", r.commonDirectory(), r.objectFormat(), r.objectDatabase().timestamp_resolution)
         else
             index.Index.initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();
         // The source index is a membership list, not a cache for this store.
         // Sparse directories keep their indexed contents from the source.
-        const source_db: ?*odb.Odb = if (source_repo) |r| &r.odb else null;
+        const source_db: ?*odb.Odb = if (source_repo) |r| r.objectDatabase() else null;
         try sparseindex.expand(store.gpa, io, &staged, source_db orelse &store.db, null);
         for (staged.entries.items) |*entry| {
             entry.stat = .none;
@@ -249,7 +249,7 @@ pub const Store = struct {
         var staged: index.Index = .initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();
         if (options.from) |before| _ = try worktree.resetIndex(store.gpa, io, &staged, &store.db, before.tree);
-        var attrs = try worktree.attributes.Attrs.init(store.gpa, options.checkout.rules.ignore_case);
+        var attrs = try @import("../patterns/attributes.zig").Attrs.init(store.gpa, options.checkout.rules.ignore_case);
         defer attrs.deinit();
         var checkout = options.checkout;
         if (store.durability == .durable) checkout.durability = .durable;

@@ -25,9 +25,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config_mod = @import("../config.zig");
-const program = @import("../repo/program.zig");
-const connection = @import("../transport/connection.zig");
+const config_mod = @import("../config/config.zig");
+const program = @import("../process/program.zig");
+const connection = @import("../wire/connection.zig");
 const lfsapi = @import("api.zig");
 
 /// Errors from an adapter's process.
@@ -76,9 +76,12 @@ pub const Adapter = struct {
     }
 };
 
+/// Errors from `configured`.
+pub const ConfiguredError = Allocator.Error || error{MalformedValue};
+
 /// The adapters `config` names with an `lfs.customtransfer.<name>.path`,
 /// in the order they are first named. Every string is `arena`'s.
-pub fn configured(arena: Allocator, config: *const config_mod.Config) (Allocator.Error || error{MalformedValue})![]const Adapter {
+pub fn configured(arena: Allocator, config: *const config_mod.Config) ConfiguredError![]const Adapter {
     var out: std.ArrayList(Adapter) = .empty;
     for (config.entries.items) |entry| {
         if (!std.ascii.eqlIgnoreCase(entry.section, "lfs")) continue;
@@ -192,7 +195,7 @@ pub const Agent = struct {
             .stderr = .capture,
         });
         const a = gpa.create(Agent) catch |err| {
-            conn.close(io);
+            conn.deinit(io);
             return err;
         };
         a.* = .{ .gpa = gpa, .io = io, .conn = conn, .line = .init(gpa), .arena_state = .init(gpa) };
@@ -240,14 +243,14 @@ pub const Agent = struct {
     }
 
     /// `terminate`, and the process waited for.
-    pub fn stop(a: *Agent) void {
+    pub fn deinit(a: *Agent) void {
         // ziglint-ignore: Z026 terminate is a courtesy; abort, next, ends the agent whether or not it heard it
         a.send("{\"event\":\"terminate\"}\n") catch {};
         a.abort();
     }
 
     fn abort(a: *Agent) void {
-        a.conn.close(a.io);
+        a.conn.deinit(a.io);
         a.line.deinit();
         a.arena_state.deinit();
         a.gpa.destroy(a);

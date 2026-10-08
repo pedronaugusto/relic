@@ -1,0 +1,894 @@
+//! Authentication as a person meets it: the helpers their installers and
+//! tools configured, the ssh they already use, and what they are told when
+//! it does not work.
+//!
+//! Each test builds a stand-in person — a home, a system configuration
+//! file, and the environment their terminal would hand a program — and has
+//! git and relic reach the same remote from it. What git asked each helper
+//! and what relic asked it are compared byte for byte, and what relic
+//! reports on a refusal is held to what git printed. A helper named after a
+//! real one — `osxkeychain`, `manager` — is a stand-in found on a private
+//! `GIT_EXEC_PATH`, checked to be the stand-in before anything is asked of
+//! it; `store` and `cache` are git's own, pointed at files and sockets the
+//! test owns. Nothing reaches the person's own keychain, agent or files.
+
+const std = @import("std");
+const suite = @import("../testing/helpers.zig");
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Environ = std.process.Environ;
+const testing = std.testing;
+
+const auth = @import("auth.zig");
+const credential = @import("credential.zig");
+const fetch_mod = @import("../transport/fetch.zig");
+const program = @import("../process/program.zig");
+const repo_mod = @import("../repo/repo.zig");
+const userconfig = @import("../config/userconfig.zig");
+const testgit = @import("../testing/git.zig");
+const testremote = @import("../testing/remote.zig");
+const testlfs = @import("../testing/lfs.zig");
+const object = @import("../object/object.zig");
+const url_mod = @import("url.zig");
+const warning = @import("../report/warning.zig");
+
+const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+
+/// A person, as far as git can tell: a home with a `~/.gitconfig`, a system
+/// file where their git was built to look, and their environment.
+const Person = struct {
+    gpa: Allocator,
+    home: testing.TmpDir,
+    tools: testing.TmpDir,
+    home_path: []u8,
+    tools_path: []u8,
+    env: Environ.Map,
+
+    fn init(gpa: Allocator, io: Io) !Person {
+        try testgit.requireGit(gpa, io);
+        var home = testing.tmpDir(.{ .iterate = true });
+        errdefer home.cleanup();
+        var tools = testing.tmpDir(.{ .iterate = true });
+        errdefer tools.cleanup();
+        const home_path = try testremote.absolutePath(gpa, io, home.dir);
+        errdefer gpa.free(home_path);
+        const tools_path = try testremote.absolutePath(gpa, io, tools.dir);
+        errdefer gpa.free(tools_path);
+        var env = try testremote.environ(gpa);
+        errdefer env.deinit();
+        try testgit.isolate(&env, home_path);
+        // The person's git reads its system file and their `~/.gitconfig`,
+        // which here are the test's.
+        _ = env.swapRemove("GIT_CONFIG_NOSYSTEM");
+        _ = env.swapRemove("GIT_CONFIG_GLOBAL");
+        const system = try std.Io.Dir.path.join(gpa, &.{ home_path, "system-gitconfig" });
+        defer gpa.free(system);
+        try env.put("GIT_CONFIG_SYSTEM", system);
+        try home.dir.writeFile(io, .{ .sub_path = "system-gitconfig", .data = "" });
+        return .{ .gpa = gpa, .home = home, .tools = tools, .home_path = home_path, .tools_path = tools_path, .env = env };
+    }
+
+    fn deinit(p: *Person) void {
+        p.env.deinit();
+        p.gpa.free(p.home_path);
+        p.gpa.free(p.tools_path);
+        p.home.cleanup();
+        p.tools.cleanup();
+        p.* = undefined;
+    }
+
+    fn writeSystem(p: *Person, io: Io, text: []const u8) !void {
+        try p.home.dir.writeFile(io, .{ .sub_path = "system-gitconfig", .data = text });
+    }
+
+    fn writeGlobal(p: *Person, io: Io, text: []const u8) !void {
+        try p.home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = text });
+    }
+
+    /// A helper at `<tools>/<name>` that writes what it is asked to
+    /// `<name>.log` and answers `get` with `<name>.answer`. The path is
+    /// the caller's.
+    fn standIn(p: *Person, io: Io, name: []const u8, answer: []const u8) ![]u8 {
+        const path = try testlfs.installProgram(p.gpa, io, p.tools.dir, name, suite.path(.lfs_test_tool));
+        errdefer p.gpa.free(path);
+        const sidecar = try p.gpa.print("{s}.fixture", .{path});
+        defer p.gpa.free(sidecar);
+        const stem = if (builtin.target.os.tag == .windows) path[0 .. path.len - 4] else path;
+        const description = try p.gpa.print("credential-person\n{s}\n", .{stem});
+        defer p.gpa.free(description);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
+        var answer_name: [64]u8 = undefined;
+        try p.tools.dir.writeFile(io, .{ .sub_path = try std.mem.print(&answer_name, "{s}.answer", .{name}), .data = answer });
+        return path;
+    }
+
+    /// A private `GIT_EXEC_PATH` containing just the named stand-ins. Git's
+    /// real exec path follows it on `PATH`, so its other helpers remain
+    /// available without copying the whole directory into every fixture.
+    /// Each is checked to be the stand-in before any test asks it anything,
+    /// so the person's real keychain is never reached.
+    fn shadowHelpers(p: *Person, io: Io, names: []const []const u8, answers: []const []const u8) !void {
+        var outcome = try program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = &.{ "git", "--exec-path" } }, .{});
+        defer outcome.deinit(p.gpa);
+        if (!outcome.succeeded()) return error.SkipZigTest;
+        const real = std.mem.trimEnd(u8, outcome.stdout, "\r\n");
+        try p.tools.dir.createDirPath(io, "exec");
+        var shadow = try p.tools.dir.openDir(io, "exec", .{});
+        defer shadow.close(io);
+        for (names, answers) |name, answer| {
+            const path = try p.standIn(io, name, answer);
+            defer p.gpa.free(path);
+            var dashed_buf: [64]u8 = undefined;
+            const dashed = try std.mem.print(&dashed_buf, "git-credential-{s}", .{name});
+            const installed = if (builtin.target.os.tag == .windows) try p.gpa.print("{s}.exe", .{dashed}) else try p.gpa.dupe(u8, dashed);
+            defer p.gpa.free(installed);
+            shadow.deleteFile(io, installed) catch |err| if (err != error.FileNotFound) return err;
+            if (builtin.target.os.tag == .windows) try Io.Dir.cwd().copyFile(path, shadow, installed, io, .{}) else try shadow.symLink(io, path, installed, .{});
+            const fixture = try p.gpa.print("{s}.fixture", .{installed});
+            defer p.gpa.free(fixture);
+            const source = try p.gpa.print("{s}.fixture", .{path});
+            defer p.gpa.free(source);
+            try Io.Dir.cwd().copyFile(source, shadow, fixture, io, .{});
+        }
+        const exec_path = try std.Io.Dir.path.join(p.gpa, &.{ p.tools_path, "exec" });
+        defer p.gpa.free(exec_path);
+        const previous_path = p.env.get("PATH") orelse return error.SkipZigTest;
+        const search_path = try p.gpa.print("{s}{c}{s}{c}{s}", .{ exec_path, std.Io.Dir.path.delimiter, real, std.Io.Dir.path.delimiter, previous_path });
+        defer p.gpa.free(search_path);
+        try p.env.put("PATH", search_path);
+        try p.env.put("GIT_EXEC_PATH", exec_path);
+        for (names) |name| {
+            var dashed_buf: [64]u8 = undefined;
+            const dashed = try std.mem.print(&dashed_buf, "credential-{s}", .{name});
+            var probe = try program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = &.{ "git", dashed, "relic-probe" } }, .{});
+            defer probe.deinit(p.gpa);
+            if (!std.mem.eql(u8, probe.stdout, "stand-in\n")) {
+                std.debug.print("git {s} is not the stand-in; stopping before it is asked anything\n", .{dashed});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+
+    /// What `name` was asked since the last `clearLogs`.
+    fn log(p: *Person, io: Io, name: []const u8) ![]u8 {
+        var buf: [64]u8 = undefined;
+        return p.tools.dir.readFileAlloc(io, try std.mem.print(&buf, "{s}.log", .{name}), p.gpa, .unlimited) catch |err| switch (err) {
+            error.FileNotFound => p.gpa.dupe(u8, ""),
+            else => err,
+        };
+    }
+
+    fn clearLogs(p: *Person, io: Io, names: []const []const u8) !void {
+        for (names) |name| {
+            var buf: [64]u8 = undefined;
+            p.tools.dir.deleteFile(io, try std.mem.print(&buf, "{s}.log", .{name})) catch |err| if (err != error.FileNotFound) return err;
+        }
+    }
+
+    /// Run git as this person, in `dir`: its outcome, with what it said on
+    /// its standard error.
+    fn git(p: *Person, io: Io, dir: Io.Dir, args: []const []const u8) !program.Outcome {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(p.gpa);
+        try argv.append(p.gpa, "git");
+        try argv.appendSlice(p.gpa, &testgit.default_settings);
+        try argv.appendSlice(p.gpa, args);
+        return program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = argv.items, .cwd = .{ .dir = dir } }, .{});
+    }
+
+    /// Open `dir` as this person's repository, with the configuration
+    /// their git would read: what `userconfig.locate` finds.
+    fn open(p: *Person, io: Io, dir: Io.Dir, locations: *userconfig.Locations) !repo_mod.Repository {
+        locations.* = try userconfig.locate(p.gpa, io, &p.env, .{ .environ = &p.env });
+        const sources = locations.sources();
+        return repo_mod.Repository.open(p.gpa, io, dir, .{
+            .system_config = sources.system,
+            .xdg_config = sources.xdg,
+            .global_config = sources.global,
+            .home = locations.home,
+            .config_pairs = locations.pairs,
+        });
+    }
+};
+
+test "credential stand-ins keep Git's other executables on PATH without copying them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    try person.shadowHelpers(io, &.{"manager"}, &.{"username=ada\npassword=secret\n"});
+
+    var shadow = try person.tools.dir.openDir(io, "exec", .{ .iterate = true });
+    defer shadow.close(io);
+    var entries = shadow.iterate();
+    var count: usize = 0;
+    while (try entries.next(io)) |_| count += 1;
+    try testing.expectEqual(@as(usize, 2), count);
+}
+
+/// A bare repository at `<root>/<name>` for the server, with one commit.
+fn served(gpa: Allocator, io: Io, root: *testing.TmpDir, name: []const u8) !void {
+    var source = try testremote.historyRepo(gpa, io, 1);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const bare = try std.Io.Dir.path.join(gpa, &.{ root_path, name });
+    defer gpa.free(bare);
+    try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
+}
+
+/// The lines of git's standard error that the server sent, `remote: `
+/// taken off, as one text.
+fn remoteLines(gpa: Allocator, stderr: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, stderr, '\n');
+    while (lines.next()) |line| {
+        const prefix = "remote: ";
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        if (out.items.len != 0) try out.append(gpa, '\n');
+        try out.appendSlice(gpa, std.mem.trimEnd(u8, line[prefix.len..], " \r"));
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "with only the person's environment, relic asks the helpers git asks: gh's reset for its host, the system keychain elsewhere" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, &root, "mine.git");
+    try served(gpa, io, &root, "other.git");
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" } });
+    defer server.stop();
+
+    // Homebrew's system file names the keychain; `gh auth setup-git`
+    // writes a reset and itself for its host, here one repository.
+    try person.shadowHelpers(io, &.{"osxkeychain"}, &.{""});
+    const gh = try person.standIn(io, "gh", "username=ada\npassword=secret\n");
+    defer gpa.free(gh);
+    try person.writeSystem(io, "[credential]\n\thelper = osxkeychain\n");
+    const global = try gpa.print(
+        \\[credential "http://127.0.0.1:{d}/mine.git"]
+        \\    helper =
+        \\    helper = !{s} auth git-credential
+        \\
+    , .{ server.port, gh });
+    defer gpa.free(global);
+    try person.writeGlobal(io, global);
+    const names = [_][]const u8{ "gh", "osxkeychain" };
+
+    for ([_][]const u8{ "mine.git", "other.git" }) |name| {
+        const url = try server.url(gpa, name);
+        defer gpa.free(url);
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+
+        try person.clearLogs(io, &names);
+        var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+        defer theirs_outcome.deinit(gpa);
+        var theirs: [names.len][]u8 = undefined;
+        for (names, 0..) |n, i| theirs[i] = try person.log(io, n);
+        defer for (theirs) |t| gpa.free(t);
+
+        try person.clearLogs(io, &names);
+        var locations: userconfig.Locations = undefined;
+        var repo = try person.open(io, by_relic.dir, &locations);
+        defer repo.deinit(io);
+        defer locations.deinit();
+        var failure: auth.Failure = .{};
+        defer failure.deinit();
+        const result = fetch_mod.fetch(gpa, io, &repo, "origin", .{
+            .who = test_who,
+            .programs = .{ .environ = &person.env },
+            .auth_failure = &failure,
+        });
+        for (names, 0..) |n, i| {
+            const ours = try person.log(io, n);
+            defer gpa.free(ours);
+            try testing.expectEqualStrings(theirs[i], ours);
+        }
+
+        if (std.mem.eql(u8, name, "mine.git")) {
+            // gh answered; the keychain was never asked.
+            try testing.expect(theirs_outcome.succeeded());
+            var outcome = try result;
+            outcome.deinit();
+            try testing.expectEqualStrings("", theirs[1]);
+            try testing.expect(std.mem.startsWith(u8, theirs[0], "== get\n"));
+        } else {
+            // Out of gh's scope: the keychain was asked, knew nothing, and
+            // with no prompt there is nothing more — git stops at its
+            // disabled terminal prompt, relic says why.
+            try testing.expect(!theirs_outcome.succeeded());
+            try testing.expectError(error.CredentialsUnavailable, result);
+            try testing.expectEqual(auth.Failure.Reason.no_credential, failure.reason);
+            try testing.expectEqual(@as(usize, 1), failure.helpers.len);
+            try testing.expectEqualStrings("osxkeychain", failure.helpers[0].command);
+            try testing.expectEqual(auth.Failure.Answer.nothing, failure.helpers[0].answer);
+            try testing.expect(!failure.prompt_available);
+            try testing.expectEqual(@as(?u16, 401), failure.status);
+            try testing.expectEqualStrings(url, failure.url);
+            try testing.expectEqualStrings("Basic realm=\"relic\"", failure.challenges[0]);
+        }
+    }
+}
+
+test "named helpers run as git runs them: Git Credential Manager, and git's own store and cache" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, &root, "repo.git");
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" } });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+
+    // `manager`, as git for Windows configures it: a stand-in, asked the
+    // same things by both.
+    try person.shadowHelpers(io, &.{"manager"}, &.{"username=ada\npassword=secret\n"});
+    try person.writeSystem(io, "[credential]\n\thelper = manager\n");
+    {
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+        try person.clearLogs(io, &.{"manager"});
+        var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+        defer theirs_outcome.deinit(gpa);
+        try testing.expect(theirs_outcome.succeeded());
+        const theirs = try person.log(io, "manager");
+        defer gpa.free(theirs);
+        try person.clearLogs(io, &.{"manager"});
+        var locations: userconfig.Locations = undefined;
+        var repo = try person.open(io, by_relic.dir, &locations);
+        defer repo.deinit(io);
+        defer locations.deinit();
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+        outcome.deinit();
+        const ours = try person.log(io, "manager");
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+    }
+
+    // `store`: git's own helper and file. What relic leaves in the file is
+    // what git leaves, when the credential works and when it is refused.
+    for ([_][]const u8{ "secret", "wrong" }) |password| {
+        const line = try gpa.print("http://ada:{s}@127.0.0.1:{d}\n", .{ password, server.port });
+        defer gpa.free(line);
+        var files: [2][]u8 = undefined;
+        for (0..2) |who| {
+            try person.tools.dir.writeFile(io, .{ .sub_path = "credentials", .data = line });
+            const tools_path = try gpa.dupe(u8, person.tools_path);
+            defer gpa.free(tools_path);
+            if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, tools_path, '\\', '/');
+            const store = try gpa.print("[credential]\n\thelper = store --file={s}/credentials\n", .{tools_path});
+            defer gpa.free(store);
+            try person.writeSystem(io, store);
+            var r = try testgit.Repo.init(gpa, io, &.{});
+            defer r.deinit();
+            try r.exec(io, &.{ "remote", "add", "origin", url });
+            if (who == 0) {
+                var o = try person.git(io, r.dir, &.{ "fetch", "-q", "origin" });
+                defer o.deinit(gpa);
+                try testing.expectEqual(std.mem.eql(u8, password, "secret"), o.succeeded());
+            } else {
+                var locations: userconfig.Locations = undefined;
+                var repo = try person.open(io, r.dir, &locations);
+                defer repo.deinit(io);
+                defer locations.deinit();
+                if (fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } })) |fetched| {
+                    var outcome = fetched;
+                    outcome.deinit();
+                    try testing.expectEqualStrings("secret", password);
+                } else |err| {
+                    try testing.expectEqual(error.AuthenticationFailed, err);
+                    try testing.expectEqualStrings("wrong", password);
+                }
+            }
+            files[who] = try person.tools.dir.readFileAlloc(io, "credentials", gpa, .unlimited);
+        }
+        defer for (files) |f| gpa.free(f);
+        try testing.expectEqualStrings(files[0], files[1]);
+    }
+
+    // `cache`: git's daemon, on a socket of the test's. relic hands it the
+    // credential the caller's prompt gave; git's own `credential fill`
+    // then reads it back, and relic's next fetch needs no prompt.
+    {
+        // git's cache refuses a socket directory others can read.
+        try person.tools.dir.createDirPath(io, "cache");
+        if (builtin.target.os.tag != .windows) try person.tools.dir.setFilePermissions(io, "cache", .fromMode(0o700), .{});
+        const socket = try std.Io.Dir.path.join(gpa, &.{ person.tools_path, "cache", "sock" });
+        defer gpa.free(socket);
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, socket, '\\', '/');
+        const cache = try gpa.print("[credential]\n\thelper = cache --socket={s}\n", .{socket});
+        defer gpa.free(cache);
+        try person.writeSystem(io, cache);
+        const socket_arg = try gpa.print("--socket={s}", .{socket});
+        defer gpa.free(socket_arg);
+        defer {
+            var o = person.git(io, person.tools.dir, &.{ "credential-cache", "exit", socket_arg }) catch null;
+            if (o) |*outcome| outcome.deinit(gpa);
+        }
+        var r = try testgit.Repo.init(gpa, io, &.{});
+        defer r.deinit();
+        try r.exec(io, &.{ "remote", "add", "origin", url });
+        var locations: userconfig.Locations = undefined;
+        var repo = try person.open(io, r.dir, &locations);
+        defer repo.deinit(io);
+        defer locations.deinit();
+        const Asker = struct {
+            fn ask(allocator: Allocator, _: ?*anyopaque, field: credential.Field, _: []const u8) Allocator.Error!?[]u8 {
+                const answer = try allocator.dupe(u8, if (field == .username) "ada" else "secret");
+                return answer;
+            }
+        };
+        var first = try fetch_mod.fetch(gpa, io, &repo, "origin", .{
+            .who = test_who,
+            .programs = .{ .environ = &person.env },
+            .prompt = .{ .ask = Asker.ask },
+        });
+        first.deinit();
+        const question = try gpa.print("url={s}\n\n", .{url});
+        defer gpa.free(question);
+        const filled = try testremote.gitInputEnv(gpa, io, r.dir, &person.env, &.{ "credential", "fill" }, question, true);
+        defer gpa.free(filled);
+        try testing.expect(std.mem.find(u8, filled, "password=secret\n") != null);
+        var second = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+        second.deinit();
+    }
+}
+
+test "a refusal says what git says: the server's words, the helpers asked, the prompt there was not" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, &root, "repo.git");
+    const words = "Invalid username or token.\nPassword authentication is not supported for Git operations.\n";
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{
+        .basic_auth = .{ .user = "ada", .password = "secret" },
+        .refusal_text = words,
+    });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+
+    const Case = struct { answer: []const u8, err: anyerror, reason: auth.Failure.Reason, helper: auth.Failure.Answer };
+    for ([_]Case{
+        .{ .answer = "username=ada\npassword=wrong\n", .err = error.AuthenticationFailed, .reason = .refused, .helper = .credential },
+        .{ .answer = "quit=1\n", .err = error.CredentialHelperQuit, .reason = .helper_quit, .helper = .quit },
+    }) |case| {
+        const helper = try person.standIn(io, "helper", case.answer);
+        defer gpa.free(helper);
+        const global = try gpa.print("[credential]\n\thelper = {s}\n", .{helper});
+        defer gpa.free(global);
+        try person.writeGlobal(io, global);
+        var r = try testgit.Repo.init(gpa, io, &.{});
+        defer r.deinit();
+        try r.exec(io, &.{ "remote", "add", "origin", url });
+
+        var theirs = try person.git(io, r.dir, &.{ "fetch", "-q", "origin" });
+        defer theirs.deinit(gpa);
+        try testing.expect(!theirs.succeeded());
+
+        var locations: userconfig.Locations = undefined;
+        var repo = try person.open(io, r.dir, &locations);
+        defer repo.deinit(io);
+        defer locations.deinit();
+        var failure: auth.Failure = .{};
+        defer failure.deinit();
+        try testing.expectError(case.err, fetch_mod.fetch(gpa, io, &repo, "origin", .{
+            .who = test_who,
+            .programs = .{ .environ = &person.env },
+            .auth_failure = &failure,
+        }));
+        try testing.expectEqual(case.reason, failure.reason);
+        try testing.expectEqual(url_mod.Scheme.http, failure.scheme);
+        try testing.expectEqualStrings(url, failure.url);
+        try testing.expectEqual(@as(usize, 1), failure.helpers.len);
+        try testing.expectEqualStrings(helper, failure.helpers[0].command);
+        try testing.expectEqual(case.helper, failure.helpers[0].answer);
+        try testing.expect(!failure.prompt_available);
+        try testing.expectEqual(@as(?u16, 401), failure.status);
+        if (case.reason == .refused) {
+            // The username refused, never the password; and the server's
+            // own words, which git shows as `remote:` lines.
+            try testing.expectEqualStrings("ada", failure.username.?);
+            try testing.expectEqual(auth.Failure.Source.helper, failure.source);
+            const shown = try remoteLines(gpa, theirs.stderr);
+            defer gpa.free(shown);
+            try testing.expectEqualStrings(shown, failure.server_message);
+            try testing.expectEqualStrings(std.mem.trimEnd(u8, words, "\n"), failure.server_message);
+        }
+    }
+
+    // A helper configured and no leave to run it: said by name, before
+    // anything is sent.
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.exec(io, &.{ "remote", "add", "origin", url });
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, r.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+    var failure: auth.Failure = .{};
+    defer failure.deinit();
+    try testing.expectError(error.ProgramsNotGranted, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .auth_failure = &failure }));
+    try testing.expectEqual(auth.Failure.Reason.programs_not_granted, failure.reason);
+    try testing.expectEqual(auth.Failure.Answer.failed, failure.helpers[0].answer);
+}
+
+test "a helper's bearer token is sent as git sends it, and handed back with its state" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, &root, "repo.git");
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{
+        .basic_auth = .{ .user = "nobody", .password = "unused" },
+        .bearer = "TOKEN",
+    });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    const helper = try person.standIn(io, "helper",
+        \\capability[]=authtype
+        \\capability[]=state
+        \\authtype=Bearer
+        \\credential=TOKEN
+        \\state[]=helper:one
+        \\oauth_refresh_token=REFRESH
+        \\password_expiry_utc=9999999999
+        \\
+    );
+    defer gpa.free(helper);
+    const global = try gpa.print("[credential]\n\thelper = {s}\n", .{helper});
+    defer gpa.free(global);
+    try person.writeGlobal(io, global);
+
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    try person.clearLogs(io, &.{"helper"});
+    var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+    defer theirs_outcome.deinit(gpa);
+    try testing.expect(theirs_outcome.succeeded());
+    const theirs = try person.log(io, "helper");
+    defer gpa.free(theirs);
+    try person.clearLogs(io, &.{"helper"});
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, by_relic.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+    outcome.deinit();
+    const ours = try person.log(io, "helper");
+    defer gpa.free(ours);
+    try testing.expectEqualStrings(theirs, ours);
+    try testing.expect(std.mem.find(u8, ours, "state[]=helper:one") != null);
+}
+
+test "a helper's password past its password_expiry_utc is passed over for the next helper's, and not stored, as git passes it over" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, &root, "repo.git");
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" } });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    // An hour before the epoch's billionth second: long past.
+    const stale = try person.standIn(io, "stale", "username=ada\npassword=old\npassword_expiry_utc=999996400\n");
+    defer gpa.free(stale);
+    const fresh = try person.standIn(io, "fresh", "username=ada\npassword=secret\n");
+    defer gpa.free(fresh);
+    const global = try gpa.print("[credential]\n\thelper = {s}\n\thelper = {s}\n", .{ stale, fresh });
+    defer gpa.free(global);
+    try person.writeGlobal(io, global);
+
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    const names: []const []const u8 = &.{ "stale", "fresh" };
+    try person.clearLogs(io, names);
+    var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+    defer theirs_outcome.deinit(gpa);
+    try testing.expect(theirs_outcome.succeeded());
+    var theirs: [2][]u8 = undefined;
+    for (names, &theirs) |name, *out| out.* = try person.log(io, name);
+    defer for (theirs) |t| gpa.free(t);
+    try person.clearLogs(io, names);
+
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, by_relic.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+    // The caller's clock says when it is.
+    var who = test_who;
+    who.when_secs = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &person.env } });
+    outcome.deinit();
+    for (names, theirs) |name, t| {
+        const ours = try person.log(io, name);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(t, ours);
+    }
+}
+
+test "what ssh says on a conversation that succeeds is handed back as a warning, the words git passes on" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    // ssh that adds a host key, says so, and goes on.
+    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", suite.path(.fake_ssh_helper));
+    defer gpa.free(ssh);
+    const sidecar = try gpa.print("{s}.fixture", .{ssh});
+    defer gpa.free(sidecar);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = "warn\nWarning: Permanently added 'work-github' (ED25519) to the list of known hosts.\n" });
+    try person.env.put("GIT_SSH_COMMAND", ssh);
+    var source = try testremote.historyRepo(gpa, io, 1);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const url = try gpa.print("work-github:{s}", .{source_path});
+    defer gpa.free(url);
+
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    var theirs = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+    defer theirs.deinit(gpa);
+    try testing.expect(theirs.succeeded());
+
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, by_relic.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+    var warnings: warning.Warnings = .init(gpa);
+    defer warnings.deinit();
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env }, .warnings = &warnings });
+    outcome.deinit();
+    var ours: std.ArrayList(u8) = .empty;
+    defer ours.deinit(gpa);
+    for (warnings.items.items) |w| try ours.print(gpa, "{s}\n", .{try w.message(warnings.arena.allocator())});
+    // ssh is asked twice by git — once for the refs, once for the pack —
+    // and relic once, so each says it the times it is asked.
+    var lines = std.mem.tokenizeScalar(u8, theirs.stderr, '\n');
+    const first = lines.next().?;
+    try testing.expectEqualStrings("Warning: Permanently added 'work-github' (ED25519) to the list of known hosts.", first);
+    try testing.expect(ours.items.len != 0);
+    var said = std.mem.tokenizeScalar(u8, ours.items, '\n');
+    while (said.next()) |line| try testing.expectEqualStrings(first, line);
+}
+
+/// A stand-in `ssh` at `<tools>/ssh` that notes its arguments and the
+/// agent and home it was started with, then either says `refusal` on its
+/// standard error and exits 255, as ssh does, or runs the command here.
+fn sshStandIn(person: *Person, io: Io, refusal: ?[]const u8) ![]u8 {
+    const path = try testlfs.installProgram(person.gpa, io, person.tools.dir, "ssh", suite.path(.fake_ssh_helper));
+    errdefer person.gpa.free(path);
+    const sidecar = try person.gpa.print("{s}.fixture", .{path});
+    defer person.gpa.free(sidecar);
+    const description = if (refusal) |message|
+        try person.gpa.print("refuse\n{s}\n", .{message})
+    else
+        try person.gpa.dupe(u8, "auth\n");
+    defer person.gpa.free(description);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
+    return path;
+}
+
+test "ssh's refusal is named once ssh has ended, while something it started still holds its standard error" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    const said = "git@work-github: Permission denied (publickey).";
+    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", suite.path(.fake_ssh_helper));
+    defer gpa.free(ssh);
+    const release = try std.Io.Dir.path.join(gpa, &.{ person.tools_path, "release" });
+    defer gpa.free(release);
+    const ended = try gpa.print("{s}.ended", .{release});
+    defer gpa.free(ended);
+    {
+        const sidecar = try gpa.print("{s}.fixture", .{ssh});
+        defer gpa.free(sidecar);
+        const description = try gpa.print("refuse-held\n{s}\n{s}\n", .{ said, release });
+        defer gpa.free(description);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
+    }
+    try person.env.put("GIT_SSH_COMMAND", ssh);
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.exec(io, &.{ "remote", "add", "origin", "git@work-github:org/repo.git" });
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, r.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+
+    // Released however the test ends, and waited for, since the
+    // grandchild runs from the folder the test removes.
+    defer {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = release, .data = "" }) catch {};
+        for (0..6000) |_| {
+            if (Io.Dir.cwd().access(io, ended, .{})) |_| break else |_| {}
+            io.sleep(.fromMilliseconds(10), .awake) catch break;
+        }
+    }
+    var failure: auth.Failure = .{};
+    defer failure.deinit();
+    try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{
+        .who = test_who,
+        .programs = .{ .environ = &person.env },
+        .auth_failure = &failure,
+    }));
+    try testing.expectEqualStrings(said, failure.server_message);
+    // The fetch did not wait for the grandchild, which is still there.
+    if (Io.Dir.cwd().access(io, ended, .{})) |_| {
+        std.debug.print("the fetch returned only once ssh's grandchild had ended\n", .{});
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}
+
+test "ssh gets the person's host alias, agent and command line untouched, as git hands them over" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    // The person's agent, which their ssh uses and relic must pass along.
+    // Git for Windows runs configured SSH commands through MSYS sh, which
+    // rewrites a Unix /tmp path to its own temporary directory. Use a
+    // Windows absolute path so the exact value can be compared on both.
+    const agent = if (builtin.target.os.tag == .windows)
+        try gpa.print("{s}/agent.person", .{person.tools_path})
+    else
+        try gpa.dupe(u8, "/tmp/agent.person");
+    defer gpa.free(agent);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, agent, '\\', '/');
+    try person.env.put("SSH_AUTH_SOCK", agent);
+    const ssh = try sshStandIn(&person, io, null);
+    defer gpa.free(ssh);
+    var source = try testremote.historyRepo(gpa, io, 1);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const ssh_path = try gpa.dupe(u8, source_path);
+    defer gpa.free(ssh_path);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+
+    // A `Host work-github` alias with its `IdentityFile` and `ProxyJump`
+    // lives in ~/.ssh/config, which only ssh reads: the host goes to ssh
+    // as written. `GIT_SSH_COMMAND` and `core.sshCommand` are command
+    // lines, their options kept.
+    const scp = try gpa.print("work-github:{s}", .{ssh_path});
+    defer gpa.free(scp);
+    const with_user = try gpa.print("ssh://git@work-github{s}{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path });
+    defer gpa.free(with_user);
+    const Case = struct { url: []const u8, env_command: ?[]const u8 = null, config_command: ?[]const u8 = null };
+    const env_line = try gpa.print("{s} -i ~/.ssh/work_ed25519 -o ProxyJump=bastion", .{ssh});
+    defer gpa.free(env_line);
+    const config_line = try gpa.print("{s} -F ~/.ssh/config.work", .{ssh});
+    defer gpa.free(config_line);
+    for ([_]Case{
+        .{ .url = scp, .config_command = config_line },
+        .{ .url = with_user, .config_command = config_line },
+        .{ .url = scp, .env_command = env_line },
+    }) |case| {
+        if (case.env_command) |line| try person.env.put("GIT_SSH_COMMAND", line) else _ = person.env.swapRemove("GIT_SSH_COMMAND");
+        const global = if (case.config_command) |line|
+            try gpa.print("[core]\n\tsshCommand = {s}\n", .{line})
+        else
+            try gpa.dupe(u8, "");
+        defer gpa.free(global);
+        try person.writeGlobal(io, global);
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", case.url });
+
+        person.tools.dir.deleteFile(io, "ssh.log") catch |err| if (err != error.FileNotFound) return err;
+        var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+        defer theirs_outcome.deinit(gpa);
+        try testing.expect(theirs_outcome.succeeded());
+        const theirs = try person.tools.dir.readFileAlloc(io, "ssh.log", gpa, .unlimited);
+        defer gpa.free(theirs);
+        try person.tools.dir.deleteFile(io, "ssh.log");
+
+        var locations: userconfig.Locations = undefined;
+        var repo = try person.open(io, by_relic.dir, &locations);
+        defer repo.deinit(io);
+        defer locations.deinit();
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+        outcome.deinit();
+        const ours = try person.tools.dir.readFileAlloc(io, "ssh.log", gpa, .unlimited);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+        try testing.expect(std.mem.find(u8, ours, "work-github]") != null);
+        const agent_entry = try gpa.print("agent={s}", .{agent});
+        defer gpa.free(agent_entry);
+        try testing.expect(std.mem.find(u8, ours, agent_entry) != null);
+    }
+}
+
+test "ssh's refusal of a key or a host is named, with what ssh said" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    const Case = struct { said: []const u8, err: anyerror, reason: auth.Failure.Reason };
+    for ([_]Case{
+        .{ .said = "git@work-github: Permission denied (publickey).", .err = error.AuthenticationFailed, .reason = .refused },
+        .{ .said = "Host key verification failed.", .err = error.HostKeyVerificationFailed, .reason = .host_key },
+    }) |case| {
+        const ssh = try sshStandIn(&person, io, case.said);
+        defer gpa.free(ssh);
+        try person.env.put("GIT_SSH_COMMAND", ssh);
+        var r = try testgit.Repo.init(gpa, io, &.{});
+        defer r.deinit();
+        try r.exec(io, &.{ "remote", "add", "origin", "git@work-github:org/repo.git" });
+
+        var theirs = try person.git(io, r.dir, &.{ "fetch", "-q", "origin" });
+        defer theirs.deinit(gpa);
+        try testing.expect(!theirs.succeeded());
+        // git passes ssh's words through to the person.
+        try testing.expect(std.mem.find(u8, theirs.stderr, case.said) != null);
+
+        var locations: userconfig.Locations = undefined;
+        var repo = try person.open(io, r.dir, &locations);
+        defer repo.deinit(io);
+        defer locations.deinit();
+        var failure: auth.Failure = .{};
+        defer failure.deinit();
+        try testing.expectError(case.err, fetch_mod.fetch(gpa, io, &repo, "origin", .{
+            .who = test_who,
+            .programs = .{ .environ = &person.env },
+            .auth_failure = &failure,
+        }));
+        try testing.expectEqual(case.reason, failure.reason);
+        try testing.expectEqual(url_mod.Scheme.ssh, failure.scheme);
+        try testing.expectEqualStrings("work-github:org/repo.git", failure.url);
+        try testing.expectEqualStrings(case.said, failure.server_message);
+        try testing.expectEqualStrings("git", failure.username.?);
+    }
+}

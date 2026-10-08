@@ -10,9 +10,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 
-const submodule = @import("../../submodule.zig");
-const repo_mod = @import("../../repo.zig");
-const safepath = @import("../../worktree/safepath.zig");
+const submodule = @import("../../submodule/submodule.zig");
+const repo_mod = @import("../../repo/repo.zig");
+const safepath = @import("../../names/path.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 

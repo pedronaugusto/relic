@@ -27,19 +27,19 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
-const refs_mod = @import("refs.zig");
-const repo_mod = @import("repo.zig");
-const revwalk = @import("revwalk.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const odb_mod = @import("odb/odb.zig");
+const refs_mod = @import("refs/refs.zig");
+const repo_mod = @import("repo/repo.zig");
+const revwalk = @import("walk/walk.zig");
 const revparse = @import("revwalk/revparse.zig");
-const cquote = @import("cquote.zig");
-const gitdate = @import("object/gitdate.zig");
-const signing = @import("commit/signing.zig");
-const safepath = @import("worktree/safepath.zig");
+const cquote = @import("text/cquote.zig");
+const gitdate = @import("text/date.zig");
+const signing = @import("object/signing.zig");
+const safepath = @import("names/path.zig");
 const ref_names = @import("names/ref.zig");
-const fs = @import("repo/fs.zig");
+const fs = @import("fs/fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -262,9 +262,12 @@ pub const Marks = struct {
         try m.map.put(gpa, mark, oid);
     }
 
+    /// Errors from `parse`.
+    pub const ParseError = Allocator.Error || error{CorruptMarks};
+
     /// Read a marks file's lines, `:<mark> <name>`, into the table; a mark
     /// read again takes the later name.
-    pub fn parse(m: *Marks, gpa: Allocator, kind: hash.Kind, bytes: []const u8) (Allocator.Error || error{CorruptMarks})!void {
+    pub fn parse(m: *Marks, gpa: Allocator, kind: hash.Kind, bytes: []const u8) ParseError!void {
         var lines = std.mem.splitScalar(u8, bytes, '\n');
         while (lines.next()) |line| {
             if (line.len == 0 and lines.peek() == null) break;
@@ -277,8 +280,11 @@ pub const Marks = struct {
         }
     }
 
+    /// Errors from `write`.
+    pub const WriteError = Allocator.Error || Io.Writer.Error;
+
     /// Write the table as git writes a marks file, lowest mark first.
-    pub fn write(m: *const Marks, gpa: Allocator, w: *Io.Writer) (Allocator.Error || Io.Writer.Error)!void {
+    pub fn write(m: *const Marks, gpa: Allocator, w: *Io.Writer) WriteError!void {
         const keys = try gpa.alloc(u64, m.map.count());
         defer gpa.free(keys);
         var it = m.map.keyIterator();
@@ -408,7 +414,7 @@ const Importer = struct {
     }
 
     fn deinit(imp: *Importer) void {
-        if (imp.pack) |p| imp.repo.odb.abortPack(imp.io, p);
+        if (imp.pack) |p| imp.repo.objectDatabase().abortPack(imp.io, p);
         var it = imp.pending.valueIterator();
         while (it.next()) |p| imp.gpa.free(p.bytes);
         imp.pending.deinit(imp.gpa);
@@ -553,7 +559,7 @@ const Importer = struct {
 
     /// The directory a marks path is relative to.
     fn marksDir(imp: *Importer, path: []const u8) Io.Dir {
-        if (std.mem.startsWith(u8, path, "info/fast-import/") and imp.relative_marks) return imp.repo.common_dir;
+        if (std.mem.startsWith(u8, path, "info/fast-import/") and imp.relative_marks) return imp.repo.commonDirectory();
         return imp.options.cwd orelse Io.Dir.cwd();
     }
 
@@ -1548,9 +1554,9 @@ const Importer = struct {
         if (mark != 0) try imp.marks.put(imp.gpa, mark, oid);
         try imp.types.put(imp.gpa, oid, t);
         if (imp.pending.contains(oid)) return oid;
-        if (try imp.repo.odb.exists(imp.io, oid)) return oid;
-        if (imp.pack == null) imp.pack = try imp.repo.odb.beginPack(imp.io, .{});
-        _ = try imp.repo.odb.writeInto(imp.io, imp.pack.?, t, bytes);
+        if (try imp.repo.objectDatabase().exists(imp.io, oid)) return oid;
+        if (imp.pack == null) imp.pack = try imp.repo.objectDatabase().beginPack(imp.io, .{});
+        _ = try imp.repo.objectDatabase().writeInto(imp.io, imp.pack.?, t, bytes);
         try imp.pending.put(imp.gpa, oid, .{ .type = t, .bytes = try imp.gpa.dupe(u8, bytes) });
         imp.pending_bytes += bytes.len;
         if (imp.pending_bytes > pending_limit) try imp.closePack();
@@ -1562,7 +1568,7 @@ const Importer = struct {
     fn closePack(imp: *Importer) Error!void {
         const p = imp.pack orelse return;
         imp.pack = null;
-        _ = try imp.repo.odb.finishPack(imp.io, p);
+        _ = try imp.repo.objectDatabase().finishPack(imp.io, p);
         var it = imp.pending.valueIterator();
         while (it.next()) |v| imp.gpa.free(v.bytes);
         imp.pending.clearRetainingCapacity();
@@ -1573,12 +1579,12 @@ const Importer = struct {
     /// The bytes are the caller's.
     fn readObject(imp: *Importer, oid: Oid) Error!odb_mod.Odb.Read {
         if (imp.pending.get(oid)) |p| return .{ .type = p.type, .bytes = try imp.gpa.dupe(u8, p.bytes) };
-        return imp.repo.odb.read(imp.io, oid);
+        return imp.repo.objectDatabase().read(imp.io, oid);
     }
 
     fn typeOf(imp: *Importer, oid: Oid) Error!?object.Type {
         if (imp.types.get(oid)) |t| return t;
-        const header = imp.repo.odb.readHeader(imp.io, oid) catch |err| switch (err) {
+        const header = imp.repo.objectDatabase().readHeader(imp.io, oid) catch |err| switch (err) {
             error.ObjectNotFound => return null,
             else => |e| return e,
         };
@@ -1638,7 +1644,7 @@ const Importer = struct {
 
     /// Update every branch: git's `dump_branches` and `update_branch`.
     fn dumpBranches(imp: *Importer) Error!void {
-        const db = &imp.repo.odb;
+        const db = imp.repo.objectDatabase();
         for (imp.branches.values()) |b| {
             const store_refs = imp.repo.refStore();
             if (afterPrefix(b.name, "refs/replace/")) |rest| if (b.oid) |oid| {
@@ -1664,7 +1670,7 @@ const Importer = struct {
                     try imp.rejected.append(imp.gpa, .{ .name = b.name, .new = new, .old = o, .reason = .missing_commits });
                     continue;
                 }
-                if (!try revwalk.isAncestor(imp.gpa, imp.io, db, old_commit.?, new_commit.?)) {
+                if (!try revwalk.isAncestor(imp.gpa, imp.io, db, old_commit.?, new_commit.?, .{})) {
                     try imp.rejected.append(imp.gpa, .{ .name = b.name, .new = new, .old = o, .reason = .not_fast_forward });
                     continue;
                 }

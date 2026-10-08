@@ -9,21 +9,21 @@
 //! (`transport/local.zig`), so what a link in it points at reaches a clone
 //! only as an object its refs name.
 
+const local = @import("../../transport/local.zig");
 const std = @import("std");
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 
 const apply = @import("../../patch/apply.zig");
-const repo_mod = @import("../../repo.zig");
-const worktree = @import("../../worktree.zig");
-const index_mod = @import("../../index.zig");
+const repo_mod = @import("../../repo/repo.zig");
+const worktree = @import("../../checkout/checkout.zig");
+const index_mod = @import("../../index/index.zig");
 const clone_mod = @import("../../transport/clone.zig");
-const local = @import("../../transport/local.zig");
-const transport = @import("../../transport.zig");
-const submodule = @import("../../submodule.zig");
-const object = @import("../../object.zig");
-const hash = @import("../../hash.zig");
+const transport = @import("../../transport/transport.zig");
+const submodule = @import("../../submodule/submodule.zig");
+const object = @import("../../object/object.zig");
+const hash = @import("../../hash/hash.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 
@@ -193,7 +193,7 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
             defer index.deinit();
             // Refused, or written with the delayed file kept inside: what
             // must never be is a file in `target-dir`.
-            if (worktree.checkout(gpa, io, git.dir, &index, &repo.odb, try hash.Oid.parse(.sha1, tree_text), .{
+            if (worktree.checkout(gpa, io, git.dir, &index, repo.objectDatabase(), try hash.Oid.parse(.sha1, tree_text), .{
                 .rules = rules,
                 .programs = .{ .environ = &env },
             })) |_| {} else |_| {}
@@ -416,6 +416,6 @@ test "CVE-2024-32002, t7423-submodule-symlinks 'git submodule update must not cr
     rules.ignore_case = true;
     var why: worktree.Refusal = .{};
     try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{ .rules = rules, .refusal = &why }));
-    try std.testing.expectEqual(worktree.safepath.Reason.path_collision, why.reason.?);
+    try std.testing.expectEqual(@import("../../names/path.zig").Reason.path_collision, why.reason.?);
     try std.testing.expectError(error.FileNotFound, h.git_dir.access(io, "modules/x", .{}));
 }

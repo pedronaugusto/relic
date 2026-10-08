@@ -1,0 +1,85 @@
+error: ImportBoundary
+/Users/gusto/work/tycho/.wt/relic-phase2/zig-pkg/preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P/src/structure.zig:82:24: 0x1002d304b in main (preflight-structure)
+    if (problems != 0) return error.ImportBoundary;
+                       ^
+test
++- examples
+   +- run exe usage
+      +- lint
+         +- run exe preflight-checks
+            +- run exe preflight-structure failure
+error: process exited with code 1
+failed command: cd . && ./.zig-cache/o/084c57191313976a2cb7b1d4c6a5092b/preflight-structure --config ci/preflight.json
+
+Build Summary: 28/38 steps succeeded (1 failed)
+test transitive failure
++- run test relic-tests transitive failure
+|  +- lint transitive failure
+|     +- run exe preflight-checks transitive failure
+|        +- run exe preflight-structure failure
++- examples transitive failure
+|  +- run exe usage transitive failure
+|  |  +- lint (+1 more reused dependencies)
+|  +- run test transitive failure
+|     +- lint (+1 more reused dependencies)
++- run exe relic-regressions transitive failure
+|  +- lint (+1 more reused dependencies)
++- run exe relic-phase2 transitive failure
+   +- lint (+1 more reused dependencies)
+
+s: unused imports: src/odb/revindex_test.zig: @import("revindex.zig")
+imports: unused imports: src/refs/reftablestack/policy.zig: @import("../../hash/hash.zig")
+imports: unused imports: src/refs/reftablestack/transaction.zig: @import("builtin")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("../hash/hash.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack/cache.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/refs/reftablestack_test.zig: @import("reftablestack.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/refs_ownership.zig: @import("../refs/refs.zig")
+imports: unused imports: src/testing/security/submodule_name.zig: @import("../../checkout/checkout.zig")
+imports: unused imports: src/testing/url_ownership.zig: @import("../wire/url.zig")
+imports: unused imports: src/testing/url_ownership.zig: @import("../wire/url.zig")
+imports: unused imports: src/testing/url_ownership.zig: @import("../wire/url.zig")
+imports: unused imports: src/testing/url_ownership.zig: @import("../wire/url.zig")
+imports: unused imports: src/testing/url_ownership.zig: @import("../wire/url.zig")
+imports: unused imports: src/testing/url_ownership.zig: @import("../wire/url.zig")
+imports: unused imports: src/testing/url_ownership.zig: @import("../hash/hash.zig")
+imports: unused imports: src/walk/objectwalk/filter.zig: @import("../../hash/hash.zig")
+imports: layers: src/checkout/checkout.zig -> src/lfs/lfs.zig (upward)
+imports: layers: src/checkout/convert.zig -> src/lfs/lfs.zig (upward)
+imports: layers: src/checkout/filter.zig -> src/lfs/lfs.zig (upward)
+imports: layers: src/transport/clone.zig -> src/lfs/clone.zig (upward)
+imports: layers: src/transport/push.zig -> src/lfs/push.zig (upward)

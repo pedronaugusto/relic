@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const ident = @import("ident.zig");
-const config_mod = @import("../config.zig");
+const config_mod = @import("../config/config.zig");
 const testgit = @import("../testing/git.zig");
 
 const Case = struct {

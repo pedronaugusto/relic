@@ -13,23 +13,23 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
-const odb_mod = @import("../odb.zig");
+const hash = @import("../hash/hash.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
+const odb_mod = @import("../odb/odb.zig");
 const pack = @import("../odb/pack.zig");
-const protocol = @import("protocol.zig");
-const objectwalk = @import("objectwalk.zig");
-const url_mod = @import("url.zig");
-const object = @import("../object.zig");
-const revwalk = @import("../revwalk.zig");
-const shallow_mod = @import("../revwalk/shallow.zig");
+const protocol = @import("../wire/protocol.zig");
+const objectwalk = @import("../walk/objectwalk.zig");
+const url_mod = @import("../wire/url.zig");
+const object = @import("../object/object.zig");
+const revwalk = @import("../walk/walk.zig");
+const shallow_mod = @import("../walk/shallow.zig");
 const ref_names = @import("../names/ref.zig");
-const sendpack = @import("sendpack.zig");
-const hidden_refs = @import("hidden.zig");
+const sendpack = @import("../wire/sendpack.zig");
+const hidden_refs = @import("../wire/hidden.zig");
 const builtin = @import("builtin");
 const revindex = @import("../odb/revindex.zig");
-const config_mod = @import("../config.zig");
+const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;
 
@@ -52,7 +52,7 @@ pub const Remote = struct {
     /// The refs not shown: `uploadpack.hideRefs` and `transfer.hideRefs`
     /// from the repository's configuration, or `receive.hideRefs` once
     /// `serve` says a push is coming.
-    hidden: hidden_refs.HiddenRefs,
+    hidden: hidden_refs.Refs,
 
     /// Open the repository at `location`: a path, relative to the current
     /// directory or absolute, or a `file://` URL. The path is the
@@ -86,7 +86,7 @@ pub const Remote = struct {
         };
         var opened = repo;
         errdefer opened.deinit(io);
-        const hidden = try hidden_refs.HiddenRefs.load(gpa, opened.configuration(), .upload_pack);
+        const hidden = try hidden_refs.Refs.load(gpa, opened.configuration(), .upload_pack);
         return .{ .gpa = gpa, .repo = opened, .hidden = hidden };
     }
 
@@ -100,7 +100,7 @@ pub const Remote = struct {
     /// Hide what the repository hides from `service`: a push is shown
     /// what `receive.hideRefs` leaves.
     pub fn serve(r: *Remote, service: hidden_refs.Service) Error!void {
-        const hidden = try hidden_refs.HiddenRefs.load(r.gpa, r.repo.configuration(), service);
+        const hidden = try hidden_refs.Refs.load(r.gpa, r.repo.configuration(), service);
         r.hidden.deinit();
         r.hidden = hidden;
     }
@@ -172,8 +172,8 @@ pub const Remote = struct {
             }
             if (entry.peeled) |peeled| {
                 ref.peeled = peeled;
-            } else if (try r.repo.odb.exists(io, ref.oid)) {
-                const header = try r.repo.odb.readHeader(io, ref.oid);
+            } else if (try r.repo.objectDatabase().exists(io, ref.oid)) {
+                const header = try r.repo.objectDatabase().readHeader(io, ref.oid);
                 if (header.type == .tag) ref.peeled = try r.repo.peel(io, ref.oid);
             }
             try out.append(arena, ref);
@@ -198,7 +198,7 @@ pub const Remote = struct {
         include_tags: bool,
         options: odb_mod.PackOptions,
     ) Error!?pack.WriteReport {
-        var collected = try objectwalk.missing(r.gpa, io, &r.repo.odb, wants, haves);
+        var collected = try objectwalk.missing(r.gpa, io, r.repo.objectDatabase(), wants, haves);
         defer collected.deinit();
         if (collected.entries.len == 0) return null;
 
@@ -222,11 +222,11 @@ pub const Remote = struct {
                 var current = start;
                 var depth: u8 = 0;
                 while (depth < 16) : (depth += 1) {
-                    if (!try r.repo.odb.exists(io, current)) break;
-                    const header = try r.repo.odb.readHeader(io, current);
+                    if (!try r.repo.objectDatabase().exists(io, current)) break;
+                    const header = try r.repo.objectDatabase().readHeader(io, current);
                     if (header.type != .tag) break;
                     try chain.append(r.gpa, current);
-                    const found = try r.repo.odb.read(io, current);
+                    const found = try r.repo.objectDatabase().read(io, current);
                     defer r.gpa.free(found.bytes);
                     var tag = try object.Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
                     defer tag.deinit();
@@ -245,7 +245,7 @@ pub const Remote = struct {
             }
         }
 
-        const report = try r.repo.odb.writePack(io, pack_dir, collected.entries, options);
+        const report = try r.repo.objectDatabase().writePack(io, pack_dir, collected.entries, options);
         try into.refresh(io);
         return report;
     }
@@ -257,6 +257,9 @@ pub const Remote = struct {
         /// Apply every command or none.
         atomic: bool = false,
     };
+
+    /// Errors from `receivePush`.
+    pub const ReceivePushError = Error || sendpack.Error;
 
     /// Apply a push to this repository as `git-receive-pack` applies one:
     /// the objects copied from `from` as one pack, then each command under
@@ -277,7 +280,7 @@ pub const Remote = struct {
         commands: []const sendpack.Command,
         objects: []const odb_mod.PackEntry,
         options: ReceiveOptions,
-    ) (Error || sendpack.Error)!sendpack.Report {
+    ) ReceivePushError!sendpack.Report {
         try r.refuseHooks(io);
 
         var report: sendpack.Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
@@ -289,10 +292,10 @@ pub const Remote = struct {
             if (!command.new.isZero()) needs_pack = true;
         }
         if (needs_pack and objects.len != 0) {
-            var pack_dir = try r.repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
+            var pack_dir = try r.repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
             defer pack_dir.close(io);
             _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = revindex.wanted(r.repo.configuration()) });
-            try r.repo.odb.refresh(io);
+            try r.repo.objectDatabase().refresh(io);
         }
 
         const config = r.repo.configuration();
@@ -325,7 +328,7 @@ pub const Remote = struct {
                 if (is_current and deny_delete_current) reason = "deletion of the current branch prohibited";
             } else {
                 if (is_current and deny_current) reason = "branch is currently checked out";
-                if (reason == null and !try r.repo.odb.exists(io, command.new)) reason = "missing necessary objects";
+                if (reason == null and !try r.repo.objectDatabase().exists(io, command.new)) reason = "missing necessary objects";
                 // A shallow pusher's history ends at its boundary; taking a
                 // ref whose history does moves this repository's, which git
                 // allows only with `receive.shallowUpdate`.
@@ -338,7 +341,7 @@ pub const Remote = struct {
                     }
                 }
                 if (reason == null and deny_non_ff and !command.old.isZero()) {
-                    const ok = revwalk.isAncestor(gpa, io, &r.repo.odb, command.old, command.new) catch false;
+                    const ok = revwalk.isAncestor(gpa, io, r.repo.objectDatabase(), command.old, command.new, .{}) catch false;
                     if (!ok) reason = "non-fast-forward";
                 }
             }
@@ -379,8 +382,8 @@ pub const Remote = struct {
         }
         if (new_roots.count() != 0) {
             var it = new_roots.keyIterator();
-            while (it.next()) |root| try r.repo.odb.shallow.put(r.repo.gpa, root.*, {});
-            try shallow_mod.write(gpa, io, r.repo.common_dir, &r.repo.odb.shallow);
+            while (it.next()) |root| try r.repo.objectDatabase().shallow.put(r.repo.allocator(), root.*, {});
+            try shallow_mod.write(gpa, io, r.repo.commonDirectory(), &r.repo.objectDatabase().shallow);
         }
         report.refs = refs.items;
         return report;
@@ -391,7 +394,7 @@ pub const Remote = struct {
         // receive-pack's own rules, as git rejects it.
         return if (command.new.isZero())
             "deny deleting a hidden ref"
-        else if (!try r.repo.odb.exists(io, command.new))
+        else if (!try r.repo.objectDatabase().exists(io, command.new))
             "missing necessary objects"
         else
             "deny updating a hidden ref";
@@ -435,7 +438,7 @@ pub const Remote = struct {
         var dir = (if (hooks_path) |path|
             Io.Dir.cwd().openDir(io, path, .{})
         else
-            r.repo.common_dir.openDir(io, "hooks", .{})) catch return;
+            r.repo.commonDirectory().openDir(io, "hooks", .{})) catch return;
         defer dir.close(io);
         for ([_][]const u8{
             "pre-receive",  "update",           "post-receive",          "post-update",

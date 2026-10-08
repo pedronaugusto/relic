@@ -4,13 +4,13 @@
 //! architecture's `wire/policy`), which `transport.Session.open` asks for
 //! every transport, a remote helper's included, and a redirect asks again.
 
+const config_mod = @import("../../config/config.zig");
 const std = @import("std");
 const Io = std.Io;
 
-const policy = @import("../../transport/policy.zig");
-const transport = @import("../../transport.zig");
-const config_mod = @import("../../config.zig");
-const object = @import("../../object.zig");
+const policy = @import("../../wire/policy.zig");
+const transport = @import("../../transport/transport.zig");
+const object = @import("../../object/object.zig");
 const sub_transport = @import("../../submodule/transport.zig");
 const testgit = @import("../git.zig");
 const testremote = @import("../remote.zig");
@@ -107,7 +107,7 @@ test "git 2.11.1, t5812-proto-disable-http 'curl limits redirects' and t5550-htt
         defer gpa.free(url);
         if (transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{})) |opened| {
             var session = opened;
-            session.close(io);
+            session.deinit(io);
             std.debug.print("a redirect to {s} was followed\n", .{to});
             return error.TestUnexpectedResult;
         } else |_| {}
@@ -122,7 +122,7 @@ test "git 2.11.1, t5812-proto-disable-http 'curl limits redirects' and t5550-htt
     defer never.deinit();
     try std.testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &never }));
     var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{});
-    defer session.close(io);
+    defer session.deinit(io);
     var refs = try session.listRefs(gpa, io, &.{"refs/heads/"});
     defer refs.deinit();
     const log = try server.requests(gpa);

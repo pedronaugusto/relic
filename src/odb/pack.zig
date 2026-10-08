@@ -9,19 +9,20 @@
 //! and for a pack received by `indexpack.zig`.
 
 const Self = @This();
+const retention = @import("keep.zig");
 
 const std = @import("std");
-const crc32 = @import("../crc32.zig");
+const crc32 = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
 const inflate_mod = @import("inflate.zig");
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const delta = @import("delta.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const delta = @import("../codec/delta.zig");
 const revindex = @import("revindex.zig");
-const fs = @import("../repo/fs.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -1702,8 +1703,8 @@ pub const WriteError = error{
     /// A name this pack already holds. An index's names must rise, so a
     /// pack cannot hold one twice; `Writer.holds` says whether it does.
     DuplicateObject,
-} || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
-    Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
+} || retention.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
+    @import("../fs/fs.zig").SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirError || Io.File.WritePositionalError ||
     Io.File.ReadPositionalError;
 
@@ -1731,6 +1732,8 @@ pub const Compression = enum {
 
 /// How a pack is written.
 pub const WriteOptions = struct {
+    /// Retain publication until the returned report is released.
+    keep: bool = false,
     /// How hard the two files are pushed towards the disk before they are
     /// renamed into place. A pack that a loose object is about to be deleted
     /// for wants `batch` at least.
@@ -1747,6 +1750,7 @@ pub const WriteOptions = struct {
 
 /// What a finished pack turned out to be.
 pub const WriteReport = struct {
+    keep: ?retention.Token = null,
     /// The pack's own trailing checksum, which is the name both files carry:
     /// `pack-<name>.pack` and `pack-<name>.idx`. It is what git names a pack
     /// after too.
@@ -1967,7 +1971,7 @@ pub const Writer = struct {
         w.sink = .{
             .out = out,
             .hasher = .init(kind),
-            .crc = .init(),
+            .crc = .init,
             .count = 0,
             .writer = .{ .buffer = &w.sink.buffer, .vtable = &.{ .drain = Sink.drain } },
             .buffer = undefined,
@@ -2029,7 +2033,7 @@ pub const Writer = struct {
         w.sink = .{
             .out = &w.file_writer.interface,
             .hasher = .init(kind),
-            .crc = .init(),
+            .crc = .init,
             .count = 0,
             .writer = .{ .buffer = &w.sink.buffer, .vtable = &.{ .drain = Sink.drain } },
             .buffer = undefined,
@@ -2172,7 +2176,7 @@ pub const Writer = struct {
             if (w.entries.items.len >= expected) return error.ObjectCountMismatch;
         }
         if (w.seen.contains(oid)) return error.DuplicateObject;
-        w.sink.crc = .init();
+        w.sink.crc = .init;
 
         var head: [16]u8 = undefined;
         const head_len = encodeTypeAndSize(&head, type_bits, payload_len);
@@ -2213,11 +2217,13 @@ pub const Writer = struct {
         else
             try w.patchCountAndRehash(io);
         try w.sink.out.writeAll(checksum.raw());
+        var token: ?retention.Token = if (w.options.keep) try retention.Token.open(w.gpa, io, w.dir, checksum) else null;
+        errdefer if (token) |*t| t.deinit(io);
         const pack_bytes = w.sink.count + w.kind.rawLen();
         try w.file_writer.interface.flush();
         switch (w.options.sync) {
             .none => {},
-            .batch, .per_file => try w.file.sync(io),
+            .batch, .per_file => try fs.syncFile(io, w.file, .{ .policy = w.options.sync }),
         }
         w.file.close(io);
         w.finished = true;
@@ -2270,6 +2276,7 @@ pub const Writer = struct {
         };
 
         return .{
+            .keep = token,
             .name = checksum,
             .objects = @intCast(w.entries.items.len),
             .pack_bytes = pack_bytes,
@@ -2412,7 +2419,7 @@ pub fn writeIndexFile(
     try out.flush();
     switch (sync) {
         .none => {},
-        .batch, .per_file => try file.sync(io),
+        .batch, .per_file => try fs.syncFile(io, file, .{ .policy = sync }),
     }
     file.close(io);
     failed = false;

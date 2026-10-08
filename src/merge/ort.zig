@@ -33,18 +33,18 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
 const merge = @import("blobmerge.zig");
 const subtreeshift = @import("subtreeshift.zig");
 const rename = @import("../diff/rename.zig");
-const attributes = @import("../worktree/attributes.zig");
-const revwalk = @import("../revwalk.zig");
+const attributes = @import("../patterns/attributes.zig");
+const revwalk = @import("../walk/walk.zig");
 const abbrev = @import("../odb/abbrev.zig");
-const convert = @import("../worktree/convert.zig");
-const parallax = @import("../dependencies.zig").parallax;
-const message = @import("../commit/message.zig");
+const convert = @import("../checkout/convert.zig");
+const parallax = @import("parallax");
+const message = @import("../object/message.zig");
 
 const Oid = hash.Oid;
 
@@ -313,7 +313,7 @@ pub const Result = struct {
 /// Merge the trees `ours` and `theirs` against `base`, which is `null` for
 /// two histories with nothing in common: `merge_incore_nonrecursive`, as a
 /// cherry-pick, a revert and `merge-tree --merge-base` use it.
-pub fn mergeTrees(
+pub fn trees(
     gpa: Allocator,
     io: Io,
     db: *odb_mod.Odb,
@@ -336,7 +336,7 @@ pub fn mergeTrees(
 /// first: `merge_incore_recursive`, as `git merge` and a rebase's `merge`
 /// use it. `bases` is in the order git passes them, the oldest first, or
 /// `null` to find them.
-pub fn mergeCommits(
+pub fn commits(
     gpa: Allocator,
     io: Io,
     db: *odb_mod.Odb,
@@ -618,10 +618,10 @@ const Merge = struct {
 
     /// `traverse_trees` over three trees: every name any of them holds,
     /// in byte order, a file and a directory of one name met together.
-    fn traverse(m: *Merge, trees: [3]?Oid, dir: []const u8, depth: u32) Error!void {
+    fn traverse(m: *Merge, tree_ids: [3]?Oid, dir: []const u8, depth: u32) Error!void {
         if (depth > max_tree_depth) return error.TreeTooDeep;
         var lists: [3][]TreeItem = undefined;
-        for (0..3) |i| lists[i] = try m.readTree(trees[i]);
+        for (0..3) |i| lists[i] = try m.readTree(tree_ids[i]);
         var names: std.array_hash_map.String(Names) = .empty;
         for (lists, 0..) |list, i| {
             for (list) |item| {
@@ -764,11 +764,11 @@ const Merge = struct {
             }
 
             ci.match_mask &= filemask;
-            var trees: [3]?Oid = undefined;
-            for (0..3) |i| trees[i] = if (isDir(names[i].mode)) names[i].oid else null;
+            var tree_ids: [3]?Oid = undefined;
+            for (0..3) |i| tree_ids[i] = if (isDir(names[i].mode)) names[i].oid else null;
             const original_dir_name = m.current_dir_name;
             m.current_dir_name = fullpath;
-            try m.traverse(trees, fullpath, depth + 1);
+            try m.traverse(tree_ids, fullpath, depth + 1);
             m.current_dir_name = original_dir_name;
             m.dir_rename_mask = prev_dir_rename_mask;
         }
@@ -875,9 +875,9 @@ const Merge = struct {
                     resolveTrivialDirectoryMerge(ci, side);
                     continue;
                 }
-                var trees: [3]?Oid = undefined;
+                var tree_ids: [3]?Oid = undefined;
                 const dirmask = ci.dirmask;
-                for (0..3) |i| trees[i] = if (dirmask & (@as(u3, 1) << @intCast(i)) != 0) ci.stages[i].oid else null;
+                for (0..3) |i| tree_ids[i] = if (dirmask & (@as(u3, 1) << @intCast(i)) != 0) ci.stages[i].oid else null;
                 ci.match_mask &= ci.filemask;
                 m.current_dir_name = path;
                 m.dir_rename_mask = node.value;
@@ -885,7 +885,7 @@ const Merge = struct {
                 // As deep as the directory sits: `traverse` counts from the
                 // root, wherever the walk picks a directory up again.
                 const depth = std.math.cast(u32, std.mem.countScalar(u8, interned, '/') + 1) orelse return error.TreeTooDeep;
-                try m.traverse(trees, interned, depth);
+                try m.traverse(tree_ids, interned, depth);
             }
             var rest = m.deferred[side].possible_trivial_merges.iterator();
             while (rest.next()) |node| {
@@ -1184,17 +1184,17 @@ const Merge = struct {
             }
         }
         const gpa = m.db.allocator();
-        if (!try revwalk.isAncestor(gpa, m.io, sdb, o, a) or !try revwalk.isAncestor(gpa, m.io, sdb, o, b)) {
+        if (!try revwalk.isAncestor(gpa, m.io, sdb, o, a, .{}) or !try revwalk.isAncestor(gpa, m.io, sdb, o, b, .{})) {
             try m.pathMsg("Failed to merge submodule {s} (commits don't follow merge-base)", .submodule_may_have_rewinds, path, null, null, &.{}, .{path});
             return false;
         }
         var hex: [hash.max_hex_len]u8 = undefined;
-        if (try revwalk.isAncestor(gpa, m.io, sdb, a, b)) {
+        if (try revwalk.isAncestor(gpa, m.io, sdb, a, b, .{})) {
             result.* = b;
             try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, b.hex(&hex) });
             return true;
         }
-        if (try revwalk.isAncestor(gpa, m.io, sdb, b, a)) {
+        if (try revwalk.isAncestor(gpa, m.io, sdb, b, a, .{})) {
             result.* = a;
             try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, a.hex(&hex) });
             return true;
@@ -1238,15 +1238,15 @@ const Merge = struct {
         while (try walk.next(m.io)) |commit| {
             if (commit.parents.len < 2) continue;
             // `--ancestry-path`: descendants of `a` only.
-            if (!try revwalk.isAncestor(gpa, m.io, sdb, a, commit.oid)) continue;
-            if (try revwalk.isAncestor(gpa, m.io, sdb, b, commit.oid)) try candidates.append(m.arena, commit.oid);
+            if (!try revwalk.isAncestor(gpa, m.io, sdb, a, commit.oid, .{})) continue;
+            if (try revwalk.isAncestor(gpa, m.io, sdb, b, commit.oid, .{})) try candidates.append(m.arena, commit.oid);
         }
         var out: std.ArrayList(Oid) = .empty;
         for (candidates.items, 0..) |m1, i| {
             var contains_another = false;
             for (candidates.items, 0..) |m2, j| {
                 if (i == j) continue;
-                if (try revwalk.isAncestor(gpa, m.io, sdb, m2, m1)) {
+                if (try revwalk.isAncestor(gpa, m.io, sdb, m2, m1, .{})) {
                     contains_another = true;
                     break;
                 }
@@ -1764,7 +1764,7 @@ const Merge = struct {
     }
 
     //---------------------------------------------------------------------
-    // Processing every path, and writing trees
+    // Processing every path, and writing tree_ids
     //---------------------------------------------------------------------
 
     const VersionItem = struct { name: []const u8, version: *Version };
@@ -2116,7 +2116,7 @@ const Merge = struct {
             try virtuals.append(m.arena, .{ .oid = v.fake, .parents = parents });
         }
         const gpa = m.db.allocator();
-        const found = try revwalk.mergeBasesWith(gpa, m.io, m.db, m.oidOf(a), m.oidOf(b), .{ .virtuals = virtuals.items });
+        const found = try revwalk.mergeBases(gpa, m.io, m.db, m.oidOf(a), m.oidOf(b), .{ .virtuals = virtuals.items });
         defer gpa.free(found);
         return m.arena.dupe(Oid, found);
     }

@@ -29,13 +29,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const repo_mod = @import("../repo.zig");
-const attributes = @import("../worktree/attributes.zig");
-const fs = @import("../repo/fs.zig");
-const lfs = @import("../lfs.zig");
+const repo_mod = @import("../repo/repo.zig");
+const attributes = @import("../patterns/attributes.zig");
+const fs = @import("../fs/fs.zig");
+const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfsssh = @import("ssh.zig");
-const index_mod = @import("../index.zig");
+const index_mod = @import("../index/index.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -127,8 +127,11 @@ fn toLocks(arena: Allocator, raw: []const LockJson) (Allocator.Error || error{Ma
     return out;
 }
 
+/// Errors from `parseLockAnswer`.
+pub const ParseLockAnswerError = Allocator.Error || error{MalformedResponse};
+
 /// Read an answer to `POST /locks` or `POST /locks/<id>/unlock`.
-pub fn parseLockAnswer(arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!LockAnswer {
+pub fn parseLockAnswer(arena: Allocator, bytes: []const u8) ParseLockAnswerError!LockAnswer {
     const Raw = struct { lock: ?LockJson = null, message: ?[]const u8 = null };
     const raw = try parseJson(Raw, arena, bytes);
     if (raw.lock) |l| {
@@ -138,9 +141,12 @@ pub fn parseLockAnswer(arena: Allocator, bytes: []const u8) (Allocator.Error || 
     return .{ .message = raw.message };
 }
 
+/// Errors from `parseListPage`.
+pub const ParseListPageError = Allocator.Error || error{MalformedResponse};
+
 /// Read a page of `GET /locks`, or the `remote` cache git-lfs writes, which
 /// is a bare array of locks.
-pub fn parseListPage(arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!ListPage {
+pub fn parseListPage(arena: Allocator, bytes: []const u8) ParseListPageError!ListPage {
     const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
     if (trimmed.len != 0 and trimmed[0] == '[') {
         return .{ .locks = try toLocks(arena, try parseJson([]const LockJson, arena, trimmed)) };
@@ -150,8 +156,11 @@ pub fn parseListPage(arena: Allocator, bytes: []const u8) (Allocator.Error || er
     return .{ .locks = try toLocks(arena, raw.locks orelse &.{}), .next_cursor = raw.next_cursor, .message = raw.message };
 }
 
+/// Errors from `parseVerifyPage`.
+pub const ParseVerifyPageError = Allocator.Error || error{MalformedResponse};
+
 /// Read a page of `POST /locks/verify`, or the `verifiable` cache.
-pub fn parseVerifyPage(arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!VerifyPage {
+pub fn parseVerifyPage(arena: Allocator, bytes: []const u8) ParseVerifyPageError!VerifyPage {
     const Raw = struct { ours: ?[]const LockJson = null, theirs: ?[]const LockJson = null, next_cursor: ?[]const u8 = null, message: ?[]const u8 = null };
     const raw = try parseJson(Raw, arena, bytes);
     return .{
@@ -273,7 +282,7 @@ pub fn lock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, path: [
         s.endObject() catch return error.OutOfMemory;
     }
     const ex = try server.client.api(.upload, .POST, "locks", body.written(), 0);
-    defer ex.close();
+    defer ex.deinit();
     const status = ex.status();
     if (status == .not_found or status == .not_implemented) {
         server.client.noteStatus(ex, "lock");
@@ -301,7 +310,7 @@ fn tookLock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, taken: 
     var cache = try Cache.load(arena, server, ref);
     cache.addOurs(arena, taken) catch return error.OutOfMemory;
     try cache.save(arena, server, ref);
-    if (repo.work_dir) |wt| _ = try setWritable(server.io, wt, path, true);
+    if (repo.workDirectory()) |wt| _ = try setWritable(server.io, wt, path, true);
 }
 
 /// Give back the lock with `id`, or break someone else's with `force`, as
@@ -330,7 +339,7 @@ fn unlockAsked(arena: Allocator, server: *lfsapi.Server, repo: *Repository, id: 
     }
     const suffix = try arena.print("locks/{s}/unlock", .{id});
     const ex = try server.client.api(.upload, .POST, suffix, body.written(), 0);
-    defer ex.close();
+    defer ex.deinit();
     const status = ex.status();
     switch (status) {
         .not_implemented => {
@@ -370,7 +379,7 @@ fn gaveBack(arena: Allocator, server: *lfsapi.Server, repo: *Repository, release
     try cache.remove(arena, id);
     try cache.save(arena, server, ref);
     const path = asked orelse if (checkPath(released.path)) released.path else |_| return;
-    if (repo.work_dir) |wt| {
+    if (repo.workDirectory()) |wt| {
         if (readOnlyWanted(&server.settings)) {
             var lockables = try Lockables.load(server.io, repo);
             defer lockables.deinit();
@@ -394,6 +403,21 @@ pub fn unlockPath(arena: Allocator, server: *lfsapi.Server, repo: *Repository, p
     return unlockAsked(arena, server, repo, id, path, force, options);
 }
 
+/// Progress is shared by HTTP and SSH listings and verification. A repeated
+/// opaque cursor is a malformed response, including cycles longer than one.
+const Pagination = struct {
+    seen: std.StringHashMapUnmanaged(void) = .empty,
+
+    fn next(p: *Pagination, arena: Allocator, cursor: ?[]const u8) Self.Error!?[]const u8 {
+        const value = cursor orelse return null;
+        if (value.len == 0) return null;
+        const entry = try p.seen.getOrPut(arena, value);
+        if (entry.found_existing) return error.MalformedResponse;
+        entry.key_ptr.* = try arena.dupe(u8, value);
+        return entry.key_ptr.*;
+    }
+};
+
 /// What a listing asks for.
 pub const Filter = struct {
     path: ?[]const u8 = null,
@@ -412,6 +436,7 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
     const ref = try refFor(arena, server.io, repo, options);
     var locks: std.ArrayList(Lock) = .empty;
     var cursor: ?[]const u8 = null;
+    var pages: Pagination = .{};
     const ssh = try server.client.sshTransfer(.download);
     while (true) {
         if (ssh) |t| {
@@ -421,7 +446,7 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
                 if (filter.limit != 0 and locks.items.len >= filter.limit) break;
             }
             if (filter.limit != 0 and locks.items.len >= filter.limit) break;
-            cursor = page.next_cursor orelse break;
+            cursor = try pages.next(arena, page.next_cursor) orelse break;
             continue;
         }
         var query: std.ArrayList(u8) = .empty;
@@ -441,7 +466,7 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
             sep = '&';
         }
         const ex = try server.client.api(.download, .GET, query.items, null, 0);
-        defer ex.close();
+        defer ex.deinit();
         const status = ex.status();
         if (status == .not_found or status == .not_implemented) {
             server.client.noteStatus(ex, "locks");
@@ -458,7 +483,7 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
             if (filter.limit != 0 and locks.items.len >= filter.limit) break;
         }
         if (filter.limit != 0 and locks.items.len >= filter.limit) break;
-        cursor = page.next_cursor orelse break;
+        cursor = try pages.next(arena, page.next_cursor) orelse break;
     }
     out.locks = locks.items;
     if (filter.path == null and filter.id == null and filter.limit == 0) {
@@ -481,6 +506,7 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Self.
     var ours: std.ArrayList(Lock) = .empty;
     var theirs: std.ArrayList(Lock) = .empty;
     var cursor: ?[]const u8 = null;
+    var pages: Pagination = .{};
     const ssh = try server.client.sshTransfer(.upload);
     while (true) {
         if (ssh) |t| {
@@ -490,7 +516,7 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Self.
                 .theirs => try theirs.append(arena, l.lock),
                 .unknown => {},
             };
-            cursor = page.next_cursor orelse break;
+            cursor = try pages.next(arena, page.next_cursor) orelse break;
             continue;
         }
         var body: Io.Writer.Allocating = .init(arena);
@@ -505,7 +531,7 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Self.
             s.endObject() catch return error.OutOfMemory;
         }
         const ex = try server.client.api(.upload, .POST, "locks/verify", body.written(), 0);
-        defer ex.close();
+        defer ex.deinit();
         const status = ex.status();
         if (status == .not_found or status == .not_implemented) {
             server.client.noteStatus(ex, "locks/verify");
@@ -519,7 +545,7 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Self.
         }
         try ours.appendSlice(arena, page.ours);
         try theirs.appendSlice(arena, page.theirs);
-        cursor = page.next_cursor orelse break;
+        cursor = try pages.next(arena, page.next_cursor) orelse break;
     }
     out.ours = ours.items;
     out.theirs = theirs.items;
@@ -648,11 +674,14 @@ fn sshListPage(arena: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, q:
     return .{ .locks = try parseSshLocks(arena, status.lines), .next_cursor = status.arg("next-cursor") };
 }
 
+/// Errors from `parseSshLocks`.
+pub const ParseSshLocksError = Allocator.Error || error{MalformedResponse};
+
 /// Read the lines of a `list-lock` answer: each lock declared by `lock
 /// <id>` and described by `path`, `locked-at`, `ownername` and `owner`
 /// lines naming the same id, as git-lfs reads them. Anything else is
 /// `error.MalformedResponse`.
-pub fn parseSshLocks(arena: Allocator, lines: []const []const u8) (Allocator.Error || error{MalformedResponse})![]const SshListed {
+pub fn parseSshLocks(arena: Allocator, lines: []const []const u8) ParseSshLocksError![]const SshListed {
     var out: std.ArrayList(SshListed) = .empty;
     for (lines) |line| {
         var it = std.mem.splitScalar(u8, line, ' ');
@@ -878,7 +907,7 @@ pub const Lockables = struct {
 
     /// Load them for `repo`.
     pub fn load(io: Io, repo: *Repository) Self.Error!Lockables {
-        return .{ .attrs = try repo.loadAttrs(io), .io = io, .work_dir = repo.work_dir };
+        return .{ .attrs = try repo.loadAttrs(io), .io = io, .work_dir = repo.workDirectory() };
     }
 
     /// Whether `path` has the `lockable` attribute.
@@ -917,14 +946,14 @@ pub const Fixed = struct {
 /// `lfs.setlockablereadonly` is false.
 pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Self.Error!Fixed {
     var fixed: Fixed = .{};
-    const wt = repo.work_dir orelse return fixed;
-    var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), repo.work_dir);
+    const wt = repo.workDirectory() orelse return fixed;
+    var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), repo.workDirectory());
     defer settings.deinit();
     if (!readOnlyWanted(&settings)) return fixed;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var store_settings = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, repo.work_dir, .{});
+    var store_settings = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.commonDirectory(), repo.workDirectory(), .{});
     defer store_settings.deinit();
     const ref = try refFor(arena, io, repo, options);
     const cache = try Cache.read(arena, io, &store_settings.store, ref);

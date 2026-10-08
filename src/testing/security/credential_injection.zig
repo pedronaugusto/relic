@@ -9,9 +9,9 @@ const std = @import("std");
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 
-const credential = @import("../../transport/credential.zig");
-const url_mod = @import("../../transport/url.zig");
-const config_mod = @import("../../config.zig");
+const credential = @import("../../wire/credential.zig");
+const url_mod = @import("../../wire/url.zig");
+const config_mod = @import("../../config/config.zig");
 const testgit = @import("../git.zig");
 
 /// What a fill sent its one helper, and how it ended.

@@ -1,0 +1,13 @@
+preflight: test seed 1904645295 (reproduce with PREFLIGHT_TEST_SEED=1904645295)
+expected 133, found 184
+testing.surface.test.phase2 module tables equal the exported namespace tree: TestExpectedEqual; seed 1904645295
+/Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:93:17: 0x1026ff627 in expectEqualInner__func_1200 (relic-tests)
+                return error.TestExpectedEqual;
+                ^
+/Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:57:5: 0x1027727d3 in expectEqual (relic-tests)
+    return expectEqualInner(T, expected, actual);
+    ^
+/Users/gusto/work/tycho/.wt/relic-phase2/src/testing/surface.zig:57:5: 0x102772887 in test.phase2 module tables equal the exported namespace tree (relic-tests)
+    try std.testing.expectEqual(count, rows(readme[start..end]));
+    ^
+preflight: 1 failed tests; seed 1904645295

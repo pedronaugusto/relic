@@ -44,9 +44,12 @@ pub fn murmur(seed_value: u32, path: []const u8, version: u32) u32 {
     return seed;
 }
 
+/// Errors from `build`.
+pub const BuildError = Allocator.Error || error{ UnsupportedBloomVersion, InvalidBloomSettings };
+
 /// Build a filter from distinct changed paths, including directory prefixes.
 /// Empty and oversized diffs have git's one-byte all-zero and all-one filters.
-pub fn build(gpa: Allocator, paths: []const []const u8, settings: Settings) (Allocator.Error || error{ UnsupportedBloomVersion, InvalidBloomSettings })![]u8 {
+pub fn build(gpa: Allocator, paths: []const []const u8, settings: Settings) BuildError![]u8 {
     if (settings.version != 1 and settings.version != 2) return error.UnsupportedBloomVersion;
     if (settings.hashes == 0 or settings.bits_per_entry == 0 or settings.bits_per_entry > 64 or settings.hashes > 64) return error.InvalidBloomSettings;
     if (paths.len > settings.max_changed_paths) return gpa.dupe(u8, &.{255});

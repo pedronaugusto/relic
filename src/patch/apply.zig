@@ -28,23 +28,23 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const patchparse = @import("../patch.zig");
+const patchparse = @import("patch.zig");
 const whitespace = @import("whitespace.zig");
 const binarypatch = @import("binary.zig");
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const index_mod = @import("../index.zig");
-const repo_mod = @import("../repo.zig");
-const worktree = @import("../worktree.zig");
-const attributes = @import("../worktree/attributes.zig");
-const convert = @import("../worktree/convert.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const index_mod = @import("../index/index.zig");
+const repo_mod = @import("../repo/repo.zig");
+const worktree = @import("../checkout/checkout.zig");
+const attributes = @import("../patterns/attributes.zig");
+const convert = @import("../checkout/convert.zig");
 const blobmerge = @import("../merge/blobmerge.zig");
-const fs = @import("../repo/fs.zig");
-const safepath = @import("../worktree/safepath.zig");
+const fs = @import("../fs/fs.zig");
+const safepath = @import("../names/path.zig");
 const glob_mod = @import("../text/glob.zig");
 const rerere = @import("../merge/rerere.zig");
-const program = @import("../repo/program.zig");
+const program = @import("../process/program.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -528,7 +528,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     const writes = !options.check;
     const ws = wsPolicy(ws_option, writes);
 
-    const wt: ?Io.Dir = repo.work_dir;
+    const wt: ?Io.Dir = repo.workDirectory();
     if (!cached and wt == null) return error.BareRepository;
 
     // the repository's attributes unless the caller brings rules of its
@@ -557,7 +557,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .wt = wt,
         .rules = rules,
         .conv = .init(gpa, io, .{
-            .wt = wt orelse repo.git_dir,
+            .wt = wt orelse repo.gitDirectory(),
             .kind = repo.objectFormat(),
             .core = rules.core,
             .required_filters = rules.required_filters,
@@ -605,7 +605,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         try writeOutResults(&st, list.items, &conflicted);
         std.mem.sort([]const u8, conflicted.items, {}, lessPath);
         if (conflicted.items.len != 0 and !st.cached) {
-            if (st.index) |ix| _ = try rerere.afterStop(gpa, a, io, repo, ix, null);
+            if (st.index) |ix| _ = try rerere.afterStop(gpa, io, repo, ix, .{ .arena = a, .autoupdate = null });
         }
         if (st.update_index and options.index == null) try repo.writeIndex(io, st.index.?);
     }
@@ -1301,9 +1301,9 @@ fn applyBinary(st: *State, img: *Image, entry: *Entry) Error!?Reason {
         img.clear();
         return null;
     }
-    if (try st.repo.odb.exists(st.io, new_oid.?)) {
-        const found = try st.repo.odb.read(st.io, new_oid.?);
-        defer st.repo.odb.allocator().free(found.bytes);
+    if (try st.repo.objectDatabase().exists(st.io, new_oid.?)) {
+        const found = try st.repo.objectDatabase().read(st.io, new_oid.?);
+        defer st.repo.objectDatabase().allocator().free(found.bytes);
         try img.prepare(st.gpa, found.bytes, false);
         return null;
     }
@@ -1357,8 +1357,8 @@ fn readBlobFor(st: *State, oid: Oid, mode: Mode, out: *std.ArrayList(u8)) Error!
         try out.print(st.gpa, "Subproject commit {s}\n", .{oid.hex(&hex)});
         return;
     }
-    const found = try st.repo.odb.read(st.io, oid);
-    defer st.repo.odb.allocator().free(found.bytes);
+    const found = try st.repo.objectDatabase().read(st.io, oid);
+    defer st.repo.objectDatabase().allocator().free(found.bytes);
     try out.appendSlice(st.gpa, found.bytes);
 }
 
@@ -1433,11 +1433,11 @@ fn loadPreimage(st: *State, img: *Image, entry: *Entry, found: ?fs.Entry, ce: ?i
 }
 
 fn writeBlob(st: *State, bytes: []const u8) Error!Oid {
-    return st.repo.odb.write(st.io, .blob, bytes);
+    return st.repo.objectDatabase().write(st.io, .blob, bytes);
 }
 
 fn threeWayMerge(st: *State, img: *Image, path: []const u8, base: Oid, ours: Oid, theirs: Oid) Error!bool {
-    const db = &st.repo.odb;
+    const db = st.repo.objectDatabase();
     if (base.eql(ours)) {
         try resolveTo(st, img, theirs);
         return false;
@@ -1473,8 +1473,8 @@ fn threeWayMerge(st: *State, img: *Image, path: []const u8, base: Oid, ours: Oid
 }
 
 fn resolveTo(st: *State, img: *Image, oid: Oid) Error!void {
-    const found = try st.repo.odb.read(st.io, oid);
-    defer st.repo.odb.allocator().free(found.bytes);
+    const found = try st.repo.objectDatabase().read(st.io, oid);
+    defer st.repo.objectDatabase().allocator().free(found.bytes);
     try img.prepare(st.gpa, found.bytes, false);
 }
 
@@ -1512,7 +1512,7 @@ fn tryThreeway(st: *State, img: *Image, entry: *Entry, found: ?fs.Entry, ce: ?in
         pre_oid = try writeBlob(st, "");
         try tmp.prepare(st.gpa, "", true);
     } else {
-        pre_oid = st.repo.odb.findPrefix(st.io, p.old_oid_prefix) catch return false;
+        pre_oid = st.repo.objectDatabase().findPrefix(st.io, p.old_oid_prefix) catch return false;
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(st.gpa);
         readBlobFor(st, pre_oid, p.old_mode, &buf) catch return false;
@@ -1638,7 +1638,7 @@ fn modeFromStat(st: *State, found: fs.Entry, ce: ?index_mod.Entry) Mode {
 
 fn checkoutTarget(st: *State, ce: index_mod.Entry) Error!?fs.Entry {
     const wt = st.wt.?;
-    var written = try worktree.writeEntry(st.gpa, st.io, wt, &st.repo.odb, &st.conv, ce.path, ce.mode, ce.oid, st.rules);
+    var written = try worktree.writeEntry(st.gpa, st.io, wt, st.repo.objectDatabase(), &st.conv, ce.path, ce.mode, ce.oid, st.rules);
     if (st.index.?.find(ce.path)) |e| e.stat = written.stat;
     _ = &written;
     return fs.statAt(st.io, wt, ce.path);

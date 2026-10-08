@@ -14,6 +14,9 @@ pub fn build(b: *std.Build) void {
     const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
     const parallax = b.dependency("parallax", .{ .target = target, .optimize = optimize }).module("parallax");
+    const warp = b.dependency("warp", .{ .target = target, .optimize = optimize }).module("warp");
+    const airlock_dependency = b.dependency("airlock", .{ .target = target, .optimize = optimize });
+    const airlock = airlock_dependency.module("airlock");
     const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize }).module("uplink");
 
     const module = b.addModule("relic", .{
@@ -26,6 +29,8 @@ pub fn build(b: *std.Build) void {
     module.addImport("sweep", sweep);
     module.addImport("parallax", parallax);
     module.addImport("uplink", uplink);
+    module.addImport("airlock", airlock);
+    module.addImport("warp", warp);
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -191,6 +196,10 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("sweep", sweep);
     test_module.addImport("parallax", parallax);
     test_module.addImport("uplink", uplink);
+    test_module.addImport("airlock", airlock);
+    if (b.lazyImport(@This(), "airlock")) |airlock_build|
+        test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency) catch return);
+    test_module.addImport("warp", warp);
     if (b.pkg_hash.len == 0) {
         if (b.lazyDependency("shakedown", .{ .target = target, .optimize = optimize })) |dep| {
             test_module.addImport("shakedown", dep.module("shakedown"));
@@ -283,31 +292,16 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
 
     if (b.pkg_hash.len == 0) {
-        const bench_step = b.step("bench", "Build the benchmarks into zig-out/bench");
-        const bench_options = b.addOptions();
-        bench_options.addOption(bool, "smoke", b.option(bool, "bench-smoke", "Benchmarks run every point once and read no clock") orelse false);
-        const regressions = b.addTest(.{
-            .name = "relic-regressions",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/regressions.zig"),
+        if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{
+            .tests = test_step,
+            .bench = .{
+                .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-phase2", .source = "bench/phase2.zig" } },
+                .imports = benchImports,
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "relic", .module = module },
-                    .{ .name = "bench_options", .module = bench_options.createModule() },
-                },
-            }),
-            .filters = if (b.option([]const u8, "bench-filter", "Select benchmark rows by name")) |filter| &.{filter} else &.{"benchmark:"},
+            },
         });
-        bench_step.dependOn(&b.addInstallArtifact(regressions, .{ .dest_dir = .{ .override = .{ .custom = "bench" } } }).step);
-        check_step.dependOn(&regressions.step);
     }
-    // The CI gate is the repository's own, never a consumer's: a project
-    // that depends on relic neither fetches preflight nor imports it.
-    if (b.pkg_hash.len == 0) {
-        if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{ .tests = test_step });
-    }
-    namespaceImportChecker(b);
     const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = b.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
     const prepare = b.addRunArtifact(setup);
     prepare.addPassthruArgs();
@@ -323,19 +317,8 @@ const example_sources = [_][]const u8{
     "examples/usage.zig",
 };
 
-// Main keeps namespace reexports outside implementation layer and cycle
-// checks, which preflight's structure check has no declaration for yet. Both
-// of preflight's structure runs (check-imports and lint) share one compile
-// step, so relic's checker replaces that step's source.
-fn namespaceImportChecker(b: *std.Build) void {
-    if (b.pkg_hash.len != 0) return;
-    const structure = b.top_level_steps.get("check-imports") orelse return;
-    for (structure.step.dependencies.items) |dependency| {
-        const run = dependency.cast(std.Build.Step.Run) orelse continue;
-        const checker = run.producer orelse continue;
-        if (!std.mem.eql(u8, checker.name, "preflight-structure")) continue;
-        checker.root_module.root_source_file = b.path("ci/imports.zig");
-        return;
-    }
-    @panic("check-imports: preflight's structure checker not found");
+fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+    const module = b.createModule(.{ .root_source_file = b.path("src/benchmark.zig"), .target = target, .optimize = optimize });
+    for ([_][]const u8{ "conduit", "sweep", "parallax", "uplink", "airlock", "warp" }) |name| module.addImport(name, b.dependency(name, .{ .target = target, .optimize = optimize }).module(name));
+    return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "relic", .module = module }}) catch @panic("out of memory");
 }

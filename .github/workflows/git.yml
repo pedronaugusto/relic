@@ -1,0 +1,44 @@
+# Package-specific Git compatibility contracts, preserved beside generated CI.
+name: Git compatibility
+on:
+  workflow_dispatch:
+concurrency:
+  group: git-compatibility-${{ github.ref_name }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  old-git:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELIC_GIT: old
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pedronaugusto/preflight
+          ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+          path: .preflight
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: zig build --build-file ci/bootstrap.zig setup -- old
+      - run: zig build --build-file .preflight/build.zig -Drepo-root="$PWD" fetch
+      - run: zig build ci -Dci-lint=false -Doptimize=safe
+  git-master:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    env:
+      RELIC_GIT: master
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pedronaugusto/preflight
+          ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+          path: .preflight
+      - uses: ./.preflight/.github/actions/setup
+      - run: zig build ci-setup -- master
+      - run: zig build ci -Dci-lint=false -Doptimize=safe

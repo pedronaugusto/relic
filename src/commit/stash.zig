@@ -32,31 +32,31 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const index_mod = @import("../index.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
-const worktree = @import("../worktree.zig");
-const merge = @import("../merge.zig");
-const diff = @import("../diff.zig");
-const hooks = @import("../repo/hooks.zig");
-const fs = @import("../repo/fs.zig");
-const ignore = @import("../worktree/ignore.zig");
-const attributes = @import("../worktree/attributes.zig");
-const glob_mod = @import("../text/glob.zig");
-const odb_mod = @import("../odb.zig");
-const parallax = @import("../dependencies.zig").parallax;
-const convert = @import("../worktree/convert.zig");
-const filter = @import("../worktree/filter.zig");
-const program = @import("../repo/program.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const index_mod = @import("../index/index.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
+const worktree = @import("../checkout/checkout.zig");
+const merge = @import("../merge/merge.zig");
+const diff = @import("../diff/diff.zig");
+const hooks = @import("../hooks/hooks.zig");
+const fs = @import("../fs/fs.zig");
+const ignore = @import("../patterns/ignore.zig");
+const attributes = @import("../patterns/attributes.zig");
+const pathspec_mod = @import("../patterns/pathspec.zig");
+const odb_mod = @import("../odb/odb.zig");
+const parallax = @import("parallax");
+const convert = @import("../checkout/convert.zig");
+const filter = @import("../checkout/filter.zig");
+const program = @import("../process/program.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 const Index = index_mod.Index;
 
 /// The ref every stash hangs from.
-pub const ref_name = "refs/stash";
+const ref_name = @import("../names/ref.zig").stash;
 
 /// Errors from stashing.
 pub const Error = error{
@@ -87,7 +87,7 @@ pub const Error = error{
     /// An untracked directory holding a repository of its own, which a stash
     /// would record as a submodule. `Refusal` names it.
     NestedRepository,
-} || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
+} || pathspec_mod.Error || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
     diff.Error || hooks.Error || refs_mod.LogReadError || fs.LockError || fs.CommitError ||
     ignore.Error || attributes.Error || convert.Error || error{NameTooLong};
 
@@ -225,7 +225,7 @@ pub const Applied = struct {
 
 /// Every stash, newest first.
 pub fn list(io: Io, repo: *Repository) Self.Error!List {
-    const gpa = repo.gpa;
+    const gpa = repo.allocator();
     var log = try repo.refStore().readLog(gpa, io, ref_name);
     errdefer log.deinit();
     const entries = try gpa.alloc(Entry, log.entries.len);
@@ -246,8 +246,8 @@ pub fn get(io: Io, repo: *Repository, n: usize) Self.Error!Stash {
 
 /// A commit shaped like a stash, taken apart.
 pub fn inspect(io: Io, repo: *Repository, commit: Oid) Self.Error!Stash {
-    const gpa = repo.gpa;
-    const found = try repo.odb.read(io, commit);
+    const gpa = repo.allocator();
+    const found = try repo.objectDatabase().read(io, commit);
     defer gpa.free(found.bytes);
     if (found.type != .commit) return error.NotAStash;
     var parsed = try object.Commit.parse(gpa, repo.objectFormat(), found.bytes);
@@ -270,12 +270,13 @@ pub fn inspect(io: Io, repo: *Repository, commit: Oid) Self.Error!Stash {
 /// tree it recorded: `git stash show`.
 pub fn show(io: Io, repo: *Repository, n: usize, options: diff.TreeOptions) Self.Error!diff.Changes {
     const stash = try get(io, repo, n);
-    return diff.tree(repo.gpa, io, &repo.odb, stash.base_tree, stash.tree, options);
+    return diff.tree(repo.allocator(), io, repo.objectDatabase(), stash.base_tree, stash.tree, options);
 }
 
 /// Everything a stash operation carries around: the rules the working tree
 /// is read with, and the index.
 const Ctx = struct {
+    paths: ?*const pathspec_mod.Pathspec = null,
     repo: *Repository,
     io: Io,
     gpa: Allocator,
@@ -298,11 +299,11 @@ const Ctx = struct {
         filters: ?*const filter.Drivers,
         programs: ?program.Programs,
     ) Error!void {
-        const wt = repo.work_dir orelse return error.BareRepository;
+        const wt = repo.workDirectory() orelse return error.BareRepository;
         ctx.* = .{
             .repo = repo,
             .io = io,
-            .gpa = repo.gpa,
+            .gpa = repo.allocator(),
             .arena = arena,
             .wt = wt,
             .ignore_rules = try repo.loadIgnore(io),
@@ -317,12 +318,12 @@ const Ctx = struct {
         errdefer ctx.attrs.deinit();
         ctx.rules.ignore = &ctx.ignore_rules;
         ctx.rules.attrs = &ctx.attrs;
-        const required = try repo.requiredFilters(repo.gpa);
-        defer repo.gpa.free(required);
+        const required = try repo.requiredFilters(repo.allocator());
+        defer repo.allocator().free(required);
         ctx.rules.required_filters = try arena.dupe([]const u8, required);
         ctx.rules.filters = filters;
         ctx.index = try repo.openIndex(io);
-        ctx.conv = .init(repo.gpa, io, .{
+        ctx.conv = .init(repo.allocator(), io, .{
             .wt = wt,
             .kind = repo.objectFormat(),
             .core = ctx.rules.core,
@@ -330,7 +331,7 @@ const Ctx = struct {
             .drivers = filters,
             .programs = programs,
             .index = &ctx.index,
-            .db = &repo.odb,
+            .db = repo.objectDatabase(),
         });
     }
 
@@ -393,7 +394,7 @@ const Ctx = struct {
             content = (try ctx.conv.toGit(a, path, raw, applied, if (write) .store else .hash_only)).bytes;
         }
         const oid = if (write)
-            try ctx.repo.odb.write(ctx.io, .blob, content)
+            try ctx.repo.objectDatabase().write(ctx.io, .blob, content)
         else
             hash.Hasher.object(ctx.repo.objectFormat(), "blob", content);
         return .{ .mode = mode, .oid = oid };
@@ -424,18 +425,10 @@ const TreeEntry = worktree.TreeEntry;
 
 /// Whether a pathspec matches `path`: the path itself, a directory above
 /// it, or a glob over the whole path in which `*` crosses `/`.
-fn matchesAny(gpa: Allocator, specs: []const []const u8, path: []const u8) Allocator.Error!bool {
-    if (specs.len == 0) return true;
-    for (specs) |raw| {
-        const spec = std.mem.trimEnd(u8, raw, "/");
-        if (spec.len == 0 or std.mem.eql(u8, spec, ".")) return true;
-        if (std.mem.eql(u8, spec, path)) return true;
-        if (std.mem.startsWith(u8, path, spec) and path.len > spec.len and path[spec.len] == '/') return true;
-        if (std.mem.findAny(u8, spec, "*?[") != null) {
-            if (try glob_mod.matches(gpa, spec, path, .{ .pathname = false })) return true;
-        }
-    }
-    return false;
+fn matchesAny(gpa: Allocator, specs: []const []const u8, path: []const u8) pathspec_mod.Error!bool {
+    var parsed = try pathspec_mod.parse(gpa, specs);
+    defer parsed.deinit();
+    return parsed.matches(path);
 }
 
 /// `git stash push`: record the index and the working tree — and the
@@ -443,22 +436,25 @@ fn matchesAny(gpa: Allocator, specs: []const []const u8, path: []const u8) Alloc
 /// the index back to `HEAD`, as git does. `null` when there is nothing to
 /// stash, which git reports as "No local changes to save".
 pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
-    const gpa = repo.gpa;
+    const gpa = repo.allocator();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var ctx: Ctx = undefined;
     try ctx.init(arena, io, repo, options.filters, options.programs);
     defer ctx.deinit();
+    var parsed_paths = try pathspec_mod.parse(arena, options.paths);
+    defer parsed_paths.deinit();
+    ctx.paths = &parsed_paths;
 
     const head = (try repo.head(io)) orelse return error.NoInitialCommit;
     gpa.free(head.name);
     if (ctx.unmerged()) return error.UnmergedIndex;
 
-    const head_bytes = try repo.odb.read(io, head.oid);
+    const head_bytes = try repo.objectDatabase().read(io, head.oid);
     defer gpa.free(head_bytes.bytes);
     const head_commit = try object.Commit.parse(arena, repo.objectFormat(), try arena.dupe(u8, head_bytes.bytes));
-    var head_map = try worktree.flatten(arena, io, &repo.odb, head_commit.tree);
+    var head_map = try worktree.flatten(arena, io, repo.objectDatabase(), head_commit.tree);
 
     if (options.untracked == .none) try requireTracked(arena, &ctx.index, options.paths, options.refusal);
 
@@ -467,10 +463,10 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     var candidates: std.array_hash_map.String(void) = .empty;
     var head_it = head_map.keyIterator();
     while (head_it.next()) |key| {
-        if (try matchesAny(arena, options.paths, key.*)) try candidates.put(arena, key.*, {});
+        if (parsed_paths.matches(key.*)) try candidates.put(arena, key.*, {});
     }
     for (ctx.index.entries.items) |e| {
-        if (try matchesAny(arena, options.paths, e.path)) try candidates.put(arena, e.path, {});
+        if (parsed_paths.matches(e.path)) try candidates.put(arena, e.path, {});
     }
     var updates: std.ArrayList(Update) = .empty;
     var changed = false;
@@ -511,7 +507,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     const label = try arena.print("{s}: {s} {s}", .{ branch, abbrev, subject });
 
     // `I`: the index as it stands.
-    const index_tree = try worktree.writeTree(gpa, io, &ctx.index, &repo.odb);
+    const index_tree = try worktree.writeTree(gpa, io, &ctx.index, repo.objectDatabase());
     const index_commit = try writeCommit(io, repo, index_tree, &.{head.oid}, options.who, try arena.print("index on {s}\n", .{label}));
 
     // `U`: the untracked files, in a tree of their own.
@@ -547,7 +543,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     }
 
     try resetAfterPush(&ctx, &head_map, head_commit.tree, index_tree, untracked_files.items, options);
-    try ctx.index.write(io, repo.git_dir, "index", .{ .lock = .{ .shared = repo.shared } });
+    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = .{ .shared = repo.sharedPermissions() } });
     return stash_commit;
 }
 
@@ -557,8 +553,10 @@ const Update = struct { path: []const u8, side: ?merge.Side };
 /// Refuse a pathspec that names nothing the index tracks.
 fn requireTracked(arena: Allocator, index: *const Index, paths: []const []const u8, refusal: ?*Refusal) Error!void {
     for (paths) |spec| {
+        var parsed = try pathspec_mod.parse(arena, &.{spec});
+        defer parsed.deinit();
         const hit = for (index.entries.items) |e| {
-            if (try matchesAny(arena, &.{spec}, e.path)) break true;
+            if (parsed.matches(e.path)) break true;
         } else false;
         if (!hit) {
             if (refusal) |r| r.set(spec);
@@ -575,7 +573,7 @@ fn untrackedTree(ctx: *Ctx, paths: []const []const u8) Error!Oid {
         const s = (try ctx.side(path, null, true)) orelse continue;
         try temp.add(.{ .path = path, .oid = s.oid, .mode = s.mode });
     }
-    return worktree.writeTree(ctx.gpa, ctx.io, &temp, &ctx.repo.odb);
+    return worktree.writeTree(ctx.gpa, ctx.io, &temp, ctx.repo.objectDatabase());
 }
 
 /// The tree of a stash's `W` commit: the index, with every tracked file
@@ -593,11 +591,11 @@ fn workTree(ctx: *Ctx, updates: []const Update) Error!Oid {
         const s = (try ctx.side(u.path, ctx.stage0(u.path), true)).?;
         try temp.add(.{ .path = u.path, .oid = s.oid, .mode = s.mode });
     }
-    return worktree.writeTree(ctx.gpa, ctx.io, &temp, &ctx.repo.odb);
+    return worktree.writeTree(ctx.gpa, ctx.io, &temp, ctx.repo.objectDatabase());
 }
 
 fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const u8)) Error!void {
-    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt, &ctx.index, &ctx.repo.odb, .{
+    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt, &ctx.index, ctx.repo.objectDatabase(), .{
         .rules = ctx.rules,
         .programs = ctx.programs,
         .untracked = .all,
@@ -617,7 +615,7 @@ fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const
             try walkFiles(ctx, e.path, options.paths, out, 0);
             continue;
         }
-        if (try matchesAny(ctx.arena, options.paths, e.path)) try out.append(ctx.arena, try ctx.arena.dupe(u8, e.path));
+        if (ctx.paths.?.matches(e.path)) try out.append(ctx.arena, try ctx.arena.dupe(u8, e.path));
     }
     std.mem.sort([]const u8, out.items, {}, lessThanPath);
 }
@@ -631,7 +629,7 @@ fn walkFiles(ctx: *Ctx, dir_path: []const u8, specs: []const []const u8, out: *s
         const path = try ctx.arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {
             try walkFiles(ctx, path, specs, out, depth + 1);
-        } else if (try matchesAny(ctx.arena, specs, path)) {
+        } else if (ctx.paths.?.matches(path)) {
             try out.append(ctx.arena, path);
         }
     }
@@ -654,7 +652,7 @@ fn resetAfterPush(
     options: PushOptions,
 ) Error!void {
     const io = ctx.io;
-    const db = &ctx.repo.odb;
+    const db = ctx.repo.objectDatabase();
     var checkout_options = ctx.checkoutOptions();
     // The working tree goes back to `HEAD` as `reset --hard` takes it: what
     // it gives up is in the stash just written.
@@ -678,8 +676,8 @@ fn resetAfterPush(
     // Only the named paths go back to `HEAD`.
     var paths: std.array_hash_map.String(void) = .empty;
     var head_it = head_map.keyIterator();
-    while (head_it.next()) |key| if (try matchesAny(ctx.arena, options.paths, key.*)) try paths.put(ctx.arena, key.*, {});
-    for (ctx.index.entries.items) |e| if (try matchesAny(ctx.arena, options.paths, e.path)) try paths.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
+    while (head_it.next()) |key| if (ctx.paths.?.matches(key.*)) try paths.put(ctx.arena, key.*, {});
+    for (ctx.index.entries.items) |e| if (ctx.paths.?.matches(e.path)) try paths.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
     for (untracked) |path| try paths.put(ctx.arena, path, {});
     var writes: std.ArrayList(worktree.PathWrite) = .empty;
     for (paths.keys()) |path| {
@@ -695,8 +693,8 @@ fn resetAfterPush(
         var index_map = try worktree.flatten(ctx.arena, io, db, index_tree);
         var keep: std.array_hash_map.String(void) = .empty;
         var it = index_map.keyIterator();
-        while (it.next()) |key| if (try matchesAny(ctx.arena, options.paths, key.*)) try keep.put(ctx.arena, key.*, {});
-        for (ctx.index.entries.items) |e| if (try matchesAny(ctx.arena, options.paths, e.path)) try keep.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
+        while (it.next()) |key| if (ctx.paths.?.matches(key.*)) try keep.put(ctx.arena, key.*, {});
+        for (ctx.index.entries.items) |e| if (ctx.paths.?.matches(e.path)) try keep.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
         writes.clearRetainingCapacity();
         for (keep.keys()) |path| {
             const want = mapSide(&index_map, path);
@@ -722,7 +720,7 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
 /// A stash commit, written as git writes one: unsigned whatever the
 /// configuration says, because git never signs them.
 fn writeCommit(io: Io, repo: *Repository, tree: Oid, parents: []const Oid, who: object.Signature, message: []const u8) Error!Oid {
-    const bytes = object.Commit.build(repo.gpa, repo.objectFormat(), .{
+    const bytes = object.Commit.build(repo.allocator(), repo.objectFormat(), .{
         .tree = tree,
         .parents = parents,
         .author = who,
@@ -732,8 +730,8 @@ fn writeCommit(io: Io, repo: *Repository, tree: Oid, parents: []const Oid, who: 
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.UnexpectedObjectType,
     };
-    defer repo.gpa.free(bytes);
-    return repo.odb.write(io, .commit, bytes);
+    defer repo.allocator().free(bytes);
+    return repo.objectDatabase().write(io, .commit, bytes);
 }
 
 /// The shortest prefix of `oid`, seven digits or more, that names nothing
@@ -746,7 +744,7 @@ fn abbreviate(io: Io, repo: *Repository, oid: Oid, buf: *[hash.max_hex_len]u8) E
         if (configured >= 4) len = @intCast(@min(configured, @as(i64, @intCast(hex.len))));
     } else |_| {}
     while (len < hex.len) : (len += 1) {
-        _ = repo.odb.findPrefix(io, hex[0..len]) catch |err| switch (err) {
+        _ = repo.objectDatabase().findPrefix(io, hex[0..len]) catch |err| switch (err) {
             error.AmbiguousPrefix => continue,
             error.ObjectNotFound => break,
             else => |e| return e,
@@ -779,14 +777,14 @@ fn oneline(arena: Allocator, message: []const u8) Allocator.Error![]const u8 {
 /// the index as they are.
 pub fn apply(io: Io, repo: *Repository, n: usize, options: ApplyOptions) Self.Error!Applied {
     const stash = try get(io, repo, n);
-    return applyStash(io, repo, stash, options);
+    return applyEntry(io, repo, stash, options);
 }
 
 /// `git stash pop stash@{n}`: apply, then drop the stash if nothing
 /// conflicted.
 pub fn pop(io: Io, repo: *Repository, n: usize, options: ApplyOptions) Self.Error!Applied {
     const stash = try get(io, repo, n);
-    var applied = try applyStash(io, repo, stash, options);
+    var applied = try applyEntry(io, repo, stash, options);
     errdefer applied.deinit();
     if (applied.isClean()) {
         _ = try drop(io, repo, n, .{ .hooks = options.hooks });
@@ -796,8 +794,8 @@ pub fn pop(io: Io, repo: *Repository, n: usize, options: ApplyOptions) Self.Erro
 }
 
 /// Apply a stash commit, by name rather than by its place in the list.
-pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions) Self.Error!Applied {
-    const gpa = repo.gpa;
+pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions) Self.Error!Applied {
+    const gpa = repo.allocator();
     var result_arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer result_arena.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -806,7 +804,7 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     var ctx: Ctx = undefined;
     try ctx.init(arena, io, repo, options.filters, options.programs);
     defer ctx.deinit();
-    const db = &repo.odb;
+    const db = repo.objectDatabase();
 
     if (ctx.unmerged()) return error.UnmergedIndex;
     const current_tree = try worktree.writeTree(gpa, io, &ctx.index, db);
@@ -820,7 +818,7 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         .base = "Stash base",
         .theirs = "Stashed changes",
     };
-    var result = try merge.treesWithOptions(gpa, io, db, stash.base_tree, current_tree, stash.tree, .{
+    var result = try merge.trees(gpa, io, db, stash.base_tree, current_tree, stash.tree, .{
         .content_merge = true,
         .blob = .{ .labels = labels },
     });
@@ -889,7 +887,7 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     }
 
     _ = try worktree.writePaths(gpa, io, ctx.wt, &ctx.index, db, untracked_writes.items, checkout_options);
-    try ctx.index.write(io, repo.git_dir, "index", .{ .lock = .{ .shared = repo.shared } });
+    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = .{ .shared = repo.sharedPermissions() } });
 
     return .{
         .gpa = gpa,
@@ -905,7 +903,7 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
 fn stagedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, stash: Stash, current_tree: Oid) Error!?Oid {
     if (stash.base_tree.eql(stash.index_tree) or current_tree.eql(stash.index_tree)) return null;
     if (!try patchApplies(gpa, io, db, stash.base_tree, current_tree, stash.index_tree)) return error.IndexConflict;
-    var staged = try merge.treesWithOptions(gpa, io, db, stash.base_tree, current_tree, stash.index_tree, .{ .content_merge = true });
+    var staged = try merge.trees(gpa, io, db, stash.base_tree, current_tree, stash.index_tree, .{ .content_merge = true });
     defer staged.deinit();
     if (!staged.isClean()) return error.IndexConflict;
     // unreachable: a clean merge has no conflict to refuse
@@ -1066,7 +1064,7 @@ pub const DropOptions = struct {
 /// `reference-transaction` hook. The last stash dropped takes `refs/stash`
 /// with it, as `clear` does. Returns the commit dropped.
 pub fn drop(io: Io, repo: *Repository, n: usize, options: DropOptions) Self.Error!Oid {
-    const gpa = repo.gpa;
+    const gpa = repo.allocator();
     {
         var l = try list(io, repo);
         defer l.deinit();
@@ -1098,7 +1096,7 @@ const Dropping = struct {
 
 /// `git stash clear`: remove `refs/stash` and the list with it.
 pub fn clear(io: Io, repo: *Repository, options: DropOptions) Self.Error!void {
-    var arena_instance: std.heap.ArenaAllocator = .init(repo.gpa);
+    var arena_instance: std.heap.ArenaAllocator = .init(repo.allocator());
     defer arena_instance.deinit();
     if (try repo.refStore().read(arena_instance.allocator(), io, ref_name)) |current| {
         var tx = repo.beginRefs();
@@ -1111,4 +1109,13 @@ pub fn clear(io: Io, repo: *Repository, options: DropOptions) Self.Error!void {
         // Deleting the ref deletes its log, which is the list.
         try tx.commit(io, null);
     }
+}
+
+test "phase2 extraction shared pathspec magic and exclusions" {
+    const gpa = std.testing.allocator;
+    const specs: []const []const u8 = &.{ ":(icase)SRC/**", ":(exclude)src/private/**" };
+    try std.testing.expect(try matchesAny(gpa, specs, "src/public/main.zig"));
+    try std.testing.expect(!try matchesAny(gpa, specs, "src/private/main.zig"));
+    try std.testing.expect(try matchesAny(gpa, &.{":(literal)a*b"}, "a*b"));
+    try std.testing.expect(!try matchesAny(gpa, &.{":(literal)a*b"}, "axb"));
 }

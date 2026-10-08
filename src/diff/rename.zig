@@ -23,8 +23,8 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const odb_mod = @import("../odb.zig");
+const hash = @import("../hash/hash.zig");
+const odb_mod = @import("../odb/odb.zig");
 const similarity = @import("similarity.zig");
 
 const Oid = hash.Oid;

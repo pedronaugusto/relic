@@ -6,14 +6,14 @@
 //! layout, and `worktree/safepath.zig` with `object/fsck.zig` for a
 //! `.gitmodules` that is a symbolic link.
 
+const worktree = @import("../../checkout/checkout.zig");
 const std = @import("std");
 const Io = std.Io;
 
-const gitmodules = @import("../../submodule/gitmodules.zig");
-const submodule = @import("../../submodule.zig");
+const gitmodules = @import("../../config/gitmodules.zig");
+const submodule = @import("../../submodule/submodule.zig");
 const fsck = @import("../../object/fsck.zig");
-const repo_mod = @import("../../repo.zig");
-const worktree = @import("../../worktree.zig");
+const repo_mod = @import("../../repo/repo.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 
@@ -44,7 +44,7 @@ test "CVE-2018-11235, t7450-bad-git-dotfiles 'check names', 'fsck detects evil s
         const symlink = (try fsck.checkObject(gpa, &fsck.baseline, .sha1, .zero(.sha1), .tree, bytes, null, null)).?;
         try std.testing.expectEqual(fsck.Problem.gitmodules_symlink, symlink.problem.?);
         const tree = try h.writeTree(gpa, io, &.{.{ .mode = "120000", .name = name, .oid = target }});
-        try std.testing.expectEqual(worktree.safepath.Reason.symlinked_gitmodules, (try h.checkout(gpa, io, tree)).?);
+        try std.testing.expectEqual(@import("../../names/path.zig").Reason.symlinked_gitmodules, (try h.checkout(gpa, io, tree)).?);
     }
 }
 

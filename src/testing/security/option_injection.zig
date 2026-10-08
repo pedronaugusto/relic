@@ -6,14 +6,14 @@
 //! names, and `repo/program.zig` over conduit (`process/`) for the command
 //! line itself.
 
+const transport = @import("../../transport/transport.zig");
 const std = @import("std");
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 
-const transport = @import("../../transport.zig");
-const gitmodules = @import("../../submodule/gitmodules.zig");
+const gitmodules = @import("../../config/gitmodules.zig");
 const fsck = @import("../../object/fsck.zig");
-const program = @import("../../repo/program.zig");
+const program = @import("../../process/program.zig");
 const testgit = @import("../git.zig");
 
 test "CVE-2017-1000117, t5813-proto-disable-ssh 'hostnames starting with dash are rejected' and 'repo names starting with dash are rejected': ssh never sees an option a URL wrote" {
@@ -93,7 +93,7 @@ test "CVE-2019-1350, t7416-submodule-dash-url 'trailing backslash is handled cor
     // Directly, as a hook or a helper named by path runs.
     try argv.appendSlice(gpa, &.{ suite.path(.process_fixture), "args" });
     try argv.appendSlice(gpa, &tricky);
-    var direct = try program.run(.{ .environ = &env }, gpa, io, .{ .argv = argv.items }, "", .{});
+    var direct = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv.items }, .{});
     defer direct.deinit(gpa);
     try std.testing.expect(direct.succeeded());
     try std.testing.expectEqualStrings(expected.items, direct.stdout);
@@ -103,7 +103,7 @@ test "CVE-2019-1350, t7416-submodule-dash-url 'trailing backslash is handled cor
     argv.clearRetainingCapacity();
     try argv.append(gpa, line);
     try argv.appendSlice(gpa, &tricky);
-    var shelled = try program.run(.{ .environ = &env }, gpa, io, .{ .argv = argv.items, .shell = true }, "", .{});
+    var shelled = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv.items, .shell = true }, .{});
     defer shelled.deinit(gpa);
     try std.testing.expect(shelled.succeeded());
     try std.testing.expectEqualStrings(expected.items, shelled.stdout);

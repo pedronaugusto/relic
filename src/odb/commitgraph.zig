@@ -17,8 +17,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const fs = @import("../repo/fs.zig");
+const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 const format = @import("accelerators/chunks.zig");
@@ -547,9 +547,12 @@ pub const WriteOptions = struct {
     bases: []const Oid = &.{},
 };
 
+/// Errors from `encode`.
+pub const EncodeError = Allocator.Error || error{InvalidGraphInput};
+
 /// Encode one graph, byte for byte git's chunk order. Commits must be sorted by name.
 /// The returned file is the caller's. No worker count changes this order.
-pub fn encode(gpa: Allocator, kind: hash.Kind, commits: []const WriteCommit, options: WriteOptions) (Allocator.Error || error{InvalidGraphInput})![]u8 {
+pub fn encode(gpa: Allocator, kind: hash.Kind, commits: []const WriteCommit, options: WriteOptions) EncodeError![]u8 {
     if (commits.len > 0x7000_0000 or options.bases.len > 255) return error.InvalidGraphInput;
     var buffers: [9]format.Buffer = undefined;
     for (&buffers) |*buffer| buffer.* = .{ .gpa = gpa };

@@ -11,8 +11,8 @@ const builtin = @import("builtin");
 const Io = std.Io;
 
 const clone_mod = @import("../../transport/clone.zig");
-const config_mod = @import("../../config.zig");
-const object = @import("../../object.zig");
+const config_mod = @import("../../config/config.zig");
+const object = @import("../../object/object.zig");
 const testgit = @import("../git.zig");
 
 test "git 2.39.4 defense-in-depth (reverted in 2.39.5 and 2.45.2), t5601-clone 'clone -c core.hooksPath=/dev/null works again'" {

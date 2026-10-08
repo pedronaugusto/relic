@@ -25,34 +25,34 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const fs = @import("../repo/fs.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const fs = @import("../fs/fs.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
-const revwalk = @import("../revwalk.zig");
-const fetchpack = @import("fetchpack.zig");
-const shallow_mod = @import("../revwalk/shallow.zig");
+const revwalk = @import("../walk/walk.zig");
+const fetchpack = @import("../wire/fetchpack.zig");
+const shallow_mod = @import("../walk/shallow.zig");
 const revindex = @import("../odb/revindex.zig");
 const partial = @import("partial.zig");
-const config_mod = @import("../config.zig");
-const refspec_mod = @import("refspec.zig");
+const config_mod = @import("../config/config.zig");
+const refspec_mod = @import("../wire/refspec.zig");
 const ref_names = @import("../names/ref.zig");
-const remote_mod = @import("remote.zig");
-const url_mod = @import("url.zig");
-const program = @import("../repo/program.zig");
-const protocol = @import("protocol.zig");
-const transport = @import("../transport.zig");
-const objectwalk = @import("objectwalk.zig");
+const remote_mod = @import("../wire/remote.zig");
+const url_mod = @import("../wire/url.zig");
+const program = @import("../process/program.zig");
+const protocol = @import("../wire/protocol.zig");
+const transport = @import("transport.zig");
+const objectwalk = @import("../walk/objectwalk.zig");
 const indexpack = @import("../odb/indexpack.zig");
-const progress_mod = @import("progress.zig");
-const credential = @import("credential.zig");
-const auth = @import("auth.zig");
-const warning = @import("../repo/warning.zig");
+const progress_mod = @import("../report/progress.zig");
+const credential = @import("../wire/credential.zig");
+const auth = @import("../wire/auth.zig");
+const warning = @import("../report/warning.zig");
 const fsck = @import("../object/fsck.zig");
-const promisors = @import("promisors.zig");
-const accelerators = @import("../odb/accelerators.zig");
+const promisors = @import("../wire/promisors.zig");
+const accelerators = @import("../maintenance/maintenance.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -141,7 +141,7 @@ pub const Options = struct {
     /// askpass runs only when it says so.
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
-    proxy: transport.Proxy = .auto,
+    proxy: @import("../wire/httpsettings.zig").Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -206,7 +206,7 @@ pub const Update = struct {
 };
 
 /// One line of `FETCH_HEAD`.
-pub const FetchHeadEntry = struct {
+pub const HeadEntry = struct {
     oid: Oid,
     for_merge: bool,
     /// `branch 'main' of <url>` and the like: everything after the second
@@ -220,7 +220,7 @@ pub const Outcome = struct {
     updates: []const Update,
     /// Remote-tracking refs deleted because their source is gone.
     pruned: []const []const u8,
-    fetch_head: []const FetchHeadEntry,
+    fetch_head: []const HeadEntry,
     /// The pack that came, or `null` when nothing new was needed.
     pack: ?Oid,
     objects: u32,
@@ -327,7 +327,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     const url = remote.urls[0];
     var session = try openSession(gpa, io, repo, &remote, url, options);
-    defer session.close(io);
+    defer session.deinit(io);
     try partial.storeAdvertised(io, repo, session.promisorStores(), options.warnings);
     if (selection.auto) filter_spec = try promisors.autoFilter(arena, repo.configuration(), session.promisorsTaken());
 
@@ -352,10 +352,10 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     // under a pruned one can be created.
     const pruned: []const []const u8 = if (prune) try pruneStale(arena, gpa, io, repo, local_refs.entries, map.items, asked.specs) else &.{};
 
-    var boundary_change: BoundaryChange = .{ .old = repo.odb.shallow };
+    var boundary_change: BoundaryChange = .{ .old = repo.objectDatabase().shallow };
     defer boundary_change.release(gpa);
     errdefer boundary_change.restore(gpa, repo);
-    const brought = try bringObjects(arena, gpa, io, repo, &session, &boundary_change, .{
+    var brought = try bringObjects(arena, gpa, io, repo, &session, &boundary_change, .{
         .map = map.items,
         .remote_refs = remote_refs.refs,
         .local = &local,
@@ -368,6 +368,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .promisor = promisor,
         .options = options,
     });
+    defer brought.deinit(io);
     outcome.pack = brought.pack;
     outcome.objects = brought.objects;
     const backfill = brought.backfill;
@@ -404,7 +405,16 @@ const Bringing = struct {
 };
 
 /// What came: the pack, if one did, and the tags that followed.
-const Brought = struct { pack: ?Oid, objects: u32, backfill: []MapEntry };
+const Brought = struct {
+    pack: ?Oid,
+    objects: u32,
+    backfill: []MapEntry,
+    tokens: [2]?@import("../odb/keep.zig").Token = .{ null, null },
+
+    fn deinit(b: *Brought, io: Io) void {
+        for (&b.tokens) |*token| if (token.*) |*t| t.deinit(io);
+    }
+};
 
 /// Bring the objects the map names that are not here yet into one new
 /// pack, take the boundary the server drew in `boundary_change`, follow
@@ -425,16 +435,16 @@ fn bringObjects(
     const wants = try wantsInOrder(arena, io, repo, b.remote_refs, b.map, b.deepen != null);
     const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, b.remote_refs);
 
-    var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
-    const boundary = try shallowList(arena, &repo.odb.shallow);
+    const boundary = try shallowList(arena, &repo.objectDatabase().shallow);
     var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
     // What the pack's objects name, collected as it is indexed, so that
     // whether it is connected is asked without reading it again.
     var links: indexpack.Links = .init(gpa);
     defer links.deinit();
-    const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
+    var fetched = try session.fetch(gpa, io, repo.objectDatabase(), pack_dir, .{
         .wants = wants.oids,
         .want_names = wants.names,
         .tips = tips.ours,
@@ -449,6 +459,7 @@ fn bringObjects(
         .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, &links),
         .shallow_info = &shallow_info,
     });
+    errdefer fetched.deinit(io);
     // A remote helper's import learns the values as it goes.
     takeFetchedValues(session, b.map);
     // A fetch's promisor pack names no refs; git's names none either.
@@ -457,6 +468,8 @@ fn bringObjects(
     try boundary_change.take(arena, gpa, repo, &shallow_info, session.advertisedShallow(), b.deepen != null);
 
     // Tags that point at what the fetch brought.
+    var tag_keep: ?@import("../odb/keep.zig").Token = null;
+    errdefer if (tag_keep) |*t| t.deinit(io);
     const backfill: []MapEntry = if (b.tags == .auto and b.autotags)
         try followTags(arena, gpa, io, repo, session, pack_dir, .{
             .remote_refs = b.remote_refs,
@@ -465,6 +478,7 @@ fn bringObjects(
             .tips = tips,
             .progress = b.options.progress,
             .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, null),
+            .keep = &tag_keep,
         })
     else
         &.{};
@@ -483,15 +497,15 @@ fn bringObjects(
         .missing = b.options.missing,
     });
 
-    if (boundary_change.moved) try shallow_mod.write(gpa, io, repo.common_dir, &repo.odb.shallow);
-    return .{ .pack = fetched.pack, .objects = fetched.objects, .backfill = backfill };
+    if (boundary_change.moved) try shallow_mod.write(gpa, io, repo.commonDirectory(), &repo.objectDatabase().shallow);
+    return .{ .pack = fetched.pack, .objects = fetched.objects, .backfill = backfill, .tokens = .{ fetched.keep, tag_keep } };
 }
 
 /// The shallow boundary across a fetch: the one before it, put back if
 /// the fetch fails, and the remote's roots the fetch did not ask for.
 const BoundaryChange = struct {
     old: Oid.Set,
-    /// Whether `repo.odb.shallow` is a new set, `old` kept beside it.
+    /// Whether `repo.objectDatabase().shallow` is a new set, `old` kept beside it.
     moved: bool = false,
     /// A shallow remote's boundary, on a fetch that did not ask for one:
     /// walked with for the connectivity check, and kept only as
@@ -519,15 +533,15 @@ const BoundaryChange = struct {
             }
             b.remote_roots = roots.items;
         }
-        repo.odb.shallow = try shallow_mod.apply(gpa, &b.old, info.shallow.items, info.unshallow.items);
+        repo.objectDatabase().shallow = try shallow_mod.apply(gpa, &b.old, info.shallow.items, info.unshallow.items);
         b.moved = true;
     }
 
     /// Put the old boundary back, after a failure.
     fn restore(b: *BoundaryChange, gpa: Allocator, repo: *Repository) void {
         if (!b.moved) return;
-        repo.odb.shallow.deinit(gpa);
-        repo.odb.shallow = b.old;
+        repo.objectDatabase().shallow.deinit(gpa);
+        repo.objectDatabase().shallow = b.old;
         b.moved = false;
     }
 
@@ -545,6 +559,7 @@ const Following = struct {
     tips: Tips,
     progress: ?progress_mod.Progress,
     receive: indexpack.Options,
+    keep: *?@import("../odb/keep.zig").Token,
 };
 
 /// git's automatic tag following: the remote tags that point at what the
@@ -554,13 +569,14 @@ fn followTags(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sessi
     try findNonLocalTags(arena, gpa, io, repo, f.remote_refs, f.local, &backfill, f.map);
     const missing_tags = try wantsInOrder(arena, io, repo, f.remote_refs, backfill.items, false);
     if (missing_tags.oids.len == 0) return backfill.items;
-    _ = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
+    const fetched = try session.fetch(gpa, io, repo.objectDatabase(), pack_dir, .{
         .wants = missing_tags.oids,
         .want_names = missing_tags.names,
         .tips = f.tips.ours,
         .common_tips = f.tips.common,
         .include_tag = false,
     }, .{ .progress = f.progress, .receive = f.receive });
+    f.keep.* = fetched.keep;
     takeFetchedValues(session, backfill.items);
     return backfill.items;
 }
@@ -569,7 +585,7 @@ fn followTags(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sessi
 /// a warning, as git's is: the fetch itself is done.
 fn writeCommitGraph(gpa: Allocator, io: Io, repo: *Repository, warnings: ?*warning.Warnings) Error!void {
     _ = accelerators.writeConfiguredCommitGraph(gpa, io, repo, .fetch) catch |err| {
-        try warning.note(warnings, .{ .commit_graph_write_failed = err });
+        try warning.note(warnings, .{ .commit_graph_write_failed = @errorName(err) });
     };
 }
 
@@ -828,6 +844,7 @@ fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, 
 /// objects promised when `promisor`, its links kept in `links` when set.
 fn receiveOptions(repo: *Repository, checks: ?*const fsck.Rules, promisor: bool, warnings: ?*warning.Warnings, links: ?*indexpack.Links) indexpack.Options {
     return .{
+        .keep = true,
         .fsck = checks,
         .promised = promisor,
         .warnings = warnings,
@@ -877,7 +894,7 @@ fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r
         fresh = try pack.Index.open(gpa, io, r.pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     }
     if (fresh) |*index| {
-        objectwalk.checkReceived(gpa, io, &repo.odb, all_tips.items, index, r.links, r.missing, .{ .promisor = r.promisor }) catch |err| switch (err) {
+        objectwalk.checkReceived(gpa, io, repo.objectDatabase(), all_tips.items, index, r.links, r.missing, .{ .promisor = r.promisor }) catch |err| switch (err) {
             error.MissingObject => return error.MissingObject,
             else => |e| return e,
         };
@@ -886,7 +903,7 @@ fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r
         // whole below it. Only that each is here is checked, where git's
         // `--not --all` walk has nothing to walk.
         for (all_tips.items) |tip| {
-            if (try repo.odb.exists(io, tip)) continue;
+            if (try repo.objectDatabase().exists(io, tip)) continue;
             if (r.missing) |out| out.* = tip;
             return error.MissingObject;
         }
@@ -908,15 +925,15 @@ fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r
             for (reached) |root| try needed.put(arena, root, {});
         } else entry.rejected_shallow = true;
     };
-    repo.odb.shallow.deinit(gpa);
-    repo.odb.shallow = try r.old_boundary.clone(gpa);
+    repo.objectDatabase().shallow.deinit(gpa);
+    repo.objectDatabase().shallow = try r.old_boundary.clone(gpa);
     var it = needed.keyIterator();
-    while (it.next()) |root| try repo.odb.shallow.put(gpa, root.*, {});
+    while (it.next()) |root| try repo.objectDatabase().shallow.put(gpa, root.*, {});
 }
 
 /// The lines of `FETCH_HEAD`, the updates reported, and the ref writes,
 /// all in `arena`.
-const Plan = struct { fetch_head: []const FetchHeadEntry, updates: []const Update, pending: []const Pending };
+const Plan = struct { fetch_head: []const HeadEntry, updates: []const Update, pending: []const Pending };
 
 /// git's `store_updated_refs`: each pass's refs, those for merging first,
 /// into `FETCH_HEAD` and the refs they are kept in, each decided by
@@ -932,7 +949,7 @@ fn planUpdates(
     options: Options,
     local: *const LocalIndex,
 ) Error!Plan {
-    var fetch_head: std.ArrayList(FetchHeadEntry) = .empty;
+    var fetch_head: std.ArrayList(HeadEntry) = .empty;
     var updates: std.ArrayList(Update) = .empty;
     var pending: std.ArrayList(Pending) = .empty;
     for (passes) |entries| {
@@ -1177,9 +1194,9 @@ fn findNonLocalTags(
         // twice; before it, git takes a tag the command line named without
         // a place to keep it as well, and so does this.
         if (queued.contains(ref.name) or added.contains(ref.name)) continue;
-        var reachable = try repo.odb.exists(io, ref.oid);
+        var reachable = try repo.objectDatabase().exists(io, ref.oid);
         if (!reachable) {
-            if (ref.peeled) |peeled| reachable = try repo.odb.exists(io, peeled);
+            if (ref.peeled) |peeled| reachable = try repo.objectDatabase().exists(io, peeled);
         }
         if (!reachable and fetched == null) {
             reachable = wanted.contains(ref.oid) or (if (ref.peeled) |peeled| wanted.contains(peeled) else false);
@@ -1264,8 +1281,8 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
             continue;
         }
         if (boundary.contains(oid) or (try index.find(oid)) == null) continue;
-        const found = repo.odb.read(io, oid) catch continue;
-        defer repo.odb.allocator().free(found.bytes);
+        const found = repo.objectDatabase().read(io, oid) catch continue;
+        defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .commit) continue;
         var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
         defer commit.deinit();
@@ -1277,7 +1294,7 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
 /// What the options ask of the boundary, as the protocol asks it.
 fn deepenRequest(repo: *Repository, options: Options) Error!?fetchpack.Deepen {
     if (options.unshallow) {
-        if (repo.odb.shallow.count() == 0) return error.NotShallow;
+        if (repo.objectDatabase().shallow.count() == 0) return error.NotShallow;
         return .{ .depth = 0x7fff_ffff };
     }
     if (options.depth == null and options.deepen == null and options.shallow_since == null and options.shallow_exclude.len == 0) return null;
@@ -1313,7 +1330,7 @@ fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const
     for (advertised) |ref| {
         if (ref.unborn or !names.contains(ref.name)) continue;
         if ((try listed.getOrPut(arena, ref.name)).found_existing) continue;
-        if (!all and try repo.odb.exists(io, ref.oid)) continue;
+        if (!all and try repo.objectDatabase().exists(io, ref.oid)) continue;
         try wants.append(arena, ref.oid);
         try want_names.append(arena, ref.name);
     }
@@ -1322,7 +1339,7 @@ fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const
     for (entries) |entry| {
         if (listed.contains(entry.name)) continue;
         if ((try listed.getOrPut(arena, entry.name)).found_existing) continue;
-        if (!all and try repo.odb.exists(io, entry.oid)) continue;
+        if (!all and try repo.objectDatabase().exists(io, entry.oid)) continue;
         try wants.append(arena, entry.oid);
         try want_names.append(arena, entry.name);
     }
@@ -1336,7 +1353,7 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
     var out: std.ArrayList([]const u8) = .empty;
     // The main working tree's `HEAD`, whichever worktree this repository
     // was opened from.
-    if (!repo.isBare() or repo.common_is_separate) {
+    if (!repo.isBare() or repo.isLinkedWorktree()) {
         const bare = repo.configuration().getBool("core.bare", false) catch false;
         if (!bare) {
             if (try repo.refStore().read(gpa, io, "main-worktree/HEAD")) |head| switch (head) {
@@ -1358,9 +1375,9 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
 }
 
 fn isCommitish(io: Io, repo: *Repository, oid: Oid) Error!bool {
-    if (!try repo.odb.exists(io, oid)) return false;
+    if (!try repo.objectDatabase().exists(io, oid)) return false;
     const peeled = repo.peel(io, oid) catch return false;
-    const header = try repo.odb.readHeader(io, peeled);
+    const header = try repo.objectDatabase().readHeader(io, peeled);
     return header.type == .commit;
 }
 
@@ -1416,7 +1433,7 @@ fn decide(
             "storing ref";
         return .{ .old = old, .result = .created, .message = message };
     }
-    if (try revwalk.isAncestor(gpa, io, &repo.odb, old_commit.?, new_commit.?)) {
+    if (try revwalk.isAncestor(gpa, io, repo.objectDatabase(), old_commit.?, new_commit.?, .{})) {
         return .{ .old = old, .result = .fast_forward, .message = "fast-forward" };
     }
     if (force or entry.force) return .{ .old = old, .result = .forced, .message = "forced-update" };
@@ -1425,7 +1442,7 @@ fn decide(
 
 fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
     const peeled = repo.peel(io, oid) catch return null;
-    const header = repo.odb.readHeader(io, peeled) catch return null;
+    const header = repo.objectDatabase().readHeader(io, peeled) catch return null;
     return if (header.type == .commit) peeled else null;
 }
 
@@ -1465,7 +1482,7 @@ fn describe(arena: Allocator, name: []const u8, url: []const u8) Allocator.Error
     return out.items;
 }
 
-fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const FetchHeadEntry, append: bool) Error!void {
+fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const HeadEntry, append: bool) Error!void {
     var text: std.Io.Writer.Allocating = .init(gpa);
     defer text.deinit();
     for (entries) |entry| {
@@ -1826,7 +1843,7 @@ test "unshallowing a whole repository and a filtered fetch are refused by name" 
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.init(gpa, io, tmp.dir, .{});
+    var repo = try Repository.create(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
     try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true }));
     try testing.expectError(error.NotAPromisorRemote, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));

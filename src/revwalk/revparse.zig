@@ -24,19 +24,19 @@
 const Self = @This();
 
 const std = @import("std");
-const allocation = @import("../testing/allocation.zig");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
+const hash = @import("../hash/hash.zig");
 const ref_names = @import("../names/ref.zig");
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
-const refs_mod = @import("../refs.zig");
-const revwalk = @import("../revwalk.zig");
-const remote_mod = @import("../transport/remote.zig");
-const ere = @import("../ere.zig");
-const gitdate = @import("../object/gitdate.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
+const refs_mod = @import("../refs/refs.zig");
+const revwalk = @import("../walk/walk.zig");
+const remote_mod = @import("../wire/remote.zig");
+const ere = @import("../text/ere.zig");
+const gitdate = @import("../text/date.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -178,7 +178,7 @@ const Resolver = struct {
         var lower: [hash.max_hex_len]u8 = undefined;
         if (hex.len > lower.len) return error.BadRevision;
         for (hex, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-        return r.repo.odb.findPrefix(r.io, lower[0..hex.len]) catch |err| switch (err) {
+        return r.repo.objectDatabase().findPrefix(r.io, lower[0..hex.len]) catch |err| switch (err) {
             error.AmbiguousPrefix => error.AmbiguousRevision,
             error.ObjectNotFound => error.BadRevision,
             error.OutOfMemory => error.OutOfMemory,
@@ -398,7 +398,7 @@ const Resolver = struct {
     const Want = enum { commit, tree, blob, tag, any };
 
     fn typeOf(r: *Resolver, oid: Oid) Error!object.Type {
-        const header = r.repo.odb.readHeader(r.io, oid) catch |err| return revisionError(err);
+        const header = r.repo.objectDatabase().readHeader(r.io, oid) catch |err| return revisionError(err);
         return header.type;
     }
 
@@ -425,8 +425,8 @@ const Resolver = struct {
     }
 
     fn tagTarget(r: *Resolver, oid: Oid) Error!Oid {
-        const found = r.repo.odb.read(r.io, oid) catch |err| return revisionError(err);
-        defer r.repo.odb.allocator().free(found.bytes);
+        const found = r.repo.objectDatabase().read(r.io, oid) catch |err| return revisionError(err);
+        defer r.repo.objectDatabase().allocator().free(found.bytes);
         var tag = object.Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer tag.deinit();
         return tag.target;
@@ -497,7 +497,7 @@ const Resolver = struct {
         }
         var pattern = try ere.Pattern.compile(r.gpa, pattern_text);
         defer pattern.deinit();
-        var walk = revwalk.Walk.init(r.gpa, &r.repo.odb);
+        var walk = revwalk.Walk.init(r.gpa, r.repo.objectDatabase());
         defer walk.deinit();
         if (from) |oid| {
             try walk.push(oid);
@@ -514,8 +514,8 @@ const Resolver = struct {
             }
         }
         while (walk.next(r.io) catch |err| return revisionError(err)) |c| {
-            const found = r.repo.odb.read(r.io, c.oid) catch |err| return revisionError(err);
-            defer r.repo.odb.allocator().free(found.bytes);
+            const found = r.repo.objectDatabase().read(r.io, c.oid) catch |err| return revisionError(err);
+            defer r.repo.objectDatabase().allocator().free(found.bytes);
             var commit = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
             defer commit.deinit();
             const hit = try pattern.search(r.gpa, commit.message);
@@ -529,8 +529,8 @@ const Resolver = struct {
         var current = tree;
         var parts = std.mem.tokenizeScalar(u8, path, '/');
         while (parts.next()) |part| {
-            const found = r.repo.odb.read(r.io, current) catch |err| return revisionError(err);
-            defer r.repo.odb.allocator().free(found.bytes);
+            const found = r.repo.objectDatabase().read(r.io, current) catch |err| return revisionError(err);
+            defer r.repo.objectDatabase().allocator().free(found.bytes);
             if (found.type != .tree) return error.BadRevision;
             const entry = (object.Tree.parse(r.repo.objectFormat(), found.bytes).find(part) catch return error.BadRevision) orelse return error.BadRevision;
             current = entry.oid;
@@ -742,22 +742,28 @@ test "revision parsing preserves allocation resource failures" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.init(gpa, io, tmp.dir, .{});
+    var repo = try Repository.create(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
-    const commit = try repo.odb.write(io, .commit, "tree " ++ @as([40]u8, @splat('0')) ++ "\nparent " ++ @as([40]u8, @splat('1')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nsubject\n");
+    const commit = try repo.objectDatabase().write(io, .commit, "tree " ++ @as([40]u8, @splat('0')) ++ "\nparent " ++ @as([40]u8, @splat('1')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nsubject\n");
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = commit.hex(&hex);
-    try repo.git_dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = text });
+    try repo.gitDirectory().writeFile(io, .{ .sub_path = "refs/heads/main", .data = text });
     const Check = struct {
         fn run(allocator: Allocator, repository: *Repository, expr: []const u8, expected: Oid) !void {
             const got = try resolve(allocator, std.testing.io, repository, expr);
             try std.testing.expect(got.eql(expected));
         }
     };
-    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{ &repo, "HEAD", commit });
+    {
+        var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{ &repo, "HEAD", commit });
+    }
     const parent_expr = try gpa.print("{s}^", .{text});
     defer gpa.free(parent_expr);
-    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{ &repo, parent_expr, try Oid.parse(.sha1, &@as([40]u8, @splat('1'))) });
+    {
+        var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{ &repo, parent_expr, try Oid.parse(.sha1, &@as([40]u8, @splat('1'))) });
+    }
 }
 
 test "revision parsing preserves I/O and cancellation resource failures" {
@@ -771,7 +777,7 @@ test "revision parsing preserves I/O and cancellation resource failures" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.init(gpa, io, tmp.dir, .{});
+    var repo = try Repository.create(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Fault.read;
@@ -802,10 +808,10 @@ test "a walk back from a commit reads each commit once per repository handle" {
     var hex: [hash.max_hex_len]u8 = undefined;
     try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~25")).hex(&hex));
     // Every object here is in the one pack, and every read of one asks it.
-    const before = repo.odb.stats.pack_scans;
+    const before = repo.objectDatabase().stats.pack_scans;
     try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~25")).hex(&hex));
     try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~24^")).hex(&hex));
     // Each expression asks the object it starts from, and `^` the one it
     // starts from, for its type; no commit is read again.
-    try testing.expect(repo.odb.stats.pack_scans - before <= 3);
+    try testing.expect(repo.objectDatabase().stats.pack_scans - before <= 3);
 }

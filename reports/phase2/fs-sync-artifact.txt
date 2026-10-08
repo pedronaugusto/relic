@@ -1,0 +1,13 @@
+preflight: test seed 544087954 (reproduce with PREFLIGHT_TEST_SEED=544087954)
+expected 1, found 0
+fs.fs.test.a lock syncs the target's directory after rename only when asked: TestExpectedEqual; seed 544087954
+/Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:93:17: 0x10328c277 in expectEqualInner__func_4264 (relic-tests)
+                return error.TestExpectedEqual;
+                ^
+/Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:57:5: 0x10328cc17 in expectEqual (relic-tests)
+    return expectEqualInner(T, expected, actual);
+    ^
+/Users/gusto/work/tycho/.wt/relic-phase2/src/fs/fs.zig:1446:17: 0x10328cccf in test.a lock syncs the target's directory after rename only when asked (relic-tests)
+                try std.testing.expectEqual(expected_dirs, Counting.directories);
+                ^
+preflight: 1 failed tests; seed 544087954

@@ -5,13 +5,13 @@ const Io = std.Io;
 const builtin = @import("builtin");
 
 const testgit = @import("git.zig");
-const hash = @import("../hash.zig");
-const odb_mod = @import("../odb.zig");
+const hash = @import("../hash/hash.zig");
+const odb_mod = @import("../odb/odb.zig");
 const odb_state = @import("../odb/state.zig");
 const pack_mod = @import("../odb/pack.zig");
-const fs = @import("../repo/fs.zig");
-const worktree = @import("../worktree.zig");
-const repo_mod = @import("../repo.zig");
+const fs = @import("../fs/fs.zig");
+const worktree = @import("../checkout/checkout.zig");
+const repo_mod = @import("../repo/repo.zig");
 
 /// How many files the generated tree holds.
 ///
@@ -54,19 +54,19 @@ test "staging and cache-tree reuse count only the work they need" {
     var index = try repo.openIndex(io);
     defer index.deinit();
 
-    const cold = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
-    const cold_stats = repo.odb.stats;
+    const cold = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
+    const cold_stats = repo.objectDatabase().stats;
 
-    const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
 
-    try index.write(io, repo.git_dir, "index", .{});
+    try index.write(io, repo.gitDirectory(), "index", .{});
     index.deinit();
     index = try repo.openIndex(io);
 
-    const warm = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
+    const warm = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
 
-    const before_tree = repo.odb.stats;
-    const same_tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    const before_tree = repo.objectDatabase().stats;
+    const same_tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
 
     // A dirty tree: one file in ten changed, which is the shape a status
     // actually meets.
@@ -76,7 +76,7 @@ test "staging and cache-tree reuse count only the work they need" {
         const text = try std.mem.print(&content, "file {d} changed\n", .{i * 10});
         try repo_git.writeFile(io, path, text);
     }
-    var result = try worktree.status(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+    var result = try worktree.status(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
         .rules = wt_rules,
         .head_tree = null,
     });
@@ -97,7 +97,7 @@ test "staging and cache-tree reuse count only the work they need" {
     // The cache tree: a warm write-tree writes no tree object at all
     // and returns the same name.
     try std.testing.expect(same_tree.eql(tree));
-    try std.testing.expectEqualDeep(before_tree, repo.odb.stats);
+    try std.testing.expectEqualDeep(before_tree, repo.objectDatabase().stats);
 
     try std.testing.expect(result.entries.len >= file_count / 10);
 }
@@ -385,17 +385,17 @@ test "loose and packed staging count object writes and deltas reduce pack bytes"
         var index = try repo.openIndex(io);
         defer index.deinit();
 
-        const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
             .rules = wt_rules,
             .new_blobs = where,
         });
         try std.testing.expectEqual(@as(u32, @intCast(file_count)), outcome.added);
         if (where == .pack) {
             packed_report = outcome.pack;
-            try std.testing.expectEqual(@as(u64, file_count), repo.odb.stats.packed_written);
-            try std.testing.expectEqual(@as(u64, 0), repo.odb.stats.loose_written);
-        } else try std.testing.expectEqual(@as(u64, file_count), repo.odb.stats.loose_written);
-        trees[pass] = try worktree.writeTree(gpa, io, &index, &repo.odb);
+            try std.testing.expectEqual(@as(u64, file_count), repo.objectDatabase().stats.packed_written);
+            try std.testing.expectEqual(@as(u64, 0), repo.objectDatabase().stats.loose_written);
+        } else try std.testing.expectEqual(@as(u64, file_count), repo.objectDatabase().stats.loose_written);
+        trees[pass] = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     }
     try std.testing.expect(trees[0].eql(trees[1]));
     try std.testing.expect(packed_report != null);

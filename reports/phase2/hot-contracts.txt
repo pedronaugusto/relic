@@ -1,0 +1,11 @@
+test
++- examples
+   +- run test w
+preflight: test seed 3590853941 (reproduce with PREFLIGHT_TEST_SEED=3590853941)
+failed command: ./.zig-cache/o/1c696fba5624ef6909dabb54a46e2d68/test --cache-dir=./.zig-cache --seed=0xd6081535 --listen=-
+
+test
++- run test relic-tests w
+preflight: test seed 3590853941 (reproduce with PREFLIGHT_TEST_SEED=3590853941)
+failed command: ./.zig-cache/o/739a74f50d2b675f90ae5451451bb78d/relic-tests --cache-dir=./.zig-cache --seed=0xd6081535 --listen=-
+

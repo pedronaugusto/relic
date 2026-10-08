@@ -23,13 +23,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const index_mod = @import("../index.zig");
-const sparse = @import("../worktree/sparse.zig");
-const fs = @import("../repo/fs.zig");
-const builtin = @import("builtin");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const index_mod = @import("index.zig");
+const sparse = @import("../patterns/sparse.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -87,6 +86,9 @@ pub fn expand(gpa: Allocator, io: Io, index: *Index, db: *Odb, patterns: ?*const
     return expandSelected(gpa, io, index, db, cone, null);
 }
 
+/// Errors from `expandPresent`.
+pub const ExpandPresentError = Error || fs.StatError;
+
 /// Expand the sparse directories that are on the disk after all, and no
 /// others.
 ///
@@ -95,7 +97,7 @@ pub fn expand(gpa: Allocator, io: Io, index: *Index, db: *Odb, patterns: ?*const
 /// file the index holds or a new one, and to tell which, and to stage a new
 /// one, the index needs its entries rather than the one that stands for
 /// them. The rest of the index stays as sparse as it was.
-pub fn expandPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb) (Error || fs.StatError)!void {
+pub fn expandPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb) ExpandPresentError!void {
     var present: std.StringHashMapUnmanaged(void) = .empty;
     defer present.deinit(gpa);
     for (index.entries.items) |entry| {
@@ -108,6 +110,9 @@ pub fn expandPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb
     return expandSelected(gpa, io, index, db, null, &present);
 }
 
+/// Errors from `clearSkipFromPresent`.
+pub const ClearSkipFromPresentError = Error || fs.StatError;
+
 /// git's `clear_skip_worktree_from_present_files`, which runs on every
 /// index read in a sparse worktree: an entry marked `skip-worktree` whose
 /// path is on the disk anyway -- a checkout with
@@ -115,7 +120,7 @@ pub fn expandPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb
 /// update that follows takes the file out again if it is unchanged. A
 /// sparse directory that is on the disk expands the index and the pass
 /// runs over every file. Returns how many entries lost the mark.
-pub fn clearSkipFromPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb) (Error || fs.StatError)!u32 {
+pub fn clearSkipFromPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb) ClearSkipFromPresentError!u32 {
     var cleared: u32 = 0;
     if (try clearSkipPass(io, wt, index, &cleared)) {
         try expand(gpa, io, index, db, null);
@@ -304,7 +309,7 @@ pub fn collapse(gpa: Allocator, io: Io, index: *Index, db: *Odb, patterns: *cons
 fn collapseNode(
     gpa: Allocator,
     cone: *const sparse.Cone,
-    node: *const index_mod.CacheTree.Node,
+    node: *const index_mod.CacheTreeNode,
     entries: []const Entry,
     prefix: *std.ArrayList(u8),
     out: *std.ArrayList(Entry),
@@ -356,7 +361,7 @@ fn collapseNode(
     return true;
 }
 
-fn findChild(node: *const index_mod.CacheTree.Node, name: []const u8) ?*const index_mod.CacheTree.Node {
+fn findChild(node: *const index_mod.CacheTreeNode, name: []const u8) ?*const index_mod.CacheTreeNode {
     for (node.children.items) |*c| {
         if (std.mem.eql(u8, c.name, name)) return c;
     }
@@ -384,22 +389,3 @@ fn rebuildCacheTree(io: Io, index: *Index, db: *Odb) Error!void {
 // name, stage and flags, and the `TREE` extension byte for byte. A stat
 // is not compared where git may have refreshed it and this has not.
 //=========================================================================
-
-pub const test_access = if (builtin.is_test) struct {
-    pub const hash = Self.hash;
-    pub const object = Self.object;
-    pub const odb_mod = Self.odb_mod;
-    pub const index_mod = Self.index_mod;
-    pub const sparse = Self.sparse;
-    pub const fs = Self.fs;
-    pub const Index = Self.Index;
-    pub const Entry = Self.Entry;
-    pub const Odb = Self.Odb;
-    pub const max_depth = Self.max_depth;
-    pub const expandSelected = Self.expandSelected;
-    pub const expandTree = Self.expandTree;
-    pub const appendEntry = Self.appendEntry;
-    pub const collapseNode = Self.collapseNode;
-    pub const findChild = Self.findChild;
-    pub const rebuildCacheTree = Self.rebuildCacheTree;
-} else struct {};

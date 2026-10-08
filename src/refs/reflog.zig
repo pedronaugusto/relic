@@ -17,9 +17,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const fs = @import("../repo/fs.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 
@@ -310,10 +310,13 @@ pub fn expire(
     return last_kept;
 }
 
+/// Errors from `create`.
+pub const CreateError = Allocator.Error || Io.File.OpenError || Io.Dir.CreateDirError || Io.Dir.CreateDirPathError;
+
 /// Make an empty `logs/<ref>` where there is none, as git's
 /// `files_create_reflog` does: the directories it needs, and the file,
 /// given the permissions `core.sharedRepository` asks for.
-pub fn create(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, shared: fs.Shared) (Allocator.Error || Io.File.OpenError || Io.Dir.CreateDirError || Io.Dir.CreateDirPathError)!void {
+pub fn create(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, shared: fs.Shared) CreateError!void {
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     if (std.Io.Dir.path.dirnamePosix(path)) |parent| {
@@ -330,9 +333,12 @@ pub fn create(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, shared: 
     fs.adjustShared(io, git_dir, path, shared);
 }
 
+/// Errors from `delete`.
+pub const DeleteError = Allocator.Error || Io.Dir.DeleteFileError;
+
 /// Remove `logs/<ref>`, as git's `files_delete_reflog` does. A log that is
 /// not there is no error.
-pub fn delete(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) (Allocator.Error || Io.Dir.DeleteFileError)!void {
+pub fn delete(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) DeleteError!void {
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     git_dir.deleteFile(io, path) catch |err| switch (err) {

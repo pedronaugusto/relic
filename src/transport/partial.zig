@@ -24,24 +24,26 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const pack = @import("../odb/pack.zig");
-const program = @import("../repo/program.zig");
-const config_mod = @import("../config.zig");
-const credential = @import("credential.zig");
-const auth = @import("auth.zig");
-const transport = @import("../transport.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const program = @import("../process/program.zig");
+const config_mod = @import("../config/config.zig");
+const credential = @import("../wire/credential.zig");
+const auth = @import("../wire/auth.zig");
+const transport = @import("transport.zig");
+const repo_mod = @import("../repo/repo.zig");
 const fsck = @import("../object/fsck.zig");
-const promisors = @import("promisors.zig");
-const warning = @import("../repo/warning.zig");
+const promisors = @import("../wire/promisors.zig");
+const warning = @import("../report/warning.zig");
 const revindex = @import("../odb/revindex.zig");
-const filterspec = @import("filterspec.zig");
-const remote_mod = @import("remote.zig");
+const filterspec = @import("../wire/filterspec.zig");
+const remote_mod = @import("../wire/remote.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
+
+/// Errors from lazy object acquisition and partial-clone configuration.
+pub const Error = error{NotAPartialClone} || transport.Error || remote_mod.Error || repo_mod.Error || Repository.WriteConfigError || @import("../odb/odb.zig").Error || fsck.LoadError || Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error || std.fmt.BufPrintError;
 
 /// Errors from reading a filter.
 pub const FilterError = filterspec.Error;
@@ -80,7 +82,7 @@ pub fn promisorRemotes(arena: Allocator, config: *const config_mod.Config) Alloc
 /// says it.
 pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Store, warnings: ?*warning.Warnings) Repository.WriteConfigError!void {
     if (stores.len == 0) return;
-    var arena_state: std.heap.ArenaAllocator = .init(repo.gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(repo.allocator());
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const edits = try arena.alloc(Repository.ConfigEdit, stores.len);
@@ -117,10 +119,13 @@ pub const PromisorRef = struct {
     name: []const u8,
 };
 
+/// Errors from `writePromisor`.
+pub const WritePromisorError = Io.File.OpenError || Io.Writer.Error;
+
 /// Write `pack-<name>.promisor` beside the pack in `pack_dir`: the refs it
 /// was fetched for, `<oid> <name>` to a line, as git writes them; empty for
 /// a lazy fetch, which fetches objects rather than refs.
-pub fn writePromisor(io: Io, pack_dir: Io.Dir, name: Oid, refs: []const PromisorRef) (Io.File.OpenError || Io.Writer.Error)!void {
+pub fn writePromisor(io: Io, pack_dir: Io.Dir, name: Oid, refs: []const PromisorRef) WritePromisorError!void {
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [96]u8 = undefined;
     // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
@@ -141,7 +146,7 @@ pub const Lazy = struct {
     repo: *Repository,
     options: Options,
     /// The error behind the last `error.PromisorFetchFailed`.
-    failure: ?anyerror = null,
+    failure: ?Error = null,
     /// A refused credential, described.
     auth_failure: auth.Failure = .{},
     /// How many fetches it made, and for how many objects.
@@ -176,13 +181,13 @@ pub const Lazy = struct {
 
     /// Have every read of a missing object in the repository ask.
     pub fn install(l: *Lazy) void {
-        l.repo.odb.lazy = .{ .context = l, .fetch = fetchFn };
+        l.repo.objectDatabase().lazy = .{ .context = l, .fetch = fetchFn };
     }
 
     /// Stop asking.
     pub fn uninstall(l: *Lazy) void {
-        if (l.repo.odb.lazy) |lazy| {
-            if (lazy.context == @as(*anyopaque, l)) l.repo.odb.lazy = null;
+        if (l.repo.objectDatabase().lazy) |lazy| {
+            if (lazy.context == @as(*anyopaque, l)) l.repo.objectDatabase().lazy = null;
         }
     }
 
@@ -202,13 +207,13 @@ pub const Lazy = struct {
     /// git's lazy fetch asks them: in `promisorRemotes`' order, the next one
     /// asked only when a request fails, and then for what is still missing.
     /// The last failure is the one returned when none gives everything.
-    pub fn fetch(l: *Lazy, io: Io, oids: []const Oid) !void {
+    pub fn fetch(l: *Lazy, io: Io, oids: []const Oid) Error!void {
         if (oids.len == 0) return;
         const repo = l.repo;
         // Nothing the fetch itself reads may ask again.
-        const saved = repo.odb.lazy;
-        repo.odb.lazy = null;
-        defer repo.odb.lazy = saved;
+        const saved = repo.objectDatabase().lazy;
+        repo.objectDatabase().lazy = null;
+        defer repo.objectDatabase().lazy = saved;
         var arena_state: std.heap.ArenaAllocator = .init(l.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -231,7 +236,7 @@ pub const Lazy = struct {
         }
         if (names.len == 0) return error.NotAPartialClone;
         var remaining = try arena.dupe(Oid, oids);
-        var last_error: anyerror = error.NotAPartialClone;
+        var last_error: Error = error.NotAPartialClone;
         for (names) |name| {
             if (l.fetchFrom(io, name, remaining)) |_| {
                 l.fetches += 1;
@@ -243,10 +248,10 @@ pub const Lazy = struct {
                 else => last_error = err,
             }
             // What came before the failure is not asked for again.
-            try repo.odb.refresh(io);
+            try repo.objectDatabase().refresh(io);
             var kept: usize = 0;
             for (remaining) |oid| {
-                if (!try repo.odb.exists(io, oid)) {
+                if (!try repo.objectDatabase().exists(io, oid)) {
                     remaining[kept] = oid;
                     kept += 1;
                 }
@@ -260,7 +265,7 @@ pub const Lazy = struct {
     /// One request to the promisor remote `name`. A promisor remote with no
     /// `partialclonefilter` is given `blob:none` first, in the repository's
     /// configuration, as git's lazy fetch registers it.
-    fn fetchFrom(l: *Lazy, io: Io, name: []const u8, oids: []const Oid) !void {
+    fn fetchFrom(l: *Lazy, io: Io, name: []const u8, oids: []const Oid) Error!void {
         const repo = l.repo;
         {
             var buf: [256]u8 = undefined;
@@ -281,24 +286,25 @@ pub const Lazy = struct {
             .remote_name = remote.name,
             .repository = repo,
         });
-        defer session.close(io);
-        var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{});
+        defer session.deinit(io);
+        var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{});
         defer pack_dir.close(io);
         var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), repo.objectFormat(), .fetch, l.options.check_objects, null);
         defer if (rules) |*r| r.deinit(l.gpa);
-        const fetched = try session.fetch(l.gpa, io, &repo.odb, pack_dir, .{
+        var fetched = try session.fetch(l.gpa, io, repo.objectDatabase(), pack_dir, .{
             .wants = oids,
             .tips = &.{},
             .include_tag = false,
             .filter = "blob:none",
-        }, .{ .receive = .{ .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = revindex.wanted(repo.configuration()) } });
+        }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = revindex.wanted(repo.configuration()) } });
+        defer fetched.deinit(io);
         if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
     }
 
     /// Fetch, in one request, every blob below `tree` that the repository
     /// lacks — what a checkout of `tree` will read — as git fetches them
     /// before it checks out rather than one at a time.
-    pub fn prefetchTree(l: *Lazy, io: Io, tree: Oid) !void {
+    pub fn prefetchTree(l: *Lazy, io: Io, tree: Oid) Error!void {
         var missing: std.ArrayList(Oid) = .empty;
         defer missing.deinit(l.gpa);
         var seen: Oid.Set = .empty;
@@ -306,7 +312,7 @@ pub const Lazy = struct {
         var stack: std.ArrayList(Oid) = .empty;
         defer stack.deinit(l.gpa);
         try stack.append(l.gpa, tree);
-        const db = &l.repo.odb;
+        const db = l.repo.objectDatabase();
         while (stack.pop()) |oid| {
             if ((try seen.getOrPut(l.gpa, oid)).found_existing) continue;
             if (!try db.exists(io, oid)) {

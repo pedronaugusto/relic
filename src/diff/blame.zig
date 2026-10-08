@@ -23,12 +23,12 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const diff = @import("../diff.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const diff = @import("diff.zig");
 const rename = @import("rename.zig");
-const parallax = @import("../dependencies.zig").parallax;
+const parallax = @import("parallax");
 
 const Oid = hash.Oid;
 

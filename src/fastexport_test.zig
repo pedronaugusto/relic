@@ -9,9 +9,9 @@ const Io = std.Io;
 
 const fastexport = @import("fastexport.zig");
 const fastimport = @import("fastimport.zig");
-const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const repo_mod = @import("repo/repo.zig");
 const testgit = @import("testing/git.zig");
 
 const Oid = hash.Oid;

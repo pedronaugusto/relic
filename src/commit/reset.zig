@@ -17,12 +17,12 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const index_mod = @import("../index.zig");
-const worktree = @import("../worktree.zig");
-const convert = @import("../worktree/convert.zig");
-const fs = @import("../repo/fs.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const index_mod = @import("../index/index.zig");
+const worktree = @import("../checkout/checkout.zig");
+const convert = @import("../checkout/convert.zig");
+const fs = @import("../fs/fs.zig");
+const repo_mod = @import("../repo/repo.zig");
 const threeway = @import("../merge/threeway.zig");
 
 const Oid = hash.Oid;
@@ -55,8 +55,8 @@ pub fn toTree(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = repo.work_dir orelse return error.BareRepository;
-    const db = &repo.odb;
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const db = repo.objectDatabase();
 
     var rules = try repo.worktreeRules();
     rules.required_filters = try repo.requiredFilters(arena);
@@ -135,7 +135,7 @@ pub fn toTree(
             if (found.kind == .directory) try wt.deleteTree(io, path);
         }
         // Validate before `enter` consults a directory in the working tree.
-        if (worktree.safepath.checkEntry(path, .worktree, want.mode == .symlink) != null) return error.UnsafePath;
+        if (@import("../names/path.zig").checkEntry(path, .worktree, want.mode == .symlink) != null) return error.UnsafePath;
         try write_attrs.enter(io, wt, path);
         const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, rules);
         try stats.put(arena, path, written.stat);
@@ -210,7 +210,7 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
 /// Whether the file for `entry` is something other than the index says. A
 /// missing file loses nothing.
 fn differs(gpa: Allocator, io: Io, wt: Io.Dir, index: *const Index, entry: index_mod.Entry, rules: worktree.Rules) Error!bool {
-    return threeway.differsOnDisk(gpa, io, wt, index, entry, rules);
+    return worktree.differsFromIndex(gpa, io, wt, index, entry, rules);
 }
 
 test "reset writes through the target tree's attributes as git reset hard does" {

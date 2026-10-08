@@ -8,9 +8,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const hostile = @import("hostile.zig");
-const safepath = @import("../../worktree/safepath.zig");
+const safepath = @import("../../names/path.zig");
 const fsck = @import("../../object/fsck.zig");
-const hash = @import("../../hash.zig");
+const hash = @import("../../hash/hash.zig");
 
 const windows = builtin.target.os.tag == .windows;
 

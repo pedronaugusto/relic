@@ -1,0 +1,9 @@
+{
+  "current_binary": "/Users/gusto/work/tycho/.wt/relic-phase2/.zig-cache/o/0a7dd68068e880254b44461d8a4c4bc7/relic-phase2",
+  "current_sha256": "15c6c5d9e23cd9da774acbfaae963cf7791efe45e64c4fe8407bd87928e63a1b",
+  "baseline_sha256": "a1a2d08fb86ac0f0a53384e93ec874fa250d635a13443106de97b91c40dd9990",
+  "build_log": "reports/phase2/owned-contracts.txt",
+  "optimization": "ReleaseFast (-Doptimize=ReleaseFast)",
+  "source_diff_sha256": "6a62e842901d4d8b1550a9467a00b97d8064335aa124f5588556ca8574b0ad09",
+  "quiet": true
+}

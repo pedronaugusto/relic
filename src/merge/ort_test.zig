@@ -8,8 +8,8 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const odb_mod = @import("../odb.zig");
+const hash = @import("../hash/hash.zig");
+const odb_mod = @import("../odb/odb.zig");
 const ort = @import("ort.zig");
 const testgit = @import("../testing/git.zig");
 
@@ -109,7 +109,7 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
     var opts = options;
     opts.labels.ours = ours;
     opts.labels.theirs = theirs;
-    const merged = ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, repo, ours), try revParse(gpa, io, repo, theirs), null, opts);
+    const merged = ort.commits(gpa, io, &db, try revParse(gpa, io, repo, ours), try revParse(gpa, io, repo, theirs), null, opts);
     // On a few histories git's merge stops on one of its own assertions and
     // prints nothing. There the merge has to stop the same way, on the same
     // checks, and nowhere else.
@@ -215,7 +215,7 @@ test "a directory rename split is unclean with no path conflicted, as git's merg
     defer git_dir.close(io);
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var result = try ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
+    var result = try ort.commits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
     defer result.deinit();
     try std.testing.expectEqual(0, result.conflicted.len);
     try std.testing.expect(!result.isClean());
@@ -256,7 +256,7 @@ test "trees nested to git's depth limit merge, and deeper ones are refused by na
         defer git_dir.close(io);
         var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
         defer db.deinit(io);
-        const merged = ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
+        const merged = ort.commits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
         if (depth > ort.max_tree_depth) {
             try std.testing.expectError(error.TreeTooDeep, merged);
         } else {
@@ -1175,7 +1175,7 @@ test "a rename search too big for merge.renameLimit is skipped as git skips it" 
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{ .rename_limit = 4 });
 }
 
-const diff = @import("../diff.zig");
+const diff = @import("../diff/diff.zig");
 
 fn renderNameStatus(gpa: Allocator, changes: *const diff.Changes) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);

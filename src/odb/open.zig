@@ -6,8 +6,8 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const odb = @import("policy.zig");
-const hash = @import("../hash.zig");
-const fs = @import("../repo/fs.zig");
+const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
 const storage = @import("state.zig");
 
 pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, options: odb.Options) odb.Error!Odb {

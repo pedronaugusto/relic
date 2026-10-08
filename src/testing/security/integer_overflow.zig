@@ -10,15 +10,15 @@
 const std = @import("std");
 const Io = std.Io;
 
-const diff = @import("../../diff.zig");
+const diff = @import("../../diff/diff.zig");
 const blobmerge = @import("../../merge/blobmerge.zig");
-const objectwalk = @import("../../transport/objectwalk.zig");
-const pretty = @import("../../pretty.zig");
+const objectwalk = @import("../../walk/objectwalk.zig");
+const pretty = @import("../../pretty/pretty.zig");
 const archive = @import("../../archive.zig");
-const attributes = @import("../../worktree/attributes.zig");
+const attributes = @import("../../patterns/attributes.zig");
 const apply = @import("../../patch/apply.zig");
-const repo_mod = @import("../../repo.zig");
-const hash = @import("../../hash.zig");
+const repo_mod = @import("../../repo/repo.zig");
+const hash = @import("../../hash/hash.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 
@@ -88,7 +88,7 @@ test "CVE-2022-41903, t4205-log-pretty-formats 'log --pretty with overflowing wr
         "%B%<(1)%x30",
     }) |format| {
         var out: std.ArrayList(u8) = .empty;
-        try std.testing.expectError(error.UnsupportedPlaceholder, pretty.formatCommit(arena.allocator(), io, &repo.odb, commit, format, .{}, &out));
+        try std.testing.expectError(error.UnsupportedPlaceholder, pretty.formatCommit(arena.allocator(), io, repo.objectDatabase(), commit, format, .{}, &out));
     }
     var sink: Io.Writer.Allocating = .init(gpa);
     defer sink.deinit();

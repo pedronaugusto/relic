@@ -1,14 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Oid = @import("../hash.zig").Oid;
-const Kind = @import("../hash.zig").Kind;
-const access = @import("reftablestack/transaction.zig").test_access;
+const Oid = @import("../hash/hash.zig").Oid;
+const Kind = @import("../hash/hash.zig").Kind;
 const hash = @import("reftablestack/cache.zig").internal.hash;
-const object = @import("../object.zig");
+const object = @import("../object/object.zig");
 const fs = @import("reftablestack/cache.zig").internal.fs;
 const reftable = @import("reftablestack/cache.zig").internal.reftable;
-const refs = @import("../refs.zig");
+const refs = @import("refs.zig");
 const reflog = @import("reflog.zig");
 const Options = @import("reftablestack.zig").Options;
 const Error = @import("reftablestack.zig").Error;
@@ -24,60 +23,27 @@ const isTableName = @import("reftablestack/cache.zig").internal.isTableName;
 const tableName = @import("reftablestack/cache.zig").internal.tableName;
 const Cache = @import("reftablestack.zig").Cache;
 const Validity = @import("reftablestack/cache.zig").internal.Validity;
-const View = access.View;
 const Stacks = @import("reftablestack/cache.zig").internal.Stacks;
 const loadIn = @import("reftablestack/cache.zig").internal.loadIn;
 const reloadIn = @import("reftablestack/cache.zig").internal.reloadIn;
 const isLinked = @import("reftablestack/cache.zig").internal.isLinked;
 const read = @import("reftablestack.zig").read;
-const readIn = access.readIn;
-const resolveIn = access.resolveIn;
 const list = @import("reftablestack.zig").list;
-const lessThanNamed = access.lessThanNamed;
 const readLog = @import("reftablestack.zig").readLog;
-const put = access.put;
 const logExists = @import("reftablestack.zig").logExists;
 const minutesFromZone = @import("reftablestack.zig").minutesFromZone;
 const zoneFromMinutes = @import("reftablestack.zig").zoneFromMinutes;
 const Pending = @import("reftablestack.zig").Pending;
-const lockStack = access.lockStack;
 const prepare = @import("reftablestack.zig").prepare;
-const checkNames = access.checkNames;
-const deletedHere = access.deletedHere;
 const commit = @import("reftablestack.zig").commit;
 const appendLog = @import("reftablestack.zig").appendLog;
-const install = access.install;
 const releasePending = @import("reftablestack.zig").releasePending;
-const addTable = access.addTable;
-const logMessage = access.logMessage;
-const writeTable = access.writeTable;
 const Compaction = @import("reftablestack.zig").Compaction;
 const compactIn = @import("reftablestack.zig").compactIn;
-const Segment = access.Segment;
-const suggestSegment = access.suggestSegment;
-const suggest = access.suggest;
 const testgit = @import("../testing/git.zig");
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 const state_mod = @import("state.zig");
-const config_mod = @import("../config.zig");
-
-test "the geometric rule merges what git's merges" {
-    // git's own examples from its source.
-    try std.testing.expect(suggest(&.{ 64, 32, 16, 8, 4, 2, 1 }, 2) == null);
-    // The segment ends before the newest table, and gathering back from
-    // there each older table is smaller than twice what came after it, so
-    // it reaches the oldest.
-    const tail = suggest(&.{ 64, 32, 16, 8, 4, 3, 1 }, 2).?;
-    try std.testing.expectEqual(@as(usize, 0), tail.start);
-    try std.testing.expectEqual(@as(usize, 6), tail.end);
-    const deep = suggest(&.{ 128, 32, 16, 8, 4, 3, 1 }, 2).?;
-    try std.testing.expectEqual(@as(usize, 1), deep.start);
-    try std.testing.expectEqual(@as(usize, 6), deep.end);
-    try std.testing.expect(suggest(&.{5}, 2) == null);
-    const pair = suggest(&.{ 10, 10 }, 2).?;
-    try std.testing.expectEqual(@as(usize, 0), pair.start);
-    try std.testing.expectEqual(@as(usize, 2), pair.end);
-}
+const config_mod = @import("../config/config.zig");
 
 test "a zone is git's hhmm number both ways" {
     try std.testing.expectEqual(@as(i16, 130), zoneFromMinutes(90));
@@ -192,10 +158,10 @@ test "what this writes into a reftable repository git reads, logs and all" {
     try requireReftableGit(gpa, io);
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
     defer repo.deinit(io);
 
-    const tree = try repo.odb.write(io, .tree, "");
+    const tree = try repo.objectDatabase().write(io, .tree, "");
     var commits: [12]Oid = undefined;
     var parent: ?Oid = null;
     for (&commits, 0..) |*c, i| {
@@ -214,7 +180,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
         .name = "v1",
         .tagger = fixtureWho(1_700_000_100),
         .message = "a tag\n",
-    }, null);
+    }, .{ .diagnostic = null });
 
     // One transaction per commit, each moving main and HEAD's log with it,
     // and the geometric rule compacting as they pile up.
@@ -243,7 +209,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
 
     // Compaction kept the stack short.
     {
-        var dir = try repo.git_dir.openDir(io, "reftable", .{});
+        var dir = try repo.gitDirectory().openDir(io, "reftable", .{});
         defer dir.close(io);
         var stack = try Stack.load(gpa, io, dir, .sha1);
         defer stack.deinit();
@@ -381,7 +347,7 @@ test "a held tables.list.lock refuses the transaction and changes nothing" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
     defer repo.deinit(io);
     const before = try tmp.dir.readFileAlloc(io, ".git/reftable/tables.list", gpa, .limited(4096));
     defer gpa.free(before);
@@ -406,7 +372,7 @@ test "a name and a directory of names conflict with what is already there" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
     defer repo.deinit(io);
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     {
@@ -617,7 +583,7 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     {
-        var made = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+        var made = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
         made.deinit(io);
     }
     {
@@ -662,7 +628,7 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     // What the reference-transaction hook hears is git 2.54's: a
     // "preparing" state, and a symbolic ref's updates among the others.
     try testgit.requireGitVersion(gpa, io, 2, 54);
-    const hooks = @import("../repo/hooks.zig");
+    const hooks = @import("../hooks/hooks.zig");
     var environ = try testgit.programEnviron(gpa);
     defer environ.deinit();
     try environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
@@ -713,8 +679,8 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     defer config.deinit();
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = repo.git_dir,
-        .common_dir = repo.common_dir,
+        .git_dir = repo.gitDirectory(),
+        .common_dir = repo.commonDirectory(),
         .work_dir = twins[1].dir,
     }, .{ .environ = &environ }, .{ .output = .ignore });
     defer runner.deinit();
@@ -797,7 +763,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     try requireReftableGit(gpa, io);
-    const worktrees = @import("../worktree/worktrees.zig");
+    const worktrees = @import("../checkout/worktrees.zig");
     var git = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
     defer git.deinit();
     try git.writeFile(io, "a.txt", "a\n");

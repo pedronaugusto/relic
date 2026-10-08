@@ -16,7 +16,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config_mod = @import("../config.zig");
+const config_mod = @import("../config/config.zig");
 
 /// What is checked of who owns a repository that is discovered.
 pub const Ownership = enum {
@@ -108,11 +108,14 @@ pub const BareRepositories = enum {
     explicit,
 };
 
+/// Errors from `bareRepositories`.
+pub const BareRepositoriesError = error{InvalidSafeBareRepository};
+
 /// `safe.bareRepository` in `protected`, as git's `allowed_bare_repo_cb`
 /// reads it: `explicit` and `all`, spelled exactly, the last one winning.
 /// Any other value, a bare name among them, is
 /// `error.InvalidSafeBareRepository`, where git dies rather than guess.
-pub fn bareRepositories(protected: *const config_mod.Config) error{InvalidSafeBareRepository}!BareRepositories {
+pub fn bareRepositories(protected: *const config_mod.Config) BareRepositoriesError!BareRepositories {
     var result: BareRepositories = .all;
     for (protected.entries.items) |entry| {
         if (!entry.matches("safe", null, "barerepository")) continue;

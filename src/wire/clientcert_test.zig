@@ -1,0 +1,327 @@
+//! Client certificates, proved against servers that require one: OpenSSL's
+//! own `s_server -Verify 1` for the certificates relic reads, in TLS 1.3
+//! and 1.2, and a TLS front that requires one, where git and relic fetch
+//! side by side with the same settings and the same credential helper.
+
+const clientcert = @import("clientcert.zig");
+const repo_mod = @import("../repo/repo.zig");
+const fetch_mod = @import("../transport/fetch.zig");
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Environ = std.process.Environ;
+const testing = std.testing;
+
+const program = @import("../process/program.zig");
+const uplink = @import("uplink");
+const tls = uplink.tls;
+const testgit = @import("../testing/git.zig");
+const testlfs = @import("../testing/lfs.zig");
+const testremote = @import("../testing/remote.zig");
+const object = @import("../object/object.zig");
+
+const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const Pki = testremote.Pki;
+const passphrase = testremote.Pki.passphrase;
+
+/// `openssl s_server` requiring a client certificate the test authority
+/// signed, answering each request with its status page.
+const SServer = struct {
+    running: program.Running,
+    port: u16,
+
+    fn start(gpa: Allocator, io: Io, pki: *Pki, version: []const u8) !SServer {
+        var running = program.start(gpa, io, .{ .environ = &pki.env }, .{
+            .argv = &.{
+                "openssl", "s_server", "-accept", "127.0.0.1:0",          "-cert",   "server.pem", "-key",  "server.key",
+                "-www",    "-Verify",  "1",       "-verify_return_error", "-CAfile", "ca.pem",     version,
+            },
+            .cwd = .{ .dir = pki.dir.dir },
+            .stderr = .ignore,
+        }) catch return error.SkipZigTest;
+        errdefer running.deinit(io);
+        var line_buf: [256]u8 = undefined;
+        var reader = running.child.stdoutFile().?.readerStreaming(io, &line_buf);
+        while (true) {
+            const line = reader.interface.takeDelimiterExclusive('\n') catch return error.SkipZigTest;
+            reader.interface.toss(1);
+            const prefix = "ACCEPT 127.0.0.1:";
+            if (!std.mem.startsWith(u8, line, prefix)) continue;
+            const port = std.fmt.parseUnsigned(u16, std.mem.trim(u8, line[prefix.len..], " \r"), 10) catch return error.SkipZigTest;
+            return .{ .running = running, .port = port };
+        }
+    }
+
+    fn stop(s: *SServer, io: Io) void {
+        s.running.deinit(io);
+    }
+};
+
+/// How `openssl s_server -www` says the client signed: the scheme's name
+/// from OpenSSL 3.2 on, and a type and a digest before it.
+const SignedWith = struct {
+    scheme: []const u8,
+    type: []const u8,
+    digest: ?[]const u8,
+
+    fn on(s: SignedWith, page: []const u8) bool {
+        if (hasLine(page, "Peer signature type: ", s.scheme)) return true;
+        if (!hasLine(page, "Peer signature type: ", s.type)) return false;
+        const digest = s.digest orelse return true;
+        return hasLine(page, "Peer signing digest: ", digest);
+    }
+
+    fn hasLine(page: []const u8, label: []const u8, value: []const u8) bool {
+        var lines = std.mem.splitScalar(u8, page, '\n');
+        while (lines.next()) |line| {
+            const rest = std.mem.trimEnd(u8, line, "\r");
+            if (std.mem.startsWith(u8, rest, label) and std.mem.eql(u8, rest[label.len..], value)) return true;
+        }
+        return false;
+    }
+};
+
+/// A `GET /` over uplink to the server on `port`, trusting only
+/// `server.pem`: the page, in `gpa`.
+fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?*const tls.ClientAuth) ![]u8 {
+    var trust: tls.Trust = .init(gpa);
+    defer trust.deinit();
+    const server_cert = try pki.path("server.pem");
+    defer gpa.free(server_cert);
+    try trust.addFile(io, Io.Dir.cwd(), server_cert);
+    var client: uplink.Client = .init(gpa, .{ .tls = .{ .trust = &trust, .client_auth = auth } });
+    defer client.deinit(io);
+    var url_buf: [64]u8 = undefined;
+    var res = try client.send(io, .{ .url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{port}) });
+    defer res.deinit(io);
+    return res.collect(gpa, io, .limited(1 << 20));
+}
+
+test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 and 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const pki = try Pki.make(gpa, io);
+    defer pki.destroy();
+    for ([_][]const u8{ "-tls1_3", "-tls1_2" }) |version| {
+        var server = try SServer.start(gpa, io, pki, version);
+        defer server.stop(io);
+        const protocol = if (std.mem.eql(u8, version, "-tls1_3")) "Protocol  : TLSv1.3" else "Protocol  : TLSv1.2";
+        for (Pki.kinds) |kind| {
+            // RSA answers in PSS, as OpenSSL's own client does. OpenSSL
+            // names the scheme since 3.2; before it, a type and a digest.
+            const signed_with: SignedWith = if (std.mem.eql(u8, kind, "rsa"))
+                .{ .scheme = "rsa_pss_rsae_sha256", .type = "RSA-PSS", .digest = "SHA256" }
+            else if (std.mem.eql(u8, kind, "p256"))
+                .{ .scheme = "ecdsa_secp256r1_sha256", .type = "ECDSA", .digest = "SHA256" }
+            else if (std.mem.eql(u8, kind, "p384"))
+                .{ .scheme = "ecdsa_secp384r1_sha384", .type = "ECDSA", .digest = "SHA384" }
+            else
+                .{ .scheme = "ed25519", .type = "Ed25519", .digest = null };
+            for ([_]bool{ false, true }) |encrypted| {
+                var arena_state: std.heap.ArenaAllocator = .init(gpa);
+                defer arena_state.deinit();
+                const arena = arena_state.allocator();
+                const cert = try pki.path(try arena.print("{s}.pem", .{kind}));
+                defer gpa.free(cert);
+                const key = try pki.path(try arena.print("{s}.{s}", .{ kind, if (encrypted) "enc.key" else "key" }));
+                defer gpa.free(key);
+                var auth = try clientcert.load(gpa, io, .{ .cert = cert, .key = key }, .{ .arena = arena, .passphrase = if (encrypted) passphrase else null });
+                defer auth.deinit();
+                const page = try relicGet(gpa, io, pki, server.port, &auth);
+                defer gpa.free(page);
+                try testing.expect(std.mem.find(u8, page, protocol) != null);
+                try testing.expect(signed_with.on(page));
+                try testing.expect(std.mem.find(u8, page, "Verify return code: 0 (ok)") != null);
+            }
+        }
+        // No certificate, and one from an authority the server does not
+        // trust, are refused by the server, and named for what they are.
+        try testing.expectError(error.ClientCertificateRejected, relicGet(gpa, io, pki, server.port, null));
+        var arena_state: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_state.deinit();
+        const strange = try pki.path("p256.stranger.pem");
+        defer gpa.free(strange);
+        const strange_key = try pki.path("p256.key");
+        defer gpa.free(strange_key);
+        var stranger = try clientcert.load(gpa, io, .{ .cert = strange, .key = strange_key }, .{ .arena = arena_state.allocator(), .passphrase = null });
+        defer stranger.deinit();
+        try testing.expectError(error.ClientCertificateRejected, relicGet(gpa, io, pki, server.port, &stranger));
+    }
+}
+
+/// A bare copy of a history under a directory an HTTP server serves.
+fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir) !void {
+    var source = try testremote.historyRepo(gpa, io, 2);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const bare = try gpa.print("{s}/repo.git", .{root_path});
+    defer gpa.free(bare);
+    try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
+}
+
+fn expectSameFetch(gpa: Allocator, io: Io, by_git: *testgit.Repo, by_relic: *testgit.Repo) !void {
+    const format = "--format=%(refname) %(objectname)";
+    const theirs = try testgit.fetchRefs(by_git, io, format, false);
+    defer gpa.free(theirs);
+    const ours = try testgit.fetchRefs(by_relic, io, format, true);
+    defer gpa.free(ours);
+    try testing.expectEqualStrings(theirs, ours);
+    try testing.expect(theirs.len != 0);
+}
+
+fn relicFetch(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map) !void {
+    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+    defer repo.deinit(io);
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = env } });
+    outcome.deinit();
+}
+
+/// One side-by-side case: the settings both get, and what relic answers.
+const Case = struct {
+    kind: []const u8 = "p256",
+    /// The certificate's file, `<kind>.pem` when `null`.
+    cert: ?[]const u8 = null,
+    /// The key's file; none for the key in the certificate's file.
+    key: ?[]const u8 = "key",
+    /// Ask the helper for the passphrase, and what it answers.
+    protected: ?[]const u8 = null,
+    /// What relic's fetch fails with, when it does; git fails too.
+    refused: ?anyerror = null,
+    /// Whether git is left out: a key OpenSSL would ask for on the terminal.
+    relic_only: bool = false,
+};
+
+test "git and relic fetch from a server that requires a certificate alike: key beside or with the certificate, a passphrase from the helper, and the refusals" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const pki = try Pki.make(gpa, io);
+    defer pki.destroy();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const client_ca = try pki.path("ca.pem");
+    defer gpa.free(client_ca);
+
+    // A certificate and its key in one file, as curl reads it when no key
+    // file is named.
+    {
+        const cert = try pki.dir.dir.readFileAlloc(io, "rsa.pem", gpa, .unlimited);
+        defer gpa.free(cert);
+        const key = try pki.dir.dir.readFileAlloc(io, "rsa.key", gpa, .unlimited);
+        defer gpa.free(key);
+        const both = try std.mem.concat(gpa, u8, &.{ cert, key });
+        defer gpa.free(both);
+        try pki.dir.dir.writeFile(io, .{ .sub_path = "rsa.both.pem", .data = both });
+    }
+
+    for ([_]bool{ false, true }) |tls12| {
+        const front = try testremote.TlsFront.start(gpa, io, .{ .client_ca = client_ca, .tls12 = tls12, .rsa = true });
+        defer front.stop(io);
+        try front.mirrorRefs(io, server, "repo.git");
+        const url = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
+        defer gpa.free(url);
+
+        for ([_]Case{
+            .{ .kind = "rsa" },
+            .{ .kind = "p256" },
+            .{ .kind = "p384" },
+            .{ .kind = "ed25519" },
+            .{ .kind = "rsa", .cert = "rsa.both.pem", .key = null },
+            .{ .kind = "p256", .key = "enc.key", .protected = passphrase },
+            .{ .kind = "p256", .key = "enc.key", .protected = "battery-staple", .refused = error.SslClientKeyPassphraseWrong },
+            // Asked for whether the key needs it or not, as git asks.
+            .{ .kind = "rsa", .protected = "unused" },
+            .{ .kind = "p256", .key = "enc.key", .refused = error.SslClientKeyPassphraseRequired, .relic_only = true },
+            .{ .kind = "p256", .cert = "p384.pem", .refused = error.SslClientKeyMismatch },
+            .{ .kind = "p256", .cert = "p256.stranger.pem", .refused = error.ClientCertificateRejected },
+        }) |case| {
+            try sideBySide(gpa, io, pki, root.dir, front, url, case);
+        }
+        // No certificate at all.
+        try sideBySideWithout(gpa, io, front, url);
+    }
+}
+
+fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, root: Io.Dir, front: *testremote.TlsFront, url: []const u8, case: Case) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const cert = try pki.path(case.cert orelse try arena.print("{s}.pem", .{case.kind}));
+    defer gpa.free(cert);
+    const key: ?[]u8 = if (case.key) |k| try pki.path(try arena.print("{s}.{s}", .{ case.kind, k })) else null;
+    defer if (key) |k| gpa.free(k);
+
+    var tools_git = testing.tmpDir(.{ .iterate = true });
+    defer tools_git.cleanup();
+    var tools_relic = testing.tmpDir(.{ .iterate = true });
+    defer tools_relic.cleanup();
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }, [_]Io.Dir{ tools_git.dir, tools_relic.dir }) |r, tools| {
+        try r.exec(io, &.{ "remote", "add", "origin", url });
+        try testremote.alreadyHas(gpa, io, root, r);
+        try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
+        // curl's OpenSSL backend reads certificates from files; a
+        // system's own backend may look in the person's keychain instead.
+        try r.exec(io, &.{ "config", "http.sslBackend", "openssl" });
+        try r.exec(io, &.{ "config", "http.sslCert", cert });
+        if (key) |k| try r.exec(io, &.{ "config", "http.sslKey", k });
+        if (case.protected) |answer| {
+            try r.exec(io, &.{ "config", "http.sslCertPasswordProtected", "true" });
+            const helper = try testlfs.passwordHelper(gpa, io, tools, "helper", answer);
+            defer gpa.free(helper);
+            try r.exec(io, &.{ "config", "credential.helper", helper });
+        }
+    }
+
+    const relic_result = relicFetch(gpa, io, by_relic.dir, &env);
+    if (case.refused) |want| {
+        try testing.expectError(want, relic_result);
+    } else try relic_result;
+    if (case.relic_only) return;
+
+    const git_ok = if (testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", false)) |out| blk: {
+        gpa.free(out);
+        break :blk true;
+    } else |_| false;
+    if (case.refused != null) {
+        try testing.expect(!git_ok);
+    } else if (git_ok) {
+        try expectSameFetch(gpa, io, &by_git, &by_relic);
+    } else {
+        // git's TLS library here may not sign with this key — LibreSSL's
+        // does not with Ed25519 — where relic's does.
+        try testing.expectEqualStrings("ed25519", case.kind);
+    }
+    if (case.protected != null) {
+        const theirs = try tools_git.dir.readFileAlloc(io, "helper.log", gpa, .unlimited);
+        defer gpa.free(theirs);
+        const ours = try tools_relic.dir.readFileAlloc(io, "helper.log", gpa, .unlimited);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+    }
+}
+
+fn sideBySideWithout(gpa: Allocator, io: Io, front: *testremote.TlsFront, url: []const u8) !void {
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    try by_git.exec(io, &.{ "remote", "add", "origin", url });
+    try by_git.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
+    try by_git.exec(io, &.{ "config", "http.sslBackend", "openssl" });
+    try testing.expectError(error.ClientCertificateRejected, relicFetch(gpa, io, by_git.dir, &env));
+    if (testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", false)) |out| {
+        gpa.free(out);
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}

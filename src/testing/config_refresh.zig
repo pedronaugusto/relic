@@ -11,7 +11,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const testgit = @import("git.zig");
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 const sparsecheckout = @import("../worktree/sparsecheckout.zig");
 const lfsapi = @import("../lfs/api.zig");
 

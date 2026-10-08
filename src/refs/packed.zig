@@ -18,7 +18,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
+const hash = @import("../hash/hash.zig");
 const names = @import("../names/ref.zig");
 const ReadError = @import("value.zig").ReadError;
 

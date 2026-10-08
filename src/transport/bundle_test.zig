@@ -8,7 +8,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const bundle = @import("bundle.zig");
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 
 const Repository = repo_mod.Repository;
 const CreateRequest = bundle.CreateRequest;
@@ -258,7 +258,7 @@ test "git's bundles are read, verified, listed, unbundled and fetched from as gi
 
     {
         var f = try File.open(gpa, io, tmp.dir, "inc.bundle");
-        defer f.close(gpa, io);
+        defer f.deinit(io);
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try f.header.listHeads(&out.writer, &.{});
@@ -282,7 +282,7 @@ test "git's bundles are read, verified, listed, unbundled and fetched from as gi
         var empty_repo = try Repository.open(gpa, io, empty.dir, .{});
         defer empty_repo.deinit(io);
         var f = try File.open(gpa, io, tmp.dir, "inc.bundle");
-        defer f.close(gpa, io);
+        defer f.deinit(io);
         try std.testing.expectError(error.MissingPrerequisites, unbundle(gpa, io, &empty_repo, f, .{}));
         empty.report_failures = false;
         try std.testing.expectError(error.GitFailed, empty.exec(io, &.{ "bundle", "verify", "-q", path }));

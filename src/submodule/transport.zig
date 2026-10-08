@@ -20,18 +20,18 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
+const hash = @import("../hash/hash.zig");
 const ref_names = @import("../names/ref.zig");
-const object = @import("../object.zig");
-const program = @import("../repo/program.zig");
-const config_mod = @import("../config.zig");
-const credential = @import("../transport/credential.zig");
-const auth = @import("../transport/auth.zig");
-const progress_mod = @import("../transport/progress.zig");
-const submodule = @import("../submodule.zig");
+const object = @import("../object/object.zig");
+const program = @import("../process/program.zig");
+const config_mod = @import("../config/config.zig");
+const credential = @import("../wire/credential.zig");
+const auth = @import("../wire/auth.zig");
+const progress_mod = @import("../report/progress.zig");
+const submodule = @import("submodule.zig");
 const clone_mod = @import("../transport/clone.zig");
 const fetch_mod = @import("../transport/fetch.zig");
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -116,8 +116,8 @@ pub const Transport = struct {
     fn fetchFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
         const t: *Transport = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Transport
         t.fetchOnce(gpa, io, repo, remote, &.{}) catch |err| return t.failed(err);
-        repo.odb.refresh(io) catch |err| return t.failed(err);
-        if (repo.odb.exists(io, want) catch |err| return t.failed(err)) return;
+        repo.objectDatabase().refresh(io) catch |err| return t.failed(err);
+        if (repo.objectDatabase().exists(io, want) catch |err| return t.failed(err)) return;
         // Not on any branch the remote advertises: asked for by name, as
         // git's `fetch <remote> <commit>` asks.
         var hex: [hash.max_hex_len]u8 = undefined;

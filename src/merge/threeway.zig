@@ -17,24 +17,24 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const index_mod = @import("../index.zig");
-const merge = @import("../merge.zig");
-const worktree = @import("../worktree.zig");
-const fs = @import("../repo/fs.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const index_mod = @import("../index/index.zig");
+const merge = @import("merge.zig");
+const worktree = @import("../checkout/checkout.zig");
+const fs = @import("../fs/fs.zig");
+const repo_mod = @import("../repo/repo.zig");
 const ort = @import("ort.zig");
 const octopus = @import("octopus.zig");
-const revwalk = @import("../revwalk.zig");
-const config_mod = @import("../config.zig");
+const revwalk = @import("../walk/walk.zig");
+const config_mod = @import("../config/config.zig");
 const strategy = @import("strategy.zig");
-const convert = @import("../worktree/convert.zig");
-const attributes = @import("../worktree/attributes.zig");
-const filter = @import("../worktree/filter.zig");
-const program = @import("../repo/program.zig");
-const diff = @import("../diff.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
+const convert = @import("../checkout/convert.zig");
+const attributes = @import("../patterns/attributes.zig");
+const filter = @import("../checkout/filter.zig");
+const program = @import("../process/program.zig");
+const diff = @import("../diff/diff.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
 const abbrev = @import("../odb/abbrev.zig");
 
 const Oid = hash.Oid;
@@ -183,8 +183,8 @@ fn run(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = repo.work_dir orelse return error.BareRepository;
-    const db = &repo.odb;
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const db = repo.objectDatabase();
 
     for (index.entries.items) |entry| {
         if (entry.stage != 0) {
@@ -247,10 +247,10 @@ fn run(
         .inner_messages = options.inner_messages or (repo.configuration().getInt("merge.verbosity", 2) catch 2) >= 5,
     };
     var merged = switch (sides) {
-        .trees => |t| try ort.mergeTrees(gpa, io, db, t.base, t.ours, t.theirs, ort_options),
+        .trees => |t| try ort.trees(gpa, io, db, t.base, t.ours, t.theirs, ort_options),
         .commits => |c| blk: {
             ort_options.labels.base = "";
-            break :blk try ort.mergeCommits(gpa, io, db, c.ours, c.theirs, c.bases, ort_options);
+            break :blk try ort.commits(gpa, io, db, c.ours, c.theirs, c.bases, ort_options);
         },
     };
     defer merged.deinit();
@@ -280,8 +280,8 @@ pub fn applyOctopus(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const db = &repo.odb;
-    if (repo.work_dir == null) return error.BareRepository;
+    const db = repo.objectDatabase();
+    if (repo.workDirectory() == null) return error.BareRepository;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) {
             if (options.blocked) |b| b.set(entry.path);
@@ -296,7 +296,7 @@ pub fn applyOctopus(
     defer attrs.deinit();
     rules.attrs = &attrs;
     rules.filters = options.filters;
-    var merged = try octopus.mergeCommits(gpa, io, db, head, heads, .{ .conflict_style = options.blob.conflict_style });
+    var merged = try octopus.commits(gpa, io, db, head, heads, .{ .conflict_style = options.blob.conflict_style });
     defer merged.deinit();
     return carry(gpa, io, repo, index, &arena_instance, ours, rules, .{
         .tree = merged.worktree_tree,
@@ -340,8 +340,8 @@ fn carry(
     options: Options,
 ) Error!Outcome {
     const arena = arena_instance.allocator();
-    const wt = repo.work_dir orelse return error.BareRepository;
-    const db = &repo.odb;
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const db = repo.objectDatabase();
     // What the merge changes: the merged tree against ours, a walk past
     // every subtree the two share, so a pick costs what it changes.
     var tree_changes = try diff.tree(gpa, io, db, ours, merged.tree, .{});
@@ -644,7 +644,7 @@ const SubmoduleOpener = struct {
         }
         opened.tips = try tips.toOwnedSlice(s.gpa);
         try s.opened.append(s.gpa, opened);
-        return .{ .db = &opened.repo.odb, .tips = opened.tips };
+        return .{ .db = opened.repo.objectDatabase(), .tips = opened.tips };
     }
 };
 
@@ -783,10 +783,6 @@ fn configuredDrivers(arena: Allocator, repo: *Repository) Allocator.Error![]cons
     return out.items;
 }
 
-/// Whether the file at `entry.path` holds something other than what the
-/// index says: `worktree.differsFromIndex`.
-pub const differsOnDisk = worktree.differsFromIndex;
-
 test "a merge reads the trees it changes, not the whole tree" {
     const testgit = @import("../testing/git.zig");
     const gpa = std.testing.allocator;
@@ -816,17 +812,17 @@ test "a merge reads the trees it changes, not the whole tree" {
     defer gpa.free(theirs.name);
 
     // Every object is in the one pack, and every read of one asks it.
-    const before = repo.odb.stats.pack_scans;
+    const before = repo.objectDatabase().stats.pack_scans;
     var outcome = try applyCommits(gpa, io, &repo, &index, ours.oid, theirs.oid, null, .{});
     defer outcome.deinit();
-    const reads = repo.odb.stats.pack_scans - before;
+    const reads = repo.objectDatabase().stats.pack_scans - before;
     try std.testing.expect(outcome.isClean());
     try std.testing.expectEqual(@as(u32, 1), outcome.written);
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("theirs\n", try r.dir.readFile(io, "d005/f", &buf));
     try std.testing.expectEqualStrings("ours\n", try r.dir.readFile(io, "d250/f", &buf));
     // The index is the merged tree, and git says so.
-    try index.write(io, repo.git_dir, "index", .{ .lock = .{ .shared = repo.shared } });
+    try index.write(io, repo.gitDirectory(), "index", .{ .lock = .{ .shared = repo.sharedPermissions() } });
     var hex: [hash.max_hex_len]u8 = undefined;
     const written = try r.line(io, &.{"write-tree"});
     defer gpa.free(written);

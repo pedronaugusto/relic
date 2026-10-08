@@ -261,7 +261,9 @@ fn historyRecord(h: *const Hook) !u8 {
             try entry.appendSlice(arena, " msg=[");
             try appendTranslated(arena, &entry, message, '|');
         } else {
-            const stripped = try relic.repo.program.run(.{ .environ = h.environ }, arena, io, .{ .argv = &.{ "git", "stripspace", "-s" } }, message, .{});
+            const stripped = try relic.repo.program.run(arena, io, .{ .environ = h.environ }, .{ .argv = &.{ "git", "stripspace", "-s" } }, .{
+                .input = message,
+            });
             if (!stripped.succeeded()) return error.GitFailed;
             try entry.appendSlice(arena, " edited=[");
             try appendTranslated(arena, &entry, stripped.stdout, '|');

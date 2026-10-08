@@ -12,10 +12,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const config_mod = @import("../config.zig");
-const fs = @import("../repo/fs.zig");
-const diagnostic_mod = @import("../repo/diagnostic.zig");
+const hash = @import("../hash/hash.zig");
+const config_mod = @import("../config/config.zig");
+const fs = @import("../fs/fs.zig");
+const diagnostic_mod = @import("../report/diagnostic.zig");
 const refs = @import("../refs/value.zig");
 
 const Diagnostic = diagnostic_mod.Diagnostic;
@@ -60,10 +60,13 @@ pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, diagnostic: ?*Diagnostic
     return parse(gpa, text, diagnostic);
 }
 
+/// Errors from `parse`.
+pub const ParseError = Self.Error || config_mod.ParseError;
+
 /// Decide the format from the text of a repository's own `config`: what
 /// `read` decides once it has the file, and what a write about to replace
 /// the file would leave.
-pub fn parse(gpa: Allocator, text: []const u8, diagnostic: ?*Diagnostic) (Self.Error || config_mod.ParseError)!Format {
+pub fn parse(gpa: Allocator, text: []const u8, diagnostic: ?*Diagnostic) ParseError!Format {
     var config = try config_mod.Config.parseText(gpa, text, .local);
     defer config.deinit();
     return decide(&config, diagnostic);

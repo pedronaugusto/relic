@@ -9,17 +9,17 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
-const worktree = @import("../worktree.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
+const worktree = @import("../checkout/checkout.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
 const partial = @import("partial.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
-const warning = @import("../repo/warning.zig");
-const config_mod = @import("../config.zig");
+const warning = @import("../report/warning.zig");
+const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -232,11 +232,11 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
         const text = try git(gpa, io, lone, &.{ "rev-parse", "HEAD:big.txt" });
         defer gpa.free(text);
         const blob = try Oid.parse(repo.objectFormat(), std.mem.trimEnd(u8, text, "\n"));
-        try testing.expectError(error.ObjectNotFound, repo.odb.read(io, blob));
+        try testing.expectError(error.ObjectNotFound, repo.objectDatabase().read(io, blob));
         var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
         defer lazy.deinit();
         lazy.install();
-        const found = try repo.odb.read(io, blob);
+        const found = try repo.objectDatabase().read(io, blob);
         gpa.free(found.bytes);
         try testing.expectEqual(@as(u32, 1), lazy.fetches);
     }
@@ -247,13 +247,13 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
     const head = (try repo.headTree(io)).?;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    try testing.expectError(error.ObjectNotFound, worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = try repo.worktreeRules() }));
+    try testing.expectError(error.ObjectNotFound, worktree.checkout(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), head, .{ .rules = try repo.worktreeRules() }));
     var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = try repo.worktreeRules() });
-    try index.write(io, repo.git_dir, "index", .{});
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), head, .{ .rules = try repo.worktreeRules() });
+    try index.write(io, repo.gitDirectory(), "index", .{});
     try testing.expectEqual(@as(u32, 1), lazy.fetches);
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
 }
@@ -417,8 +417,8 @@ test "a promised object is fetched from the next promisor remote when one fails,
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = try repo.worktreeRules() });
-    try index.write(io, repo.git_dir, "index", .{});
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), head, .{ .rules = try repo.worktreeRules() });
+    try index.write(io, repo.gitDirectory(), "index", .{});
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
 
     // With no promisor remote that has them, the read fails by name.
@@ -426,7 +426,7 @@ test "a promised object is fetched from the next promisor remote when one fails,
     gpa.free(set);
     try repo.editConfig(io, &.{.{ .name = "remote.mirror.url", .value = "file:///nowhere/mirror.git" }}, null);
     const missing = try Oid.parse(repo.objectFormat(), "1111111111111111111111111111111111111111");
-    try testing.expectError(error.PromisorFetchFailed, repo.odb.read(io, missing));
+    try testing.expectError(error.PromisorFetchFailed, repo.objectDatabase().read(io, missing));
 }
 
 test "a lazy fetch writes the filter it registers, and leaves another process's settings and none of memory's" {

@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const sweep = @import("../dependencies.zig").sweep;
+const sweep = @import("sweep");
 
 /// git's matcher flags.
 pub const Options = struct {

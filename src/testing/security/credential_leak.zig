@@ -6,9 +6,9 @@
 
 const std = @import("std");
 
-const transport = @import("../../transport.zig");
-const config_mod = @import("../../config.zig");
-const warning = @import("../../repo/warning.zig");
+const transport = @import("../../transport/transport.zig");
+const config_mod = @import("../../config/config.zig");
+const warning = @import("../../report/warning.zig");
 
 /// Open `url` with `transfer.credentialsInUrl` set to `value`, warning
 /// into `warnings`. No programs are granted, so an ssh URL that passes the
@@ -22,7 +22,7 @@ fn open(gpa: std.mem.Allocator, url: []const u8, value: []const u8, warnings: *w
         .config = &config,
         .warnings = warnings,
     });
-    session.close(std.testing.io);
+    session.deinit(std.testing.io);
     return error.TestUnexpectedResult;
 }
 

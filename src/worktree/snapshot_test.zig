@@ -1,16 +1,16 @@
 const std = @import("std");
-const allocation = @import("../testing/allocation.zig");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
 const snapshot = @import("snapshot.zig");
-const repo = @import("../repo.zig");
-const odb = @import("../odb.zig");
-const object = @import("../object.zig");
-const hash = @import("../hash.zig");
-const diff_mod = @import("../diff.zig");
-const fs = @import("../repo/fs.zig");
-const lfs = @import("../lfs.zig");
+const repo = @import("../repo/repo.zig");
+const odb = @import("../odb/odb.zig");
+const object = @import("../object/object.zig");
+const hash = @import("../hash/hash.zig");
+const diff_mod = @import("../diff/diff.zig");
+const fs = @import("../fs/fs.zig");
+const lfs = @import("../lfs/lfs.zig");
 const storage = @import("../odb/state.zig");
 const testgit = @import("../testing/git.zig");
 
@@ -202,7 +202,10 @@ test "snapshot allocation failures leave no published result or lost owner" {
     try source.exec(io, &.{ "add", "." });
     try source.exec(io, &.{ "commit", "-qm", "base" });
     try source.exec(io, &.{ "repack", "-ad" });
-    try testing.checkAllAllocationFailures(allocation.no_resize, allocationCase, .{source.dir});
+    {
+        var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
+        try testing.checkAllAllocationFailures(no_resize.allocator(), allocationCase, .{source.dir});
+    }
 }
 
 fn allocationCase(gpa: std.mem.Allocator, source: Io.Dir) !void {
@@ -396,7 +399,7 @@ test "a live snapshot store reads its own objects after source packs are damaged
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
     const saved = (try store.capture(io, .{ .repository = &r }, .{})).snapshot;
-    const pack_name = storage.get(r.odb._state).sources.items[0].packs.items[0].name;
+    const pack_name = storage.get(r.objectDatabase()._state).sources.items[0].packs.items[0].name;
     const path = try gpa.print(".git/objects/pack/{s}.pack", .{pack_name});
     defer gpa.free(path);
     try source.writeFile(io, path, "damaged\n");
@@ -581,11 +584,11 @@ test "snapshot adoption keeps a mixed tree after the source has moved on" {
         const bytes = try root.build();
         defer gpa.free(bytes);
         const tree = try store.db.write(io, .tree, bytes);
-        frame = try store.adoptTree(io, &r.odb, tree);
+        frame = try store.adoptTree(io, r.objectDatabase(), tree);
         try testing.expect(frame.tree.eql(tree));
         try expectClosure(&store.db, tree);
         const writes = store.db.stats.loose_written;
-        _ = try store.adoptTree(io, &r.odb, tree);
+        _ = try store.adoptTree(io, r.objectDatabase(), tree);
         try testing.expectEqual(writes, store.db.stats.loose_written);
     }
     // Every old object may now disappear, and reopening must still restore it.
@@ -633,7 +636,10 @@ test "snapshot adoption preserves refusals and allocation ownership" {
             try expectClosure(&store.db, tree);
         }
     };
-    try testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
+    {
+        var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
+        try testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{});
+    }
 }
 
 test "snapshot adoption refuses file entries that name trees" {

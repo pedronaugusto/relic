@@ -7,9 +7,9 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const testgit = @import("../testing/git.zig");
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
 const blame = @import("blame.zig");
 
 const Oid = hash.Oid;
@@ -45,7 +45,7 @@ fn expectSameAsGit(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *repo_mod.R
         }
     }
 
-    var got = try blame.file(gpa, io, &repo.odb, commit, path, options);
+    var got = try blame.file(gpa, io, repo.objectDatabase(), commit, path, options);
     defer got.deinit();
     var actual: std.Io.Writer.Allocating = .init(gpa);
     defer actual.deinit();
@@ -81,7 +81,7 @@ const History = struct {
         var sub: object.Tree.Builder = .init(h.gpa, .sha1);
         defer sub.deinit();
         for (files.keys(), files.values()) |path, bytes| {
-            const blob = try h.repo.odb.write(h.io, .blob, bytes);
+            const blob = try h.repo.objectDatabase().write(h.io, .blob, bytes);
             if (std.mem.findScalar(u8, path, '/')) |slash| {
                 try sub.add(.file, path[slash + 1 ..], blob);
             } else try top.add(.file, path, blob);
@@ -89,11 +89,11 @@ const History = struct {
         if (sub.count() != 0) {
             const bytes = try sub.build();
             defer h.gpa.free(bytes);
-            try top.add(.tree, "dir", try h.repo.odb.write(h.io, .tree, bytes));
+            try top.add(.tree, "dir", try h.repo.objectDatabase().write(h.io, .tree, bytes));
         }
         const tree_bytes = try top.build();
         defer h.gpa.free(tree_bytes);
-        const tree = try h.repo.odb.write(h.io, .tree, tree_bytes);
+        const tree = try h.repo.objectDatabase().write(h.io, .tree, tree_bytes);
         const who: object.Signature = .{ .name = "T", .email = "t@example.invalid", .when_secs = when, .offset_minutes = 0 };
         return h.repo.writeCommit(h.io, .{ .tree = tree, .parents = parents, .author = who, .committer = who, .message = "c\n" }, null);
     }
@@ -144,7 +144,7 @@ test "blame gives each line the commit git gives it, across edits, a rename and 
     try expectSameAsGit(gpa, io, &git, &repo, merged, "dir/b.txt", .{ .follow_renames = false });
     try expectSameAsGit(gpa, io, &git, &repo, merged, "other", .{});
     try expectSameAsGit(gpa, io, &git, &repo, edit, "a.txt", .{});
-    try std.testing.expectError(error.PathNotFound, blame.file(gpa, io, &repo.odb, merged, "a.txt", .{}));
+    try std.testing.expectError(error.PathNotFound, blame.file(gpa, io, repo.objectDatabase(), merged, "a.txt", .{}));
 }
 
 test "blame of random histories with merges, renames and repeated lines agrees with git" {

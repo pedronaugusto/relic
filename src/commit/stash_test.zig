@@ -15,9 +15,9 @@ const testing = std.testing;
 
 const testgit = @import("../testing/git.zig");
 const stash = @import("stash.zig");
-const object = @import("../object.zig");
-const Repository = @import("../repo.zig").Repository;
-const program = @import("../repo/program.zig");
+const object = @import("../object/object.zig");
+const Repository = @import("../repo/repo.zig").Repository;
+const program = @import("../process/program.zig");
 
 const who: object.Signature = .{
     .name = "Fixture",
@@ -79,9 +79,9 @@ const Twin = struct {
                 defer a.deinit(io);
                 var b = try Repository.open(gpa, io, t.relic.dir, .{});
                 defer b.deinit(io);
-                var by_git = try a.readLog(io, stash.ref_name);
+                var by_git = try a.readLog(io, @import("../names/ref.zig").stash);
                 defer by_git.deinit();
-                var by_relic = try b.readLog(io, stash.ref_name);
+                var by_relic = try b.readLog(io, @import("../names/ref.zig").stash);
                 defer by_relic.deinit();
                 try testing.expectEqual(by_git.entries.len, by_relic.entries.len);
                 for (by_git.entries, by_relic.entries) |x, y| {

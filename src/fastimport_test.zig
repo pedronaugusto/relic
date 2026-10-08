@@ -8,8 +8,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const fastimport = @import("fastimport.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
+const object = @import("object/object.zig");
+const repo_mod = @import("repo/repo.zig");
 const testgit = @import("testing/git.zig");
 
 const Repository = repo_mod.Repository;

@@ -26,21 +26,21 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const repo_mod = @import("../repo.zig");
-const refs_mod = @import("../refs.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const repo_mod = @import("../repo/repo.zig");
+const refs_mod = @import("../refs/refs.zig");
 const revparse = @import("../revwalk/revparse.zig");
-const revwalk = @import("../revwalk.zig");
-const objectwalk = @import("objectwalk.zig");
+const revwalk = @import("../walk/walk.zig");
+const objectwalk = @import("../walk/objectwalk.zig");
 const fsck = @import("../object/fsck.zig");
 const indexpack = @import("../odb/indexpack.zig");
-const filterspec = @import("filterspec.zig");
-const message = @import("../commit/message.zig");
-const fs = @import("../repo/fs.zig");
-const ignore = @import("../worktree/ignore.zig");
-const progress_mod = @import("progress.zig");
+const filterspec = @import("../wire/filterspec.zig");
+const message = @import("../object/message.zig");
+const fs = @import("../fs/fs.zig");
+const ignore = @import("../patterns/ignore.zig");
+const progress_mod = @import("../report/progress.zig");
 const revindex = @import("../odb/revindex.zig");
 const ref_names = @import("../names/ref.zig");
 
@@ -243,6 +243,7 @@ pub const OpenError = ParseError || Io.File.OpenError;
 
 /// A bundle file, open at its pack.
 pub const File = struct {
+    gpa: Allocator,
     file: Io.File,
     buffer: [64 * 1024]u8 = undefined,
     reader: Io.File.Reader = undefined,
@@ -252,6 +253,7 @@ pub const File = struct {
     pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) Self.OpenError!*File {
         const f = try gpa.create(File);
         errdefer gpa.destroy(f);
+        f.gpa = gpa;
         f.file = try dir.openFile(io, path, .{});
         errdefer f.file.close(io);
         f.reader = f.file.reader(io, &f.buffer);
@@ -260,10 +262,10 @@ pub const File = struct {
     }
 
     /// Close it.
-    pub fn close(f: *File, gpa: Allocator, io: Io) void {
+    pub fn deinit(f: *File, io: Io) void {
         f.header.deinit();
         f.file.close(io);
-        gpa.destroy(f);
+        f.gpa.destroy(f);
     }
 
     /// The pack, from where the header ends.
@@ -345,9 +347,12 @@ fn connectedBelow(gpa: Allocator, io: Io, db: *odb_mod.Odb, tips: []const Oid, r
     return true;
 }
 
+/// Errors from `repositoryTips`.
+pub const RepositoryTipsError = refs_mod.ReadError || Allocator.Error;
+
 /// The tip of every ref of `repo`, and `HEAD`'s: what `--all` names. The
 /// result is the caller's.
-pub fn repositoryTips(gpa: Allocator, io: Io, repo: *Repository) (refs_mod.ReadError || Allocator.Error)![]Oid {
+pub fn repositoryTips(gpa: Allocator, io: Io, repo: *Repository) RepositoryTipsError![]Oid {
     var out: std.ArrayList(Oid) = .empty;
     errdefer out.deinit(gpa);
     var listing = try repo.refStore().list(gpa, io, "refs/");
@@ -376,12 +381,12 @@ pub const UnbundleOptions = struct {
 /// repository, completing a thin pack from it; a filtered bundle's pack is
 /// kept as a promisor pack, as git keeps it. Returns what was received.
 pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Self.Error!indexpack.Result {
-    var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
     const strict: fsck.Rules = .{ .strict = true };
-    return receive(gpa, io, &repo.odb, pack_dir, bundle, tips, .{
+    return receive(gpa, io, repo.objectDatabase(), pack_dir, bundle, tips, .{
         .fix_thin = true,
         .fsck = if (options.check_objects) &strict else null,
         .progress = options.progress,
@@ -400,7 +405,8 @@ pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundl
     if (!v.connected) return error.PrerequisitesNotConnected;
     var receive_options = options;
     receive_options.fix_thin = true;
-    const result = try indexpack.receive(gpa, io, db, pack_dir, bundle.pack(), receive_options);
+    var result = try db.receivePack(io, bundle.pack(), receive_options);
+    errdefer result.deinit(io);
     if (bundle.header.filter != null) if (result.name) |name| {
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [96]u8 = undefined;
@@ -501,7 +507,7 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     }
 
     // The walk: what is shown, in order, and the boundary below it.
-    var walk: revwalk.Walk = .init(gpa, &repo.odb);
+    var walk: revwalk.Walk = .init(gpa, repo.objectDatabase());
     defer walk.deinit();
     for (pending.items) |p| {
         const c = p.commit orelse continue;
@@ -540,8 +546,8 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     var haves: std.ArrayList(Oid) = .empty;
     var wants: std.ArrayList(Oid) = .empty;
     for (ordered) |b| {
-        const found = try repo.odb.read(io, b);
-        defer repo.odb.allocator().free(found.bytes);
+        const found = try repo.objectDatabase().read(io, b);
+        defer repo.objectDatabase().allocator().free(found.bytes);
         var commit = try object.Commit.parse(gpa, kind, found.bytes);
         defer commit.deinit();
         const subject = try message.onelineSubject(a, commit.message);
@@ -569,9 +575,9 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     try w.writeByte('\n');
     if (ref_count == 0) return error.EmptyBundle;
 
-    var collected = try objectwalk.missingWith(gpa, io, &repo.odb, wants.items, haves.items, .{ .filter = filter });
+    var collected = try objectwalk.missingWith(gpa, io, repo.objectDatabase(), wants.items, haves.items, .{ .filter = filter });
     defer collected.deinit();
-    _ = try repo.odb.writePackTo(io, w, collected.entries, request.pack);
+    _ = try repo.objectDatabase().writePackTo(io, w, collected.entries, request.pack);
     try w.flush();
 }
 
@@ -603,11 +609,11 @@ fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) Create
         error.Canceled => return error.Canceled,
         else => return error.SparseBlobMissing,
     };
-    const found = repo.odb.read(io, oid) catch |err| switch (err) {
+    const found = repo.objectDatabase().read(io, oid) catch |err| switch (err) {
         error.ObjectNotFound => return error.SparseBlobMissing,
         else => |e| return e,
     };
-    defer repo.odb.allocator().free(found.bytes);
+    defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .blob) return error.SparseBlobMissing;
     const rules = try a.create(ignore.Rules);
     rules.* = try .init(a, false);
@@ -619,7 +625,7 @@ fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) Create
 /// The commit `oid` is or peels to, or `null`.
 fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
     const peeled = repo.peel(io, oid) catch return null;
-    const header = repo.odb.readHeader(io, peeled) catch return null;
+    const header = repo.objectDatabase().readHeader(io, peeled) catch return null;
     return if (header.type == .commit) peeled else null;
 }
 
@@ -629,10 +635,10 @@ fn topoOrder(a: Allocator, io: Io, repo: *Repository, list: []const Oid) CreateE
     var parents: Oid.Map([]const Oid) = .empty;
     for (list) |c| try indegree.put(a, c, 1);
     for (list) |c| {
-        const found = try repo.odb.read(io, c);
-        defer repo.odb.allocator().free(found.bytes);
+        const found = try repo.objectDatabase().read(io, c);
+        defer repo.objectDatabase().allocator().free(found.bytes);
         var commit = try object.Commit.parse(a, repo.objectFormat(), found.bytes);
-        const ps = try a.dupe(Oid, revwalk.parentsOf(&repo.odb, c, commit.parents));
+        const ps = try a.dupe(Oid, revwalk.parentsOf(repo.objectDatabase(), c, commit.parents));
         commit.deinit();
         try parents.put(a, c, ps);
         for (ps) |p| if (indegree.getPtr(p)) |d| {

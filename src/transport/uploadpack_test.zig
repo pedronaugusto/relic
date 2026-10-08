@@ -4,6 +4,7 @@
 //! and ref, deepened and unshallowed, and filtered, in protocol v2 and v0;
 //! and relic fetches from it in process for a `file://` remote.
 
+const config_mod = @import("../config/config.zig");
 const std = @import("std");
 const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
@@ -11,15 +12,14 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
 
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
-const warning = @import("../repo/warning.zig");
+const warning = @import("../report/warning.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 
-const config_mod = @import("../config.zig");
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 const sparse_spec = "/file\n/dir/\n!/dir/deep/\n";

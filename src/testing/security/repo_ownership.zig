@@ -11,7 +11,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const repo_mod = @import("../../repo.zig");
+const repo_mod = @import("../../repo/repo.zig");
 const safe = @import("../../repo/safe.zig");
 const local = @import("../../transport/local.zig");
 const testgit = @import("../git.zig");

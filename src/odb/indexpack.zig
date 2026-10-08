@@ -24,25 +24,28 @@
 //! itself, is a named error and leaves nothing behind.
 
 const Self = @This();
+const retention = @import("keep.zig");
 
 const std = @import("std");
-const crc32 = @import("../crc32.zig");
+const crc32 = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
 const inflate_mod = @import("inflate.zig");
-const config_mod = @import("../config.zig");
+const config_mod = @import("../config/config.zig");
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
 const revindex = @import("revindex.zig");
 const pack = @import("pack.zig");
-const delta = @import("delta.zig");
-const fs = @import("../repo/fs.zig");
-const odb_mod = @import("../odb.zig");
+const delta = @import("../codec/delta.zig");
+const fs = @import("../fs/fs.zig");
+const policy = @import("policy.zig");
+const Database = @import("database.zig").Database;
+const odb_mod = @import("odb.zig"); // Test fixtures only.
 const fsck = @import("../object/fsck.zig");
-const warning = @import("../repo/warning.zig");
-const progress_mod = @import("../transport/progress.zig");
+const warning = @import("../report/warning.zig");
+const progress_mod = @import("../report/progress.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -100,10 +103,12 @@ pub const Error = error{
     MalformedBlob,
     /// The stream being read failed; its own reader says why.
     ReadFailed,
-} || delta.Error || odb_mod.Error || Io.File.Reader.Error || Io.File.SetLengthError;
+} || retention.Error || delta.Error || policy.Error || Io.File.Reader.Error || Io.File.SetLengthError;
 
 /// How a pack is received.
 pub const Options = struct {
+    /// Retain a received pack until the caller releases Result.
+    keep: bool = false,
     /// Complete a thin pack from the object database. Off, a reference
     /// delta whose base is not in the pack is `error.DeltaBaseMissing`.
     fix_thin: bool = true,
@@ -227,17 +232,20 @@ pub const Links = struct {
         }
     }
 
+    /// Errors from `firstMissing`.
+    pub const FirstMissingError = policy.Error || pack.IndexError;
+
     /// The first name the pack holds that is neither in the pack, whose
     /// index is `fresh`, nor in `db`; `null` when every one is there. A
     /// parent of a commit in `db`'s shallow boundary is not looked for.
-    pub fn firstMissing(l: *const Links, io: Io, db: *odb_mod.Odb, fresh: *const pack.Index) (odb_mod.Error || pack.IndexError)!?Oid {
+    pub fn firstMissing(l: *const Links, io: Io, db: anytype, fresh: *const pack.Index) FirstMissingError!?Oid {
         var it = l.named.keyIterator();
         while (it.next()) |oid| {
             if ((try fresh.find(oid.*)) != null) continue;
             if (!try db.exists(io, oid.*)) return oid.*;
         }
         for (l.parents.items) |pair| {
-            if (db.shallow.contains(pair[0])) continue;
+            if (db.isShallow(pair[0])) continue;
             if ((try fresh.find(pair[1])) != null) continue;
             if (!try db.exists(io, pair[1])) return pair[1];
         }
@@ -259,6 +267,8 @@ pub const Diagnostic = struct {
 
 /// What was received.
 pub const Result = struct {
+    keep: ?retention.Token = null,
+
     /// The pack's checksum, which names both files: `pack-<name>.pack` and
     /// `pack-<name>.idx`. `null` when the pack held no objects, in which
     /// case nothing is kept.
@@ -270,6 +280,11 @@ pub const Result = struct {
     /// How many bases a thin pack named and did not carry, appended from the
     /// object database.
     appended: u32,
+
+    pub fn deinit(result: *Result, io: Io) void {
+        if (result.keep) |*token| token.deinit(io);
+        result.keep = null;
+    }
 };
 
 const EntryKind = enum(u2) { whole, ofs_delta, ref_delta };
@@ -321,7 +336,7 @@ const OfsBase = struct {
 pub fn receive(
     gpa: Allocator,
     io: Io,
-    db: *odb_mod.Odb,
+    db: anytype,
     pack_dir: Io.Dir,
     in: *Io.Reader,
     options: Options,
@@ -346,7 +361,7 @@ pub fn receive(
     var tee: Tee = .init(io, file, in, kind, tee_buffer, options);
     const count = try readPackHeader(&tee);
 
-    var indexer: Indexer = try .init(gpa, io, db, file, options);
+    var indexer: Indexer = try .init(gpa, io, Database.from(db), file, options);
     defer indexer.deinit();
     const read = try readEntries(&tee, &indexer, count, kind);
     const trailer = read.trailer;
@@ -370,7 +385,7 @@ pub fn receive(
 
     switch (options.sync) {
         .none => {},
-        .batch, .per_file => try file.sync(io),
+        .batch, .per_file => try fs.syncFile(io, file, .{ .policy = options.sync }),
     }
     file.close(io);
     file_open = false;
@@ -384,7 +399,10 @@ pub fn receive(
     // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
     const idx_name = std.mem.print(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
+    var token: ?retention.Token = if (options.keep) try retention.Token.open(gpa, io, pack_dir, name) else null;
+    errdefer if (token) |*t| t.deinit(io);
     const result: Result = .{
+        .keep = token,
         .name = name,
         .objects = @intCast(index_entries.len),
         .deltas = indexer.deltas,
@@ -619,7 +637,7 @@ const Tee = struct {
 const Indexer = struct {
     gpa: Allocator,
     io: Io,
-    db: *odb_mod.Odb,
+    db: Database,
     kind: Kind,
     file: Io.File,
     options: Options,
@@ -651,7 +669,7 @@ const Indexer = struct {
     /// `lock`.
     found: fsck.Found = .{},
 
-    fn init(gpa: Allocator, io: Io, db: *odb_mod.Odb, file: Io.File, options: Options) Allocator.Error!Indexer {
+    fn init(gpa: Allocator, io: Io, db: Database, file: Io.File, options: Options) Allocator.Error!Indexer {
         const read_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(read_buffer);
         const window = try gpa.alloc(u8, flate.max_window_len);
@@ -870,7 +888,7 @@ const Indexer = struct {
     }
 
     fn hashOptions(x: *const Indexer) hash.Hasher.Options {
-        return .{ .detect_collisions = x.db.settings().detect_sha1_collisions };
+        return .{ .detect_collisions = x.db.detect_collisions };
     }
 
     fn checkObject(x: *Indexer, oid: Oid, t: object.Type, bytes: []const u8, offset: u64) Error!void {
@@ -1007,7 +1025,7 @@ const Indexer = struct {
     }
 
     fn crcOf(x: *Indexer, start: u64, end: u64) Error!u32 {
-        var crc: crc32.Crc32 = .init();
+        var crc: crc32.Crc32 = .init;
         var buf: [16 * 1024]u8 = undefined;
         var at = start;
         while (at < end) {
@@ -1199,7 +1217,7 @@ const Indexer = struct {
             try compressor.writer.flush();
             try compressor.finish();
 
-            var crc: crc32.Crc32 = .init();
+            var crc: crc32.Crc32 = .init;
             crc.update(head[0..head_len]);
             crc.update(compressed.written());
             try x.file.writePositionalAll(io, head[0..head_len], end);
@@ -1574,7 +1592,6 @@ fn encodeTypeAndSize(buf: *[16]u8, t: object.Type, size: u64) usize {
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
-const repo_mod = @import("../repo.zig");
 
 /// One entry of a pack built by hand, for the shapes a real packer does not
 /// write.
@@ -1755,13 +1772,13 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
 
         var target = try testgit.Repo.init(gpa, io, &.{"--bare"});
         defer target.deinit();
-        var repo = try repo_mod.Repository.open(gpa, io, target.dir, .{});
+        var repo = try odb_mod.Odb.open(gpa, io, target.dir, .sha1, .{});
         defer repo.deinit(io);
         var pack_dir = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
         defer pack_dir.close(io);
 
         var in: Io.Reader = .fixed(pack_bytes);
-        const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .threads = threads });
+        const result = try receive(gpa, io, &repo, pack_dir, &in, .{ .threads = threads });
         try testing.expect(result.deltas > 0);
         try testing.expectEqual(@as(u32, 0), result.appended);
 
@@ -1779,7 +1796,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         try target.exec(io, &.{ "update-ref", "refs/heads/main", head });
         try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
         // The database reads the new pack at once.
-        const found = try repo.odb.read(io, try Oid.parse(.sha1, head));
+        const found = try repo.read(io, try Oid.parse(.sha1, head));
         gpa.free(found.bytes);
     }
 
@@ -1808,13 +1825,13 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
             for ([_]u32{ 1, 2, 4, 8 }) |threads| {
                 var tmp = testing.tmpDir(.{ .iterate = true });
                 defer tmp.cleanup();
-                var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+                var repo = try emptyDatabase(gpa, io, tmp.dir);
                 defer repo.deinit(io);
                 var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
                 defer pack_dir.close(io);
                 var in: Io.Reader = .fixed(bytes);
                 const counted = if (executor == 0) Tasks.wrap(each_io) else Tasks.wrapInline(each_io);
-                const result = try receive(gpa, counted, &repo.odb, pack_dir, &in, .{ .threads = threads });
+                const result = try receive(gpa, counted, &repo, pack_dir, &in, .{ .threads = threads });
                 // The caller resolves too, and there are only four roots.
                 try Tasks.expect(0, @min(threads, 4) - 1);
                 try testing.expectEqual(@as(u32, 8), result.objects);
@@ -1850,7 +1867,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
 
     var target = try testgit.Repo.init(gpa, io, &.{"--bare"});
     defer target.deinit();
-    var repo = try repo_mod.Repository.open(gpa, io, target.dir, .{});
+    var repo = try odb_mod.Odb.open(gpa, io, target.dir, .sha1, .{});
     defer repo.deinit(io);
     var pack_dir = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -1861,7 +1878,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     const first = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--stdout", "-q" }, first_input);
     defer gpa.free(first);
     var first_in: Io.Reader = .fixed(first);
-    _ = try receive(gpa, io, &repo.odb, pack_dir, &first_in, .{});
+    _ = try receive(gpa, io, &repo, pack_dir, &first_in, .{});
     const packs_before = try countEntries(io, pack_dir);
 
     // Then a thin pack of what is new, its deltas against what is not in it.
@@ -1873,7 +1890,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     // Refused whole when completing it is not allowed, and nothing is left.
     var diagnostic: Diagnostic = .{};
     var refused_in: Io.Reader = .fixed(thin);
-    try testing.expectError(error.DeltaBaseMissing, receive(gpa, io, &repo.odb, pack_dir, &refused_in, .{
+    try testing.expectError(error.DeltaBaseMissing, receive(gpa, io, &repo, pack_dir, &refused_in, .{
         .fix_thin = false,
         .diagnostic = &diagnostic,
     }));
@@ -1881,7 +1898,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     try testing.expectEqual(packs_before, try countEntries(io, pack_dir));
 
     var thin_in: Io.Reader = .fixed(thin);
-    const result = try receive(gpa, io, &repo.odb, pack_dir, &thin_in, .{});
+    const result = try receive(gpa, io, &repo, pack_dir, &thin_in, .{});
     try testing.expect(result.appended > 0);
 
     var hex: [hash.max_hex_len]u8 = undefined;
@@ -1913,7 +1930,7 @@ test "a malformed tree is refused by name, and nothing is kept" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try emptyDatabase(gpa, io, tmp.dir);
     defer repo.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -1932,14 +1949,14 @@ test "a malformed tree is refused by name, and nothing is kept" {
     defer gpa.free(bytes);
     var diagnostic: Diagnostic = .{};
     var in: Io.Reader = .fixed(bytes);
-    try testing.expectError(error.MalformedTree, receive(gpa, io, &repo.odb, pack_dir, &in, .{ .diagnostic = &diagnostic }));
+    try testing.expectError(error.MalformedTree, receive(gpa, io, &repo, pack_dir, &in, .{ .diagnostic = &diagnostic }));
     try testing.expectEqual(fsck.Problem.tree_not_sorted, diagnostic.problem.?);
     try testing.expect(diagnostic.oid.?.eql(hash.Hasher.object(.sha1, "tree", tree.items)));
     try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
 
     // Asked not to check, the same pack is kept.
     var unchecked: Io.Reader = .fixed(bytes);
-    const kept = try receive(gpa, io, &repo.odb, pack_dir, &unchecked, .{ .fsck = null });
+    const kept = try receive(gpa, io, &repo, pack_dir, &unchecked, .{ .fsck = null });
     try testing.expectEqual(@as(u32, 2), kept.objects);
 }
 
@@ -2018,7 +2035,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
 
         var tmp = testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
-        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+        var repo = try emptyDatabase(gpa, io, tmp.dir);
         defer repo.deinit(io);
         var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
         defer pack_dir.close(io);
@@ -2033,7 +2050,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
         }
         var diagnostic: Diagnostic = .{};
         var in: Io.Reader = .fixed(bytes);
-        const refused = if (receive(gpa, io, &repo.odb, pack_dir, &in, .{ .fsck = &rules, .diagnostic = &diagnostic })) |_| false else |err| switch (err) {
+        const refused = if (receive(gpa, io, &repo, pack_dir, &in, .{ .fsck = &rules, .diagnostic = &diagnostic })) |_| false else |err| switch (err) {
             error.MalformedCommit, error.MalformedTree, error.MalformedTag, error.MalformedBlob => true,
             else => return err,
         };
@@ -2054,7 +2071,7 @@ test "a .gitmodules a tree names and nobody has is refused unless promised" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try emptyDatabase(gpa, io, tmp.dir);
     defer repo.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -2068,12 +2085,12 @@ test "a .gitmodules a tree names and nobody has is refused unless promised" {
     const strict: fsck.Rules = .{ .strict = true };
     var diagnostic: Diagnostic = .{};
     var in: Io.Reader = .fixed(bytes);
-    try testing.expectError(error.MalformedBlob, receive(gpa, io, &repo.odb, pack_dir, &in, .{ .fsck = &strict, .diagnostic = &diagnostic }));
+    try testing.expectError(error.MalformedBlob, receive(gpa, io, &repo, pack_dir, &in, .{ .fsck = &strict, .diagnostic = &diagnostic }));
     try testing.expectEqual(fsck.Problem.gitmodules_missing, diagnostic.problem.?);
     var promised: Io.Reader = .fixed(bytes);
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    _ = try receive(gpa, io, &repo.odb, pack_dir, &promised, .{ .fsck = &strict, .promised = true, .warnings = &warnings });
+    _ = try receive(gpa, io, &repo, pack_dir, &promised, .{ .fsck = &strict, .promised = true, .warnings = &warnings });
     try testing.expectEqual(@as(usize, 0), warnings.items.items.len);
 }
 
@@ -2082,7 +2099,7 @@ test "a damaged stream is a named error and leaves nothing behind" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try emptyDatabase(gpa, io, tmp.dir);
     defer repo.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -2115,14 +2132,14 @@ test "a damaged stream is a named error and leaves nothing behind" {
     };
     for (cases) |case| {
         var in: Io.Reader = .fixed(case.bytes);
-        try testing.expectError(case.err, receive(gpa, io, &repo.odb, pack_dir, &in, .{}));
+        try testing.expectError(case.err, receive(gpa, io, &repo, pack_dir, &in, .{}));
         try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
     }
 
     var in: Io.Reader = .fixed(good);
-    const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{});
+    const result = try receive(gpa, io, &repo, pack_dir, &in, .{});
     try testing.expectEqual(@as(u32, 2), result.objects);
-    const found = try repo.odb.read(io, hash.Hasher.object(.sha1, "blob", "basemore\n"));
+    const found = try repo.read(io, hash.Hasher.object(.sha1, "blob", "basemore\n"));
     defer gpa.free(found.bytes);
     try testing.expectEqualStrings("basemore\n", found.bytes);
 }
@@ -2187,7 +2204,7 @@ fn receiveChain(chain: usize, seed: u8) !usize {
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try emptyDatabase(gpa, io, tmp.dir);
     defer repo.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -2217,18 +2234,18 @@ fn receiveChain(chain: usize, seed: u8) !usize {
 
     var in: Io.Reader = .fixed(bytes);
     var peak: Peak = .{ .child = gpa };
-    const result = try receive(peak.allocator(), io, &repo.odb, pack_dir, &in, .{ .delta_base_cache_limit = 100 * 1024, .threads = 1 });
+    const result = try receive(peak.allocator(), io, &repo, pack_dir, &in, .{ .delta_base_cache_limit = 100 * 1024, .threads = 1 });
     try testing.expectEqual(@as(u32, @intCast(chain + 2)), result.objects);
     const expected = try gpa.alloc(u8, base_len + chain + "side".len);
     defer gpa.free(expected);
     @memcpy(expected[0..base_len], base);
     @memset(expected[base_len..][0..chain], 'x');
-    const last = try repo.odb.read(io, hash.Hasher.object(.sha1, "blob", expected[0 .. base_len + chain]));
+    const last = try repo.read(io, hash.Hasher.object(.sha1, "blob", expected[0 .. base_len + chain]));
     defer gpa.free(last.bytes);
     try testing.expectEqualSlices(u8, expected[0 .. base_len + chain], last.bytes);
     @memcpy(expected[base_len + 1 ..][0.."side".len], "side");
     const branched = expected[0 .. base_len + 1 + "side".len];
-    const found = try repo.odb.read(io, hash.Hasher.object(.sha1, "blob", branched));
+    const found = try repo.read(io, hash.Hasher.object(.sha1, "blob", branched));
     defer gpa.free(found.bytes);
     try testing.expectEqualSlices(u8, branched, found.bytes);
     return peak.most;
@@ -2239,7 +2256,7 @@ test "an object the database holds under the same name with other bytes is refus
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try emptyDatabase(gpa, io, tmp.dir);
     defer repo.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -2276,7 +2293,7 @@ test "an object the database holds under the same name with other bytes is refus
         defer gpa.free(bytes);
         var diagnostic: Diagnostic = .{};
         var in: Io.Reader = .fixed(bytes);
-        try testing.expectError(error.HashCollision, receive(gpa, io, &repo.odb, pack_dir, &in, .{ .diagnostic = &diagnostic }));
+        try testing.expectError(error.HashCollision, receive(gpa, io, &repo, pack_dir, &in, .{ .diagnostic = &diagnostic }));
         try testing.expect(diagnostic.oid.?.eql(oid));
         try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
     }
@@ -2286,9 +2303,9 @@ test "an object the database holds under the same name with other bytes is refus
     defer gpa.free(same);
     var in: Io.Reader = .fixed(same);
     const evil = hash.Hasher.object(.sha1, "blob", "evil");
-    _ = try repo.odb.write(io, .blob, "evil");
-    _ = try receive(gpa, io, &repo.odb, pack_dir, &in, .{});
-    try testing.expect(try repo.odb.exists(io, evil));
+    _ = try repo.write(io, .blob, "evil");
+    _ = try receive(gpa, io, &repo, pack_dir, &in, .{});
+    try testing.expect(try repo.exists(io, evil));
 }
 
 test "a pack added in front of an alternate's never reads that pack's cached delta bases" {
@@ -2302,9 +2319,9 @@ test "a pack added in front of an alternate's never reads that pack's cached del
     defer theirs_dir.close(io);
     var ours_dir = try tmp.dir.openDir(io, "ours", .{ .iterate = true });
     defer ours_dir.close(io);
-    var theirs = try repo_mod.Repository.init(gpa, io, theirs_dir, .{ .bare = true });
+    var theirs = try emptyDatabase(gpa, io, theirs_dir);
     defer theirs.deinit(io);
-    var ours = try repo_mod.Repository.init(gpa, io, ours_dir, .{ .bare = true });
+    var ours = try emptyDatabase(gpa, io, ours_dir);
     defer ours.deinit(io);
 
     // Two packs of one shape: a base at offset 12 and a delta on it, so
@@ -2321,13 +2338,13 @@ test "a pack added in front of an alternate's never reads that pack's cached del
         var pack_dir = try theirs_dir.openDir(io, "objects/pack", .{ .iterate = true });
         defer pack_dir.close(io);
         var in: Io.Reader = .fixed(packs[0]);
-        _ = try receive(gpa, io, &theirs.odb, pack_dir, &in, .{});
+        _ = try receive(gpa, io, &theirs, pack_dir, &in, .{});
     }
     const their_objects = try theirs_dir.realPathFileAlloc(io, "objects", gpa);
     defer gpa.free(their_objects);
-    try ours.odb.addAlternate(io, their_objects);
+    try ours.addAlternate(io, their_objects);
 
-    const a = try ours.odb.read(io, hash.Hasher.object(.sha1, "blob", "AAAA1"));
+    const a = try ours.read(io, hash.Hasher.object(.sha1, "blob", "AAAA1"));
     defer gpa.free(a.bytes);
     try testing.expectEqualStrings("AAAA1", a.bytes);
 
@@ -2335,8 +2352,8 @@ test "a pack added in front of an alternate's never reads that pack's cached del
     var pack_dir = try ours_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     var in: Io.Reader = .fixed(packs[1]);
-    _ = try receive(gpa, io, &ours.odb, pack_dir, &in, .{});
-    const b = try ours.odb.read(io, hash.Hasher.object(.sha1, "blob", "BBBB1"));
+    _ = try receive(gpa, io, &ours, pack_dir, &in, .{});
+    const b = try ours.read(io, hash.Hasher.object(.sha1, "blob", "BBBB1"));
     defer gpa.free(b.bytes);
     try testing.expectEqualStrings("BBBB1", b.bytes);
 }
@@ -2397,7 +2414,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
     Park.base = io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try emptyDatabase(gpa, io, tmp.dir);
     defer repo.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -2431,7 +2448,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
     Park.beside.store(false, .release);
     Park.on_caller.store(false, .release);
     Park.beside_canceled.store(false, .release);
-    var future = try io.concurrent(Park.receiveOn, .{ gpa, parked, &repo.odb, pack_dir, bytes });
+    var future = try io.concurrent(Park.receiveOn, .{ gpa, parked, &repo, pack_dir, bytes });
     for (0..20_000) |_| {
         if (Park.on_caller.load(.acquire)) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -2453,7 +2470,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
 
     // Unarmed, the same stream is received whole.
     var in: Io.Reader = .fixed(bytes);
-    const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .threads = 3 });
+    const result = try receive(gpa, io, &repo, pack_dir, &in, .{ .threads = 3 });
     try testing.expectEqual(@as(u32, 3 * pairs), result.objects);
 }
 
@@ -2546,14 +2563,14 @@ test "the names a pack holds are collected as it is indexed, and one that is now
 
     var target = try testgit.Repo.init(gpa, io, &.{"--bare"});
     defer target.deinit();
-    var repo = try repo_mod.Repository.open(gpa, io, target.dir, .{});
+    var repo = try odb_mod.Odb.open(gpa, io, target.dir, .sha1, .{});
     defer repo.deinit(io);
     var pack_dir = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     var links: Links = .init(gpa);
     defer links.deinit();
     var in: Io.Reader = .fixed(bytes);
-    const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .fsck = null, .links = &links });
+    const result = try receive(gpa, io, &repo, pack_dir, &in, .{ .fsck = null, .links = &links });
     var hex: [hash.max_hex_len]u8 = undefined;
     var idx_buf: [96]u8 = undefined;
     const idx_name = try std.mem.print(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
@@ -2562,8 +2579,13 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     try testing.expect(!links.unreadable);
     // The commit's parent is not there either; what the tree names is
     // looked for first.
-    const missing = (try links.firstMissing(io, &repo.odb, &index)).?;
+    const missing = (try links.firstMissing(io, &repo, &index)).?;
     const ls = try source.run(io, &.{ "ls-tree", "-r", "-t", "HEAD" });
     defer gpa.free(ls);
     try testing.expect(std.mem.find(u8, ls, missing.hex(&hex)) != null);
+}
+
+fn emptyDatabase(gpa: Allocator, io: Io, dir: Io.Dir) odb_mod.Error!odb_mod.Odb {
+    try dir.createDirPath(io, "objects/pack");
+    return odb_mod.Odb.open(gpa, io, dir, .sha1, .{});
 }

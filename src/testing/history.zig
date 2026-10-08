@@ -15,17 +15,17 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const testgit = @import("git.zig");
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
 const merging = @import("../commit/merging.zig");
 const rerere = @import("../merge/rerere.zig");
-const worktree = @import("../worktree.zig");
+const worktree = @import("../checkout/checkout.zig");
 const threeway = @import("../merge/threeway.zig");
 const ort = @import("../merge/ort.zig");
-const signing = @import("../commit/signing.zig");
-const program = @import("../repo/program.zig");
-const fs = @import("../repo/fs.zig");
+const signing = @import("../object/signing.zig");
+const program = @import("../process/program.zig");
+const fs = @import("../fs/fs.zig");
 const ref_names = @import("../names/ref.zig");
 
 const Oid = hash.Oid;
@@ -1051,10 +1051,10 @@ test "a pick's pseudo-refs are found and removed in a reftable repository, as gi
 
     const head = try r.run(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head);
-    try repo.refStore().root().write(repo.gpa, io, .rebase_head, try Oid.parse(.sha1, head[0..40]));
+    try repo.refStore().root().write(repo.allocator(), io, .rebase_head, try Oid.parse(.sha1, head[0..40]));
     gpa.free(try r.run(io, &.{ "rev-parse", "--verify", "-q", "REBASE_HEAD" }));
-    try repo.refStore().root().delete(repo.gpa, io, .rebase_head);
-    try repo.refStore().root().delete(repo.gpa, io, .rebase_head);
+    try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
+    try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
     try std.testing.expectError(error.GitFailed, r.exec(io, &.{ "rev-parse", "--verify", "-q", "REBASE_HEAD" }));
 }
 
@@ -2879,8 +2879,8 @@ test "adding a resolved file replaces its conflict and remembers the stages, as 
                     var rules = try repo.worktreeRules();
                     rules.ignore = &ignore;
                     rules.attrs = &attrs;
-                    _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = rules });
-                    try index.write(io, repo.git_dir, "index", .{});
+                    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = rules });
+                    try index.write(io, repo.gitDirectory(), "index", .{});
                 }
                 try expectSameState(&pair, io, &merge_state, &main_logs);
             }
@@ -3678,7 +3678,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
                     defer repo.deinit(io);
                     var arena: std.heap.ArenaAllocator = .init(gpa);
                     defer arena.deinit();
-                    const targets = try merging.upstreams(gpa, arena.allocator(), io, &repo);
+                    const targets = try merging.upstreams(gpa, io, &repo, .{ .arena = arena.allocator() });
                     var outcome = try merging.startHeads(gpa, io, &repo, targets, .{ .who = who });
                     defer outcome.deinit();
                 }
@@ -3691,7 +3691,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
                 defer repo.deinit(io);
                 var arena: std.heap.ArenaAllocator = .init(gpa);
                 defer arena.deinit();
-                try std.testing.expectError(error.NoMergeTarget, merging.upstreams(gpa, arena.allocator(), io, &repo));
+                try std.testing.expectError(error.NoMergeTarget, merging.upstreams(gpa, io, &repo, .{ .arena = arena.allocator() }));
             }
             {
                 try pair.ours.exec(io, &.{ "config", "--unset", "merge.defaultToUpstream" });
@@ -3700,7 +3700,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
                 defer repo.deinit(io);
                 var arena: std.heap.ArenaAllocator = .init(gpa);
                 defer arena.deinit();
-                try std.testing.expectError(error.NoDefaultUpstream, merging.upstreams(gpa, arena.allocator(), io, &repo));
+                try std.testing.expectError(error.NoDefaultUpstream, merging.upstreams(gpa, io, &repo, .{ .arena = arena.allocator() }));
             }
         }
     }.inFormat);

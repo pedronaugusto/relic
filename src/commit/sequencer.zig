@@ -16,33 +16,33 @@
 const Self = @This();
 
 const std = @import("std");
-const allocation = @import("../testing/allocation.zig");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const merge = @import("../merge.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const merge = @import("../merge/merge.zig");
 const threeway = @import("../merge/threeway.zig");
-const signing_mod = @import("signing.zig");
-const hooks_mod = @import("../repo/hooks.zig");
+const signing_mod = @import("../object/signing.zig");
+const hooks_mod = @import("../hooks/hooks.zig");
 const commithooks = @import("commithooks.zig");
-const program = @import("../repo/program.zig");
-const filter = @import("../worktree/filter.zig");
+const program = @import("../process/program.zig");
+const filter = @import("../checkout/filter.zig");
 const reset = @import("reset.zig");
-const head_mod = @import("head.zig");
+const head_mod = @import("../repo/head.zig");
 const ref_names = @import("../names/ref.zig");
-const message = @import("message.zig");
-const trailer = @import("trailer.zig");
+const message = @import("../object/message.zig");
+const trailer = @import("../object/trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const todo = @import("todo.zig");
-const worktree = @import("../worktree.zig");
+const worktree = @import("../checkout/checkout.zig");
 const merging = @import("merging.zig");
 const rerere = @import("../merge/rerere.zig");
-const config_mod = @import("../config.zig");
-const repo_mod = @import("../repo.zig");
-const refs_mod = @import("../refs.zig");
-const diagnostic = @import("../repo/diagnostic.zig");
+const config_mod = @import("../config/config.zig");
+const repo_mod = @import("../repo/repo.zig");
+const refs_mod = @import("../refs/refs.zig");
+const diagnostic = @import("../report/diagnostic.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -232,9 +232,9 @@ pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, o
 /// Whether a cherry-pick or revert is waiting: a sequence in
 /// `.git/sequencer`, or a single pick's `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
 pub fn inProgress(io: Io, repo: *Repository) ?Action {
-    if (lastCommand(repo.gpa, io, repo)) |action| return action;
-    if (repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head)) return .pick;
-    if (repo.refStore().root().exists(repo.gpa, io, .revert_head)) return .revert;
+    if (lastCommand(repo.allocator(), io, repo)) |action| return action;
+    if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head)) return .pick;
+    if (repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return .revert;
     return null;
 }
 
@@ -251,7 +251,7 @@ const opts_path = "sequencer/opts";
 /// The action the first line of `.git/sequencer/todo` names, as
 /// `sequencer_get_last_command` reads it.
 fn lastCommand(gpa: Allocator, io: Io, repo: *Repository) ?Action {
-    const text = (head_mod.readState(gpa, io, repo.git_dir, todo_path) catch return null) orelse return null;
+    const text = (head_mod.readState(gpa, io, repo.gitDirectory(), todo_path) catch return null) orelse return null;
     defer gpa.free(text);
     var at: usize = 0;
     while (at < text.len and (text[at] == ' ' or text[at] == '\t' or text[at] == '\r' or text[at] == '\n')) at += 1;
@@ -333,12 +333,12 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         any = true;
         w.print("\tdefault-msg-cleanup = {s}\n", .{@tagName(mode)}) catch return error.OutOfMemory;
     }
-    if (any) try head_mod.writeState(io, repo.git_dir, opts_path, out.written());
+    if (any) try head_mod.writeState(io, repo.gitDirectory(), opts_path, out.written());
 }
 
 /// Apply what `.git/sequencer/opts` says on top of `options`.
 fn readOpts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, options: *Options) Error!void {
-    const text = (try head_mod.readState(gpa, io, repo.git_dir, opts_path)) orelse return;
+    const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), opts_path)) orelse return;
     defer gpa.free(text);
     try parseOpts(gpa, arena, text, options);
 }
@@ -403,18 +403,18 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
 /// Write `abort-safety`: where `HEAD` is now, so an abort can tell whether
 /// something else has moved it since.
 fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
-    if (!head_mod.stateExists(io, repo.git_dir, seq_dir)) return;
+    if (!head_mod.stateExists(io, repo.gitDirectory(), seq_dir)) return;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     var buf: [hash.max_hex_len + 1]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     // unreachable: a hex name is at most max_hex_len digits, the buffer with its newline
     const text = std.mem.print(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch unreachable;
-    try head_mod.writeState(io, repo.git_dir, safety_path, text);
+    try head_mod.writeState(io, repo.gitDirectory(), safety_path, text);
 }
 
 fn removeSequencerState(io: Io, repo: *Repository) Error!void {
-    try repo.git_dir.deleteTree(io, seq_dir);
+    try repo.gitDirectory().deleteTree(io, seq_dir);
 }
 
 //=========================================================================
@@ -438,15 +438,15 @@ const Replay = struct {
 
     fn short(r: *Replay, oid: Oid) Error![]const u8 {
         var buf: [hash.max_hex_len]u8 = undefined;
-        return r.arena.dupe(u8, try abbrev.unique(r.io, &r.repo.odb, oid, r.abbrev_len, &buf));
+        return r.arena.dupe(u8, try abbrev.unique(r.io, r.repo.objectDatabase(), oid, r.abbrev_len, &buf));
     }
 };
 
 const Picked = enum { committed, conflicted, empty, dropped, staged };
 
 fn readCommit(r: *Replay, oid: Oid) Error!struct { bytes: []const u8, commit: object.Commit } {
-    const found = try r.repo.odb.read(r.io, oid);
-    defer r.repo.odb.allocator().free(found.bytes);
+    const found = try r.repo.objectDatabase().read(r.io, oid);
+    defer r.repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
     const commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes);
@@ -473,7 +473,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     // With `--no-commit` the merge starts from what is staged; otherwise
     // from `HEAD`, and the index must be `HEAD`.
     const head_tree: Oid = if (r.options.no_commit)
-        try worktree.writeTree(gpa, io, &index, &repo.odb)
+        try worktree.writeTree(gpa, io, &index, repo.objectDatabase())
     else if (head.oid) |h|
         try repo.commitTree(io, h)
     else
@@ -548,21 +548,21 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     });
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
-    try repo.refStore().root().write(repo.gpa, io, .auto_merge, outcome.auto_merge);
+    try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
 
     if (!outcome.isClean()) try noteConflicts(r, &msg, outcome.conflicts);
-    try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", msg.items);
+    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
 
     // The pseudo-ref a continuation reads the commit back from.
     const clean = outcome.isClean();
     switch (r.action) {
-        .pick => if (!r.options.no_commit) try repo.refStore().root().write(repo.gpa, io, .cherry_pick_head, oid),
-        .revert => if ((r.options.no_commit and clean) or !clean) try repo.refStore().root().write(repo.gpa, io, .revert_head, oid),
+        .pick => if (!r.options.no_commit) try repo.refStore().root().write(repo.allocator(), io, .cherry_pick_head, oid),
+        .revert => if ((r.options.no_commit and clean) or !clean) try repo.refStore().root().write(repo.allocator(), io, .revert_head, oid),
     }
     if (!clean) {
         try updateAbortSafety(gpa, io, repo);
         // git runs rerere once the pick has stopped.
-        _ = try rerere.afterStop(gpa, arena, io, repo, &index, r.options.rerere_autoupdate);
+        _ = try rerere.afterStop(gpa, io, repo, &index, .{ .arena = arena, .autoupdate = r.options.rerere_autoupdate });
         return .conflicted;
     }
 
@@ -617,9 +617,9 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         } else switch (r.options.empty) {
             .keep => allow_empty_commit = true,
             .drop => {
-                try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
-                try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
-                try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
+                try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
+                try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+                try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
                 try updateAbortSafety(gpa, io, repo);
                 return .dropped;
             },
@@ -642,9 +642,9 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
     var text: []const u8 = msg;
     if (commit_hooks.exists(io, "prepare-commit-msg")) {
-        try head_mod.writeState(io, repo.git_dir, "COMMIT_EDITMSG", text);
+        try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", text);
         _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .message, null);
-        text = (try head_mod.readState(arena, io, repo.git_dir, "COMMIT_EDITMSG")) orelse "";
+        text = (try head_mod.readState(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
     const cleaned = try message.cleanup(arena, text, cleanup, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
@@ -659,8 +659,8 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     const log = try arena.print("{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
-    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
-    try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
+    try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
+    try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
     try updateAbortSafety(gpa, io, repo);
     try r.made.append(arena, made);
     return .committed;
@@ -679,7 +679,7 @@ fn configuredCleanup(repo: *Repository) message.Cleanup {
 }
 
 fn emptyTree(io: Io, repo: *Repository) Error!Oid {
-    return repo.odb.write(io, .tree, "");
+    return repo.objectDatabase().write(io, .tree, "");
 }
 
 /// `sequencer_format_revert_message`: `Revert "<subject>"`, or `Reapply
@@ -720,7 +720,7 @@ fn newReplay(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, action
         .options = options,
         .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
         .trailers = try message.trailerSettings(arena, repo.configuration()),
-        .abbrev_len = abbrev.defaultLength(repo.configuration(), &repo.odb),
+        .abbrev_len = abbrev.defaultLength(repo.configuration(), repo.objectDatabase()),
     };
 }
 
@@ -748,13 +748,13 @@ fn start(gpa: Allocator, io: Io, repo: *Repository, action: Action, commits: []c
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     if (head.oid == null and action == .revert) return error.UnbornBranch;
-    repo.git_dir.createDir(io, seq_dir, .default_dir) catch |err| switch (err) {
+    repo.gitDirectory().createDir(io, seq_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => return error.SequencerInProgress,
         else => |e| return e,
     };
     var hex: [hash.max_hex_len]u8 = undefined;
     const head_text = if (head.oid) |oid| try arena.print("{s}\n", .{oid.hex(&hex)}) else "\n";
-    try head_mod.writeState(io, repo.git_dir, head_path, head_text);
+    try head_mod.writeState(io, repo.gitDirectory(), head_path, head_text);
     try writeOpts(gpa, io, repo, action, options);
     try updateAbortSafety(gpa, io, repo);
     return runSequence(&r, &arena_instance, items.items);
@@ -796,12 +796,12 @@ fn saveTodo(r: *Replay, items: []const todo.Item) Error!void {
     const Shorten = struct {
         fn shorten(context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
             const replay: *Replay = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Replay
-            const text = abbrev.unique(replay.io, &replay.repo.odb, oid, replay.abbrev_len, buf) catch return oid.hex(buf);
+            const text = abbrev.unique(replay.io, replay.repo.objectDatabase(), oid, replay.abbrev_len, buf) catch return oid.hex(buf);
             return text;
         }
     };
     const bytes = try todo.toBytes(r.arena, items, .{ .short = .{ .context = r, .shortenFn = Shorten.shorten } });
-    try head_mod.writeState(r.io, r.repo.git_dir, todo_path, bytes);
+    try head_mod.writeState(r.io, r.repo.gitDirectory(), todo_path, bytes);
 }
 
 /// How a sheet's names are resolved: any name a commit goes by, with its
@@ -821,7 +821,7 @@ pub const ResolverContext = struct {
 
     fn resolveName(context: *anyopaque, text: []const u8) ?todo.Resolver.Resolved {
         const c: *ResolverContext = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a ResolverContext
-        const gpa = c.repo.gpa;
+        const gpa = c.repo.allocator();
         var oid: ?Oid = null;
         if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;
         if (oid == null) {
@@ -838,11 +838,11 @@ pub const ResolverContext = struct {
                 }
             }
         }
-        if (oid == null) oid = c.repo.odb.findPrefix(c.io, text) catch null;
+        if (oid == null) oid = c.repo.objectDatabase().findPrefix(c.io, text) catch null;
         const found = oid orelse return null;
         const peeled = c.repo.peel(c.io, found) catch return null;
-        const read = c.repo.odb.read(c.io, peeled) catch return null;
-        defer c.repo.odb.allocator().free(read.bytes);
+        const read = c.repo.objectDatabase().read(c.io, peeled) catch return null;
+        defer c.repo.objectDatabase().allocator().free(read.bytes);
         if (read.type != .commit) return null;
         var commit = object.Commit.parse(gpa, c.repo.objectFormat(), read.bytes) catch return null;
         defer commit.deinit();
@@ -852,7 +852,7 @@ pub const ResolverContext = struct {
 
 /// Read `.git/sequencer/todo`.
 fn readTodo(r: *Replay) Error!todo.List {
-    const text = (try head_mod.readState(r.arena, r.io, r.repo.git_dir, todo_path)) orelse return error.NoSequencerInProgress;
+    const text = (try head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), todo_path)) orelse return error.NoSequencerInProgress;
     var context: ResolverContext = .{ .repo = r.repo, .io = r.io };
     const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment });
     if (list.count() == 0) return error.MalformedState;
@@ -881,7 +881,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     }
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
-    const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try repo.writeIndex(io, &index);
 
     const picked = try repo.refStore().root().read(gpa, io, .cherry_pick_head);
@@ -891,7 +891,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
     const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
-    const given = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "";
+    const given = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
     const raw = try commit_hooks.beforeCommit(arena, io, repo, given, .merge, author);
     const cleaned = try message.cleanup(arena, raw, .strip, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
@@ -908,8 +908,8 @@ fn commitStaged(r: *Replay) Error!Oid {
     else
         try arena.print("commit: {s}", .{firstLine(cleaned)});
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
-    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
-    try repo.refStore().root().delete(repo.gpa, io, .revert_head);
+    try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
+    try repo.refStore().root().delete(repo.allocator(), io, .revert_head);
     // The commit is `git commit`'s, which records resolutions as it ends.
     try rerere.afterCommit(gpa, io, repo);
     try commit_hooks.postCommit(arena, io, author);
@@ -930,13 +930,13 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     try readOpts(gpa, arena, io, repo, &opts);
     var r = try newReplay(gpa, arena, io, repo, action, opts);
 
-    if (!head_mod.stateExists(io, repo.git_dir, todo_path)) {
+    if (!head_mod.stateExists(io, repo.gitDirectory(), todo_path)) {
         _ = try commitStaged(&r);
         return finishOutcome(&r, &arena_instance, .committed, null);
     }
     const list = try readTodo(&r);
-    if (repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head) or
-        repo.refStore().root().exists(repo.gpa, io, .revert_head))
+    if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) or
+        repo.refStore().root().exists(repo.allocator(), io, .revert_head))
     {
         _ = try commitStaged(&r);
     }
@@ -968,7 +968,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnresolvedConflicts;
     }
-    const tree = try worktree.writeTree(r.gpa, r.io, &index, &r.repo.odb);
+    const tree = try worktree.writeTree(r.gpa, r.io, &index, r.repo.objectDatabase());
     if (!tree.eql(head_tree)) return error.DirtyIndex;
 }
 
@@ -976,11 +976,11 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
-    if (!repo.refStore().root().exists(repo.gpa, io, action.headRef())) {
+    if (!repo.refStore().root().exists(repo.allocator(), io, action.headRef())) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
     try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), options.who, options.blocked);
-    if (!head_mod.stateExists(io, repo.git_dir, seq_dir)) {
+    if (!head_mod.stateExists(io, repo.gitDirectory(), seq_dir)) {
         const arena_instance: std.heap.ArenaAllocator = .init(gpa);
         return .{ .gpa = gpa, .arena = arena_instance.state };
     }
@@ -992,9 +992,9 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// `HEAD` since the sequence last did, in which case `HEAD` is left where it
 /// is, as git leaves it. The state goes either way.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Self.Error!void {
-    const text = (try head_mod.readState(gpa, io, repo.git_dir, head_path)) orelse {
-        if (!repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head) and
-            !repo.refStore().root().exists(repo.gpa, io, .revert_head)) return error.NoSequencerInProgress;
+    const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), head_path)) orelse {
+        if (!repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) and
+            !repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.NoSequencerInProgress;
         return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), who, blocked);
     };
     defer gpa.free(text);
@@ -1022,7 +1022,7 @@ fn currentHead(gpa: Allocator, io: Io, repo: *Repository) Error!Oid {
 fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
-    const text = (try head_mod.readState(gpa, io, repo.git_dir, safety_path)) orelse {
+    const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), safety_path)) orelse {
         return head.oid == null;
     };
     defer gpa.free(text);
@@ -1052,7 +1052,7 @@ pub fn resetMerge(
     defer index.deinit();
     try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, to), .merge, blocked);
     try repo.writeIndex(io, &index);
-    try repo.refStore().root().write(repo.gpa, io, .orig_head, current);
+    try repo.refStore().root().write(repo.allocator(), io, .orig_head, current);
     var buf: ["reset: moving to ".len + hash.max_hex_len]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     const log = if (target) |oid|
@@ -1067,8 +1067,8 @@ pub fn resetMerge(
 /// `remove_branch_state`: the pseudo-refs and files a command in progress
 /// leaves, all of them.
 fn removeBranchState(io: Io, repo: *Repository) Error!void {
-    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
-    try repo.refStore().root().delete(repo.gpa, io, .revert_head);
+    try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
+    try repo.refStore().root().delete(repo.allocator(), io, .revert_head);
     try merging.removeMergeState(io, repo);
 }
 
@@ -1118,7 +1118,10 @@ test "sequencer settings preserve allocation resource failures" {
             try std.testing.expect(options.signoff);
         }
     };
-    try std.testing.checkAllAllocationFailures(allocation.no_resize, Check.run, .{});
+    {
+        var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{});
+    }
 }
 
 test "sequencer signing policy refuses malformed values, and reads one without the configuration allocating" {
@@ -1131,17 +1134,16 @@ test "sequencer signing policy refuses malformed values, and reads one without t
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var r = try Repository.init(gpa, io, tmp.dir, .{});
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = std.math.maxInt(usize) });
+    var r = try Repository.create(failing.allocator(), io, tmp.dir, .{});
     defer r.deinit(io);
     try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "maybe" }}, null);
     try std.testing.expectError(error.NotABoolean, Read.run(&r, .{}));
     try std.testing.expect(try Read.run(&r, .{ .sign = .always }));
     try std.testing.expect(!try Read.run(&r, .{ .sign = .never }));
     try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "true" }}, null);
-    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    const config_gpa = repo_mod.test_access.configAllocator(&r);
-    config_gpa.* = failing.allocator();
-    defer config_gpa.* = gpa;
+    failing.fail_index = failing.alloc_index;
+    defer failing.fail_index = std.math.maxInt(usize);
     try std.testing.expect(try Read.run(&r, .{}));
 }
 

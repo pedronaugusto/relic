@@ -9,8 +9,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const odb_mod = @import("../odb.zig");
+const hash = @import("../hash/hash.zig");
+const odb_mod = @import("../odb/odb.zig");
 const ort = @import("ort.zig");
 const strategy = @import("strategy.zig");
 const blobmerge = @import("blobmerge.zig");
@@ -112,7 +112,7 @@ fn expectSameMerges(
     for (cases, expected) |c, want| {
         const ours = tips.get(c.ours) orelse return error.MissingBranch;
         const theirs = tips.get(c.theirs) orelse return error.MissingBranch;
-        var result = try ort.mergeCommits(gpa, io, &db, ours, theirs, null, .{
+        var result = try ort.commits(gpa, io, &db, ours, theirs, null, .{
             .labels = .{ .ours = c.ours, .theirs = c.theirs },
             .conflict_style = style,
             .resolve = settings.resolve,

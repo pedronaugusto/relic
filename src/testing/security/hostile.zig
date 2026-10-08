@@ -8,14 +8,14 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const testgit = @import("../git.zig");
-const hash = @import("../../hash.zig");
-const odb_mod = @import("../../odb.zig");
-const index_mod = @import("../../index.zig");
-const worktree = @import("../../worktree.zig");
-const ignore = @import("../../worktree/ignore.zig");
-const attributes = @import("../../worktree/attributes.zig");
-const repo_mod = @import("../../repo.zig");
-const submodule = @import("../../submodule.zig");
+const hash = @import("../../hash/hash.zig");
+const odb_mod = @import("../../odb/odb.zig");
+const index_mod = @import("../../index/index.zig");
+const worktree = @import("../../checkout/checkout.zig");
+const ignore = @import("../../patterns/ignore.zig");
+const attributes = @import("../../patterns/attributes.zig");
+const repo_mod = @import("../../repo/repo.zig");
+const submodule = @import("../../submodule/submodule.zig");
 
 const Oid = hash.Oid;
 
@@ -60,7 +60,7 @@ pub const Harness = struct {
 
     /// Check `root` out into the working tree, and say which rule refused
     /// it, or `null` when it was written.
-    pub fn checkout(h: *Harness, gpa: Allocator, io: Io, root: Oid) !?worktree.safepath.Reason {
+    pub fn checkout(h: *Harness, gpa: Allocator, io: Io, root: Oid) !?@import("../../names/path.zig").Reason {
         var refusal: worktree.Refusal = .{};
         _ = worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, root, .{
             .rules = h.worktreeRules(),

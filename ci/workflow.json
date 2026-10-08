@@ -21,5 +21,6 @@
   "shards": {
     "macos": 2,
     "windows": 5
-  }
+  },
+  "windows_git_latest": true
 }

@@ -10,10 +10,10 @@
 const std = @import("std");
 const Io = std.Io;
 
-const object = @import("../../object.zig");
+const object = @import("../../object/object.zig");
 const archive = @import("../../archive.zig");
-const repo_mod = @import("../../repo.zig");
-const hash = @import("../../hash.zig");
+const repo_mod = @import("../../repo/repo.zig");
+const hash = @import("../../hash/hash.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 

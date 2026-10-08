@@ -11,8 +11,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const fs = @import("../repo/fs.zig");
+const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 
@@ -348,9 +348,12 @@ fn samePackName(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a[0..end_a], b[0..end_b]);
 }
 
+/// Errors from `encode`.
+pub const EncodeError = Allocator.Error || error{ InvalidMidxInput, UnknownPreferredPack, EmptyPreferredPack };
+
 /// Encode git's MIDX version one, deduplicating by preferred pack, then newest pack.
 /// The optional RIDX and BTMP chunks describe git's pseudo-pack order.
-pub fn encode(gpa: Allocator, kind: hash.Kind, packs: []const WritePack, options: WriteOptions) (Allocator.Error || error{ InvalidMidxInput, UnknownPreferredPack, EmptyPreferredPack })![]u8 {
+pub fn encode(gpa: Allocator, kind: hash.Kind, packs: []const WritePack, options: WriteOptions) EncodeError![]u8 {
     if (packs.len == 0 or packs.len > std.math.maxInt(u32)) return error.InvalidMidxInput;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();

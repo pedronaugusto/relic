@@ -8,8 +8,8 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const ere = @import("../ere.zig");
-const config_mod = @import("../config.zig");
+const ere = @import("../text/ere.zig");
+const config_mod = @import("../config/config.zig");
 
 /// Errors from reading a driver's patterns.
 pub const Error = error{
@@ -128,7 +128,7 @@ pub const Rule = struct {
 
     /// Whether `line`, without its newline, starts a function. `vm` is at
     /// least `programLen` long.
-    pub fn matches(rule: *const Rule, vm: *ere.Vm, line: []const u8) ere.Regex.FindError!bool {
+    pub fn matches(rule: *const Rule, vm: *ere.Vm, line: []const u8) ere.Regex.FindWithError!bool {
         if (rule.regs.len == 0) {
             if (line.len == 0) return false;
             return std.ascii.isAlphabetic(line[0]) or line[0] == '_' or line[0] == '$';

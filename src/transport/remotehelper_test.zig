@@ -11,16 +11,16 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Environ = std.process.Environ;
 
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
-const config_mod = @import("../config.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
 const push_mod = @import("push.zig");
-const transport = @import("../transport.zig");
+const transport = @import("transport.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
-const program = @import("../repo/program.zig");
+const program = @import("../process/program.zig");
 
 const Repository = repo_mod.Repository;
 

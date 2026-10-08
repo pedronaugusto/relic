@@ -1,7 +1,7 @@
 //! The repository's published configuration, owned behind an opaque
 //! handle so that only `Repository` replaces it.
 //! Package plumbing, reached by no public name.
-const config = @import("../config.zig");
+const config = @import("config.zig");
 const Allocator = @import("std").mem.Allocator;
 
 pub const State = opaque {};

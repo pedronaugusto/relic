@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     try pktline.flush(w);
     try w.flush();
 
-    const session: Session = .{ .gpa = gpa, .io = io, .repo = repo, .operation = options.operation, .user = options.user, .w = w };
+    var session: Session = .{ .gpa = gpa, .io = io, .repo = repo, .operation = options.operation, .user = options.user, .w = w, .lock_cursors = options.lock_cursors };
     while (true) {
         const req = (try readRequest(gpa, r, options.operation)) orelse return;
         try note(gpa, &log, req);
@@ -72,6 +72,7 @@ const Options = struct {
     log_dir: ?[]const u8 = null,
     user: []const u8 = "ada",
     offer_version: bool = true,
+    lock_cursors: ?[]const u8 = null,
     path: []const u8 = "",
     operation: []const u8 = "",
 
@@ -85,6 +86,8 @@ const Options = struct {
                 options.log_dir = arg["--log=".len..];
             } else if (std.mem.startsWith(u8, arg, "--user=")) {
                 options.user = arg["--user=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--lock-cursors=")) {
+                options.lock_cursors = arg["--lock-cursors=".len..];
             } else if (std.mem.eql(u8, arg, "--no-version")) {
                 options.offer_version = false;
             } else try rest.append(gpa, arg);
@@ -105,9 +108,11 @@ const Session = struct {
     operation: []const u8,
     user: []const u8,
     w: *Io.Writer,
+    lock_cursors: ?[]const u8 = null,
+    lock_page: usize = 0,
 
     /// Answer one request; false once the client has said `quit`.
-    fn answer(s: *const Session, req: Request) !bool {
+    fn answer(s: *Session, req: Request) !bool {
         const cmd = req.command;
         if (std.mem.eql(u8, cmd, "version 1")) {
             try status(s.w, 200, &.{}, null);
@@ -210,7 +215,7 @@ const Session = struct {
 
     /// The locks matching the path and id asked for, a page at a time from
     /// the cursor, with the next page's cursor when there is one.
-    fn listLocks(s: *const Session, req: Request) !void {
+    fn listLocks(s: *Session, req: Request) !void {
         const gpa = s.gpa;
         const locks = try readLocks(gpa, s.io, s.repo);
         const want_path = argValue(req.args, "path");
@@ -236,7 +241,13 @@ const Session = struct {
             try lines.append(gpa, try gpa.print("owner {s} {s}", .{ l.id, if (std.mem.eql(u8, l.owner, s.user)) "ours" else "theirs" }));
         }
         var out_args: std.ArrayList([]const u8) = .empty;
-        if (next) |n| try out_args.append(gpa, try gpa.print("next-cursor={d}", .{n}));
+        if (s.lock_cursors) |script| {
+            var cursors = std.mem.splitScalar(u8, script, ',');
+            for (0..s.lock_page) |_| _ = cursors.next();
+            const value = cursors.next() orelse return status(s.w, 400, &.{}, null);
+            s.lock_page += 1;
+            if (!std.mem.eql(u8, value, "null")) try out_args.append(gpa, try gpa.print("next-cursor={s}", .{value}));
+        } else if (next) |n| try out_args.append(gpa, try gpa.print("next-cursor={d}", .{n}));
         try status(s.w, 200, out_args.items, lines.items);
     }
 

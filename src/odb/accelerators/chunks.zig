@@ -2,7 +2,7 @@
 
 const Self = @This();
 const std = @import("std");
-const hash = @import("../../hash.zig");
+const hash = @import("../../hash/hash.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{CorruptAccelerator} || Allocator.Error;

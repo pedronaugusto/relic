@@ -32,19 +32,19 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Environ = std.process.Environ;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
-const program = @import("../repo/program.zig");
-const cquote = @import("../cquote.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
+const program = @import("../process/program.zig");
+const cquote = @import("../text/cquote.zig");
 const fastimport = @import("../fastimport.zig");
 const fastexport = @import("../fastexport.zig");
-const connection = @import("connection.zig");
-const protocol = @import("protocol.zig");
-const refspec_mod = @import("refspec.zig");
-const sendpack = @import("sendpack.zig");
-const fetchpack = @import("fetchpack.zig");
-const url_mod = @import("url.zig");
+const connection = @import("../wire/connection.zig");
+const protocol = @import("../wire/protocol.zig");
+const refspec_mod = @import("../wire/refspec.zig");
+const sendpack = @import("../wire/sendpack.zig");
+const fetchpack = @import("../wire/fetchpack.zig");
+const url_mod = @import("../wire/url.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -229,7 +229,7 @@ pub const Helper = struct {
             error.FileNotFound => return error.HelperNotFound,
             else => |e| return e,
         };
-        errdefer h.conn.?.close(io);
+        errdefer h.conn.?.deinit(io);
         try h.capabilities();
         if (h.caps.option) {
             _ = try h.option("progress", if (options.progress) "true" else "false", .raw);
@@ -248,12 +248,12 @@ pub const Helper = struct {
 
     /// End the conversation: a blank line, as git's disconnect writes it,
     /// and the helper waited for.
-    pub fn close(h: *Helper) void {
+    pub fn deinit(h: *Helper) void {
         const io = h.io;
         if (h.conn) |conn| {
             // ziglint-ignore: Z026 the blank line is a courtesy; the helper is waited for whether or not it heard it
             sayGoodbye(conn) catch {};
-            conn.close(io);
+            conn.deinit(io);
         }
         // ziglint-ignore: Z026 a lock file that cannot be removed is stale, and the next run that needs it says so
         for (h.locks.items) |path| Io.Dir.cwd().deleteFile(io, path) catch {};
@@ -271,7 +271,7 @@ pub const Helper = struct {
     pub fn takeOver(h: *Helper) *Connection {
         const conn = h.conn.?;
         h.conn = null;
-        h.close();
+        h.deinit();
         return conn;
     }
 
@@ -518,7 +518,7 @@ pub const Helper = struct {
             // `connectivity-ok`, and anything else, is a word for git's
             // own checks; this repository's are its own.
         }
-        try repo.odb.refresh(h.io);
+        try repo.objectDatabase().refresh(h.io);
     }
 
     fn fetchWithImport(h: *Helper, repo: *Repository, wants: []const Want, who: object.Signature) Error!void {

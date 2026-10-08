@@ -6,7 +6,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const testgit = @import("git.zig");
-const ft = @import("../worktree/filter_test.zig");
+const ft = @import("../checkout/filter_test.zig");
 
 const testing = std.testing;
 

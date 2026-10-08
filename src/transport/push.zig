@@ -29,23 +29,23 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
-const revwalk = @import("../revwalk.zig");
-const refspec_mod = @import("refspec.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
+const revwalk = @import("../walk/walk.zig");
+const refspec_mod = @import("../wire/refspec.zig");
 const ref_names = @import("../names/ref.zig");
-const remote_mod = @import("remote.zig");
-const program = @import("../repo/program.zig");
-const protocol = @import("protocol.zig");
-const transport = @import("../transport.zig");
-const sendpack = @import("sendpack.zig");
-const objectwalk = @import("objectwalk.zig");
-const credential = @import("credential.zig");
-const auth = @import("auth.zig");
-const warning = @import("../repo/warning.zig");
-const progress_mod = @import("progress.zig");
+const remote_mod = @import("../wire/remote.zig");
+const program = @import("../process/program.zig");
+const protocol = @import("../wire/protocol.zig");
+const transport = @import("transport.zig");
+const sendpack = @import("../wire/sendpack.zig");
+const objectwalk = @import("../walk/objectwalk.zig");
+const credential = @import("../wire/credential.zig");
+const auth = @import("../wire/auth.zig");
+const warning = @import("../report/warning.zig");
+const progress_mod = @import("../report/progress.zig");
 const lfspush = @import("../lfs/push.zig");
 const builtin = @import("builtin");
 
@@ -131,7 +131,7 @@ pub const Options = struct {
     programs: ?program.Programs = null,
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
-    proxy: transport.Proxy = .auto,
+    proxy: @import("../wire/httpsettings.zig").Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -274,7 +274,7 @@ fn pushTo(
     outcome: *Outcome,
 ) Error!void {
     var session = try openSession(gpa, io, repo, remote, url, options);
-    defer session.close(io);
+    defer session.deinit(io);
     var remote_refs = try session.listRefs(gpa, io, &.{});
     defer remote_refs.deinit();
 
@@ -436,9 +436,9 @@ fn send(
     var exclude: std.ArrayList(Oid) = .empty;
     for (remote_refs) |r| {
         if (r.unborn) continue;
-        if (try repo.odb.exists(io, r.oid)) try exclude.append(arena, r.oid);
+        if (try repo.objectDatabase().exists(io, r.oid)) try exclude.append(arena, r.oid);
     }
-    var objects = try objectwalk.missing(gpa, io, &repo.odb, include.items, exclude.items);
+    var objects = try objectwalk.missing(gpa, io, repo.objectDatabase(), include.items, exclude.items);
     defer objects.deinit();
 
     var remote_refs_pushed: std.ArrayList([]const u8) = .empty;
@@ -454,7 +454,7 @@ fn send(
 
     var with_objects = request;
     with_objects.objects = objects.entries;
-    var report = try session.push(gpa, io, &repo.odb, with_objects);
+    var report = try session.push(gpa, io, repo.objectDatabase(), with_objects);
     defer report.deinit();
     if (!report.unpack_ok) {
         outcome.unpack_ok = false;
@@ -582,7 +582,7 @@ fn resolveSource(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, lo
     }
     if (text.len == repo.objectFormat().hexLen()) {
         const oid = Oid.parse(repo.objectFormat(), text) catch return error.SourceNotFound;
-        if (try repo.odb.exists(io, oid)) return .{ .name = null, .oid = oid };
+        if (try repo.objectDatabase().exists(io, oid)) return .{ .name = null, .oid = oid };
     }
     return error.SourceNotFound;
 }
@@ -646,7 +646,7 @@ fn matchRefs(
                 if (std.mem.startsWith(u8, name, "refs/heads/")) break :blk try arena.print("refs/heads/{s}", .{dst_text});
                 if (std.mem.startsWith(u8, name, "refs/tags/")) break :blk try arena.print("refs/tags/{s}", .{dst_text});
             }
-            const header = try repo.odb.readHeader(io, src.oid);
+            const header = try repo.objectDatabase().readHeader(io, src.oid);
             switch (header.type) {
                 .commit => break :blk try arena.print("refs/heads/{s}", .{dst_text}),
                 .tag => break :blk try arena.print("refs/tags/{s}", .{dst_text}),
@@ -698,14 +698,14 @@ fn judge(
     if (reject == null and !deletion and !result.old.isZero()) {
         if (std.mem.startsWith(u8, result.remote_ref, "refs/tags/")) {
             reject = .rejected_already_exists;
-        } else if (!try repo.odb.exists(io, result.old)) {
+        } else if (!try repo.objectDatabase().exists(io, result.old)) {
             reject = .rejected_fetch_first;
         } else {
             const old_commit = commitOf(io, repo, result.old);
             const new_commit = commitOf(io, repo, result.new);
             if (old_commit == null or new_commit == null) {
                 reject = .rejected_needs_force;
-            } else if (!try revwalk.isAncestor(gpa, io, &repo.odb, old_commit.?, new_commit.?)) {
+            } else if (!try revwalk.isAncestor(gpa, io, repo.objectDatabase(), old_commit.?, new_commit.?, .{})) {
                 reject = .rejected_non_fast_forward;
             }
         }
@@ -719,7 +719,7 @@ fn judge(
 
 fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
     const peeled = repo.peel(io, oid) catch return null;
-    const header = repo.odb.readHeader(io, peeled) catch return null;
+    const header = repo.objectDatabase().readHeader(io, peeled) catch return null;
     return if (header.type == .commit) peeled else null;
 }
 

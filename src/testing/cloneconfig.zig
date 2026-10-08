@@ -8,7 +8,7 @@ const testing = std.testing;
 const Io = std.Io;
 
 const clone_mod = @import("../transport/clone.zig");
-const object = @import("../object.zig");
+const object = @import("../object/object.zig");
 const userconfig = @import("../config/userconfig.zig");
 const testlfs = @import("lfs.zig");
 const lfstest = @import("../lfs/transfer_test.zig");

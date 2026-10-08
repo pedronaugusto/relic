@@ -7,9 +7,10 @@
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
-const smoke = @import("bench_options").smoke;
+var smoke = false;
+var benchmark_io: Io = undefined;
 
-const relic = @import("relic");
+const relic = @import("relic").api;
 const testgit = @import("scratchgit.zig");
 const hash = relic.hash;
 const odb_mod = relic.odb;
@@ -22,14 +23,18 @@ const dirscan = relic.worktree.dirscan;
 /// A Debug build runs the same code with every safety check on and is two
 /// orders of magnitude slower at hashing, so it measures a smaller tree; the
 /// ratios it checks are the same ones.
-const file_count: usize = if (smoke) 30 else switch (builtin.optimize) {
-    .Debug => 300,
-    else => 3000,
-};
+fn fileCount() usize {
+    return if (smoke) 30 else switch (builtin.optimize) {
+        .Debug => 300,
+        else => 3000,
+    };
+}
 
 /// How many directories the files are spread over, which is what the cache
 /// tree's work is proportional to.
-const directory_count: usize = if (smoke) 3 else 60;
+fn directoryCount() usize {
+    return if (smoke) 3 else 60;
+}
 
 fn elapsedMs(io: Io, from: Io.Timestamp) f64 {
     const now = benchmarkNow(io);
@@ -53,8 +58,8 @@ fn bestMs(io: Io, passes: usize, context: anytype, comptime pass: fn (@TypeOf(co
     return best;
 }
 
-test "benchmark: add, write-tree and status stay inside the budget" {
-    const io = std.testing.io;
+fn row0() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
@@ -62,9 +67,9 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     // A shape like the one the numbers were measured on: a few thousand
     // small files over sixty directories.
     var content: [96]u8 = undefined;
-    for (0..file_count) |i| {
+    for (0..fileCount()) |i| {
         var path_buf: [64]u8 = undefined;
-        const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
+        const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ i % directoryCount(), i });
         const text = try std.mem.print(&content, "file {d}\nsome contents that are not all the same\n", .{i});
         try repo_git.writeFile(io, path, text);
     }
@@ -83,36 +88,36 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     defer index.deinit();
 
     const cold_start = benchmarkNow(io);
-    const cold = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
+    const cold = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
     const cold_add_ms = elapsedMs(io, cold_start);
-    const cold_stats = repo.odb.stats;
+    const cold_stats = repo.objectDatabase().stats;
 
     const cold_tree_start = benchmarkNow(io);
-    const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     const cold_tree_ms = elapsedMs(io, cold_tree_start);
 
-    try index.write(io, repo.git_dir, "index", .{});
+    try index.write(io, repo.gitDirectory(), "index", .{});
     index.deinit();
     index = try repo.openIndex(io);
 
     const warm_start = benchmarkNow(io);
-    const warm = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
+    const warm = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
     const warm_add_ms = elapsedMs(io, warm_start);
 
     const warm_tree_start = benchmarkNow(io);
-    const same_tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    const same_tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     const warm_tree_ms = elapsedMs(io, warm_tree_start);
 
     // A dirty tree: one file in ten changed, which is the shape a status
     // actually meets.
-    for (0..file_count / 10) |i| {
+    for (0..fileCount() / 10) |i| {
         var path_buf: [64]u8 = undefined;
-        const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ (i * 10) % directory_count, i * 10 });
+        const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ (i * 10) % directoryCount(), i * 10 });
         const text = try std.mem.print(&content, "file {d} changed\n", .{i * 10});
         try repo_git.writeFile(io, path, text);
     }
     const status_start = benchmarkNow(io);
-    var result = try worktree.status(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+    var result = try worktree.status(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
         .rules = wt_rules,
         .head_tree = null,
     });
@@ -131,10 +136,10 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         \\
     , .{
         @tagName(builtin.optimize),
-        file_count,
-        directory_count,
-        dirscan.armFor(gpa, io, repo.work_dir.?),
-        repo.odb.timestamp_resolution.ns,
+        fileCount(),
+        directoryCount(),
+        dirscan.armFor(gpa, io, repo.workDirectory().?),
+        repo.objectDatabase().timestamp_resolution.ns,
         cold_add_ms,
         warm_add_ms,
         cold_tree_ms,
@@ -151,13 +156,13 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     // the fan-out directories are made once each rather than once per object:
     // two hundred and fifty-six is every directory that can exist, so this
     // bound holds whatever the tree looks like.
-    try std.testing.expectEqual(@as(u64, file_count), cold_stats.loose_written);
+    try std.testing.expectEqual(@as(u64, fileCount()), cold_stats.loose_written);
     try std.testing.expect(cold_stats.fan_out_created <= 256);
 
     // The stat shortcut: a warm pass opens nothing.
-    try std.testing.expectEqual(@as(u32, @intCast(file_count)), cold.hashed);
+    try std.testing.expectEqual(@as(u32, @intCast(fileCount())), cold.hashed);
     try std.testing.expectEqual(@as(u32, 0), warm.hashed);
-    try std.testing.expectEqual(@as(u32, @intCast(file_count)), warm.unchanged);
+    try std.testing.expectEqual(@as(u32, @intCast(fileCount())), warm.unchanged);
 
     // The cache tree: a warm write-tree writes no tree object at all, so it
     // is far faster than the cold one and gives the same name.
@@ -185,11 +190,11 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     if (!smoke) std.debug.print("speed condition cold_add_ms < budget_ms: {s}\n", .{if (cold_add_ms < budget_ms) "within" else "over"});
     if (!smoke) std.debug.print("speed condition warm_add_ms < budget_ms: {s}\n", .{if (warm_add_ms < budget_ms) "within" else "over"});
     if (!smoke) std.debug.print("speed condition status_ms < budget_ms: {s}\n", .{if (status_ms < budget_ms) "within" else "over"});
-    try std.testing.expect(result.entries.len >= file_count / 10);
+    try std.testing.expect(result.entries.len >= fileCount() / 10);
 }
 
-test "benchmark: a packed object with a delta chain reads inside the budget" {
-    const io = std.testing.io;
+fn row1() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
@@ -254,8 +259,8 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
     if (!smoke) std.debug.print("speed condition ms < budget_ms: {s}\n", .{if (ms < budget_ms) "within" else "over"});
 }
 
-test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
-    const io = std.testing.io;
+fn row2() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
 
     // Enough bytes that the measurement is the compression function and not
@@ -363,8 +368,8 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
     // working fails it.
 }
 
-test "benchmark: a staging pass into a pack, and writing one" {
-    const io = std.testing.io;
+fn row3() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
 
     // The same tree staged twice: once as one loose object per blob, which
@@ -379,9 +384,9 @@ test "benchmark: a staging pass into a pack, and writing one" {
         var repo_git = try testgit.Repo.init(gpa, io);
         defer repo_git.deinit();
         var content: [96]u8 = undefined;
-        for (0..file_count) |i| {
+        for (0..fileCount()) |i| {
             var path_buf: [64]u8 = undefined;
-            const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
+            const path = try std.mem.print(&path_buf, "d{d}/f{d}.txt", .{ i % directoryCount(), i });
             const text = try std.mem.print(&content, "file {d}\nsome contents that are not all the same\n", .{i});
             try repo_git.writeFile(io, path, text);
         }
@@ -396,14 +401,14 @@ test "benchmark: a staging pass into a pack, and writing one" {
         defer index.deinit();
 
         const start = benchmarkNow(io);
-        const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
             .rules = wt_rules,
             .new_blobs = where,
         });
         ms[pass] = elapsedMs(io, start);
-        try std.testing.expectEqual(@as(u32, @intCast(file_count)), outcome.added);
+        try std.testing.expectEqual(@as(u32, @intCast(fileCount())), outcome.added);
         if (where == .pack) packed_report = outcome.pack;
-        trees[pass] = try worktree.writeTree(gpa, io, &index, &repo.odb);
+        trees[pass] = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     }
     try std.testing.expect(trees[0].eql(trees[1]));
     try std.testing.expect(packed_report != null);
@@ -467,7 +472,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
         \\
     , .{
         @tagName(builtin.optimize),
-        file_count,
+        fileCount(),
         deltified.objects,
         ms[0],
         ms[1],
@@ -527,8 +532,8 @@ fn rulePaths(gpa: std.mem.Allocator, count: usize) ![][]const u8 {
     return paths;
 }
 
-test "benchmark: ignore and attribute rules decide paths" {
-    const io = std.testing.io;
+fn row4() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     const path_count: usize = if (smoke) 50 else switch (builtin.optimize) {
         .Debug => 5_000,
@@ -609,8 +614,8 @@ test "benchmark: ignore and attribute rules decide paths" {
     try std.testing.expect(!rules.matchPath("src/d1/keep.log", false).excluded);
 }
 
-test "benchmark: status walks a tree with an ignore file in every directory" {
-    const io = std.testing.io;
+fn row5() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
@@ -648,14 +653,14 @@ test "benchmark: status walks a tree with an ignore file in every directory" {
         repo: *repo_mod.Repository,
         index: *relic.index.Index,
         fn status(p: @This()) void {
-            var rules = p.repo.loadIgnore(std.testing.io) catch unreachable;
+            var rules = p.repo.loadIgnore(benchmark_io) catch unreachable;
             defer rules.deinit();
-            var attrs = p.repo.loadAttrs(std.testing.io) catch unreachable;
+            var attrs = p.repo.loadAttrs(benchmark_io) catch unreachable;
             defer attrs.deinit();
             var wt_rules = p.repo.worktreeRules() catch unreachable;
             wt_rules.ignore = &rules;
             wt_rules.attrs = &attrs;
-            var result = worktree.status(std.heap.smp_allocator, std.testing.io, p.repo.work_dir.?, p.index, &p.repo.odb, .{
+            var result = worktree.status(std.heap.smp_allocator, benchmark_io, p.repo.workDirectory().?, p.index, p.repo.objectDatabase(), .{
                 .rules = wt_rules,
                 .head_tree = null,
             }) catch unreachable;
@@ -672,8 +677,8 @@ test "benchmark: status walks a tree with an ignore file in every directory" {
     , .{ @tagName(builtin.optimize), dirs, dirs * files_per_dir, status_ms });
 }
 
-test "benchmark: for-each-ref chooses among many refs by pattern" {
-    const io = std.testing.io;
+fn row6() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
@@ -717,7 +722,7 @@ test "benchmark: for-each-ref chooses among many refs by pattern" {
         repo: *repo_mod.Repository,
         fn pass(l: @This()) void {
             var sink: std.Io.Writer.Discarding = .init(&.{});
-            relic.refs.filter.listRefs(std.heap.smp_allocator, std.testing.io, l.repo, .{
+            relic.pretty.refs.listRefs(std.heap.smp_allocator, benchmark_io, l.repo, .{
                 .filter = .{ .patterns = &.{ "refs/heads/f*/1[0-9].*", "refs/tags/v*" }, .exclude = &.{"refs/tags/v1?.*"} },
                 .format = "%(refname)",
             }, &sink.writer) catch unreachable;
@@ -749,8 +754,8 @@ fn editedText(gpa: std.mem.Allocator, lines: usize, stride: usize, round: usize)
     return out.toOwnedSlice(gpa);
 }
 
-test "benchmark: unified bodies, line counts and content merges of many files" {
-    const io = std.testing.io;
+fn row7() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     const files: usize = if (smoke) 4 else switch (builtin.optimize) {
         .Debug => 40,
@@ -815,8 +820,8 @@ test "benchmark: unified bodies, line counts and content merges of many files" {
     , .{ @tagName(builtin.optimize), files, bodies_ms, counts_ms, merges_ms });
 }
 
-test "benchmark: blame follows a file through a long history" {
-    const io = std.testing.io;
+fn row8() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
@@ -840,7 +845,7 @@ test "benchmark: blame follows a file through a long history" {
         repo: *repo_mod.Repository,
         commit: hash.Oid,
         fn blame(p: @This()) void {
-            var b = relic.diff.blame.file(std.heap.smp_allocator, std.testing.io, &p.repo.odb, p.commit, "file.zig", .{}) catch unreachable;
+            var b = relic.diff.blame.file(std.heap.smp_allocator, benchmark_io, p.repo.objectDatabase(), p.commit, "file.zig", .{}) catch unreachable;
             std.mem.doNotOptimizeAway(b.hunks.len);
             b.deinit();
         }
@@ -970,8 +975,8 @@ fn exchange(conn: *relic.transport.connection.Connection) !usize {
     };
 }
 
-test "benchmark: smart HTTP carries a large answer, and many small ones, over one connection" {
-    const io = std.testing.io;
+fn row9() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     const size: usize = if (smoke) 1 << 20 else 256 << 20;
     const big = try sidebandAnswer(gpa, size);
@@ -983,7 +988,7 @@ test "benchmark: smart HTTP carries a large answer, and many small ones, over on
         var url_buf: [64]u8 = undefined;
         const url = try relic.transport.url.Url.parse(try std.mem.print(&url_buf, "http://127.0.0.1:{d}/repo.git", .{server.port}));
         const conn = try relic.transport.smarthttp.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
-        defer conn.close(io);
+        defer conn.deinit(io);
         const Pass = struct {
             conn: *relic.transport.connection.Connection,
             rounds: usize,
@@ -1003,8 +1008,8 @@ test "benchmark: smart HTTP carries a large answer, and many small ones, over on
     , .{ @tagName(builtin.optimize), size >> 20, @as(f64, @floatFromInt(size)) / 1e6 / (timings[0] / 1000), 20_000 / (timings[1] / 1000) });
 }
 
-test "benchmark: LFS downloads hash and store a large object" {
-    const io = std.testing.io;
+fn row10() !void {
+    const io = benchmark_io;
     const gpa = std.heap.smp_allocator;
     const size: usize = if (smoke) 1 << 20 else 256 << 20;
     const content = try gpa.alloc(u8, size);
@@ -1014,7 +1019,7 @@ test "benchmark: LFS downloads hash and store a large object" {
     defer server.stop();
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
-    const objects = [_]relic.lfs.lfstransfer.Object{.{ .oid = std.fmt.bytesToHex(digest, .lower), .size = size }};
+    const objects = [_]relic.lfs.transfer.Object{.{ .oid = std.fmt.bytesToHex(digest, .lower), .size = size }};
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
     const url = try gpa.print("http://127.0.0.1:{d}/repo.git", .{server.port});
@@ -1022,16 +1027,16 @@ test "benchmark: LFS downloads hash and store a large object" {
     try repo_git.exec(io, &.{ "remote", "add", "origin", url });
     var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
     defer repo.deinit(io);
-    const lfs_server = try relic.lfs.lfsapi.Server.open(gpa, io, &repo, "origin", .{});
-    defer lfs_server.close();
+    const lfs_server = try relic.lfs.api.Server.open(gpa, io, &repo, "origin", .{});
+    defer lfs_server.deinit();
     const Pass = struct {
-        server: *relic.lfs.lfsapi.Server,
+        server: *relic.lfs.api.Server,
         dir: Io.Dir,
         io: Io,
-        objects: []const relic.lfs.lfstransfer.Object,
+        objects: []const relic.lfs.transfer.Object,
         fn run(p: @This()) void {
             p.dir.deleteTree(p.io, ".git/lfs/objects") catch unreachable;
-            var outcome = relic.lfs.lfstransfer.download(p.server, p.objects, .{ .concurrency = 1 }) catch unreachable;
+            var outcome = relic.lfs.transfer.download(p.server, p.objects, .{ .concurrency = 1 }) catch unreachable;
             defer outcome.deinit();
             std.debug.assert(outcome.failures() == 0);
             std.debug.assert(outcome.results[0].status == .transferred);
@@ -1044,6 +1049,27 @@ test "benchmark: LFS downloads hash and store a large object" {
 // Smoke exercises correctness without sampling a benchmark clock.
 var smoke_ticks = std.atomic.Value(i64).init(0);
 fn benchmarkNow(io: std.Io) std.Io.Timestamp {
-    if (@import("bench_options").smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1, .monotonic) };
+    if (smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1, .monotonic) };
     return std.Io.Clock.awake.now(io);
+}
+
+pub fn main(init: std.process.Init) !void {
+    benchmark_io = init.io;
+    testgit.environment = init.minimal.environ;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    var filter: ?[]const u8 = null;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--smoke")) smoke = true else filter = arg;
+    }
+    if (filter == null or std.mem.find(u8, "benchmark: add, write-tree and status stay inside the budget", filter.?) != null) try row0();
+    if (filter == null or std.mem.find(u8, "benchmark: a packed object with a delta chain reads inside the budget", filter.?) != null) try row1();
+    if (filter == null or std.mem.find(u8, "benchmark: SHA-1 runs at the rate the processor's instructions give it", filter.?) != null) try row2();
+    if (filter == null or std.mem.find(u8, "benchmark: a staging pass into a pack, and writing one", filter.?) != null) try row3();
+    if (filter == null or std.mem.find(u8, "benchmark: ignore and attribute rules decide paths", filter.?) != null) try row4();
+    if (filter == null or std.mem.find(u8, "benchmark: status walks a tree with an ignore file in every directory", filter.?) != null) try row5();
+    if (filter == null or std.mem.find(u8, "benchmark: for-each-ref chooses among many refs by pattern", filter.?) != null) try row6();
+    if (filter == null or std.mem.find(u8, "benchmark: unified bodies, line counts and content merges of many files", filter.?) != null) try row7();
+    if (filter == null or std.mem.find(u8, "benchmark: blame follows a file through a long history", filter.?) != null) try row8();
+    if (filter == null or std.mem.find(u8, "benchmark: smart HTTP carries a large answer, and many small ones, over one connection", filter.?) != null) try row9();
+    if (filter == null or std.mem.find(u8, "benchmark: LFS downloads hash and store a large object", filter.?) != null) try row10();
 }

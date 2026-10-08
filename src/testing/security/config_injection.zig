@@ -8,11 +8,11 @@
 const std = @import("std");
 const Io = std.Io;
 
-const gitmodules = @import("../../submodule/gitmodules.zig");
-const submodule = @import("../../submodule.zig");
+const gitmodules = @import("../../config/gitmodules.zig");
+const submodule = @import("../../submodule/submodule.zig");
 const fsck = @import("../../object/fsck.zig");
-const config_mod = @import("../../config.zig");
-const repo_mod = @import("../../repo.zig");
+const config_mod = @import("../../config/config.zig");
+const repo_mod = @import("../../repo/repo.zig");
 const testgit = @import("../git.zig");
 
 test "CVE-2019-19604, t7406-submodule-update 'submodule update - command in .gitmodules is rejected', 'fsck detects command in .gitmodules' and 'submodule init does not copy command into .git/config'" {

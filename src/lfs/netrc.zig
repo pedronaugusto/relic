@@ -27,10 +27,13 @@ pub const Netrc = struct {
     arena: std.heap.ArenaAllocator,
     machines: []const Machine,
 
+    /// Errors from `parse`.
+    pub const ParseError = Allocator.Error || error{MalformedNetrc};
+
     /// Read `text`, which is not kept. A file that is not what the format
     /// describes is `error.MalformedNetrc`, which git-lfs also refuses to
     /// use.
-    pub fn parse(gpa: Allocator, text: []const u8) (Allocator.Error || error{MalformedNetrc})!Netrc {
+    pub fn parse(gpa: Allocator, text: []const u8) ParseError!Netrc {
         var n: Netrc = .{ .arena = .init(gpa), .machines = &.{} };
         errdefer n.arena.deinit();
         const a = n.arena.allocator();

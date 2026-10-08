@@ -22,21 +22,21 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const repo_mod = @import("../repo.zig");
-const config_mod = @import("../config.zig");
-const diff = @import("../diff.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
+const diff = @import("../diff/diff.zig");
 const patchid = @import("../diff/patchid.zig");
-const revwalk = @import("../revwalk.zig");
+const revwalk = @import("../walk/walk.zig");
 const abbrev = @import("../odb/abbrev.zig");
-const cquote = @import("../cquote.zig");
+const cquote = @import("../text/cquote.zig");
 const binarypatch = @import("binary.zig");
-const mailfmt = @import("mail/format.zig");
-const unicodewidth = @import("../unicodewidth.zig");
-const message = @import("../commit/message.zig");
-const attributes = @import("../worktree/attributes.zig");
+const mailfmt = @import("../mail/format.zig");
+const unicodewidth = @import("../text/unicodewidth.zig");
+const message = @import("../object/message.zig");
+const attributes = @import("../patterns/attributes.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -255,7 +255,7 @@ const Ctx = struct {
 
     /// Which files are binary, as git's `diff_filespec_is_binary` says.
     fn binaryRule(ctx: *const Ctx) diff.BinaryRule {
-        return .{ .attrs = ctx.attrs, .work_dir = ctx.repo.work_dir, .config = ctx.repo.configuration() };
+        return .{ .attrs = ctx.attrs, .work_dir = ctx.repo.workDirectory(), .config = ctx.repo.configuration() };
     }
 };
 
@@ -265,7 +265,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
     const config = repo.configuration();
-    const db = &repo.odb;
+    const db = repo.objectDatabase();
 
     if (options.keep_subject and options.numbered == true) return error.KeepSubjectWithNumbered;
     if (options.keep_subject and (options.rfc != null or !std.mem.eql(u8, options.subject_prefix, "PATCH"))) return error.KeepSubjectWithPrefix;
@@ -281,9 +281,9 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
 
     var own_attrs: ?attributes.Attrs = null;
     defer if (own_attrs) |*x| x.deinit();
-    if (repo.work_dir != null) own_attrs = try repo.loadAttrs(io);
+    if (repo.workDirectory() != null) own_attrs = try repo.loadAttrs(io);
     defer if (own_attrs) |*x| x.leave();
-    const binary: diff.BinaryRule = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.work_dir, .config = config };
+    const binary: diff.BinaryRule = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.workDirectory(), .config = config };
 
     const selected = try selectCommits(gpa, a, io, db, range, options, binary) orelse return emptySeries(gpa, &arena_instance);
     const list = selected.list;
@@ -536,7 +536,7 @@ fn prepareBases(ctx: *Ctx, base: Oid, list: []const Oid) Error!Bases {
     for (list[1..]) |c| {
         common = (try revwalk.mergeBase(gpa, ctx.io, ctx.db, common, c)) orelse return error.BaseNotAncestor;
     }
-    if (!try revwalk.isAncestor(gpa, ctx.io, ctx.db, base, common)) return error.BaseNotAncestor;
+    if (!try revwalk.isAncestor(gpa, ctx.io, ctx.db, base, common, .{})) return error.BaseNotAncestor;
     var walk = revwalk.Walk.init(gpa, ctx.db);
     defer walk.deinit();
     walk.sort = .topological;
@@ -587,16 +587,22 @@ fn utf8Message(ctx: *Ctx, c: *const object.Commit) Error![]const u8 {
     return logMessage(ctx.a, c);
 }
 
+/// Errors from `logMessage`.
+pub const LogMessageError = error{ UnsupportedEncoding, OutOfMemory };
+
 /// A commit's message in UTF-8, as git reencodes it for the log: as it
 /// is when its `encoding` is UTF-8 or ASCII, converted from Latin-1, and
 /// any other encoding refused. Allocated from `a` when converted.
-pub fn logMessage(a: Allocator, c: *const object.Commit) error{ UnsupportedEncoding, OutOfMemory }![]const u8 {
+pub fn logMessage(a: Allocator, c: *const object.Commit) LogMessageError![]const u8 {
     return logText(a, c, c.message);
 }
 
+/// Errors from `logText`.
+pub const LogTextError = error{ UnsupportedEncoding, OutOfMemory };
+
 /// `text`, from commit `c`'s header or message, in UTF-8 as `logMessage`
 /// converts it.
-pub fn logText(a: Allocator, c: *const object.Commit, text: []const u8) error{ UnsupportedEncoding, OutOfMemory }![]const u8 {
+pub fn logText(a: Allocator, c: *const object.Commit, text: []const u8) LogTextError![]const u8 {
     const enc = c.encoding orelse return text;
     if (std.ascii.eqlIgnoreCase(enc, "utf-8") or std.ascii.eqlIgnoreCase(enc, "utf8") or
         std.ascii.eqlIgnoreCase(enc, "us-ascii")) return text;
@@ -1455,7 +1461,7 @@ fn writeStatOnly(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Chang
 
 fn coverShortlog(ctx: *Ctx, out: *std.ArrayList(u8), list: []const Oid) Error!void {
     const a = ctx.a;
-    if (ctx.repo.work_dir) |wt| {
+    if (ctx.repo.workDirectory()) |wt| {
         if (wt.access(ctx.io, ".mailmap", .{})) |_| return error.MailmapUnsupported else |_| {}
     }
     const config = ctx.repo.configuration();

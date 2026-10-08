@@ -28,15 +28,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const repo_mod = @import("repo.zig");
-const index_mod = @import("index.zig");
-const ignore = @import("worktree/ignore.zig");
-const pathspec_mod = @import("pathspec.zig");
-const gitlink = @import("submodule/gitlink.zig");
-const dirscan = @import("worktree/dirscan.zig");
-const cquote = @import("cquote.zig");
-const config_core = @import("config.zig");
-const fs = @import("repo/fs.zig");
+const repo_mod = @import("repo/repo.zig");
+const index_mod = @import("index/index.zig");
+const ignore = @import("patterns/ignore.zig");
+const pathspec_mod = @import("patterns/pathspec.zig");
+const gitlink = @import("discover/gitlink.zig");
+const dirscan = @import("checkout/dirscan.zig");
+const cquote = @import("text/cquote.zig");
+const config_core = @import("config/config.zig");
+const fs = @import("fs/fs.zig");
 
 const Repository = repo_mod.Repository;
 const Index = index_mod.Index;
@@ -130,7 +130,7 @@ pub const Outcome = struct {
 /// Remove the untracked files of `repo`'s working tree that `options`
 /// name.
 pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
-    const wt = repo.work_dir orelse return error.BareRepository;
+    const wt = repo.workDirectory() orelse return error.BareRepository;
     const config = repo.configuration();
     if (try config.getBool("clean.requireforce", true) and options.force == .no and !options.dry_run)
         return error.ForceRequired;

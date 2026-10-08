@@ -23,20 +23,20 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const pktline = @import("pktline.zig");
-const protocol = @import("protocol.zig");
-const objectwalk = @import("objectwalk.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const pktline = @import("../codec/pktline.zig");
+const protocol = @import("../wire/protocol.zig");
+const objectwalk = @import("../walk/objectwalk.zig");
 const revparse = @import("../revwalk/revparse.zig");
-const filterspec = @import("filterspec.zig");
-const ignore = @import("../worktree/ignore.zig");
-const revwalk = @import("../revwalk.zig");
+const filterspec = @import("../wire/filterspec.zig");
+const ignore = @import("../patterns/ignore.zig");
+const revwalk = @import("../walk/walk.zig");
 const local = @import("local.zig");
-const connection = @import("connection.zig");
-const promisors = @import("promisors.zig");
-const repo_mod = @import("../repo.zig");
+const connection = @import("../wire/connection.zig");
+const promisors = @import("../wire/promisors.zig");
+const repo_mod = @import("../repo/repo.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -103,7 +103,7 @@ pub const Server = struct {
     }
 
     fn db(s: *Server) *odb_mod.Odb {
-        return &s.remote.repo.odb;
+        return s.remote.repo.objectDatabase();
     }
 
     fn kind(s: *Server) hash.Kind {
@@ -455,7 +455,7 @@ pub const Server = struct {
                 if (ref.unborn) continue;
                 const tip = ref.peeled orelse ref.oid;
                 if ((try s.db().readHeader(s.io, tip)).type != .commit) continue;
-                if (revwalk.isAncestor(s.gpa, s.io, s.db(), oid, tip) catch false) return true;
+                if (revwalk.isAncestor(s.gpa, s.io, s.db(), oid, tip, .{}) catch false) return true;
             }
         }
         return false;
@@ -900,11 +900,11 @@ const Negotiation = struct {
         const s = n.server;
         const repo = &s.remote.repo;
         const oid = (try n.resolveBlob(name)) orelse return null;
-        const found = repo.odb.read(s.io, oid) catch |err| switch (err) {
+        const found = repo.objectDatabase().read(s.io, oid) catch |err| switch (err) {
             error.ObjectNotFound => return null,
             else => |e| return e,
         };
-        defer repo.odb.allocator().free(found.bytes);
+        defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .blob) return null;
         const rules = try n.arena.create(ignore.Rules);
         rules.* = try .init(n.arena, false);
@@ -1183,7 +1183,7 @@ test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .bare = true });
     repo.deinit(io);
     const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);

@@ -11,11 +11,11 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("../repo.zig");
-const lfs = @import("../lfs.zig");
+const repo_mod = @import("../repo/repo.zig");
+const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfstransfer = @import("transfer.zig");
-const objectwalk = @import("../transport/objectwalk.zig");
+const objectwalk = @import("../walk/objectwalk.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 
@@ -157,18 +157,18 @@ fn relicUpload(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
     defer repo.deinit(fx.io);
     const head = (try repo.head(fx.io)).?;
     defer fx.gpa.free(head.name);
-    var collected = try objectwalk.missing(fx.gpa, fx.io, &repo.odb, &.{head.oid}, &.{});
+    var collected = try objectwalk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, &.{});
     defer collected.deinit();
     const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
-    defer server.close();
-    return lfstransfer.pushObjects(server, &repo.odb, collected.entries, .{});
+    defer server.deinit();
+    return lfstransfer.pushObjects(server, repo.objectDatabase(), collected.entries, .{});
 }
 
 fn relicFetch(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
     var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
     defer repo.deinit(fx.io);
     const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
-    defer server.close();
+    defer server.deinit();
     return lfstransfer.fetch(server, &repo, .{});
 }
 
@@ -226,7 +226,7 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
     try testing.expectEqualStrings(a, b);
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
-    var store = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, null, .{});
+    var store = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.commonDirectory(), null, .{});
     defer store.deinit();
     const content = testbytes.repeat("the first object\n", 64);
     const pointer: lfs.Pointer = .{ .oid = testlfs.sha256Hex(content), .size = content.len };

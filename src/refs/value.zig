@@ -1,14 +1,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const hash = @import("../hash.zig");
+const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
-const object = @import("../object.zig");
-const fs = @import("../repo/fs.zig");
+const object = @import("../object/object.zig");
+const fs = @import("../fs/fs.zig");
 const reftable = @import("reftable.zig");
 const reflog = @import("reflog.zig");
-const hooks = @import("../repo/hooks.zig");
+const hooks = @import("../hooks/hooks.zig");
 const policy = @import("reftablestack/policy.zig");
 /// The header `packed-refs` carries, with the space before the newline that
 /// is in git's source and in no document.

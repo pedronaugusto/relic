@@ -32,19 +32,19 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
 const revparse = @import("revparse.zig");
-const revwalk = @import("../revwalk.zig");
-const message = @import("../commit/message.zig");
-const head_mod = @import("../commit/head.zig");
+const revwalk = @import("../walk/walk.zig");
+const message = @import("../object/message.zig");
+const head_mod = @import("../repo/head.zig");
 const threeway = @import("../merge/threeway.zig");
-const hooks = @import("../repo/hooks.zig");
-const program = @import("../repo/program.zig");
+const hooks = @import("../hooks/hooks.zig");
+const program = @import("../process/program.zig");
 const ref_names = @import("../names/ref.zig");
-const pathspec = @import("../pathspec.zig");
+const pathspec = @import("../patterns/pathspec.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -177,7 +177,7 @@ const Ctx = struct {
     }
 
     fn dir(c: *Ctx) Io.Dir {
-        return c.repo.git_dir;
+        return c.repo.gitDirectory();
     }
 
     fn readState(c: *Ctx, name: []const u8) Error!?[]u8 {
@@ -220,8 +220,8 @@ const Ctx = struct {
 
     /// `%s` of a commit.
     fn subject(c: *Ctx, oid: Oid) Error![]const u8 {
-        const found = try c.repo.odb.read(c.io, oid);
-        defer c.repo.odb.allocator().free(found.bytes);
+        const found = try c.repo.objectDatabase().read(c.io, oid);
+        defer c.repo.objectDatabase().allocator().free(found.bytes);
         var commit = try object.Commit.parse(c.gpa, c.repo.objectFormat(), found.bytes);
         defer commit.deinit();
         return message.onelineSubject(c.a, commit.message);
@@ -234,7 +234,7 @@ const Ctx = struct {
             else => return error.BadRevision,
         };
         const peeled = c.repo.peel(c.io, oid) catch return error.BadRevision;
-        const header = c.repo.odb.readHeader(c.io, peeled) catch return error.BadRevision;
+        const header = c.repo.objectDatabase().readHeader(c.io, peeled) catch return error.BadRevision;
         if (header.type != .commit) return error.BadRevision;
         return peeled;
     }
@@ -480,7 +480,7 @@ fn next(c: *Ctx, t: Terms) Error!Step {
 
 /// `bisect_skipped_commits`: the commits left, in the log.
 fn skippedCommits(c: *Ctx, t: Terms) Error!void {
-    var walk: revwalk.Walk = .init(c.gpa, &c.repo.odb);
+    var walk: revwalk.Walk = .init(c.gpa, c.repo.objectDatabase());
     defer walk.deinit();
     var listing = try c.repo.refStore().list(c.gpa, c.io, "refs/bisect/");
     defer listing.deinit();
@@ -566,7 +566,7 @@ fn readPaths(c: *Ctx) Error![]const []const u8 {
 }
 
 fn listCommits(c: *Ctx, revs: *const Revs, first_parent: bool) Error!Listed {
-    var walk: revwalk.Walk = .init(c.gpa, &c.repo.odb);
+    var walk: revwalk.Walk = .init(c.gpa, c.repo.objectDatabase());
     defer walk.deinit();
     walk.first_parent = first_parent;
     const specs = try readPaths(c);
@@ -885,12 +885,12 @@ fn checkGoodAncestors(c: *Ctx, t: Terms, revs: *const Revs, no_checkout: bool) E
     if (revs.good.items.len == 0) return null;
 
     // `check_ancestors`: is any good commit not reached from the bad one?
-    var walk: revwalk.Walk = .init(c.gpa, &c.repo.odb);
+    var walk: revwalk.Walk = .init(c.gpa, c.repo.objectDatabase());
     defer walk.deinit();
     try walk.hide(bad);
     for (revs.good.items) |g| try walk.push(g);
     if (try walk.count(c.io) != 0) {
-        const bases = try revwalk.mergeBasesMany(c.gpa, c.io, &c.repo.odb, bad, revs.good.items);
+        const bases = try revwalk.mergeBasesMany(c.gpa, c.io, c.repo.objectDatabase(), bad, revs.good.items, .{});
         defer c.gpa.free(bases);
         for (bases) |mb| {
             if (mb.eql(bad)) return badMergeBase(c, t, revs);
@@ -939,7 +939,7 @@ fn switchTo(c: *Ctx, target: Oid, branch: ?[]const u8, given: []const u8) Error!
         "(invalid)";
     var index = try c.repo.openIndex(c.io);
     defer index.deinit();
-    const from_tree = if (h.oid) |oid| try c.repo.commitTree(c.io, oid) else try c.repo.odb.write(c.io, .tree, "");
+    const from_tree = if (h.oid) |oid| try c.repo.commitTree(c.io, oid) else try c.repo.objectDatabase().write(c.io, .tree, "");
     var outcome = try threeway.apply(c.gpa, c.io, c.repo, &index, from_tree, from_tree, try c.repo.commitTree(c.io, target), .{ .blocked = c.options.blocked });
     outcome.deinit();
     try c.repo.writeIndex(c.io, &index);
@@ -1160,7 +1160,7 @@ pub fn mark(gpa: Allocator, io: Io, repo: *Repository, state: []const u8, revs: 
         // `bisect_skip`: a range is every commit in it.
         for (revs) |rev| {
             if (std.mem.find(u8, rev, "..")) |dots| {
-                var walk: revwalk.Walk = .init(c.gpa, &c.repo.odb);
+                var walk: revwalk.Walk = .init(c.gpa, c.repo.objectDatabase());
                 defer walk.deinit();
                 try walk.hide(try c.commitOf(rev[0..dots]));
                 try walk.push(try c.commitOf(rev[dots + 2 ..]));
@@ -1240,7 +1240,7 @@ fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
 
 /// `git bisect log`: what `BISECT_LOG` holds. The result is the caller's.
 pub fn log(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
-    const text = repo.git_dir.readFileAlloc(io, "BISECT_LOG", gpa, .unlimited) catch |err| switch (err) {
+    const text = repo.gitDirectory().readFileAlloc(io, "BISECT_LOG", gpa, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return error.NoLog,
         else => |e| return e,
     };
@@ -1388,14 +1388,14 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u
 /// `do_bisect_run`: `running <cmd>`, and its exit status.
 fn runCommand(c: *Ctx, line: []const u8, run_options: RunOptions) Error!i32 {
     try c.print("running {s}\n", .{line});
-    var outcome = try program.run(run_options.programs, c.gpa, c.io, .{
+    var outcome = try program.run(c.gpa, c.io, run_options.programs, .{
         .argv = &.{line},
         .shell = true,
-        .cwd = if (c.repo.work_dir) |wt| .{ .dir = wt } else .inherit,
-    }, "", .{});
+        .cwd = if (c.repo.workDirectory()) |wt| .{ .dir = wt } else .inherit,
+    }, .{});
     defer outcome.deinit(c.gpa);
     return switch (outcome.term) {
-        .exited => |code| code,
+        .exited => |code| std.math.cast(i32, code) orelse 128,
         else => 128,
     };
 }

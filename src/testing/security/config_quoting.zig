@@ -9,10 +9,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 
-const config_mod = @import("../../config.zig");
+const config_mod = @import("../../config/config.zig");
 const clone_mod = @import("../../transport/clone.zig");
-const submodule = @import("../../submodule.zig");
-const object = @import("../../object.zig");
+const submodule = @import("../../submodule/submodule.zig");
+const object = @import("../../object/object.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 

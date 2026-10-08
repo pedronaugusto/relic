@@ -12,8 +12,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config = @import("../config.zig");
-const fs = @import("../repo/fs.zig");
+const config = @import("config.zig");
+const fs = @import("../fs/fs.zig");
 
 /// One change to a configuration file.
 pub const Edit = union(enum) {
@@ -56,9 +56,12 @@ pub const Pending = struct {
         return p.bytes;
     }
 
+    /// Errors from `commit`.
+    pub const CommitError = fs.CommitError || error{WriteFailed};
+
     /// Put the new file in place, with the mode the old one had, as git
     /// gives it.
-    pub fn commit(p: *Pending, io: Io) (fs.CommitError || error{WriteFailed})!void {
+    pub fn commit(p: *Pending, io: Io) CommitError!void {
         if (std.Io.File.Permissions.has_executable_bit) {
             if (p.dir.statFile(io, p.sub_path, .{})) |st| {
                 p.dir.setFilePermissions(io, p.lock.lock_name, st.permissions, .{}) catch |err| {

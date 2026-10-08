@@ -32,9 +32,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../../hash.zig");
-const object = @import("../../object.zig");
-const fs = @import("../../repo/fs.zig");
+const hash = @import("../../hash/hash.zig");
+const object = @import("../../object/object.zig");
+const fs = @import("../../fs/fs.zig");
 const reftable = @import("../reftable.zig");
 const reflog = @import("../reflog.zig");
 const ref_names = @import("../../names/ref.zig");

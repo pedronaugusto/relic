@@ -16,19 +16,19 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
 const abbrev = @import("../odb/abbrev.zig");
-const repo_mod = @import("../repo.zig");
-const diff = @import("../diff.zig");
-const parallax = @import("../dependencies.zig").parallax;
-const revwalk = @import("../revwalk.zig");
-const pretty = @import("../pretty.zig");
+const repo_mod = @import("../repo/repo.zig");
+const diff = @import("../diff/diff.zig");
+const parallax = @import("parallax");
+const revwalk = @import("../walk/walk.zig");
+const pretty = @import("../pretty/pretty.zig");
 const notes_mod = @import("../commit/notes.zig");
 const mailmap_mod = @import("../revwalk/mailmap.zig");
-const attributes = @import("../worktree/attributes.zig");
-const cquote = @import("../cquote.zig");
-const unicodewidth = @import("../unicodewidth.zig");
+const attributes = @import("../patterns/attributes.zig");
+const cquote = @import("../text/cquote.zig");
+const unicodewidth = @import("../text/unicodewidth.zig");
 const formatpatch = @import("format.zig");
 
 const Oid = hash.Oid;
@@ -169,7 +169,7 @@ const Reader = struct {
             defer gpa.free(ref);
             r.notes = try notes_mod.Notes.open(gpa, io, repo, ref, .concatenate);
         }
-        if (repo.work_dir != null) r.attrs = try repo.loadAttrs(io);
+        if (repo.workDirectory() != null) r.attrs = try repo.loadAttrs(io);
         return r;
     }
 
@@ -181,7 +181,7 @@ const Reader = struct {
     }
 
     fn readPatches(r: *Reader, range: Range) Error![]Patch {
-        var walk = revwalk.Walk.init(r.gpa, &r.repo.odb);
+        var walk = revwalk.Walk.init(r.gpa, r.repo.objectDatabase());
         defer walk.deinit();
         walk.sort = .date_order;
         walk.reverse = true;
@@ -197,7 +197,7 @@ const Reader = struct {
 
     fn readPatch(r: *Reader, oid: Oid) Error!Patch {
         const a = r.a;
-        const db = &r.repo.odb;
+        const db = r.repo.objectDatabase();
         const found = try db.read(r.io, oid);
         defer db.allocator().free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
@@ -213,7 +213,7 @@ const Reader = struct {
         try appendMessage(a, &text, try formatpatch.logMessage(a, &commit));
         if (r.notes) |*n| {
             var shown: Io.Writer.Allocating = .init(a);
-            try notes_mod.formatNote(n, r.io, oid, &shown.writer, false);
+            try notes_mod.formatNote(r.io, n, oid, &shown.writer, .{ .raw = false });
             var lines = std.mem.splitScalar(u8, shown.written(), '\n');
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "Notes") and std.mem.endsWith(u8, line, ":")) {
@@ -258,15 +258,15 @@ const Reader = struct {
             var hex: [hash.max_hex_len]u8 = undefined;
             bytes = try r.a.print("Subproject commit {s}\n", .{e.oid.hex(&hex)});
         } else {
-            const found = try r.repo.odb.read(r.io, e.oid);
-            defer r.repo.odb.allocator().free(found.bytes);
+            const found = try r.repo.objectDatabase().read(r.io, e.oid);
+            defer r.repo.objectDatabase().allocator().free(found.bytes);
             bytes = try r.a.dupe(u8, found.bytes);
         }
         return .{ .path = e.path, .mode = e.mode, .oid = e.oid, .bytes = bytes, .binary = try r.isBinary(e.path, bytes) };
     }
 
     fn isBinary(r: *Reader, path: []const u8, bytes: []const u8) Error!bool {
-        const rule: diff.BinaryRule = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.work_dir, .config = r.repo.configuration() };
+        const rule: diff.BinaryRule = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
         return rule.isBinary(r.a, r.io, path, bytes);
     }
 
@@ -802,7 +802,7 @@ const Writer = struct {
     a: Allocator,
 
     fn pairHeader(s: *Writer, old: ?*const Patch, old_index: usize, new: ?*const Patch, new_index: usize) Error!void {
-        const db = &s.repo.odb;
+        const db = s.repo.objectDatabase();
         const oid = if (old) |p| p.oid else new.?.oid;
         if (s.dashes == null) {
             var buf: [hash.max_hex_len]u8 = undefined;
@@ -832,7 +832,7 @@ const Writer = struct {
         const text = std.mem.print(&number, "{d}", .{index + 1}) catch unreachable;
         if (text.len < s.width) try s.w.splatByteAll(' ', s.width - text.len);
         var buf: [hash.max_hex_len]u8 = undefined;
-        try s.w.print("{s}:  {s}", .{ text, try abbrev.unique(s.io, &s.repo.odb, p.oid, s.abbrev_len, &buf) });
+        try s.w.print("{s}:  {s}", .{ text, try abbrev.unique(s.io, s.repo.objectDatabase(), p.oid, s.abbrev_len, &buf) });
     }
 
     /// `patch_diff`: the diff of two patches, every line indented four
@@ -885,7 +885,7 @@ fn output(gpa: Allocator, io: Io, repo: *Repository, result: *RangeDiff, options
         .w = w,
         .a = arena.allocator(),
         .width = decimalWidth(1 + @max(old.len, new.len)),
-        .abbrev_len = abbrev.defaultLength(config, &repo.odb),
+        .abbrev_len = abbrev.defaultLength(config, repo.objectDatabase()),
     };
     const shown = try gpa.alloc(bool, old.len);
     defer gpa.free(shown);

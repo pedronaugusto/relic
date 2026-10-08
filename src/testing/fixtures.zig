@@ -4,13 +4,13 @@
 const std = @import("std");
 const Io = std.Io;
 const testgit = @import("git.zig");
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
 const odb_state = @import("../odb/state.zig");
 const pack = @import("../odb/pack.zig");
 const sha1dc = @import("../hash/sha1dc.zig");
-const fs = @import("../repo/fs.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 
@@ -219,7 +219,7 @@ test "a loose object this writes is one git reads" {
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
 
-const index_mod = @import("../index.zig");
+const index_mod = @import("../index/index.zig");
 
 /// Read the index git wrote, write it back, and compare the bytes.
 fn expectIndexRoundTrip(
@@ -647,7 +647,7 @@ test "includeIf reads the file git reads" {
     try std.testing.expectEqualStrings("included", theirs);
 }
 
-const config_mod = @import("../config.zig");
+const config_mod = @import("../config/config.zig");
 
 test "sparse checkout takes paths out of the working tree and puts them back" {
     const io = std.testing.io;
@@ -698,15 +698,15 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
     try std.testing.expect(!index.find("docs/page.md").?.skip_worktree);
 }
 
-const sparse_mod = @import("../worktree/sparse.zig");
-const worktree = @import("../worktree.zig");
+const sparse_mod = @import("../patterns/sparse.zig");
+const worktree = @import("../checkout/checkout.zig");
 
 const commitgraph_mod = @import("../odb/commitgraph.zig");
 const midx_mod = @import("../odb/midx.zig");
-const merge_mod = @import("../merge.zig");
-const revwalk = @import("../revwalk.zig");
-const worktrees_mod = @import("../worktree/worktrees.zig");
-const repo_mod = @import("../repo.zig");
+const merge_mod = @import("../merge/merge.zig");
+const revwalk = @import("../walk/walk.zig");
+const worktrees_mod = @import("../checkout/worktrees.zig");
+const repo_mod = @import("../repo/repo.zig");
 
 test "the commit-graph and the multi-pack index read what git wrote" {
     const io = std.testing.io;
@@ -833,14 +833,7 @@ test "a three-way tree merge agrees with git merge-tree" {
     defer gpa.free(merge_base_text);
     try std.testing.expectEqualStrings(merge_base_text, base.hex(&hex));
 
-    var result = try merge_mod.trees(
-        gpa,
-        io,
-        &db,
-        try treeOf(gpa, io, &db, base),
-        try treeOf(gpa, io, &db, ours),
-        try treeOf(gpa, io, &db, theirs),
-    );
+    var result = try merge_mod.trees(gpa, io, &db, try treeOf(gpa, io, &db, base), try treeOf(gpa, io, &db, ours), try treeOf(gpa, io, &db, theirs), .{});
     defer result.deinit();
     try std.testing.expect(result.isClean());
 
@@ -889,14 +882,7 @@ test "a conflicting three-way merge leaves stages 1, 2 and 3" {
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
 
-    var result = try merge_mod.trees(
-        gpa,
-        io,
-        &db,
-        try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)),
-        try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)),
-        try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)),
-    );
+    var result = try merge_mod.trees(gpa, io, &db, try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)), try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)), try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)), .{});
     defer result.deinit();
 
     try std.testing.expect(!result.isClean());
@@ -975,7 +961,7 @@ test "a tree merge resolves independent text edits when asked" {
     defer git_dir.close(io);
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var result = try merge_mod.treesWithOptions(
+    var result = try merge_mod.trees(
         gpa,
         io,
         &db,
@@ -1020,7 +1006,7 @@ test "a worktree that moved is repaired and git follows it" {
 
     var parent = try git.dir.openDir(io, "trees", .{ .iterate = true });
     defer parent.close(io);
-    try worktrees_mod.move(gpa, io, repo.common_dir, "moving", parent, "after");
+    try worktrees_mod.move(gpa, io, repo.commonDirectory(), "moving", parent, "after");
 
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "trees/before", .{}));
     var moved = try git.dir.openDir(io, "trees/after", .{ .iterate = true });
@@ -1034,10 +1020,10 @@ test "a worktree that moved is repaired and git follows it" {
     // Opening the moved worktree still finds the repository behind it.
     var linked = try repo_mod.Repository.open(gpa, io, moved, .{ .discover = false });
     defer linked.deinit(io);
-    try std.testing.expect(linked.common_is_separate);
+    try std.testing.expect(linked.isLinkedWorktree());
 
     // And repair on its own is idempotent.
-    try worktrees_mod.repair(io, repo.common_dir, "moving", moved);
+    try worktrees_mod.repair(io, repo.commonDirectory(), "moving", moved);
     const again = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(again);
     try std.testing.expectEqualStrings(listed, again);
@@ -1715,7 +1701,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
 
         var index = try repo.openIndex(io);
         defer index.deinit();
-        const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
             .rules = wt_rules,
             .new_blobs = where,
         });
@@ -1725,13 +1711,13 @@ test "a staging pass that writes a pack stages what one that writes loose object
             // Forty-one distinct blobs: the two identical files are one
             // object, and a pack cannot hold a name twice.
             try std.testing.expectEqual(@as(u32, 41), outcome.pack.?.objects);
-            try std.testing.expectEqual(@as(usize, 1), repo.odb.packCount());
+            try std.testing.expectEqual(@as(usize, 1), repo.objectDatabase().packCount());
         } else {
             try std.testing.expect(outcome.pack == null);
         }
 
-        trees[pass] = try worktree.writeTree(gpa, io, &index, &repo.odb);
-        try index.write(io, repo.git_dir, "index", .{});
+        trees[pass] = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
+        try index.write(io, repo.gitDirectory(), "index", .{});
 
         // git reads what was written, whichever way it was written.
         var hex: [hash.max_hex_len]u8 = undefined;

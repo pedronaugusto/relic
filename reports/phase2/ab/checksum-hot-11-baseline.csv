@@ -1,0 +1,7 @@
+row,operations,ns_per_operation,result
+ignore_load_32,1000,13925.417,1000
+ignore_match_32,100000,296.010,50000
+includeif_short,100000,27.664,100000
+ere_compile_search,1000,444.917,1000
+attributes_load_match,1000,836.500,1000
+crc_hash_1m,1000,104997.375,2147483647500

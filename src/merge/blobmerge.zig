@@ -8,8 +8,8 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const parallax = @import("../dependencies.zig").parallax;
-const attributes = @import("../worktree/attributes.zig");
+const parallax = @import("parallax");
+const attributes = @import("../patterns/attributes.zig");
 
 /// A content merge refuses data git classifies as binary.
 pub const BlobError = error{BinaryBlob} || Allocator.Error;

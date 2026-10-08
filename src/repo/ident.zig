@@ -5,14 +5,14 @@
 //! asked: a name or an email the configuration and the environment do not
 //! give is a refusal.
 
+const object = @import("../object/object.zig");
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
-const config_mod = @import("../config.zig");
-const object = @import("../object.zig");
-const gitdate = @import("../object/gitdate.zig");
+const config_mod = @import("../config/config.zig");
+const gitdate = @import("../text/date.zig");
 
 /// Whose identity: the commit's author or its committer.
 pub const Role = enum { author, committer };

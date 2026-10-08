@@ -1,36 +1,143 @@
 //! relic — read and write a git repository from Zig.
 //!
-//! The API is one module per concern, and each of those holds the modules
-//! that belong to it: `relic.refs` is refs, their transactions and the
-//! logs beside them, and `relic.refs.reftable` is the table format.
+//! Architecture phase 2 is work in progress. The table below describes this
+//! branch's exported namespaces; its contract is checked against the API.
 //!
-//! | Module | What it is | Under it |
-//! |---|---|---|
-//! | `repo` | `Repository`: open or create one, and reach the rest from it. | `hooks`, `program`, `warning`, `fs` |
-//! | `hash` | `Oid`, `Kind`, `Hasher`: object names, SHA-1 or SHA-256. | `sha1`, `sha1dc` |
-//! | `object` | `Commit`, `Tree`, `Tag`, `Signature`: objects as bytes. | `fsck` |
-//! | `odb` | `Odb`: loose objects, packs, alternates. | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `bitmap`, `accelerators`, `abbrev` |
-//! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs` or a reftable stack, their logs, listed, sorted and formatted. | `reftable`, `reftablestack`, `filter`, `names` |
-//! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
-//! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |
-//! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `convert`, `filter`, `dirscan`, `safepath` |
-//! | `diff` | Tree against tree, blob against blob, unified text. | `rename`, `similarity`, `patchid`, `blame` |
-//! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow`, `mailmap`, `shortlog`, `describe`, `bisect` |
-//! | `merge` | Three-way merges of contents and trees. | `ort`, `octopus`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
-//! | `commit` | Making a commit as `git commit` does. | `message`, `head`, `reset`, `stash`, `signing`, `commithooks`, `merging`, `sequencer`, `rebase`, `todo`, `notes` |
-//! | `transport` | `Session`: a remote, open. | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress`, `bundle`, `remotehelper` |
-//! | `submodule` | Submodules: status, init, update, sync, absorb. | `gitmodules`, `gitlink`, `submoduletransport` |
-//! | `lfs` | Git LFS in process: pointers and the store. | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `lfscustom`, `netrc` |
-//! | `patch` | Patches: read, applied, written from commits, applied from a mailbox, two series compared. | `apply`, `format`, `mail`, `am`, `rangediff` |
-//! | `grep` | `git grep` over the working tree, the index or a tree. | |
-//! | `archive` | `git archive`: a tree as a tar or zip file. | |
-//! | `clean` | `git clean`: the untracked files of the working tree removed. | |
-//! | `fastimport` | `git fast-import`: a fast-import stream read into a repository. | |
-//! | `fastexport` | `git fast-export`: history written as a fast-import stream. | |
-//!
-//! | Shared plumbing | Used by |
+//! | Module | Purpose |
 //! |---|---|
-//! | `unicodewidth` | `revwalk.shortlog` and `patch.format`: git's character and string columns. |
+//! | `repo` | Public concern. |
+//! | `repo.warning` | Module within `repo`. |
+//! | `repo.hooks` | Module within `repo`. |
+//! | `repo.program` | Module within `repo`. |
+//! | `repo.fs` | Module within `repo`. |
+//! | `repo.safe` | Module within `repo`. |
+//! | `repo.ident` | Module within `repo`. |
+//! | `hash` | Public concern. |
+//! | `hash.sha1` | Module within `hash`. |
+//! | `hash.sha1dc` | Module within `hash`. |
+//! | `object` | Public concern. |
+//! | `object.fsck` | Module within `object`. |
+//! | `odb` | Public concern. |
+//! | `odb.abbrev` | Module within `odb`. |
+//! | `odb.bitmap` | Module within `odb`. |
+//! | `odb.commitgraph` | Module within `odb`. |
+//! | `odb.commitgraph.bloom` | Module within `odb.commitgraph`. |
+//! | `odb.revindex` | Module within `odb`. |
+//! | `odb.indexpack` | Module within `odb`. |
+//! | `odb.pack` | Module within `odb`. |
+//! | `odb.delta` | Module within `odb`. |
+//! | `odb.inflate` | Module within `odb`. |
+//! | `odb.midx` | Module within `odb`. |
+//! | `refs` | Public concern. |
+//! | `refs.reftablestack` | Module within `refs`. |
+//! | `refs.reftable` | Module within `refs`. |
+//! | `refs.names` | Module within `refs`. |
+//! | `config` | Public concern. |
+//! | `config.user` | Module within `config`. |
+//! | `index` | Public concern. |
+//! | `index.sparse` | Module within `index`. |
+//! | `worktree` | Public concern. |
+//! | `worktree.sparsecheckout` | Module within `worktree`. |
+//! | `worktree.linked` | Module within `worktree`. |
+//! | `worktree.snapshot` | Module within `worktree`. |
+//! | `worktree.sparse` | Module within `worktree`. |
+//! | `worktree.ignore` | Module within `worktree`. |
+//! | `worktree.attributes` | Module within `worktree`. |
+//! | `worktree.convert` | Module within `worktree`. |
+//! | `worktree.encoding` | Module within `worktree`. |
+//! | `worktree.fsmonitor` | Module within `worktree`. |
+//! | `worktree.filter` | Module within `worktree`. |
+//! | `worktree.dirscan` | Module within `worktree`. |
+//! | `worktree.safepath` | Module within `worktree`. |
+//! | `diff` | Public concern. |
+//! | `diff.blame` | Module within `diff`. |
+//! | `diff.patchid` | Module within `diff`. |
+//! | `diff.rename` | Module within `diff`. |
+//! | `diff.similarity` | Module within `diff`. |
+//! | `revwalk` | Public concern. |
+//! | `revwalk.bisect` | Module within `revwalk`. |
+//! | `revwalk.describe` | Module within `revwalk`. |
+//! | `revwalk.mailmap` | Module within `revwalk`. |
+//! | `revwalk.revparse` | Module within `revwalk`. |
+//! | `revwalk.shallow` | Module within `revwalk`. |
+//! | `revwalk.objectwalk` | Module within `revwalk`. |
+//! | `revwalk.objectfilter` | Module within `revwalk`. |
+//! | `merge` | Public concern. |
+//! | `merge.rerere` | Module within `merge`. |
+//! | `merge.threeway` | Module within `merge`. |
+//! | `merge.subtreeshift` | Module within `merge`. |
+//! | `merge.strategy` | Module within `merge`. |
+//! | `merge.ort` | Module within `merge`. |
+//! | `merge.octopus` | Module within `merge`. |
+//! | `commit` | Public concern. |
+//! | `commit.notes` | Module within `commit`. |
+//! | `commit.todo` | Module within `commit`. |
+//! | `commit.rebase` | Module within `commit`. |
+//! | `commit.sequencer` | Module within `commit`. |
+//! | `commit.merging` | Module within `commit`. |
+//! | `commit.stash` | Module within `commit`. |
+//! | `commit.message` | Module within `commit`. |
+//! | `commit.trailer` | Module within `commit`. |
+//! | `commit.head` | Module within `commit`. |
+//! | `commit.reset` | Module within `commit`. |
+//! | `commit.signing` | Module within `commit`. |
+//! | `commit.hooks` | Module within `commit`. |
+//! | `transport` | Public concern. |
+//! | `transport.filterspec` | Module within `transport`. |
+//! | `transport.partial` | Module within `transport`. |
+//! | `transport.sideband` | Module within `transport`. |
+//! | `transport.httpsettings` | Module within `transport`. |
+//! | `transport.hidden` | Module within `transport`. |
+//! | `transport.promisors` | Module within `transport`. |
+//! | `transport.push` | Module within `transport`. |
+//! | `transport.clone` | Module within `transport`. |
+//! | `transport.fetch` | Module within `transport`. |
+//! | `transport.refspec` | Module within `transport`. |
+//! | `transport.remote` | Module within `transport`. |
+//! | `transport.url` | Module within `transport`. |
+//! | `transport.fetchpack` | Module within `transport`. |
+//! | `transport.sendpack` | Module within `transport`. |
+//! | `transport.local` | Module within `transport`. |
+//! | `transport.ssh` | Module within `transport`. |
+//! | `transport.smarthttp` | Module within `transport`. |
+//! | `transport.credential` | Module within `transport`. |
+//! | `transport.auth` | Module within `transport`. |
+//! | `transport.protocol` | Module within `transport`. |
+//! | `transport.connection` | Module within `transport`. |
+//! | `transport.pktline` | Module within `transport`. |
+//! | `transport.uploadpack` | Module within `transport`. |
+//! | `transport.bundle` | Module within `transport`. |
+//! | `transport.progress` | Module within `transport`. |
+//! | `transport.remotehelper` | Module within `transport`. |
+//! | `transport.policy` | Module within `transport`. |
+//! | `submodule` | Public concern. |
+//! | `submodule.transport` | Module within `submodule`. |
+//! | `submodule.gitmodules` | Module within `submodule`. |
+//! | `submodule.gitlink` | Module within `submodule`. |
+//! | `lfs` | Public concern. |
+//! | `lfs.netrc` | Module within `lfs`. |
+//! | `lfs.ssh` | Module within `lfs`. |
+//! | `lfs.hooks` | Module within `lfs`. |
+//! | `lfs.push` | Module within `lfs`. |
+//! | `lfs.locks` | Module within `lfs`. |
+//! | `lfs.transfer` | Module within `lfs`. |
+//! | `lfs.custom` | Module within `lfs`. |
+//! | `lfs.api` | Module within `lfs`. |
+//! | `patch` | Public concern. |
+//! | `patch.am` | Module within `patch`. |
+//! | `patch.mail` | Module within `patch`. |
+//! | `patch.format` | Module within `patch`. |
+//! | `patch.apply` | Module within `patch`. |
+//! | `patch.rangediff` | Module within `patch`. |
+//! | `grep` | Public concern. |
+//! | `archive` | Public concern. |
+//! | `pretty` | Public concern. |
+//! | `pretty.refs` | Module within `pretty`. |
+//! | `pretty.shortlog` | Module within `pretty`. |
+//! | `clean` | Public concern. |
+//! | `fastimport` | Public concern. |
+//! | `fastexport` | Public concern. |
+//! | `maintenance` | Public concern. |
 
 pub const repo = @import("repo.zig");
 pub const hash = @import("hash.zig");
@@ -54,3 +161,5 @@ pub const pretty = @import("pretty.zig");
 pub const clean = @import("clean.zig");
 pub const fastimport = @import("fastimport.zig");
 pub const fastexport = @import("fastexport.zig");
+
+pub const maintenance = @import("maintenance.zig");

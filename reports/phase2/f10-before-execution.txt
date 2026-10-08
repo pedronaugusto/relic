@@ -1,0 +1,13 @@
+preflight: test seed 3802486532 (reproduce with PREFLIGHT_TEST_SEED=3802486532)
+expected true, found false
+ere.test.phase2 boolean ERE uses git extensions and captures: TestExpectedEqual; seed 3802486532
+/Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:93:17: 0x1007ea1c7 in expectEqualInner__func_3897 (relic-tests)
+                return error.TestExpectedEqual;
+                ^
+/Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:57:5: 0x1007ea46b in expectEqual (relic-tests)
+    return expectEqualInner(T, expected, actual);
+    ^
+/Users/gusto/work/tycho/.wt/relic-phase2/src/ere.zig:1262:9: 0x1007ea4d7 in test.phase2 boolean ERE uses git extensions and captures (relic-tests)
+        try testing.expectEqual(case[2], try p.search(testing.allocator, case[1]));
+        ^
+preflight: 1 failed tests; seed 3802486532

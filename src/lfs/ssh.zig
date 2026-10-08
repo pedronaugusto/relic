@@ -29,9 +29,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const program = @import("../repo/program.zig");
-const pktline = @import("../transport/pktline.zig");
-const connection = @import("../transport/connection.zig");
+const program = @import("../process/program.zig");
+const pktline = @import("../codec/pktline.zig");
+const connection = @import("../wire/connection.zig");
 
 /// Errors from the protocol.
 pub const Error = error{
@@ -85,7 +85,7 @@ pub const Connection = struct {
     pub fn start(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Self.Error!*Connection {
         // `message` belongs to `gpa`.
         const conn = try connection.Process.start(gpa, io, programs, invocation);
-        errdefer conn.close(io);
+        errdefer conn.deinit(io);
         const c = try gpa.create(Connection);
         errdefer gpa.destroy(c);
         c.* = .{
@@ -241,7 +241,7 @@ pub const Connection = struct {
 
     /// Say `quit`, read its answer, and close the connection. A connection
     /// that already failed is only closed.
-    pub fn end(c: *Connection) void {
+    pub fn deinit(c: *Connection) void {
         if (!c.ended) {
             c.ended = true;
             var scratch: std.heap.ArenaAllocator = .init(c.gpa);
@@ -249,7 +249,7 @@ pub const Connection = struct {
             // ziglint-ignore: Z026 quit is a courtesy; the connection is closed next whether or not the server answered
             c.sayQuit(scratch.allocator()) catch {};
         }
-        c.conn.close(c.io);
+        c.conn.deinit(c.io);
         c.gpa.destroy(c);
     }
 };
@@ -301,7 +301,7 @@ pub const Transfer = struct {
         if (control_dir) |d| t.control_dir = try a.dupe(u8, d);
         errdefer t.removeControlDir();
         const c0 = try Connection.start(gpa, io, programs, t.first, failure);
-        errdefer c0.end();
+        errdefer c0.deinit();
         try t.connections.append(gpa, c0);
         return t;
     }
@@ -326,8 +326,8 @@ pub const Transfer = struct {
     }
 
     /// Say `quit` on every connection, close them, and release everything.
-    pub fn close(t: *Transfer) void {
-        for (t.connections.items) |maybe| if (maybe) |c| c.end();
+    pub fn deinit(t: *Transfer) void {
+        for (t.connections.items) |maybe| if (maybe) |c| c.deinit();
         t.connections.deinit(t.gpa);
         t.removeControlDir();
         t.message.deinit(t.gpa);

@@ -9,6 +9,7 @@
 //! needs only `isSafe`, which is what lets a ref with a bad name, found in
 //! a listing, be removed.
 
+const testgit = @import("../testing/git.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -243,7 +244,6 @@ pub const Special = enum {
 };
 
 const testing = std.testing;
-const testgit = @import("../testing/git.zig");
 
 test "a ref name follows check_refname_format, flag by flag" {
     try testing.expect(checkFormat("refs/heads/main", .{}));
@@ -375,3 +375,6 @@ fn fuzzOne(_: void, smith: *testing.Smith) anyerror!void {
     try testing.expect(parsed.bare.len <= input.len);
     _ = isRootRef(input);
 }
+
+/// The ref whose log records the stash stack.
+pub const stash = "refs/stash";

@@ -9,8 +9,8 @@ const std = @import("std");
 const Io = std.Io;
 
 const fastimport = @import("../../fastimport.zig");
-const repo_mod = @import("../../repo.zig");
-const object = @import("../../object.zig");
+const repo_mod = @import("../../repo/repo.zig");
+const object = @import("../../object/object.zig");
 const testgit = @import("../git.zig");
 
 const who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };

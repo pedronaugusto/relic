@@ -7,9 +7,9 @@
 const std = @import("std");
 const Io = std.Io;
 
-const hash = @import("../../hash.zig");
+const hash = @import("../../hash/hash.zig");
 const sha1dc = @import("../../hash/sha1dc.zig");
-const odb_mod = @import("../../odb.zig");
+const odb_mod = @import("../../odb/odb.zig");
 const indexpack = @import("../../odb/indexpack.zig");
 const testgit = @import("../git.zig");
 

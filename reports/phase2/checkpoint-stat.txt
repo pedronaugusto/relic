@@ -1,0 +1,502 @@
+ .github/workflows/ci.yml                           |   79 +-
+ .github/workflows/git.yml                          |   44 +
+ .gitignore                                         |    3 +
+ CHANGELOG.md                                       |   17 +
+ README.md                                          |  167 +-
+ bench/phase2.zig                                   |   88 +
+ bench/regressions.zig                              |  160 +-
+ bench/scratchgit.zig                               |   35 +-
+ build.zig                                          |   55 +-
+ build.zig.zon                                      |   28 +-
+ ci/imports.zig                                     |  114 -
+ ci/layers.zig                                      |  541 +-
+ ci/preflight.json                                  |    8 +-
+ ci/workflow.json                                   |    3 +-
+ examples/usage.zig                                 |   18 +-
+ reports/phase2/ab/checksum-hot-00-baseline.csv     |    7 +
+ reports/phase2/ab/checksum-hot-00-baseline.stderr  |    0
+ reports/phase2/ab/checksum-hot-01-current.csv      |    7 +
+ reports/phase2/ab/checksum-hot-01-current.stderr   |    0
+ reports/phase2/ab/checksum-hot-02-current.csv      |    7 +
+ reports/phase2/ab/checksum-hot-02-current.stderr   |    0
+ reports/phase2/ab/checksum-hot-03-baseline.csv     |    7 +
+ reports/phase2/ab/checksum-hot-03-baseline.stderr  |    0
+ reports/phase2/ab/checksum-hot-04-baseline.csv     |    7 +
+ reports/phase2/ab/checksum-hot-04-baseline.stderr  |    0
+ reports/phase2/ab/checksum-hot-05-current.csv      |    7 +
+ reports/phase2/ab/checksum-hot-05-current.stderr   |    0
+ reports/phase2/ab/checksum-hot-06-current.csv      |    7 +
+ reports/phase2/ab/checksum-hot-06-current.stderr   |    0
+ reports/phase2/ab/checksum-hot-07-baseline.csv     |    7 +
+ reports/phase2/ab/checksum-hot-07-baseline.stderr  |    0
+ reports/phase2/ab/checksum-hot-08-baseline.csv     |    7 +
+ reports/phase2/ab/checksum-hot-08-baseline.stderr  |    0
+ reports/phase2/ab/checksum-hot-09-current.csv      |    7 +
+ reports/phase2/ab/checksum-hot-09-current.stderr   |    0
+ reports/phase2/ab/checksum-hot-10-current.csv      |    7 +
+ reports/phase2/ab/checksum-hot-10-current.stderr   |    0
+ reports/phase2/ab/checksum-hot-11-baseline.csv     |    7 +
+ reports/phase2/ab/checksum-hot-11-baseline.stderr  |    0
+ reports/phase2/ab/checksum-hot-metadata.json       |   10 +
+ reports/phase2/ab/fast-pooled-00-baseline.csv      |    6 +
+ reports/phase2/ab/fast-pooled-00-baseline.stderr   |    0
+ reports/phase2/ab/fast-pooled-01-current.csv       |    6 +
+ reports/phase2/ab/fast-pooled-01-current.stderr    |    0
+ reports/phase2/ab/fast-pooled-02-current.csv       |    6 +
+ reports/phase2/ab/fast-pooled-02-current.stderr    |    0
+ reports/phase2/ab/fast-pooled-03-baseline.csv      |    6 +
+ reports/phase2/ab/fast-pooled-03-baseline.stderr   |    0
+ reports/phase2/ab/fast-pooled-04-baseline.csv      |    6 +
+ reports/phase2/ab/fast-pooled-04-baseline.stderr   |    0
+ reports/phase2/ab/fast-pooled-05-current.csv       |    6 +
+ reports/phase2/ab/fast-pooled-05-current.stderr    |    0
+ reports/phase2/ab/fast-pooled-06-current.csv       |    6 +
+ reports/phase2/ab/fast-pooled-06-current.stderr    |    0
+ reports/phase2/ab/fast-pooled-07-baseline.csv      |    6 +
+ reports/phase2/ab/fast-pooled-07-baseline.stderr   |    0
+ reports/phase2/ab/fast-pooled-08-baseline.csv      |    6 +
+ reports/phase2/ab/fast-pooled-08-baseline.stderr   |    0
+ reports/phase2/ab/fast-pooled-09-current.csv       |    6 +
+ reports/phase2/ab/fast-pooled-09-current.stderr    |    0
+ reports/phase2/ab/fast-pooled-10-current.csv       |    6 +
+ reports/phase2/ab/fast-pooled-10-current.stderr    |    0
+ reports/phase2/ab/fast-pooled-11-baseline.csv      |    6 +
+ reports/phase2/ab/fast-pooled-11-baseline.stderr   |    0
+ reports/phase2/ab/fast-pooled-metadata.json        |    9 +
+ reports/phase2/ab/fast-sets-00-baseline.csv        |    6 +
+ reports/phase2/ab/fast-sets-00-baseline.stderr     |    0
+ reports/phase2/ab/fast-sets-01-current.csv         |    6 +
+ reports/phase2/ab/fast-sets-01-current.stderr      |    0
+ reports/phase2/ab/fast-sets-02-current.csv         |    6 +
+ reports/phase2/ab/fast-sets-02-current.stderr      |    0
+ reports/phase2/ab/fast-sets-03-baseline.csv        |    6 +
+ reports/phase2/ab/fast-sets-03-baseline.stderr     |    0
+ reports/phase2/ab/fast-sets-04-baseline.csv        |    6 +
+ reports/phase2/ab/fast-sets-04-baseline.stderr     |    0
+ reports/phase2/ab/fast-sets-05-current.csv         |    6 +
+ reports/phase2/ab/fast-sets-05-current.stderr      |    0
+ reports/phase2/ab/fast-sets-06-current.csv         |    6 +
+ reports/phase2/ab/fast-sets-06-current.stderr      |    0
+ reports/phase2/ab/fast-sets-07-baseline.csv        |    6 +
+ reports/phase2/ab/fast-sets-07-baseline.stderr     |    0
+ reports/phase2/ab/initial-00-baseline.csv          |    6 +
+ reports/phase2/ab/initial-00-baseline.stderr       |    0
+ reports/phase2/ab/initial-01-current.csv           |    6 +
+ reports/phase2/ab/initial-01-current.stderr        |    0
+ reports/phase2/ab/initial-02-current.csv           |    6 +
+ reports/phase2/ab/initial-02-current.stderr        |    0
+ reports/phase2/ab/initial-03-baseline.csv          |    6 +
+ reports/phase2/ab/initial-03-baseline.stderr       |    0
+ reports/phase2/ab/initial-04-baseline.csv          |    6 +
+ reports/phase2/ab/initial-04-baseline.stderr       |    0
+ reports/phase2/ab/initial-05-current.csv           |    6 +
+ reports/phase2/ab/initial-05-current.stderr        |    0
+ reports/phase2/ab/initial-06-current.csv           |    6 +
+ reports/phase2/ab/initial-06-current.stderr        |    0
+ reports/phase2/ab/initial-07-baseline.csv          |    6 +
+ reports/phase2/ab/initial-07-baseline.stderr       |    0
+ reports/phase2/ab/metadata.json                    |   10 +
+ reports/phase2/ab/reserved-hot-00-baseline.csv     |    7 +
+ reports/phase2/ab/reserved-hot-00-baseline.stderr  |    0
+ reports/phase2/ab/reserved-hot-01-current.csv      |    7 +
+ reports/phase2/ab/reserved-hot-01-current.stderr   |    0
+ reports/phase2/ab/reserved-hot-02-current.csv      |    7 +
+ reports/phase2/ab/reserved-hot-02-current.stderr   |    0
+ reports/phase2/ab/reserved-hot-03-baseline.csv     |    7 +
+ reports/phase2/ab/reserved-hot-03-baseline.stderr  |    0
+ reports/phase2/ab/reserved-hot-04-baseline.csv     |    7 +
+ reports/phase2/ab/reserved-hot-04-baseline.stderr  |    0
+ reports/phase2/ab/reserved-hot-05-current.csv      |    7 +
+ reports/phase2/ab/reserved-hot-05-current.stderr   |    0
+ reports/phase2/ab/reserved-hot-06-current.csv      |    7 +
+ reports/phase2/ab/reserved-hot-06-current.stderr   |    0
+ reports/phase2/ab/reserved-hot-07-baseline.csv     |    7 +
+ reports/phase2/ab/reserved-hot-07-baseline.stderr  |    0
+ reports/phase2/ab/reserved-hot-08-baseline.csv     |    7 +
+ reports/phase2/ab/reserved-hot-08-baseline.stderr  |    0
+ reports/phase2/ab/reserved-hot-09-current.csv      |    7 +
+ reports/phase2/ab/reserved-hot-09-current.stderr   |    0
+ reports/phase2/ab/reserved-hot-10-current.csv      |    7 +
+ reports/phase2/ab/reserved-hot-10-current.stderr   |    0
+ reports/phase2/ab/reserved-hot-11-baseline.csv     |    7 +
+ reports/phase2/ab/reserved-hot-11-baseline.stderr  |    0
+ reports/phase2/ab/reserved-hot-metadata.json       |    8 +
+ reports/phase2/ab/sets-00-baseline.csv             |    6 +
+ reports/phase2/ab/sets-00-baseline.stderr          |    0
+ reports/phase2/ab/sets-01-current.csv              |    6 +
+ reports/phase2/ab/sets-01-current.stderr           |    0
+ reports/phase2/ab/sets-02-current.csv              |    6 +
+ reports/phase2/ab/sets-02-current.stderr           |    0
+ reports/phase2/ab/sets-03-baseline.csv             |    6 +
+ reports/phase2/ab/sets-03-baseline.stderr          |    0
+ reports/phase2/ab/sets-04-baseline.csv             |    6 +
+ reports/phase2/ab/sets-04-baseline.stderr          |    0
+ reports/phase2/ab/sets-05-current.csv              |    6 +
+ reports/phase2/ab/sets-05-current.stderr           |    0
+ reports/phase2/ab/sets-06-current.csv              |    6 +
+ reports/phase2/ab/sets-06-current.stderr           |    0
+ reports/phase2/ab/sets-07-baseline.csv             |    6 +
+ reports/phase2/ab/sets-07-baseline.stderr          |    0
+ reports/phase2/airlock-check.txt                   |    0
+ reports/phase2/airlock-seam-artifact.txt           |    1 +
+ reports/phase2/airlock-seam-check.txt              |    0
+ reports/phase2/allocation-contracts.txt            |   11 +
+ reports/phase2/baseline-checksum-build.txt         |    0
+ reports/phase2/bench-baseline-build.txt            |    0
+ reports/phase2/bench-set-build.txt                 |   58 +
+ reports/phase2/check-progress.txt                  |   11 +
+ reports/phase2/checkpoint-check.txt                |    0
+ reports/phase2/checkpoint-contracts.txt            |    1 +
+ reports/phase2/contracts-after.txt                 |   11 +
+ reports/phase2/contracts.txt                       |   11 +
+ reports/phase2/current-contracts.txt               |   11 +
+ reports/phase2/dependencies-current.json           | 2120 ++++++++
+ reports/phase2/dependency-heads.json               | 5640 ++++++++++++++++++++
+ reports/phase2/dependency-recheck.json             |   98 +
+ reports/phase2/diff-limit-before.txt               |   24 +
+ reports/phase2/extraction-after.txt                |   11 +
+ reports/phase2/extraction-before.txt               |   53 +
+ reports/phase2/f02-after.txt                       |   42 +
+ reports/phase2/f02-before.txt                      |   26 +
+ reports/phase2/f08-http-before-execution.txt       |   12 +
+ reports/phase2/f08-http-before.txt                 |   29 +
+ reports/phase2/f08-ssh-before.txt                  |   29 +
+ reports/phase2/f10-allocation-before.txt           |  110 +
+ reports/phase2/f10-before-execution.txt            |   13 +
+ reports/phase2/f10-before.txt                      |  Bin 0 -> 10947 bytes
+ reports/phase2/fixture-layer-check.txt             |    0
+ reports/phase2/fs-sync-artifact.txt                |   13 +
+ reports/phase2/fs-sync-check.txt                   |    0
+ reports/phase2/fs-sync-current-artifact.txt        |    1 +
+ reports/phase2/fs-sync-current-check.txt           |    0
+ reports/phase2/hot-contracts.txt                   |   11 +
+ reports/phase2/hot-reserve-contracts.txt           |   11 +
+ reports/phase2/layers-current.txt                  |   90 +
+ reports/phase2/lifecycle-check-0.txt               |  264 +
+ reports/phase2/lifecycle-check-1.txt               |   41 +
+ reports/phase2/lifecycle-check-2.txt               |   35 +
+ reports/phase2/lifecycle-check-3.txt               |   19 +
+ reports/phase2/lifecycle-check-4.txt               |    0
+ reports/phase2/lifecycle-check.txt                 |    0
+ reports/phase2/lint-checkpoint.txt                 |   78 +
+ reports/phase2/lint-current.txt                    |   78 +
+ reports/phase2/moves-check.txt                     |   70 +
+ reports/phase2/moves.json                          |  101 +
+ reports/phase2/named-error-check.txt               |    0
+ reports/phase2/opaque-repository-check.txt         |    0
+ reports/phase2/options-check.txt                   |   31 +
+ reports/phase2/ordered-api-check.txt               |    0
+ reports/phase2/owned-contracts.txt                 |   11 +
+ reports/phase2/pathspec-before.txt                 |   39 +
+ reports/phase2/performance-contracts.txt           |   11 +
+ reports/phase2/phase2-artifact-contracts.txt       |    1 +
+ reports/phase2/phase2-artifact.json                |    6 +
+ reports/phase2/plan-fast.json                      |    1 +
+ reports/phase2/plan-generation.txt                 |    0
+ reports/phase2/plan-help.txt                       |   10 +
+ reports/phase2/process-contracts.txt               |   20 +
+ reports/phase2/program-api-check.txt               |    0
+ reports/phase2/public-alias-check.txt              |    0
+ reports/phase2/public-names-check.txt              |   18 +
+ reports/phase2/publication-contracts.txt           |   11 +
+ reports/phase2/publication-fault-debug.txt         |   11 +
+ reports/phase2/receive-owned-contracts.txt         |   11 +
+ reports/phase2/regex-artifact-contracts.txt        |    1 +
+ reports/phase2/regex-contracts.txt                 |   85 +
+ reports/phase2/releasefast-contracts.txt           |   11 +
+ reports/phase2/remaining-dependencies-current.json | 3522 ++++++++++++
+ reports/phase2/remote-before-checkpoint.txt        |    1 +
+ reports/phase2/set-contracts.txt                   |   11 +
+ reports/phase2/status.md                           |   92 +
+ reports/phase2/surface-artifact-contracts.txt      |   13 +
+ reports/phase2/surface-check.txt                   |    0
+ reports/phase2/targeted-progress.txt               |   11 +
+ reports/phase2/warp-pack-contracts.txt             |   11 +
+ reports/phase2/workflow-generation.txt             |    0
+ src/archive.zig                                    |   41 +-
+ src/archive_test.zig                               |    4 +-
+ src/benchmark.zig                                  |    4 +
+ src/checkout/checkout.zig                          | 3336 ++++++++++++
+ .../checkout_test.zig}                             |   45 +-
+ src/{worktree => checkout}/convert.zig             |   16 +-
+ src/{worktree => checkout}/dirscan.zig             |    2 +-
+ src/{worktree => checkout}/filter.zig              |   21 +-
+ src/{worktree => checkout}/filter_test.zig         |   28 +-
+ src/{worktree => checkout}/fsmonitor.zig           |   12 +-
+ src/{worktree => checkout}/fsmonitor_test.zig      |   12 +-
+ src/{worktree => checkout}/worktrees.zig           |   10 +-
+ src/clean.zig                                      |   20 +-
+ src/clean_test.zig                                 |    2 +-
+ src/{odb => codec}/delta.zig                       |   10 +-
+ src/{ => codec}/ewah.zig                           |   15 +-
+ src/{transport => codec}/pktline.zig               |    0
+ src/{ => codec}/varint.zig                         |    0
+ src/commit.zig                                     |  691 +--
+ src/commit/commit.zig                              |  678 +++
+ src/commit/commithooks.zig                         |   16 +-
+ src/commit/merging.zig                             |   96 +-
+ src/commit/notes.zig                               |  116 +-
+ src/commit/rebase.zig                              |  243 +-
+ src/commit/reset.zig                               |   20 +-
+ src/commit/sequencer.zig                           |  152 +-
+ src/commit/stash.zig                               |  157 +-
+ src/commit/stash_test.zig                          |   10 +-
+ src/commit/todo.zig                                |    2 +-
+ src/config.zig                                     | 2760 +---------
+ src/config/config.zig                              | 2777 ++++++++++
+ src/{submodule => config}/gitmodules.zig           |    4 +-
+ src/config/state.zig                               |    2 +-
+ src/config/userconfig.zig                          |   18 +-
+ src/config/write.zig                               |    9 +-
+ src/crc32.zig                                      |  117 -
+ src/dependencies.zig                               |    5 -
+ src/diff.zig                                       |  825 +--
+ src/diff/blame.zig                                 |   10 +-
+ src/diff/blame_test.zig                            |   16 +-
+ src/diff/diff.zig                                  |  835 +++
+ src/{ => diff}/diff_test.zig                       |   12 +-
+ src/diff/patchid.zig                               |   12 +-
+ src/diff/rename.zig                                |    4 +-
+ src/diff/similarity.zig                            |    2 +-
+ src/diff/userdiff.zig                              |    6 +-
+ src/discover/format.zig                            |   13 +-
+ src/{submodule => discover}/gitlink.zig            |   16 +-
+ src/fastexport.zig                                 |   46 +-
+ src/fastexport_test.zig                            |    6 +-
+ src/fastimport.zig                                 |   52 +-
+ src/fastimport_test.zig                            |    4 +-
+ src/{repo => fs}/fs.zig                            |  195 +-
+ src/{repo => }/fs/stat.zig                         |    0
+ src/grep.zig                                       |   40 +-
+ src/grep_test.zig                                  |    4 +-
+ src/hash.zig                                       |  445 +-
+ src/hash/hash.zig                                  |  447 ++
+ src/{repo => hooks}/hooks.zig                      |   24 +-
+ src/index.zig                                      | 2332 +-------
+ src/index/index.zig                                | 2328 ++++++++
+ src/index/sparseindex.zig                          |   46 +-
+ src/index/sparseindex_test.zig                     |   60 +-
+ src/lfs.zig                                        |  933 +---
+ src/lfs/api.zig                                    |   77 +-
+ src/{transport/clone/lfs.zig => lfs/clone.zig}     |   12 +-
+ src/lfs/custom.zig                                 |   17 +-
+ src/lfs/custom_test.zig                            |   16 +-
+ src/lfs/hooks.zig                                  |   20 +-
+ src/lfs/lfs.zig                                    |  909 ++++
+ src/{ => lfs}/lfs_test.zig                         |   12 +-
+ src/lfs/locks.zig                                  |   75 +-
+ src/lfs/locks_test.zig                             |   68 +-
+ src/lfs/netrc.zig                                  |    5 +-
+ src/lfs/push.zig                                   |   22 +-
+ src/lfs/push_test.zig                              |    4 +-
+ src/lfs/ssh.zig                                    |   18 +-
+ src/lfs/ssh_test.zig                               |   68 +-
+ src/lfs/transfer.zig                               |  105 +-
+ src/lfs/transfer_test.zig                          |  100 +-
+ src/{patch => }/mail/format.zig                    |    2 +-
+ src/{patch => mail}/mail.zig                       |    0
+ src/maintenance.zig                                |   20 +
+ .../maintenance.zig}                               |   44 +-
+ .../maintenance_test.zig}                          |   24 +-
+ src/merge.zig                                      |  989 +---
+ src/merge/blobmerge.zig                            |    4 +-
+ src/merge/merge.zig                                |  963 ++++
+ src/merge/octopus.zig                              |   16 +-
+ src/merge/ort.zig                                  |   52 +-
+ src/merge/ort_test.zig                             |   12 +-
+ src/merge/rerere.zig                               |  124 +-
+ src/merge/strategy.zig                             |   33 +-
+ src/merge/strategy_test.zig                        |    6 +-
+ src/merge/subtreeshift.zig                         |    6 +-
+ src/merge/threeway.zig                             |   60 +-
+ src/{worktree/safepath.zig => names/path.zig}      |    0
+ src/names/ref.zig                                  |    5 +-
+ src/object.zig                                     | 1065 +---
+ src/object/fsck.zig                                |   17 +-
+ src/{commit => object}/message.zig                 |    4 +-
+ src/object/object.zig                              | 1067 ++++
+ src/{commit => object}/signing.zig                 |   56 +-
+ src/{commit => object}/signing_test.zig            |   38 +-
+ src/{commit => object}/trailer.zig                 |   10 +-
+ src/{commit => object}/trailer_test.zig            |   22 +-
+ src/odb.zig                                        | 4720 +---------------
+ src/odb/abbrev.zig                                 |    6 +-
+ src/odb/accelerators/chunks.zig                    |    2 +-
+ src/odb/bitmap.zig                                 |    9 +-
+ src/odb/bitmap/reachability.zig                    |    6 +-
+ src/odb/commitgraph.zig                            |    9 +-
+ src/odb/commitgraph/bloom.zig                      |    5 +-
+ src/odb/database.zig                               |   67 +
+ src/odb/indexpack.zig                              |  150 +-
+ src/odb/inflate_test.zig                           |    4 +-
+ src/odb/keep.zig                                   |  166 +
+ src/odb/midx.zig                                   |    9 +-
+ src/odb/odb.zig                                    | 4744 ++++++++++++++++
+ src/odb/open.zig                                   |    4 +-
+ src/odb/pack.zig                                   |   31 +-
+ src/odb/pack/entry.zig                             |    2 +-
+ src/odb/policy.zig                                 |    8 +-
+ src/odb/revindex.zig                               |   29 +-
+ src/odb/revindex_test.zig                          |   22 +-
+ src/odb/state.zig                                  |    2 +-
+ src/patch.zig                                      | 1243 +----
+ src/patch/am.zig                                   |   72 +-
+ src/patch/am_test.zig                              |    4 +-
+ src/patch/apply.zig                                |   52 +-
+ src/patch/apply_test.zig                           |    2 +-
+ src/patch/binary.zig                               |   12 +-
+ src/patch/format.zig                               |   46 +-
+ src/patch/format_test.zig                          |    6 +-
+ src/patch/patch.zig                                | 1221 +++++
+ src/patch/rangediff.zig                            |   40 +-
+ src/patch/rangediff_test.zig                       |    4 +-
+ src/{worktree => patterns}/attributes.zig          |   86 +-
+ src/{worktree => patterns}/ignore.zig              |  106 +-
+ src/{ => patterns}/pathspec.zig                    |    2 +-
+ src/patterns/set.zig                               |   88 +
+ src/{worktree => patterns}/sparse.zig              |  100 +-
+ src/pretty.zig                                     |  692 +--
+ src/pretty/pretty.zig                              |  683 +++
+ src/{refs/filter.zig => pretty/refs.zig}           |  108 +-
+ src/{refs/filter_test.zig => pretty/refs_test.zig} |   10 +-
+ src/{revwalk => pretty}/shortlog.zig               |   31 +-
+ src/process/child.zig                              |   82 +
+ src/{repo => process}/program.zig                  |   95 +-
+ src/refs.zig                                       | 2921 +---------
+ src/refs/packed.zig                                |    2 +-
+ src/refs/reflog.zig                                |   16 +-
+ src/refs/refs.zig                                  | 2905 ++++++++++
+ src/{ => refs}/refs_test.zig                       |   22 +-
+ src/refs/reftable.zig                              |    9 +-
+ src/refs/reftablestack.zig                         |   11 +-
+ src/refs/reftablestack/cache.zig                   |    6 +-
+ src/refs/reftablestack/policy.zig                  |    4 +-
+ src/refs/reftablestack/transaction.zig             |   45 +-
+ src/refs/reftablestack_test.zig                    |   68 +-
+ src/refs/state.zig                                 |    4 +-
+ src/refs/value.zig                                 |    8 +-
+ src/relic.zig                                      |  167 +-
+ src/repo.zig                                       | 1586 +-----
+ src/{commit => repo}/cache.zig                     |   12 +-
+ src/repo/fs/durability.zig                         |   82 -
+ src/{commit => repo}/head.zig                      |   16 +-
+ src/repo/ident.zig                                 |    6 +-
+ src/repo/ident_test.zig                            |    2 +-
+ src/repo/repo.zig                                  | 1741 ++++++
+ src/{ => repo}/repo_test.zig                       |  321 +-
+ src/repo/safe.zig                                  |    7 +-
+ src/repo/safe_test.zig                             |    2 +-
+ src/{repo => report}/diagnostic.zig                |    0
+ src/{transport => report}/progress.zig             |    0
+ src/{repo => report}/warning.zig                   |    6 +-
+ src/revwalk.zig                                    | 1136 +---
+ src/revwalk/bisect.zig                             |   50 +-
+ src/revwalk/describe.zig                           |   64 +-
+ src/revwalk/mailmap.zig                            |   17 +-
+ src/revwalk/revparse.zig                           |   58 +-
+ src/submodule.zig                                  | 1907 +------
+ src/submodule/submodule.zig                        | 1822 +++++++
+ src/{ => submodule}/submodule_test.zig             |   44 +-
+ src/submodule/transport.zig                        |   22 +-
+ src/testing/allocation.zig                         |   34 -
+ src/testing/cloneconfig.zig                        |    2 +-
+ src/testing/concurrency.zig                        |   12 +-
+ src/testing/config_refresh.zig                     |    2 +-
+ src/testing/embedded_repo.zig                      |   18 +-
+ src/testing/encoding.zig                           |    4 +-
+ src/testing/eol.zig                                |    2 +-
+ src/testing/fetchpack.zig                          |  117 +
+ src/testing/fixtures.zig                           |   58 +-
+ src/testing/history.zig                            |   30 +-
+ src/testing/hook.zig                               |    4 +-
+ src/testing/lfs.zig                                |   24 +-
+ src/testing/lfs/transfer.zig                       |   19 +-
+ src/testing/objectwalk.zig                         |  106 +
+ src/testing/pack_keep.zig                          |  183 +
+ src/testing/packwrite.zig                          |    4 +-
+ src/testing/refs_ownership.zig                     |   40 +-
+ src/testing/remote.zig                             |   42 +-
+ src/testing/security/buffer_overflow.zig           |    6 +-
+ src/testing/security/config_injection.zig          |    8 +-
+ src/testing/security/config_quoting.zig            |    6 +-
+ src/testing/security/credential_injection.zig      |    6 +-
+ src/testing/security/credential_leak.zig           |    8 +-
+ src/testing/security/dos_memory.zig                |    4 +-
+ src/testing/security/file_write.zig                |    4 +-
+ src/testing/security/hardlink.zig                  |    2 +-
+ src/testing/security/hash_collision.zig            |    4 +-
+ src/testing/security/hook_write.zig                |    4 +-
+ src/testing/security/hostile.zig                   |   18 +-
+ src/testing/security/integer_overflow.zig          |   14 +-
+ src/testing/security/lazy_fetch.zig                |    6 +-
+ src/testing/security/option_injection.zig          |   10 +-
+ src/testing/security/path_alias.zig                |    4 +-
+ src/testing/security/path_search.zig               |    4 +-
+ src/testing/security/protocol_injection.zig        |    4 +-
+ src/testing/security/protocol_policy.zig           |   12 +-
+ src/testing/security/repo_ownership.zig            |    2 +-
+ src/testing/security/submodule_gitdir.zig          |    6 +-
+ src/testing/security/submodule_name.zig            |   10 +-
+ src/testing/security/symlink_traversal.zig         |   20 +-
+ src/testing/security/terminal_escape.zig           |   12 +-
+ src/testing/shared.zig                             |   16 +-
+ src/testing/surface.zig                            |   87 +
+ src/testing/url_ownership.zig                      |   14 +-
+ src/testing/workcount.zig                          |   38 +-
+ src/tests.zig                                      |  163 +-
+ src/{ => text}/cquote.zig                          |    0
+ src/{object/gitdate.zig => text/date.zig}          |    0
+ src/{worktree => text}/encoding.zig                |    0
+ src/{ => text}/ere.zig                             |  592 +-
+ src/text/glob.zig                                  |    2 +-
+ src/{ => text}/unicodewidth.zig                    |    0
+ src/transport.zig                                  |  675 +--
+ src/transport/bundle.zig                           |   64 +-
+ src/transport/bundle_test.zig                      |    6 +-
+ src/transport/clone.zig                            |   84 +-
+ src/transport/fetch.zig                            |  139 +-
+ src/transport/local.zig                            |   67 +-
+ src/transport/partial.zig                          |   72 +-
+ src/transport/partial_test.zig                     |   28 +-
+ src/transport/push.zig                             |   52 +-
+ src/transport/remotehelper.zig                     |   32 +-
+ src/transport/remotehelper_test.zig                |   10 +-
+ src/transport/transport.zig                        |  656 +++
+ src/{ => transport}/transport_test.zig             |   46 +-
+ src/transport/uploadpack.zig                       |   34 +-
+ src/transport/uploadpack_test.zig                  |    8 +-
+ src/{transport => walk}/objectfilter.zig           |   26 +-
+ src/{transport => walk}/objectwalk.zig             |  118 +-
+ src/{transport => walk}/objectwalk/filter.zig      |    8 +-
+ src/{revwalk => walk}/shallow.zig                  |    4 +-
+ src/{revwalk => walk}/shallow_test.zig             |   14 +-
+ src/{revwalk => walk}/simplify.zig                 |    8 +-
+ src/walk/walk.zig                                  | 1099 ++++
+ src/{revwalk_test.zig => walk/walk_test.zig}       |   18 +-
+ src/{transport => wire}/auth.zig                   |    0
+ src/{transport => wire}/auth_test.zig              |   16 +-
+ src/{transport => wire}/clientcert.zig             |    8 +-
+ src/{transport => wire}/clientcert_test.zig        |   18 +-
+ src/{transport => wire}/connection.zig             |   23 +-
+ src/{transport => wire}/credential.zig             |   12 +-
+ src/{transport => wire}/fetchpack.zig              |  139 +-
+ src/{transport => wire}/filterspec.zig             |    2 +-
+ src/{transport => wire}/hidden.zig                 |   21 +-
+ src/{transport => wire}/hidden_test.zig            |   12 +-
+ src/{transport => wire}/httpsettings.zig           |    6 +-
+ src/{transport => wire}/policy.zig                 |    2 +-
+ src/{transport => wire}/promisors.zig              |    9 +-
+ src/{transport => wire}/promisors_test.zig         |   16 +-
+ src/{transport => wire}/protocol.zig               |    9 +-
+ src/{transport => wire}/refspec.zig                |    2 +-
+ src/{transport => wire}/remote.zig                 |    2 +-
+ src/{transport => wire}/sendpack.zig               |    8 +-
+ src/{transport => wire}/sideband.zig               |    4 +-
+ src/{transport => wire}/smarthttp.zig              |   12 +-
+ src/{transport => wire}/ssh.zig                    |   13 +-
+ src/{transport => wire}/url.zig                    |   19 +-
+ src/worktree.zig                                   | 3389 +-----------
+ src/worktree/snapshot.zig                          |   36 +-
+ src/worktree/snapshot_test.zig                     |   32 +-
+ src/worktree/sparsecheckout.zig                    |   82 +-
+ 501 files changed, 47306 insertions(+), 32695 deletions(-)

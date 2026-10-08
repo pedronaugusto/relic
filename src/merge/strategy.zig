@@ -15,7 +15,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const blobmerge = @import("blobmerge.zig");
-const parallax = @import("../dependencies.zig").parallax;
+const parallax = @import("parallax");
 const similarity = @import("../diff/similarity.zig");
 
 /// Errors from reading strategy options.
@@ -26,20 +26,7 @@ pub const Error = error{
 
 /// A line diff as `diff.algorithm` and `-X diff-algorithm` name it: an
 /// algorithm, and for Myers whether to prove the script minimal.
-pub const LineDiff = struct {
-    algorithm: parallax.Algorithm,
-    minimal: bool = false,
-
-    /// git's `parse_algorithm_value`: `myers` or `default`, `minimal`,
-    /// `patience` or `histogram`, in any case. `null` for anything else.
-    pub fn parse(text: []const u8) ?LineDiff {
-        if (std.ascii.eqlIgnoreCase(text, "myers") or std.ascii.eqlIgnoreCase(text, "default")) return .{ .algorithm = .myers };
-        if (std.ascii.eqlIgnoreCase(text, "minimal")) return .{ .algorithm = .myers, .minimal = true };
-        if (std.ascii.eqlIgnoreCase(text, "patience")) return .{ .algorithm = .patience };
-        if (std.ascii.eqlIgnoreCase(text, "histogram")) return .{ .algorithm = .histogram };
-        return null;
-    }
-};
+const LineDiff = @import("../diff/diff.zig").LineDiff;
 
 /// What a merge does with its content and its renames, once configuration
 /// and the strategy options have had their say.
@@ -76,7 +63,7 @@ pub const Settings = struct {
     pub fn configureAlgorithm(s: *Settings, text: []const u8) ?void {
         const diff = LineDiff.parse(text) orelse return null;
         s.algorithm = diff.algorithm;
-        if (diff.minimal) s.minimal = true;
+        s.minimal = diff.minimal;
     }
 
     /// Apply one `-X` word: git's `parse_merge_opt`.
@@ -88,8 +75,10 @@ pub const Settings = struct {
             s.resolve = .theirs;
         } else if (std.mem.eql(u8, word, "patience")) {
             s.algorithm = .patience;
+            s.minimal = false;
         } else if (std.mem.eql(u8, word, "histogram")) {
             s.algorithm = .histogram;
+            s.minimal = false;
         } else if (std.mem.startsWith(u8, word, "diff-algorithm=")) {
             const diff = LineDiff.parse(word["diff-algorithm=".len..]) orelse return error.UnknownStrategyOption;
             s.algorithm = diff.algorithm;
@@ -305,4 +294,16 @@ fn fuzzSplit(_: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: any strategy_opts line splits or is a named failure, and round-trips" {
     try std.testing.fuzz({}, fuzzSplit, .{});
+}
+
+test "phase2 extraction strategy algorithm clears previous minimal" {
+    var settings: Settings = .{};
+    inline for (.{ "patience", "histogram", "diff-algorithm=myers" }) |word| {
+        try settings.apply("diff-algorithm=minimal");
+        try settings.apply(word);
+        try std.testing.expect(!settings.minimal);
+    }
+    _ = settings.configureAlgorithm("minimal").?;
+    _ = settings.configureAlgorithm("default").?;
+    try std.testing.expect(!settings.minimal);
 }

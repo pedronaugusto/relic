@@ -8,7 +8,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const clone_mod = @import("../../transport/clone.zig");
-const object = @import("../../object.zig");
+const object = @import("../../object/object.zig");
 const testgit = @import("../git.zig");
 
 /// The inode of every file under `dir`.

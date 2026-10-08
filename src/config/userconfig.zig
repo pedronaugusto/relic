@@ -28,8 +28,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Environ = std.process.Environ;
 
-const program = @import("../repo/program.zig");
-const config_mod = @import("../config.zig");
+const program = @import("../process/program.zig");
+const config_mod = @import("config.zig");
 
 /// Errors from finding the configuration.
 pub const Error = error{
@@ -252,11 +252,11 @@ fn exists(io: Io, path: []const u8) bool {
 /// `git var <name>`, run as the person runs git: the answer, or `null` when
 /// git is not there, is older than the variable (2.42), or has no answer.
 fn askGit(arena: Allocator, io: Io, programs: program.Programs, name: []const u8) Error!?[]const u8 {
-    var outcome = program.run(programs, arena, io, .{
+    var outcome = program.run(arena, io, programs, .{
         .argv = &.{ "git", "var", name },
         .stderr = .ignore,
         .unset = &program.repository_variables,
-    }, "", .{ .output = .limited(64 * 1024) }) catch |err| switch (err) {
+    }, .{ .output = .limited(64 * 1024) }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return null,
@@ -321,7 +321,7 @@ test "the files are the ones git names, found from the person's environment" {
     try testing.expectEqualStrings(l.global[1], l.globalFile().?);
 
     // git itself names the same files, in the same order.
-    var outcome = try program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{ "git", "var", "GIT_CONFIG_GLOBAL" } }, "", .{});
+    var outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "git", "var", "GIT_CONFIG_GLOBAL" } }, .{});
     defer outcome.deinit(gpa);
     if (outcome.succeeded()) {
         var lines = std.mem.tokenizeScalar(u8, outcome.stdout, '\n');
@@ -347,11 +347,11 @@ test "the files are the ones git names, found from the person's environment" {
 /// `git config --list` in `env`, the command-line values alone, one per
 /// line; `null` when git refuses them.
 fn gitCommandValues(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map) !?[]u8 {
-    var outcome = try program.run(.{ .environ = env }, gpa, io, .{
+    var outcome = try program.run(gpa, io, .{ .environ = env }, .{
         .argv = &.{ "git", "config", "--list", "--show-scope" },
         .cwd = .{ .dir = dir },
         .stderr = .ignore,
-    }, "", .{});
+    }, .{});
     defer outcome.deinit(gpa);
     if (!outcome.succeeded()) return null;
     var out: std.ArrayList(u8) = .empty;
@@ -466,11 +466,11 @@ test "the XDG file and ~/.gitconfig are both read, the second winning, as git re
     var config = try config_mod.Config.open(gpa, io, l.sources(), .{ .home = l.home });
     defer config.deinit();
     for ([_][]const u8{ "x.a", "x.b" }) |name| {
-        var outcome = try program.run(.{ .environ = &env }, gpa, io, .{
+        var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
             .argv = &.{ "git", "config", "--get-all", name },
             .cwd = .{ .dir = home.dir },
             .unset = &program.repository_variables,
-        }, "", .{});
+        }, .{});
         defer outcome.deinit(gpa);
         const values = try config.all(name);
         defer gpa.free(values);

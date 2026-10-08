@@ -16,6 +16,7 @@
 //! directory of its own, no system configuration, no terminal prompt.
 
 const std = @import("std");
+const warp = @import("warp");
 const suite = @import("helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -23,7 +24,7 @@ const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 const http = std.http;
 
-const program = @import("../repo/program.zig");
+const program = @import("../process/program.zig");
 const testgit = @import("git.zig");
 const testremote = @import("remote.zig");
 
@@ -59,7 +60,7 @@ pub fn requireGitLfs(gpa: Allocator, io: Io, env: *const Environ.Map) !void {
     try testgit.requireGit(gpa, io);
     if (!lfs_checked) {
         lfs_checked = true;
-        var outcome = program.run(.{ .environ = env }, gpa, io, .{ .argv = &.{ "git", "lfs", "version" } }, "", .{}) catch
+        var outcome = program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ "git", "lfs", "version" } }, .{}) catch
             return error.SkipZigTest;
         defer outcome.deinit(gpa);
         lfs_present = outcome.succeeded();
@@ -134,6 +135,7 @@ pub const Server = struct {
     objects: std.array_hash_map.String([]u8) = .empty,
     locks: std.ArrayList(Lock) = .empty,
     next_lock: u32 = 1,
+    lock_page: usize = 0,
     faults: std.ArrayList(Fault) = .empty,
     log: std.ArrayList(u8) = .empty,
     /// One `<method> <oid> <header>=<value>` line per object moved, for the
@@ -169,6 +171,8 @@ pub const Server = struct {
         locking: bool = true,
         /// The most locks one page of a listing holds.
         page_size: usize = 100,
+        /// Scripted cursors; exhausted scripts refuse another page.
+        lock_cursors: ?[]const ?[]const u8 = null,
         /// Where the actions point, in place of the server's own URL: a
         /// name only `url.<base>.insteadOf` can turn back into this server.
         href_base: ?[]const u8 = null,
@@ -690,6 +694,12 @@ pub const Server = struct {
             try w.writeByte('}');
             return request.respond(out.written(), .{ .status = .created, .keep_alive = false, .extra_headers = json_header });
         }
+        if (s.options.lock_cursors) |cursors| {
+            if (std.mem.eql(u8, route, "/locks") or std.mem.eql(u8, route, "/locks/verify")) {
+                if (s.lock_page >= cursors.len) return request.respond("{}", .{ .status = .bad_request, .keep_alive = false });
+                s.lock_page += 1;
+            }
+        }
         if (method == .POST and std.mem.eql(u8, route, "/locks/verify")) {
             const Verify = struct { cursor: ?[]const u8 = null, limit: ?usize = null };
             const v = std.json.parseFromSliceLeaky(Verify, arena, if (body.len == 0) "{}" else body, .{ .ignore_unknown_fields = true }) catch
@@ -712,7 +722,7 @@ pub const Server = struct {
                 try writeLock(w, l);
             }
             try w.writeByte(']');
-            if (pg.next) |next| try w.print(",\"next_cursor\":\"{s}\"", .{next});
+            if (if (s.options.lock_cursors) |cs| cs[s.lock_page - 1] else pg.next) |next| try w.print(",\"next_cursor\":\"{s}\"", .{next});
             try w.writeByte('}');
             return request.respond(out.written(), .{ .keep_alive = false, .extra_headers = json_header });
         }
@@ -764,7 +774,7 @@ pub const Server = struct {
                 try writeLock(w, l);
             }
             try w.writeByte(']');
-            if (pg.next) |next| try w.print(",\"next_cursor\":\"{s}\"", .{next});
+            if (if (s.options.lock_cursors) |cs| cs[s.lock_page - 1] else pg.next) |next| try w.print(",\"next_cursor\":\"{s}\"", .{next});
             try w.writeByte('}');
             return request.respond(out.written(), .{ .keep_alive = false, .extra_headers = json_header });
         }
@@ -809,7 +819,9 @@ pub const Server = struct {
         if (content_type) |ct| try cgi_env.put("CONTENT_TYPE", ct);
         if (git_protocol) |gp| try cgi_env.put("GIT_PROTOCOL", gp);
         if (method == .POST) try cgi_env.put("CONTENT_LENGTH", try arena.print("{d}", .{body.len}));
-        var outcome = try program.run(.{ .environ = &cgi_env }, s.gpa, s.io, .{ .argv = &.{ "git", "-c", "http.receivepack=true", "http-backend" } }, body, .{});
+        var outcome = try program.run(s.gpa, s.io, .{ .environ = &cgi_env }, .{ .argv = &.{ "git", "-c", "http.receivepack=true", "http-backend" } }, .{
+            .input = body,
+        });
         defer outcome.deinit(s.gpa);
         const output = outcome.stdout;
         const split = std.mem.find(u8, output, "\r\n\r\n") orelse return error.MalformedCgiResponse;
@@ -919,7 +931,7 @@ fn encodeGzip(arena: Allocator, bytes: []const u8) ![]u8 {
         if (last) break;
     }
     var footer: [8]u8 = undefined;
-    std.mem.writeInt(u32, footer[0..4], std.hash.Crc32.hash(bytes), .little);
+    std.mem.writeInt(u32, footer[0..4], warp.Crc32.hash(bytes), .little);
     std.mem.writeInt(u32, footer[4..8], @truncate(bytes.len), .little);
     try out.appendSlice(arena, &footer);
     return out.items;

@@ -10,7 +10,7 @@ const Io = std.Io;
 
 const relic = @import("../relic.zig");
 const testgit = @import("git.zig");
-const platstat = @import("../repo/fs/stat.zig");
+const platstat = @import("../fs/stat.zig");
 
 const Repository = relic.repo.Repository;
 const Oid = relic.hash.Oid;
@@ -96,8 +96,8 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     defer repo.deinit(io);
     var index = try repo.openIndex(io);
     defer index.deinit();
-    _ = try relic.worktree.addAll(gpa, io, git.dir, &index, &repo.odb, .{ .rules = try repo.worktreeRules() });
-    const tree = try relic.worktree.writeTree(gpa, io, &index, &repo.odb);
+    _ = try relic.worktree.addAll(gpa, io, git.dir, &index, repo.objectDatabase(), .{ .rules = try repo.worktreeRules() });
+    const tree = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try repo.writeIndex(io, &index);
     const commit = try repo.writeCommit(io, .{ .tree = tree, .author = who, .committer = who, .message = "first\n" }, null);
     {
@@ -117,18 +117,18 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
         .{ .name = "refs/heads/main", .oid = commit, .peeled = null },
         .{ .name = "refs/heads/topic/one", .oid = commit, .peeled = null },
     });
-    try repo.git_dir.deleteFile(io, "refs/heads/main");
-    try repo.git_dir.deleteFile(io, "refs/heads/topic/one");
+    try repo.gitDirectory().deleteFile(io, "refs/heads/main");
+    try repo.gitDirectory().deleteFile(io, "refs/heads/topic/one");
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         try tx.update("refs/heads/loose", .{ .direct = commit }, .must_not_exist);
         try tx.commit(io, .{ .who = who, .message = "loose" });
     }
-    _ = try repo.odb.repack(io, .{ .remove_packs = true });
-    _ = try repo.odb.write(io, .blob, "");
+    _ = try repo.objectDatabase().repack(io, .{ .remove_packs = true });
+    _ = try repo.objectDatabase().write(io, .blob, "");
     _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.value", .value = "set" } }}, null);
-    _ = try relic.odb.accelerators.writeCommitGraph(gpa, io, &repo.odb, &.{commit}, .{});
+    _ = try relic.maintenance.writeCommitGraph(gpa, io, repo.objectDatabase(), &.{commit}, .{});
 }
 
 test "core.sharedRepository gives what is written git's permissions" {

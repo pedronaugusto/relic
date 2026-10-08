@@ -65,6 +65,8 @@
 //! transfer anyway. Certificates to trust from `http.sslCAInfo` are checked
 //! against the time when they are loaded, as `smarthttp` checks them.
 
+const refs_mod = @import("../refs/refs.zig");
+const config_mod = @import("../config/config.zig");
 const Self = @This();
 
 const std = @import("std");
@@ -93,26 +95,24 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
 
-const config_mod = @import("../config.zig");
-const program = @import("../repo/program.zig");
-const credential = @import("../transport/credential.zig");
-const auth_mod = @import("../transport/auth.zig");
-const httpsettings = @import("../transport/httpsettings.zig");
-const url_mod = @import("../transport/url.zig");
-const remote_mod = @import("../transport/remote.zig");
-const repo_mod = @import("../repo.zig");
-const lfs = @import("../lfs.zig");
+const program = @import("../process/program.zig");
+const credential = @import("../wire/credential.zig");
+const auth_mod = @import("../wire/auth.zig");
+const httpsettings = @import("../wire/httpsettings.zig");
+const url_mod = @import("../wire/url.zig");
+const remote_mod = @import("../wire/remote.zig");
+const repo_mod = @import("../repo/repo.zig");
+const lfs = @import("lfs.zig");
 const mimesniff = @import("mimesniff.zig");
-const fs = @import("../repo/fs.zig");
-const object = @import("../object.zig");
+const fs = @import("../fs/fs.zig");
+const object = @import("../object/object.zig");
 const netrc_mod = @import("netrc.zig");
 const timetext = @import("timetext.zig");
 const lfsssh = @import("ssh.zig");
-const clientcert = @import("../transport/clientcert.zig");
-const uplink = @import("../dependencies.zig").uplink;
-const shakedown = @import("../dependencies.zig").shakedown;
+const clientcert = @import("../wire/clientcert.zig");
+const uplink = @import("uplink");
+const shakedown = @import("shakedown");
 const tls = uplink.tls;
-const refs_mod = @import("../refs.zig");
 
 const Config = config_mod.Config;
 const assert = std.debug.assert;
@@ -254,12 +254,15 @@ pub const Settings = struct {
         return s;
     }
 
+    /// Errors from `loadRepo`.
+    pub const LoadRepoError = LoadError || LfsconfigError;
+
     /// The settings of `repo`, with `.lfsconfig` found where git-lfs finds
     /// it: `Repository.lfsconfigText`. `repo`'s configuration is borrowed.
-    pub fn loadRepo(gpa: Allocator, io: Io, repo: *repo_mod.Repository) (LoadError || LfsconfigError)!Settings {
+    pub fn loadRepo(gpa: Allocator, io: Io, repo: *repo_mod.Repository) LoadRepoError!Settings {
         var s: Settings = .{ .gpa = gpa, .config = repo.configuration() };
         const text = (try repo.lfsconfigText(io)) orelse return s;
-        defer repo.gpa.free(text);
+        defer repo.allocator().free(text);
         s.file = try Config.parseText(gpa, text, .local);
         return s;
     }
@@ -1019,9 +1022,12 @@ pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Self.Error!SshAuth
     };
 }
 
+/// Errors from `checkHeader`.
+pub const CheckHeaderError = error{InvalidHttpHeader};
+
 /// A header the standard library can be handed: a name with no colon and no
 /// line break, a value with no line break.
-pub fn checkHeader(name: []const u8, value: []const u8) error{InvalidHttpHeader}!void {
+pub fn checkHeader(name: []const u8, value: []const u8) CheckHeaderError!void {
     if (name.len == 0) return error.InvalidHttpHeader;
     if (std.mem.findAny(u8, name, ":\r\n") != null) return error.InvalidHttpHeader;
     if (std.mem.findAny(u8, value, "\r\n") != null) return error.InvalidHttpHeader;
@@ -1175,7 +1181,7 @@ pub const Client = struct {
         c.access.deinit(c.gpa);
         c.learned.deinit(c.gpa);
         for (&c.ssh_transfers) |*slot| switch (slot.*) {
-            .open => |t| t.close(),
+            .open => |t| t.deinit(),
             else => {},
         };
         c.ssh_failure.deinit(c.gpa);
@@ -1300,7 +1306,7 @@ pub const Client = struct {
         const retries: usize = @intCast(@max(0, c.settings.getInt("lfs.ssh.retries", 5)));
         var attempt: usize = 0;
         while (true) : (attempt += 1) {
-            var outcome = try program.run(programs, c.gpa, c.io, invocation, "", .{ .output = .limited(1 << 20) });
+            var outcome = try program.run(c.gpa, c.io, programs, invocation, .{ .output = .limited(1 << 20) });
             defer outcome.deinit(c.gpa);
             if (outcome.succeeded()) {
                 var auth = try parseAuthenticate(arena, try arena.dupe(u8, outcome.stdout));
@@ -1583,11 +1589,11 @@ pub const Client = struct {
             switch (status) {
                 .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => {
                     const location = ex.location() orelse {
-                        ex.close();
+                        ex.deinit();
                         return c.fail("redirect with no location from {s}", .{stripQuery(url)}, error.HttpStatus);
                     };
                     const next = try resolveLocation(scratch, url, location);
-                    ex.close();
+                    ex.deinit();
                     if (std.ascii.startsWithIgnoreCase(url, "https:") and std.ascii.startsWithIgnoreCase(next, "http:")) {
                         return error.InsecureRedirect;
                     }
@@ -1725,7 +1731,7 @@ pub const Client = struct {
         const offers = ex.authenticateOffers();
         refusal.challenges = try ex.challenges(scratch);
         refusal.said = ex.refusalText(scratch);
-        ex.close();
+        ex.deinit();
         try c.mutex.lock(c.io);
         defer c.mutex.unlock(c.io);
         if (attempt.cred) |cr| {
@@ -2055,7 +2061,7 @@ pub const Client = struct {
                 if (try s.fill(c.io, c.credentialOptions())) passphrase = s.password;
             }
         }
-        const auth = clientcert.load(c.gpa, arena, c.io, files, passphrase) catch |err| {
+        const auth = clientcert.load(c.gpa, c.io, files, .{ .arena = arena, .passphrase = passphrase }) catch |err| {
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Canceled => error.Canceled,
@@ -2393,7 +2399,7 @@ pub const Exchange = struct {
     }
 
     /// Give the connection back and release everything.
-    pub fn close(ex: *Exchange) void {
+    pub fn deinit(ex: *Exchange) void {
         const c = ex.client;
         if (ex.in_flight) ex.state().response.deinit(c.io);
         ex.arena.deinit();
@@ -2441,10 +2447,10 @@ pub const Server = struct {
             .base_path = undefined,
             .remote = undefined,
         };
-        s.base_path = try (repo.work_dir orelse repo.common_dir).realPathFileAlloc(io, ".", gpa);
+        s.base_path = try (repo.workDirectory() orelse repo.commonDirectory()).realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(s.base_path);
         const lfsconfig = try repo.lfsconfigText(io);
-        defer if (lfsconfig) |t| repo.gpa.free(t);
+        defer if (lfsconfig) |t| repo.allocator().free(t);
         s.settings = .{ .gpa = gpa, .config = repo.configuration() };
         if (lfsconfig) |t| s.settings.file = try Config.parseText(gpa, t, .local);
         errdefer s.settings.deinit();
@@ -2466,14 +2472,14 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, null, .{ .lfsconfig = lfsconfig });
+        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.commonDirectory(), null, .{ .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
         s.client = try Client.init(gpa, io, &s.settings, s.remote, .{ .base = s.base_path, .fetch_head = s.fetch_head }, options);
         return s;
     }
 
     /// Close everything.
-    pub fn close(s: *Server) void {
+    pub fn deinit(s: *Server) void {
         const gpa = s.gpa;
         s.client.deinit();
         s.lfs.deinit();
@@ -2491,13 +2497,16 @@ pub const Server = struct {
     }
 };
 
+/// Errors from `downloadRef`.
+pub const DownloadRefError = Error || refs_mod.ReadError;
+
 /// The ref git-lfs names in every download's batch, whatever the download
 /// is for: the branch `HEAD` is on, or its `branch.<name>.merge` when that
 /// is set; `HEAD` when it is detached; and nothing on a branch with no
 /// commit yet, which git-lfs cannot resolve. The result is the caller's.
-pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings: *const Settings) (Error || refs_mod.ReadError)![]u8 {
+pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings: *const Settings) DownloadRefError![]u8 {
     const head = (try repo.head(io)) orelse return gpa.dupe(u8, "");
-    defer repo.gpa.free(head.name);
+    defer repo.allocator().free(head.name);
     if (!std.mem.startsWith(u8, head.name, "refs/heads/")) return gpa.dupe(u8, head.name);
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
@@ -2903,7 +2912,7 @@ test "learned LFS policy writes the shared source without replacing worktree con
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
         repo.deinit(io);
     }
     try tmp.dir.writeFile(io, .{
@@ -2919,12 +2928,12 @@ test "learned LFS policy writes the shared source without replacing worktree con
     defer client.deinit();
     try client.learnLocksVerify("https://example.com/project", false);
     try client.remember(io, &repo);
-    var shared = try Config.openFile(gpa, io, .{ .dir = repo.common_dir, .sub_path = "config" }, .local, .{});
+    var shared = try Config.openFile(gpa, io, .{ .dir = repo.commonDirectory(), .sub_path = "config" }, .local, .{});
     defer shared.deinit();
     try testing.expect(shared.get("fixture.shared") != null);
     try testing.expectEqualStrings("kept", shared.get("fixture.shared").?);
     try testing.expectEqualStrings("false", shared.get("lfs.https://example.com/project.locksverify").?);
-    const after = try repo.common_dir.readFileAlloc(io, "config.worktree", gpa, .limited(4096));
+    const after = try repo.commonDirectory().readFileAlloc(io, "config.worktree", gpa, .limited(4096));
     defer gpa.free(after);
     try testing.expectEqualStrings(worktree, after);
     _ = try repo.refreshConfig(io, null);

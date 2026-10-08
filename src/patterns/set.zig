@@ -1,0 +1,88 @@
+//! Private storage for one compiled pattern set per precedence level.
+const std = @import("std");
+const sweep = @import("sweep");
+const Allocator = std.mem.Allocator;
+
+pub const Builder = struct {
+    gpa: Allocator,
+    arena: *std.heap.ArenaAllocator,
+    inner: sweep.Set.Builder,
+    transferred: bool = false,
+
+    pub fn init(gpa: Allocator) Allocator.Error!Builder {
+        const arena = try gpa.create(std.heap.ArenaAllocator);
+        arena.* = .init(gpa);
+        return .{ .gpa = gpa, .arena = arena, .inner = .init(arena.allocator()) };
+    }
+
+    pub fn deinit(b: *Builder) void {
+        if (b.transferred) return;
+        b.inner.deinit();
+        b.arena.deinit();
+        b.gpa.destroy(b.arena);
+    }
+};
+
+pub fn add(builder: *Builder, pattern: []const u8, anchored: bool, dir_only: bool, fold: bool) Allocator.Error!bool {
+    _ = builder.inner.add(pattern, .{
+        .options = .{ .syntax = .git, .anywhere = !anchored, .case = if (fold) .ascii_git else .sensitive },
+        .dir_only = dir_only,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidPattern, error.PatternTooLong => return false,
+        error.SeparatorMismatch => unreachable, // Every entry above uses git's slash separator.
+    };
+    return true;
+}
+
+pub const Matcher = struct {
+    gpa: Allocator,
+    arena: *std.heap.ArenaAllocator,
+    set: sweep.Set,
+    cache: sweep.Set.Cache,
+    turn: std.atomic.Mutex = .unlocked,
+    walking: ?sweep.Set.Ancestors = null,
+
+    pub fn build(gpa: Allocator, builder: *Builder) Allocator.Error!*Matcher {
+        const m = try gpa.create(Matcher);
+        errdefer gpa.destroy(m);
+        var compiled = try builder.inner.build();
+        errdefer compiled.deinit();
+        m.* = .{ .gpa = gpa, .arena = builder.arena, .set = compiled, .cache = try .init(gpa, &compiled, .{ .capacity = 1 << 16 }) };
+        builder.inner.deinit();
+        builder.transferred = true;
+        return m;
+    }
+
+    pub fn deinit(m: *Matcher) void {
+        const gpa = m.gpa;
+        m.cache.deinit();
+        m.arena.deinit();
+        gpa.destroy(m.arena);
+        gpa.destroy(m);
+    }
+
+    pub fn lock(m: *Matcher) void {
+        while (!m.turn.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn unlock(m: *Matcher) void {
+        m.turn.unlock();
+    }
+
+    pub fn last(m: *Matcher, path: []const u8, is_dir: bool) ?u32 {
+        m.lock();
+        defer m.unlock();
+        return m.set.last(&m.cache, path, if (is_dir) .dir else .file);
+    }
+
+    pub fn all(m: *Matcher, a: Allocator, path: []const u8, is_dir: bool, out: *std.ArrayList(u32)) Allocator.Error!void {
+        m.lock();
+        defer m.unlock();
+        try m.set.all(a, &m.cache, path, if (is_dir) .dir else .file, out);
+    }
+
+    pub fn begin(m: *Matcher, path: []const u8, is_dir: bool) void {
+        m.walking = m.set.ancestors(&m.cache, path, if (is_dir) .dir else .file);
+    }
+};

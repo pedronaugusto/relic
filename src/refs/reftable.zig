@@ -25,12 +25,13 @@
 const Self = @This();
 
 const std = @import("std");
+const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
 
-const hash = @import("../hash.zig");
-const varint = @import("../varint.zig");
+const hash = @import("../hash/hash.zig");
+const varint = @import("../codec/varint.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -245,7 +246,7 @@ pub const Table = struct {
         const log_index = std.mem.readInt(u64, footer[at..][0..8], .big);
         at += 8;
         const stored_crc = std.mem.readInt(u32, footer[at..][0..4], .big);
-        if (std.hash.Crc32.hash(footer[0..at]) != stored_crc) return error.FooterChecksumMismatch;
+        if (warp.Crc32.hash(footer[0..at]) != stored_crc) return error.FooterChecksumMismatch;
 
         // The type of the first block, which is what says whether there
         // are refs at all. An empty table's "first block" is its footer.
@@ -1278,7 +1279,7 @@ const Writer = struct {
             std.mem.writeInt(u64, footer[at..][0..8], field, .big);
             at += 8;
         }
-        std.mem.writeInt(u32, footer[at..][0..4], std.hash.Crc32.hash(footer[0..at]), .big);
+        std.mem.writeInt(u32, footer[at..][0..4], warp.Crc32.hash(footer[0..at]), .big);
         at += 4;
         // The footer `open` reads back from the end: the header again, five
         // offsets and the CRC, its length fixed by the version.

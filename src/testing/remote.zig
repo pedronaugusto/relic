@@ -14,9 +14,9 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
-const program = @import("../repo/program.zig");
+const program = @import("../process/program.zig");
 const testgit = @import("git.zig");
-const uplink = @import("../dependencies.zig").uplink;
+const uplink = @import("uplink");
 
 /// The environment a program started by a test sees: the test's own `PATH`
 /// and what Windows needs (`testgit.keepSystemVariables`), isolated as
@@ -44,10 +44,12 @@ pub fn gitInput(gpa: Allocator, io: Io, dir: Io.Dir, args: []const []const u8, i
     try argv.append(gpa, "git");
     try argv.appendSlice(gpa, &testgit.default_settings);
     try argv.appendSlice(gpa, args);
-    var outcome = try program.run(.{ .environ = &env }, gpa, io, .{
+    var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
         .argv = argv.items,
         .cwd = .{ .dir = dir },
-    }, input, .{});
+    }, .{
+        .input = input,
+    });
     defer gpa.free(outcome.stderr);
     if (!outcome.succeeded()) {
         std.debug.print("git {s} failed:\n{s}\n", .{ args[0], outcome.stderr });
@@ -66,10 +68,12 @@ pub fn gitInputEnv(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map,
     try argv.append(gpa, "git");
     try argv.appendSlice(gpa, &testgit.default_settings);
     try argv.appendSlice(gpa, args);
-    var outcome = try program.run(.{ .environ = env }, gpa, io, .{
+    var outcome = try program.run(gpa, io, .{ .environ = env }, .{
         .argv = argv.items,
         .cwd = .{ .dir = dir },
-    }, input, .{});
+    }, .{
+        .input = input,
+    });
     defer gpa.free(outcome.stderr);
     if (!outcome.succeeded()) {
         if (report) std.debug.print("git {s} failed:\n{s}\n", .{ args[0], outcome.stderr });
@@ -321,10 +325,12 @@ pub const HttpServer = struct {
             var inflate: std.compress.flate.Decompress = .init(&in, .gzip, &window);
             input = try inflate.reader.allocRemaining(arena, .limited(1 << 30));
         };
-        var outcome = try program.run(.{ .environ = &env }, s.gpa, io, .{
+        var outcome = try program.run(s.gpa, io, .{ .environ = &env }, .{
             .argv = &.{ program_path, if (info_refs) "--advertise-refs" else "--stateless-rpc", full },
             .stderr = .capture,
-        }, input, .{});
+        }, .{
+            .input = input,
+        });
         defer outcome.deinit(s.gpa);
         var answer_bytes: std.ArrayList(u8) = .empty;
         if (info_refs and !v2) try answer_bytes.appendSlice(arena, "001e# service=git-upload-pack\n0000");
@@ -424,10 +430,12 @@ pub const HttpServer = struct {
         }
         if (remote_user) |user| try cgi_env.put("REMOTE_USER", user);
 
-        var outcome = try program.run(.{ .environ = &cgi_env }, gpa, io, .{
+        var outcome = try program.run(gpa, io, .{ .environ = &cgi_env }, .{
             .argv = &.{ "git", "http-backend" },
             .stderr = .capture,
-        }, body, .{});
+        }, .{
+            .input = body,
+        });
         defer outcome.deinit(gpa);
         const output = outcome.stdout;
         const split = std.mem.find(u8, output, "\r\n\r\n") orelse return error.MalformedCgiResponse;
@@ -506,22 +514,22 @@ pub const TlsFront = struct {
         // the address as both an IP and a DNS name: curl matches the first,
         // the standard library the second. `lfs.example.invalid` is the name
         // a test reaches it by through a proxy.
-        var made = program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{
+        var made = program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{
             "openssl",                             "req",                                                               "-x509",                                                                     "-newkey",
             if (options.rsa) "rsa:2048" else "ec", "-pkeyopt",                                                          if (options.rsa) "rsa_keygen_bits:2048" else "ec_paramgen_curve:prime256v1", "-nodes",
             "-keyout",                             key_path,                                                            "-out",                                                                      cert_path,
             "-days",                               "2",                                                                 "-subj",                                                                     "/CN=127.0.0.1",
             "-addext",                             "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1,DNS:lfs.example.invalid",
-        } }, "", .{}) catch return error.SkipZigTest;
+        } }, .{}) catch return error.SkipZigTest;
         defer made.deinit(gpa);
         if (!made.succeeded()) return error.SkipZigTest;
         try dir.dir.createDirPath(io, "ca");
         try dir.dir.copyFile("cert.pem", dir.dir, "ca/cert.pem", io, .{});
         // OpenSSL looks up CApath certificates by their subject hash. A
         // copied file works on Windows too, where rehash's symlink may not.
-        var hashed = try program.run(.{ .environ = &env }, gpa, io, .{
+        var hashed = try program.run(gpa, io, .{ .environ = &env }, .{
             .argv = &.{ "openssl", "x509", "-hash", "-noout", "-in", cert_path },
-        }, "", .{});
+        }, .{});
         defer hashed.deinit(gpa);
         if (!hashed.succeeded()) return error.SkipZigTest;
         const ca_name = try gpa.print("ca/{s}.0", .{std.mem.trim(u8, hashed.stdout, "\r\n")});
@@ -537,7 +545,7 @@ pub const TlsFront = struct {
         try argv.appendSlice(gpa, &.{ "openssl", "s_server", "-accept", "127.0.0.1:0", "-cert", cert_path, "-key", key_path, "-HTTP", "-http_server_binmode" });
         if (options.client_ca) |ca| try argv.appendSlice(gpa, &.{ "-Verify", "1", "-verify_return_error", "-CAfile", ca });
         if (options.tls12) try argv.append(gpa, "-tls1_2");
-        var running = program.start(.{ .environ = &env }, gpa, io, .{
+        var running = program.start(gpa, io, .{ .environ = &env }, .{
             .argv = argv.items,
             .cwd = .{ .dir = www },
             .stderr = .ignore,
@@ -701,10 +709,10 @@ pub const Pki = struct {
         defer argv.deinit(p.gpa);
         try argv.append(p.gpa, "openssl");
         try argv.appendSlice(p.gpa, args);
-        var made = program.run(.{ .environ = &p.env }, p.gpa, io, .{
+        var made = program.run(p.gpa, io, .{ .environ = &p.env }, .{
             .argv = argv.items,
             .cwd = .{ .dir = p.dir.dir },
-        }, "", .{}) catch return error.SkipZigTest;
+        }, .{}) catch return error.SkipZigTest;
         defer made.deinit(p.gpa);
         if (!made.succeeded()) return error.SkipZigTest;
     }

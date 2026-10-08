@@ -20,27 +20,28 @@
 const Self = @This();
 
 const std = @import("std");
+const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 const flate = std.compress.flate;
 
-const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
-const repo_mod = @import("repo.zig");
-const worktree = @import("worktree.zig");
-const attributes = @import("worktree/attributes.zig");
-const convert = @import("worktree/convert.zig");
-const pathspec_mod = @import("pathspec.zig");
-const pretty = @import("pretty.zig");
-const message = @import("commit/message.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const odb_mod = @import("odb/odb.zig");
+const repo_mod = @import("repo/repo.zig");
+const worktree = @import("checkout/checkout.zig");
+const attributes = @import("patterns/attributes.zig");
+const convert = @import("checkout/convert.zig");
+const pathspec_mod = @import("patterns/pathspec.zig");
+const pretty = @import("pretty/pretty.zig");
+const message = @import("object/message.zig");
 const abbrev = @import("odb/abbrev.zig");
-const mailfmt = @import("patch/mail/format.zig");
-const program = @import("repo/program.zig");
-const fs = @import("repo/fs.zig");
+const mailfmt = @import("mail/format.zig");
+const program = @import("process/program.zig");
+const fs = @import("fs/fs.zig");
 const mailmap_mod = @import("revwalk/mailmap.zig");
-const signing = @import("commit/signing.zig");
+const signing = @import("object/signing.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -403,7 +404,7 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
     } else {
         attr2 = if (kind == 0o120000) (mode | 0o777) << 16 else if (mode & 0o111 != 0) mode << 16 else 0;
         if (kind == 0o120000 or mode & 0o111 != 0) creator_version = 0x0317;
-        crc = std.hash.Crc32.hash(content);
+        crc = warp.Crc32.hash(content);
         text = !is_binary;
         out = content;
         compressed_size = content.len;
@@ -594,7 +595,7 @@ const Walk = struct {
 
     fn lookup(wk: *Walk, path: []const u8, is_dir: bool) Error!attributes.Attributes {
         if (wk.options.worktree_attributes) {
-            if (wk.repo.work_dir) |wt| try wk.attrs.enter(wk.io, wt, path);
+            if (wk.repo.workDirectory()) |wt| try wk.attrs.enter(wk.io, wt, path);
         }
         return wk.attrs.lookup(wk.a, path, is_dir);
     }
@@ -613,7 +614,7 @@ const Walk = struct {
     fn walk(wk: *Walk, tree_oid: Oid, base: []const u8) Error!void {
         // The directories queued are the ones this walk is inside.
         if (wk.queued.items.len > object.max_tree_depth) return error.TreeTooDeep;
-        const db = &wk.repo.odb;
+        const db = wk.repo.objectDatabase();
         const found = try db.read(wk.io, tree_oid);
         defer db.allocator().free(found.bytes);
         if (found.type != .tree) return error.NotATree;
@@ -706,7 +707,7 @@ fn formatSubst(wk: *Walk, commit: Oid, src: []const u8) Error![]const u8 {
         const b = std.mem.find(u8, rest, "$Format:") orelse break;
         const c = std.mem.findScalarPos(u8, rest, b + 8, '$') orelse break;
         try out.appendSlice(wk.a, rest[0..b]);
-        try pretty.formatCommit(wk.a, wk.io, &wk.repo.odb, commit, rest[b + 8 .. c], try wk.formatContext(rest[b + 8 .. c]), &out);
+        try pretty.formatCommit(wk.a, wk.io, wk.repo.objectDatabase(), commit, rest[b + 8 .. c], try wk.formatContext(rest[b + 8 .. c]), &out);
         rest = rest[c + 1 ..];
     }
     try out.appendSlice(wk.a, rest);
@@ -749,7 +750,7 @@ pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options:
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();
-    const db = &repo.odb;
+    const db = repo.objectDatabase();
 
     // the tree, and the commit it came from
     var commit: ?Oid = null;
@@ -801,7 +802,7 @@ pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options:
     }
     const rules = try repo.worktreeRules();
     var conv: convert.Session = .init(gpa, io, .{
-        .wt = repo.work_dir orelse repo.git_dir,
+        .wt = repo.workDirectory() orelse repo.gitDirectory(),
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = try repo.requiredFilters(a),

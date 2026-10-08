@@ -1,12 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const hash = @import("../hash.zig");
+const hash = @import("../hash/hash.zig");
 const Kind = hash.Kind;
 const Oid = hash.Oid;
-const object = @import("../object.zig");
+const object = @import("../object/object.zig");
 const pack = @import("pack.zig");
-const fs = @import("../repo/fs.zig");
+const fs = @import("../fs/fs.zig");
 /// How the object database behaves. The only caches in this package are
 /// named here.
 pub const Options = struct {
@@ -103,7 +103,7 @@ pub const Error = error{
 } || pack.Error || pack.WriteError || object.HeaderParseError ||
     object.ParseError || object.TreeParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
-    Io.File.Reader.Error || Io.Reader.Error || Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
+    Io.File.Reader.Error || Io.Reader.Error || @import("../fs/fs.zig").SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
 
 /// Counters saying how lookups resolved and what writing cost. Nothing

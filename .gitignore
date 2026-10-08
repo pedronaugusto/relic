@@ -8,3 +8,6 @@ zig-pkg/
 
 # macOS.
 .DS_Store
+
+# Standalone, unshared baseline clones for retained phase comparisons.
+.phase2/

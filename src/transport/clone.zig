@@ -27,33 +27,33 @@ const Io = std.Io;
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
-const fetchpack = @import("fetchpack.zig");
-const shallow_mod = @import("../revwalk/shallow.zig");
+const fetchpack = @import("../wire/fetchpack.zig");
+const shallow_mod = @import("../walk/shallow.zig");
 const indexpack = @import("../odb/indexpack.zig");
 const revindex = @import("../odb/revindex.zig");
 const partial = @import("partial.zig");
-const worktree = @import("../worktree.zig");
-const filter = @import("../worktree/filter.zig");
-const url_mod = @import("url.zig");
-const program = @import("../repo/program.zig");
-const transport = @import("../transport.zig");
-const objectwalk = @import("objectwalk.zig");
-const protocol = @import("protocol.zig");
-const credential = @import("credential.zig");
-const auth = @import("auth.zig");
-const remote_mod = @import("remote.zig");
-const warning = @import("../repo/warning.zig");
-const clonelfs = @import("clone/lfs.zig");
-const progress_mod = @import("progress.zig");
-const config_mod = @import("../config.zig");
+const worktree = @import("../checkout/checkout.zig");
+const filter = @import("../checkout/filter.zig");
+const url_mod = @import("../wire/url.zig");
+const program = @import("../process/program.zig");
+const transport = @import("transport.zig");
+const objectwalk = @import("../walk/objectwalk.zig");
+const protocol = @import("../wire/protocol.zig");
+const credential = @import("../wire/credential.zig");
+const auth = @import("../wire/auth.zig");
+const remote_mod = @import("../wire/remote.zig");
+const warning = @import("../report/warning.zig");
+const clonelfs = @import("../lfs/clone.zig");
+const progress_mod = @import("../report/progress.zig");
+const config_mod = @import("../config/config.zig");
 const fsck = @import("../object/fsck.zig");
-const promisors = @import("promisors.zig");
-const odb_mod = @import("../odb.zig");
+const promisors = @import("../wire/promisors.zig");
+const odb_mod = @import("../odb/odb.zig");
 const ref_names = @import("../names/ref.zig");
 
 const Oid = hash.Oid;
@@ -139,7 +139,7 @@ pub const Options = struct {
     home: ?[]const u8 = null,
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
-    proxy: transport.Proxy = .auto,
+    proxy: @import("../wire/httpsettings.zig").Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -245,7 +245,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     }
 
     var session = try openSession(gpa, io, reached, target.local_copy, settings, if (repo_made) &repo else null, options);
-    defer session.close(io);
+    defer session.deinit(io);
 
     var remote_refs = try session.listRefs(gpa, io, &.{ "HEAD", "refs/heads/", "refs/tags/" });
     defer remote_refs.deinit();
@@ -276,7 +276,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     try configureRemote(arena, io, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
 
     var chosen = try chooseRefs(arena, remote_refs.refs, head, single_branch, single_tag, options);
-    const detached = try receiveObjects(arena, gpa, io, &repo, &session, &chosen, .{
+    var received = try receiveObjects(arena, gpa, io, &repo, &session, &chosen, .{
         .settings = settings,
         .remote_refs = remote_refs.refs,
         .deepen = deepen,
@@ -285,6 +285,9 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .single_tag = single_tag,
         .detached = head.detached,
     }, options);
+
+    defer received.fetched.deinit(io);
+    const detached = received.detached;
 
     // The remote's refs, in one step and with no logs, as git's initial
     // transaction writes them: packed, or one table.
@@ -350,9 +353,9 @@ fn receiveObjects(
     chosen: *Chosen,
     ask: Receiving,
     options: Options,
-) Error!?Oid {
+) Error!struct { detached: ?Oid, fetched: transport.Session.Fetched } {
     var detached = ask.detached;
-    var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
@@ -363,7 +366,7 @@ fn receiveObjects(
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
     var rules = try fsck.forTransfer(gpa, io, ask.settings, repo.objectFormat(), .fetch, options.check_objects, to_warnings.sink());
     defer if (rules) |*r| r.deinit(gpa);
-    const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
+    var fetched = try session.fetch(gpa, io, repo.objectDatabase(), pack_dir, .{
         .wants = chosen.wants.items,
         .want_names = chosen.want_names.items,
         .tips = &.{},
@@ -372,10 +375,11 @@ fn receiveObjects(
         .filter = ask.filter,
     }, .{
         .progress = options.progress,
-        .receive = .{ .fsck = if (rules) |*r| r else null, .promised = ask.filter != null, .warnings = options.warnings, .reverse_index = revindex.wanted(ask.settings), .links = &links, .threads = indexpack.configuredThreads(ask.settings) },
+        .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = ask.filter != null, .warnings = options.warnings, .reverse_index = revindex.wanted(ask.settings), .links = &links, .threads = indexpack.configuredThreads(ask.settings) },
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });
+    errdefer fetched.deinit(io);
     // A remote helper's import learns the values as it goes.
     chosen.takeFetchedValues(session);
     if (detached) |oid| if (oid.isZero()) if (session.fetchedValue("HEAD")) |value| {
@@ -389,16 +393,16 @@ fn receiveObjects(
     if (ask.deepen == null) try shallow_info.shallow.appendSlice(gpa, session.advertisedShallow());
     if (shallow_info.shallow.items.len != 0) {
         var empty: Oid.Set = .empty;
-        repo.odb.shallow.deinit(gpa);
-        repo.odb.shallow = try shallow_mod.apply(gpa, &empty, shallow_info.shallow.items, shallow_info.unshallow.items);
-        try shallow_mod.write(gpa, io, repo.common_dir, &repo.odb.shallow);
+        repo.objectDatabase().shallow.deinit(gpa);
+        repo.objectDatabase().shallow = try shallow_mod.apply(gpa, &empty, shallow_info.shallow.items, shallow_info.unshallow.items);
+        try shallow_mod.write(gpa, io, repo.commonDirectory(), &repo.objectDatabase().shallow);
     }
     // A single branch's tags are those the pack brought, which is what
     // git's clone keeps of them.
     if (ask.single_branch and options.tags) try chosen.keepFetchedTags(arena, io, repo, ask.remote_refs, ask.single_tag);
 
     try checkCloned(gpa, io, repo, pack_dir, fetched.pack, chosen.wants.items, &links, ask.filter != null);
-    return detached;
+    return .{ .detached = detached, .fetched = fetched };
 }
 
 /// Where a clone that is not a remote helper's goes, and what it records.
@@ -535,7 +539,7 @@ const Chosen = struct {
         for (remote_refs) |ref| {
             if (!std.mem.startsWith(u8, ref.name, "refs/tags/") or std.mem.endsWith(u8, ref.name, "^{}")) continue;
             if (single_tag != null and std.mem.eql(u8, ref.name, single_tag.?)) continue;
-            if (!try repo.odb.exists(io, ref.oid)) continue;
+            if (!try repo.objectDatabase().exists(io, ref.oid)) continue;
             if (!ref_names.checkFormat(ref.name, .{})) continue;
             try c.first_refs.append(arena, .{ .name = try arena.dupe(u8, ref.name), .oid = ref.oid, .peeled = ref.peeled });
         }
@@ -604,9 +608,9 @@ fn checkCloned(gpa: Allocator, io: Io, repo: *Repository, pack_dir: Io.Dir, pack
         fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     }
     const connected = if (fresh) |*index|
-        objectwalk.checkReceived(gpa, io, &repo.odb, wants, index, links, null, .{ .promisor = promisor })
+        objectwalk.checkReceived(gpa, io, repo.objectDatabase(), wants, index, links, null, .{ .promisor = promisor })
     else
-        objectwalk.checkConnectedWith(gpa, io, &repo.odb, wants, null, null, .{ .promisor = promisor });
+        objectwalk.checkConnectedWith(gpa, io, repo.objectDatabase(), wants, null, null, .{ .promisor = promisor });
     connected catch |err| switch (err) {
         error.MissingObject => return error.MissingObject,
         else => |e| return e,
@@ -743,7 +747,7 @@ fn containsOid(list: []const Oid, oid: Oid) bool {
 /// The new repository, as the clone makes it: `object_format` the
 /// remote's, or the default when it is not known yet.
 fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_format: ?hash.Kind, initial: []const u8) Error!Repository {
-    var repo = try Repository.init(gpa, io, dir, .{
+    var repo = try Repository.create(gpa, io, dir, .{
         .object_format = object_format orelse .sha1,
         .ref_format = options.ref_format,
         .default_branch = initial,
@@ -800,7 +804,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     const lfs_configured = repo.configuration().get("filter.lfs.process") != null or repo.configuration().get("filter.lfs.smudge") != null;
     // A new clone's working tree has nothing in it to lose, as git's
     // clone takes it.
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, tree, .{
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), tree, .{
         .rules = rules,
         .programs = programs,
         .lfs_fetch = if (lfs_configured) lfs_fetch.fetcher() else null,
@@ -994,7 +998,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     var serial = try clone(gpa, Tasks.wrap(io), source_path, serial_target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
     defer serial.deinit(io);
     try Tasks.expect(0, 0);
-    var serial_packs = try serial.git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    var serial_packs = try serial.gitDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer serial_packs.close(io);
     const serial_name = try PackFile.only(gpa, io, serial_packs);
     defer gpa.free(serial_name);
@@ -1023,7 +1027,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
             const readers: usize = @min(case.workers, 6);
             const spawned = if (case.workers == 1) 0 else 2 * (readers - 1) + case.workers - 1;
             try Tasks.expect(spawned, 0);
-            var packs = try repo.git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+            var packs = try repo.gitDirectory().openDir(io, "objects/pack", .{ .iterate = true });
             defer packs.close(io);
             const name = try PackFile.only(gpa, io, packs);
             defer gpa.free(name);

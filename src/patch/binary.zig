@@ -24,7 +24,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 const flate = std.compress.flate;
 
-const delta = @import("../odb/delta.zig");
+const delta = @import("../codec/delta.zig");
 const inflate_mod = @import("../odb/inflate.zig");
 
 /// Which kind a hunk is.
@@ -176,17 +176,23 @@ fn writeBody(gpa: Allocator, w: *Io.Writer, from: []const u8, to: []const u8) (A
     try w.writeByte('\n');
 }
 
+/// Errors from `write`.
+pub const WriteError = Allocator.Error || Io.Writer.Error;
+
 /// The `GIT binary patch` block for a change from `old` to `new`: the
 /// forward hunk and the reverse one.
-pub fn write(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8) (Allocator.Error || Io.Writer.Error)!void {
+pub fn write(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8) WriteError!void {
     try w.writeAll("GIT binary patch\n");
     try writeBody(gpa, w, old, new);
     try writeBody(gpa, w, new, old);
 }
 
+/// Errors from `applyHunk`.
+pub const ApplyHunkError = delta.Error || Allocator.Error;
+
 /// The file a hunk makes from `image`: the literal data, or the delta
 /// applied to it. The result is the caller's.
-pub fn applyHunk(gpa: Allocator, image: []const u8, method: Method, data: []const u8) (delta.Error || Allocator.Error)![]u8 {
+pub fn applyHunk(gpa: Allocator, image: []const u8, method: Method, data: []const u8) ApplyHunkError![]u8 {
     return switch (method) {
         .literal => gpa.dupe(u8, data),
         .delta => delta.apply(gpa, image, data),

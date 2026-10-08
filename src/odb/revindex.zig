@@ -14,17 +14,16 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const builtin = @import("builtin");
 
-const hash = @import("../hash.zig");
+const hash = @import("../hash/hash.zig");
 const pack = @import("pack/entry.zig");
-const fs = @import("../repo/fs.zig");
-const config_mod = @import("../config.zig");
+const fs = @import("../fs/fs.zig");
+const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;
 
 /// Errors from writing one.
-pub const Error = Allocator.Error || Io.File.OpenError || Io.File.SyncError || Io.Writer.Error;
+pub const Error = Allocator.Error || Io.File.OpenError || fs.SyncError || Io.Writer.Error;
 
 /// Whether `config` asks for reverse indexes: `pack.writeReverseIndex`,
 /// true when unset, as git has it since 2.41.
@@ -88,26 +87,8 @@ pub fn write(
     try out.flush();
     switch (sync) {
         .none => {},
-        .batch, .per_file => try file.sync(io),
+        .batch, .per_file => try fs.syncFile(io, file, .{ .policy = sync }),
     }
     file.close(io);
     failed = false;
 }
-
-const testing = std.testing;
-const testremote = @import("../testing/remote.zig");
-
-pub const test_access = if (builtin.is_test) struct {
-    pub const hash = fixture_hash;
-    pub const pack = fixture_pack;
-    pub const fs = fixture_fs;
-    pub const config_mod = fixture_config_mod;
-    pub const testing = fixture_testing;
-    pub const testremote = fixture_testremote;
-} else struct {};
-const fixture_hash = hash;
-const fixture_pack = pack;
-const fixture_fs = fs;
-const fixture_config_mod = config_mod;
-const fixture_testing = testing;
-const fixture_testremote = testremote;

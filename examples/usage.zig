@@ -45,7 +45,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
 
     // Create a repository. `HEAD`, `config`, `objects/` and `refs/` land on
     // the disk and git reads what is written.
-    var repo = try relic.repo.Repository.init(gpa, io, dir, .{
+    var repo = try relic.repo.Repository.create(gpa, io, dir, .{
         .default_branch = "main",
         .object_format = .sha1,
     });
@@ -73,14 +73,14 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
     // costs a walk and nothing else.
     var index = try repo.openIndex(io);
     defer index.deinit();
-    const staged = try relic.worktree.addAll(gpa, io, dir, &index, &repo.odb, .{ .rules = rules });
+    const staged = try relic.worktree.addAll(gpa, io, dir, &index, repo.objectDatabase(), .{ .rules = rules });
     std.debug.assert(staged.added == 3);
 
     // Write the tree, through the cache tree, and the index that describes
     // it. The index goes through `index.lock`; a lock another writer holds
     // is `error.LockHeld` and is never broken.
-    const tree = try relic.worktree.writeTree(gpa, io, &index, &repo.odb);
-    try index.write(io, repo.git_dir, "index", .{});
+    const tree = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
+    try index.write(io, repo.gitDirectory(), "index", .{});
 
     // A commit object, with no ref moved: moving one is a transaction.
     const commit = try repo.writeCommit(io, .{
@@ -104,11 +104,11 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
 
     // Change a file, stage it, and write a second tree.
     try dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {\n    work();\n}\n" });
-    _ = try relic.worktree.addAll(gpa, io, dir, &index, &repo.odb, .{ .rules = rules });
-    const second = try relic.worktree.writeTree(gpa, io, &index, &repo.odb);
+    _ = try relic.worktree.addAll(gpa, io, dir, &index, repo.objectDatabase(), .{ .rules = rules });
+    const second = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
 
     // What changed, as values rather than as text.
-    var changes = try relic.diff.tree(gpa, io, &repo.odb, tree, second, .{});
+    var changes = try relic.diff.tree(gpa, io, repo.objectDatabase(), tree, second, .{});
     defer changes.deinit();
     std.debug.assert(changes.items.len == 1);
     std.debug.assert(changes.items[0].status == .modified);
@@ -117,12 +117,12 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
     // And as the patch git prints, when text is what you want.
     var patch: std.Io.Writer.Allocating = .init(gpa);
     defer patch.deinit();
-    try relic.diff.unified(gpa, io, &patch.writer, &repo.odb, changes.items[0], .{});
+    try relic.diff.unified(gpa, io, &patch.writer, repo.objectDatabase(), changes.items[0], .{});
     std.debug.assert(std.mem.startsWith(u8, patch.written(), "diff --git a/src/main.zig b/src/main.zig\n"));
 
     // Put the first tree back: files the tree lacks go, changed ones are
     // rewritten, and untracked and ignored files are left alone.
-    const restored = try relic.worktree.checkout(gpa, io, dir, &index, &repo.odb, tree, .{ .rules = rules });
+    const restored = try relic.worktree.checkout(gpa, io, dir, &index, repo.objectDatabase(), tree, .{ .rules = rules });
     std.debug.assert(restored.written == 1);
 
     // --- README:usage ---

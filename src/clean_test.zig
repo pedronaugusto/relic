@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const clean_mod = @import("clean.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo/repo.zig");
 const testgit = @import("testing/git.zig");
 
 const Repository = repo_mod.Repository;

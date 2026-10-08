@@ -1,20 +1,18 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Oid = @import("../hash.zig").Oid;
-const Kind = @import("../hash.zig").Kind;
-const access = @import("revindex.zig").test_access;
-const hash = access.hash;
-const pack = access.pack;
-const fs = access.fs;
-const config_mod = access.config_mod;
+const Oid = @import("../hash/hash.zig").Oid;
+const Kind = @import("../hash/hash.zig").Kind;
+const hash = @import("../hash/hash.zig");
+const pack = @import("pack/entry.zig");
+const fs = @import("../fs/fs.zig");
 const Error = @import("revindex.zig").Error;
 const wanted = @import("revindex.zig").wanted;
 const write = @import("revindex.zig").write;
-const testing = access.testing;
-const testremote = access.testremote;
+const testing = std.testing;
+const testremote = @import("../testing/remote.zig");
 const testgit = @import("../testing/git.zig");
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 
 test "a pack relic writes has the reverse index git's index-pack writes for it" {
     const gpa = testing.allocator;
@@ -23,11 +21,11 @@ test "a pack relic writes has the reverse index git's index-pack writes for it" 
     defer source.deinit();
     var repo = try repo_mod.Repository.open(gpa, io, source.dir, .{});
     defer repo.deinit(io);
-    var collected = try repo.odb.collectAll(io, .{});
+    var collected = try repo.objectDatabase().collectAll(io, .{});
     defer collected.deinit();
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const report = try repo.odb.writePack(io, tmp.dir, collected.entries, .{ .reverse_index = true });
+    const report = try repo.objectDatabase().writePack(io, tmp.dir, collected.entries, .{ .reverse_index = true });
     var hex: [hash.max_hex_len]u8 = undefined;
     const base = try gpa.print("pack-{s}", .{report.name.hex(&hex)});
     defer gpa.free(base);

@@ -1,0 +1,623 @@
+//! Which objects one side has that the other lacks, and whether a set of
+//! tips is whole.
+//!
+//! A push sends, and a fetch from a repository on this machine copies, the
+//! objects reachable from what is wanted and not from what the other side
+//! already has: `git rev-list --objects <want> --not <have>`. The commits
+//! are walked newest first from both sets at once, each side's flag carried
+//! down to the parents, and the walk stops once nothing left to walk can
+//! still be wanted; the trees of the commits it stopped at are marked had,
+//! so a file that did not change is not sent again. It is git's own
+//! approximation and it has git's cost, which is the commits and trees
+//! between the two sides and not the whole history.
+//!
+//! After a pack arrives, the tips it was fetched for are checked to be
+//! whole: every object below them read, as far as the new pack reaches,
+//! and every object outside it asked for by name. What the repository
+//! already held is taken to be whole, which is the assumption git's own
+//! check after a fetch makes.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const pack = @import("../odb/pack.zig");
+const revwalk = @import("walk.zig");
+const objectfilter = @import("objectfilter.zig");
+const bitmap = @import("../odb/bitmap.zig");
+const indexpack = @import("../odb/indexpack.zig");
+const reachability = @import("../odb/bitmap/reachability.zig");
+
+const Oid = hash.Oid;
+const Odb = odb_mod.Odb;
+
+/// Errors from walking objects.
+pub const Error = @import("objectwalk/filter.zig").Error;
+
+const flag_uninteresting: u8 = 1;
+const flag_seen: u8 = 2;
+const flag_popped: u8 = 4;
+
+const Node = struct {
+    flags: u8 = 0,
+    time: i64 = 0,
+    parents: []const Oid = &.{},
+    tree: Oid,
+    loaded: bool = false,
+};
+
+const Queued = struct {
+    time: i64,
+    oid: Oid,
+
+    fn newerFirst(_: void, a: Queued, b: Queued) std.math.Order {
+        if (a.time != b.time) return std.math.order(b.time, a.time);
+        return a.oid.order(b.oid);
+    }
+};
+
+/// Every object reachable from `include` and not from `exclude`, in `db`,
+/// each with the path it was found at as its delta hint. A name in
+/// `exclude` that `db` does not hold is passed over: it is the other
+/// side's, and says nothing about this one.
+pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!Odb.Collected {
+    return missingWith(gpa, io, db, include, exclude, .{});
+}
+
+/// What a server's pack leaves out: git's `--filter` specs.
+pub const Filter = @import("objectwalk/filter.zig").Filter;
+
+/// How `missingWith` walks.
+pub const MissingOptions = struct {
+    /// Disable the optional accelerator for a traversal that supplies writer hints.
+    use_bitmaps: bool = true,
+    /// Commits whose parents are not followed: a shallow clone's boundary,
+    /// as the server draws it for one request.
+    boundary: ?*const Oid.Set = null,
+    /// What is left out. An object named in `include` is kept whatever the
+    /// filter says, as git keeps one.
+    filter: Filter = .none,
+};
+
+/// `missing`, walked with `options`.
+pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid, options: MissingOptions) Error!Odb.Collected {
+    if (options.use_bitmaps and options.boundary == null and options.filter == .none) {
+        if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
+            defer gpa.free(result.words);
+            var collected: Odb.Collected = .{ .arena = .init(gpa), .entries = &.{} };
+            errdefer collected.deinit();
+            const arena = collected.arena.allocator();
+            var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+            for (result.words, 0..) |word, i| {
+                var remaining = word;
+                while (remaining != 0) {
+                    const pos: u32 = @intCast(i * 64 + @ctz(remaining));
+                    const name_position = result.store.reverse[pos];
+                    try entries.append(arena, .{ .oid = result.store.names[name_position], .hint_hash = result.store.bitmap.nameHashAt(name_position), .in_pack = true });
+                    remaining &= remaining - 1;
+                }
+            }
+            collected.entries = entries.items;
+            db.stats.bitmap_hits += 1;
+            return collected;
+        }
+    }
+    var walk: Walk = .{
+        .gpa = gpa,
+        .io = io,
+        .db = db,
+        .arena = .init(gpa),
+        .boundary = options.boundary,
+    };
+    defer walk.deinit();
+    var collected: Odb.Collected = .{ .arena = .init(gpa), .entries = &.{} };
+    errdefer collected.arena.deinit();
+    const out_arena = collected.arena.allocator();
+
+    var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+    defer entries.deinit(gpa);
+    // Trees and blobs asked for by name, in the order asked.
+    var pending: std.ArrayList(Oid) = .empty;
+    defer pending.deinit(gpa);
+
+    for (exclude) |tip| {
+        if (!try db.exists(io, tip)) continue;
+        const peeled = try walk.peel(tip, null);
+        switch (peeled.type) {
+            .commit => try walk.enqueue(peeled.oid, flag_uninteresting),
+            .tree => try walk.markTreeHad(peeled.oid),
+            .blob => try walk.had.put(gpa, peeled.oid, {}),
+            .tag => unreachable,
+        }
+    }
+    for (include) |tip| {
+        var tags: std.ArrayList(Oid) = .empty;
+        defer tags.deinit(gpa);
+        const peeled = try walk.peel(tip, &tags);
+        for (tags.items) |tag| {
+            if (walk.had.contains(tag) or walk.added.contains(tag)) continue;
+            try walk.added.put(gpa, tag, {});
+            try entries.append(gpa, .{ .oid = tag });
+        }
+        switch (peeled.type) {
+            .commit => {
+                // Asked for by name: sent whatever the filter says, as git
+                // sends a wanted commit under `object:type=blob`.
+                try walk.named.put(gpa, peeled.oid, {});
+                try walk.enqueue(peeled.oid, 0);
+            },
+            .tree, .blob => {
+                // Asked for by name: sent whatever the filter says.
+                try walk.named.put(gpa, peeled.oid, {});
+                try pending.append(gpa, peeled.oid);
+            },
+            .tag => unreachable,
+        }
+    }
+
+    const commits = try walk.walkCommits();
+    defer gpa.free(commits);
+
+    // The trees of the commits the walk stopped at are what the other side
+    // is known to have.
+    var it = walk.nodes.iterator();
+    while (it.next()) |kv| {
+        const node = kv.value_ptr;
+        if (node.flags & flag_uninteresting == 0 or !node.loaded) continue;
+        try walk.markTreeHad(node.tree);
+    }
+
+    if (options.filter != .none) {
+        // Filtered: object for object as git's filters choose.
+        var pairs: std.ArrayList(objectfilter.CommitTree) = .empty;
+        defer pairs.deinit(gpa);
+        for (commits) |oid| {
+            const node = walk.nodes.getPtr(oid).?;
+            if (node.flags & flag_uninteresting != 0) continue;
+            try pairs.append(gpa, .{ .oid = oid, .tree = node.tree });
+        }
+        try objectfilter.collect(gpa, io, db, &entries, .{ .arena = out_arena, .filter = options.filter, .commits = pairs.items, .pending = pending.items, .named = &walk.named, .had = &walk.had });
+        collected.entries = try out_arena.dupe(odb_mod.PackEntry, entries.items);
+        return collected;
+    }
+    for (commits) |oid| {
+        const node = walk.nodes.getPtr(oid).?;
+        if (node.flags & flag_uninteresting != 0) continue;
+        try entries.append(gpa, .{ .oid = oid });
+        try walk.addTree(out_arena, node.tree, "", &entries);
+    }
+    for (pending.items) |oid| {
+        if ((try db.readHeader(io, oid)).type == .tree) {
+            try walk.addTree(out_arena, oid, "", &entries);
+        } else {
+            if (walk.had.contains(oid) or walk.added.contains(oid)) continue;
+            try walk.added.put(gpa, oid, {});
+            try entries.append(gpa, .{ .oid = oid });
+        }
+    }
+
+    collected.entries = try out_arena.dupe(odb_mod.PackEntry, entries.items);
+    return collected;
+}
+
+const Walk = struct {
+    gpa: Allocator,
+    io: Io,
+    db: *Odb,
+    arena: std.heap.ArenaAllocator,
+    nodes: Oid.Map(Node) = .empty,
+    queue: std.PriorityQueue(Queued, void, Queued.newerFirst) = .empty,
+    /// Commits in the queue that are still wanted.
+    wanted_queued: usize = 0,
+    /// Trees and blobs the other side is known to have.
+    had: Oid.Set = .empty,
+    /// Objects already listed.
+    added: Oid.Set = .empty,
+    /// Objects named in `include`, which no filter leaves out.
+    named: Oid.Set = .empty,
+    boundary: ?*const Oid.Set = null,
+
+    fn deinit(w: *Walk) void {
+        w.nodes.deinit(w.gpa);
+        w.queue.deinit(w.gpa);
+        w.had.deinit(w.gpa);
+        w.added.deinit(w.gpa);
+        w.named.deinit(w.gpa);
+        w.arena.deinit();
+        w.* = undefined;
+    }
+
+    const Peeled = struct { oid: Oid, type: object.Type };
+
+    /// Follow tags to what they name, noting each tag on the way.
+    fn peel(w: *Walk, start: Oid, tags: ?*std.ArrayList(Oid)) Error!Peeled {
+        var current = start;
+        var depth: u8 = 0;
+        while (depth < 16) : (depth += 1) {
+            const header = try w.db.readHeader(w.io, current);
+            if (header.type != .tag) return .{ .oid = current, .type = header.type };
+            if (tags) |list| try list.append(w.gpa, current);
+            const found = try w.db.read(w.io, current);
+            defer w.db.allocator().free(found.bytes);
+            var tag = try object.Tag.parse(w.gpa, w.db.objectFormat(), found.bytes);
+            defer tag.deinit();
+            current = tag.target;
+        }
+        return error.UnexpectedObjectType;
+    }
+
+    fn load(w: *Walk, oid: Oid) Error!*Node {
+        const gop = try w.nodes.getOrPut(w.gpa, oid);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .tree = .zero(w.db.objectFormat()) };
+        const node = gop.value_ptr;
+        if (node.loaded) return node;
+        const found = try w.db.read(w.io, oid);
+        defer w.db.allocator().free(found.bytes);
+        if (found.type != .commit) return error.UnexpectedObjectType;
+        var commit = try object.Commit.parse(w.gpa, w.db.objectFormat(), found.bytes);
+        defer commit.deinit();
+        // `load` may have grown the map; the pointer is taken again.
+        const again = w.nodes.getPtr(oid).?;
+        again.time = commit.committer.when_secs;
+        const on_boundary = if (w.boundary) |b| b.contains(oid) else false;
+        again.parents = if (on_boundary) &.{} else try w.arena.allocator().dupe(Oid, revwalk.parentsOf(w.db, oid, commit.parents));
+        again.tree = commit.tree;
+        again.loaded = true;
+        return again;
+    }
+
+    fn enqueue(w: *Walk, oid: Oid, flags: u8) Error!void {
+        const node = try w.load(oid);
+        if (node.flags & flag_seen != 0) {
+            if (flags & flag_uninteresting != 0) try w.markUninteresting(oid);
+            return;
+        }
+        node.flags |= flag_seen | flags;
+        if (node.flags & flag_uninteresting == 0) w.wanted_queued += 1;
+        try w.queue.push(w.gpa, .{ .time = node.time, .oid = oid });
+    }
+
+    /// Mark a commit had, and every commit below it the walk has already
+    /// been through.
+    fn markUninteresting(w: *Walk, start: Oid) Error!void {
+        var stack: std.ArrayList(Oid) = .empty;
+        defer stack.deinit(w.gpa);
+        try stack.append(w.gpa, start);
+        while (stack.pop()) |oid| {
+            const node = w.nodes.getPtr(oid) orelse continue;
+            if (node.flags & flag_uninteresting != 0) continue;
+            node.flags |= flag_uninteresting;
+            if (node.flags & flag_seen != 0 and node.flags & flag_popped == 0) w.wanted_queued -= 1;
+            if (node.flags & flag_popped != 0) {
+                for (node.parents) |parent| try stack.append(w.gpa, parent);
+            }
+        }
+    }
+
+    /// Take commits newest first until nothing queued is still wanted.
+    /// Returns the wanted ones in the order taken; one marked had later is
+    /// left for the caller to skip.
+    ///
+    /// git's `limit_list`: a had commit ends the walk only once nothing
+    /// queued is still wanted, nothing queued is as new as the last wanted
+    /// commit, and five more have been taken. Commit dates are not
+    /// ordered — two made in one second tie, and clocks drift — and the
+    /// five are what lets a had commit reach one taken as wanted before it
+    /// and mark it had after all.
+    fn walkCommits(w: *Walk) Error![]Oid {
+        const slop_default = 5;
+        var out: std.ArrayList(Oid) = .empty;
+        errdefer out.deinit(w.gpa);
+        var slop: usize = slop_default;
+        var last_wanted: i64 = std.math.maxInt(i64);
+        if (w.wanted_queued == 0) return out.toOwnedSlice(w.gpa);
+        while (w.queue.pop()) |item| {
+            const node = w.nodes.getPtr(item.oid).?;
+            node.flags |= flag_popped;
+            const uninteresting = node.flags & flag_uninteresting != 0;
+            if (!uninteresting) w.wanted_queued -= 1;
+            const time = node.time;
+            const parents = node.parents;
+            for (parents) |parent| {
+                try w.enqueue(parent, if (uninteresting) flag_uninteresting else 0);
+            }
+            if (uninteresting) {
+                const next = w.queue.peek() orelse break;
+                if (last_wanted <= next.time or w.wanted_queued != 0) {
+                    slop = slop_default;
+                } else {
+                    slop -= 1;
+                    if (slop == 0) break;
+                }
+                continue;
+            }
+            try out.append(w.gpa, item.oid);
+            last_wanted = time;
+        }
+        return out.toOwnedSlice(w.gpa);
+    }
+
+    /// Mark a tree and everything below it had.
+    fn markTreeHad(w: *Walk, root: Oid) Error!void {
+        var stack: std.ArrayList(Oid) = .empty;
+        defer stack.deinit(w.gpa);
+        try stack.append(w.gpa, root);
+        while (stack.pop()) |oid| {
+            if (w.had.contains(oid)) continue;
+            try w.had.put(w.gpa, oid, {});
+            const found = w.db.read(w.io, oid) catch |err| switch (err) {
+                error.ObjectNotFound => continue,
+                else => |e| return e,
+            };
+            defer w.db.allocator().free(found.bytes);
+            if (found.type != .tree) continue;
+            var entries = object.Tree.parse(w.db.objectFormat(), found.bytes).iterate();
+            while (try entries.next()) |entry| {
+                switch (entry.mode) {
+                    .tree => try stack.append(w.gpa, entry.oid),
+                    .gitlink => {},
+                    else => try w.had.put(w.gpa, entry.oid, {}),
+                }
+            }
+        }
+    }
+
+    /// List a tree and what is below it, less what is had or listed.
+    fn addTree(
+        w: *Walk,
+        arena: Allocator,
+        root: Oid,
+        root_path: []const u8,
+        out: *std.ArrayList(odb_mod.PackEntry),
+    ) Error!void {
+        const Item = struct { oid: Oid, path: []const u8 };
+        var stack: std.ArrayList(Item) = .empty;
+        defer stack.deinit(w.gpa);
+        try stack.append(w.gpa, .{ .oid = root, .path = root_path });
+        while (stack.pop()) |item| {
+            if (w.had.contains(item.oid) or w.added.contains(item.oid)) continue;
+            try w.added.put(w.gpa, item.oid, {});
+            try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
+            const found = try w.db.read(w.io, item.oid);
+            defer w.db.allocator().free(found.bytes);
+            if (found.type != .tree) return error.UnexpectedObjectType;
+            var entries = object.Tree.parse(w.db.objectFormat(), found.bytes).iterate();
+            while (try entries.next()) |entry| {
+                const path = if (item.path.len == 0)
+                    try arena.dupe(u8, entry.name)
+                else
+                    try arena.print("{s}/{s}", .{ item.path, entry.name });
+                switch (entry.mode) {
+                    .tree => try stack.append(w.gpa, .{ .oid = entry.oid, .path = path }),
+                    // A gitlink names a commit in another repository.
+                    .gitlink => {},
+                    else => {
+                        if (w.had.contains(entry.oid) or w.added.contains(entry.oid)) continue;
+                        try w.added.put(w.gpa, entry.oid, {});
+                        try out.append(w.gpa, .{ .oid = entry.oid, .hint = path });
+                    },
+                }
+            }
+        }
+    }
+};
+
+/// Check that everything below `tips` is present. Objects `fresh` holds —
+/// the index of a pack just received — are read and walked into; any other
+/// object is asked for by name only and taken to be whole, as what the
+/// repository held before is. `fresh` of `null` walks everything.
+///
+/// The first object that is not there is `error.MissingObject`, and is
+/// written to `missing_out` when one is given.
+pub fn checkConnected(
+    gpa: Allocator,
+    io: Io,
+    db: *Odb,
+    tips: []const Oid,
+    fresh: ?*const pack.Index,
+    missing_out: ?*Oid,
+) Error!void {
+    return checkConnectedWith(gpa, io, db, tips, fresh, missing_out, .{});
+}
+
+/// What `checkConnectedWith` allows.
+pub const ConnectedOptions = struct {
+    /// The pack came from a partial clone's promisor remote, whose filter
+    /// left objects out on purpose: an object the pack's objects name and
+    /// the repository lacks is one the remote promises, as git's
+    /// `--exclude-promisor-objects` reads it.
+    promisor: bool = false,
+};
+
+/// `checkConnectedWith` for a pack just received, whose `links` were
+/// collected as it was indexed. When they read whole and the pack is not a
+/// promisor's, nothing is walked: every name the pack holds is looked up in
+/// the pack and the database, and every tip, which is what git's index-pack
+/// `--check-self-contained-and-connected` lets git's fetch skip its walk
+/// for. Otherwise it walks, as `checkConnectedWith` does.
+pub fn checkReceived(
+    gpa: Allocator,
+    io: Io,
+    db: *Odb,
+    tips: []const Oid,
+    fresh: *const pack.Index,
+    links: *const indexpack.Links,
+    missing_out: ?*Oid,
+    options: ConnectedOptions,
+) Error!void {
+    if (options.promisor or links.unreadable) return checkConnectedWith(gpa, io, db, tips, fresh, missing_out, options);
+    if (try links.firstMissing(io, db, fresh)) |oid| {
+        if (missing_out) |out| out.* = oid;
+        return error.MissingObject;
+    }
+    for (tips) |tip| {
+        if ((try fresh.find(tip)) != null) continue;
+        if (try db.exists(io, tip)) continue;
+        if (missing_out) |out| out.* = tip;
+        return error.MissingObject;
+    }
+}
+
+/// `checkConnected`, with `options`.
+pub fn checkConnectedWith(
+    gpa: Allocator,
+    io: Io,
+    db: *Odb,
+    tips: []const Oid,
+    fresh: ?*const pack.Index,
+    missing_out: ?*Oid,
+    options: ConnectedOptions,
+) Error!void {
+    var seen: Oid.Set = .empty;
+    defer seen.deinit(gpa);
+    // A tree names its blobs as blobs: one is only looked for, never read,
+    // as git's rev-list reads none.
+    const Item = struct { oid: Oid, blob: bool = false };
+    var stack: std.ArrayList(Item) = .empty;
+    defer stack.deinit(gpa);
+    for (tips) |tip| try stack.append(gpa, .{ .oid = tip });
+    while (stack.pop()) |item| {
+        const oid = item.oid;
+        if (seen.contains(oid)) continue;
+        try seen.put(gpa, oid, {});
+        const in_fresh = if (fresh) |index| (try index.find(oid)) != null else false;
+        if (item.blob and in_fresh) continue;
+        const walk_into = if (fresh == null) !item.blob else in_fresh;
+        if (!walk_into) {
+            if (!try db.exists(io, oid)) {
+                // A tip is never promised; what the pack's objects name is.
+                const is_tip = for (tips) |tip| {
+                    if (tip.eql(oid)) break true;
+                } else false;
+                if (options.promisor and !is_tip) continue;
+                if (missing_out) |out| out.* = oid;
+                return error.MissingObject;
+            }
+            continue;
+        }
+        const found = db.read(io, oid) catch |err| switch (err) {
+            error.ObjectNotFound => {
+                if (missing_out) |out| out.* = oid;
+                return error.MissingObject;
+            },
+            else => |e| return e,
+        };
+        defer db.allocator().free(found.bytes);
+        switch (found.type) {
+            .blob => {},
+            .commit => {
+                var commit = try object.Commit.parse(gpa, db.objectFormat(), found.bytes);
+                defer commit.deinit();
+                try stack.append(gpa, .{ .oid = commit.tree });
+                for (revwalk.parentsOf(db, oid, commit.parents)) |parent| try stack.append(gpa, .{ .oid = parent });
+            },
+            .tag => {
+                var tag = try object.Tag.parse(gpa, db.objectFormat(), found.bytes);
+                defer tag.deinit();
+                try stack.append(gpa, .{ .oid = tag.target });
+            },
+            .tree => {
+                var entries = object.Tree.parse(db.objectFormat(), found.bytes).iterate();
+                while (try entries.next()) |entry| switch (entry.mode) {
+                    .gitlink => {},
+                    .tree => try stack.append(gpa, .{ .oid = entry.oid }),
+                    else => try stack.append(gpa, .{ .oid = entry.oid, .blob = true }),
+                };
+            },
+        }
+    }
+}
+
+const BitmapDifference = struct { store: *const reachability.Store, words: []u64 };
+
+fn bitmapDifference(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!?BitmapDifference {
+    const store = (try db.reachabilityBitmap(io)) orelse return null;
+    const words = try gpa.alloc(u64, (@as(usize, store.bitmap.object_count) + 63) / 64);
+    errdefer gpa.free(words);
+    @memset(words, 0);
+    for (include) |oid| {
+        const found = store.reach(gpa, oid) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            gpa.free(words);
+            return null;
+        };
+        const reach = found orelse {
+            gpa.free(words);
+            return null;
+        };
+        defer gpa.free(reach);
+        for (words, reach) |*word, bits| word.* |= bits;
+    }
+    const excluded = try gpa.alloc(u64, words.len);
+    defer gpa.free(excluded);
+    @memset(excluded, 0);
+    for (exclude) |oid| {
+        if (!try db.exists(io, oid)) continue;
+        const found = store.reach(gpa, oid) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            gpa.free(words);
+            return null;
+        };
+        const reach = found orelse {
+            gpa.free(words);
+            return null;
+        };
+        defer gpa.free(reach);
+        for (excluded, reach) |*word, bits| word.* |= bits;
+    }
+    for (words, excluded) |*word, bits| word.* &= ~bits;
+    return .{ .store = store, .words = words };
+}
+
+/// Counts of objects reachable from the wanted tips and absent from the hidden tips.
+pub const Counts = struct {
+    commits: u64 = 0,
+    trees: u64 = 0,
+    blobs: u64 = 0,
+    tags: u64 = 0,
+    pub fn total(counts: Counts) u64 {
+        return counts.commits + counts.trees + counts.blobs + counts.tags;
+    }
+};
+
+/// Count objects with bitmaps when available, falling back to the ordinary walk.
+/// This is the counting stage of pack-objects and rev-list --objects --count.
+pub fn countObjects(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!Counts {
+    if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
+        defer gpa.free(result.words);
+        db.stats.bitmap_hits += 1;
+        return .{ .commits = bitmap.count(result.words, result.store.bitmap.types[0]), .trees = bitmap.count(result.words, result.store.bitmap.types[1]), .blobs = bitmap.count(result.words, result.store.bitmap.types[2]), .tags = bitmap.count(result.words, result.store.bitmap.types[3]) };
+    }
+    var collected = try missingWith(gpa, io, db, include, exclude, .{ .use_bitmaps = false });
+    defer collected.deinit();
+    var counts: Counts = .{};
+    for (collected.entries) |entry| switch ((try db.readHeader(io, entry.oid)).type) {
+        .commit => counts.commits += 1,
+        .tree => counts.trees += 1,
+        .blob => counts.blobs += 1,
+        .tag => counts.tags += 1,
+    };
+    return counts;
+}
+
+/// Errors from `countCommits`.
+pub const CountCommitsError = Error || revwalk.Error;
+
+/// Count commits as rev-list --count, using bitmap type intersections when possible.
+pub fn countCommits(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) CountCommitsError!u64 {
+    if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
+        defer gpa.free(result.words);
+        db.stats.bitmap_hits += 1;
+        return bitmap.count(result.words, result.store.bitmap.types[0]);
+    }
+    var walk = revwalk.Walk.init(gpa, db);
+    defer walk.deinit();
+    for (include) |oid| try walk.push(oid);
+    for (exclude) |oid| try walk.hide(oid);
+    var total: u64 = 0;
+    while (try walk.next(io)) |_| total += 1;
+    return total;
+}

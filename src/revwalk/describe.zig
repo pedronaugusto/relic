@@ -26,20 +26,20 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const index_mod = @import("../index.zig");
+const index_mod = @import("../index/index.zig");
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
 const revparse = @import("revparse.zig");
-const revwalk = @import("../revwalk.zig");
+const revwalk = @import("../walk/walk.zig");
 const abbrev_mod = @import("../odb/abbrev.zig");
 const glob_mod = @import("../text/glob.zig");
-const worktree = @import("../worktree.zig");
+const worktree = @import("../checkout/checkout.zig");
 const commitgraph = @import("../odb/commitgraph.zig");
-const warning = @import("../repo/warning.zig");
+const warning = @import("../report/warning.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -292,8 +292,8 @@ pub const Describer = struct {
     /// `repo_find_unique_abbrev` at the length asked for: zero is the
     /// whole name.
     fn shortName(d: *Describer, io: Io, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
-        const len: usize = if (d.abbrev) |n| (if (n == 0) oid.kind.hexLen() else n) else abbrev_mod.defaultLength(d.repo.configuration(), &d.repo.odb);
-        return abbrev_mod.unique(io, &d.repo.odb, oid, len, buf);
+        const len: usize = if (d.abbrev) |n| (if (n == 0) oid.kind.hexLen() else n) else abbrev_mod.defaultLength(d.repo.configuration(), d.repo.objectDatabase());
+        return abbrev_mod.unique(io, d.repo.objectDatabase(), oid, len, buf);
     }
 
     /// The description of the object `oid` names: a commit (or a tag of
@@ -317,7 +317,7 @@ pub const Describer = struct {
         if (commit) |c| {
             try d.describeCommit(io, c, suffix, &out);
         } else {
-            const header = try d.repo.odb.readHeader(io, oid);
+            const header = try d.repo.objectDatabase().readHeader(io, oid);
             if (header.type != .blob) return error.NotCommitOrBlob;
             try d.describeBlob(io, oid, &out);
         }
@@ -345,7 +345,7 @@ pub const Describer = struct {
             var it = d.names.valueIterator();
             while (it.next()) |n| {
                 // `peeled` is past every tag already: only its type is asked.
-                const header = d.repo.odb.readHeader(io, n.peeled) catch continue;
+                const header = d.repo.objectDatabase().readHeader(io, n.peeled) catch continue;
                 if (header.type != .commit) continue;
                 try map.put(d.gpa, n.peeled, n);
             }
@@ -438,7 +438,7 @@ pub const Describer = struct {
     fn describeBlob(d: *Describer, io: Io, blob: Oid, out: *std.ArrayList(u8)) Error!void {
         const tip = (try d.repo.head(io)) orelse return error.UnbornBranch;
         defer d.gpa.free(tip.name);
-        var walk: revwalk.Walk = .init(d.gpa, &d.repo.odb);
+        var walk: revwalk.Walk = .init(d.gpa, d.repo.objectDatabase());
         defer walk.deinit();
         walk.reverse = true;
         try walk.push(tip.oid);
@@ -476,8 +476,8 @@ pub const Describer = struct {
         }
         if (d.options.always) {
             var buf: [hash.max_hex_len]u8 = undefined;
-            const len = abbrev_mod.defaultLength(d.repo.configuration(), &d.repo.odb);
-            try out.appendSlice(d.gpa, try abbrev_mod.unique(io, &d.repo.odb, cmit, len, &buf));
+            const len = abbrev_mod.defaultLength(d.repo.configuration(), d.repo.objectDatabase());
+            try out.appendSlice(d.gpa, try abbrev_mod.unique(io, d.repo.objectDatabase(), cmit, len, &buf));
             return;
         }
         return error.CannotDescribe;
@@ -517,14 +517,14 @@ pub fn head(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// Whether the index or the working tree differs from `HEAD`'s tree,
 /// untracked files aside: `git diff-index --quiet HEAD`.
 fn isDirty(gpa: Allocator, io: Io, repo: *Repository, head_oid: Oid) Error!bool {
-    const wt = repo.work_dir orelse return error.BareRepository;
+    const wt = repo.workDirectory() orelse return error.BareRepository;
     var index = try repo.openIndex(io);
     defer index.deinit();
     var rules = try repo.worktreeRules();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
     rules.attrs = &attrs;
-    var status = try worktree.status(gpa, io, wt, &index, &repo.odb, .{
+    var status = try worktree.status(gpa, io, wt, &index, repo.objectDatabase(), .{
         .rules = rules,
         .head_tree = try repo.commitTree(io, head_oid),
         .untracked = .no,
@@ -556,7 +556,7 @@ fn peelFully(io: Io, repo: *Repository, oid: Oid) Error!Oid {
 /// `lookup_commit_reference_gently`: the commit `oid` is, or peels to.
 fn peelToCommit(io: Io, repo: *Repository, oid: Oid) Error!Oid {
     const peeled = try peelFully(io, repo, oid);
-    const header = repo.odb.readHeader(io, peeled) catch |err| switch (err) {
+    const header = repo.objectDatabase().readHeader(io, peeled) catch |err| switch (err) {
         error.ObjectNotFound => return error.NotACommit,
         else => |e| return e,
     };
@@ -565,10 +565,10 @@ fn peelToCommit(io: Io, repo: *Repository, oid: Oid) Error!Oid {
 }
 
 fn readTag(a: Allocator, io: Io, repo: *Repository, oid: Oid) Error!TagInfo {
-    const found = try repo.odb.read(io, oid);
-    defer repo.odb.allocator().free(found.bytes);
+    const found = try repo.objectDatabase().read(io, oid);
+    defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .tag) return error.UnexpectedObjectType;
-    var tag = try object.Tag.parse(repo.gpa, repo.objectFormat(), found.bytes);
+    var tag = try object.Tag.parse(repo.allocator(), repo.objectFormat(), found.bytes);
     defer tag.deinit();
     return .{
         .name = try a.dupe(u8, tag.name),
@@ -623,13 +623,13 @@ const Walk = struct {
             const known = try w.parsed.getOrPut(w.gpa, oid);
             if (!known.found_existing) {
                 errdefer _ = w.parsed.remove(oid);
-                const found = try w.repo.odb.read(io, oid);
-                defer w.repo.odb.allocator().free(found.bytes);
+                const found = try w.repo.objectDatabase().read(io, oid);
+                defer w.repo.objectDatabase().allocator().free(found.bytes);
                 if (found.type != .commit) return error.NotACommit;
                 var commit = try object.Commit.parse(w.gpa, w.repo.objectFormat(), found.bytes);
                 defer commit.deinit();
                 known.value_ptr.* = .{
-                    .parents = try w.arena.dupe(Oid, revwalk.parentsOf(&w.repo.odb, oid, commit.parents)),
+                    .parents = try w.arena.dupe(Oid, revwalk.parentsOf(w.repo.objectDatabase(), oid, commit.parents)),
                     .time = commit.committer.when_secs,
                 };
             }
@@ -688,8 +688,8 @@ fn finishDepth(w: *Walk, io: Io, depth: *u32, within: u32) Error!void {
 fn findInTree(d: *Describer, io: Io, tree: Oid, blob: Oid, seen: *Oid.Set, path: *std.ArrayList(u8), depth: u32) Error!bool {
     if (depth > object.max_tree_depth) return error.TreeTooDeep;
     if ((try seen.getOrPut(d.gpa, tree)).found_existing) return false;
-    const found = try d.repo.odb.read(io, tree);
-    defer d.repo.odb.allocator().free(found.bytes);
+    const found = try d.repo.objectDatabase().read(io, tree);
+    defer d.repo.objectDatabase().allocator().free(found.bytes);
     var it = object.Tree.parse(d.repo.objectFormat(), found.bytes).iterate();
     while (try it.next()) |entry| {
         const base = path.items.len;
@@ -762,13 +762,13 @@ const NameRev = struct {
         const slot = try nr.commits.getOrPut(nr.gpa, oid);
         if (!slot.found_existing) {
             errdefer _ = nr.commits.remove(oid);
-            const found = try nr.repo.odb.read(io, oid);
-            defer nr.repo.odb.allocator().free(found.bytes);
+            const found = try nr.repo.objectDatabase().read(io, oid);
+            defer nr.repo.objectDatabase().allocator().free(found.bytes);
             if (found.type != .commit) return error.NotACommit;
             var c = try object.Commit.parse(nr.gpa, nr.repo.objectFormat(), found.bytes);
             defer c.deinit();
             slot.value_ptr.* = .{
-                .parents = try nr.gpa.dupe(Oid, revwalk.parentsOf(&nr.repo.odb, oid, c.parents)),
+                .parents = try nr.gpa.dupe(Oid, revwalk.parentsOf(nr.repo.objectDatabase(), oid, c.parents)),
                 .time = c.committer.when_secs,
                 .parsed = true,
             };
@@ -778,7 +778,7 @@ const NameRev = struct {
 
     fn setCutoff(nr: *NameRev, io: Io, cmit: Oid) Error!void {
         if (try nr.repo.configuration().getBool("core.commitgraph", true)) {
-            const objects = try nr.repo.common_dir.openDir(io, "objects", .{});
+            const objects = try nr.repo.commonDirectory().openDir(io, "objects", .{});
             defer objects.close(io);
             if (try commitgraph.Graph.openUsable(nr.gpa, io, objects, nr.repo.objectFormat())) |graph_value| {
                 var graph = graph_value;
@@ -842,7 +842,7 @@ const NameRev = struct {
             var kind: ?object.Type = null;
             var depth: u8 = 0;
             while (depth < 16) : (depth += 1) {
-                const header = nr.repo.odb.readHeader(io, current) catch break;
+                const header = nr.repo.objectDatabase().readHeader(io, current) catch break;
                 kind = header.type;
                 if (header.type != .tag) break;
                 const tag = readTag(a, io, nr.repo, current) catch {

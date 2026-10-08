@@ -26,15 +26,15 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
-const index_mod = @import("index.zig");
-const odb_mod = @import("odb.zig");
-const attributes = @import("worktree/attributes.zig");
-const ere = @import("ere.zig");
-const pathspec_mod = @import("pathspec.zig");
-const fs = @import("repo/fs.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const repo_mod = @import("repo/repo.zig");
+const index_mod = @import("index/index.zig");
+const odb_mod = @import("odb/odb.zig");
+const attributes = @import("patterns/attributes.zig");
+const ere = @import("text/ere.zig");
+const pathspec_mod = @import("patterns/pathspec.zig");
+const fs = @import("fs/fs.zig");
 const userdiff = @import("diff/userdiff.zig");
 
 const Oid = hash.Oid;
@@ -855,7 +855,7 @@ fn collectIndex(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_m
 
 fn collectTree(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, tree_oid: Oid, prefix: []const u8, name_prefix: []const u8, items: *std.ArrayList(Item), depth: u32) Error!void {
     if (depth > object.max_tree_depth) return error.TreeTooDeep;
-    const db = &repo.odb;
+    const db = repo.objectDatabase();
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.NotATree;
@@ -878,14 +878,14 @@ fn peelToTree(io: Io, repo: *Repository, oid: Oid) Error!Oid {
     var current = oid;
     var depth: usize = 0;
     while (depth < 64) : (depth += 1) {
-        const header = try repo.odb.readHeader(io, current);
+        const header = try repo.objectDatabase().readHeader(io, current);
         switch (header.type) {
             .tree => return current,
             .commit => return repo.commitTree(io, current),
             .tag => {
-                const found = try repo.odb.read(io, current);
-                defer repo.odb.allocator().free(found.bytes);
-                var tag = object.Tag.parse(repo.gpa, repo.objectFormat(), found.bytes) catch return error.NotATree;
+                const found = try repo.objectDatabase().read(io, current);
+                defer repo.objectDatabase().allocator().free(found.bytes);
+                var tag = object.Tag.parse(repo.allocator(), repo.objectFormat(), found.bytes) catch return error.NotATree;
                 defer tag.deinit();
                 current = tag.target;
             },
@@ -908,7 +908,7 @@ fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attr
     for (items) |*item| {
         var driver: ?[]const u8 = null;
         if (attrs) |at| {
-            if (repo.work_dir) |w| try at.enter(io, w, item.path);
+            if (repo.workDirectory()) |w| try at.enter(io, w, item.path);
             const applied = try at.lookup(a, item.path, false);
             if (applied.get("diff")) |state| switch (state) {
                 .unset => item.binary = true,
@@ -994,7 +994,7 @@ fn patternSyntax(repo: *Repository, options: Options) Syntax {
 fn collect(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, source: Source, items: *std.ArrayList(Item)) Error!void {
     switch (source) {
         .worktree => {
-            if (repo.work_dir == null) return error.BareRepository;
+            if (repo.workDirectory() == null) return error.BareRepository;
             try collectIndex(a, io, repo, spec, false, items);
         },
         .index => try collectIndex(a, io, repo, spec, true, items),
@@ -1024,10 +1024,10 @@ const Batch = struct {
             const item = items[end];
             const content: ?[]u8 = switch (item.source) {
                 .blob => |oid| blk: {
-                    const found = try repo.odb.read(io, oid);
+                    const found = try repo.objectDatabase().read(io, oid);
                     break :blk found.bytes;
                 },
-                .file => (fs.readFileAlloc(repo.odb.allocator(), io, repo.work_dir.?, item.path, 1 << 31) catch null) orelse null,
+                .file => (fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?, item.path, 1 << 31) catch null) orelse null,
             };
             if (content) |c| {
                 try batch.owned.append(gpa, c);
@@ -1048,7 +1048,7 @@ const Batch = struct {
     }
 
     fn deinit(batch: *Batch, gpa: Allocator, repo: *Repository) void {
-        for (batch.owned.items) |b| repo.odb.allocator().free(b);
+        for (batch.owned.items) |b| repo.objectDatabase().allocator().free(b);
         batch.owned.deinit(gpa);
         batch.* = undefined;
     }
@@ -1087,7 +1087,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
 
     var attrs: ?attributes.Attrs = null;
     defer if (attrs) |*x| x.deinit();
-    if (repo.work_dir != null) attrs = try repo.loadAttrs(io);
+    if (repo.workDirectory() != null) attrs = try repo.loadAttrs(io);
     defer if (attrs) |*x| x.leave();
     var rules: std.array_hash_map.String(*userdiff.Rule) = .empty;
     defer for (rules.values()) |rule| rule.deinit();

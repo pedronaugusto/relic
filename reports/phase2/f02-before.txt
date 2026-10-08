@@ -1,0 +1,26 @@
+test
++- examples
+   +- run test w
+preflight: test seed 414853803 (reproduce with PREFLIGHT_TEST_SEED=414853803)
+failed command: ./.zig-cache/o/e2f6ffa84c1ced35864619e2f950ab52/test --cache-dir=./.zig-cache --seed=0x18ba2aab --listen=-
+
+test
++- run test relic-tests 4 pass, 1 fail (5 total)
+error: 'odb.indexpack.test.phase2 received pack survives prune before references are published' failed:
+       preflight: test seed 414853803 (reproduce with PREFLIGHT_TEST_SEED=414853803)
+       odb.indexpack.test.phase2 received pack survives prune before references are published: FileNotFound; seed 414853803
+       /Users/gusto/.local/zig/0.17.0/lib/std/Io/Threaded.zig:4219:31: 0x1021d4893 in dirAccessPosix (relic-tests)
+                           .NOENT => return error.FileNotFound,
+                                     ^
+       /Users/gusto/.local/zig/0.17.0/lib/std/Io/Dir.zig:442:5: 0x10226a54f in access (relic-tests)
+           return io.vtable.dirAccess(io.userdata, dir, sub_path, options);
+           ^
+       /Users/gusto/work/tycho/.wt/relic-phase2/src/odb/indexpack.zig:2611:9: 0x102269bab in test.phase2 received pack survives prune before references are published (relic-tests)
+               try dir.access(io, marker, .{});
+               ^
+failed command: ./.zig-cache/o/7318aaf542fa7288ec3eeef8903325d8/relic-tests --cache-dir=./.zig-cache --seed=0x18ba2aab --listen=-
+
+Build Summary: 25/27 steps succeeded (1 failed); 5/6 tests passed (1 failed)
+test transitive failure
++- run test relic-tests 4 pass, 1 fail (5 total)
+

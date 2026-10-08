@@ -12,12 +12,12 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 const push_mod = @import("../transport/push.zig");
 const lfspush = @import("push.zig");
 const testlfs = @import("../testing/lfs.zig");
 const lt = @import("transfer_test.zig");
-const object = @import("../object.zig");
+const object = @import("../object/object.zig");
 
 const Fixture = lt.Fixture;
 

@@ -3,11 +3,11 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const hash = @import("../../hash.zig");
+const hash = @import("../../hash/hash.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
-const object = @import("../../object.zig");
-const fs = @import("../../repo/fs.zig");
+const object = @import("../../object/object.zig");
+const fs = @import("../../fs/fs.zig");
 const reftable = @import("../reftable.zig");
 const reflog = @import("../reflog.zig");
 const refs = @import("../value.zig");
@@ -228,10 +228,13 @@ fn lessThanBroken(_: void, a: refs.Broken, b: refs.Broken) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
+/// Errors from `readLog`.
+pub const ReadLogError = refs.ReadError || reflog.ReadError;
+
 /// `Store.readLog` over reftable: the entries oldest first, as the files
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
-pub fn readLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
+pub fn readLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) ReadLogError!reflog.Log {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const records = try logRecords(gpa, arena_instance.allocator(), io, store, name);
@@ -1051,20 +1054,20 @@ pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) re
 // Tests
 //=========================================================================
 
-pub const test_access = if (builtin.is_test) struct {
-    pub const View = Self.View;
-    pub const readIn = Self.readIn;
-    pub const resolveIn = Self.resolveIn;
-    pub const lessThanNamed = Self.lessThanNamed;
-    pub const put = Self.put;
-    pub const lockStack = Self.lockStack;
-    pub const checkNames = Self.checkNames;
-    pub const deletedHere = Self.deletedHere;
-    pub const install = Self.install;
-    pub const addTable = Self.addTable;
-    pub const logMessage = Self.logMessage;
-    pub const writeTable = Self.writeTable;
-    pub const Segment = Self.Segment;
-    pub const suggestSegment = Self.suggestSegment;
-    pub const suggest = Self.suggest;
-} else struct {};
+test "the geometric rule merges what git's merges" {
+    // git's own examples from its source.
+    try std.testing.expect(suggest(&.{ 64, 32, 16, 8, 4, 2, 1 }, 2) == null);
+    // The segment ends before the newest table, and gathering back from
+    // there each older table is smaller than twice what came after it, so
+    // it reaches the oldest.
+    const tail = suggest(&.{ 64, 32, 16, 8, 4, 3, 1 }, 2).?;
+    try std.testing.expectEqual(@as(usize, 0), tail.start);
+    try std.testing.expectEqual(@as(usize, 6), tail.end);
+    const deep = suggest(&.{ 128, 32, 16, 8, 4, 3, 1 }, 2).?;
+    try std.testing.expectEqual(@as(usize, 1), deep.start);
+    try std.testing.expectEqual(@as(usize, 6), deep.end);
+    try std.testing.expect(suggest(&.{5}, 2) == null);
+    const pair = suggest(&.{ 10, 10 }, 2).?;
+    try std.testing.expectEqual(@as(usize, 0), pair.start);
+    try std.testing.expectEqual(@as(usize, 2), pair.end);
+}

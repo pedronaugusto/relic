@@ -1,0 +1,41 @@
+check
++- compile test relic-tests debug native 4 errors
+src/lfs/ssh_test.zig:345:29: error: no field or member function named 'close' in 'lfs.api.Server'
+                defer server.close();
+                      ~~~~~~^~~~~~
+src/lfs/api.zig:2407:20: note: struct declared here
+pub const Server = struct {
+                   ^~~~~~
+src/lfs/ssh_test.zig:345:29: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/lfs/ssh_test.zig:345:29: note: use '.*' to dereference pointer
+referenced by:
+    test_0: src/tests.zig:95:21
+src/transport/transport.zig:286:30: error: no field or member function named 'close' in 'wire.connection.Connection'
+                errdefer conn.close(io);
+                         ~~~~^~~~~~
+src/wire/connection.zig:60:24: note: struct declared here
+pub const Connection = struct {
+                       ^~~~~~
+src/transport/transport.zig:286:30: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/transport.zig:286:30: note: use '.*' to dereference pointer
+src/transport/transport.zig:399:41: error: no field or member function named 'close' in 'transport.remotehelper.Helper'
+            .helper => |helper| helper.h.close(),
+                                ~~~~~~~~^~~~~~
+src/transport/remotehelper.zig:183:20: note: struct declared here
+pub const Helper = struct {
+                   ^~~~~~
+src/transport/transport.zig:399:41: note: method invocation only supports up to one level of implicit pointer dereferencing
+src/transport/transport.zig:399:41: note: use '.*' to dereference pointer
+src/transport/transport_test.zig:408:16: error: no field or member function named 'close' in 'transport.transport.Session'
+        session.close(io);
+        ~~~~~~~^~~~~~
+src/transport/transport.zig:161:21: note: struct declared here
+pub const Session = struct {
+                    ^~~~~~
+error: 4 compilation errors
+failed command: /Users/gusto/.local/zig/0.17.0/zig test -Odebug --dep conduit --dep sweep --dep parallax --dep uplink --dep airlock --dep warp --dep shakedown --dep build_options --dep preflight_timings --dep preflight_order --dep preflight_runner_options --dep preflight_default_test_runner -Mroot=src/tests.zig -Odebug --dep conduit.tty --dep conduit_options -Mconduit=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/conduit.zig -Odebug -Msweep=zig-pkg/sweep-0.1.0-6ErwaUfyCQCOPME4WppYGKV7aBld1LZjPNQIvG-30NBM/src/sweep.zig -Odebug -Mparallax=zig-pkg/parallax-0.1.0-lz9Br1eyBQDfFPWZk-5_xRzpA-3IBIA7YViOv9P_x1KC/src/parallax.zig -Odebug -Muplink=zig-pkg/uplink-0.1.0-0eVSJpb2DABkf8TwlkKWcmLIhxfR4GoInPTIMmuC0ZZ_/src/uplink.zig -Odebug --dep seam -Mairlock=zig-pkg/airlock-0.1.0-rfvu6NtSBQAASbhZxM8kQ4szfgW3YCNvxVXDPMOv-APr/src/airlock.zig -Odebug --dep kernels_arm_crc --dep kernels_arm_pmull --dep kernels_arm_eor3 --dep kernels_arm_dotprod -Mwarp=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/warp.zig -Odebug -Mshakedown=zig-pkg/shakedown-0.1.0-BR8U4wgEDgAy2m7lSRtXgIZd_M19hPZ256UdmaPT_9Nj/src/shakedown.zig -Mbuild_options=.zig-cache/o/eb8d691eb29ff9b4efbc7ba4e87d72df/options.zig -Mpreflight_timings=zig-pkg/preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P/src/timings.zig -Mpreflight_order=zig-pkg/preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P/src/order.zig -Mpreflight_runner_options=.zig-cache/o/463caaec1b426f72fbe04871c30fadeb/options.zig -Mpreflight_default_test_runner=/Users/gusto/.local/zig/0.17.0/lib/compiler/test_runner.zig -Odebug -Mconduit.tty=zig-pkg/conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3/src/tty.zig -Mconduit_options=.zig-cache/o/d576ada3f61aecbd22bbc4605333792a/options.zig -Odebug -Mseam=zig-pkg/airlock-0.1.0-rfvu6NtSBQAASbhZxM8kQ4szfgW3YCNvxVXDPMOv-APr/src/seam.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+crc --dep kernels_fold -Mkernels_arm_crc=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_crc.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+aes+crc --dep kernels_fold -Mkernels_arm_pmull=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_pmull.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+aes+crc+sha3 --dep kernels_fold -Mkernels_arm_eor3=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_eor3.zig -Odebug -target aarch64-macos.26.2...26.2-none -mcpu apple_m3+dotprod --dep kernels_fold -Mkernels_arm_dotprod=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/arm_dotprod.zig -Odebug -Mkernels_fold=zig-pkg/warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ/src/kernels/fold.zig -lc --test-runner zig-pkg/preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P/src/runner.zig --cache-dir .zig-cache --global-cache-dir /Users/gusto/.cache/zig --build-root . --name relic-tests --zig-lib-dir /Users/gusto/.local/zig/0.17.0/lib/ --listen=-
+
+Build Summary: 16/18 steps succeeded (1 failed)
+check transitive failure
++- compile test relic-tests debug native 4 errors
+

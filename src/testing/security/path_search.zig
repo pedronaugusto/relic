@@ -11,7 +11,7 @@ const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 
-const program = @import("../../repo/program.zig");
+const program = @import("../../process/program.zig");
 const testgit = @import("../git.zig");
 
 const exe = if (builtin.target.os.tag == .windows) ".exe" else "";
@@ -28,7 +28,7 @@ fn plant(io: Io, dir: Io.Dir, name: []const u8) !void {
 
 /// Run the bare `name` in `cwd`, asked to make the file `ran` there.
 fn runBare(gpa: std.mem.Allocator, io: Io, env: *const std.process.Environ.Map, name: []const u8, cwd: Io.Dir) !void {
-    var outcome = program.run(.{ .environ = env }, gpa, io, .{ .argv = &.{ name, "touch", "ran" }, .cwd = .{ .dir = cwd } }, "", .{}) catch |err| switch (err) {
+    var outcome = program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ name, "touch", "ran" }, .cwd = .{ .dir = cwd } }, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };

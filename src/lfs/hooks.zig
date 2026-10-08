@@ -24,11 +24,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const repo_mod = @import("../repo.zig");
-const diff = @import("../diff.zig");
-const hooks = @import("../repo/hooks.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const repo_mod = @import("../repo/repo.zig");
+const diff = @import("../diff/diff.zig");
+const hooks = @import("../hooks/hooks.zig");
 const lfslocks = @import("locks.zig");
 
 const Oid = hash.Oid;
@@ -82,8 +82,8 @@ pub const Native = struct {
         } else if (std.mem.eql(u8, event, "post-commit")) {
             const head = (try n.repo.head(io)) orelse return;
             defer n.gpa.free(head.name);
-            const found = try n.repo.odb.read(io, head.oid);
-            defer n.repo.odb.allocator().free(found.bytes);
+            const found = try n.repo.objectDatabase().read(io, head.oid);
+            defer n.repo.objectDatabase().allocator().free(found.bytes);
             var commit = try object.Commit.parse(arena, n.repo.objectFormat(), found.bytes);
             defer commit.deinit();
             // git's diff-tree of a root commit lists nothing.
@@ -97,7 +97,7 @@ pub const Native = struct {
     fn changed(n: *Native, arena: Allocator, io: Io, old: Oid, new: Oid) ![]const []const u8 {
         const old_tree = try treeOf(arena, io, n.repo, old);
         const new_tree = try treeOf(arena, io, n.repo, new);
-        var changes = try diff.tree(n.gpa, io, &n.repo.odb, old_tree, new_tree, .{});
+        var changes = try diff.tree(n.gpa, io, n.repo.objectDatabase(), old_tree, new_tree, .{});
         defer changes.deinit();
         const out = try arena.alloc([]const u8, changes.items.len);
         for (changes.items, out) |c, *p| p.* = try arena.dupe(u8, c.path());
@@ -107,8 +107,8 @@ pub const Native = struct {
 
 fn treeOf(arena: Allocator, io: Io, repo: *Repository, commit_oid: Oid) !Oid {
     const peeled = try repo.peel(io, commit_oid);
-    const found = try repo.odb.read(io, peeled);
-    defer repo.odb.allocator().free(found.bytes);
+    const found = try repo.objectDatabase().read(io, peeled);
+    defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type == .tree) return peeled;
     var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
     defer commit.deinit();

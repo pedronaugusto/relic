@@ -12,9 +12,9 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const testgit = @import("git.zig");
-const hash = @import("../hash.zig");
-const repo_mod = @import("../repo.zig");
-const worktree = @import("../worktree.zig");
+const hash = @import("../hash/hash.zig");
+const repo_mod = @import("../repo/repo.zig");
+const worktree = @import("../checkout/checkout.zig");
 
 const Repository = repo_mod.Repository;
 const testing = std.testing;
@@ -120,7 +120,7 @@ fn relicStatus(gpa: Allocator, io: Io, git: *testgit.Repo, untracked: worktree.S
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    var result = try worktree.status(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+    var result = try worktree.status(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
         .rules = rules,
         .head_tree = try repo.headTree(io),
         .untracked = untracked,
@@ -195,7 +195,7 @@ test "list names a repository inside the working tree once, as git ls-files --ot
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    var listing = try worktree.list(gpa, io, repo.work_dir.?, &index, rules);
+    var listing = try worktree.list(gpa, io, repo.workDirectory().?, &index, rules);
     defer listing.deinit();
 
     const out = try git.run(io, &.{ "ls-files", "--others", "--exclude-standard" });
@@ -233,10 +233,10 @@ test "addAll stages a repository inside the working tree as the gitlink git add 
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = rules });
+    const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = rules });
     try testing.expectEqual(@as(u32, 1), outcome.nested_repositories);
-    const ours_tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
-    try index.write(io, repo.git_dir, "index", .{});
+    const ours_tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
+    try index.write(io, repo.gitDirectory(), "index", .{});
     const ours = try git.run(io, &.{ "ls-files", "-s" });
     defer gpa.free(ours);
 
@@ -266,7 +266,7 @@ test "a repository inside the working tree with no commit stops addAll, as it st
     var index = try repo.openIndex(io);
     defer index.deinit();
     var refusal: worktree.Refusal = .{};
-    try testing.expectError(error.NoCommitCheckedOut, worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+    try testing.expectError(error.NoCommitCheckedOut, worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
         .rules = try repo.worktreeRules(),
         .refusal = &refusal,
     }));

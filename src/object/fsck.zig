@@ -27,13 +27,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const config_mod = @import("../config.zig");
-const gitmodules = @import("../submodule/gitmodules.zig");
-const safepath = @import("../worktree/safepath.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("object.zig");
+const config_mod = @import("../config/config.zig");
+const gitmodules = @import("../config/gitmodules.zig");
+const safepath = @import("../names/path.zig");
 const ref_names = @import("../names/ref.zig");
-const warning = @import("../repo/warning.zig");
+const warning = @import("../report/warning.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -446,12 +446,15 @@ pub fn wanted(config: *const config_mod.Config, scope: Scope) config_mod.ValueEr
     return null;
 }
 
+/// Errors from `forTransfer`.
+pub const ForTransferError = LoadError || config_mod.ValueError;
+
 /// The rules a fetch or clone with `config` checks with, or `null` for
 /// none: `explicit` when the caller says, otherwise `fetch.fsckObjects` or
 /// `transfer.fsckObjects`. On, they are git's strict checks with
 /// `fetch.fsck.*`; unset, `baseline` with `fetch.fsck.*`; off, none, as git
 /// checks nothing then. The result's skip list is `gpa`'s.
-pub fn forTransfer(gpa: Allocator, io: Io, config: ?*const config_mod.Config, kind: Kind, scope: Scope, explicit: ?bool, sink: ?Sink) (LoadError || config_mod.ValueError)!?Rules {
+pub fn forTransfer(gpa: Allocator, io: Io, config: ?*const config_mod.Config, kind: Kind, scope: Scope, explicit: ?bool, sink: ?Sink) ForTransferError!?Rules {
     const on = explicit orelse if (config) |c| try wanted(c, scope) else null;
     var rules = baseline;
     if (on) |yes| {

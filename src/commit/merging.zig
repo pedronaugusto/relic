@@ -17,29 +17,29 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const merge = @import("../merge.zig");
-const revwalk = @import("../revwalk.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const merge = @import("../merge/merge.zig");
+const revwalk = @import("../walk/walk.zig");
 const threeway = @import("../merge/threeway.zig");
-const refspec = @import("../transport/refspec.zig");
-const signing_mod = @import("signing.zig");
-const hooks_mod = @import("../repo/hooks.zig");
+const refspec = @import("../wire/refspec.zig");
+const signing_mod = @import("../object/signing.zig");
+const hooks_mod = @import("../hooks/hooks.zig");
 const commithooks = @import("commithooks.zig");
-const program = @import("../repo/program.zig");
-const filter = @import("../worktree/filter.zig");
+const program = @import("../process/program.zig");
+const filter = @import("../checkout/filter.zig");
 const ort = @import("../merge/ort.zig");
 const rerere = @import("../merge/rerere.zig");
 const reset = @import("reset.zig");
-const head_mod = @import("head.zig");
-const message = @import("message.zig");
+const head_mod = @import("../repo/head.zig");
+const message = @import("../object/message.zig");
 const glob_mod = @import("../text/glob.zig");
-const worktree = @import("../worktree.zig");
-const repo_mod = @import("../repo.zig");
-const refs_mod = @import("../refs.zig");
-const index_mod = @import("../index.zig");
-const diagnostic = @import("../repo/diagnostic.zig");
-const config = @import("../config.zig");
+const worktree = @import("../checkout/checkout.zig");
+const repo_mod = @import("../repo/repo.zig");
+const refs_mod = @import("../refs/refs.zig");
+const index_mod = @import("../index/index.zig");
+const diagnostic = @import("../report/diagnostic.zig");
+const config = @import("../config/config.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -122,7 +122,7 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self
             }
         }
     }
-    const oid = repo.odb.findPrefix(io, name) catch return error.NotACommit;
+    const oid = repo.objectDatabase().findPrefix(io, name) catch return error.NotACommit;
     return targetOf(io, repo, oid, name, .commit);
 }
 
@@ -131,7 +131,10 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self
 /// remote's fetch refspecs map it to -- or the ref itself for a remote of
 /// `.` -- named by its full name, as git names it in the message. More than
 /// one is an octopus, `startHeads`. The names live in `arena`.
-pub fn upstreams(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository) Self.Error![]const Target {
+pub const UpstreamOptions = struct { arena: Allocator };
+
+pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, options: UpstreamOptions) Self.Error![]const Target {
+    const arena = options.arena;
     if (!(repo.configuration().getBool("merge.defaulttoupstream", true) catch true)) return error.NoMergeTarget;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -169,7 +172,7 @@ pub fn upstreams(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository) Se
 }
 
 fn targetOf(io: Io, repo: *Repository, oid: Oid, name: []const u8, kind: Kind) Error!Target {
-    const header = try repo.odb.readHeader(io, oid);
+    const header = try repo.objectDatabase().readHeader(io, oid);
     switch (header.type) {
         .commit => return .{ .oid = oid, .name = name, .kind = kind },
         .tag => return error.AnnotatedTag,
@@ -285,8 +288,8 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
 
     if (targets.len == 0) return error.NoMergeTarget;
     if (inProgress(io, repo)) return error.MergeInProgress;
-    if (repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head) or
-        repo.refStore().root().exists(repo.gpa, io, .revert_head)) return error.SequencerInProgress;
+    if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) or
+        repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.SequencerInProgress;
     if (repo.configuration().getBool("merge.log", false) catch true) return error.UnsupportedMergeMessage;
     if (repo.configuration().getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
 
@@ -317,10 +320,10 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const reflog_action = action.items;
     if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &index, head, reduced, reflog_action, fast_forward, options);
 
-    try repo.refStore().root().write(repo.gpa, io, .orig_head, ours);
+    try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     const target = reduced.heads[0];
-    const bases = try revwalk.mergeBases(gpa, io, &repo.odb, ours, target.oid);
+    const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), ours, target.oid, .{});
     defer gpa.free(bases);
 
     if (bases.len == 0 and !options.allow_unrelated_histories) return error.UnrelatedHistories;
@@ -361,7 +364,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     });
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
-    try repo.refStore().root().write(repo.gpa, io, .auto_merge, outcome.auto_merge);
+    try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
     return commitOrStop(gpa, io, repo, &arena_instance, &index, &outcome, .{
         .head = head,
         .parents = &.{ ours, target.oid },
@@ -412,7 +415,7 @@ fn reduceHeads(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, oids
     var kept: std.ArrayList(Oid) = .empty;
     for (unique.items, 0..) |one, i| {
         const redundant = for (unique.items, 0..) |other, j| {
-            if (i != j and try revwalk.isAncestor(gpa, io, &repo.odb, one, other)) break true;
+            if (i != j and try revwalk.isAncestor(gpa, io, repo.objectDatabase(), one, other, .{})) break true;
         } else false;
         if (!redundant) try kept.append(arena, one);
     }
@@ -436,11 +439,11 @@ fn octopus(
     const ours = head.oid.?;
     const heads = try arena.alloc(Oid, reduced.heads.len);
     for (reduced.heads, heads) |target, *oid| oid.* = target.oid;
-    try repo.refStore().root().write(repo.gpa, io, .orig_head, ours);
+    try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (!options.allow_unrelated_histories and !try shareHistory(gpa, arena, io, repo, ours, heads)) return error.UnrelatedHistories;
     // Up to date when `HEAD` reaches every head.
     for (heads) |one| {
-        const bases = try revwalk.mergeBases(gpa, io, &repo.odb, ours, one);
+        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), ours, one, .{});
         defer gpa.free(bases);
         if (bases.len == 0 or !bases[0].eql(one)) break;
     } else return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
@@ -476,7 +479,7 @@ fn shareHistory(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, our
     for (heads) |one| {
         var next: std.ArrayList(Oid) = .empty;
         for (bases.items) |base| {
-            const found = try revwalk.mergeBases(gpa, io, &repo.odb, one, base);
+            const found = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), one, base, .{});
             defer gpa.free(found);
             try next.appendSlice(arena, found);
         }
@@ -539,12 +542,12 @@ fn commitOrStop(
                 .{ .name = "GIT_INDEX_FILE", .value = e.index_path },
                 .{ .name = "GIT_EDITOR", .value = ":" },
             } });
-            try repo.refStore().special().write(repo.gpa, io, .merge_head, merge_heads.items);
-            try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", text);
+            try repo.refStore().special().write(repo.allocator(), io, .merge_head, merge_heads.items);
+            try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", text);
             const message_path = try h.path(arena, "MERGE_MSG");
             _ = try runner.prepareCommitMsg(io, e, message_path, .merge, null);
             if (h.verify) _ = try runner.commitMsg(io, e, message_path);
-            text = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "";
+            text = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
         }
         const cleaned = try message.cleanup(arena, text, cleanupMode(repo, false), comment);
         if (cleaned.len == 0) return error.EmptyMessage;
@@ -565,7 +568,7 @@ fn commitOrStop(
     }
 
     // Stopped: with conflicts, or before committing as asked.
-    try repo.refStore().special().write(repo.gpa, io, .merge_head, merge_heads.items);
+    try repo.refStore().special().write(repo.allocator(), io, .merge_head, merge_heads.items);
     // `MERGE_MSG` ends the message with a newline whatever it ended with.
     try msg.append(arena, '\n');
     if (!outcome.isClean()) {
@@ -579,10 +582,10 @@ fn commitOrStop(
             try msg.append(arena, '\n');
         }
     }
-    try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", msg.items);
-    try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
+    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
+    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
     var reused: []const []const u8 = &.{};
-    if (!outcome.isClean()) reused = try runRerere(gpa, arena, io, repo, index, options.rerere_autoupdate);
+    if (!outcome.isClean()) reused = try rerere.afterStop(gpa, io, repo, index, .{ .arena = arena, .autoupdate = options.rerere_autoupdate });
     return .{
         .gpa = gpa,
         .arena = arena_instance.state,
@@ -637,7 +640,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     }
     // `git commit` drops a parent another reaches unless the merge was
     // asked not to fast-forward: an octopus that went past `HEAD`.
-    const mode = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MODE")) orelse "";
+    const mode = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MODE")) orelse "";
     const kept: []const Oid = if (std.mem.eql(u8, mode, "no-ff")) parents.items else try reduceHeads(gpa, arena, io, repo, parents.items);
 
     var index = try repo.openIndex(io);
@@ -645,12 +648,12 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnresolvedConflicts;
     }
-    const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try repo.writeIndex(io, &index);
 
     const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
     const author = options.author orelse options.who;
-    const given = options.message orelse ((try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "");
+    const given = options.message orelse ((try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
     const raw = try h.beforeCommit(arena, io, repo, given, .merge, author);
     const comment = message.commentString(repo.configuration().get("core.commentchar"), raw);
     const cleaned = try message.cleanup(arena, raw, options.cleanup, comment);
@@ -665,17 +668,10 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     }, options.diagnostic);
     const log_message = try arena.print("commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
-    try finishCommit(gpa, io, repo);
+    try rerere.afterCommit(gpa, io, repo);
     try h.postCommit(arena, io, author);
     return commit;
 }
-
-/// What `git commit` does to a stop's files once the commit that ends it is
-/// made: `rerere.afterCommit`.
-pub const finishCommit = rerere.afterCommit;
-
-/// Run rerere on a stop: `rerere.afterStop`.
-pub const runRerere = rerere.afterStop;
 
 /// Undo a merge that stopped: `git merge --abort`, which is `git reset
 /// --merge`. Changes a person made before the merge, to paths the merge did
@@ -692,7 +688,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     try removeMergeState(io, repo);
     // `git reset` records where it moved from and logs the move, even to
     // where it already was.
-    try repo.refStore().root().write(repo.gpa, io, .orig_head, current);
+    try repo.refStore().root().write(repo.allocator(), io, .orig_head, current);
     try head_mod.advance(io, repo, head, current, .{ .who = who, .message = "reset: moving to HEAD" });
 }
 
@@ -701,9 +697,9 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
 pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
     try repo.refStore().special().delete(io, .merge_head);
     for ([_][]const u8{ "MERGE_RR", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
-        try head_mod.removeState(io, repo.git_dir, name);
+        try head_mod.removeState(io, repo.gitDirectory(), name);
     }
-    try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
+    try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
 }
 
 fn configuredFastForward(repo: *Repository) FastForward {

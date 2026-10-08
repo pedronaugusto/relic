@@ -1,31 +1,23 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Oid = @import("../hash.zig").Oid;
-const Kind = @import("../hash.zig").Kind;
-const access = @import("sparseindex.zig").test_access;
-const hash = access.hash;
-const object = access.object;
-const odb_mod = access.odb_mod;
-const index_mod = access.index_mod;
-const sparse = access.sparse;
-const fs = access.fs;
-const Index = access.Index;
-const Entry = access.Entry;
-const Odb = access.Odb;
+const Oid = @import("../hash/hash.zig").Oid;
+const Kind = @import("../hash/hash.zig").Kind;
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const index_mod = @import("index.zig");
+const sparse = @import("../patterns/sparse.zig");
+const fs = @import("../fs/fs.zig");
+const Index = index_mod.Index;
+const Entry = index_mod.Entry;
+const Odb = odb_mod.Odb;
 const Error = @import("sparseindex.zig").Error;
-const max_depth = access.max_depth;
 const hasSparseDirectories = @import("sparseindex.zig").hasSparseDirectories;
 const containing = @import("sparseindex.zig").containing;
 const expand = @import("sparseindex.zig").expand;
 const expandPresent = @import("sparseindex.zig").expandPresent;
-const expandSelected = access.expandSelected;
-const expandTree = access.expandTree;
-const appendEntry = access.appendEntry;
 const collapse = @import("sparseindex.zig").collapse;
-const collapseNode = access.collapseNode;
-const findChild = access.findChild;
-const rebuildCacheTree = access.rebuildCacheTree;
 const testgit = @import("../testing/git.zig");
 
 fn requireSparseIndexGit(gpa: Allocator, io: Io) !void {
@@ -71,7 +63,7 @@ fn expectSameEntries(want: *const Index, got: *const Index) !void {
 /// The two cache trees node for node: name, count, object name, and the
 /// children in the order the extension holds them, which is what makes the
 /// extension's bytes the same.
-fn expectSameNode(want: *const index_mod.CacheTree.Node, got: *const index_mod.CacheTree.Node) !void {
+fn expectSameNode(want: *const index_mod.CacheTreeNode, got: *const index_mod.CacheTreeNode) !void {
     try std.testing.expectEqualStrings(want.name, got.name);
     try std.testing.expectEqual(want.entry_count, got.entry_count);
     try std.testing.expectEqual(want.oid == null, got.oid == null);
@@ -190,8 +182,8 @@ test "patterns that are not a cone, or an unmerged entry, leave the index full" 
     try std.testing.expect(!hasSparseDirectories(&index));
 }
 
-const worktree = @import("../worktree.zig");
-const repo_mod = @import("../repo.zig");
+const worktree = @import("../checkout/checkout.zig");
+const repo_mod = @import("../repo/repo.zig");
 
 /// `git status --porcelain` as text, from a status: changes first, then
 /// untracked paths, each sorted, which is git's order.
@@ -229,7 +221,7 @@ fn relicStatus(gpa: Allocator, io: Io, repo: *repo_mod.Repository, index: *Index
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    var status = try worktree.status(gpa, io, repo.work_dir.?, index, &repo.odb, .{
+    var status = try worktree.status(gpa, io, repo.workDirectory().?, index, repo.objectDatabase(), .{
         .rules = rules,
         .head_tree = try repo.headTree(io),
     });
@@ -269,7 +261,7 @@ test "status, write-tree and add on a sparse index say what they say on the full
     try std.testing.expect(index.sparse);
     var full = try Index.parse(gpa, .sha1, bytes);
     defer full.deinit();
-    try expand(gpa, io, &full, &repo.odb, null);
+    try expand(gpa, io, &full, repo.objectDatabase(), null);
 
     const expected = try git.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
     defer gpa.free(expected);
@@ -284,10 +276,10 @@ test "status, write-tree and add on a sparse index say what they say on the full
     // The tree the sparse index describes is the one git writes.
     const git_tree = try git.line(io, &.{"write-tree"});
     defer gpa.free(git_tree);
-    const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     var hex: [hash.max_hex_len]u8 = undefined;
     try std.testing.expectEqualStrings(git_tree, tree.hex(&hex));
-    try std.testing.expect((try worktree.writeTree(gpa, io, &full, &repo.odb)).eql(tree));
+    try std.testing.expect((try worktree.writeTree(gpa, io, &full, repo.objectDatabase())).eql(tree));
 
     // Staging everything expands only the directory that is on the disk,
     // and stages what a full index would.
@@ -295,8 +287,8 @@ test "status, write-tree and add on a sparse index say what they say on the full
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    _ = try worktree.addAll(gpa, io, git.dir, &index, &repo.odb, .{ .rules = rules });
-    _ = try worktree.addAll(gpa, io, git.dir, &full, &repo.odb, .{ .rules = rules });
+    _ = try worktree.addAll(gpa, io, git.dir, &index, repo.objectDatabase(), .{ .rules = rules });
+    _ = try worktree.addAll(gpa, io, git.dir, &full, repo.objectDatabase(), .{ .rules = rules });
     try std.testing.expect(index.sparse);
     try std.testing.expect(index.find("D/E/stray.txt") != null);
     try std.testing.expect(index.find("A/X/") != null);
@@ -304,7 +296,7 @@ test "status, write-tree and add on a sparse index say what they say on the full
     defer gpa.free(staged_bytes);
     var widened = try Index.parse(gpa, .sha1, staged_bytes);
     defer widened.deinit();
-    try expand(gpa, io, &widened, &repo.odb, null);
+    try expand(gpa, io, &widened, repo.objectDatabase(), null);
     try expectSameEntries(&full, &widened);
 
     try repo.writeIndex(io, &index);
@@ -333,10 +325,10 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     defer sparse_index.deinit();
     var full = try repo.openIndex(io);
     defer full.deinit();
-    try expand(gpa, io, &full, &repo.odb, null);
+    try expand(gpa, io, &full, repo.objectDatabase(), null);
 
-    _ = try worktree.resetIndex(gpa, io, &sparse_index, &repo.odb, head);
-    _ = try worktree.resetIndex(gpa, io, &full, &repo.odb, head);
+    _ = try worktree.resetIndex(gpa, io, &sparse_index, repo.objectDatabase(), head);
+    _ = try worktree.resetIndex(gpa, io, &full, repo.objectDatabase(), head);
     try std.testing.expect(!sparse_index.sparse);
     try expectSameEntries(&full, &sparse_index);
 
@@ -345,10 +337,10 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     var checked_out = try repo.openIndex(io);
     defer checked_out.deinit();
     // Every path written, as `read-tree --reset -u` writes them.
-    _ = try worktree.checkout(gpa, io, git.dir, &checked_out, &repo.odb, head, .{ .force = true });
+    _ = try worktree.checkout(gpa, io, git.dir, &checked_out, repo.objectDatabase(), head, .{ .force = true });
     try std.testing.expect(!checked_out.sparse and !hasSparseDirectories(&checked_out));
     try git.dir.access(io, "D/E/F/f.txt", .{});
-    try checked_out.write(io, repo.git_dir, "index", .{});
+    try checked_out.write(io, repo.gitDirectory(), "index", .{});
     try git.exec(io, &.{ "sparse-checkout", "disable" });
     const status = try git.run(io, &.{ "status", "--porcelain" });
     defer gpa.free(status);

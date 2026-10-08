@@ -7,8 +7,8 @@
 
 const std = @import("std");
 
-const transport = @import("../../transport.zig");
-const gitmodules = @import("../../submodule/gitmodules.zig");
+const transport = @import("../../transport/transport.zig");
+const gitmodules = @import("../../config/gitmodules.zig");
 const fsck = @import("../../object/fsck.zig");
 
 test "CVE-2021-40330, t5570-git-daemon 'client refuses to ask for repo with newline': no request is made for a git:// URL with a line break" {

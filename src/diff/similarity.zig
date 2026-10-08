@@ -16,7 +16,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const attributes = @import("../worktree/attributes.zig");
+const attributes = @import("../patterns/attributes.zig");
 
 /// A perfect score: the whole of the larger blob is shared.
 pub const max_score: u32 = 60000;

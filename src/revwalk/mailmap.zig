@@ -33,9 +33,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const odb_mod = @import("../odb.zig");
+const odb_mod = @import("../odb/odb.zig");
 
-const repo_mod = @import("../repo.zig");
+const repo_mod = @import("../repo/repo.zig");
 const revparse = @import("revparse.zig");
 
 const Repository = repo_mod.Repository;
@@ -214,7 +214,7 @@ pub const Mailmap = struct {
         errdefer m.deinit();
         const config = repo.configuration();
 
-        if (!repo.isBare()) if (repo.work_dir) |wt| {
+        if (!repo.isBare()) if (repo.workDirectory()) |wt| {
             try m.addFileAt(io, wt, ".mailmap", false);
         };
 
@@ -230,29 +230,32 @@ pub const Mailmap = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blob,
             };
-            const found = repo.odb.read(io, oid) catch |err| switch (err) {
+            const found = repo.objectDatabase().read(io, oid) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blob,
             };
-            defer repo.odb.allocator().free(found.bytes);
+            defer repo.objectDatabase().allocator().free(found.bytes);
             if (found.type != .blob) break :blob;
             try m.addText(found.bytes);
         }
 
         if (try config.getPath(gpa, "mailmap.file")) |path| {
             defer gpa.free(path);
-            const dir = repo.work_dir orelse Io.Dir.cwd();
+            const dir = repo.workDirectory() orelse Io.Dir.cwd();
             try m.addFileAt(io, dir, path, true);
         }
         return m;
     }
+
+    /// Errors from `addFileAt`.
+    pub const AddFileAtError = Allocator.Error || Io.File.Reader.Error;
 
     /// Add the file at `path`, read as git reads one; a file that is not
     /// there, or cannot be read, adds nothing. Without `follow_symlinks`, a
     /// symbolic link adds nothing, as git's `open_nofollow` refuses one;
     /// git for Windows has no such open and follows it, and so does this
     /// there.
-    pub fn addFileAt(m: *Mailmap, io: Io, dir: Io.Dir, path: []const u8, follow_symlinks: bool) (Allocator.Error || Io.File.Reader.Error)!void {
+    pub fn addFileAt(m: *Mailmap, io: Io, dir: Io.Dir, path: []const u8, follow_symlinks: bool) AddFileAtError!void {
         if (!follow_symlinks and builtin.target.os.tag != .windows) {
             const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
             if (st.kind == .sym_link) return;

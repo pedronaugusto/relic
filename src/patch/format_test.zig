@@ -9,10 +9,10 @@ const Io = std.Io;
 
 const formatpatch = @import("format.zig");
 const apply_mod = @import("apply.zig");
-const hash = @import("../hash.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const repo_mod = @import("../repo/repo.zig");
 const testgit = @import("../testing/git.zig");
-const object = @import("../object.zig");
+const object = @import("../object/object.zig");
 
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;

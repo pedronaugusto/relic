@@ -1,0 +1,12 @@
+preflight: test seed 452788226 (reproduce with PREFLIGHT_TEST_SEED=452788226)
+lfs.locks_test.test.phase2 LFS HTTP pagination ends or fails without publishing partial caches: HttpStatus; seed 452788226
+/Users/gusto/work/tycho/.wt/relic-phase2/src/lfs/api.zig:2200:9: 0x102946393 in failStatus (relic-tests)
+        return if (status == .unauthorized or status == .forbidden) error.AuthenticationFailed else error.HttpStatus;
+        ^
+/Users/gusto/work/tycho/.wt/relic-phase2/src/lfs/locks.zig:450:28: 0x102927d1f in list (relic-tests)
+        if (status != .ok) return server.client.failStatus(ex, "locks");
+                           ^
+/Users/gusto/work/tycho/.wt/relic-phase2/src/lfs/locks_test.zig:402:34: 0x10292610f in test.phase2 LFS HTTP pagination ends or fails without publishing partial caches (relic-tests)
+                    var result = try lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" });
+                                 ^
+preflight: 1 failed tests; seed 452788226

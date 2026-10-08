@@ -9,6 +9,31 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
+pub var environment: Environ = undefined;
+
+const TmpDir = struct {
+    dir: Io.Dir,
+    parent: Io.Dir,
+    path: [24]u8,
+    io: Io,
+
+    fn init(io: Io) !TmpDir {
+        var bytes: [12]u8 = undefined;
+        io.random(&bytes);
+        const path = std.fmt.bytesToHex(bytes, .lower);
+        var parent = try Io.Dir.cwd().createDirPathOpen(io, ".zig-cache/bench", .{});
+        errdefer parent.close(io);
+        const dir = try parent.createDirPathOpen(io, &path, .{ .open_options = .{ .iterate = true } });
+        return .{ .dir = dir, .parent = parent, .path = path, .io = io };
+    }
+
+    fn cleanup(t: *TmpDir) void {
+        t.dir.close(t.io);
+        t.parent.deleteTree(t.io, &t.path) catch {};
+        t.parent.close(t.io);
+    }
+};
+
 const settings = [_][]const u8{
     "-c", "user.name=Fixture",
     "-c", "user.email=fixture@example.com",
@@ -29,21 +54,21 @@ const personal = [_][]const u8{ "SSH_AUTH_SOCK", "GPG_AGENT_INFO", "GNUPGHOME", 
 
 pub const Repo = struct {
     gpa: Allocator,
-    tmp: std.testing.TmpDir,
-    home: std.testing.TmpDir,
+    tmp: TmpDir,
+    home: TmpDir,
     /// The working tree's directory.
     dir: Io.Dir,
     environ: Environ.Map,
 
     /// A temporary directory with `git init -b main` run in it.
     pub fn init(gpa: Allocator, io: Io) !Repo {
-        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        var tmp = try TmpDir.init(io);
         errdefer tmp.cleanup();
-        var home = std.testing.tmpDir(.{ .iterate = true });
+        var home = try TmpDir.init(io);
         errdefer home.cleanup();
         const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(home_path);
-        var map = try std.testing.environ.createMap(gpa);
+        var map = try environment.createMap(gpa);
         errdefer map.deinit();
         var i = map.count();
         while (i > 0) {

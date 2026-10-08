@@ -28,17 +28,17 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const refs_mod = @import("../refs.zig");
-const repo_mod = @import("../repo.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const refs_mod = @import("../refs/refs.zig");
+const repo_mod = @import("../repo/repo.zig");
 const revparse = @import("../revwalk/revparse.zig");
-const revwalk = @import("../revwalk.zig");
-const message = @import("message.zig");
-const diff = @import("../diff.zig");
+const revwalk = @import("../walk/walk.zig");
+const message = @import("../object/message.zig");
+const diff = @import("../diff/diff.zig");
 const blobmerge = @import("../merge/blobmerge.zig");
-const head_mod = @import("head.zig");
+const head_mod = @import("../repo/head.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -187,7 +187,7 @@ pub const Notes = struct {
             error.BadRevision => return t,
             else => |e| return e,
         };
-        const header = try repo.odb.readHeader(io, tip);
+        const header = try repo.objectDatabase().readHeader(io, tip);
         const tree = switch (header.type) {
             .commit => try repo.commitTree(io, tip),
             .tree => tip,
@@ -371,8 +371,8 @@ pub const Notes = struct {
     /// `n`.
     fn loadSubtree(t: *Notes, io: Io, subtree: *const Leaf, node: *IntNode, n: usize) Error!void {
         const raw_len = t.rawLen();
-        const found = try t.repo.odb.read(io, subtree.val);
-        defer t.repo.odb.allocator().free(found.bytes);
+        const found = try t.repo.objectDatabase().read(io, subtree.val);
+        defer t.repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .tree) return error.MalformedNotesTree;
         const prefix_len: usize = subtree.key[t.keyIndex()];
         if (prefix_len >= raw_len or prefix_len * 2 < n) return error.MalformedNotesTree;
@@ -591,7 +591,7 @@ pub const Notes = struct {
         try t.forEach(io, t.root, 0, 0, .{ .yield_subtrees = true, .dont_unpack_subtrees = true }, TreeWriter{ .root = &root, .io = io });
         try t.writeNonNotesUntil(io, &root, null);
         try root.finishSubtree(io, t);
-        return t.repo.odb.write(io, .tree, root.buf.items);
+        return t.repo.objectDatabase().write(io, .tree, root.buf.items);
     }
 
     /// `write_each_non_note_until`: the non-notes that sort before
@@ -652,7 +652,7 @@ pub const Notes = struct {
         // git collects them onto the front of a list.
         while (i > 0) {
             i -= 1;
-            if (try t.repo.odb.exists(io, all[i].object)) continue;
+            if (try t.repo.objectDatabase().exists(io, all[i].object)) continue;
             try gone.append(gpa, all[i].object);
         }
         if (!dry_run) for (gone.items) |o| {
@@ -668,13 +668,13 @@ pub const Notes = struct {
             .ignore => {},
             .concatenate => {
                 const new_msg = (try t.readBlob(io, new)) orelse return;
-                defer t.repo.odb.allocator().free(new_msg);
+                defer t.repo.objectDatabase().allocator().free(new_msg);
                 if (new_msg.len == 0) return;
                 const cur_msg = (try t.readBlob(io, cur.*)) orelse {
                     cur.* = new;
                     return;
                 };
-                defer t.repo.odb.allocator().free(cur_msg);
+                defer t.repo.objectDatabase().allocator().free(cur_msg);
                 if (cur_msg.len == 0) {
                     cur.* = new;
                     return;
@@ -682,7 +682,7 @@ pub const Notes = struct {
                 const keep = if (cur_msg[cur_msg.len - 1] == '\n') cur_msg[0 .. cur_msg.len - 1] else cur_msg;
                 const joined = try std.mem.concat(t.gpa, u8, &.{ keep, "\n\n", new_msg });
                 defer t.gpa.free(joined);
-                cur.* = try t.repo.odb.write(io, .blob, joined);
+                cur.* = try t.repo.objectDatabase().write(io, .blob, joined);
             },
             .cat_sort_uniq => {
                 var lines: std.ArrayList([]const u8) = .empty;
@@ -691,12 +691,12 @@ pub const Notes = struct {
                 defer for (held) |h| if (h) |b| t.gpa.free(b);
                 for ([_]Oid{ cur.*, new }, 0..) |oid, k| {
                     if (oid.isZero()) continue;
-                    const found = t.repo.odb.read(io, oid) catch |err| switch (err) {
+                    const found = t.repo.objectDatabase().read(io, oid) catch |err| switch (err) {
                         error.ObjectNotFound => return error.CombineFailed,
                         else => |e| return e,
                     };
                     if (found.type != .blob) {
-                        t.repo.odb.allocator().free(found.bytes);
+                        t.repo.objectDatabase().allocator().free(found.bytes);
                         return error.CombineFailed;
                     }
                     held[k] = found.bytes;
@@ -717,7 +717,7 @@ pub const Notes = struct {
                     try out.append(t.gpa, '\n');
                     last = line;
                 }
-                cur.* = try t.repo.odb.write(io, .blob, out.items);
+                cur.* = try t.repo.objectDatabase().write(io, .blob, out.items);
             },
         }
     }
@@ -726,12 +726,12 @@ pub const Notes = struct {
     /// for the zero name, a missing object or one that is not a blob.
     fn readBlob(t: *Notes, io: Io, oid: Oid) Error!?[]u8 {
         if (oid.isZero()) return null;
-        const found = t.repo.odb.read(io, oid) catch |err| switch (err) {
+        const found = t.repo.objectDatabase().read(io, oid) catch |err| switch (err) {
             error.ObjectNotFound => return null,
             else => |e| return e,
         };
         if (found.type != .blob) {
-            t.repo.odb.allocator().free(found.bytes);
+            t.repo.objectDatabase().allocator().free(found.bytes);
             return null;
         }
         return found.bytes;
@@ -777,7 +777,7 @@ const Stack = struct {
     fn finishSubtree(s: *Stack, io: Io, t: *Notes) Error!void {
         const n = s.next orelse return;
         try n.finishSubtree(io, t);
-        const oid = try t.repo.odb.write(io, .tree, n.buf.items);
+        const oid = try t.repo.objectDatabase().write(io, .tree, n.buf.items);
         n.buf.deinit(t.gpa);
         t.gpa.destroy(n);
         s.next = null;
@@ -877,8 +877,8 @@ fn concatContents(gpa: Allocator, io: Io, repo: *Repository, options: WriteOptio
                 strip = true;
             },
             .blob => |oid| {
-                const found = try repo.odb.read(io, oid);
-                defer repo.odb.allocator().free(found.bytes);
+                const found = try repo.objectDatabase().read(io, oid);
+                defer repo.objectDatabase().allocator().free(found.bytes);
                 if (found.type != .blob) return error.NotABlob;
                 try buf.appendSlice(gpa, found.bytes);
             },
@@ -909,7 +909,7 @@ pub fn add(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOp
 
 fn writeNote(comptime verb: []const u8, io: Io, t: *Notes, obj: Oid, text: []const u8, options: WriteOptions) Error!Outcome {
     if (text.len != 0 or options.allow_empty) {
-        const blob = try t.repo.odb.write(io, .blob, text);
+        const blob = try t.repo.objectDatabase().write(io, .blob, text);
         try t.add(io, obj, blob, .overwrite);
         _ = try t.commit(io, "Notes added by 'git notes " ++ verb ++ "'", options.who);
         return .added;
@@ -929,8 +929,8 @@ pub fn append(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: Writ
     var t = try Notes.open(gpa, io, repo, ref, .concatenate);
     defer t.deinit();
     if (try t.get(io, obj)) |existing| {
-        const found = try repo.odb.read(io, existing);
-        defer repo.odb.allocator().free(found.bytes);
+        const found = try repo.objectDatabase().read(io, existing);
+        defer repo.objectDatabase().allocator().free(found.bytes);
         var prev: std.ArrayList(u8) = .empty;
         defer prev.deinit(gpa);
         try prev.appendSlice(gpa, found.bytes);
@@ -1001,20 +1001,26 @@ pub fn show(gpa: Allocator, io: Io, repo: *Repository, ref: ?[]const u8, obj: Oi
     var t = try Notes.open(gpa, io, repo, name, .concatenate);
     defer t.deinit();
     const note = (try t.get(io, obj)) orelse return null;
-    const found = try repo.odb.read(io, note);
-    defer repo.odb.allocator().free(found.bytes);
+    const found = try repo.objectDatabase().read(io, note);
+    defer repo.objectDatabase().allocator().free(found.bytes);
     return gpa.dupe(u8, found.bytes);
 }
+
+/// Errors from `formatNote`.
+pub const FormatNoteError = Error || Io.Writer.Error;
 
 /// `format_note`: the note on `obj` in `t` as `git log` shows it under a
 /// commit -- a blank line, `Notes:` (or `Notes (<name>):` for a ref other
 /// than `refs/notes/commits`), and each line indented four spaces -- or,
 /// with `raw`, the lines alone, as `%N` gives them. Nothing for an object
 /// with no note.
-pub fn formatNote(t: *Notes, io: Io, obj: Oid, w: *Io.Writer, raw: bool) (Error || Io.Writer.Error)!void {
+pub const FormatOptions = struct { raw: bool = false };
+
+pub fn formatNote(io: Io, t: *Notes, obj: Oid, w: *Io.Writer, options: FormatOptions) FormatNoteError!void {
+    const raw = options.raw;
     const note = (try t.get(io, obj)) orelse return;
-    const found = t.repo.odb.read(io, note) catch return;
-    defer t.repo.odb.allocator().free(found.bytes);
+    const found = t.repo.objectDatabase().read(io, note) catch return;
+    defer t.repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .blob) return;
     var msg = found.bytes;
     if (msg.len != 0 and msg[msg.len - 1] == '\n') msg = msg[0 .. msg.len - 1];
@@ -1185,7 +1191,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     } else if (remote == null) {
         result = local.?;
     } else {
-        const bases = try revwalk.mergeBases(gpa, io, &repo.odb, local.?, remote.?);
+        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), local.?, remote.?, .{});
         defer gpa.free(bases);
         const base: ?Oid = if (bases.len == 0) null else bases[0];
         if (base != null and remote.?.eql(base.?)) {
@@ -1232,7 +1238,7 @@ fn mergeFromDiffs(
 
     // `diff_tree_remote`.
     {
-        var changes = try diff.tree(gpa, io, &repo.odb, base, remote, .{});
+        var changes = try diff.tree(gpa, io, repo.objectDatabase(), base, remote, .{});
         defer changes.deinit();
         for (changes.items) |c| {
             if (c.status != .added and c.status != .deleted and c.status != .modified) continue;
@@ -1250,7 +1256,7 @@ fn mergeFromDiffs(
     }
     // `diff_tree_local`.
     {
-        var changes = try diff.tree(gpa, io, &repo.odb, base, local, .{});
+        var changes = try diff.tree(gpa, io, repo.objectDatabase(), base, local, .{});
         defer changes.deinit();
         for (changes.items) |c| {
             if (c.status != .added and c.status != .deleted and c.status != .modified) continue;
@@ -1301,9 +1307,9 @@ fn mergeFromDiffs(
 /// `check_notes_merge_worktree`: a merge already under way holds files in
 /// the directory.
 fn checkMergeWorktree(io: Io, repo: *Repository) Error!void {
-    var dir = repo.git_dir.openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => {
-            try repo.git_dir.createDirPath(io, merge_worktree);
+            try repo.gitDirectory().createDirPath(io, merge_worktree);
             return;
         },
         else => |e| return e,
@@ -1318,17 +1324,17 @@ fn checkMergeWorktree(io: Io, repo: *Repository) Error!void {
 fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: []const u8, remote_ref: []const u8) Error!void {
     var name_buf: [hash.max_hex_len]u8 = undefined;
     const name = p.obj.hex(&name_buf);
-    var dir = try repo.git_dir.openDir(io, merge_worktree, .{});
+    var dir = try repo.gitDirectory().openDir(io, merge_worktree, .{});
     defer dir.close(io);
     var bytes: []const u8 = undefined;
     var owned: ?[]u8 = null;
     defer if (owned) |b| gpa.free(b);
     var held: [3]?[]u8 = .{ null, null, null };
-    defer for (held) |h| if (h) |b| repo.odb.allocator().free(b);
+    defer for (held) |h| if (h) |b| repo.objectDatabase().allocator().free(b);
     const read = struct {
         fn f(i: Io, r: *Repository, oid: Oid, slot: *?[]u8) Error![]const u8 {
             if (oid.isZero()) return "";
-            const found = try r.odb.read(i, oid);
+            const found = try r.objectDatabase().read(i, oid);
             slot.* = found.bytes;
             if (found.type != .blob) return error.NotABlob;
             return found.bytes;
@@ -1370,8 +1376,8 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
 pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!Oid {
     const kind = repo.objectFormat();
     const partial = (try repo.refStore().root().read(gpa, io, .notes_merge_partial)) orelse return error.NoMergeInProgress;
-    const found = try repo.odb.read(io, partial);
-    defer repo.odb.allocator().free(found.bytes);
+    const found = try repo.objectDatabase().read(io, partial);
+    defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     var commit = try object.Commit.parse(gpa, kind, found.bytes);
     defer commit.deinit();
@@ -1388,7 +1394,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 
     var t = try Notes.open(gpa, io, repo, ref_names.Root.notes_merge_partial.name(), .overwrite);
     defer t.deinit();
-    var dir = repo.git_dir.openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.NoMergeInProgress,
         else => |e| return e,
     };
@@ -1398,7 +1404,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
         const obj = Oid.parse(kind, e.name) catch continue;
         const bytes = try dir.readFileAlloc(io, e.name, gpa, .unlimited);
         defer gpa.free(bytes);
-        const blob = try repo.odb.write(io, .blob, bytes);
+        const blob = try repo.objectDatabase().write(io, .blob, bytes);
         try t.add(io, obj, blob, null);
     }
     if (commit.message.len == 0) return error.MalformedObject;
@@ -1417,9 +1423,9 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 /// removed, and the files in `NOTES_MERGE_WORKTREE`; the directory itself
 /// stays, as git leaves it.
 pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
-    try repo.refStore().root().delete(repo.gpa, io, .notes_merge_partial);
-    try repo.refStore().root().delete(repo.gpa, io, .notes_merge_ref);
-    var dir = repo.git_dir.openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    try repo.refStore().root().delete(repo.allocator(), io, .notes_merge_partial);
+    try repo.refStore().root().delete(repo.allocator(), io, .notes_merge_ref);
+    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
     };
@@ -1427,10 +1433,10 @@ pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
     var it = dir.iterate();
     var names: std.ArrayList([]u8) = .empty;
     defer {
-        for (names.items) |n| repo.gpa.free(n);
-        names.deinit(repo.gpa);
+        for (names.items) |n| repo.allocator().free(n);
+        names.deinit(repo.allocator());
     }
-    while (try it.next(io)) |e| try names.append(repo.gpa, try repo.gpa.dupe(u8, e.name));
+    while (try it.next(io)) |e| try names.append(repo.allocator(), try repo.allocator().dupe(u8, e.name));
     for (names.items) |n| try dir.deleteTree(io, n);
 }
 
@@ -1543,7 +1549,7 @@ test "notes added, appended, copied and removed are git's commits, trees and log
 
             var objects: [140]Oid = undefined;
             for (&objects, 0..) |*o, i| o.* = try t.blob(io, i);
-            try repo.odb.refresh(io);
+            try repo.objectDatabase().refresh(io);
 
             var hex: [hash.max_hex_len]u8 = undefined;
             var hex2: [hash.max_hex_len]u8 = undefined;
@@ -1763,7 +1769,7 @@ test "fuzz: any tree reads as notes or a named error, and edits keep exactly the
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try Repository.create(gpa, io, tmp.dir, .{ .bare = true });
     defer repo.deinit(io);
     try std.testing.fuzz(&repo, fuzzNotes, .{});
 }
@@ -1778,7 +1784,7 @@ fn fuzzNotes(repo: *Repository, smith: *std.testing.Smith) anyerror!void {
     {
         var t = try Notes.open(gpa, io, repo, default_ref, .concatenate);
         defer t.deinit();
-        const tree = try repo.odb.write(io, .tree, input);
+        const tree = try repo.objectDatabase().write(io, .tree, input);
         var leaf: Leaf = .{ .key = @splat(0), .val = tree };
         if (t.loadSubtree(io, &leaf, t.root, 0)) {
             if (t.list(gpa, io)) |entries| gpa.free(entries) else |_| {}
@@ -1791,7 +1797,7 @@ fn fuzzNotes(repo: *Repository, smith: *std.testing.Smith) anyerror!void {
     defer t.deinit();
     var model: Oid.Map(Oid) = .empty;
     defer model.deinit(gpa);
-    const note = try repo.odb.write(io, .blob, "note\n");
+    const note = try repo.objectDatabase().write(io, .blob, "note\n");
     var i: usize = 0;
     while (i + 3 <= input.len) : (i += 3) {
         var key = Oid.zero(.sha1);

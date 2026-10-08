@@ -5,7 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const program = @import("../repo/program.zig");
+const program = @import("../process/program.zig");
 const inflate = @import("inflate.zig");
 const testremote = @import("../testing/remote.zig");
 
@@ -41,7 +41,7 @@ test "every stream zlib makes, at every level, strategy and window, decodes to w
     const io = testing.io;
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    var made = program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{ "python3", "-c", script } }, "", .{}) catch return error.SkipZigTest;
+    var made = program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "python3", "-c", script } }, .{}) catch return error.SkipZigTest;
     defer made.deinit(gpa);
     if (!made.succeeded()) return error.SkipZigTest;
 

@@ -18,12 +18,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash.zig");
-const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
-const index_mod = @import("../index.zig");
-const revwalk = @import("../revwalk.zig");
-const worktree = @import("../worktree.zig");
+const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const index_mod = @import("../index/index.zig");
+const revwalk = @import("../walk/walk.zig");
+const worktree = @import("../checkout/checkout.zig");
 const blobmerge = @import("blobmerge.zig");
 const ort = @import("ort.zig");
 
@@ -73,7 +73,7 @@ pub const Result = struct {
 /// Merge `heads`, in order, into the commit `head`, as `git merge-octopus`
 /// does: the heads are those `git merge` keeps once it has dropped every
 /// one another reaches.
-pub fn mergeCommits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, options: Options) Self.Error!Result {
+pub fn commits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, options: Options) Self.Error!Result {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -90,7 +90,7 @@ pub fn mergeCommits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const 
             // Only the last head may leave a conflict.
             if (step.failed) return error.OctopusFailed;
         }
-        const common = try revwalk.mergeBasesMany(gpa, io, db, one, merged_commits.items);
+        const common = try revwalk.mergeBasesMany(gpa, io, db, one, merged_commits.items, .{});
         defer gpa.free(common);
         if (common.len == 0) return error.OctopusFailed;
         if (contains(common, one)) continue;
