@@ -1,0 +1,83 @@
+# Relic design
+
+Relic implements repository formats and operations as a Zig library. Architecture
+phase 2 is in progress. Public namespaces publish concerns; implementation files
+own state and import the implementations beneath them directly.
+
+## Owners and layers
+
+Hash and object representations underpin codecs and the object database. The
+object database owns loose objects, packs, indexes and receipt of new objects.
+Reference stores own reference transactions, reflogs and special files. The
+index and checkout own staged entries, conversion and working-tree writes.
+Walks, diffs, patches and merges build on these owners. Repository operations
+compose them through an opaque Repository and its accessors.
+
+Publishing facades expose the public vocabulary without executing operations or
+owning mutable state. Production implementation imports point downward rather
+than through publishing facades. Test fixtures live in testing modules and do not
+create production dependencies upward. Stateful owners release their resources
+through deinit. Public functions name error sets and distinguish refusal from an
+empty successful result.
+
+LFS owns its pointer format, object store, commands, transfer policy and lock
+cache. Checkout accepts neutral native-filter providers and drivers; it does not
+know LFS commands or storage. Clone and push accept neutral callbacks that upper
+LFS composition supplies. A native filter session owns its resources and copies
+configuration needed after the caller returns. Snapshot redirects object writes
+through the same provider contract. Operation I/O is supplied by the caller.
+
+## Publication and failure
+
+Receiving a pack acquires an independently owned keep token before publication.
+The receiver retains that token until all reference transaction work finishes,
+including HEAD and FETCH_HEAD where applicable. Cleanup removes only the token
+it owns. Cancellation cleanup releases it without cancellation interrupting the
+release. Repacking preserves packs protected by another operation. A failed ref
+transaction cannot expose refs to objects that collection has already removed.
+
+Airlock owns atomic replacement and durability. Relic chooses the durability
+policy and orders object publication before refs, and file synchronization before
+parent-directory synchronization. Tests inject faults through the owning
+package's published seams, including native filesystem synchronization.
+
+LFS pagination treats an absent or empty cursor as termination. Each traversal
+remembers every nonempty cursor and refuses a repeated or cyclic cursor. A failed
+traversal returns an explicit error and preserves the previous lock cache; a
+partial page sequence never becomes successful cached state.
+
+## Parsing and matching
+
+One bounded expression parser and execution core supports boolean and search
+adapters. Adapters choose newline policy while sharing syntax and matching
+semantics. Parsing, program size and execution work are bounded so adversarial
+patterns fail explicitly. Common small programs use bounded stack scratch;
+larger programs allocate checked owned scratch.
+
+Each ignore, attribute and sparse rule level owns one Sweep Set and its cache.
+Results preserve rule order and negation. Matching a level collects matching
+indices under that level's lock. This makes matching proportional to candidates
+rather than scanning every pattern, while small levels still pay construction
+and cache costs. Long includeIf patterns use checked sizing and an allocated
+fallback instead of truncating bounded scratch. Shared pathspec consumers and
+line-diff parsing use one grammar each.
+
+Warp owns the adopted checksum implementation. Remaining codec and hunk-grammar
+adoption must use published dependency APIs; Relic does not copy dependency
+implementations or publish compatibility wrappers. Conduit owns child termination
+states. Allocation contracts exercise lifecycle failures using Shakedown's
+NoResize allocator.
+
+## Cost and validation
+
+Received pack protection uses one token per publication and a bounded lifetime,
+so collection safety does not require retaining all historical packs. Cursor
+history costs space proportional to pages and guarantees cycle detection.
+Expression work limits bound worst-case matching independently of input intent.
+Rule sets trade per-level construction and cache memory for cheaper repeated
+queries; both construction and matching are benchmarked.
+
+Contract tests exercise publication failure, cancellation, pagination, parser
+semantics, ownership and allocation failures. Benchmarks live in bench and compile
+in CI; timing is measured separately in ReleaseFast with interleaved comparisons
+against the previous main. CI owns platform and complete-suite verification.

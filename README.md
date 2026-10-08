@@ -10,7 +10,7 @@ that needs a repository can have one in process.
 
 Architecture phase 2 is work in progress. Published dependency APIs, layering,
 public API cleanup and performance validation still have open work; this branch
-is not release complete. See [the phase 2 report](reports/phase2/status.md).
+is not release complete. Its architecture is described in [docs/design.md](docs/design.md).
 
 ## Usage
 
@@ -279,6 +279,7 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `worktree.encoding` | Module within `worktree`. |
 | `worktree.fsmonitor` | `refresh`, `configured`, `ChangeSource`: the file monitor git asks through `core.fsmonitor` (hook protocol 1 and 2), or a program's own, deciding which files `status` looks at; `FSMN` read and written. |
 | `worktree.filter` | Module within `worktree`. |
+| `worktree.filter.native` | Native content-filter protocol. |
 | `worktree.dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safepath` | What a path from a tree is allowed to be. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`. |
@@ -347,6 +348,8 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `submodule.gitmodules` | Module within `submodule`. |
 | `submodule.gitlink` | Module within `submodule`. |
 | `lfs` | LFS without git-lfs: pointers and the store. |
+| `lfs.filter` | Native LFS filters selected by an operation owner. |
+| `lfs.clone` | Clone with native LFS checkout and downloads. |
 | `lfs.netrc` | What the LFS client reads beside: `~/.netrc`. |
 | `lfs.ssh` | Module within `lfs`. |
 | `lfs.hooks` | Module within `lfs`. |
@@ -371,6 +374,18 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `fastexport` | `write` — `git fast-export` byte for byte: marks, renames, tags, signatures, refspecs. |
 | `maintenance` | `writeCommitGraph`, `writeMidx`, `repackMidx`, `expireMidx`, `writePackBitmap`, `writeMidxBitmap`, `writeConfiguredCommitGraph`, `repackRepository`. The format modules own the bytes; these operations gather through the object database, diff and revision walk. Fetch applies `fetch.writeCommitGraph`; configured maintenance applies `gc.writeCommitGraph` and the bitmap settings. |
 <!-- END PHASE2 MODULES -->
+
+Native LFS belongs to the operation owner. Use `lfs.filter.load(gpa, io, &repo,
+.{ .fetch = fetcher })` to load native LFS alongside configured program filters,
+then supply that collection as `worktree.Rules.filters`. `repo.loadFilters` loads
+ordinary program filters unless its options supply a native provider. Use
+`lfs.clone.clone` for clone with native LFS downloads, and `lfs.push.push` for
+push with LFS locks and uploads. Transport's lower operations accept neutral
+filter-loading and content-preparation callbacks. A snapshot that needs native
+LFS supplies `lfs.filter.provider` in `CaptureOptions.native_provider`; the
+snapshot redirects its writes to its private store. Checkout reports unavailable
+native content in `native_fallbacks` and `filter.Report.native_missing`.
+
 
 Public declarations document their contracts. Phase 2 is completing the
 named error sets and call conventions across operations. A refusal is a named error. For a refused

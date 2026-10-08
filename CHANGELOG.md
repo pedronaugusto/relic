@@ -6,8 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Native LFS filtering and clone/push composition live at `lfs.filter`,
+  `lfs.clone` and `lfs.push`. Lower operations accept neutral owner callbacks;
+  native LFS selection is explicit. Checkout's missing-content diagnostics use
+  `native_fallbacks` and `Report.native_missing`.
+
 Architecture phase 2 is work in progress on the phase2 branch. Its dependency,
-layering and performance gates remain open; this is not a release-complete claim.
+layering and API work remain open; this is not a release-complete claim.
 
 - Breaking (phase 2): `Repository.create` replaces `Repository.init`; repository
   mutable state is reached through directory, allocator, object database and
@@ -21,7 +26,7 @@ layering and performance gates remain open; this is not a release-complete claim
   choices belong to operation options. Inline public error unions have names.
 - Phase 2 contracts retain received packs through ref publication and cancellation,
   reject cyclic LFS lock pagination on HTTP and SSH, and share one ERE core across
-  search adapters. See the [phase 2 evidence](reports/phase2/status.md).
+  search adapters.
 
 - Breaking: HTTP and TLS are [uplink](https://github.com/pedronaugusto/uplink)'s; relic's own HTTP/1.1 client, its proxy authentication, its SOCKS client and its copy of std's TLS client are gone, and relic's API names no uplink type. `transport.httpclient`, `transport.httpauth`, `transport.tls`, `transport.clientcert` and `lfs.lfsapi.timeoutsFor` are removed; LFS transport and exchange network state are opaque, and `Exchange.response` and `Exchange.diagnostics` are removed; smart HTTP and LFS are configured by git's and git-lfs's settings as before, which relic maps onto uplink's options. The errors a proxy fails with are uplink's: `ProxyNetworkUnreachable` and `ProxyTtlExpired` are `ProxyHostUnreachable`, `ProxyCommandUnsupported` is `ProxyRefused`, and `SocksProtocolError` is `ProxyProtocolError`, the SOCKS reply code in the message. A remote URL whose path holds a space or a control character is `MalformedUrl`, as curl refuses it, where the bytes went onto the request line; an `http.extraHeader` that is no field (a name that is not a token, a control character in its value) or names `Host`, `Content-Length` or `Transfer-Encoding`, and an `http.userAgent` with a control character, are `InvalidHttpHeader`, where they were sent as given. Responses are read as curl reads them: a bare LF ends a line and a folded field is unfolded, where both were refused, and a `Content-Length` with an underscore, which std's number parser took, is refused. `no_proxy` names an address range in CIDR notation, as curl 7.86 and later read it. Every socket has `TCP_NODELAY`, as curl sets it.
 

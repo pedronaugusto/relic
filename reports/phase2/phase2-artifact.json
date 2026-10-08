@@ -1,6 +1,0 @@
-{
-  "filter": "phase2",
-  "build": "zig build check -Dtest-filter=phase2",
-  "binary_sha256": "ebd3a517666188a5659b99da6dc2b1a4e393f0a977165d77254572a49b3631b0",
-  "lint_gate": "unresolved; diagnostic execution does not satisfy CI"
-}
