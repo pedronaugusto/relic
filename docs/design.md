@@ -20,11 +20,10 @@ create production dependencies upward. Stateful owners release their resources
 through deinit. Public functions group policy and optional inputs in named options, with one
 canonical operation instead of parallel With variants. Index.read is the
 constructor exception: reading describes its creation operation. Index read options carry
-a premeasured timestamp resolution when a repository already has one. Public
+a premeasured timestamp resolution when a repository already has one.
 Tree, commit and ancestry inputs group the participating object names, keeping
 operation policy in a separate options value. Public functions name error sets
-and distinguish refusal from an
-empty successful result.
+and distinguish refusal from an empty successful result.
 
 LFS owns its pointer format, object store, commands, transfer policy and lock
 cache. Checkout accepts neutral native-filter providers and drivers; it does not
