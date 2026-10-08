@@ -54,7 +54,6 @@ jobs:
     needs: skip
     if: needs.skip.outputs.docs-only != 'true' && github.event_name != 'push' && (github.event_name != 'workflow_dispatch' || inputs.tier != 'fast')
     runs-on: ubuntu-latest
-    container: buildpack-deps:bookworm
     timeout-minutes: 30
     env:
       RELIC_GIT: old
@@ -69,7 +68,6 @@ jobs:
         with:
           version: 0.17.0
       - run: zig build --build-file ci/bootstrap.zig setup -- old
-      # Inside the container the workspace is not where github.workspace says.
       - run: zig build --build-file .preflight/build.zig -Drepo-root="$PWD" fetch
       - run: zig build ci -Dci-lint=false -Doptimize=safe
   git-master:

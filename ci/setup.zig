@@ -6,6 +6,8 @@ const builtin = @import("builtin");
 /// release every job installs.
 const git_version = "2.55.0";
 const git_sha256 = "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357";
+const floor_version = "2.39.5";
+const floor_sha256 = "c58da92c378df4a986ca33266897a7397e86c22ee266a284d8c2432c39066b59";
 const lfs_version = "3.8.0";
 const make_flags = [_][]const u8{ "NO_TCLTK=1", "NO_GETTEXT=1", "NO_RUST=1" };
 
@@ -60,20 +62,30 @@ const Context = struct {
     }
 };
 
-fn buildGit(c: Context, root: []const u8, master: bool) !void {
-    const prefix = try std.Io.Dir.path.join(c.a, &.{ root, if (master) "master" else "git" });
+const Git = enum { release, master, floor };
+
+fn buildGit(c: Context, root: []const u8, kind: Git) !void {
+    const master = kind == .master;
+    const name = switch (kind) {
+        .release => "git",
+        .master => "master",
+        .floor => "old-git",
+    };
+    const prefix = try std.Io.Dir.path.join(c.a, &.{ root, name });
     if (!master and c.exists(try std.Io.Dir.path.join(c.a, &.{ prefix, "bin", "git" }))) return;
     try c.command(&.{ "sudo", "apt-get", "update" });
     try c.command(&.{ "sudo", "apt-get", "install", "-y", "--no-install-recommends", "build-essential", "gettext", "libcurl4-openssl-dev", "libexpat1-dev", "libssl-dev", "zlib1g-dev", "gnupg", "openssh-client" });
-    const source = try std.Io.Dir.path.join(c.a, &.{ root, if (master) "master-source" else "git-source" });
+    const source = try std.Io.Dir.path.join(c.a, &.{ root, try c.a.print("{s}-source", .{name}) });
     if (master) {
         if (c.exists(source)) {
             try c.command(&.{ "git", "-C", source, "fetch", "--depth", "1", "origin", "master" });
             try c.command(&.{ "git", "-C", source, "checkout", "--detach", "FETCH_HEAD" });
         } else try c.command(&.{ "git", "clone", "--depth", "1", "https://github.com/git/git.git", source });
     } else {
-        const archive = try std.Io.Dir.path.join(c.a, &.{ root, "git.tar.xz" });
-        try c.fetch(try c.a.print("https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{git_version}), archive, git_sha256);
+        const archive = try std.Io.Dir.path.join(c.a, &.{ root, try c.a.print("{s}.tar.xz", .{name}) });
+        const version = if (kind == .floor) floor_version else git_version;
+        const digest = if (kind == .floor) floor_sha256 else git_sha256;
+        try c.fetch(try c.a.print("https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{version}), archive, digest);
         try std.Io.Dir.cwd().createDirPath(c.io, source);
         try c.command(&.{ "tar", "-xJf", archive, "-C", source, "--strip-components=1" });
     }
@@ -118,17 +130,22 @@ fn lfs(c: Context, root: []const u8) !void {
     return error.MissingLfsExecutable;
 }
 
-fn old(c: Context) !void {
-    try c.command(&.{ "apt-get", "update" });
-    // The floor job proves interop with the distribution's git and nothing
-    // else. The bootstrap image supplies xz for Zig, but also Python, ssh
-    // and signers; those go, and the comparisons that need them stand aside.
-    // Modern native jobs keep them for the full comparisons.
-    try c.command(&.{ "apt-get", "remove", "-y", "--purge", "python3-minimal", "openssh-client", "gpg", "gpgconf" });
-    try c.command(&.{ "apt-get", "install", "-y", "--no-install-recommends", "git", "curl", "xz-utils", "ca-certificates" });
-    // Debian 12's packaged git, the oldest a supported LTS distribution ships.
-    const version = try c.capture(&.{ "git", "--version" });
-    if (!std.mem.eql(u8, std.mem.trimEnd(u8, version, "\r\n"), "git version 2.39.5")) return error.WrongOldestGit;
+fn old(c: Context, root: []const u8) !void {
+    try buildGit(c, root, .floor);
+    const bin = try std.Io.Dir.path.join(c.a, &.{ root, "old-git", "bin" });
+    const git = try std.Io.Dir.path.join(c.a, &.{ bin, "git" });
+    const version = try c.capture(&.{ git, "--version" });
+    if (!std.mem.eql(u8, std.mem.trimEnd(u8, version, "\r\n"), "git version " ++ floor_version)) return error.WrongOldestGit;
+    try lfs(c, root);
+    try selectLfs(c, root, git);
+    // The next hosted step must choose this Git before the runner's own.
+    const path_file = c.env.get("GITHUB_PATH") orelse return error.HostedSetupOnly;
+    const file = try std.Io.Dir.cwd().openFile(c.io, path_file, .{ .mode = .write_only });
+    defer file.close(c.io);
+    const at = (try file.stat(c.io)).size;
+    const lfs_bin = try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" });
+    try file.writePositionalAll(c.io, try c.a.print("{s}\n{s}\n", .{ bin, lfs_bin }), at);
+    try report("{s}", c.io, .{version});
 }
 
 fn selectLfs(c: Context, root: []const u8, git: []const u8) !void {
@@ -165,12 +182,12 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, init.environ_map.get("GITHUB_ACTIONS") orelse "", "true")) return error.HostedSetupOnly;
     const c: Context = .{ .a = a, .io = init.io, .env = init.environ_map };
     const args = try init.minimal.args.toSlice(a);
-    if (args.len > 1 and std.mem.eql(u8, args[1], "old")) return old(c);
     const root = try std.Io.Dir.path.join(a, &.{ init.environ_map.get("RUNNER_TEMP") orelse return error.HostedSetupOnly, "preflight-tools" });
     try std.Io.Dir.cwd().createDirPath(c.io, root);
+    if (args.len > 1 and std.mem.eql(u8, args[1], "old")) return old(c, root);
     const master = args.len > 1 and std.mem.eql(u8, args[1], "master");
     switch (builtin.target.os.tag) {
-        .linux => try buildGit(c, root, master),
+        .linux => try buildGit(c, root, if (master) .master else .release),
         .macos => {
             if (!recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "brew", "upgrade", "git" });
         },
