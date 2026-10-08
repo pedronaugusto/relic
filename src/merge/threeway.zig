@@ -834,7 +834,7 @@ test "a merge reads the trees it changes, not the whole tree" {
 
     // Every object is in the one pack, and every read of one asks it.
     const before = repo.objectDatabase().stats.pack_scans;
-    var outcome = try applyCommits(gpa, io, &repo, &index, ours.oid, theirs.oid, null, .{});
+    var outcome = try applyCommits(gpa, io, &repo, .{ .index = &index, .ours = ours.oid, .theirs = theirs.oid }, .{});
     defer outcome.deinit();
     const reads = repo.objectDatabase().stats.pack_scans - before;
     try std.testing.expect(outcome.isClean());

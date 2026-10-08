@@ -16,7 +16,6 @@ pub const Options = @import("policy.zig").Options;
 pub const Error = @import("policy.zig").Error;
 const state_mod = @import("../state.zig");
 const ref_names = @import("../../names/ref.zig");
-const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Stack = cache.Stack;
 const Cache = cache.Cache;

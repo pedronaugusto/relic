@@ -11,7 +11,6 @@ const fs = @import("../fs/fs.zig");
 const opening = @import("open.zig");
 const reachability = @import("bitmap/reachability.zig");
 const midx = @import("midx.zig");
-const bitmap = @import("bitmap.zig");
 // The modules relic's API puts under this one, as `relic.odb.<name>`.
 const pack = @import("pack.zig");
 const delta = @import("../codec/delta.zig");
