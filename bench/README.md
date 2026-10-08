@@ -40,3 +40,10 @@ that each still works.
 `relic-native` measures cached 256-byte native pipe round trips through
 Shakedown, with process startup outside the clock and exact answer checking.
 `relic-native --smoke` runs the protocol without sampling timings.
+
+`relic-local-push` uses shakedown.bench for a repeated local push of one commit,
+one tree and one blob, including pack writing and receiver ref publication.
+Construction and teardown are outside timing. `--smoke` checks its object count,
+accepted report and final ref without reporting timing. Compare ReleaseFast
+executables in paired, interleaved order; fixture filesystem work remains visible
+in the timing spread.

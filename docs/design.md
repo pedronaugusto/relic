@@ -126,3 +126,10 @@ Transaction cleanup precedes token release on success, failure and cancellation;
 cancellation remains an operation error rather than a successful refusal report.
 Concurrent Git collection cannot remove the received object closure before refs
 make it reachable. Tokens own their directory handle independently of the writer.
+
+Local-push retention adds constant marker work per received pack: one token
+acquisition and one release after ref publication, independent of the object
+count or number of refs. The local_push benchmark measures a three-object pack
+and its ref publication through shakedown.bench; its smoke checks the accepted
+report, exact fixture object count and final ref. Shared filesystem contention
+belongs in paired-run spread, while token lifetime is a deterministic contract.
