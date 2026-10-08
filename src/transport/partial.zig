@@ -292,7 +292,7 @@ pub const Lazy = struct {
         defer session.deinit(io);
         var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{});
         defer pack_dir.close(io);
-        var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), repo.objectFormat(), .fetch, l.options.check_objects, null);
+        var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch }, .{ .explicit = l.options.check_objects, .sink = null });
         defer if (rules) |*r| r.deinit(l.gpa);
         var fetched = try session.fetch(l.gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
             .wants = oids,

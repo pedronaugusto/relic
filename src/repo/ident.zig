@@ -97,9 +97,15 @@ fn withoutCrud(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
     return out.items;
 }
 
+/// Caller-selected role, fallback machine identity and timestamp.
+pub const Inputs = struct { role: Role, machine: Machine = .{}, now: Now };
+
 /// The identity git's `fmt_ident` gives `role` for a commit, strictly, as
 /// `git commit` asks for it. Strings are `arena`'s.
-pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*const Environ.Map, role: Role, machine: Machine, now: Now) Error!object.Signature {
+pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*const Environ.Map, inputs: Inputs) Error!object.Signature {
+    const role = inputs.role;
+    const machine = inputs.machine;
+    const now = inputs.now;
     const role_name = @tagName(role);
     const config_only = config.getBool("user.useconfigonly", false) catch false;
     const email_given = config.has("author.email") or config.has("committer.email") or config.has("user.email");

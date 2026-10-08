@@ -396,7 +396,7 @@ const Ctx = struct {
         if (mode != .symlink) {
             try ctx.attrs.enter(ctx.io, ctx.wt, path);
             const applied = try ctx.attrs.lookup(a, path, false);
-            content = (try ctx.conv.toGit(a, path, raw, applied, if (write) .store else .hash_only)).bytes;
+            content = (try ctx.conv.toGit(a, .{ .path = path, .bytes = raw, .applied = applied }, .{ .storing = if (write) .store else .hash_only })).bytes;
         }
         const oid = if (write)
             try ctx.repo.objectDatabase().write(ctx.io, .blob, content)

@@ -458,12 +458,21 @@ pub fn wanted(config: *const config_mod.Config, scope: Scope) config_mod.ValueEr
 /// Errors from `forTransfer`.
 pub const ForTransferError = LoadError || config_mod.ValueError;
 
+/// Borrowed format and transfer scope.
+pub const TransferInputs = struct { kind: Kind, scope: Scope };
+/// Explicit policy and an optional warning sink.
+pub const TransferOptions = struct { explicit: ?bool = null, sink: ?Sink = null };
+
 /// The rules a fetch or clone with `config` checks with, or `null` for
 /// none: `explicit` when the caller says, otherwise `fetch.fsckObjects` or
 /// `transfer.fsckObjects`. On, they are git's strict checks with
 /// `fetch.fsck.*`; unset, `baseline` with `fetch.fsck.*`; off, none, as git
 /// checks nothing then. The result's skip list is `gpa`'s.
-pub fn forTransfer(gpa: Allocator, io: Io, config: ?*const config_mod.Config, kind: Kind, scope: Scope, explicit: ?bool, sink: ?Sink) ForTransferError!?Rules {
+pub fn forTransfer(gpa: Allocator, io: Io, config: ?*const config_mod.Config, inputs: TransferInputs, options: TransferOptions) ForTransferError!?Rules {
+    const kind = inputs.kind;
+    const scope = inputs.scope;
+    const explicit = options.explicit;
+    const sink = options.sink;
     const on = explicit orelse if (config) |c| try wanted(c, scope) else null;
     var rules = baseline;
     if (on) |yes| {
@@ -572,19 +581,34 @@ const Reporter = struct {
     }
 };
 
+/// Borrowed object identity, type and content.
+pub const ObjectInputs = struct { kind: Kind, oid: Oid, type: object.Type, bytes: []const u8 };
+/// Optional special-blob collection and warning sink.
+pub const CheckOptions = struct { found: ?*Found = null, sink: ?Sink = null };
+
 /// The first error in object `oid` of type `t`, whose content is `bytes`,
 /// as git's `index-pack` finds it with `rules`: a commit or tag git's
 /// parser cannot read, then `checkObject`. `null` when there is none.
-pub fn inspect(gpa: Allocator, rules: *const Rules, kind: Kind, oid: Oid, t: object.Type, bytes: []const u8, found: ?*Found, sink: ?Sink) Allocator.Error!?Finding {
+pub fn inspect(gpa: Allocator, rules: *const Rules, inputs: ObjectInputs, options: CheckOptions) Allocator.Error!?Finding {
+    const kind = inputs.kind;
+    const oid = inputs.oid;
+    const t = inputs.type;
+    const bytes = inputs.bytes;
     if (!parsesAsGit(kind, t, bytes)) return .{ .oid = oid, .problem = null, .level = .@"error" };
-    return checkObject(gpa, rules, kind, oid, t, bytes, found, sink);
+    return checkObject(gpa, rules, inputs, options);
 }
 
 /// The first error git's `fsck_object` finds in an object with `rules`,
 /// or `null`. Warnings go to `sink`; a tree's `.gitmodules` and
 /// `.gitattributes` go to `found`, for `checkBlob`. A blob is checked by
 /// `checkBlob`, once it is known to be one of those.
-pub fn checkObject(gpa: Allocator, rules: *const Rules, kind: Kind, oid: Oid, t: object.Type, bytes: []const u8, found: ?*Found, sink: ?Sink) Allocator.Error!?Finding {
+pub fn checkObject(gpa: Allocator, rules: *const Rules, inputs: ObjectInputs, options: CheckOptions) Allocator.Error!?Finding {
+    const kind = inputs.kind;
+    const oid = inputs.oid;
+    const t = inputs.type;
+    const bytes = inputs.bytes;
+    const found = options.found;
+    const sink = options.sink;
     var r: Reporter = .{ .rules = rules, .oid = oid, .sink = sink };
     switch (t) {
         .blob => {},
@@ -983,10 +1007,18 @@ fn checkIdent(r: *Reporter, bytes: []const u8, at: *usize) Allocator.Error!bool 
 const attr_max_file_size: usize = 100 * 1024 * 1024;
 const attr_max_line_length: usize = 2048;
 
+/// A special blob, or null content when it exceeds the read limit.
+pub const BlobInputs = struct { oid: Oid, as: Special, bytes: ?[]const u8 };
+pub const BlobOptions = struct { sink: ?Sink = null };
+
 /// The first error in a blob a tree named `.gitmodules` or
 /// `.gitattributes`, as git's `fsck_blob` finds it; `bytes` is `null` for
 /// one too large to read.
-pub fn checkBlob(gpa: Allocator, rules: *const Rules, oid: Oid, as: Special, bytes: ?[]const u8, sink: ?Sink) Allocator.Error!?Finding {
+pub fn checkBlob(gpa: Allocator, rules: *const Rules, inputs: BlobInputs, options: BlobOptions) Allocator.Error!?Finding {
+    const oid = inputs.oid;
+    const as = inputs.as;
+    const bytes = inputs.bytes;
+    const sink = options.sink;
     var r: Reporter = .{ .rules = rules, .oid = oid, .sink = sink };
     if (rules.skips(oid)) return null;
     switch (as) {
@@ -1056,7 +1088,7 @@ const good_ident = "A U Thor <author@example.com> 1700000000 +0000";
 
 /// The first problem `rules` makes an error of, by git's `fsck_object`.
 fn firstProblem(rules: *const Rules, t: object.Type, bytes: []const u8) !?Problem {
-    const finding = try checkObject(testing.allocator, rules, .sha1, .zero(.sha1), t, bytes, null, null) orelse return null;
+    const finding = try checkObject(testing.allocator, rules, .{ .kind = .sha1, .oid = .zero(.sha1), .type = t, .bytes = bytes }, .{ .found = null, .sink = null }) orelse return null;
     return finding.problem;
 }
 
@@ -1153,7 +1185,7 @@ test "the found .gitmodules and .gitattributes are read as git reads them" {
     const tree = "100644 .gitattributes\x00" ++ a ++ "100644 .gitmodules\x00" ++ m ++ "120000 .mailmap\x00" ++ m;
     var warnings: Collected = .{ .gpa = gpa };
     defer warnings.deinit();
-    try testing.expect(try checkObject(gpa, &baseline, .sha1, .zero(.sha1), .tree, tree, &found, warnings.sink()) == null);
+    try testing.expect(try checkObject(gpa, &baseline, .{ .kind = .sha1, .oid = .zero(.sha1), .type = .tree, .bytes = tree }, .{ .found = &found, .sink = warnings.sink() }) == null);
     try testing.expect(found.modules.contains(try Oid.fromRaw(.sha1, m)));
     try testing.expect(found.attributes.contains(try Oid.fromRaw(.sha1, a)));
     // A symbolic `.mailmap` is information: a warning, never an error.
@@ -1172,14 +1204,14 @@ test "the found .gitmodules and .gitattributes are read as git reads them" {
         // What comes before a parse error is still read.
         .{ .text = "[submodule \"a\"]\n\turl = -u/x\n[broken\n", .problem = .gitmodules_url },
     }) |case| {
-        const finding = try checkBlob(gpa, &strict, oid, .modules, case.text, null);
+        const finding = try checkBlob(gpa, &strict, .{ .oid = oid, .as = .modules, .bytes = case.text }, .{ .sink = null });
         try testing.expectEqual(case.problem, if (finding) |f| f.problem else null);
     }
     // An unparsable file is information.
-    try testing.expect(try checkBlob(gpa, &strict, oid, .modules, "[broken\n", null) == null);
+    try testing.expect(try checkBlob(gpa, &strict, .{ .oid = oid, .as = .modules, .bytes = "[broken\n" }, .{ .sink = null }) == null);
     const long = @as([2048]u8, @splat('a')) ++ " text\n";
-    try testing.expectEqual(@as(?Problem, .gitattributes_line_length), (try checkBlob(gpa, &strict, oid, .attributes, long, null)).?.problem);
-    try testing.expect(try checkBlob(gpa, &strict, oid, .attributes, "*.c text\n", null) == null);
+    try testing.expectEqual(@as(?Problem, .gitattributes_line_length), (try checkBlob(gpa, &strict, .{ .oid = oid, .as = .attributes, .bytes = long }, .{ .sink = null })).?.problem);
+    try testing.expect(try checkBlob(gpa, &strict, .{ .oid = oid, .as = .attributes, .bytes = "*.c text\n" }, .{ .sink = null }) == null);
 }
 
 const Collected = struct {
@@ -1250,8 +1282,8 @@ test "levels and skip lists come from the scope's own settings" {
 
     // A skipped object is not reported, and a lowered one only warns.
     const bad_tz = "tree " ++ zero_hex ++ "\nauthor A <a@b> 1 0000\ncommitter " ++ good_ident ++ "\n\n";
-    try testing.expect(try checkObject(gpa, &rules, .sha1, try Oid.parse(.sha1, skipped), .commit, "tree 1\n", null, null) == null);
-    try testing.expect(try checkObject(gpa, &rules, .sha1, .zero(.sha1), .commit, bad_tz, null, collected.sink()) == null);
+    try testing.expect(try checkObject(gpa, &rules, .{ .kind = .sha1, .oid = try Oid.parse(.sha1, skipped), .type = .commit, .bytes = "tree 1\n" }, .{ .found = null, .sink = null }) == null);
+    try testing.expect(try checkObject(gpa, &rules, .{ .kind = .sha1, .oid = .zero(.sha1), .type = .commit, .bytes = bad_tz }, .{ .found = null, .sink = collected.sink() }) == null);
     try testing.expectEqual(Problem.bad_timezone, collected.items.items[0]);
 
     // git's own `fsck.` refuses a name it does not know, and lowering a
@@ -1356,11 +1388,11 @@ fn fuzzCheck(_: void, smith: *testing.Smith) anyerror!void {
         for ([_]Kind{ .sha1, .sha256 }) |kind| {
             var found: Found = .{};
             defer found.deinit(testing.allocator);
-            _ = try inspect(testing.allocator, &strict, kind, .zero(kind), t, input, &found, null);
+            _ = try inspect(testing.allocator, &strict, .{ .kind = kind, .oid = .zero(kind), .type = t, .bytes = input }, .{ .found = &found, .sink = null });
         }
     }
-    _ = try checkBlob(testing.allocator, &strict, .zero(.sha1), .modules, input, null);
-    _ = try checkBlob(testing.allocator, &strict, .zero(.sha1), .attributes, input, null);
+    _ = try checkBlob(testing.allocator, &strict, .{ .oid = .zero(.sha1), .as = .modules, .bytes = input }, .{ .sink = null });
+    _ = try checkBlob(testing.allocator, &strict, .{ .oid = .zero(.sha1), .as = .attributes, .bytes = input }, .{ .sink = null });
 }
 
 /// All errors reported by this namespace.

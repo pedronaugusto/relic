@@ -622,8 +622,14 @@ fn cstr(s: []const u8) []const u8 {
     return if (std.mem.findScalar(u8, s, 0)) |z| s[0..z] else s;
 }
 
+/// The object database, commit and format, borrowed for the call.
+pub const CommitInputs = struct { db: *odb_mod.Odb, oid: Oid, format: []const u8 };
+
 /// The commit `oid` formatted by `format`, appended to `out`.
-pub fn formatCommit(a: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, format: []const u8, ctx: Context, out: *std.ArrayList(u8)) Self.Error!void {
+pub fn formatCommit(a: Allocator, io: Io, inputs: CommitInputs, out: *std.ArrayList(u8), ctx: Context) Self.Error!void {
+    const db = inputs.db;
+    const oid = inputs.oid;
+    const format = inputs.format;
     const found = try db.read(io, oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;

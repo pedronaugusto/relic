@@ -33,7 +33,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, case: Case) !void {
         git.report_failures = false;
         var theirs = try git.capture(io, args.items);
         defer theirs.deinit(gpa);
-        const ours = ident.signature(arena, &config, &env, role, .{}, .{ .secs = testgit.fixture_date });
+        const ours = ident.signature(arena, &config, &env, .{ .role = role, .machine = .{}, .now = .{ .secs = testgit.fixture_date } });
         if (theirs.code != 0) {
             if (ours) |sig| {
                 std.debug.print("{s}: git refused ({s}), relic gave {s} <{s}>\n", .{ @tagName(role), theirs.stderr, sig.name, sig.email });

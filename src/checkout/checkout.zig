@@ -620,7 +620,7 @@ const Walker = struct {
 
         if (w.options.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, false);
-            const converted = try w.conv.toGitFile(a, path, found.stat.size, applied, .store);
+            const converted = try w.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .store });
             if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
                 .false => {},
                 .true => return error.IrreversibleConversion,
@@ -1462,7 +1462,7 @@ const StatusScan = struct {
             break :blk try a.dupe(u8, buf[0..len]);
         } else if (s.options.rules.attrs) |attrs| blk: {
             const applied = try attrs.lookup(a, path, false);
-            break :blk (try s.conv.toGitFile(a, path, found.stat.size, applied, .hash_only)).bytes;
+            break :blk (try s.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
         } else try s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
         const oid = hash.Hasher.object(s.db.objectFormat(), "blob", content);
         if (oid.eql(entry.oid)) return .unmodified;
@@ -2055,7 +2055,7 @@ const CheckoutWrite = struct {
                 const found = try c.db.read(c.io, want.oid);
                 defer c.gpa.free(found.bytes);
                 const executable = want.mode == .exec and c.options.rules.file_mode;
-                const smudged: native.Content = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, path, found.bytes, try attrs.lookup(a, path, false), .{
+                const smudged: native.Content = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = try attrs.lookup(a, path, false) }, .{
                     .blob = want.oid,
                     .treeish = c.tree_oid,
                     .can_delay = true,
@@ -2596,7 +2596,7 @@ fn writePathFile(
     };
     try attrs.enter(io, wt, path);
     const applied = try attrs.lookup(a, path, false);
-    const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{
+    const smudged = try conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = applied }, .{
         .blob = want.oid,
         .can_delay = true,
     });
@@ -2650,7 +2650,7 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
             const found = try db.read(io, oid);
             defer db.allocator().free(found.bytes);
             const applied: attributes.Attributes = if (rules.attrs) |attrs| try attrs.lookup(a, path, false) else .{ .items = &.{} };
-            const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{ .blob = oid });
+            const smudged = try conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = applied }, .{ .blob = oid });
             try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
         },
         .tree => return error.UnsupportedEntry,
@@ -2693,7 +2693,7 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
                 try attrs.enter(io, wt, path);
                 break :blk try attrs.lookup(a, path, false);
             } else .{ .items = &.{} };
-            const smudged = try conv.toWorktree(a, path, bytes, applied, .{});
+            const smudged = try conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = applied }, .{});
             try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
             if (rules.attrs) |attrs| attrs.written(path);
         },
@@ -2936,7 +2936,7 @@ pub fn differsFromIndex(
             try attrs.enter(io, wt, entry.path);
             defer if (!entered) attrs.leave();
             const applied = try attrs.lookup(a, entry.path, false);
-            content = (try conv.toGit(a, entry.path, bytes, applied, .hash_only)).bytes;
+            content = (try conv.toGit(a, .{ .path = entry.path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only })).bytes;
         }
     }
     return !hash.Hasher.object(index.kind, "blob", content).eql(entry.oid);
@@ -3125,7 +3125,7 @@ pub fn applySparse(
                         if (found.kind != .sym_link) {
                             try attrs.enter(io, wt, entry.path);
                             const applied = try attrs.lookup(a, entry.path, false);
-                            content = (try conv.toGit(a, entry.path, raw, applied, .hash_only)).bytes;
+                            content = (try conv.toGit(a, .{ .path = entry.path, .bytes = raw, .applied = applied }, .{ .storing = .hash_only })).bytes;
                         }
                     }
                     if (!hash.Hasher.object(db.objectFormat(), "blob", content).eql(entry.oid)) {
@@ -3196,7 +3196,7 @@ fn restoreSparse(
             if (options.rules.attrs) |attrs| {
                 try attrs.enter(io, wt, entry.path);
                 const applied = try attrs.lookup(a, entry.path, false);
-                const smudged = try conv.toWorktree(a, entry.path, found.bytes, applied, .{ .blob = entry.oid });
+                const smudged = try conv.toWorktree(a, .{ .path = entry.path, .blob = found.bytes, .applied = applied }, .{ .blob = entry.oid });
                 try writeSmudged(io, wt, entry.path, smudged, executable);
             } else {
                 try writeFile(io, wt, entry.path, .{ .bytes = found.bytes }, executable);

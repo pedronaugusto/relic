@@ -548,7 +548,7 @@ fn commitOrStop(
             try repo.refStore().special().write(repo.allocator(), io, .merge_head, merge_heads.items);
             try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", text);
             const message_path = try h.path(arena, "MERGE_MSG");
-            _ = try runner.prepareCommitMsg(io, e, message_path, .merge, null);
+            _ = try runner.prepareCommitMsg(io, e, message_path, .{ .source = .merge, .commit = null });
             if (h.verify) _ = try runner.commitMsg(io, e, message_path);
             text = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
         }
@@ -657,7 +657,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
     const author = options.author orelse options.who;
     const given = options.message orelse ((try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
-    const raw = try h.beforeCommit(arena, io, repo, given, .merge, author);
+    const raw = try h.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
     const comment = message.commentString(repo.configuration().get("core.commentchar"), raw);
     const cleaned = try message.cleanup(arena, raw, options.cleanup, comment);
     if (cleaned.len == 0) return error.EmptyMessage;

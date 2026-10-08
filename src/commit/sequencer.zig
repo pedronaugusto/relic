@@ -646,7 +646,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     var text: []const u8 = msg;
     if (commit_hooks.exists(io, "prepare-commit-msg")) {
         try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", text);
-        _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .message, null);
+        _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
         text = (try head_mod.readState(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
     const cleaned = try message.cleanup(arena, text, cleanup, r.comment);
@@ -895,7 +895,7 @@ fn commitStaged(r: *Replay) Error!Oid {
 
     const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
     const given = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
-    const raw = try commit_hooks.beforeCommit(arena, io, repo, given, .merge, author);
+    const raw = try commit_hooks.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
     const cleaned = try message.cleanup(arena, raw, .strip, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
     const made = try repo.writeCommit(io, .{

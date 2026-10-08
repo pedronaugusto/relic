@@ -306,7 +306,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     defer remote.deinit();
 
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
-    var rules = try fsck.forTransfer(gpa, io, repo.configuration(), repo.objectFormat(), .fetch, options.check_objects, to_warnings.sink());
+    var rules = try fsck.forTransfer(gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
     defer if (rules) |*r| r.deinit(gpa);
     const checks: ?*const fsck.Rules = if (rules) |*r| r else null;
 

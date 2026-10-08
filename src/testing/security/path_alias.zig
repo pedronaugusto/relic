@@ -35,7 +35,7 @@ const t1014_rows = [_][]const u8{
 fn fsckProblem(gpa: std.mem.Allocator, mode: []const u8, name: []const u8) !?fsck.Problem {
     const bytes = try hostile.treeBytes(gpa, &.{.{ .mode = mode, .name = name, .oid = try hash.Oid.fromRaw(.sha1, &(@as([20]u8, @splat(1)))) }});
     defer gpa.free(bytes);
-    const finding = try fsck.checkObject(gpa, &fsck.baseline, .sha1, .zero(.sha1), .tree, bytes, null, null) orelse return null;
+    const finding = try fsck.checkObject(gpa, &fsck.baseline, .{ .kind = .sha1, .oid = .zero(.sha1), .type = .tree, .bytes = bytes }, .{ .found = null, .sink = null }) orelse return null;
     return finding.problem;
 }
 

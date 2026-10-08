@@ -186,18 +186,20 @@ pub const Session = struct {
         return .none;
     }
 
+    pub const FileInputs = struct { path: []const u8, size: u64, applied: attributes.Attributes };
+    pub const GitInputs = struct { path: []const u8, bytes: []const u8, applied: attributes.Attributes };
+    pub const WorktreeInputs = struct { path: []const u8, blob: []const u8, applied: attributes.Attributes };
+    pub const ToGitOptions = struct { storing: native.Storing = .store };
+
     /// Read `path` from the working tree and convert it for storage. `size`
     /// is what a stat said, a hint for the read. A file relic's own LFS
     /// keeps is streamed into the store, or only hashed, and never held
     /// whole.
-    pub fn toGitFile(
-        s: *Session,
-        a: Allocator,
-        path: []const u8,
-        size: u64,
-        applied: attributes.Attributes,
-        storing: native.Storing,
-    ) Self.Error!ToGit {
+    pub fn toGitFile(s: *Session, a: Allocator, inputs: FileInputs, options: ToGitOptions) Self.Error!ToGit {
+        const path = inputs.path;
+        const size = inputs.size;
+        const applied = inputs.applied;
+        const storing = options.storing;
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         if (resolved == .native) {
@@ -209,14 +211,11 @@ pub const Session = struct {
     }
 
     /// Convert bytes already in memory for storage.
-    pub fn toGit(
-        s: *Session,
-        a: Allocator,
-        path: []const u8,
-        bytes: []const u8,
-        applied: attributes.Attributes,
-        storing: native.Storing,
-    ) Self.Error!ToGit {
+    pub fn toGit(s: *Session, a: Allocator, inputs: GitInputs, options: ToGitOptions) Self.Error!ToGit {
+        const path = inputs.path;
+        const bytes = inputs.bytes;
+        const applied = inputs.applied;
+        const storing = options.storing;
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         return s.convertToGit(a, path, bytes, applied, resolved, storing);
@@ -276,14 +275,10 @@ pub const Session = struct {
     }
 
     /// Convert a blob for the working tree.
-    pub fn toWorktree(
-        s: *Session,
-        a: Allocator,
-        path: []const u8,
-        blob: []const u8,
-        applied: attributes.Attributes,
-        meta: Meta,
-    ) Self.Error!native.Content {
+    pub fn toWorktree(s: *Session, a: Allocator, inputs: WorktreeInputs, meta: Meta) Self.Error!native.Content {
+        const path = inputs.path;
+        const blob = inputs.blob;
+        const applied = inputs.applied;
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         const ident = if (identOn(applied)) try identToWorktree(a, s.options.kind, blob) else null;

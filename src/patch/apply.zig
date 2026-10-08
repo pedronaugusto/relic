@@ -1392,7 +1392,7 @@ fn readOldData(st: *State, path: []const u8, found: fs.Entry, crlf_in_old: bool,
             const attrs = st.rules.attrs.?;
             try attrs.enter(st.io, wt, path);
             const applied = try attrs.lookup(scratch.allocator(), path, false);
-            const converted = try st.conv.toGit(scratch.allocator(), path, bytes, applied, .hash_only);
+            const converted = try st.conv.toGit(scratch.allocator(), .{ .path = path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only });
             try out.appendSlice(st.gpa, converted.bytes);
         },
         else => return error.UnsupportedEntry,

@@ -824,7 +824,7 @@ const Writer = struct {
         try s.w.print(" {c} ", .{status});
         try s.side(new, new_index);
         var subject: std.ArrayList(u8) = .empty;
-        try pretty.formatCommit(s.a, s.io, db, oid, "%s", .{}, &subject);
+        try pretty.formatCommit(s.a, s.io, .{ .db = db, .oid = oid, .format = "%s" }, &subject, .{});
         const found = try db.read(s.io, oid);
         defer db.allocator().free(found.bytes);
         const commit = try object.Commit.parse(s.a, db.objectFormat(), try s.a.dupe(u8, found.bytes));

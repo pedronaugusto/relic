@@ -223,7 +223,7 @@ pub const Shortlog = struct {
         for (s.formats) |format| {
             const n = named.?;
             var text: std.ArrayList(u8) = .empty;
-            try pretty.formatCommit(a, n.io, n.db, n.oid, format, s.options.format_context, &text);
+            try pretty.formatCommit(a, n.io, .{ .db = n.db, .oid = n.oid, .format = format }, &text, s.options.format_context);
             if (s.dedup and (try seen.getOrPut(a, text.items)).found_existing) continue;
             try s.insert(text.items, oneline);
         }
@@ -308,7 +308,7 @@ pub const Shortlog = struct {
                 const msg = record.subjects.items[j];
                 if (s.options.wrap) |opt| {
                     wrapped.clearRetainingCapacity();
-                    try addWrappedText(s.gpa, &wrapped, msg, @intCast(opt.indent1), @intCast(opt.indent2), @intCast(opt.width));
+                    try addWrappedText(s.gpa, msg, &wrapped, .{ .indent1 = @intCast(opt.indent1), .indent2 = @intCast(opt.indent2), .width = @intCast(opt.width) });
                     try w.writeAll(wrapped.items);
                     try w.writeByte('\n');
                 } else {
@@ -346,7 +346,11 @@ fn escapeLength(text: []const u8, at: usize) usize {
 /// `strbuf_add_wrapped_text`: `text` folded at spaces to `width` columns,
 /// the first line indented by `indent1` and the rest by `indent2`. A text
 /// that is not UTF-8 is counted a byte to a column, as git counts it.
-pub fn addWrappedText(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8, indent1: i32, indent2: i32, width: i32) Allocator.Error!void {
+pub const WrapOptions = struct { indent1: i32 = 0, indent2: i32 = 0, width: i32 = 0 };
+pub fn addWrappedText(gpa: Allocator, text: []const u8, out: *std.ArrayList(u8), options: WrapOptions) Allocator.Error!void {
+    const indent1 = options.indent1;
+    const indent2 = options.indent2;
+    const width = options.width;
     if (width <= 0) {
         // `strbuf_add_indented_text`.
         var indent: usize = @intCast(@max(indent1, 0));
@@ -463,7 +467,7 @@ test "a subject folds where git's -w folds it" {
     const gpa = std.testing.allocator;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    try addWrappedText(gpa, &out, "a b c d e f g h i j k l m n o p q r s t u v w x y z", 2, 4, 12);
+    try addWrappedText(gpa, "a b c d e f g h i j k l m n o p q r s t u v w x y z", &out, .{ .indent1 = 2, .indent2 = 4, .width = 12 });
     try std.testing.expectEqualStrings("  a b c d e\n    f g h i\n    j k l m\n    n o p q\n    r s t u\n    v w x y\n    z", out.items);
 }
 

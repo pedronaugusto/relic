@@ -212,7 +212,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     }
 
     if (options.hooks) |runner| {
-        _ = try runner.prepareCommitMsg(io, env, message_path, .message, null);
+        _ = try runner.prepareCommitMsg(io, env, message_path, .{ .source = .message, .commit = null });
         if (options.verify) _ = try runner.commitMsg(io, env, message_path);
     }
 

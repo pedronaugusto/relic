@@ -68,7 +68,7 @@ test "CVE-2018-17456, t7416-submodule-dash-url and t7417-submodule-path-url: a .
         .{ .text = "[submodule \"x\"]\n\tpath = sub\n\turl = -oProxyCommand=touch pwned\n", .problem = .gitmodules_url },
         .{ .text = "[submodule \"x\"]\n\tpath = -sub\n\turl = https://example.com/r.git\n", .problem = .gitmodules_path },
     }) |case| {
-        const finding = (try fsck.checkBlob(gpa, &fsck.baseline, .zero(.sha1), .modules, case.text, null)).?;
+        const finding = (try fsck.checkBlob(gpa, &fsck.baseline, .{ .oid = .zero(.sha1), .as = .modules, .bytes = case.text }, .{ .sink = null })).?;
         try std.testing.expectEqual(case.problem, finding.problem.?);
     }
 }

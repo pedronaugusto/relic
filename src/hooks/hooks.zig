@@ -583,14 +583,10 @@ pub const Runner = struct {
 
     /// `prepare-commit-msg <file> [<source> [<commit>]]`, which may rewrite
     /// the message file.
-    pub fn prepareCommitMsg(
-        runner: *Runner,
-        io: Io,
-        env: CommitEnv,
-        message_path: []const u8,
-        source: ?MessageSource,
-        commit: ?[]const u8,
-    ) Self.Error!Ran {
+    pub const PrepareMessageOptions = struct { source: ?MessageSource = null, commit: ?[]const u8 = null };
+    pub fn prepareCommitMsg(runner: *Runner, io: Io, env: CommitEnv, message_path: []const u8, options: PrepareMessageOptions) Self.Error!Ran {
+        const source = options.source;
+        const commit = options.commit;
         var scratch: [3][64]u8 = undefined;
         var vars: [5]program.Var = undefined;
         var args_buf: [3][]const u8 = undefined;

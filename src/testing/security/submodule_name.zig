@@ -31,7 +31,7 @@ test "CVE-2018-11235, t7450-bad-git-dotfiles 'check names', 'fsck detects evil s
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 0), parsed.submodules.len);
     try std.testing.expectEqual(gitmodules.Reason.suspicious_name, parsed.refused[0].reason);
-    const finding = (try fsck.checkBlob(gpa, &fsck.baseline, .zero(.sha1), .modules, evil, null)).?;
+    const finding = (try fsck.checkBlob(gpa, &fsck.baseline, .{ .oid = .zero(.sha1), .as = .modules, .bytes = evil }, .{ .sink = null })).?;
     try std.testing.expectEqual(fsck.Problem.gitmodules_name, finding.problem.?);
 
     // A `.gitmodules` that is a link: fsck names it, checkout refuses it.
@@ -41,7 +41,7 @@ test "CVE-2018-11235, t7450-bad-git-dotfiles 'check names', 'fsck detects evil s
     for ([_][]const u8{ ".gitmodules", ".GITMODULES", "gitmod~1" }) |name| {
         const bytes = try hostile.treeBytes(gpa, &.{.{ .mode = "120000", .name = name, .oid = target }});
         defer gpa.free(bytes);
-        const symlink = (try fsck.checkObject(gpa, &fsck.baseline, .sha1, .zero(.sha1), .tree, bytes, null, null)).?;
+        const symlink = (try fsck.checkObject(gpa, &fsck.baseline, .{ .kind = .sha1, .oid = .zero(.sha1), .type = .tree, .bytes = bytes }, .{ .found = null, .sink = null })).?;
         try std.testing.expectEqual(fsck.Problem.gitmodules_symlink, symlink.problem.?);
         const tree = try h.writeTree(gpa, io, &.{.{ .mode = "120000", .name = name, .oid = target }});
         try std.testing.expectEqual(@import("../../names/path.zig").Reason.symlinked_gitmodules, (try h.checkout(gpa, io, tree)).?);

@@ -1565,7 +1565,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
             var shown = proposed;
             if (commit_hooks.runner) |runner| {
                 try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
-                _ = try runner.prepareCommitMsg(io, edit_env, try commit_hooks.path(arena, "COMMIT_EDITMSG"), .message, null);
+                _ = try runner.prepareCommitMsg(io, edit_env, try commit_hooks.path(arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
                 shown = (try head_mod.readState(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
             }
             break :blk try edited(r, .squash, shown);
@@ -1584,7 +1584,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", raw);
         const e = try commit_hooks.env(arena, null);
         const file = try commit_hooks.path(arena, "COMMIT_EDITMSG");
-        _ = try commit_hooks.runner.?.prepareCommitMsg(io, e, file, .message, null);
+        _ = try commit_hooks.runner.?.prepareCommitMsg(io, e, file, .{ .source = .message, .commit = null });
         const back = (try head_mod.readState(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
         final_text = try message.cleanup(arena, back, cleanup, r.comment);
     }
@@ -1704,7 +1704,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     if (commit_hooks.runner) |runner| {
         _ = try runner.preCommit(r.io, e);
         try head_mod.writeState(r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
-        _ = try runner.prepareCommitMsg(r.io, e, file, .commit, "HEAD");
+        _ = try runner.prepareCommitMsg(r.io, e, file, .{ .source = .commit, .commit = "HEAD" });
         proposed = (try head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
     var text = try edited(r, .reword, proposed);
@@ -2414,7 +2414,7 @@ fn finish(r: *Run) Error!Outcome {
     const head_oid = try r.headOid();
     if (tip.head_name) |branch| {
         const branch_log = try r.arena.print("rebase (finish): {s} onto {s}", .{ branch, try r.hex(onto) });
-        try head_mod.moveBranch(io, repo, branch, .{ .matches = tip.orig_head }, head_oid, .{ .who = r.options.who, .message = branch_log });
+        try head_mod.moveBranch(io, repo, branch, .{ .expected = .{ .matches = tip.orig_head }, .new = head_oid }, .{ .who = r.options.who, .message = branch_log });
         const head_log = try r.arena.print("rebase (finish): returning to {s}", .{branch});
         try head_mod.attach(io, repo, branch, head_oid, .{ .who = r.options.who, .message = head_log });
     }
@@ -2441,7 +2441,7 @@ fn finish(r: *Run) Error!Outcome {
         const records = try parseUpdateRefs(r, text);
         for (records.items) |rec| {
             if (rec.after.isZero()) continue;
-            try head_mod.moveBranch(io, repo, rec.ref, .{ .matches = rec.before }, rec.after, .{ .who = r.options.who, .message = "rewritten during rebase" });
+            try head_mod.moveBranch(io, repo, rec.ref, .{ .expected = .{ .matches = rec.before }, .new = rec.after }, .{ .who = r.options.who, .message = "rewritten during rebase" });
         }
     }
     try removeState(r);
@@ -2579,7 +2579,7 @@ fn commitStagedChanges(r: *Run) Error!void {
         e.editor = true;
         hook_env = e;
         try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
-        _ = try runner.prepareCommitMsg(io, e, try commit_hooks.path(r.arena, "COMMIT_EDITMSG"), .message, null);
+        _ = try runner.prepareCommitMsg(io, e, try commit_hooks.path(r.arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
         shown = (try head_mod.readState(r.arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
     const text = try edited(r, .resolved, shown);

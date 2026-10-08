@@ -276,7 +276,7 @@ test "%(trailers) in a log format writes what git log writes" {
             const a = arena_state.allocator();
             var ours: std.ArrayList(u8) = .empty;
             const wrapped = try a.print("[{s}]", .{format});
-            try pretty.formatCommit(a, io, repo.objectDatabase(), oid, wrapped, .{ .trailers = try message.trailerSettings(a, repo.configuration()) }, &ours);
+            try pretty.formatCommit(a, io, .{ .db = repo.objectDatabase(), .oid = oid, .format = wrapped }, &ours, .{ .trailers = try message.trailerSettings(a, repo.configuration()) });
             try ours.append(a, '\n');
             std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
                 std.debug.print("{s} on {s}\n", .{ format, rev });

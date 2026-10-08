@@ -20,7 +20,7 @@ test "CVE-2019-19604, t7406-submodule-update 'submodule update - command in .git
     const io = std.testing.io;
     const text = "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n\tupdate = !touch pwned\n";
     try std.testing.expectError(error.InvalidUpdate, gitmodules.Gitmodules.parse(gpa, text));
-    const finding = (try fsck.checkBlob(gpa, &fsck.baseline, .zero(.sha1), .modules, text, null)).?;
+    const finding = (try fsck.checkBlob(gpa, &fsck.baseline, .{ .oid = .zero(.sha1), .as = .modules, .bytes = text }, .{ .sink = null })).?;
     try std.testing.expectEqual(fsck.Problem.gitmodules_update, finding.problem.?);
 
     var git = try testgit.Repo.init(gpa, io, &.{});

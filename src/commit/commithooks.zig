@@ -80,21 +80,17 @@ pub const Hooks = struct {
     /// `prepare-commit-msg` with `source`, then `commit-msg` when
     /// verifying. The message is what the file holds afterwards; without
     /// hooks it is `text` and no file is written.
-    pub fn beforeCommit(
-        h: *const Hooks,
-        arena: Allocator,
-        io: Io,
-        repo: *Repository,
-        text: []const u8,
-        source: hooks.Runner.MessageSource,
-        author: ?object.Signature,
-    ) Self.Error![]const u8 {
+    pub const BeforeCommitInputs = struct { text: []const u8, source: hooks.Runner.MessageSource, author: ?object.Signature = null };
+    pub fn beforeCommit(h: *const Hooks, arena: Allocator, io: Io, repo: *Repository, inputs: BeforeCommitInputs) Self.Error![]const u8 {
+        const text = inputs.text;
+        const source = inputs.source;
+        const author = inputs.author;
         const runner = h.runner orelse return text;
         const e = try h.env(arena, author);
         if (h.verify) _ = try runner.preCommit(io, e);
         try fs.atomicWrite(io, repo.gitDirectory(), "COMMIT_EDITMSG", text, .{ .prefix = ".relic-msg-", .sync = .none });
         const message_path = try h.path(arena, "COMMIT_EDITMSG");
-        _ = try runner.prepareCommitMsg(io, e, message_path, source, null);
+        _ = try runner.prepareCommitMsg(io, e, message_path, .{ .source = source, .commit = null });
         if (h.verify) _ = try runner.commitMsg(io, e, message_path);
         return repo.gitDirectory().readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
     }

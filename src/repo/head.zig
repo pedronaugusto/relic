@@ -127,8 +127,13 @@ pub fn attach(io: Io, repo: *Repository, branch: []const u8, old: ?Oid, log: Log
     try appendHeadLog(io, repo, old, new, log);
 }
 
+/// The expected current value and replacement object.
+pub const MoveInputs = struct { expected: refs_mod.Expected, new: Oid };
+
 /// Move a branch that `HEAD` does not name, with a line in its log.
-pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, expected: refs_mod.Expected, new: Oid, log: Log) Self.Error!void {
+pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, inputs: MoveInputs, log: Log) Self.Error!void {
+    const expected = inputs.expected;
+    const new = inputs.new;
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.update(branch, .{ .direct = new }, expected);

@@ -88,7 +88,7 @@ test "CVE-2022-41903, t4205-log-pretty-formats 'log --pretty with overflowing wr
         "%B%<(1)%x30",
     }) |format| {
         var out: std.ArrayList(u8) = .empty;
-        try std.testing.expectError(error.UnsupportedPlaceholder, pretty.formatCommit(arena.allocator(), io, repo.objectDatabase(), commit, format, .{}, &out));
+        try std.testing.expectError(error.UnsupportedPlaceholder, pretty.formatCommit(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = commit, .format = format }, &out, .{}));
     }
     var sink: Io.Writer.Allocating = .init(gpa);
     defer sink.deinit();

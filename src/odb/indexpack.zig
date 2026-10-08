@@ -905,7 +905,7 @@ const Indexer = struct {
         // gathered apart and added under the lock.
         var found: fsck.Found = .{};
         defer found.deinit(x.gpa);
-        const finding = try fsck.inspect(x.gpa, rules, x.kind, oid, t, bytes, if (t == .tree) &found else null, x.fsckSink());
+        const finding = try fsck.inspect(x.gpa, rules, .{ .kind = x.kind, .oid = oid, .type = t, .bytes = bytes }, .{ .found = if (t == .tree) &found else null, .sink = x.fsckSink() });
         if (t == .tree and (found.modules.count() != 0 or found.attributes.count() != 0)) {
             x.lock.lockUncancelable(x.io);
             defer x.lock.unlock(x.io);
@@ -961,15 +961,15 @@ const Indexer = struct {
                 const finding = if (by_name.get(oid)) |at| blk: {
                     const entry = x.entries.items[at];
                     if (entry.type != .blob) break :blk try fsck.checkFoundObject(rules, oid, as, false, x.fsckSink());
-                    if (entry.size > x.options.max_object_bytes) break :blk try fsck.checkBlob(x.gpa, rules, oid, as, null, x.fsckSink());
+                    if (entry.size > x.options.max_object_bytes) break :blk try fsck.checkBlob(x.gpa, rules, .{ .oid = oid, .as = as, .bytes = null }, .{ .sink = x.fsckSink() });
                     const bytes = try x.readBack(&w, at, by_name);
                     defer x.gpa.free(bytes);
-                    break :blk try fsck.checkBlob(x.gpa, rules, oid, as, bytes, x.fsckSink());
+                    break :blk try fsck.checkBlob(x.gpa, rules, .{ .oid = oid, .as = as, .bytes = bytes }, .{ .sink = x.fsckSink() });
                 } else if (try x.db.exists(x.io, oid)) blk: {
                     const found = try x.db.read(x.io, oid);
                     defer x.db.allocator().free(found.bytes);
                     if (found.type != .blob) break :blk try fsck.checkFoundObject(rules, oid, as, false, x.fsckSink());
-                    break :blk try fsck.checkBlob(x.gpa, rules, oid, as, found.bytes, x.fsckSink());
+                    break :blk try fsck.checkBlob(x.gpa, rules, .{ .oid = oid, .as = as, .bytes = found.bytes }, .{ .sink = x.fsckSink() });
                 } else if (x.options.promised) null else try fsck.checkFoundObject(rules, oid, as, true, x.fsckSink());
                 if (finding) |f| return x.fail(error.MalformedBlob, .{ .oid = oid, .problem = f.problem });
             }

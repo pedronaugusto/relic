@@ -655,7 +655,7 @@ const Walk = struct {
             defer db.allocator().free(blob.bytes);
             var content: []const u8 = blob.bytes;
             if (entry.mode != .symlink) {
-                const smudged = try wk.conv.toWorktree(wk.a, path, content, applied, .{ .blob = entry.oid, .treeish = wk.commit });
+                const smudged = try wk.conv.toWorktree(wk.a, .{ .path = path, .blob = content, .applied = applied }, .{ .blob = entry.oid, .treeish = wk.commit });
                 content = switch (smudged) {
                     .bytes => |b| b,
                     else => return error.UnsupportedAttribute,
@@ -707,7 +707,7 @@ fn formatSubst(wk: *Walk, commit: Oid, src: []const u8) Error![]const u8 {
         const b = std.mem.find(u8, rest, "$Format:") orelse break;
         const c = std.mem.findScalarPos(u8, rest, b + 8, '$') orelse break;
         try out.appendSlice(wk.a, rest[0..b]);
-        try pretty.formatCommit(wk.a, wk.io, wk.repo.objectDatabase(), commit, rest[b + 8 .. c], try wk.formatContext(rest[b + 8 .. c]), &out);
+        try pretty.formatCommit(wk.a, wk.io, .{ .db = wk.repo.objectDatabase(), .oid = commit, .format = rest[b + 8 .. c] }, &out, try wk.formatContext(rest[b + 8 .. c]));
         rest = rest[c + 1 ..];
     }
     try out.appendSlice(wk.a, rest);

@@ -393,7 +393,7 @@ fn receiveObjects(
     var links: indexpack.Links = .init(gpa);
     defer links.deinit();
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
-    var rules = try fsck.forTransfer(gpa, io, ask.settings, repo.objectFormat(), .fetch, options.check_objects, to_warnings.sink());
+    var rules = try fsck.forTransfer(gpa, io, ask.settings, .{ .kind = repo.objectFormat(), .scope = .fetch }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
     defer if (rules) |*r| r.deinit(gpa);
     var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
         .wants = chosen.wants.items,
