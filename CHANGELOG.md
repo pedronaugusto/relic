@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: LockFile.open takes Inputs for the path and borrowed buffer;
+  atomicWrite and readFileSized take named options. Program invocation and
+  trailer commands use Relic's own Cwd type. Sized-read fallback failures free
+  their original allocation exactly once, including a grown file over its limit.
+
 - Local push retains the copied pack until all receiver ref transactions and
   shallow updates finish, including rollback. Cancellation propagates after ref
   locks are released; the keep token's uncancelable cleanup then runs.

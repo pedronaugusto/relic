@@ -556,7 +556,7 @@ fn replay(r: *Run, vid: Id, path: []const u8, size: u32) Error!bool {
         error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => {},
         else => |e| return e,
     };
-    try fs.atomicWrite(r.io, r.wt, path, merged, ".relic-rerere-", .none);
+    try fs.atomicWrite(r.io, r.wt, path, merged, .{ .prefix = ".relic-rerere-", .sync = .none });
     return true;
 }
 

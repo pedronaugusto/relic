@@ -355,7 +355,7 @@ pub const Odb = struct {
         if (content.len > 1 << 20) return error.AlternatesTooLarge;
         const dir = odb.backendData().sources.items[0].dir;
         try dir.createDirPath(io, "info");
-        try fs.atomicWrite(io, dir, "info/alternates", content, "alternates-", odb.backendData().options.sync);
+        try fs.atomicWrite(io, dir, "info/alternates", content, .{ .prefix = "alternates-", .sync = odb.backendData().options.sync });
         // The own source remains open; rebuild the chain below it so reads
         // immediately see additions and stop seeing removed alternates.
         for (odb.backendData().sources.items[1..]) |*source| odb.closeSource(io, source);

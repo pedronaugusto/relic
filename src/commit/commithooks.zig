@@ -92,7 +92,7 @@ pub const Hooks = struct {
         const runner = h.runner orelse return text;
         const e = try h.env(arena, author);
         if (h.verify) _ = try runner.preCommit(io, e);
-        try fs.atomicWrite(io, repo.gitDirectory(), "COMMIT_EDITMSG", text, ".relic-msg-", .none);
+        try fs.atomicWrite(io, repo.gitDirectory(), "COMMIT_EDITMSG", text, .{ .prefix = ".relic-msg-", .sync = .none });
         const message_path = try h.path(arena, "COMMIT_EDITMSG");
         _ = try runner.prepareCommitMsg(io, e, message_path, source, null);
         if (h.verify) _ = try runner.commitMsg(io, e, message_path);

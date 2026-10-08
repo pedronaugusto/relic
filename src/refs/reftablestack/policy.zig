@@ -1,9 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const hash = @import("../../hash/hash.zig");
-const Oid = hash.Oid;
-const Kind = hash.Kind;
 const fs = @import("../../fs/fs.zig");
 const reftable = @import("../reftable.zig");
 /// How the stack writes and compacts. The defaults are git's, and

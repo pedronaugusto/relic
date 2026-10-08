@@ -75,7 +75,7 @@ pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set) Se
         }
     }.lessThan);
     var buffer: [4096]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, common_dir, file_name, &buffer, .{});
+    var lock = try fs.LockFile.open(gpa, io, common_dir, .{ .sub_path = file_name, .buffer = &buffer }, .{});
     defer lock.deinit(io);
     const w = lock.writer();
     for (sorted) |oid| try w.print("{f}\n", .{oid});

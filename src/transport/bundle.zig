@@ -471,7 +471,7 @@ pub const CreateError = error{
 /// `<path>.lock` as git writes it.
 pub fn create(gpa: Allocator, io: Io, repo: *Repository, dir: Io.Dir, path: []const u8, request: CreateRequest) Self.CreateError!void {
     var buffer: [64 * 1024]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, dir, path, &buffer, .{ .sync = .none, .write_pid = false });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none, .write_pid = false });
     defer lock.deinit(io);
     try write(gpa, io, repo, lock.writer(), request);
     try lock.commit(io);

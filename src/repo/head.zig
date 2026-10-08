@@ -157,7 +157,7 @@ pub fn writeState(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) 
         std.mem.print(&dir_buf, "{s}/.relic-", .{parent}) catch ".relic-"
     else
         ".relic-";
-    try fs.atomicWrite(io, dir, sub_path, bytes, prefix, .none);
+    try fs.atomicWrite(io, dir, sub_path, bytes, .{ .prefix = prefix, .sync = .none });
 }
 
 /// The state file `sub_path` under `dir`, or `null`. The bytes are the

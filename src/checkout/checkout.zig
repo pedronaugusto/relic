@@ -620,7 +620,7 @@ const Walker = struct {
             };
             return converted.bytes;
         }
-        return fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
+        return fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 });
     }
 
     /// Put a blob where this pass puts them.
@@ -3105,7 +3105,7 @@ pub fn applySparse(
                         var buf: [4096]u8 = undefined;
                         const len = try wt.readLink(io, entry.path, &buf);
                         break :blk try a.dupe(u8, buf[0..len]);
-                    } else try fs.readFileSized(a, io, wt, entry.path, found.stat.size, 1 << 31);
+                    } else try fs.readFileSized(a, io, wt, entry.path, .{ .size = found.stat.size, .max_bytes = 1 << 31 });
                     var content: []const u8 = raw;
                     if (options.rules.attrs) |attrs| {
                         if (found.kind != .sym_link) {

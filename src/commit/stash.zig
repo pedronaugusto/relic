@@ -391,7 +391,7 @@ const Ctx = struct {
             var buf: [4096]u8 = undefined;
             const len = try ctx.wt.readLink(ctx.io, path, &buf);
             break :blk try a.dupe(u8, buf[0..len]);
-        } else try fs.readFileSized(a, ctx.io, ctx.wt, path, found.stat.size, 1 << 31);
+        } else try fs.readFileSized(a, ctx.io, ctx.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 });
         var content: []const u8 = raw;
         if (mode != .symlink) {
             try ctx.attrs.enter(ctx.io, ctx.wt, path);

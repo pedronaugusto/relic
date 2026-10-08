@@ -106,7 +106,7 @@ pub fn prepare(
     };
     const buffer = try gpa.alloc(u8, 16 * 1024);
     errdefer gpa.free(buffer);
-    var lock = try fs.LockFile.open(gpa, io, dir, sub_path, buffer, .{ .shared = shared });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, .{ .shared = shared });
     errdefer lock.deinit(io);
 
     const text = (try fs.readFileAlloc(gpa, io, dir, sub_path, 1 << 24)) orelse try gpa.alloc(u8, 0);

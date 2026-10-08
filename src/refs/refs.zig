@@ -598,7 +598,7 @@ pub const Store = struct {
     /// Take `packed-refs.lock`, waiting as `core.packedRefsTimeout` says.
     fn lockPacked(store: *const Store, io: Io, buffer: []u8) TransactionError!fs.LockFile {
         const data = state_mod.get(store._state);
-        return fs.LockFile.open(data.gpa, io, store.commonDir(), "packed-refs", buffer, .{
+        return fs.LockFile.open(data.gpa, io, store.commonDir(), .{ .sub_path = "packed-refs", .buffer = buffer }, .{
             .shared = store.sharedPermissions(),
             .on_contention = data.packed_lock,
         });
@@ -743,7 +743,7 @@ pub const Store = struct {
         // git's `files_reflog_expire` takes the ref's lock first, which every
         // transaction moving the ref or appending to its log also takes.
         var buffer: [max_loose_ref]u8 = undefined;
-        var lock = try fs.LockFile.open(gpa, io, dir, name, &buffer, .{ .shared = store.sharedPermissions() });
+        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions() });
         defer lock.deinit(io);
         const newest = try reflog.expire(gpa, io, dir, name, store.objectFormat(), store.sharedPermissions(), options.rewrite, keeper);
         if (!options.update_ref) return;
@@ -1033,7 +1033,7 @@ pub const SpecialRefs = struct {
 
     /// `<ref>.lock`, waiting as long as git waits on a ref's lock.
     fn takeLock(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, buffer: []u8) TransactionError!fs.LockFile {
-        return fs.LockFile.open(gpa, io, s.store.gitDir(), ref.name(), buffer, .{
+        return fs.LockFile.open(gpa, io, s.store.gitDir(), .{ .sub_path = ref.name(), .buffer = buffer }, .{
             .on_contention = .{ .wait_ms = 100 },
             .sync = .none,
             .shared = s.store.sharedPermissions(),
@@ -1328,7 +1328,7 @@ pub const Transaction = struct {
             }
             const buffer = try tx.gpa.alloc(u8, 4096);
             edit.lock_buffer = buffer;
-            edit.lock = fs.LockFile.open(tx.gpa, io, dir, edit.name, buffer, .{ .shared = tx.store.sharedPermissions() }) catch |err| switch (err) {
+            edit.lock = fs.LockFile.open(tx.gpa, io, dir, .{ .sub_path = edit.name, .buffer = buffer }, .{ .shared = tx.store.sharedPermissions() }) catch |err| switch (err) {
                 error.LockHeld => return error.LockHeld,
                 else => |e| return e,
             };

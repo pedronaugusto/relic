@@ -151,3 +151,14 @@ test "phase2 pack storage requests stay within five positional inputs" {
     try std.testing.expect(!@hasDecl(relic.odb.pack.Writer, "init"));
     try std.testing.expect(!@hasDecl(relic.odb.pack.Writer, "initCounting"));
 }
+
+test "phase2 filesystem requests stay within five positional inputs" {
+    inline for (.{ relic.repo.fs.LockFile.open, relic.repo.fs.atomicWrite, relic.repo.fs.readFileSized }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}
+test "phase2 program invocation owns its working directory type" {
+    try std.testing.expect(@FieldType(relic.repo.program.Invocation, "cwd") == relic.repo.program.Cwd);
+    try std.testing.expect(@FieldType(relic.repo.program.Invocation, "cwd") != std.process.Child.Cwd);
+    try std.testing.expect(@FieldType(relic.commit.trailer.Commands, "cwd") == relic.repo.program.Cwd);
+}

@@ -827,7 +827,7 @@ pub const Cache = struct {
             var s: std.json.Stringify = .{ .writer = &out.writer };
             writeLockArray(&s, c.remote) catch return error.OutOfMemory;
             out.writer.writeByte('\n') catch return error.OutOfMemory;
-            try fs.atomicWrite(io, dir, "remote", out.written(), ".relic-locks-", .none);
+            try fs.atomicWrite(io, dir, "remote", out.written(), .{ .prefix = ".relic-locks-", .sync = .none });
         }
         if (c.have_verifiable) {
             var out: Io.Writer.Allocating = .init(a);
@@ -839,7 +839,7 @@ pub const Cache = struct {
             writeLockArray(&s, c.theirs) catch return error.OutOfMemory;
             s.endObject() catch return error.OutOfMemory;
             out.writer.writeByte('\n') catch return error.OutOfMemory;
-            try fs.atomicWrite(io, dir, "verifiable", out.written(), ".relic-locks-", .none);
+            try fs.atomicWrite(io, dir, "verifiable", out.written(), .{ .prefix = ".relic-locks-", .sync = .none });
         }
     }
 };

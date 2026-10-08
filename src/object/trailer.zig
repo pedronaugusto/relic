@@ -218,7 +218,7 @@ pub const New = struct {
 pub const Commands = struct {
     programs: program.Programs,
     /// Where the commands run; the process's own directory when `.inherit`.
-    cwd: std.process.Child.Cwd = .inherit,
+    cwd: program.Cwd = .inherit,
 };
 
 // ---------------------------------------------------------------------------

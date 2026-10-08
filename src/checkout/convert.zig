@@ -204,7 +204,7 @@ pub const Session = struct {
             const pointer_bytes = try (try s.nativeOf()).cleanFile(a, s.io, .{ .path = path, .storing = storing });
             return s.afterFilter(a, path, pointer_bytes, applied, storing);
         }
-        const bytes = try fs.readFileSized(a, s.io, s.options.wt, path, size, 1 << 31);
+        const bytes = try fs.readFileSized(a, s.io, s.options.wt, path, .{ .size = size, .max_bytes = 1 << 31 });
         return s.convertToGit(a, path, bytes, applied, resolved, storing);
     }
 

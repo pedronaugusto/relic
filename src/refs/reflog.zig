@@ -269,7 +269,7 @@ pub fn expire(
     defer gpa.free(path);
     if (!try exists(gpa, io, git_dir, ref)) return null;
     var buffer: [4096]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, git_dir, path, &buffer, .{ .shared = shared });
+    var lock = try fs.LockFile.open(gpa, io, git_dir, .{ .sub_path = path, .buffer = &buffer }, .{ .shared = shared });
     defer lock.deinit(io);
     // Read under the lock: an append that took it first is in the file.
     const bytes = (try fs.readFileAlloc(gpa, io, git_dir, path, 1 << 28)) orelse try gpa.alloc(u8, 0);

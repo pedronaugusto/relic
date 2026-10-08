@@ -58,7 +58,7 @@ const Mode = enum { read_only, umask };
 
 fn publish(gpa: Allocator, io: Io, db: *const odb.Odb, dir: Io.Dir, path: []const u8, bytes: []const u8, sync: fs.Sync, mode: Mode) (Allocator.Error || fs.LockError || fs.CommitError)!void {
     var buffer: [8192]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, dir, path, &buffer, .{ .sync = sync, .shared = db.sharedPermissions() });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = sync, .shared = db.sharedPermissions() });
     defer lock.deinit(io);
     try lock.writer().writeAll(bytes);
     try lock.commit(io);
@@ -163,7 +163,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         // Take the chain lock before writing layers. Its rename is the only
         // point at which a reader begins to see the new chain.
         var buffer: [8192]u8 = undefined;
-        var chain_lock = try fs.LockFile.open(gpa, io, dir, "info/commit-graphs/commit-graph-chain", &buffer, .{ .sync = options.sync, .shared = db.sharedPermissions() });
+        var chain_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "info/commit-graphs/commit-graph-chain", .buffer = &buffer }, .{ .sync = options.sync, .shared = db.sharedPermissions() });
         defer chain_lock.deinit(io);
         var hex_buffer: [hash.max_hex_len]u8 = undefined;
         if (retained) |base| {

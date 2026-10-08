@@ -348,7 +348,7 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, options: Options) refs.Tran
     errdefer dir.close(io);
     const buffer = try gpa.alloc(u8, 4096);
     errdefer gpa.free(buffer);
-    const lock = try fs.LockFile.open(gpa, io, dir, "tables.list", buffer, .{ .on_contention = options.lock, .shared = options.shared });
+    const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared });
     return .{ .dir = dir, .lock = lock, .buffer = buffer, .shared = options.shared };
 }
 
@@ -808,7 +808,7 @@ fn logMessage(arena: Allocator, text: []const u8, block_size: u32) Allocator.Err
 /// reader sees half of it.
 fn writeTable(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8, shared: fs.Shared) refs.TransactionError!void {
     var buffer: [16 * 1024]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, dir, name, &buffer, .{ .shared = shared });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = shared });
     defer lock.deinit(io);
     lock.writer().writeAll(bytes) catch return error.WriteFailed;
     try lock.commit(io);
@@ -843,7 +843,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     };
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
-    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock, .shared = options.shared });
+    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared });
     defer if (list_lock) |*lock| lock.deinit(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
@@ -925,7 +925,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
 
     // The list again, as it is now: writers may have added tables, and the
     // merged ones are wherever it has them, in the order they were merged.
-    list_lock = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock, .shared = options.shared });
+    list_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared });
     const listed = (try fs.readFileAlloc(gpa, io, dir, "tables.list", 1 << 20)) orelse try gpa.alloc(u8, 0);
     defer gpa.free(listed);
     var current: std.ArrayList([]const u8) = .empty;

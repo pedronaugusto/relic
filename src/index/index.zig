@@ -1393,7 +1393,7 @@ pub const Index = struct {
     pub fn write(index: *Index, io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) Self.WriteError!void {
         const buffer = try index.gpa.alloc(u8, 64 * 1024);
         defer index.gpa.free(buffer);
-        var lock = try fs.LockFile.open(index.gpa, io, dir, sub_path, buffer, options.lock);
+        var lock = try fs.LockFile.open(index.gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, options.lock);
         defer lock.deinit(io);
         try index.writeTo(lock.writer(), options);
         try lock.commit(io);

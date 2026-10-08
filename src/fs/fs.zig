@@ -472,6 +472,9 @@ pub const LockFile = struct {
         shared: Shared = .umask,
     };
 
+    /// The target name and the caller-owned buffer, both borrowed until deinit.
+    pub const Inputs = struct { sub_path: []const u8, buffer: []u8 };
+
     /// Errors from `open`.
     pub const OpenError = LockError || Allocator.Error;
 
@@ -482,10 +485,11 @@ pub const LockFile = struct {
         gpa: Allocator,
         io: Io,
         dir: Io.Dir,
-        sub_path: []const u8,
-        buffer: []u8,
+        inputs: Inputs,
         options: Options,
     ) OpenError!LockFile {
+        const sub_path = inputs.sub_path;
+        const buffer = inputs.buffer;
         const lock_name = try gpa.print("{s}.lock", .{sub_path});
         errdefer gpa.free(lock_name);
 
@@ -1083,6 +1087,8 @@ pub fn lockHeld(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
 pub const AtomicWriteError = Io.File.OpenError || Io.Writer.Error ||
     SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError;
 
+pub const AtomicWriteOptions = struct { prefix: []const u8, sync: Sync = .none };
+
 /// Replace `sub_path` with `bytes` through a uniquely-named neighbour.
 ///
 /// Used where git writes a temporary rather than a `.lock` — a loose object,
@@ -1092,9 +1098,10 @@ pub fn atomicWrite(
     dir: Io.Dir,
     sub_path: []const u8,
     bytes: []const u8,
-    prefix: []const u8,
-    sync: Sync,
+    options: AtomicWriteOptions,
 ) Self.AtomicWriteError!void {
+    const prefix = options.prefix;
+    const sync = options.sync;
     var name_buf: [128]u8 = undefined;
     const temp = tempName(io, &name_buf, prefix);
     var file = try dir.createFile(io, temp, .{ .exclusive = true });
@@ -1138,6 +1145,8 @@ pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
 pub const ReadSizedError = Io.File.OpenError || Io.File.ReadPositionalError ||
     Io.Dir.ReadFileAllocError || Allocator.Error;
 
+pub const ReadSizedOptions = struct { size: u64, max_bytes: usize };
+
 /// Read a file a stat has already measured.
 ///
 /// The walk that found the file already knows how long it is, so the `fstat`
@@ -1152,20 +1161,23 @@ pub fn readFileSized(
     io: Io,
     dir: Io.Dir,
     sub_path: []const u8,
-    size: u64,
-    max_bytes: usize,
+    options: ReadSizedOptions,
 ) Self.ReadSizedError![]u8 {
+    const size = options.size;
+    const max_bytes = options.max_bytes;
     if (size > max_bytes) return error.StreamTooLong;
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
     const buf = try gpa.alloc(u8, @intCast(size));
-    errdefer gpa.free(buf);
-    const n = try file.readPositionalAll(io, buf, 0);
-    if (n < buf.len) return gpa.realloc(buf, n);
-    // The file is at least as long as the stat said. One byte past the end
-    // says whether it is longer, which is the only case this cannot finish.
-    var probe: [1]u8 = undefined;
-    if (try file.readPositional(io, &.{&probe}, size) == 0) return buf;
+    {
+        errdefer gpa.free(buf);
+        const n = try file.readPositionalAll(io, buf, 0);
+        if (n < buf.len) return gpa.realloc(buf, n);
+        // The file is at least as long as the stat said. One byte past the end
+        // says whether it is longer, which is the only case this cannot finish.
+        var probe: [1]u8 = undefined;
+        if (try file.readPositional(io, &.{&probe}, size) == 0) return buf;
+    }
     gpa.free(buf);
     return dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
 }
@@ -1309,26 +1321,26 @@ test "a sized read gives the whole file whatever the size said" {
     try dir.writeFile(io, .{ .sub_path = "f", .data = "twelve bytes" });
 
     // The size a stat reported.
-    const exact = try readFileSized(gpa, io, dir, "f", 12, 1 << 20);
+    const exact = try readFileSized(gpa, io, dir, "f", .{ .size = 12, .max_bytes = 1 << 20 });
     defer gpa.free(exact);
     try std.testing.expectEqualStrings("twelve bytes", exact);
 
     // A file that grew after the stat: the read is started again rather than
     // cut short at the length the stat gave.
-    const grown = try readFileSized(gpa, io, dir, "f", 4, 1 << 20);
+    const grown = try readFileSized(gpa, io, dir, "f", .{ .size = 4, .max_bytes = 1 << 20 });
     defer gpa.free(grown);
     try std.testing.expectEqualStrings("twelve bytes", grown);
 
     // A file that shrank: what is there is what comes back.
-    const shrunk = try readFileSized(gpa, io, dir, "f", 64, 1 << 20);
+    const shrunk = try readFileSized(gpa, io, dir, "f", .{ .size = 64, .max_bytes = 1 << 20 });
     defer gpa.free(shrunk);
     try std.testing.expectEqualStrings("twelve bytes", shrunk);
 
-    const empty = try readFileSized(gpa, io, dir, "f", 0, 1 << 20);
+    const empty = try readFileSized(gpa, io, dir, "f", .{ .size = 0, .max_bytes = 1 << 20 });
     defer gpa.free(empty);
     try std.testing.expectEqualStrings("twelve bytes", empty);
 
-    try std.testing.expectError(error.StreamTooLong, readFileSized(gpa, io, dir, "f", 12, 4));
+    try std.testing.expectError(error.StreamTooLong, readFileSized(gpa, io, dir, "f", .{ .size = 12, .max_bytes = 4 }));
 }
 
 test "a lock is refused, not broken, and says who holds it" {
@@ -1341,13 +1353,13 @@ test "a lock is refused, not broken, and says who holds it" {
     try dir.writeFile(io, .{ .sub_path = "thing", .data = "old\n" });
 
     var buf: [64]u8 = undefined;
-    var lock = try LockFile.open(gpa, io, dir, "thing", &buf, .{});
+    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
     defer lock.deinit(io);
 
     var buf2: [64]u8 = undefined;
     try std.testing.expectError(
         error.LockHeld,
-        LockFile.open(gpa, io, dir, "thing", &buf2, .{}),
+        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{}),
     );
     const report = staleReport(io, dir, "thing");
     try std.testing.expect(report.held);
@@ -1371,7 +1383,7 @@ test "a lock names its holder in its own bytes, and no file but the lock is made
     // Contents shorter than the name under them, and none at all.
     for ([_][]const u8{ "x", "" }) |contents| {
         var buf: [64]u8 = undefined;
-        var lock = try LockFile.open(gpa, io, dir, "thing", &buf, .{});
+        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
         defer lock.deinit(io);
         var count: usize = 0;
         var it = dir.iterate();
@@ -1400,7 +1412,7 @@ test "a lock syncs the target's directory after rename only when asked" {
                 defer h.destroy();
                 const io = h.io();
                 var buf: [64]u8 = undefined;
-                var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, target, &buf, .{
+                var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = target, .buffer = &buf }, .{
                     .sync = policy,
                     .sync_directory = sync_directory,
                 });
@@ -1433,7 +1445,7 @@ test "phase2 airlock file failure prevents lock publication and directory failur
         const io = h.io();
         {
             var buffer: [64]u8 = undefined;
-            var lock = try LockFile.open(gpa, io, tmp.dir, "thing", &buffer, .{ .sync = .per_file, .sync_directory = true });
+            var lock = try LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{ .sync = .per_file, .sync_directory = true });
             defer lock.deinit(io);
             try lock.writer().writeAll("new\n");
             try std.testing.expectError(error.InputOutput, lock.commit(io));
@@ -1457,7 +1469,7 @@ test "phase2 airlock refused durability never publishes weaker file data" {
     defer h.destroy();
     const io = h.io();
     var buffer: [64]u8 = undefined;
-    var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, "thing", &buffer, .{ .sync = .per_file });
+    var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{ .sync = .per_file });
     defer lock.deinit(io);
     try lock.writer().writeAll("new\n");
     try std.testing.expectError(error.LevelUnavailable, lock.commit(io));
@@ -1475,7 +1487,7 @@ test "a rolled-back lock changes nothing" {
     try dir.writeFile(io, .{ .sub_path = "thing", .data = "old\n" });
     {
         var buf: [64]u8 = undefined;
-        var lock = try LockFile.open(gpa, io, dir, "thing", &buf, .{});
+        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
         defer lock.deinit(io);
         try lock.writer().writeAll("never\n");
     }
@@ -1493,7 +1505,7 @@ test "a failed lock rename removes the closed lock file" {
     try dir.createDir(io, "thing", .default_dir);
 
     var buf: [64]u8 = undefined;
-    var lock = try LockFile.open(gpa, io, dir, "thing", &buf, .{});
+    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
     try lock.writer().writeAll("cannot replace a directory\n");
     try std.testing.expectError(error.IsDir, lock.commit(io));
     lock.deinit(io);
@@ -1510,7 +1522,7 @@ test "an allocation failure abandons no lock" {
 
     try std.testing.expectError(
         error.OutOfMemory,
-        LockFile.open(failing.allocator(), io, tmp.dir, "thing", &buf, .{}),
+        LockFile.open(failing.allocator(), io, tmp.dir, .{ .sub_path = "thing", .buffer = &buf }, .{}),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "thing.lock", .{}));
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
@@ -1524,13 +1536,13 @@ test "waiting for a lock gives up with the same named error" {
     const dir = tmp.dir;
 
     var buf: [64]u8 = undefined;
-    var lock = try LockFile.open(gpa, io, dir, "thing", &buf, .{});
+    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
     defer lock.deinit(io);
 
     var buf2: [64]u8 = undefined;
     try std.testing.expectError(
         error.LockHeld,
-        LockFile.open(gpa, io, dir, "thing", &buf2, .{ .on_contention = .{ .wait_ms = 5 } }),
+        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .on_contention = .{ .wait_ms = 5 } }),
     );
 }
 
@@ -1573,3 +1585,10 @@ test "a read-only file is replaced and removed, as a lockable one nobody holds m
 
 /// All errors reported by this namespace.
 pub const Error = SyncError || StatError || BarrierError || LockError || CommitError || LockFile.OpenError || Shared.ParseError || SetTimestampsError || HardLinkError || AtomicWriteError || ReadSizedError || Self.StatError || Self.CommitError || Io.Dir.RenameError || Io.Dir.CreateDirPathError || Io.Dir.SetFilePermissionsError || Io.Dir.DeleteFileError || Self.AtomicWriteError || Self.ReadSizedError || Allocator.Error;
+
+test "phase2 sized read releases its hint allocation when a grown file exceeds the limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "grown", .data = "twelve bytes" });
+    try std.testing.expectError(error.StreamTooLong, readFileSized(std.testing.allocator, std.testing.io, tmp.dir, "grown", .{ .size = 1, .max_bytes = 4 }));
+}

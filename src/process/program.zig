@@ -67,13 +67,16 @@ pub const Var = struct {
     value: []const u8,
 };
 
+/// Where a program starts. The directory is borrowed for the launch.
+pub const Cwd = union(enum) { inherit, path: []const u8, dir: Io.Dir };
+
 pub const Invocation = struct {
     /// The program and its arguments. With `shell`, the first is a command
     /// line and the rest are its arguments.
     argv: []const []const u8,
     /// Read `argv[0]` as git reads a configured command.
     shell: bool = false,
-    cwd: std.process.Child.Cwd = .inherit,
+    cwd: Cwd = .inherit,
     /// Set on top of `Programs.environ`, after `unset`.
     set: []const Var = &.{},
     /// Removed from it: git clears a repository's own variables before it
