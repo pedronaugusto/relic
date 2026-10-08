@@ -92,7 +92,7 @@ test "CVE-2022-41903, t4205-log-pretty-formats 'log --pretty with overflowing wr
     }
     var sink: Io.Writer.Allocating = .init(gpa);
     defer sink.deinit();
-    try std.testing.expectError(error.UnsupportedPlaceholder, archive.archive(gpa, io, &repo, commit, .{}, &sink.writer));
+    try std.testing.expectError(error.UnsupportedPlaceholder, archive.archive(gpa, io, .{ .repo = &repo, .treeish = commit }, &sink.writer, .{}));
 }
 
 test "CVE-2022-23521, t0003-attributes 'large attributes line ignored in tree' and '...ignores trailing content': a line of 2048 bytes or more is passed over whole" {

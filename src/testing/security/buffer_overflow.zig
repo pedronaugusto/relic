@@ -83,6 +83,6 @@ test "git 2.2.3 (strbuf for path buffers, no t/ test): a path longer than PATH_M
     defer repo.deinit(io);
     var ours: Io.Writer.Allocating = .init(gpa);
     defer ours.deinit();
-    try archive.archive(gpa, io, &repo, commit, .{}, &ours.writer);
+    try archive.archive(gpa, io, .{ .repo = &repo, .treeish = commit }, &ours.writer, .{});
     try std.testing.expectEqualSlices(u8, theirs, ours.written());
 }

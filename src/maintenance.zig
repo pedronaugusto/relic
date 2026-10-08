@@ -18,3 +18,6 @@ pub const MaintenanceError = @import("maintenance/maintenance.zig").MaintenanceE
 pub const Maintenance = @import("maintenance/maintenance.zig").Maintenance;
 pub const writeConfiguredCommitGraph = @import("maintenance/maintenance.zig").writeConfiguredCommitGraph;
 pub const repackRepository = @import("maintenance/maintenance.zig").repackRepository;
+
+pub const BitmapInputs = @import("maintenance/maintenance.zig").BitmapInputs;
+pub const MidxBitmapInputs = @import("maintenance/maintenance.zig").MidxBitmapInputs;

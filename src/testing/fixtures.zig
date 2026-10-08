@@ -988,7 +988,7 @@ test "a worktree that moved is repaired and git follows it" {
 
     try git.dir.createDirPath(io, "trees/before");
     var dest = try git.dir.openDir(io, "trees/before", .{ .iterate = true });
-    var added = try worktrees_mod.add(gpa, io, repo.refStore(), "moving", dest, .{
+    var added = try worktrees_mod.add(gpa, io, repo.refStore(), .{ .name = "moving", .dest_dir = dest }, .{
         .detach_at = try Oid.parse(.sha1, commit_text),
     });
     added.admin_dir.close(io);
@@ -998,7 +998,7 @@ test "a worktree that moved is repaired and git follows it" {
 
     var parent = try git.dir.openDir(io, "trees", .{ .iterate = true });
     defer parent.close(io);
-    try worktrees_mod.move(gpa, io, repo.commonDirectory(), "moving", parent, "after");
+    try worktrees_mod.move(gpa, io, repo.commonDirectory(), .{ .name = "moving", .new_parent = parent, .new_name = "after" });
 
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "trees/before", .{}));
     var moved = try git.dir.openDir(io, "trees/after", .{ .iterate = true });

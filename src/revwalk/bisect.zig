@@ -1152,7 +1152,11 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
 /// `git bisect <term> [<rev>...]`, `git bisect skip [<rev>...]`: `state`
 /// is the bad or the good term or `skip`, and `revs` empty means
 /// `BISECT_HEAD` or `HEAD`. A `skip` of `<a>..<b>` skips the range.
-pub fn mark(gpa: Allocator, io: Io, repo: *Repository, state: []const u8, revs: []const []const u8, options: Options) Self.Error!Report {
+pub const MarkInputs = struct { state: []const u8, revs: []const []const u8 };
+
+pub fn mark(gpa: Allocator, io: Io, repo: *Repository, inputs: MarkInputs, options: Options) Self.Error!Report {
+    const state = inputs.state;
+    const revs = inputs.revs;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -1734,7 +1738,7 @@ fn bisectLikeGit(case: Case) !void {
             if (std.mem.find(u8, log_text, "first '") != null or std.mem.find(u8, log_text, "only skipped") != null) break;
             var word = try t.verdict(io, case.first_bad, case.skip, no_checkout);
             if (renamed) word = if (std.mem.eql(u8, word, "bad")) "broken" else if (std.mem.eql(u8, word, "good")) "fine" else word;
-            try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
+            try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, .{ .state = word, .revs = &.{} }, .{ .who = test_who }));
         }
         // Replay from the completed bisection, as git 2.56 does without
         // first restoring the original HEAD, then reset both twins.
@@ -1789,7 +1793,7 @@ test "bisect refuses what git refuses" {
             var u: Twin = undefined;
             try Twin.init(gpa, io, &u, format, 0);
             defer u.deinit(io);
-            try std.testing.expectError(error.NotBisecting, mark(gpa, io, &u.repo, "good", &.{}, .{ .who = test_who }));
+            try std.testing.expectError(error.NotBisecting, mark(gpa, io, &u.repo, .{ .state = "good", .revs = &.{} }, .{ .who = test_who }));
             try std.testing.expectError(error.UnrecognizedOption, start(gpa, io, &u.repo, &.{"--bogus"}, .{ .who = test_who }));
             try std.testing.expectError(error.InvalidTerm, start(gpa, io, &u.repo, &.{ "--term-new=skip", "HEAD" }, .{ .who = test_who }));
         }
@@ -1808,10 +1812,10 @@ test "bisect waits for good and bad commits, and skips a range, as git does" {
             defer t.deinit(io);
             // Waiting for both, then for a good commit.
             try expectReport(&t, io, &.{"start"}, start(gpa, io, &t.repo, &.{}, .{ .who = test_who }));
-            try expectReport(&t, io, &.{ "bad", "HEAD" }, mark(gpa, io, &t.repo, "bad", &.{"HEAD"}, .{ .who = test_who }));
-            try std.testing.expectError(error.TooManyBadRevisions, mark(gpa, io, &t.repo, "bad", &.{ "HEAD", "HEAD~1" }, .{ .who = test_who }));
-            try expectReport(&t, io, &.{ "good", "HEAD~4", "HEAD~6" }, mark(gpa, io, &t.repo, "good", &.{ "HEAD~4", "HEAD~6" }, .{ .who = test_who }));
-            try expectReport(&t, io, &.{ "skip", "HEAD~3..HEAD~1" }, mark(gpa, io, &t.repo, "skip", &.{"HEAD~3..HEAD~1"}, .{ .who = test_who }));
+            try expectReport(&t, io, &.{ "bad", "HEAD" }, mark(gpa, io, &t.repo, .{ .state = "bad", .revs = &.{"HEAD"} }, .{ .who = test_who }));
+            try std.testing.expectError(error.TooManyBadRevisions, mark(gpa, io, &t.repo, .{ .state = "bad", .revs = &.{ "HEAD", "HEAD~1" } }, .{ .who = test_who }));
+            try expectReport(&t, io, &.{ "good", "HEAD~4", "HEAD~6" }, mark(gpa, io, &t.repo, .{ .state = "good", .revs = &.{ "HEAD~4", "HEAD~6" } }, .{ .who = test_who }));
+            try expectReport(&t, io, &.{ "skip", "HEAD~3..HEAD~1" }, mark(gpa, io, &t.repo, .{ .state = "skip", .revs = &.{"HEAD~3..HEAD~1"} }, .{ .who = test_who }));
         }
     }.inFormat);
 }
@@ -1851,7 +1855,7 @@ fn resetWhenFoundLikeGit(option: []const u8) !void {
         for (0..3) |_| {
             if (!try t.gitExpects(io)) break;
             const word = try t.verdict(io, 14, &.{}, false);
-            try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
+            try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, .{ .state = word, .revs = &.{} }, .{ .who = test_who }));
         }
     }
 }

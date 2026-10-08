@@ -746,7 +746,11 @@ fn tarUmask(repo: *Repository, user: ?u32) Error!u32 {
 }
 
 /// `git archive <tree-ish> [<path>...]`: write the archive to `w`.
-pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options: Options, w: *Io.Writer) Self.Error!void {
+pub const Inputs = struct { repo: *Repository, treeish: Oid };
+
+pub fn archive(gpa: Allocator, io: Io, inputs: Inputs, w: *Io.Writer, options: Options) Self.Error!void {
+    const repo = inputs.repo;
+    const treeish = inputs.treeish;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();

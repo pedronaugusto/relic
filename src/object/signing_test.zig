@@ -324,12 +324,12 @@ test "export-subst's signature placeholders check the commit as git archive does
     const head = try Oid.parse(repo.objectFormat(), text);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try archive_mod.archive(gpa, io, &repo, head, .{ .programs = k.programs() }, &out.writer);
+    try archive_mod.archive(gpa, io, .{ .repo = &repo, .treeish = head }, &out.writer, .{ .programs = k.programs() });
     try testing.expectEqualSlices(u8, theirs, out.written());
     // without the programs, a signed commit's signature cannot be checked
     var none: Io.Writer.Allocating = .init(gpa);
     defer none.deinit();
-    try testing.expectError(error.SignatureNeedsSigner, archive_mod.archive(gpa, io, &repo, head, .{}, &none.writer));
+    try testing.expectError(error.SignatureNeedsSigner, archive_mod.archive(gpa, io, .{ .repo = &repo, .treeish = head }, &none.writer, .{}));
 }
 
 test "openpgp signatures made here verify in git, and git's verify here" {

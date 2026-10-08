@@ -2055,8 +2055,8 @@ const Merge = struct {
         // `-X subtree`: the other side and the base lined up with ours
         // first, as `merge_ort_nonrecursive_internal` does.
         if (m.options.subtree_shift) |prefix| {
-            side2 = try subtreeshift.shift(m.db.allocator(), m.io, m.db, side1, side2, prefix);
-            base = try subtreeshift.shift(m.db.allocator(), m.io, m.db, side1, base, prefix);
+            side2 = try subtreeshift.shift(m.db.allocator(), m.io, m.db, .{ .one = side1, .two = side2 }, .{ .prefix = prefix });
+            base = try subtreeshift.shift(m.db.allocator(), m.io, m.db, .{ .one = side1, .two = base }, .{ .prefix = prefix });
         }
         m.reset();
         var passes: u32 = 0;

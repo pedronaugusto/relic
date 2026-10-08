@@ -36,7 +36,13 @@ pub const Error = error{
 /// empty works the shift out from the trees; otherwise it is the path to
 /// shift by, as `-X subtree=<path>` gives it. `two` itself when no shift
 /// fits. A tree the shift makes is written to `db`.
-pub fn shift(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, two: Oid, prefix: []const u8) Self.Error!Oid {
+pub const Inputs = struct { one: Oid, two: Oid };
+pub const Options = struct { prefix: []const u8 = "" };
+
+pub fn shift(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: Options) Self.Error!Oid {
+    const one = inputs.one;
+    const two = inputs.two;
+    const prefix = options.prefix;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const s: Shifter = .{ .arena = arena_state.allocator(), .io = io, .db = db };
@@ -275,13 +281,13 @@ test "a side kept at the top shifts down under the directory ours holds it in" {
 
     const expected_lib = try writeTree(io, &db, &.{ .{ "a", "100644", a }, .{ "b", "100644", edited } });
     const expected = try writeTree(io, &db, &.{ .{ "README", "100644", readme }, .{ "lib", "40000", expected_lib } });
-    try std.testing.expect(expected.eql(try shift(gpa, io, &db, ours, theirs, "")));
-    try std.testing.expect(expected.eql(try shift(gpa, io, &db, ours, theirs, "lib")));
+    try std.testing.expect(expected.eql(try shift(gpa, io, &db, .{ .one = ours, .two = theirs }, .{ .prefix = "" })));
+    try std.testing.expect(expected.eql(try shift(gpa, io, &db, .{ .one = ours, .two = theirs }, .{ .prefix = "lib" })));
     // The other way round, the whole project is cut down to `lib`.
-    try std.testing.expect(lib.eql(try shift(gpa, io, &db, theirs, ours, "")));
-    try std.testing.expect(lib.eql(try shift(gpa, io, &db, theirs, ours, "lib/")));
+    try std.testing.expect(lib.eql(try shift(gpa, io, &db, .{ .one = theirs, .two = ours }, .{ .prefix = "" })));
+    try std.testing.expect(lib.eql(try shift(gpa, io, &db, .{ .one = theirs, .two = ours }, .{ .prefix = "lib/" })));
     // A path neither tree has shifts nothing.
-    try std.testing.expect(theirs.eql(try shift(gpa, io, &db, ours, theirs, "elsewhere")));
+    try std.testing.expect(theirs.eql(try shift(gpa, io, &db, .{ .one = ours, .two = theirs }, .{ .prefix = "elsewhere" })));
 }
 
 fn writeTree(io: Io, db: *odb_mod.Odb, items: []const struct { []const u8, []const u8, Oid }) !Oid {

@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: archive, range-diff, linked-worktree, bisect marking, subtree
+  shifting and bitmap writes take named input groups. Archive and range-diff
+  output writers precede their options. Published bytes, selection policies,
+  local edits and bitmap object ordering keep their behavior.
+
 - Breaking: ref-log append takes AppendInputs before LogMessage; expiration
   takes its generic keeper before named options containing the ref name.
   Reftable writes take WriteInputs before WriteOptions, and compaction takes

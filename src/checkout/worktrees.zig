@@ -274,14 +274,17 @@ pub const Added = struct {
 ///
 /// The checkout is a separate call, because it needs an object database and
 /// an index and this does not: `worktree.checkout` into `Added.work_dir`.
+pub const AddInputs = struct { name: []const u8, dest_dir: Io.Dir };
+
 pub fn add(
     gpa: Allocator,
     io: Io,
     refs: *const refs_mod.Store,
-    name: []const u8,
-    dest_dir: Io.Dir,
+    inputs: AddInputs,
     options: AddOptions,
 ) Self.Error!Added {
+    const name = inputs.name;
+    const dest_dir = inputs.dest_dir;
     const common_dir = refs.commonDir();
     // The name becomes a directory under `worktrees/`, so it is held to
     // the rules of a name written to the disk.
@@ -542,14 +545,17 @@ pub fn repair(
 /// The move itself is a rename, so it fails across filesystems rather than
 /// copying: a worktree that has to cross a device is one the caller should
 /// remove and add again.
+pub const MoveInputs = struct { name: []const u8, new_parent: Io.Dir, new_name: []const u8 };
+
 pub fn move(
     gpa: Allocator,
     io: Io,
     common_dir: Io.Dir,
-    name: []const u8,
-    new_parent: Io.Dir,
-    new_name: []const u8,
+    inputs: MoveInputs,
 ) Self.Error!void {
+    const name = inputs.name;
+    const new_parent = inputs.new_parent;
+    const new_name = inputs.new_name;
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{}) catch return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
     var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;

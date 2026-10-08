@@ -35,7 +35,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, args: []const []const u8,
     defer repo.deinit(io);
     var ours: Io.Writer.Allocating = .init(gpa);
     defer ours.deinit();
-    try rangediff.write(gpa, io, &repo, old, new, options, &ours.writer);
+    try rangediff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &ours.writer, options);
     std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
         for (args) |arg| std.debug.print("{s} ", .{arg});
         std.debug.print(": range-diff differs\n", .{});
@@ -247,6 +247,6 @@ test "a cost matrix past the limit is refused, as git refuses it" {
     defer out.deinit();
     const old = try range(gpa, io, &git, "base", "old");
     const new = try range(gpa, io, &git, "base", "new");
-    try std.testing.expectError(error.RangeDiffTooLarge, rangediff.write(gpa, io, &repo, old, new, .{ .max_memory = 100 }, &out.writer));
-    try std.testing.expectError(error.LeftAndRightOnly, rangediff.write(gpa, io, &repo, old, new, .{ .left_only = true, .right_only = true }, &out.writer));
+    try std.testing.expectError(error.RangeDiffTooLarge, rangediff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .max_memory = 100 }));
+    try std.testing.expectError(error.LeftAndRightOnly, rangediff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .left_only = true, .right_only = true }));
 }

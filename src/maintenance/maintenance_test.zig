@@ -212,7 +212,7 @@ test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with 
         const expected_bitmap = try repo.readFile(io, path);
         defer gpa.free(expected_bitmap);
         try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
-        _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{ .lookup_table = lookup });
+        _ = try ops.writeMidxBitmap(gpa, io, &db, .{ .tips = &.{head}, .midx_options = .{} }, .{ .lookup_table = lookup });
         try sameFile(&repo, ".git/objects/pack/multi-pack-index", expected);
         try sameFile(&repo, path, expected_bitmap);
         try repo.exec(io, &.{ "multi-pack-index", "verify" });
@@ -244,7 +244,7 @@ test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree
         const head = try tip(&repo, .sha1);
         const pack_name = std.Io.Dir.path.basename(path);
         try repo.dir.deleteFile(io, path);
-        try ops.writePackBitmap(gpa, io, &db, pack_name[0 .. pack_name.len - 7], &.{head}, .{ .lookup_table = lookup });
+        try ops.writePackBitmap(gpa, io, &db, .{ .pack_name = pack_name[0 .. pack_name.len - 7], .tips = &.{head} }, .{ .lookup_table = lookup });
         // git writes these bytes from 2.55 on; every git reads them.
         if (try testgit.gitAtLeast(gpa, io, 2, 55)) try sameFile(&repo, path, expected);
         try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
@@ -365,7 +365,7 @@ test "bitmap commit selection past the dense region agrees byte for byte with gi
     const head = try tip(&repo, .sha1);
     const base = std.Io.Dir.path.basename(path);
     try repo.dir.deleteFile(io, path);
-    try ops.writePackBitmap(gpa, io, &db, base[0 .. base.len - 7], &.{head}, .{});
+    try ops.writePackBitmap(gpa, io, &db, .{ .pack_name = base[0 .. base.len - 7], .tips = &.{head} }, .{});
     // git writes these bytes from 2.55 on; every git reads them.
     if (try testgit.gitAtLeast(gpa, io, 2, 55)) try sameFile(&repo, path, expected);
     try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
@@ -442,7 +442,7 @@ test "a MIDX bitmap carries the existing pack bitmap's name hash cache" {
         var db = try odb.Odb.open(gpa, io, dir, kind, .{ .use_bitmaps = false });
         defer db.deinit(io);
         const head = try tip(&repo, kind);
-        _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{});
+        _ = try ops.writeMidxBitmap(gpa, io, &db, .{ .tips = &.{head}, .midx_options = .{} }, .{});
         try sameFile(&repo, path, expected);
         try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
     }
@@ -497,7 +497,7 @@ test "an unchanged MIDX bitmap is retained even when bitmap configuration change
     var db = try odb.Odb.open(gpa, io, dir, .sha1, .{ .use_bitmaps = false });
     defer db.deinit(io);
     const head = try tip(&repo, .sha1);
-    _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{ .lookup_table = true });
+    _ = try ops.writeMidxBitmap(gpa, io, &db, .{ .tips = &.{head}, .midx_options = .{} }, .{ .lookup_table = true });
     try sameFile(&repo, path, expected);
 }
 

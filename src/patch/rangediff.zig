@@ -112,7 +112,12 @@ pub const RangeDiff = struct {
 };
 
 /// Read both ranges' patches and pair them.
-pub fn compute(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options) Self.Error!RangeDiff {
+pub const Inputs = struct { old: Range, new: Range };
+pub const WriteInputs = struct { repo: *Repository, old: Range, new: Range };
+
+pub fn compute(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options: Options) Self.Error!RangeDiff {
+    const old = inputs.old;
+    const new = inputs.new;
     if (options.left_only and options.right_only) return error.LeftAndRightOnly;
     var result: RangeDiff = .{ .arena = .init(gpa), .old = &.{}, .new = &.{} };
     errdefer result.deinit();
@@ -129,8 +134,11 @@ pub fn compute(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range
 /// the new range, an old commit with no partner once those before it have
 /// been shown, and under a pair whose patches differ, the diff between
 /// them. No colour.
-pub fn write(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options, w: *Io.Writer) Self.Error!void {
-    var result = try compute(gpa, io, repo, old, new, options);
+pub fn write(gpa: Allocator, io: Io, inputs: WriteInputs, w: *Io.Writer, options: Options) Self.Error!void {
+    const repo = inputs.repo;
+    const old = inputs.old;
+    const new = inputs.new;
+    var result = try compute(gpa, io, repo, .{ .old = old, .new = new }, options);
     defer result.deinit();
     try output(gpa, io, repo, &result, options, w);
 }

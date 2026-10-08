@@ -785,7 +785,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     try git.dir.createDirPath(io, "trees/ours");
     var dest = try git.dir.openDir(io, "trees/ours", .{ .iterate = true });
     defer dest.close(io);
-    var added = try worktrees.add(gpa, io, repo.refStore(), "ours", dest, .{ .branch = "ours" });
+    var added = try worktrees.add(gpa, io, repo.refStore(), .{ .name = "ours", .dest_dir = dest }, .{ .branch = "ours" });
     defer added.admin_dir.close(io);
     defer gpa.free(added.name);
     defer added.work_dir.close(io);

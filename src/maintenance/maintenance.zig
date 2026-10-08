@@ -674,7 +674,12 @@ fn setBit(words: []u64, pos: u32) void {
 
 /// Write a reachability bitmap for an existing pack. The pack must contain the
 /// entire history of every commit it holds, as Git's FULL_DAG flag requires.
-pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const u8, tips: []const Oid, options: BitmapOptions) Self.BitmapError!void {
+pub const BitmapInputs = struct { pack_name: []const u8, tips: []const Oid };
+pub const MidxBitmapInputs = struct { tips: []const Oid, midx_options: MidxOptions = .{} };
+
+pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: BitmapInputs, options: BitmapOptions) Self.BitmapError!void {
+    const pack_name = inputs.pack_name;
+    const tips = inputs.tips;
     if (std.mem.findAny(u8, pack_name, "/\\") != null or !std.mem.startsWith(u8, pack_name, "pack-")) return error.InvalidBitmapInput;
     const base = if (std.mem.endsWith(u8, pack_name, ".pack")) pack_name[0 .. pack_name.len - 5] else if (std.mem.endsWith(u8, pack_name, ".idx")) pack_name[0 .. pack_name.len - 4] else pack_name;
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
@@ -712,7 +717,9 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const 
 }
 
 /// Write a MIDX with RIDX and BTMP, then the bitmap named by its checksum.
-pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, midx_options: MidxOptions, options: BitmapOptions) Self.BitmapError!?Oid {
+pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: MidxBitmapInputs, options: BitmapOptions) Self.BitmapError!?Oid {
+    const tips = inputs.tips;
+    const midx_options = inputs.midx_options;
     var write_options = midx_options;
     write_options.reverse_index = true;
     write_options.keep_bitmaps = true;
@@ -885,7 +892,7 @@ pub fn repackRepository(gpa: Allocator, io: Io, repo: *repo_mod.Repository, opti
         var hex: [hash.max_hex_len]u8 = undefined;
         const name = try gpa.print("pack-{s}", .{written.name.hex(&hex)});
         defer gpa.free(name);
-        try writePackBitmap(gpa, io, repo.objectDatabase(), name, tips, .{ .hash_cache = try config.getBool("pack.writebitmaphashcache", true), .lookup_table = try config.getBool("pack.writebitmaplookuptable", false), .sync = repo.objectDatabase().settings().sync });
+        try writePackBitmap(gpa, io, repo.objectDatabase(), .{ .pack_name = name, .tips = tips }, .{ .hash_cache = try config.getBool("pack.writebitmaphashcache", true), .lookup_table = try config.getBool("pack.writebitmaplookuptable", false), .sync = repo.objectDatabase().settings().sync });
     };
     _ = try writeConfiguredCommitGraph(gpa, io, repo, .gc);
     return report;

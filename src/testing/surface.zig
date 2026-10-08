@@ -180,3 +180,9 @@ test "phase2 ref log and table requests stay within five positional inputs" {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
+
+test "phase2 history archive and maintenance requests stay within five positional inputs" {
+    inline for (.{ relic.archive.archive, relic.patch.rangediff.compute, relic.patch.rangediff.write, relic.worktree.linked.add, relic.worktree.linked.move, relic.revwalk.bisect.mark, relic.maintenance.writePackBitmap, relic.maintenance.writeMidxBitmap, relic.merge.subtreeshift.shift }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}
