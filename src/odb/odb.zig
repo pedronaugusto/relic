@@ -20,7 +20,7 @@ const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const flate = std.compress.flate;
+const warp = @import("warp");
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -529,10 +529,11 @@ pub const Odb = struct {
         odb.clearBitmap();
         for (odb.backendData().sources.items) |*source| odb.closeSource(io, source);
         odb.backendData().sources.deinit(odb.backendData().gpa);
-        if (odb.backendData().deflate_window.len != 0) odb.backendData().gpa.free(odb.backendData().deflate_window);
         if (odb.backendData().deflate_state) |state| {
+            state.compress.deinit();
             odb.backendData().gpa.destroy(state.compress);
             odb.backendData().gpa.free(state.buffer);
+            odb.backendData().gpa.free(state.input);
         }
         odb.backendData().cache.deinit();
         odb.shallow.deinit(odb.backendData().gpa);
@@ -669,11 +670,11 @@ pub const Odb = struct {
         const input_buffer = try odb.backendData().gpa.alloc(u8, odb.backendData().options.read_buffer_size);
         defer odb.backendData().gpa.free(input_buffer);
         var file_reader = file.reader(io, input_buffer);
-        var window: [flate.max_window_len]u8 = undefined;
-        var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
-        const bytes = decompress.reader.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes)) catch |err| switch (err) {
+        var window: [(1 << 15) + 4096]u8 = undefined;
+        var decompress: warp.Inflate.Reader = .init(&file_reader.interface, &window, .{});
+        const bytes = decompress.interface.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes)) catch |err| switch (err) {
             error.OutOfMemory, error.StreamTooLong => |e| return e,
-            error.ReadFailed => return looseInflateError(&decompress, &file_reader),
+            error.ReadFailed => return looseInflateError(&file_reader),
         };
         errdefer odb.backendData().gpa.free(bytes);
         try looseEnd(&file_reader);
@@ -693,11 +694,8 @@ pub const Odb = struct {
 
     // The inflater's ReadFailed can mean bad zlib or a failed file read.
     // Only the latter has a cause on the file reader.
-    fn looseInflateError(decompress: *const flate.Decompress, reader: *const Io.File.Reader) ErrorNamespace.Error {
-        if (decompress.err) |cause| {
-            if (cause == error.ReadFailed) return reader.err orelse error.ReadFailed;
-        }
-        return error.CorruptLooseObject;
+    fn looseInflateError(reader: *const Io.File.Reader) ErrorNamespace.Error {
+        return reader.err orelse error.CorruptLooseObject;
     }
 
     /// The type and length of `oid`, with no body inflated where the object
@@ -867,12 +865,12 @@ pub const Odb = struct {
                 return .{ .header = try looseHeader(&header_reader) };
             }
             var file_reader = file.reader(io, &input_buffer);
-            var window: [flate.max_window_len]u8 = undefined;
-            var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
+            var window: [(1 << 15) + 4096]u8 = undefined;
+            var decompress: warp.Inflate.Reader = .init(&file_reader.interface, &window, .{});
             var head: [64]u8 = @splat(0);
             var got: usize = 0;
             while (got < head.len) {
-                const n = decompress.reader.readSliceShort(head[got..]) catch return looseInflateError(&decompress, &file_reader);
+                const n = decompress.interface.readSliceShort(head[got..]) catch return looseInflateError(&file_reader);
                 if (n == 0) break;
                 got += n;
                 if (std.mem.findScalar(u8, head[0..got], 0) != null) break;
@@ -903,12 +901,12 @@ pub const Odb = struct {
             @memcpy(body[0..initial.len], initial);
             var body_got = initial.len;
             while (body_got < body.len) {
-                const n = decompress.reader.readSliceShort(body[body_got..]) catch return looseInflateError(&decompress, &file_reader);
+                const n = decompress.interface.readSliceShort(body[body_got..]) catch return looseInflateError(&file_reader);
                 if (n == 0) return error.CorruptLooseObject;
                 body_got += n;
             }
             var extra: [1]u8 = undefined;
-            if ((decompress.reader.readSliceShort(&extra) catch return looseInflateError(&decompress, &file_reader)) != 0) {
+            if ((decompress.interface.readSliceShort(&extra) catch return looseInflateError(&file_reader)) != 0) {
                 return error.CorruptLooseObject;
             }
             try looseEnd(&file_reader);
@@ -922,20 +920,13 @@ pub const Odb = struct {
     /// straight into a buffer the size of the longest header, rather than
     /// filling its window.
     fn looseHeader(file_reader: *Io.File.Reader) ErrorNamespace.Error!object.Header {
-        var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &.{});
+        var decoder: warp.Decompressor = .init;
         var head: [64]u8 = undefined;
-        var out: Io.Writer = .fixed(&head);
-        while (std.mem.findScalar(u8, out.buffered(), 0) == null and out.end < head.len) {
-            const n = decompress.reader.stream(&out, .limited(head.len - out.end)) catch |err| switch (err) {
-                error.EndOfStream => break,
-                error.ReadFailed => return looseInflateError(&decompress, file_reader),
-                // The limit is the room left.
-                error.WriteFailed => unreachable,
-            };
-            // A match longer than the room left: no header is that long.
-            if (n == 0) break;
-        }
-        const parsed = object.parseHeader(out.buffered()) catch return error.CorruptLooseObject;
+        const result = decoder.inflateReader(&file_reader.interface, &head, .{ .partial = true }) catch |err| return switch (err) {
+            error.ReadFailed => looseInflateError(file_reader),
+            else => error.CorruptLooseObject,
+        };
+        const parsed = object.parseHeader(head[0..result.out_len]) catch return error.CorruptLooseObject;
         return parsed.header;
     }
 
@@ -1084,24 +1075,22 @@ pub const Odb = struct {
             source.dir.deleteFile(io, temp) catch {};
         };
 
-        // The deflate state and the file's own buffer belong to the database
-        // rather than to this frame. The state is two hundred and twenty-four
-        // kilobytes and is built from scratch for every object; a stack that
-        // large per call is not what a cold `addAll` should stand on.
+        // The reusable Warp state and both writer buffers belong to the
+        // database. Each loose object starts a fresh independent stream.
         const state = try odb.deflateState();
         var file_writer = file.writer(io, state.buffer);
         // Level 1, which is what git's own `core.looseCompression` defaults
         // to. The library default is level 6: three times the processor time
         // for twenty per cent smaller objects, paid on every blob written.
         const compress = state.compress;
-        compress.* = try flate.Compress.init(&file_writer.interface, odb.backendData().deflate_window, .zlib, .level_1);
+        compress.reset(.nothing);
+        var writer: warp.Deflate.Writer = .init(compress, &file_writer.interface, state.input);
         var header_buf: [64]u8 = undefined;
         // unreachable: a type name is at most six bytes and a usize at most twenty digits
         const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
-        try compress.writer.writeAll(header);
-        try compress.writer.writeAll(bytes);
-        try compress.writer.flush();
-        try compress.finish();
+        try writer.interface.writeAll(header);
+        try writer.interface.writeAll(bytes);
+        try writer.finish();
         try file_writer.interface.flush();
         switch (odb.backendData().options.sync) {
             .none => {},
@@ -1175,10 +1164,15 @@ pub const Odb = struct {
     /// once rather than once per object.
     fn deflateState(odb: *Odb) Allocator.Error!DeflateState {
         if (odb.backendData().deflate_state) |state| return state;
-        const compress = try odb.backendData().gpa.create(flate.Compress);
-        errdefer odb.backendData().gpa.destroy(compress);
-        const buffer = try odb.backendData().gpa.alloc(u8, deflate_output_buffer_len);
-        odb.backendData().deflate_state = .{ .compress = compress, .buffer = buffer };
+        const gpa = odb.allocator();
+        const compress = try gpa.create(warp.Deflate);
+        errdefer gpa.destroy(compress);
+        compress.* = try .init(gpa, .{ .level = 1 });
+        errdefer compress.deinit();
+        const buffer = try gpa.alloc(u8, deflate_output_buffer_len);
+        errdefer gpa.free(buffer);
+        const input = try gpa.alloc(u8, 4096);
+        odb.backendData().deflate_state = .{ .compress = compress, .buffer = buffer, .input = input };
         return odb.backendData().deflate_state.?;
     }
 
@@ -1207,8 +1201,10 @@ pub const Odb = struct {
             file.close(io);
             source.dir.deleteFile(io, temp) catch {};
         }
-        const window = try odb.backendData().gpa.alloc(u8, flate.max_window_len);
-        errdefer odb.backendData().gpa.free(window);
+        const window = try odb.allocator().alloc(u8, 4096);
+        errdefer odb.allocator().free(window);
+        var compress = try warp.Deflate.init(odb.allocator(), .{ .level = 1 });
+        errdefer compress.deinit();
         const out_buffer = try odb.backendData().gpa.alloc(u8, 16 * 1024);
         errdefer odb.backendData().gpa.free(out_buffer);
 
@@ -1219,7 +1215,8 @@ pub const Odb = struct {
             .temp_len = temp.len,
             .file = file,
             .file_writer = undefined,
-            .compress = undefined,
+            .compress = compress,
+            .compressed_writer = undefined,
             .input_writer = .{ .vtable = &.{ .drain = ObjectStream.drain }, .buffer = &.{} },
             .hasher = .initOptions(odb.backendData().kind, odb.hashOptions()),
             .window = window,
@@ -1228,12 +1225,12 @@ pub const Odb = struct {
         };
         @memcpy(out.temp[0..temp.len], temp);
         out.file_writer = file.writer(io, out_buffer);
-        out.compress = try flate.Compress.init(&out.file_writer.interface, window, .zlib, .level_1);
+        out.compressed_writer = .init(&out.compress, &out.file_writer.interface, window);
         out.hasher.updateHeader(t.name(), size);
         var header_buf: [64]u8 = undefined;
         // unreachable: a type name is at most six bytes and a u64 at most twenty digits
         const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), size }) catch unreachable;
-        try out.compress.writer.writeAll(header);
+        try out.compressed_writer.interface.writeAll(header);
     }
 
     /// What `verify` found.
@@ -2539,7 +2536,8 @@ pub const ObjectStream = struct {
     temp_len: usize,
     file: Io.File,
     file_writer: Io.File.Writer,
-    compress: flate.Compress,
+    compress: warp.Deflate,
+    compressed_writer: warp.Deflate.Writer,
     input_writer: Io.Writer,
     hasher: hash.Hasher,
     window: []u8,
@@ -2576,7 +2574,7 @@ pub const ObjectStream = struct {
         if (bytes.len > s.remaining) return error.CorruptLooseObject;
         s.hasher.update(bytes);
         s.remaining -= bytes.len;
-        try s.compress.writer.writeAll(bytes);
+        try s.compressed_writer.interface.writeAll(bytes);
     }
 
     /// Close the object and put it in the database. Returns its name.
@@ -2584,8 +2582,7 @@ pub const ObjectStream = struct {
         std.debug.assert(!s.finished);
         std.debug.assert(s.file_open);
         if (s.remaining != 0) return error.CorruptLooseObject;
-        try s.compress.writer.flush();
-        try s.compress.finish();
+        try s.compressed_writer.finish();
         try s.file_writer.interface.flush();
         switch (s.odb.backendData().options.sync) {
             .none => {},
@@ -2625,6 +2622,7 @@ pub const ObjectStream = struct {
             s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
             s.finished = true;
         }
+        s.compress.deinit();
         s.odb.backendData().gpa.free(s.window);
         s.odb.backendData().gpa.free(s.out_buffer);
     }
@@ -2634,6 +2632,7 @@ pub const ObjectStream = struct {
         if (!s.finished) {
             s.abort(io);
         } else {
+            s.compress.deinit();
             s.odb.backendData().gpa.free(s.window);
             s.odb.backendData().gpa.free(s.out_buffer);
         }

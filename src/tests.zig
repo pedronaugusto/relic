@@ -238,3 +238,7 @@ test {
 test {
     _ = @import("testing/public_calls.zig");
 }
+
+test {
+    _ = @import("testing/codec_object.zig");
+}

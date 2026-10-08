@@ -9,7 +9,7 @@ const Kind = hash.Kind;
 const Oid = hash.Oid;
 const pack = @import("pack.zig");
 const midx = @import("midx.zig");
-const flate = std.compress.flate;
+const warp = @import("warp");
 const odb = @import("policy.zig");
 const reachability = @import("bitmap/reachability.zig");
 pub const Error = odb.Error;
@@ -28,7 +28,6 @@ pub const Data = struct {
     generation: u32 = 0,
     bitmap_checked: bool = false,
     bitmap: ?reachability.Store = null,
-    deflate_window: []u8,
     deflate_state: ?DeflateState = null,
 };
 
@@ -41,8 +40,7 @@ pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!
     errdefer gpa.destroy(data);
     var cache = try pack.Cache.init(gpa, options.delta_cache_bytes);
     errdefer cache.deinit();
-    const window = try gpa.alloc(u8, flate.max_window_len);
-    data.* = .{ .gpa = gpa, .kind = kind, .options = options, .cache = cache, .deflate_window = window };
+    data.* = .{ .gpa = gpa, .kind = kind, .options = options, .cache = cache };
     return @ptrCast(data); // safe: the opaque owner retains the allocated Data pointer.
 }
 
@@ -114,10 +112,10 @@ pub const Source = struct {
     }
 };
 
-/// The deflate state a writing database keeps. `flate.Compress` is two
-/// hundred and twenty-four kilobytes, which is why it is here and not on the
-/// stack of every `write`.
+/// One lazy Warp compressor and its input/output buffers, reused by loose
+/// object writes without allocating a compressor for each object.
 pub const DeflateState = struct {
-    compress: *flate.Compress,
+    compress: *warp.Deflate,
     buffer: []u8,
+    input: []u8,
 };

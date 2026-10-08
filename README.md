@@ -210,8 +210,8 @@ running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's glob
 [parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges and
 [uplink](https://github.com/pedronaugusto/uplink) for HTTP and TLS. Conduit carries its libc linkage on POSIX; Windows needs
 no C runtime. SHA-256 comes from `std.crypto`; SHA-1 is in the
-package. Warp supplies checksums and the adopted object decoder. Codec adoption
-is still in progress. There is no build option to
+package. Warp supplies checksums and DEFLATE compression and decoding. Architecture
+phase 2 is still in progress. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — reading
 objects and deflating entries while a pack is written
@@ -514,10 +514,10 @@ uplink keeps connections, goes through proxies with TLS to the server inside
 the tunnel, and answers client-certificate requests, which the standard
 library's client cannot. relic's API names no uplink type.
 
-**Warp decodes packs and binary patches.** Its decoder checks the zlib
+**Warp decodes loose objects, packs and binary patches.** Its decoder checks the zlib
 checksum, decodes into caller-owned output, and leaves the following stream in
 the input reader. Large received entries use its bounded streaming reader.
-Phase 2 is still adopting Warp at the remaining codec sites.
+Checksums are verified before object content is returned.
 
 HTTP(S) remotes and LFS accept `socks4://`, `socks4a://`, `socks5://` and
 `socks5h://` proxies, with port 1080 when none is given. SOCKS4 and SOCKS5
@@ -760,8 +760,6 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 
 Planned, in the order they are likely to come; none is promised for a date.
 
-- **Warp at every codec site.** Packed object reads and received packs
-  use Warp; loose reads and remaining compression sites are being migrated.
 - **`-s subtree`** as a strategy name, beside the `-X subtree` forms.
 
 ## Platforms

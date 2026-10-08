@@ -439,9 +439,7 @@ pub const Pack = struct {
     max_chain_bytes: u64,
     /// Scratch for one inflate at a time. A pack is read by one task at a
     /// time, and a delta chain is resolved one entry after another, so one
-    /// window — for a head read part way — and one decoder — for an entry
-    /// read whole — do.
-    window: []u8,
+    /// Warp decoder serves both partial header and whole-entry reads.
     decoder: *warp.Decompressor,
     /// The blocks positional reads keep, direct-mapped: block `b` of the
     /// file can only be in slot `b % slots`, and there are never more slots
@@ -537,8 +535,6 @@ pub const Pack = struct {
         }
         errdefer if (mapping) |*m| m.destroy(io);
 
-        const window = try gpa.alloc(u8, flate.max_window_len);
-        errdefer gpa.free(window);
         const decoder = try gpa.create(warp.Decompressor);
         errdefer gpa.destroy(decoder);
         decoder.* = .{};
@@ -554,7 +550,6 @@ pub const Pack = struct {
             .index = index,
             .max_depth = options.max_depth,
             .max_chain_bytes = options.max_chain_bytes,
-            .window = window,
             .decoder = decoder,
             // unreachable: read_block_bytes is a nonzero constant
             .slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, std.math.divCeil(u64, stat.size, read_block_bytes) catch unreachable))),
@@ -695,7 +690,6 @@ pub const Pack = struct {
 
     /// Close the pack and release everything it holds.
     pub fn deinit(p: *Pack, io: Io) void {
-        p.gpa.free(p.window);
         p.gpa.destroy(p.decoder);
         if (p.slot_memory.len != 0) {
             for (p.slot_memory) |memory| if (memory) |bytes| p.gpa.free(@as([]u8, bytes[0..block_stride]));
@@ -1140,13 +1134,11 @@ pub const Pack = struct {
             fixed_reader = .fixed(mem[@intCast(at)..]);
             break :blk &fixed_reader;
         } else try p.blockReaderAt(io, at);
-        var decompress: flate.Decompress = .init(input, .zlib, p.window);
-        decompress.reader.readSliceAll(out[0..want]) catch {
-            if (decompress.err) |cause| {
-                if (cause == error.ReadFailed) return p.read_err orelse error.ReadFailed;
-            }
-            return error.CorruptPackEntry;
+        const result = p.decoder.inflateReader(input, out[0..want], .{ .partial = true }) catch |err| return switch (err) {
+            error.ReadFailed => p.read_err orelse error.ReadFailed,
+            else => error.CorruptPackEntry,
         };
+        if (result.out_len != want) return error.CorruptPackEntry;
         return out;
     }
 
