@@ -12,8 +12,8 @@
             .hash = "conduit-0.5.1-4rIA78Y_EwAr9h5KSzT0dB5rgp2H50zYck-nBsXjJ_E3",
         },
         .sweep = .{
-            .url = "https://github.com/pedronaugusto/sweep/archive/6310a259c0ac52f94bfe3738b1fd142f70e7df21.tar.gz",
-            .hash = "sweep-0.1.0-6ErwaYgvOwBd6m0sQsWDoAK7_fY4ps_itITTpLX7y37k",
+            .url = "git+https://github.com/pedronaugusto/sweep#0b6c39b63a32135d1735b6d1ed8ed82e5fb26793",
+            .hash = "sweep-0.1.0-6Erwaaw5OwBJqKlJUwn1uRwGg5O7npXywhcNWQmYVCaB",
         },
         .parallax = .{
             .url = "git+https://github.com/pedronaugusto/parallax.git#b1acc95daaf944adab7ff9cdccafde503d682642",
