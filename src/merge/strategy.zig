@@ -297,12 +297,12 @@ test "fuzz: any strategy_opts line splits or is a named failure, and round-trips
     try std.testing.fuzz({}, fuzzSplit, .{});
 }
 
-test "phase2 extraction strategy algorithm clears previous minimal" {
+test "phase2 extraction strategy flags preserve bare aliases and replace explicit algorithms" {
     var settings: Settings = .{};
     inline for (.{ "patience", "histogram", "diff-algorithm=myers" }) |word| {
         try settings.apply("diff-algorithm=minimal");
         try settings.apply(word);
-        try std.testing.expect(!settings.minimal);
+        try std.testing.expectEqual(!std.mem.startsWith(u8, word, "diff-algorithm="), settings.minimal);
     }
     _ = settings.configureAlgorithm("minimal").?;
     _ = settings.configureAlgorithm("default").?;

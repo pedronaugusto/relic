@@ -695,12 +695,15 @@ const RParser = struct {
                     const save = p.at;
                     p.at += if (p.isBasic()) 2 else 1;
                     const interval = p.parseInterval() catch |err| {
-                        if (!p.isBasic() and err == error.InvalidPattern) {
+                        if (!p.isBasic() and err == error.NotInterval) {
                             // an extended `{` that is no interval is itself
                             p.at = save;
                             break;
                         }
-                        return err;
+                        return switch (err) {
+                            error.NotInterval => error.InvalidPattern,
+                            else => |e| e,
+                        };
                     };
                     min = interval.min;
                     max = interval.max;
@@ -715,16 +718,22 @@ const RParser = struct {
         return p.node(.{ .concat = items.items });
     }
 
-    fn parseInterval(p: *RParser) Error!struct { min: u32, max: ?u32 } {
+    const IntervalError = Error || error{NotInterval};
+
+    fn parseInterval(p: *RParser) IntervalError!struct { min: u32, max: ?u32 } {
         const close_text: []const u8 = if (p.isBasic()) "\\}" else "}";
-        const close = std.mem.findPos(u8, p.text, p.at, close_text) orelse return error.InvalidPattern;
+        const close = std.mem.findPos(u8, p.text, p.at, close_text) orelse return error.NotInterval;
         const inside = p.text[p.at..close];
         var min: u32 = undefined;
         var max: ?u32 = undefined;
         if (std.mem.findScalar(u8, inside, ',')) |comma| {
+            for (inside[0..comma]) |digit| if (!std.ascii.isDigit(digit)) return error.NotInterval;
+            for (inside[comma + 1 ..]) |digit| if (!std.ascii.isDigit(digit)) return error.NotInterval;
             min = if (comma == 0) 0 else std.fmt.parseUnsigned(u32, inside[0..comma], 10) catch return error.InvalidPattern;
             max = if (comma + 1 == inside.len) null else std.fmt.parseUnsigned(u32, inside[comma + 1 ..], 10) catch return error.InvalidPattern;
         } else {
+            if (inside.len == 0) return error.NotInterval;
+            for (inside) |digit| if (!std.ascii.isDigit(digit)) return error.NotInterval;
             min = std.fmt.parseUnsigned(u32, inside, 10) catch return error.InvalidPattern;
             max = min;
         }
@@ -1167,4 +1176,29 @@ test "phase2 ERE adapters refuse repetition operators with no operand" {
     var literal = try Regex.compile(testing.allocator, "*a", .{ .syntax = .basic });
     defer literal.deinit();
     try testing.expect((try literal.find(testing.allocator, "x*a", false)) != null);
+}
+
+test "phase2 ERE adapters reject reversed and oversized intervals" {
+    for ([_][]const u8{ "a{3,2}", "a{32768}", "a{1,32768}", "a{4294967296}", "a{1,4294967296}" }) |pattern| {
+        if (Pattern.compile(testing.allocator, pattern)) |compiled| {
+            var p = compiled;
+            defer p.deinit();
+            try testing.expect(false);
+        } else |err| try testing.expectEqual(error.InvalidPattern, err);
+        if (Regex.compile(testing.allocator, pattern, .{})) |compiled| {
+            var r = compiled;
+            defer r.deinit();
+            try testing.expect(false);
+        } else |err| try testing.expectEqual(error.InvalidPattern, err);
+    }
+    for ([_][]const u8{ "a{word}", "a{2", "a{1,2,3}" }) |literal| {
+        var p = try Pattern.compile(testing.allocator, literal);
+        defer p.deinit();
+        try testing.expect(try p.search(testing.allocator, literal));
+        var r = try Regex.compile(testing.allocator, literal, .{});
+        defer r.deinit();
+        const found = (try r.find(testing.allocator, literal, false)).?;
+        try testing.expectEqual(@as(usize, 0), found.start);
+        try testing.expectEqual(literal.len, found.end);
+    }
 }

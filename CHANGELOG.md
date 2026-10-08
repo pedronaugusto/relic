@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Both ERE adapters refuse reversed and out-of-range numeric intervals;
+  malformed interval syntax remains literal under the extended grammar.
+  Interval validation stays in their shared core and never falls back on a
+  numeric-bound error.
+
 - Breaking: archive, range-diff, linked-worktree, bisect marking, subtree
   shifting and bitmap writes take named input groups. Archive and range-diff
   output writers precede their options. Published bytes, selection policies,
