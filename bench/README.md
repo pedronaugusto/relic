@@ -1,15 +1,14 @@
 # relic's benchmarks
 
-relic's own measurements of its own work, against nothing else. They run on
-a quiet machine and never in CI; CI only compiles them (`zig build check`).
+relic's own measurements of its own work, against nothing else. They are timed on
+a quiet machine. CI compiles them and runs untimed smoke checks.
 
 ```sh
 zig build bench -Doptimize=ReleaseFast
 ./zig-out/bench/relic-regressions
 ```
 
-Select one row with `zig build bench -Doptimize=ReleaseFast
--Dbench-filter="smart HTTP"`, then run the same executable.
+Select one row after building with `./zig-out/bench/relic-regressions "smart HTTP"`.
 
 `relic-regressions` builds its repositories with the `git` on the path, in
 temporary directories, and prints each measurement with the condition it is
@@ -34,6 +33,10 @@ held to:
   small exchanges per second.
   LFS downloads also time a 256 MiB object through SHA-256 and its store.
 
-A Debug build measures a smaller tree with the same ratios. `-Dbench-smoke`
-builds it to run every measurement once on a tiny tree without reading a
-clock, to check that each still works.
+A Debug build measures a smaller tree with the same ratios. `relic-regressions --smoke`
+runs every measurement once on a tiny tree without reading a clock, to check
+that each still works.
+
+`relic-native` measures cached 256-byte native pipe round trips through
+Shakedown, with process startup outside the clock and exact answer checking.
+`relic-native --smoke` runs the protocol without sampling timings.

@@ -295,7 +295,7 @@ pub fn build(b: *std.Build) void {
         if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{
             .tests = test_step,
             .bench = .{
-                .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-phase2", .source = "bench/phase2.zig" } },
+                .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-phase2", .source = "bench/phase2.zig" }, .{ .name = "relic-native", .source = "bench/native.zig" } },
                 .imports = benchImports,
                 .target = target,
                 .optimize = optimize,
@@ -320,5 +320,6 @@ const example_sources = [_][]const u8{
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const module = b.createModule(.{ .root_source_file = b.path("src/benchmark.zig"), .target = target, .optimize = optimize });
     for ([_][]const u8{ "conduit", "sweep", "parallax", "uplink", "airlock", "warp" }) |name| module.addImport(name, b.dependency(name, .{ .target = target, .optimize = optimize }).module(name));
-    return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "relic", .module = module }}) catch @panic("out of memory");
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
+    return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown } }) catch @panic("out of memory");
 }

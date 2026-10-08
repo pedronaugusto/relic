@@ -82,7 +82,10 @@ Received pack protection uses one token per publication and a bounded lifetime,
 so collection safety does not require retaining all historical packs. Cursor
 history costs space proportional to pages and guarantees cycle detection.
 Expression work limits bound worst-case matching independently of input intent.
-Rule sets trade per-level construction and cache memory for cheaper repeated
+Native process buffers are allocated once. An exclusive stream borrow changes
+two I/O bindings without allocating; round-trip benchmarks keep startup outside
+the measured operation and validate the returned bytes. Rule sets trade per-level
+construction and cache memory for cheaper repeated
 queries; both construction and matching are benchmarked.
 
 Contract tests exercise publication failure, cancellation, pagination, parser
