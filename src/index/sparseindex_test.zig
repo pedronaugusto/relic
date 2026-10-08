@@ -122,7 +122,7 @@ test "expanding is what git's ensure_full_index writes, and collapsing is what i
     defer git_dir.close(io);
     var db = try Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var patterns = (try sparse.Patterns.loadMode(gpa, io, git_dir, .{ .cone = true })).?;
+    var patterns = (try sparse.Patterns.load(gpa, io, git_dir, .{ .cone = true })).?;
     defer patterns.deinit();
 
     var git_sparse = try Index.parse(gpa, .sha1, sparse_bytes);

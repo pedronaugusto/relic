@@ -124,9 +124,9 @@ pub const Store = struct {
             .repository => |r| r.workDirectory() orelse return error.BareRepository,
             .folder => |dir| dir,
         };
-        var ignored = if (source_repo) |r| try r.loadIgnore(io) else try @import("../patterns/ignore.zig").Rules.init(store.gpa, false);
+        var ignored = if (source_repo) |r| try r.loadIgnore(io) else try @import("../patterns/ignore.zig").Rules.init(store.gpa, .{ .case_fold = false });
         defer ignored.deinit();
-        var attrs = if (source_repo) |r| try r.loadAttrs(io) else try @import("../patterns/attributes.zig").Attrs.init(store.gpa, false);
+        var attrs = if (source_repo) |r| try r.loadAttrs(io) else try @import("../patterns/attributes.zig").Attrs.init(store.gpa, .{ .case_fold = false });
         defer attrs.deinit();
         var drivers: ?filter.Drivers = null;
         defer if (drivers) |*d| d.deinit(io);
@@ -253,7 +253,7 @@ pub const Store = struct {
         var staged: index.Index = .initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();
         if (options.from) |before| _ = try worktree.resetIndex(store.gpa, io, &staged, &store.db, before.tree);
-        var attrs = try @import("../patterns/attributes.zig").Attrs.init(store.gpa, options.checkout.rules.ignore_case);
+        var attrs = try @import("../patterns/attributes.zig").Attrs.init(store.gpa, .{ .case_fold = options.checkout.rules.ignore_case });
         defer attrs.deinit();
         var checkout = options.checkout;
         if (store.durability == .durable) checkout.durability = .durable;

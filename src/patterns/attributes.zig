@@ -152,7 +152,9 @@ pub const Attrs = struct {
     ///
     /// `binary` is `-diff -merge -text`, which git defines itself; a
     /// repository that never writes a `[attr]binary` line still has it.
-    pub fn init(gpa: Allocator, case_fold: bool) Allocator.Error!Attrs {
+    pub const InitOptions = struct { case_fold: bool = false };
+
+    pub fn init(gpa: Allocator, options: InitOptions) Allocator.Error!Attrs {
         const arena = try gpa.create(std.heap.ArenaAllocator);
         arena.* = .init(gpa);
         errdefer {
@@ -164,7 +166,7 @@ pub const Attrs = struct {
             .arena = arena,
             .levels = .empty,
             .macros = .empty,
-            .case_fold = case_fold,
+            .case_fold = options.case_fold,
         };
         const a = arena.allocator();
         const builtin_binary = try a.alloc(Assignment, 3);
@@ -913,7 +915,7 @@ pub fn toWorktree(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSe
 
 test "text=auto normalises a text file and leaves a binary one" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText("* text=auto\n", "", ".gitattributes", 1);
 
@@ -953,7 +955,7 @@ test "the two binary rules disagree, and each is used where it belongs" {
 
 test "core.autocrlf without an attribute" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -978,7 +980,7 @@ test "core.autocrlf without an attribute" {
 
 test "-text turns conversion off whatever the configuration says" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText("*.bin -text\n", "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -991,7 +993,7 @@ test "-text turns conversion off whatever the configuration says" {
 
 test "the eol attribute beats core.eol" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText("*.txt text eol=crlf\n*.sh text eol=lf\n", "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -1010,7 +1012,7 @@ test "the eol attribute beats core.eol" {
 
 test "a macro expands, and the built-in binary macro is there" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText("[attr]mine -text diff=zig\n*.zz mine\n*.png binary\n", "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -1027,7 +1029,7 @@ test "a macro expands, and the built-in binary macro is there" {
 
 test "macros naming each other many times over expand once each, where each expansion used to repeat" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     // Nine macros, each naming the next twelve times: expanded again at
     // every mention that is twelve to the eighth expansions per lookup.
@@ -1049,7 +1051,7 @@ test "macros naming each other many times over expand once each, where each expa
 
 test "a deeper file wins, and info/attributes wins over both" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText("* text\n", "", ".gitattributes", 1);
     try attrs.addText("* -text\n", "sub", "sub/.gitattributes", 2);
@@ -1065,7 +1067,7 @@ test "a deeper file wins, and info/attributes wins over both" {
 
 test "an unimplemented setting is named" {
     const gpa = std.testing.allocator;
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText("*.po working-tree-encoding=SHIFT-JIS\n*.txt working-tree-encoding=UTF-16\n*.lfs filter=lfs\n", "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -1094,7 +1096,7 @@ fn fuzzAttrs(_: void, smith: *std.testing.Smith) anyerror!void {
     var path_buf: [128]u8 = undefined;
     const text = text_buf[0..smith.slice(&text_buf)];
     const path = path_buf[0..smith.slice(&path_buf)];
-    var attrs: Attrs = try .init(gpa, false);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     attrs.addText(text, "", "fuzz", 1) catch return;
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -1107,7 +1109,7 @@ fn fuzzAttrs(_: void, smith: *std.testing.Smith) anyerror!void {
 
 test "phase2 extraction quoted attributes decode C escapes once" {
     const gpa = std.testing.allocator;
-    var attrs = try Attrs.init(gpa, false);
+    var attrs = try Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText("\"tab\\tname\" diff=tab\n\"quote\\\"name\" diff=quote\n\"octal\\040name\" diff=octal\n", "", ".gitattributes", 1);
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -1123,7 +1125,7 @@ test "phase2 attribute sets survive every allocation failure and keep precedence
     var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
-            var attrs = try Attrs.init(gpa, true);
+            var attrs = try Attrs.init(gpa, .{ .case_fold = true });
             defer attrs.deinit();
             try attrs.addText("[attr]source text diff=zig\n*.zig source\n*.bin binary\n", "", ".gitattributes", 1);
             try attrs.addText("*.ZIG diff=deep\n", "src", "src/.gitattributes", 2);

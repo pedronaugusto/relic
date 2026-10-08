@@ -86,14 +86,16 @@ pub const Rules = struct {
     case_fold: bool,
 
     /// Empty rules, which exclude nothing.
-    pub fn init(gpa: Allocator, case_fold: bool) Allocator.Error!Rules {
+    pub const InitOptions = struct { case_fold: bool = false };
+
+    pub fn init(gpa: Allocator, options: InitOptions) Allocator.Error!Rules {
         const arena = try gpa.create(std.heap.ArenaAllocator);
         arena.* = .init(gpa);
         return .{
             .gpa = gpa,
             .arena = arena,
             .levels = .empty,
-            .case_fold = case_fold,
+            .case_fold = options.case_fold,
         };
     }
 
@@ -390,7 +392,7 @@ pub fn parseLine(line: []const u8, options: LineOptions) ?Pattern {
 
 test "the last matching line in a file wins" {
     const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText("*.log\n!keep.log\n", "", ".gitignore", 2);
 
@@ -403,7 +405,7 @@ test "the last matching line in a file wins" {
 
 test "a deeper file overrides a shallower one" {
     const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText("*.log\n", "", ".gitignore", 2);
     try rules.addText("!important.log\n", "sub", "sub/.gitignore", 3);
@@ -417,7 +419,7 @@ test "a deeper file overrides a shallower one" {
 
 test "a directory excluded by its contents is still entered" {
     const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     // `dir/*` names the contents, not the directory, so a negation inside
     // still applies. `other/` names the directory and nothing inside comes
@@ -443,7 +445,7 @@ test "a bare negation line is not a pattern" {
 
 test "trailing spaces go and trailing tabs stay, as git trims a line" {
     const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText("tabbed\t\nspaced  \nkept\\ \nesc\\\\  \n", "", ".gitignore", 2);
     try std.testing.expect(rules.match("tabbed\t", false).excluded);
@@ -456,7 +458,7 @@ test "trailing spaces go and trailing tabs stay, as git trims a line" {
 
 test "anchoring, directory-only and name matching" {
     const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText("/root-only\nbuild/\ndoc/*.txt\nanywhere\n", "", ".gitignore", 2);
 
@@ -472,7 +474,7 @@ test "anchoring, directory-only and name matching" {
 
 test "the deciding pattern is reported" {
     const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText("*.o\n*.tmp\n", "", ".gitignore", 2);
     const decided = rules.match("a.tmp", false);
@@ -491,7 +493,7 @@ test "a checker reads each folder's rules the first time a path below it is aske
     try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.log\nbuild/\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "sub/.gitignore", .data = "!keep.log\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "sub/deep/.gitignore", .data = "*.tmp\n" });
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     try rules.addText("*.secret\n", "", "info/exclude", 1);
     var checker: Checker = .init(rules, tmp.dir, .{});
     defer checker.deinit();
@@ -525,7 +527,7 @@ test "a checker asks an unreadable folder's rules again, or skips them when told
     try big.setLength(io, (1 << 24) + 1);
     big.close(io);
 
-    var failing: Checker = .init(try .init(gpa, false), tmp.dir, .{});
+    var failing: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{});
     defer failing.deinit();
     try std.testing.expect(std.meta.isError(failing.excluded(io, "sub/a.log", false)));
     try std.testing.expect(!failing.read.contains(""));
@@ -536,7 +538,7 @@ test "a checker asks an unreadable folder's rules again, or skips them when told
     var big_again = try tmp.dir.createFile(io, ".gitignore", .{});
     try big_again.setLength(io, (1 << 24) + 1);
     big_again.close(io);
-    var skipping: Checker = .init(try .init(gpa, false), tmp.dir, .{ .unreadable = .skip });
+    var skipping: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{ .unreadable = .skip });
     defer skipping.deinit();
     try std.testing.expect(try skipping.excluded(io, "sub/a.log", false));
     try std.testing.expect(!try skipping.excluded(io, "b.txt", false));
@@ -550,7 +552,7 @@ test "a checker marks no folder read when reading it runs out of memory" {
     var failures: usize = 0;
     for (0..6) |offset| {
         var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var checker: Checker = .init(try .init(fa.allocator(), false), tmp.dir, .{});
+        var checker: Checker = .init(try .init(fa.allocator(), .{ .case_fold = false }), tmp.dir, .{});
         defer checker.deinit();
         fa.fail_index = fa.alloc_index + offset;
         _ = checker.excluded(io, "keep.log", false) catch |err| {
@@ -571,7 +573,7 @@ test "a checker hands back its rules with every level it read" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.o\n" });
-    var checker: Checker = .init(try .init(gpa, false), tmp.dir, .{});
+    var checker: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{});
     try std.testing.expect(try checker.excluded(io, "a.o", false));
     var rules = checker.release();
     defer rules.deinit();
@@ -588,7 +590,7 @@ fn fuzzIgnore(_: void, smith: *std.testing.Smith) anyerror!void {
     var path_buf: [128]u8 = undefined;
     const text = text_buf[0..smith.slice(&text_buf)];
     const path = path_buf[0..smith.slice(&path_buf)];
-    var rules: Rules = try .init(gpa, false);
+    var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     rules.addText(text, "", "fuzz", 2) catch return;
     _ = rules.match(path, false);
@@ -599,7 +601,7 @@ test "phase2 level sets retain negation, precedence and ancestor decisions under
     var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
-            var rules = try Rules.init(gpa, true);
+            var rules = try Rules.init(gpa, .{ .case_fold = true });
             defer rules.deinit();
             try rules.addText("*.LOG\n!keep.log\n/blocked/\n!blocked/keep.log\n", "", ".gitignore", 2);
             try rules.addText("!special.log\n", "sub", "sub/.gitignore", 3);

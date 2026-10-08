@@ -97,7 +97,7 @@ test "CVE-2022-41903, t4205-log-pretty-formats 'log --pretty with overflowing wr
 
 test "CVE-2022-23521, t0003-attributes 'large attributes line ignored in tree' and '...ignores trailing content': a line of 2048 bytes or more is passed over whole" {
     const gpa = std.testing.allocator;
-    var attrs = try attributes.Attrs.init(gpa, false);
+    var attrs = try attributes.Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);

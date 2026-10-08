@@ -149,7 +149,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
     var standard: ?ignore.Rules = if (options.ignored != .too) try repo.loadIgnore(io) else null;
     defer if (standard) |*r| r.deinit();
     const case_fold = try config.getBool("core.ignorecase", false);
-    var command_line = try ignore.Rules.init(gpa, case_fold);
+    var command_line = try ignore.Rules.init(gpa, .{ .case_fold = case_fold });
     defer command_line.deinit();
     for (options.excludes) |pattern| {
         try command_line.addText(try a.dupe(u8, pattern), "", "--exclude option", 0);

@@ -433,10 +433,10 @@ const Op = struct {
     /// `update_working_directory(NULL)`.
     fn updateWorkingTree(op: *Op, patterns: ?*const sparse.Patterns) Error!Outcome {
         if (patterns) |p| return op.updateWorkingTreeWith(p);
-        var loaded = (try sparse.Patterns.loadMode(op.repo.allocator(), op.io, op.repo.gitDirectory(), .{
+        var loaded = (try sparse.Patterns.load(op.repo.allocator(), op.io, op.repo.gitDirectory(), .{
             .case_fold = op.fold,
             .cone = op.state.cone,
-        })) orelse try sparse.Patterns.init(op.repo.allocator(), op.fold);
+        })) orelse try sparse.Patterns.init(op.repo.allocator(), .{ .case_fold = op.fold });
         defer loaded.deinit();
         return op.updateWorkingTreeWith(&loaded);
     }

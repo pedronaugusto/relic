@@ -632,7 +632,7 @@ fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) Create
     defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .blob) return error.SparseBlobMissing;
     const rules = try a.create(ignore.Rules);
-    rules.* = try .init(a, false);
+    rules.* = try .init(a, .{});
     // The rules keep slices of the text.
     try rules.addText(try a.dupe(u8, found.bytes), "", "sparse:oid", 0);
     return rules;

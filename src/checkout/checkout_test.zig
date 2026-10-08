@@ -41,8 +41,8 @@ const Harness = struct {
             .git_dir = git_dir,
             .db = db,
             .index = index,
-            .rules = try ignore.Rules.init(gpa, false),
-            .attrs = try attributes.Attrs.init(gpa, false),
+            .rules = try ignore.Rules.init(gpa, .{ .case_fold = false }),
+            .attrs = try attributes.Attrs.init(gpa, .{ .case_fold = false }),
         };
     }
 
@@ -341,7 +341,7 @@ test "sparse checkout keeps a racily clean modified file" {
     h.index.racy_cutoff_sec = found.stat.mtime_sec;
     h.index.racy_cutoff_nsec = found.stat.mtime_nsec;
 
-    var patterns = try sparse.Patterns.init(gpa, false);
+    var patterns = try sparse.Patterns.init(gpa, .{ .case_fold = false });
     defer patterns.deinit();
     const out = try worktree.applySparse(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .patterns = &patterns }, .{});
 
@@ -617,9 +617,9 @@ test "core.autocrlf with text=auto stores the blob git stores" {
     defer db.deinit(io);
     var index = index_mod.Index.initEmpty(gpa, .sha1);
     defer index.deinit();
-    var rules = try ignore.Rules.init(gpa, false);
+    var rules = try ignore.Rules.init(gpa, .{ .case_fold = false });
     defer rules.deinit();
-    var attrs = try attributes.Attrs.init(gpa, false);
+    var attrs = try attributes.Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
 
     _ = try worktree.addAll(gpa, io, repo.dir, .{ .index = &index, .db = &db }, .{
@@ -875,7 +875,7 @@ test "checkout refuses to lose local changes or untracked files, lists them as g
     defer gpa.free(git_untracked);
 
     try h.reload(gpa, io);
-    var ignore_rules = try ignore.Rules.init(gpa, false);
+    var ignore_rules = try ignore.Rules.init(gpa, .{ .case_fold = false });
     defer ignore_rules.deinit();
     var obstructions: worktree.Obstructions = .init(gpa);
     defer obstructions.deinit();
@@ -1317,14 +1317,14 @@ test "a wider sparse pattern brings a link back as a link and a submodule back a
 
     try h.git_dir.createDirPath(io, "info");
     try h.git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n!/dir/\n" });
-    var narrow = (try sparse.Patterns.load(gpa, io, h.git_dir, false)).?;
+    var narrow = (try sparse.Patterns.load(gpa, io, h.git_dir, .{ .case_fold = false })).?;
     defer narrow.deinit();
     _ = try worktree.applySparse(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .patterns = &narrow }, .{});
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "dir/file", .{}));
     try h.repo.dir.deleteTree(io, "dir");
 
     try h.git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n" });
-    var wide = (try sparse.Patterns.load(gpa, io, h.git_dir, false)).?;
+    var wide = (try sparse.Patterns.load(gpa, io, h.git_dir, .{ .case_fold = false })).?;
     defer wide.deinit();
     const back = try worktree.applySparse(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .patterns = &wide }, .{ .rules = h.worktreeRules() });
     try std.testing.expectEqual(@as(u32, if (links) 3 else 2), back.restored);
@@ -1472,7 +1472,7 @@ test "ignore rules decide every path as git check-ignore decides it" {
     // git folds the patterns then.
     const fold = try h.repo.line(io, &.{ "config", "--bool", "--default", "false", "core.ignorecase" });
     defer gpa.free(fold);
-    var rules: ignore.Rules = try .init(gpa, std.mem.eql(u8, fold, "true"));
+    var rules: ignore.Rules = try .init(gpa, .{ .case_fold = std.mem.eql(u8, fold, "true") });
     defer rules.deinit();
     try rules.addText(glob_lines, "", ".gitignore", 2);
 
@@ -1534,7 +1534,7 @@ test "attributes match globs as git check-attr matches them" {
     // git folds the patterns where git init found a folding filesystem.
     const fold = try h.repo.line(io, &.{ "config", "--bool", "--default", "false", "core.ignorecase" });
     defer gpa.free(fold);
-    const folded: attributes.Attrs = try .init(gpa, std.mem.eql(u8, fold, "true"));
+    const folded: attributes.Attrs = try .init(gpa, .{ .case_fold = std.mem.eql(u8, fold, "true") });
     h.attrs.deinit();
     h.attrs = folded;
     const many = testbytes.repeat("[ab]", 65);

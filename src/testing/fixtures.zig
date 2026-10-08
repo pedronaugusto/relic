@@ -670,7 +670,7 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
 
     try git_dir.createDirPath(io, "info");
     try git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n!/docs/\n" });
-    var patterns = (try sparse_mod.Patterns.load(gpa, io, git_dir, false)).?;
+    var patterns = (try sparse_mod.Patterns.load(gpa, io, git_dir, .{ .case_fold = false })).?;
     defer patterns.deinit();
 
     const out = try worktree.applySparse(gpa, io, repo.dir, .{ .index = &index, .db = &db, .patterns = &patterns }, .{});
@@ -690,7 +690,7 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
 
     // Widening the patterns brings it back.
     try git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n" });
-    var wider = (try sparse_mod.Patterns.load(gpa, io, git_dir, false)).?;
+    var wider = (try sparse_mod.Patterns.load(gpa, io, git_dir, .{ .case_fold = false })).?;
     defer wider.deinit();
     const back = try worktree.applySparse(gpa, io, repo.dir, .{ .index = &index, .db = &db, .patterns = &wider }, .{});
     try std.testing.expectEqual(@as(u32, 1), back.restored);

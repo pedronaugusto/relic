@@ -908,7 +908,7 @@ const Negotiation = struct {
         defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .blob) return null;
         const rules = try n.arena.create(ignore.Rules);
-        rules.* = try .init(n.arena, false);
+        rules.* = try .init(n.arena, .{});
         // The rules keep slices of the text.
         try rules.addText(try n.arena.dupe(u8, found.bytes), "", "sparse:oid", 0);
         return rules;

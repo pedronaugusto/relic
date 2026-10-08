@@ -39,8 +39,8 @@ pub const Harness = struct {
             .git_dir = git_dir,
             .db = db,
             .index = index_mod.Index.initEmpty(gpa, .sha1),
-            .rules = try ignore.Rules.init(gpa, false),
-            .attrs = try attributes.Attrs.init(gpa, false),
+            .rules = try ignore.Rules.init(gpa, .{ .case_fold = false }),
+            .attrs = try attributes.Attrs.init(gpa, .{ .case_fold = false }),
         };
     }
 

@@ -293,7 +293,7 @@ test "a file the attributes call binary is hashed by its names, so git cherry an
         defer git_dir.close(io);
         var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
         defer db.deinit(io);
-        var attrs: attributes.Attrs = try .init(gpa, false);
+        var attrs: attributes.Attrs = try .init(gpa, .{});
         defer attrs.deinit();
         defer attrs.leave();
         const rule: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = repo.dir };

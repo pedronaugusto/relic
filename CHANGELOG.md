@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Breaking:** ignore, attribute and sparse pattern constructors take defaulted `InitOptions`. Sparse file loading has one `load` operation with `LoadOptions`; `loadMode` is removed.
+
 - Warp decodes LFS zstd bodies with the frame-declared window and the existing 512 MiB refusal. Test fixtures use the adopted codecs, while external zlib and Git parity remain checked.
 
 - Loose reads verify the Adler checksum before returning content. Warp owns loose-object streaming and compression; partial header reads decode only their bounded output. Compressor and writer buffers have one database or stream owner.

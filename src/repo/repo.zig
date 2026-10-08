@@ -1178,7 +1178,7 @@ pub const Repository = struct {
     /// into it as it goes.
     pub fn loadIgnore(repo: *Repository, io: Io) Self.Error!ignore.Rules {
         const case_fold = try repo.configuration().getBool("core.ignorecase", false);
-        var rules = try ignore.Rules.init(repo.data().gpa, case_fold);
+        var rules = try ignore.Rules.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer rules.deinit();
         const excludes = try repo.configuration().getPath(repo.data().gpa, "core.excludesfile");
         defer if (excludes) |p| repo.data().gpa.free(p);
@@ -1219,7 +1219,7 @@ pub const Repository = struct {
     /// Load the attributes for the working tree's root.
     pub fn loadAttrs(repo: *Repository, io: Io) Self.Error!attributes.Attrs {
         const case_fold = try repo.configuration().getBool("core.ignorecase", false);
-        var attrs = try attributes.Attrs.init(repo.data().gpa, case_fold);
+        var attrs = try attributes.Attrs.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer attrs.deinit();
         const file = try repo.configuration().getPath(repo.data().gpa, "core.attributesfile");
         defer if (file) |p| repo.data().gpa.free(p);

@@ -45,10 +45,12 @@ pub const Patterns = struct {
     cone: ?Cone = null,
 
     /// Empty patterns, which include nothing.
-    pub fn init(gpa: Allocator, case_fold: bool) Allocator.Error!Patterns {
+    pub const InitOptions = struct { case_fold: bool = false };
+
+    pub fn init(gpa: Allocator, options: InitOptions) Allocator.Error!Patterns {
         const arena = try gpa.create(std.heap.ArenaAllocator);
         arena.* = .init(gpa);
-        return .{ .gpa = gpa, .arena = arena, .items = .empty, .case_fold = case_fold };
+        return .{ .gpa = gpa, .arena = arena, .items = .empty, .case_fold = options.case_fold };
     }
 
     /// Release everything.
@@ -61,13 +63,7 @@ pub const Patterns = struct {
         p.* = undefined;
     }
 
-    /// Read `info/sparse-checkout` from the git directory, or `null` when
-    /// there is none.
-    pub fn load(gpa: Allocator, io: Io, git_dir: Io.Dir, case_fold: bool) Self.Error!?Patterns {
-        return loadMode(gpa, io, git_dir, .{ .case_fold = case_fold });
-    }
-
-    /// How `loadMode` reads the file.
+    /// How `load` reads the file.
     pub const LoadOptions = struct {
         /// Whether the filesystem folds case, from `core.ignoreCase`.
         case_fold: bool = false,
@@ -82,8 +78,8 @@ pub const Patterns = struct {
     /// In cone mode a file without the cone's shape is read as plain
     /// patterns, which is git's own fallback; `cone` on the result says
     /// which happened.
-    pub fn loadMode(gpa: Allocator, io: Io, git_dir: Io.Dir, options: LoadOptions) Self.Error!?Patterns {
-        var patterns = try init(gpa, options.case_fold);
+    pub fn load(gpa: Allocator, io: Io, git_dir: Io.Dir, options: LoadOptions) Self.Error!?Patterns {
+        var patterns = try init(gpa, .{ .case_fold = options.case_fold });
         errdefer patterns.deinit();
         const bytes = (try fs.readFileAlloc(patterns.arena.allocator(), io, git_dir, "info/sparse-checkout", 1 << 24)) orelse {
             patterns.deinit();
@@ -97,7 +93,7 @@ pub const Patterns = struct {
     /// Patterns from text alone, read as a cone when `cone` is set and the
     /// text has the shape. The text is copied.
     pub fn fromText(gpa: Allocator, text: []const u8, options: LoadOptions) Allocator.Error!Patterns {
-        var patterns = try init(gpa, options.case_fold);
+        var patterns = try init(gpa, .{ .case_fold = options.case_fold });
         errdefer patterns.deinit();
         const owned = try patterns.arena.allocator().dupe(u8, text);
         try patterns.addText(owned);
@@ -383,7 +379,7 @@ fn matcher(ptr: *anyopaque) *sets.Matcher {
 
 test "the last matching pattern decides, and nothing is in by default" {
     const gpa = std.testing.allocator;
-    var patterns = try Patterns.init(gpa, false);
+    var patterns = try Patterns.init(gpa, .{ .case_fold = false });
     defer patterns.deinit();
     try patterns.addText("/*\n!/secret/\n");
 
@@ -394,7 +390,7 @@ test "the last matching pattern decides, and nothing is in by default" {
 
 test "a cone-shaped file includes a directory and everything under it" {
     const gpa = std.testing.allocator;
-    var patterns = try Patterns.init(gpa, false);
+    var patterns = try Patterns.init(gpa, .{ .case_fold = false });
     defer patterns.deinit();
     try patterns.addText("/*\n!/*/\n/src/\n");
 
@@ -406,7 +402,7 @@ test "a cone-shaped file includes a directory and everything under it" {
 
 test "empty patterns include nothing" {
     const gpa = std.testing.allocator;
-    var patterns = try Patterns.init(gpa, false);
+    var patterns = try Patterns.init(gpa, .{ .case_fold = false });
     defer patterns.deinit();
     try std.testing.expect(!patterns.includes("anything", false));
 }
@@ -495,7 +491,7 @@ test "phase2 sparse set rebuilding survives every allocation failure" {
     var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
-            var patterns = try Patterns.init(gpa, true);
+            var patterns = try Patterns.init(gpa, .{ .case_fold = true });
             defer patterns.deinit();
             try patterns.addText("/src/\n");
             try patterns.addText("!/src/generated/\n/src/generated/keep.zig\n");

@@ -557,14 +557,14 @@ fn row4() !void {
     const Load = struct {
         text: []const u8,
         fn ignoreRules(l: @This()) void {
-            var rules = worktree.ignore.Rules.init(std.heap.smp_allocator, false) catch unreachable;
+            var rules = worktree.ignore.Rules.init(std.heap.smp_allocator, .{ .case_fold = false }) catch unreachable;
             defer rules.deinit();
             for (levels, 0..) |base, depth| rules.addText(l.text, base, ".gitignore", @intCast(depth + 2)) catch unreachable;
         }
     };
     const load_ms = bestMs(io, 20, Load{ .text = ignore_text.items }, Load.ignoreRules);
 
-    var rules = try worktree.ignore.Rules.init(gpa, false);
+    var rules = try worktree.ignore.Rules.init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     for (levels, 0..) |base, depth| try rules.addText(ignore_text.items, base, ".gitignore", @intCast(depth + 2));
     const Ask = struct {
@@ -580,7 +580,7 @@ fn row4() !void {
     };
     const match_ms = bestMs(io, 5, Ask{ .rules = &rules, .paths = paths }, Ask.all);
 
-    var attrs = try worktree.attributes.Attrs.init(gpa, false);
+    var attrs = try worktree.attributes.Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
     try attrs.addText(attribute_text.items, "", ".gitattributes", 1);
     const Lookup = struct {

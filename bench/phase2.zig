@@ -35,13 +35,13 @@ pub fn main(init: std.process.Init) !void {
     var result: usize = 0;
     var from = time(io);
     for (0..loads) |_| {
-        var rules = try relic.worktree.ignore.Rules.init(gpa, false);
+        var rules = try relic.worktree.ignore.Rules.init(gpa, .{ .case_fold = false });
         defer rules.deinit();
         try rules.addText(patterns, "", ".gitignore", 1);
         result += @intFromBool(rules.match("d/a.log", false).excluded);
     }
     try row(w, "ignore_load_32", io, from, loads, result);
-    var rules = try relic.worktree.ignore.Rules.init(gpa, false);
+    var rules = try relic.worktree.ignore.Rules.init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText(patterns, "", ".gitignore", 1);
     result = 0;
@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
     result = 0;
     from = time(io);
     for (0..loads) |_| {
-        var attrs = try relic.worktree.attributes.Attrs.init(gpa, false);
+        var attrs = try relic.worktree.attributes.Attrs.init(gpa, .{ .case_fold = false });
         defer attrs.deinit();
         try attrs.addText("*.zig diff=zig\n*.bin -diff\n*.txt text\n", "", ".gitattributes", 1);
         var arena = std.heap.ArenaAllocator.init(gpa);

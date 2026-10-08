@@ -47,6 +47,7 @@ test "the plumbing is relic's own: no public name reaches it" {
 }
 
 test {
+    _ = @import("testing/policy_options.zig");
     // Every module the API reaches, one level down as well as at the top,
     // so that every file under the root is compiled and its tests run.
     std.testing.refAllDecls(relic);
