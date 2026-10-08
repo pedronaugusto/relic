@@ -16,6 +16,7 @@
 //! the line before it; an empty line is an empty context line. What is read
 //! is a value; applying it is `apply.zig`'s.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -202,6 +203,8 @@ pub const FilePatch = struct {
 /// A parsed patch. Everything in it is owned by its arena; the text the
 /// hunks borrow from is the caller's and must outlive it.
 pub const Patch = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     files: []FilePatch,
 

@@ -12,6 +12,7 @@
 //! a stack of the worktree's own under `reftable/`, and the `HEAD` file is
 //! the placeholder git leaves there.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -83,6 +84,8 @@ pub const Entry = struct {
 
 /// Every registered worktree.
 pub const Listing = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     entries: []Entry,

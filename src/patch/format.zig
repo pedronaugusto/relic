@@ -16,6 +16,7 @@
 //! letter's date and sender, a thread's message ids, a sign-off — is the
 //! caller's to hand in.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -211,6 +212,8 @@ pub const Mail = struct {
 
 /// The mails, in order: the cover letter first when there is one.
 pub const Series = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     mails: []const Mail,

@@ -20,6 +20,7 @@
 //! leaves its values for the programs it starts — are values above every
 //! file, in that order.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -41,6 +42,8 @@ pub const Error = error{
 
 /// The files and values git would read, and in what order.
 pub const Locations = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// The system file, when there is one to read. `null` under
     /// `GIT_CONFIG_NOSYSTEM`, and when no `git` could be asked and nothing

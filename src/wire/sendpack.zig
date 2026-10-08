@@ -11,6 +11,7 @@
 //! is one, so the server's progress and its hooks' output come back beside
 //! it. receive-pack speaks v0 and nothing else, whatever was asked for.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -79,6 +80,8 @@ pub const RefReport = struct {
 
 /// The server's answer.
 pub const Report = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// Whether the pack was taken: `unpack ok`.
     unpack_ok: bool,

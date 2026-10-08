@@ -14,3 +14,4 @@ pub const ExtraHeader = @import("object/object.zig").ExtraHeader;
 pub const ParseError = @import("object/object.zig").ParseError;
 pub const Commit = @import("object/object.zig").Commit;
 pub const Tag = @import("object/object.zig").Tag;
+pub const Error = @import("object/object.zig").Error;

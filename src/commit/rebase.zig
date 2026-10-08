@@ -24,6 +24,7 @@
 //! caller hands in. The commits a rebase rewrote come back as pairs, which is
 //! what git hands its `post-rewrite` hook.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -230,6 +231,8 @@ pub const Rewritten = struct { old: Oid, new: Oid };
 
 /// What a rebase did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     result: Result,

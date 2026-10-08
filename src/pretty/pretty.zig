@@ -13,6 +13,7 @@
 //! and human dates, wrapping, padding and colour — is refused as
 //! `error.UnsupportedPlaceholder`.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -74,6 +75,8 @@ pub const Context = struct {
 /// as `replaced`. Each object's names come newest first, as git lists
 /// them.
 pub const Decorations = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     by_object: Oid.Map(*const Decoration) = .empty,
     /// The ref `HEAD` points at, written `HEAD -> <branch>` where both

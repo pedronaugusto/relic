@@ -15,6 +15,7 @@
 //! when a command starts, and writes through `Repository.writeConfig`, so
 //! `Repository.configuration` says afterwards what the files say.
 
+const ErrorNamespace = @This();
 const index_mod = @import("../index/index.zig");
 const Self = @This();
 
@@ -226,6 +227,8 @@ pub fn disable(io: Io, repo: *Repository) Self.Error!Outcome {
 /// What `list` found: the directories of a cone, or the lines of a file
 /// that is not one.
 pub const Listing = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// Whether `entries` are cone directories rather than pattern lines.

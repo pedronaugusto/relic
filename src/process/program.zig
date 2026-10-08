@@ -19,6 +19,7 @@
 //! hook is a file and runs directly. Running a command line needs `sh`,
 //! which is every Unix's and which git for Windows installs.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -95,6 +96,8 @@ pub const Error = error{
     conduit.InputWriter.QueueError || Io.Timeout.Error || Io.Dir.RealPathError || Io.File.Reader.Error;
 
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     term: Term,
     /// Empty unless `Invocation.stdout` is `.capture`.
     stdout: []u8,
@@ -156,6 +159,8 @@ pub fn run(
 /// conversation rather than one exchange: a long-running filter, a
 /// transport over `ssh`.
 pub const Running = struct {
+    pub const Error = ErrorNamespace.Error;
+
     child: Child,
     spawn: ?SpawnHook,
     terminated: bool = false,

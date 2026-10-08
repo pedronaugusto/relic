@@ -23,6 +23,7 @@
 //! resolved again, and `gc` prunes old records against a time the caller
 //! gives, since nothing here reads a clock.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -76,6 +77,8 @@ pub const Options = struct {
 
 /// What a run did, path by path, as git reports it.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// "Recorded preimage for '<path>'".
@@ -692,6 +695,8 @@ pub fn afterStop(gpa: Allocator, io: Io, repo: *Repository, index: *Index, optio
 
 /// Paths, as `git rerere status` and `git rerere remaining` print them.
 pub const Paths = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     paths: []const []const u8 = &.{},
@@ -803,6 +808,8 @@ pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
 
 /// What `forget` did, path by path, with git's words for each.
 pub const Forgotten = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// "Updated preimage for '<path>'" and "Forgot resolution for

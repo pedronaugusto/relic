@@ -13,6 +13,7 @@
 //! taken into UTF-8; any other character set is refused by name, where git
 //! would convert it with iconv.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -57,6 +58,8 @@ pub const SplitOptions = struct {
 /// The messages of a mailbox, each as `git mailsplit` writes it to a
 /// file. Owned by its arena.
 pub const Mailbox = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     messages: []const []const u8,
 
@@ -182,6 +185,8 @@ pub const InfoOptions = struct {
 
 /// What a message held.
 pub const Info = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// `Author:`, `Email:`, `Subject:` and `Date:`, absent when the mail
     /// had none.

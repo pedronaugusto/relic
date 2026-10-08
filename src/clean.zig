@@ -22,6 +22,7 @@
 //! What git does that this does not offer: `-i` (interactive), which is a
 //! terminal conversation and not a library call.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -116,6 +117,8 @@ pub const RemoveError = Io.Dir.DeleteFileError || Io.Dir.DeleteDirError || Io.Di
 
 /// What a clean did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// In the order git prints them.
     reports: []const Report,

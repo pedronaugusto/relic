@@ -5,6 +5,7 @@
 //! caller wants — a name-status list, added and removed line counts, and a
 //! patch with git's own headers.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.diff.<name>`.
@@ -114,6 +115,8 @@ pub const Change = struct {
 
 /// The result of a tree comparison.
 pub const Changes = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     items: []Change,

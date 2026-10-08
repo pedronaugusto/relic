@@ -10,6 +10,7 @@
 //! `HEAD` does not resolve, because git cannot compare a commit it cannot
 //! name.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -30,6 +31,8 @@ pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenErr
 
 /// A submodule's repository, found from its working tree.
 pub const GitDir = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// Its `.git` directory, wherever that is.
     git_dir: Io.Dir,
     /// Where its shared state lives: `git_dir` itself, unless a `commondir`

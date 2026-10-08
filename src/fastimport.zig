@@ -20,6 +20,7 @@
 //! modes, is not offered. `rewrite-submodules-*` and `export-pack-edges`
 //! are refused by name.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -222,6 +223,8 @@ pub const Rejected = struct {
 
 /// What an import did.
 pub const Report = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// The branches not updated; git's exit status is 1 when there are any.
@@ -241,6 +244,8 @@ pub const Report = struct {
 /// Marks: the numbers a stream names objects by, as git's marks files hold
 /// them.
 pub const Marks = struct {
+    pub const Error = ErrorNamespace.Error;
+
     map: std.AutoHashMapUnmanaged(u64, Oid) = .empty,
 
     /// Release the table.

@@ -8,6 +8,7 @@
 //! `:(glob)`. Paths are from the top of the working tree: there is no
 //! current directory to be relative to. `:(attr:...)` is refused by name.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -42,6 +43,8 @@ const Item = struct {
 
 /// A parsed pathspec.
 pub const Pathspec = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     items: []const Item,
     has_exclude: bool,

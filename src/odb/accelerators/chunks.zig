@@ -1,5 +1,6 @@
 //! The chunk directory shared by git's repository accelerators.
 
+const ErrorNamespace = @This();
 const Self = @This();
 const std = @import("std");
 const hash = @import("../../hash/hash.zig");
@@ -9,6 +10,8 @@ pub const Error = error{CorruptAccelerator} || Allocator.Error;
 
 /// An owned byte buffer used by the format writers.
 pub const Buffer = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     bytes: std.ArrayList(u8) = .empty,
 

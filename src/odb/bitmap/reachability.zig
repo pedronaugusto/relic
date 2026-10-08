@@ -1,5 +1,6 @@
 //! Bind a reachability bitmap to its pack's or MIDX's object orders.
 
+const ErrorNamespace = @This();
 const Self = @This();
 const std = @import("std");
 const Io = std.Io;
@@ -16,6 +17,8 @@ pub const Error = bitmap.Error || midx.Error || pack.IndexError || Io.Dir.Access
 
 /// The two orders a bitmap uses: selected commits are in name order, bits in pack order.
 pub const Store = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     names: []Oid,
     reverse: []u32,

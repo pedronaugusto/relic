@@ -18,6 +18,7 @@
 //! walk uses a directory's stat to decide nothing, and the index holds no
 //! entry for one.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -49,6 +50,8 @@ pub const Error = Io.Dir.Iterator.Error || fs.StatError || Allocator.Error;
 /// `.` and `..` are never given. The order is the filesystem's, which is not
 /// sorted on either arm; a caller that needs an order imposes it.
 pub const Scan = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     io: Io,
     dir: Io.Dir,

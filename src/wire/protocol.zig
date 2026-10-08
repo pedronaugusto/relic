@@ -10,6 +10,7 @@
 //! back to a server that predates v2 — and it is the only dialect
 //! `git-receive-pack` has.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -56,6 +57,8 @@ pub const RemoteRef = struct {
 
 /// The server's opening message.
 pub const Advertisement = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     version: Version,
     /// Each capability as advertised: `name` or `name=value`.
@@ -223,6 +226,8 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Se
 
 /// A server's refs, as `listRefs` returns them.
 pub const RefList = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     refs: []const RemoteRef,
 

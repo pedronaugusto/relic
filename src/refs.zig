@@ -28,3 +28,4 @@ pub const CreateError = @import("refs/refs.zig").CreateError;
 pub const create = @import("refs/refs.zig").create;
 pub const LogMessage = @import("refs/refs.zig").LogMessage;
 pub const Transaction = @import("refs/refs.zig").Transaction;
+pub const Error = @import("refs/refs.zig").Error;

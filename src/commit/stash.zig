@@ -25,6 +25,7 @@
 //! Merging does not look for renames, so a path the stash renamed and the
 //! branch changed meets as a deletion and a change rather than as one file.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -180,6 +181,8 @@ pub const Entry = struct {
 
 /// Every stash, newest first: `stash@{0}` is `entries[0]`.
 pub const List = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     log: refs_mod.Log,
     entries: []Entry,
@@ -194,6 +197,8 @@ pub const List = struct {
 
 /// What bringing a stash back did.
 pub const Applied = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// The paths left in conflict, sorted. Each has its stages in the index

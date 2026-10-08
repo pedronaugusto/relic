@@ -12,6 +12,7 @@
 //! resolve; a conflict before it is the whole octopus failing, and git
 //! then leaves everything as it was.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -51,6 +52,8 @@ pub const Options = struct {
 
 /// What an octopus left.
 pub const Result = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// The merged tree, when nothing is left conflicted.

@@ -16,6 +16,7 @@
 //! commit that receives suspects after it was taken is taken again, so the
 //! answer does not depend on the order.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -63,6 +64,8 @@ pub const Hunk = struct {
 
 /// Every line of a file, by where it comes from.
 pub const Blame = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// In the order of the file's lines, covering each once.

@@ -12,6 +12,7 @@
 //! each `url` rewritten with `insteadOf`. Of several bases that match, the
 //! one with the longest match wins.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -47,6 +48,8 @@ pub const TagMode = enum {
 ///
 /// Every slice is owned by the remote's arena.
 pub const Remote = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// The configured name, or `null` for a remote named by its URL alone.
     name: ?[]const u8,
@@ -218,6 +221,8 @@ pub fn defaultFetchRefspec(gpa: Allocator, name: []const u8) Allocator.Error![]u
 ///
 /// Every slice is owned by the arena.
 pub const Branch = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     /// The branch's short name.
     name: []const u8,

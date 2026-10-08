@@ -5,6 +5,7 @@
 //! read the same when it is ignored, so this is only ever consulted before
 //! the per-pack indexes, never instead of them.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -42,6 +43,8 @@ pub const Located = struct {
 
 /// A multi-pack index, held in memory.
 pub const Index = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     kind: hash.Kind,
     bytes: []const u8,

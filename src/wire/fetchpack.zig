@@ -17,6 +17,7 @@
 //! `Progress`. A v0 server is asked in one round — wants, haves, `done` —
 //! with no multi-ack, which every server of that dialect understands.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -98,6 +99,8 @@ pub const Deepen = struct {
 /// What the server said of the boundary: the commits now at it, and those
 /// no longer at it because their parents came.
 pub const ShallowInfo = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     shallow: std.ArrayList(Oid) = .empty,
     unshallow: std.ArrayList(Oid) = .empty,

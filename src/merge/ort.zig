@@ -26,6 +26,7 @@
 //! below its highest verbosity, unless `Options.inner_messages` asks for
 //! them.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -270,6 +271,8 @@ pub const Conflicted = struct {
 
 /// What a merge produced. Everything in it is the result's.
 pub const Result = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// The merged tree, conflict markers and moved-aside files included:

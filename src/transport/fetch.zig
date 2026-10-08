@@ -18,6 +18,7 @@
 //! exact format, the refs for merging first. With `prune`, remote-tracking
 //! refs whose source is gone are deleted first, with their logs.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -216,6 +217,8 @@ pub const HeadEntry = struct {
 
 /// What a fetch did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     updates: []const Update,
     /// Remote-tracking refs deleted because their source is gone.

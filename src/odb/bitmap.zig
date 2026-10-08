@@ -1,5 +1,6 @@
 //! Pack and multi-pack reachability bitmap files, and git's EWAH/XOR encoding.
 
+const ErrorNamespace = @This();
 const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -16,6 +17,8 @@ pub const Entry = struct { position: u32, xor_offset: u8, flags: u8, start: usiz
 
 /// A checked bitmap, borrowing its pack's name order and reverse order from the caller.
 pub const Index = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     kind: hash.Kind,
     bytes: []const u8,

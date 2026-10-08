@@ -8,6 +8,7 @@
 //! one public way to write a repository's configuration, and it checks the
 //! file a write would leave before the write lands.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -41,6 +42,8 @@ pub const Outcome = struct {
 /// A write prepared and not yet in place: the file's lock held, and what
 /// the file will hold.
 pub const Pending = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     dir: Io.Dir,
     sub_path: []const u8,

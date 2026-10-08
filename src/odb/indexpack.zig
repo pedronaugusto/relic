@@ -23,6 +23,7 @@
 //! is not a pack, or stops short, or carries a delta that reaches outside
 //! itself, is a named error and leaves nothing behind.
 
+const ErrorNamespace = @This();
 const Self = @This();
 const retention = @import("keep.zig");
 
@@ -171,6 +172,8 @@ pub fn configuredThreads(config: ?*const config_mod.Config) u32 {
 /// without reading an object again: git's index-pack
 /// `--check-self-contained-and-connected`.
 pub const Links = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// Trees, blobs and tag targets named, each once.
     named: Oid.Set = .empty,
@@ -267,6 +270,8 @@ pub const Diagnostic = struct {
 
 /// What was received.
 pub const Result = struct {
+    pub const Error = ErrorNamespace.Error;
+
     keep: ?retention.Token = null,
 
     /// The pack's checksum, which names both files: `pack-<name>.pack` and

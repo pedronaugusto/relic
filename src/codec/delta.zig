@@ -5,6 +5,7 @@
 //! both are here: an omitted offset or size byte does not renumber the bytes
 //! after it, and a copy size of zero means 0x10000.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -213,6 +214,8 @@ pub fn encode(
 /// value beside that base avoids rebuilding its sixteen-byte-block index for
 /// every comparison. `base` must outlive the encoder.
 pub const Encoder = struct {
+    pub const Error = ErrorNamespace.Error;
+
     base: []const u8,
     index: Index,
 

@@ -9,6 +9,7 @@
 //! creation factor, found by git's Jonker-Volgenant solver step for step so
 //! that ties come out as git's do.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -98,6 +99,8 @@ pub const Patch = struct {
 
 /// Two ranges' patches, oldest first, paired.
 pub const RangeDiff = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     old: []Patch,
     new: []Patch,

@@ -11,6 +11,7 @@
 //! sequencer's directory) are replaced whole, so a reader never sees half of
 //! one.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -32,6 +33,8 @@ pub const Error = refs_mod.TransactionError || fs.AtomicWriteError ||
 
 /// Where `HEAD` is.
 pub const Head = struct {
+    pub const Error = ErrorNamespace.Error;
+
     /// The ref `HEAD` names, such as `refs/heads/main`, or `null` when it is
     /// detached. Owned by the caller of `read`.
     branch: ?[]const u8,

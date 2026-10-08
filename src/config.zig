@@ -19,3 +19,4 @@ pub const escapeValue = @import("config/config.zig").escapeValue;
 pub const unquote = @import("config/config.zig").unquote;
 pub const CheckKeyError = @import("config/config.zig").CheckKeyError;
 pub const UnquoteError = @import("config/config.zig").UnquoteError;
+pub const Error = @import("config/config.zig").Error;

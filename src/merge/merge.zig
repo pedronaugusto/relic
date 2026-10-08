@@ -7,6 +7,7 @@
 //! itself. With `content_merge` it is git's merge, `ort.zig`'s: renames
 //! followed, files merged, conflicts recorded as git records them.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.merge.<name>`.
@@ -112,6 +113,8 @@ pub const Conflict = struct {
 
 /// What a merge produced.
 pub const Result = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// The merged index: stage 0 for everything that reconciled, and stages
     /// 1, 2 and 3 for everything that did not. The caller owns it.

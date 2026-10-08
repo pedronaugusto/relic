@@ -13,6 +13,7 @@
 //! git: a sequence this stopped is continued, skipped or aborted by `git
 //! cherry-pick`, and one git stopped is continued, skipped or aborted here.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -198,6 +199,8 @@ pub const Stop = enum {
 
 /// What a replay did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// `null` when every commit was applied.

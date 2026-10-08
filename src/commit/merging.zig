@@ -11,6 +11,7 @@
 //! first, as git does, nested conflict markers and all. Two or more heads
 //! make an octopus, merged as git's `merge-octopus` merges them.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -230,6 +231,8 @@ pub const Options = struct {
 
 /// What a merge did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     result: Result,

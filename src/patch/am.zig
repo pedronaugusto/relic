@@ -17,6 +17,7 @@
 //! why; nothing is printed. The hooks are git's: `applypatch-msg`,
 //! `pre-applypatch`, `post-applypatch`.
 
+const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
@@ -165,6 +166,8 @@ pub const Stop = struct {
 
 /// What a run did.
 pub const Outcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     /// The commits made, in order.

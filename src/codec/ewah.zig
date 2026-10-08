@@ -8,6 +8,7 @@
 //! Encoding and decoding are shared by both formats. Decoding is bounded by
 //! the caller's index size, rather than the compressed word count.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -23,6 +24,8 @@ pub const Error = error{
 
 /// A decoded bitmap: the positions whose bit is set, in ascending order.
 pub const Bits = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     positions: []u32,
 
