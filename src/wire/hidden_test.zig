@@ -67,7 +67,7 @@ test "a repository on this machine lists what git ls-remote lists of it, hidden 
             try theirs.append(gpa, try gpa.print("{s} {s}", .{ line[0..tab], line[tab + 1 ..] }));
         }
 
-        var session = try transport.Session.open(gpa, io, source_path, .upload_pack, null, .{ .protocol_v2 = v2 });
+        var session = try transport.Session.open(gpa, io, source_path, .{ .service = .upload_pack, .kind = null }, .{ .protocol_v2 = v2 });
         defer session.deinit(io);
         var refs = try session.listRefs(gpa, io, &.{});
         defer refs.deinit();

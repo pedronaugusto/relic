@@ -346,7 +346,7 @@ fn pushTo(
 
 /// The session a push to `remote` at `url` talks over.
 fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, url: []const u8, options: Options) Error!transport.Session {
-    const session = try transport.Session.open(gpa, io, url, .receive_pack, repo.objectFormat(), .{
+    const session = try transport.Session.open(gpa, io, url, .{ .service = .receive_pack, .kind = repo.objectFormat() }, .{
         .programs = options.programs,
         .config = repo.configuration(),
         .remote_name = remote.name,

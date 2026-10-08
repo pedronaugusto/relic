@@ -270,8 +270,8 @@ test "a helper that is not there, or not allowed, is refused by name" {
     defer scratch.deinit();
     var helpers = try Helpers.init(gpa, io, &scratch);
     defer helpers.deinit();
-    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchhelper::x", .upload_pack, null, .{ .programs = helpers.programs() }));
-    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchscheme://host/x", .upload_pack, null, .{ .programs = helpers.programs() }));
-    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "ext::git %s /x", .upload_pack, null, .{ .programs = helpers.programs() }));
-    try std.testing.expectError(error.ProgramsNotGranted, transport.Session.open(gpa, io, "testgit::/x", .upload_pack, null, .{}));
+    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchhelper::x", .{ .service = .upload_pack, .kind = null }, .{ .programs = helpers.programs() }));
+    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchscheme://host/x", .{ .service = .upload_pack, .kind = null }, .{ .programs = helpers.programs() }));
+    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "ext::git %s /x", .{ .service = .upload_pack, .kind = null }, .{ .programs = helpers.programs() }));
+    try std.testing.expectError(error.ProgramsNotGranted, transport.Session.open(gpa, io, "testgit::/x", .{ .service = .upload_pack, .kind = null }, .{}));
 }

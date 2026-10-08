@@ -277,7 +277,7 @@ test "CVE-2023-22490, t5604-clone-reference 'clone repo with symlinked objects d
     var only_file = try testgit.programEnviron(gpa);
     defer only_file.deinit();
     try only_file.put("GIT_ALLOW_PROTOCOL", "file");
-    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git", .upload_pack, .sha1, .{
+    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git", .{ .service = .upload_pack, .kind = .sha1 }, .{
         .programs = .{ .environ = &only_file },
     }));
     try std.testing.expectError(error.NotARepository, local.Remote.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git", .{}));

@@ -46,11 +46,11 @@ test "CVE-2015-7545, t5812..t5815-proto-disable: ext:: is never allowed, file://
     defer programs_env.deinit();
     const url = try gpa.print("ext::sh -c touch% {s}/pwned", .{dir});
     defer gpa.free(url);
-    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{
+    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{
         .programs = .{ .environ = &programs_env },
     }));
     // A path on this machine that the person did not name.
-    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, dir, .upload_pack, .sha1, .{
+    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, dir, .{ .service = .upload_pack, .kind = .sha1 }, .{
         .from_user = false,
     }));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "pwned", .{}));
@@ -105,7 +105,7 @@ test "git 2.11.1, t5812-proto-disable-http 'curl limits redirects' and t5550-htt
         defer server.stop();
         const url = try server.url(gpa, "moved/repo.git");
         defer gpa.free(url);
-        if (transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{})) |opened| {
+        if (transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{})) |opened| {
             var session = opened;
             session.deinit(io);
             std.debug.print("a redirect to {s} was followed\n", .{to});
@@ -120,8 +120,8 @@ test "git 2.11.1, t5812-proto-disable-http 'curl limits redirects' and t5550-htt
     defer gpa.free(url);
     var never = try config_mod.Config.parseText(gpa, "[http]\n\tfollowRedirects = false\n", .local);
     defer never.deinit();
-    try std.testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &never }));
-    var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{});
+    try std.testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &never }));
+    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{});
     defer session.deinit(io);
     var refs = try session.listRefs(gpa, io, &.{"refs/heads/"});
     defer refs.deinit();

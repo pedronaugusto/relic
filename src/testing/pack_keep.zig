@@ -204,12 +204,12 @@ test "phase2 local receive owns a keep token with default receive options" {
             defer repository.deinit(io);
             const path = try source.dir.realPathFileAlloc(io, ".", gpa);
             defer gpa.free(path);
-            var session = try @import("../transport/transport.zig").Session.open(gpa, io, path, .upload_pack, repository.objectFormat(), .{ .local_copy = true });
+            var session = try @import("../transport/transport.zig").Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = repository.objectFormat() }, .{ .local_copy = true });
             defer session.deinit(io);
             var pack_dir = try repository.objectDatabase().objectsDirectory().openDir(io, "pack", .{ .iterate = true });
             defer pack_dir.close(io);
             const oid = try Oid.parse(repository.objectFormat(), head);
-            var fetched = try session.fetch(gpa, io, repository.objectDatabase(), pack_dir, .{ .wants = &.{oid}, .tips = &.{} }, .{});
+            var fetched = try session.fetch(gpa, io, .{ .db = repository.objectDatabase(), .pack_dir = pack_dir, .request = .{ .wants = &.{oid}, .tips = &.{} } }, .{});
             defer fetched.deinit(io);
             try testing.expect(fetched.keep != null);
             var hex: [hash.max_hex_len]u8 = undefined;

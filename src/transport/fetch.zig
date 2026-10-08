@@ -447,7 +447,7 @@ fn bringObjects(
     // whether it is connected is asked without reading it again.
     var links: indexpack.Links = .init(gpa);
     defer links.deinit();
-    var fetched = try session.fetch(gpa, io, repo.objectDatabase(), pack_dir, .{
+    var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
         .wants = wants.oids,
         .want_names = wants.names,
         .tips = tips.ours,
@@ -456,7 +456,7 @@ fn bringObjects(
         .deepen = b.deepen,
         .shallow = boundary,
         .filter = b.filter,
-    }, .{
+    } }, .{
         .warnings = b.options.warnings,
         .progress = b.options.progress,
         .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, &links),
@@ -572,13 +572,13 @@ fn followTags(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sessi
     try findNonLocalTags(arena, gpa, io, repo, f.remote_refs, f.local, &backfill, f.map);
     const missing_tags = try wantsInOrder(arena, io, repo, f.remote_refs, backfill.items, false);
     if (missing_tags.oids.len == 0) return backfill.items;
-    const fetched = try session.fetch(gpa, io, repo.objectDatabase(), pack_dir, .{
+    const fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
         .wants = missing_tags.oids,
         .want_names = missing_tags.names,
         .tips = f.tips.ours,
         .common_tips = f.tips.common,
         .include_tag = false,
-    }, .{ .progress = f.progress, .receive = f.receive });
+    } }, .{ .progress = f.progress, .receive = f.receive });
     f.keep.* = fetched.keep;
     takeFetchedValues(session, backfill.items);
     return backfill.items;
@@ -651,7 +651,7 @@ fn askedRefspecs(
 
 /// The session a fetch from `remote` at `url` talks over.
 fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, url: []const u8, options: Options) Error!transport.Session {
-    const session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
+    const session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = repo.objectFormat() }, .{
         .programs = options.programs,
         .config = repo.configuration(),
         .remote_name = remote.name,

@@ -40,13 +40,13 @@ test "CVE-2017-1000117, t5813-proto-disable-ssh 'hostnames starting with dash ar
         .{ .url = "ssh://-user@remote/repo.git", .refused = error.SuspiciousHostname },
         .{ .url = "remote:-repo.git", .refused = error.SuspiciousPathname },
     }) |case| {
-        try std.testing.expectError(case.refused, transport.Session.open(gpa, io, case.url, .upload_pack, .sha1, .{
+        try std.testing.expectError(case.refused, transport.Session.open(gpa, io, case.url, .{ .service = .upload_pack, .kind = .sha1 }, .{
             .programs = .{ .environ = &env },
         }));
     }
     // t5532-fetch-proxy 'funny hostnames are rejected before running
     // proxy': relic has no git:// client, so no proxy runs at all.
-    try std.testing.expectError(error.UnsupportedTransport, transport.Session.open(gpa, io, "git://-remote/repo.git", .upload_pack, .sha1, .{
+    try std.testing.expectError(error.UnsupportedTransport, transport.Session.open(gpa, io, "git://-remote/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{
         .programs = .{ .environ = &env },
     }));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "ran", .{}));

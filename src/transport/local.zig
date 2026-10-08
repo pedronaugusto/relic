@@ -255,6 +255,8 @@ pub const Remote = struct {
         atomic: bool = false,
     };
 
+    pub const ReceiveInputs = struct { from: *odb_mod.Odb, commands: []const sendpack.Command, objects: []const odb_mod.PackEntry };
+
     /// Errors from `receivePush`.
     pub const ReceivePushError = ErrorNamespace.Error || sendpack.Error;
 
@@ -273,11 +275,12 @@ pub const Remote = struct {
         r: *Remote,
         gpa: Allocator,
         io: Io,
-        from: *odb_mod.Odb,
-        commands: []const sendpack.Command,
-        objects: []const odb_mod.PackEntry,
+        inputs: ReceiveInputs,
         options: ReceiveOptions,
     ) ReceivePushError!sendpack.Report {
+        const from = inputs.from;
+        const commands = inputs.commands;
+        const objects = inputs.objects;
         try r.refuseHooks(io);
 
         var report: sendpack.Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };

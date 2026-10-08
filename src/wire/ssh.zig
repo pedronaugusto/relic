@@ -200,7 +200,11 @@ pub fn connect(
 /// connection's message on `TransportProgramFailed`. `err` is what the
 /// protocol met, returned when ssh said nothing more telling. With
 /// `failure`, a refusal is described there.
-pub fn explain(gpa: Allocator, io: Io, conn: *Connection, err: anyerror, url: url_mod.Url, failure: ?*auth.Failure) Self.Error {
+pub const ExplainOptions = struct { url: url_mod.Url, failure: ?*auth.Failure = null };
+
+pub fn explain(gpa: Allocator, io: Io, conn: *Connection, err: anyerror, options: ExplainOptions) Self.Error {
+    const url = options.url;
+    const failure = options.failure;
     const ended = connection.Process.diagnose(conn, io) catch return error.Canceled;
     const said = std.mem.trim(u8, ended.stderr, " \t\r\n");
     const refusal: ?struct { e: Error, reason: auth.Failure.Reason } =

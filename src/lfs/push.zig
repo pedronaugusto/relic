@@ -131,6 +131,8 @@ pub const Reach = struct {
     auth_failure: ?*auth.Failure = null,
 };
 
+pub const Inputs = struct { remote: []const u8, remote_refs: []const []const u8, pushed: []const odb_mod.PackEntry, reach: Reach };
+
 /// git-lfs's pre-push hook for one push URL: check locks for `remote_refs`
 /// and upload the LFS objects among `pushed`. `remote` is the remote's name,
 /// or its URL.
@@ -138,12 +140,13 @@ pub fn beforePush(
     gpa: Allocator,
     io: Io,
     repo: *Repository,
-    remote: []const u8,
-    remote_refs: []const []const u8,
-    pushed: []const odb_mod.PackEntry,
-    reach: Reach,
+    inputs: Inputs,
     options: Options,
 ) Self.Error!void {
+    const remote = inputs.remote;
+    const remote_refs = inputs.remote_refs;
+    const pushed = inputs.pushed;
+    const reach = inputs.reach;
     if (options.mode == .off) return;
     var scratch: Report = .init(gpa);
     defer scratch.deinit();
@@ -290,7 +293,7 @@ const PushContext = struct {
     fn run(context: *anyopaque, gpa: Allocator, io: Io, repository: *Repository, input: push_mod.BeforeSendInput) push_mod.BeforeSendError!void {
         const c: *PushContext = @ptrCast(@alignCast(context));
         if (c.previous) |previous| try previous.run(previous.context, gpa, io, repository, input);
-        beforePush(gpa, io, repository, input.remote, input.refs, input.objects, c.reach, c.options) catch |err| {
+        beforePush(gpa, io, repository, .{ .remote = input.remote, .remote_refs = input.refs, .pushed = input.objects, .reach = c.reach }, c.options) catch |err| {
             c.failure = err;
             return error.BeforeSendFailed;
         };

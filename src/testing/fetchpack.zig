@@ -54,7 +54,7 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
             defer adv.deinit();
             try testing.expectEqual(if (v2) protocol.Version.v2 else protocol.Version.v0, adv.version);
             const want = try Oid.parse(.sha1, old);
-            var result = try fetchpack.fetch(gpa, io, conn, &adv, repo.objectDatabase(), .{ .wants = &.{want}, .tips = &.{} }, .{});
+            var result = try fetchpack.fetch(gpa, io, conn, .{ .advertisement = &adv, .db = repo.objectDatabase(), .request = .{ .wants = &.{want}, .tips = &.{} } }, .{});
             defer result.deinit(io);
             try testing.expect(result.objects > 0);
             try objectwalk.checkConnected(gpa, io, repo.objectDatabase(), &.{want}, .{ .fresh = null, .missing_out = null });
@@ -71,10 +71,10 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
             try testing.expect(list.find("refs/heads/main").?.oid.eql(try Oid.parse(.sha1, head)));
             try testing.expect(list.find("refs/tags/v1").?.peeled != null);
             const want = try Oid.parse(.sha1, head);
-            var result = try fetchpack.fetch(gpa, io, conn, &adv, repo.objectDatabase(), .{
+            var result = try fetchpack.fetch(gpa, io, conn, .{ .advertisement = &adv, .db = repo.objectDatabase(), .request = .{
                 .wants = &.{want},
                 .tips = &.{try Oid.parse(.sha1, old)},
-            }, .{});
+            } }, .{});
             defer result.deinit(io);
             // Two commits, each with a root tree, three subtrees... far
             // fewer than the whole history; and the tag pointing at the
@@ -112,6 +112,6 @@ test "the server's refusal comes back by name, with its words" {
     defer adv.deinit();
     // An object the server does not have.
     const nowhere = hash.Hasher.object(.sha1, "blob", "not on the server");
-    try testing.expectError(error.RemoteError, fetchpack.fetch(gpa, io, conn, &adv, repo.objectDatabase(), .{ .wants = &.{nowhere}, .tips = &.{} }, .{}));
+    try testing.expectError(error.RemoteError, fetchpack.fetch(gpa, io, conn, .{ .advertisement = &adv, .db = repo.objectDatabase(), .request = .{ .wants = &.{nowhere}, .tips = &.{} } }, .{}));
     try testing.expect(std.mem.find(u8, conn.message(), "not our ref") != null);
 }

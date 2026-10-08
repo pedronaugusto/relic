@@ -104,16 +104,19 @@ pub const Report = struct {
     }
 };
 
-/// Send `request` over `conn`, whose advertisement is `adv`, with the
+pub const Inputs = struct { advertisement: *const protocol.Advertisement, db: *odb_mod.Odb };
+
+/// Send `request` over `conn`, whose advertisement is `inputs.advertisement`, with the
 /// objects read from `db`.
 pub fn send(
     gpa: Allocator,
     io: Io,
     conn: *Connection,
-    adv: *const protocol.Advertisement,
-    db: *odb_mod.Odb,
+    inputs: Inputs,
     request: Request,
 ) Self.Error!Report {
+    const adv = inputs.advertisement;
+    const db = inputs.db;
     if (request.atomic and !adv.has("atomic")) return error.AtomicPushUnsupported;
     if (request.push_options.len != 0 and !adv.has("push-options")) return error.PushOptionsUnsupported;
     var needs_pack = false;

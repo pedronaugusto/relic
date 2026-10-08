@@ -151,7 +151,7 @@ fn relicPrePush(fx: *Fixture, d: Io.Dir) !void {
     defer collected.deinit();
     var report: lfspush.Report = .init(gpa);
     defer report.deinit();
-    try lfspush.beforePush(gpa, io, &repo, "origin", &.{"refs/heads/main"}, collected.entries, .{ .programs = fx.programs() }, .{ .report = &report });
+    try lfspush.beforePush(gpa, io, &repo, .{ .remote = "origin", .remote_refs = &.{"refs/heads/main"}, .pushed = collected.entries, .reach = .{ .programs = fx.programs() } }, .{ .report = &report });
     for (report.uploads) |r| try testing.expect(!r.isFailure());
 }
 

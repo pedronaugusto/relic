@@ -125,7 +125,7 @@ test "the first request's redirect is followed, and the requests after it go whe
     const url = try server.url(gpa, "moved/repo.git");
     defer gpa.free(url);
 
-    var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{});
+    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{});
     defer session.deinit(io);
     var refs = try session.listRefs(gpa, io, &.{"refs/heads/"});
     defer refs.deinit();
@@ -156,7 +156,7 @@ test "a redirect to another server takes no credential with it, an extraHeader's
     for ([_]*testremote.HttpServer{ here, away }) |server| {
         const url = try server.url(gpa, "moved/repo.git");
         defer gpa.free(url);
-        var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &config });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config });
         session.deinit(io);
     }
     // The same server: every request with the header.
@@ -178,7 +178,7 @@ test "a redirect to another server takes no credential with it, an extraHeader's
     defer never.deinit();
     const url = try here.url(gpa, "moved/repo.git");
     defer gpa.free(url);
-    try testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &never }));
+    try testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &never }));
 }
 
 test "a redirect whose user decodes to a newline is refused before any helper hears of it" {
@@ -199,7 +199,7 @@ test "a redirect whose user decodes to a newline is refused before any helper he
     // would be `ProgramsNotGranted`.
     var config = try config_mod.Config.parseText(gpa, "[credential]\n\thelper = store\n", .local);
     defer config.deinit();
-    try testing.expectError(error.CredentialValueUnsafe, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &config }));
+    try testing.expectError(error.CredentialValueUnsafe, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
 }
 
 test "a transport the configuration or GIT_ALLOW_PROTOCOL refuses is not opened" {
@@ -207,12 +207,12 @@ test "a transport the configuration or GIT_ALLOW_PROTOCOL refuses is not opened"
     const io = testing.io;
     var config = try config_mod.Config.parseText(gpa, "[protocol \"http\"]\n\tallow = never\n", .local);
     defer config.deinit();
-    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/repo.git", .upload_pack, .sha1, .{ .config = &config }));
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
     var env = try testremote.environ(gpa);
     defer env.deinit();
     try env.put("GIT_ALLOW_PROTOCOL", "https");
-    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .upload_pack, .sha1, .{ .programs = .{ .environ = &env } }));
-    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .upload_pack, .sha1, .{ .from_user = false }));
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .programs = .{ .environ = &env } }));
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .from_user = false }));
 }
 
 test "a missing repository, a dumb setting and a header that is not one are refused by name" {
@@ -225,7 +225,7 @@ test "a missing repository, a dumb setting and a header that is not one are refu
     defer server.stop();
     const missing = try server.url(gpa, "nothere.git");
     defer gpa.free(missing);
-    try testing.expectError(error.RepositoryNotFound, transport.Session.open(gpa, io, missing, .upload_pack, .sha1, .{}));
+    try testing.expectError(error.RepositoryNotFound, transport.Session.open(gpa, io, missing, .{ .service = .upload_pack, .kind = .sha1 }, .{}));
 
     const url = try server.url(gpa, "repo.git");
     defer gpa.free(url);
@@ -245,12 +245,12 @@ test "a missing repository, a dumb setting and a header that is not one are refu
         var config = try config_mod.Config.parseText(gpa, text, .local);
         defer config.deinit();
         const target = if (expected == error.InvalidHttpHeader) url else secure;
-        try testing.expectError(expected, transport.Session.open(gpa, io, target, .upload_pack, .sha1, .{ .config = &config }));
+        try testing.expectError(expected, transport.Session.open(gpa, io, target, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
     }
     // Over plain http git reads no TLS setting, and neither does relic.
     var plain = try config_mod.Config.parseText(gpa, "[http]\nsslVerify = false\n", .local);
     defer plain.deinit();
-    var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &plain });
+    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &plain });
     session.deinit(io);
 }
 
@@ -344,7 +344,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     const with_userinfo = try gpa.print("http://ada:secret@127.0.0.1:{d}/repo.git", .{server.port});
     defer gpa.free(with_userinfo);
     {
-        var session = try transport.Session.open(gpa, io, with_userinfo, .upload_pack, .sha1, .{});
+        var session = try transport.Session.open(gpa, io, with_userinfo, .{ .service = .upload_pack, .kind = .sha1 }, .{});
         session.deinit(io);
     }
 
@@ -352,7 +352,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     defer gpa.free(url);
     // Without a helper, a prompt, or the permission to run askpass, there
     // is nothing to ask.
-    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{}));
+    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{}));
 
     // askpass: asked with git's own prompts.
     var tools = testing.tmpDir(.{ .iterate = true });
@@ -367,9 +367,9 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     try env.put("GIT_ASKPASS", askpass);
     // askpass is a window in front of the person: without the caller's
     // leave it is not run, and there is still nothing to ask.
-    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .programs = .{ .environ = &env } }));
+    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .programs = .{ .environ = &env } }));
     {
-        var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .programs = .{ .environ = &env }, .prompt = .{ .askpass = true } });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .programs = .{ .environ = &env }, .prompt = .{ .askpass = true } });
         session.deinit(io);
     }
     const ours = try tools.dir.readFileAlloc(io, "askpass.log", gpa, .unlimited);
@@ -404,7 +404,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     var asked: Asked = .{};
     defer asked.prompts.deinit(gpa);
     {
-        var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .prompt = .{ .context = &asked, .ask = Asked.ask } });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .prompt = .{ .context = &asked, .ask = Asked.ask } });
         session.deinit(io);
     }
     try testing.expectEqualStrings(theirs, asked.prompts.items);
@@ -482,7 +482,7 @@ test "ssh is handed the same arguments git hands it" {
         try text.print(gpa, "[core]\nsshCommand = {s}\n[ssh]\nvariant = {s}\n", .{ fake, case.variant orelse "auto" });
         var settings = try config_mod.Config.parseText(gpa, text.items, .local);
         defer settings.deinit();
-        if (transport.Session.open(gpa, io, case.url, .upload_pack, .sha1, .{
+        if (transport.Session.open(gpa, io, case.url, .{ .service = .upload_pack, .kind = .sha1 }, .{
             .programs = .{ .environ = &env },
             .config = &settings,
         })) |opened| {
@@ -1441,7 +1441,7 @@ test "a SOCKS proxy's refusals reach a fetch by name: credentials refused, comma
             if (std.mem.eql(u8, scheme, "socks4a") and std.mem.eql(u8, userinfo, "ada:wrong@")) continue;
             const text = try proxy.url(gpa, scheme, userinfo);
             defer gpa.free(text);
-            try testing.expectError(error.ProxyAuthenticationFailed, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .proxy = .{ .url = text } }));
+            try testing.expectError(error.ProxyAuthenticationFailed, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .proxy = .{ .url = text } }));
         }
     }
     // RFC 1928's reply codes, 1 to 8.
@@ -1451,7 +1451,7 @@ test "a SOCKS proxy's refusals reach a fetch by name: credentials refused, comma
         defer proxy.stop();
         const text = try proxy.url(gpa, "socks5h", "");
         defer gpa.free(text);
-        try testing.expectError(expected, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .proxy = .{ .url = text } }));
+        try testing.expectError(expected, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .proxy = .{ .url = text } }));
     }
 }
 

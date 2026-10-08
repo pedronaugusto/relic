@@ -34,7 +34,7 @@ const PausedPush = struct {
         errdefer l.state.ready.set(l.base);
         var remote = try local.Remote.open(testing.allocator, io, path, .{});
         defer remote.deinit(io);
-        var report = try remote.receivePush(testing.allocator, io, from, commands, entries, .{
+        var report = try remote.receivePush(testing.allocator, io, .{ .from = from, .commands = commands, .objects = entries }, .{
             .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 },
             .atomic = atomic,
         });

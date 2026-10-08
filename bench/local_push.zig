@@ -17,7 +17,7 @@ const Context = struct {
 
     fn run(c: *Context, units: u64) !void {
         for (0..units) |_| {
-            var report = try c.remote.receivePush(c.gpa, c.io, c.from, &.{c.command}, c.entries, .{
+            var report = try c.remote.receivePush(c.gpa, c.io, .{ .from = c.from, .commands = &.{c.command}, .objects = c.entries }, .{
                 .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 },
                 .atomic = true,
             });

@@ -395,14 +395,14 @@ fn receiveObjects(
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
     var rules = try fsck.forTransfer(gpa, io, ask.settings, repo.objectFormat(), .fetch, options.check_objects, to_warnings.sink());
     defer if (rules) |*r| r.deinit(gpa);
-    var fetched = try session.fetch(gpa, io, repo.objectDatabase(), pack_dir, .{
+    var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
         .wants = chosen.wants.items,
         .want_names = chosen.want_names.items,
         .tips = &.{},
         .include_tag = options.tags,
         .deepen = ask.deepen,
         .filter = ask.filter,
-    }, .{
+    } }, .{
         .progress = options.progress,
         .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = ask.filter != null, .warnings = options.warnings, .reverse_index = revindex.wanted(ask.settings), .links = &links, .threads = indexpack.configuredThreads(ask.settings) },
         .shallow_info = &shallow_info,
@@ -471,7 +471,7 @@ fn openSession(
     repo: ?*Repository,
     options: Options,
 ) Error!transport.Session {
-    const session = try transport.Session.open(gpa, io, reached, .upload_pack, null, .{
+    const session = try transport.Session.open(gpa, io, reached, .{ .service = .upload_pack, .kind = null }, .{
         .local_copy = local_copy,
         .programs = options.programs,
         .config = settings,

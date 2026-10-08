@@ -103,7 +103,7 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
         try args.append(gpa, theirs);
         for (case.args) |arg| if (!std.mem.startsWith(u8, arg, "--version")) try args.append(gpa, arg);
         try src.exec(io, args.items);
-        try create(gpa, io, &repo, tmp.dir, "relic.bundle", case.request);
+        try create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "relic.bundle" }, case.request);
 
         const a = try tmp.dir.readFileAlloc(io, "git.bundle", gpa, .unlimited);
         defer gpa.free(a);
@@ -140,9 +140,9 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
     // Nothing to write is refused by name, where git refuses it.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try std.testing.expectError(error.EmptyBundle, create(gpa, io, &repo, tmp.dir, "x.bundle", .{ .include = &.{"main"}, .exclude = &.{"main"} }));
-    try std.testing.expectError(error.EmptyBundle, create(gpa, io, &repo, tmp.dir, "x.bundle", .{ .include = &.{"main~1"} }));
-    try std.testing.expectError(error.VersionTooLow, create(gpa, io, &repo, tmp.dir, "x.bundle", .{ .include = &.{"main"}, .filter = "blob:none", .version = .v2 }));
+    try std.testing.expectError(error.EmptyBundle, create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "x.bundle" }, .{ .include = &.{"main"}, .exclude = &.{"main"} }));
+    try std.testing.expectError(error.EmptyBundle, create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "x.bundle" }, .{ .include = &.{"main~1"} }));
+    try std.testing.expectError(error.VersionTooLow, create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "x.bundle" }, .{ .include = &.{"main"}, .filter = "blob:none", .version = .v2 }));
 }
 
 /// The names of the objects in the pack after a bundle's header, sorted,
@@ -202,7 +202,7 @@ test "a bundle filtered by sparse:oid= holds the objects git's holds" {
         const filter_arg = try gpa.print("--filter={s}", .{spec});
         defer gpa.free(filter_arg);
         try src.exec(io, &.{ "bundle", "create", "-q", theirs, filter_arg, "main", "topic" });
-        try create(gpa, io, &repo, tmp.dir, "relic.bundle", .{ .include = &.{ "main", "topic" }, .filter = spec });
+        try create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "relic.bundle" }, .{ .include = &.{ "main", "topic" }, .filter = spec });
 
         const a = try tmp.dir.readFileAlloc(io, "git.bundle", gpa, .unlimited);
         defer gpa.free(a);
@@ -224,7 +224,7 @@ test "a bundle filtered by sparse:oid= holds the objects git's holds" {
     defer tmp.cleanup();
     src.report_failures = false;
     try std.testing.expectError(error.GitFailed, src.run(io, &.{ "bundle", "create", "-q", "x.bundle", "--filter=sparse:oid=main:nothing", "main" }));
-    try std.testing.expectError(error.SparseBlobMissing, create(gpa, io, &repo, tmp.dir, "x.bundle", .{ .include = &.{"main"}, .filter = "sparse:oid=main:nothing" }));
+    try std.testing.expectError(error.SparseBlobMissing, create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "x.bundle" }, .{ .include = &.{"main"}, .filter = "sparse:oid=main:nothing" }));
 }
 
 test "git's bundles are read, verified, listed, unbundled and fetched from as git does" {

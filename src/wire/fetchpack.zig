@@ -141,17 +141,20 @@ pub const Options = struct {
     warnings: ?*warning.Warnings = null,
 };
 
-/// Fetch a pack for `request` over `conn`, which opened with `adv`, into
+pub const Inputs = struct { advertisement: *const protocol.Advertisement, db: *Odb, request: Request };
+
+/// Fetch a pack for `inputs.request` over `conn`, which opened with `adv`, into
 /// `pack_dir`, which is `db`'s `objects/pack`.
 pub fn fetch(
     gpa: Allocator,
     io: Io,
     conn: *Connection,
-    adv: *const protocol.Advertisement,
-    db: *Odb,
-    request: Request,
+    inputs: Inputs,
     options: Options,
 ) Self.Error!indexpack.Result {
+    const adv = inputs.advertisement;
+    const db = inputs.db;
+    const request = inputs.request;
     var negotiator: Negotiator = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa) };
     defer negotiator.deinit();
     for (request.common_tips) |tip| try negotiator.knownCommon(tip);

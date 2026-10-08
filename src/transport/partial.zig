@@ -280,7 +280,7 @@ pub const Lazy = struct {
         var remote = try remote_mod.Remote.get(l.gpa, repo.configuration(), name);
         defer remote.deinit();
         if (remote.urls.len == 0) return error.NotAPartialClone;
-        var session = try transport.Session.open(l.gpa, io, remote.urls[0], .upload_pack, repo.objectFormat(), .{
+        var session = try transport.Session.open(l.gpa, io, remote.urls[0], .{ .service = .upload_pack, .kind = repo.objectFormat() }, .{
             .programs = l.options.programs,
             .config = repo.configuration(),
             .service_program = remote.upload_pack,
@@ -294,12 +294,12 @@ pub const Lazy = struct {
         defer pack_dir.close(io);
         var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), repo.objectFormat(), .fetch, l.options.check_objects, null);
         defer if (rules) |*r| r.deinit(l.gpa);
-        var fetched = try session.fetch(l.gpa, io, repo.objectDatabase(), pack_dir, .{
+        var fetched = try session.fetch(l.gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
             .wants = oids,
             .tips = &.{},
             .include_tag = false,
             .filter = "blob:none",
-        }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = revindex.wanted(repo.configuration()) } });
+        } }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = revindex.wanted(repo.configuration()) } });
         defer fetched.deinit(io);
         if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
     }

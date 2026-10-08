@@ -162,3 +162,9 @@ test "phase2 program invocation owns its working directory type" {
     try std.testing.expect(@FieldType(relic.repo.program.Invocation, "cwd") != std.process.Child.Cwd);
     try std.testing.expect(@FieldType(relic.commit.trailer.Commands, "cwd") == relic.repo.program.Cwd);
 }
+
+test "phase2 transport and LFS requests stay within five positional inputs" {
+    inline for (.{ relic.transport.Session.open, relic.transport.Session.fetch, relic.transport.fetchpack.fetch, relic.transport.sendpack.send, relic.transport.local.Remote.receivePush, relic.transport.bundle.receive, relic.transport.bundle.create, relic.lfs.api.sshInvocation, relic.lfs.push.beforePush }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}

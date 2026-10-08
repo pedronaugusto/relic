@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: transport session, fetch/send pack, local receive and bundle APIs
+  group their named inputs; bundle creation takes Target. LFS pre-push and SSH
+  invocation take input groups and options. Object retention, protocol bytes,
+  lock pagination and failure/cancellation outcomes keep their contracts.
+
 - Breaking: LockFile.open takes Inputs for the path and borrowed buffer;
   atomicWrite and readFileSized take named options. Program invocation and
   trailer commands use Relic's own Cwd type. Sized-read fallback failures free

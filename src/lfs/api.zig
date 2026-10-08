@@ -865,7 +865,7 @@ pub fn sshArguments(
     operation: Operation,
 ) Self.Error!program.Invocation {
     const remote = try arena.print("git-lfs-authenticate {s} {s}", .{ ssh.path, @tagName(operation) });
-    return sshInvocation(arena, environ, settings, ssh, remote, null);
+    return sshInvocation(arena, environ, settings, .{ .ssh = ssh, .remote_command = remote }, .{ .multiplex = null });
 }
 
 /// The ssh program git-lfs runs, and the option dialect it speaks.
@@ -940,7 +940,10 @@ pub const Multiplex = struct {
     control_path: []const u8,
 };
 
-/// The invocation of ssh that runs `remote_command` on the host, as
+pub const SshInputs = struct { ssh: Endpoint.Ssh, remote_command: []const u8 };
+pub const SshOptions = struct { multiplex: ?Multiplex = null };
+
+/// The invocation of ssh that runs `inputs.remote_command` on the host, as
 /// git-lfs starts it: the port is `-p`, or `-P` to the PuTTY family; a host
 /// beginning with `-` is fenced off with `--` for OpenSSH and stripped of
 /// its dashes for anything else; `multiplex` is asked of OpenSSH alone.
@@ -948,10 +951,12 @@ pub fn sshInvocation(
     arena: Allocator,
     environ: *const std.process.Environ.Map,
     settings: *const Settings,
-    ssh: Endpoint.Ssh,
-    remote_command: []const u8,
-    multiplex: ?Multiplex,
+    inputs: SshInputs,
+    options: SshOptions,
 ) Self.Error!program.Invocation {
+    const ssh = inputs.ssh;
+    const remote_command = inputs.remote_command;
+    const multiplex = options.multiplex;
     const prog = try sshProgram(arena, environ, settings);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(arena, prog.command);
@@ -1375,7 +1380,7 @@ pub const Client = struct {
         }
         const programs = c.options.programs orelse return error.ProgramsNotGranted;
         const remote = try arena.print("git-lfs-transfer {s} {s}", .{ ssh.path, @tagName(operation) });
-        var first = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, null);
+        var first = try sshInvocation(arena, programs.environ, c.settings, .{ .ssh = ssh, .remote_command = remote }, .{ .multiplex = null });
         var rest = first;
         var control_dir: ?[]const u8 = null;
         const prog = try sshProgram(arena, programs.environ, c.settings);
@@ -1383,8 +1388,8 @@ pub const Client = struct {
             if (try controlDir(arena, io, programs.environ)) |dir| {
                 control_dir = dir;
                 const path = try arena.print("{s}/lfs.sock", .{dir});
-                first = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = true, .control_path = path });
-                rest = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = false, .control_path = path });
+                first = try sshInvocation(arena, programs.environ, c.settings, .{ .ssh = ssh, .remote_command = remote }, .{ .multiplex = .{ .master = true, .control_path = path } });
+                rest = try sshInvocation(arena, programs.environ, c.settings, .{ .ssh = ssh, .remote_command = remote }, .{ .multiplex = .{ .master = false, .control_path = path } });
             }
         }
         const t = lfsssh.Transfer.open(c.gpa, io, programs, .{ .first = first, .rest = rest, .control_dir = control_dir, .failure = &c.ssh_failure }) catch |err| switch (err) {

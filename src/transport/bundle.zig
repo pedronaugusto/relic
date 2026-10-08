@@ -393,7 +393,7 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
     const strict: fsck.Rules = .{ .strict = true };
-    return receive(gpa, io, repo.objectDatabase(), pack_dir, bundle, tips, .{
+    return receive(gpa, io, repo.objectDatabase(), .{ .pack_dir = pack_dir, .bundle = bundle, .refs = tips }, .{
         .fix_thin = true,
         .fsck = if (options.check_objects) &strict else null,
         .progress = options.progress,
@@ -405,7 +405,12 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
 /// `unbundle` into `db`, whose `objects/pack` is `pack_dir` and whose refs
 /// point at `refs`, with the pack received as `options` says: what a fetch
 /// from a bundle does.
-pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundle: *File, refs: []const Oid, options: indexpack.Options) Self.Error!indexpack.Result {
+pub const ReceiveInputs = struct { pack_dir: Io.Dir, bundle: *File, refs: []const Oid };
+
+pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: ReceiveInputs, options: indexpack.Options) Self.Error!indexpack.Result {
+    const pack_dir = inputs.pack_dir;
+    const bundle = inputs.bundle;
+    const refs = inputs.refs;
     var v = try verify(gpa, io, db, &bundle.header, refs);
     defer v.deinit();
     if (v.missing.len != 0) return error.MissingPrerequisites;
@@ -467,9 +472,13 @@ pub const CreateError = error{
 } || Allocator.Error || odb_mod.Error || objectwalk.Error || revparse.Error || refs_mod.ReadError ||
     object.ParseError || Io.Writer.Error || fs.LockError || fs.CommitError || repo_mod.Error;
 
-/// Write the bundle `request` asks for to `<path>` in `dir`, through
+pub const Target = struct { dir: Io.Dir, path: []const u8 };
+
+/// Write the bundle `request` asks for to `target.path` in `target.dir`, through
 /// `<path>.lock` as git writes it.
-pub fn create(gpa: Allocator, io: Io, repo: *Repository, dir: Io.Dir, path: []const u8, request: CreateRequest) Self.CreateError!void {
+pub fn create(gpa: Allocator, io: Io, repo: *Repository, target: Target, request: CreateRequest) Self.CreateError!void {
+    const dir = target.dir;
+    const path = target.path;
     var buffer: [64 * 1024]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none, .write_pid = false });
     defer lock.deinit(io);

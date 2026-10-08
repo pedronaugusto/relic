@@ -191,7 +191,9 @@ pub const Session = struct {
         },
     },
 
-    /// Open the remote at `remote_url` for `service`. `kind` is the local
+    pub const OpenInputs = struct { service: Service, kind: ?hash.Kind = null };
+
+    /// Open the remote at `remote_url` for `inputs.service`. `kind` is the local
     /// repository's hash, or `null` when there is no local repository yet.
     /// A v2 server's `promisor-remote` is answered as `options.config`
     /// says (`promisorsTaken`, `promisorStores`).
@@ -199,10 +201,11 @@ pub const Session = struct {
         gpa: Allocator,
         io: Io,
         remote_url: []const u8,
-        service: Service,
-        kind: ?hash.Kind,
+        inputs: OpenInputs,
         options: Options,
     ) Self.Error!Session {
+        const service = inputs.service;
+        const kind = inputs.kind;
         var session = try openUnanswered(gpa, io, remote_url, service, kind, options);
         errdefer session.deinit(io);
         try session.answerPromisors(options);
@@ -309,7 +312,7 @@ pub const Session = struct {
                 });
                 errdefer conn.deinit(io);
                 return fromConnection(gpa, conn, service, kind) catch |err| switch (err) {
-                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, io, conn, err, identity.url, options.auth_failure),
+                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, io, conn, err, .{ .url = identity.url, .failure = options.auth_failure }),
                     else => |e| return e,
                 };
             },
@@ -508,7 +511,7 @@ pub const Session = struct {
                 // A repository on this machine runs no hooks for relic, and
                 // push options are for hooks.
                 if (request.push_options.len != 0) return error.PushOptionsUnsupported;
-                return here.receivePush(gpa, io, db, request.commands, request.objects, .{
+                return here.receivePush(gpa, io, .{ .from = db, .commands = request.commands, .objects = request.objects }, .{
                     .who = request.who,
                     .atomic = request.atomic,
                 });
@@ -545,7 +548,7 @@ pub const Session = struct {
                         return a.order(b) == .lt;
                     }
                 }.lessThan);
-                return sendpack.send(gpa, io, smart.conn, &smart.advertisement, db, .{
+                return sendpack.send(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db }, .{
                     .shallow = shallow,
                     .commands = request.commands,
                     .objects = request.objects,
@@ -575,17 +578,20 @@ pub const Session = struct {
         }
     };
 
-    /// Bring every object reachable from `request.wants` into `db`, whose
+    pub const FetchInputs = struct { db: *odb_mod.Odb, pack_dir: Io.Dir, request: FetchRequest };
+
+    /// Bring every object reachable from `inputs.request.wants` into `inputs.db`, whose
     /// `objects/pack` is `pack_dir`, as one new pack.
     pub fn fetch(
         s: *Session,
         gpa: Allocator,
         io: Io,
-        db: *odb_mod.Odb,
-        pack_dir: Io.Dir,
-        request: FetchRequest,
+        inputs: FetchInputs,
         options: fetchpack.Options,
     ) Self.Error!Fetched {
+        const db = inputs.db;
+        const pack_dir = inputs.pack_dir;
+        const request = inputs.request;
         assert(s.service == .upload_pack);
         // The names go with the wants by position, or are not given.
         assert(request.want_names.len == 0 or request.want_names.len == request.wants.len);
@@ -631,7 +637,7 @@ pub const Session = struct {
                 // git's bundle transport has no depth and no filter; it
                 // indexes the bundle's whole pack whatever is wanted.
                 if (request.deepen != null or request.filter != null) return error.UnsupportedTransport;
-                const result = try bundle.receive(gpa, io, db, pack_dir, f, request.tips, options.receive);
+                const result = try bundle.receive(gpa, io, db, .{ .pack_dir = pack_dir, .bundle = f, .refs = request.tips }, options.receive);
                 return .{ .pack = result.name, .objects = result.objects, .keep = result.keep };
             },
             .smart => |*smart| {
@@ -640,7 +646,7 @@ pub const Session = struct {
                 // Done with either way: git ends a v2 conversation after
                 // its fetch by closing it, with no flush.
                 smart.done = true;
-                const result = try fetchpack.fetch(gpa, io, smart.conn, &smart.advertisement, db, request, options);
+                const result = try fetchpack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = request }, options);
                 return .{ .pack = result.name, .objects = result.objects, .keep = result.keep };
             },
         }
