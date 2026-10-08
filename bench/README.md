@@ -51,3 +51,8 @@ in the timing spread.
 `relic-ere` measures boolean and span compile/search adapters on one bounded
 interval expression through shakedown.bench. It checks the boolean result and
 exact longest span on every operation; `--smoke` checks both without timing.
+
+`relic-pack-codec` measures reused compression of 32 KiB text and noise at
+each supported pack level. `relic-zstd` measures the 128 KiB RLE-frame reader
+used by LFS, checking exact output and stream termination. Both use Shakedown
+and support `--smoke`; fixture and buffer allocation stay outside the clock.
