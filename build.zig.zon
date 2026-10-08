@@ -3,8 +3,8 @@
     .version = "0.3.0",
     .dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#b28046cc22055fcd32640117fc0e6965283a8ae5",
-            .hash = "preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P",
+            .url = "git+https://github.com/pedronaugusto/preflight#f34ca9adc0fcdf593acb616d87dedd9ad994211b",
+            .hash = "preflight-0.1.0-LX1ZwhbQCAA3VfNh10B9lBxEWqsBPWF0868sFi2HtLwI",
             .lazy = true,
         },
         .conduit = .{
@@ -33,8 +33,8 @@
             .hash = "airlock-0.1.0-rfvu6CZTBQB7slH2y-nDXvVwoLp-sbWLW_E1X9J3DwhQ",
         },
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp#e607c194f837fa0a7a8c08914495d4cc0202eb91",
-            .hash = "warp-0.1.0-JASxFYjCAwAP0PAOtv3qiGkW9TIRI_Wwg0jwlH8FhtSZ",
+            .url = "git+https://github.com/pedronaugusto/warp#491e62b865e27e296509fbc7bba1f392f224f565",
+            .hash = "warp-0.1.0-JASxFeiBEAB0d8WRDtwTQ-S5-HhkeEW5ArSSFwHXU6Ek",
         },
     },
     .minimum_zig_version = "0.17.0",
