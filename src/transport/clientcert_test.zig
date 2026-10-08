@@ -164,9 +164,9 @@ fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir) !void {
 
 fn expectSameFetch(gpa: Allocator, io: Io, by_git: *testgit.Repo, by_relic: *testgit.Repo) !void {
     const format = "--format=%(refname) %(objectname)";
-    const theirs = try by_git.run(io, &.{ "for-each-ref", format });
+    const theirs = try testgit.fetchRefs(by_git, io, format, false);
     defer gpa.free(theirs);
-    const ours = try by_relic.run(io, &.{ "for-each-ref", format });
+    const ours = try testgit.fetchRefs(by_relic, io, format, true);
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
     try testing.expect(theirs.len != 0);

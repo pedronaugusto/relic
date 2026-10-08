@@ -449,7 +449,8 @@ fn hostedDirs(a: Allocator, git: ?HostedGit) ![]const []const u8 {
 }
 
 /// The `PATH` every program the suite starts sees: the hosted tools'
-/// directories, then the test process's own `PATH`. The caller frees it.
+/// directories, then the test process's own `PATH` (the native floor job
+/// installs its Git there). The caller frees it.
 /// `error.SkipZigTest` where there is no `PATH`.
 pub fn searchPath(gpa: Allocator) ![]u8 {
     const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
@@ -641,6 +642,23 @@ pub fn requireGit(gpa: Allocator, io: Io) !void {
 /// asserting a shape that git was never asked to produce.
 pub fn requireGitVersion(gpa: Allocator, io: Io, major: u32, minor: u32) !void {
     if (!try gitAtLeast(gpa, io, major, minor)) return error.SkipZigTest;
+}
+
+/// Refs for a fetch comparison. Relic follows Git 2.48's automatic remote
+/// HEAD policy; check that separately when the reference Git predates it.
+/// Every other ref still has to match. The caller frees the result.
+pub fn fetchRefs(r: *Repo, io: Io, format: []const u8, modern: bool) ![]u8 {
+    const refs = try r.run(io, &.{ "for-each-ref", format });
+    errdefer r.gpa.free(refs);
+    if (!modern or try gitAtLeast(r.gpa, io, 2, 48)) return refs;
+    const head = try r.line(io, &.{ "symbolic-ref", "refs/remotes/origin/HEAD" });
+    defer r.gpa.free(head);
+    try std.testing.expectEqualStrings("refs/remotes/origin/main", head);
+    try std.testing.expect(std.mem.startsWith(u8, refs, "refs/remotes/origin/HEAD "));
+    const end = std.mem.findScalar(u8, refs, '\n') orelse return error.TestUnexpectedResult;
+    const other = try r.gpa.dupe(u8, refs[end + 1 ..]);
+    r.gpa.free(refs);
+    return other;
 }
 
 /// The ref format a fixture's repositories are made with.

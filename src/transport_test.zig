@@ -46,9 +46,9 @@ fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir, commits: usize) !vo
 
 fn expectSameFetch(gpa: Allocator, io: Io, by_git: *testgit.Repo, by_relic: *testgit.Repo) !void {
     const format = "--format=%(refname) %(objectname) %(symref)";
-    const theirs = try by_git.run(io, &.{ "for-each-ref", format });
+    const theirs = try testgit.fetchRefs(by_git, io, format, false);
     defer gpa.free(theirs);
-    const ours = try by_relic.run(io, &.{ "for-each-ref", format });
+    const ours = try testgit.fetchRefs(by_relic, io, format, true);
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
     const head_theirs = try by_git.readFile(io, ".git/FETCH_HEAD");
@@ -949,7 +949,15 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
         if (case.ok) try expectSameFetch(gpa, io, &by_git, &by_relic);
         // The helper was asked for the proxy's password as git asks, and
         // told to store or erase it as git tells it.
-        try testing.expectEqualStrings(logs[0], logs[1]);
+        if (try testgit.gitAtLeast(gpa, io, 2, 46)) {
+            try testing.expectEqualStrings(logs[0], logs[1]);
+        } else {
+            // Relic announces modern capabilities; the older reference
+            // has none. All other helper fields and operations must match.
+            const ordinary = try std.mem.replaceOwned(u8, gpa, logs[1], "== get\ncapability[]=authtype\ncapability[]=state\n", "== get\n");
+            defer gpa.free(ordinary);
+            try testing.expectEqualStrings(logs[0], ordinary);
+        }
     }
 }
 

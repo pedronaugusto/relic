@@ -305,6 +305,9 @@ test "ssh signatures in a SHA-256 repository ride in gpgsig-sha256" {
 test "export-subst's signature placeholders check the commit as git archive does" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // Git 2.41 initializes signature configuration on demand; older
+    // archive commands do not load SSH's allowed signers and can crash.
+    try testgit.requireGitVersion(gpa, io, 2, 41);
     var k = try Keyed.create(gpa, io, .ssh, &.{});
     defer k.destroy(io);
     try k.makeKey(io);

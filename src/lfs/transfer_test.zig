@@ -23,6 +23,7 @@ const objectwalk = @import("../transport/objectwalk.zig");
 const fs = @import("../repo/fs.zig");
 const progress_mod = @import("../transport/progress.zig");
 const testlfs = @import("../testing/lfs.zig");
+const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const program = @import("../repo/program.zig");
 const auth = @import("../transport/auth.zig");
@@ -1626,6 +1627,8 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
 test "a refused credential is described as git-lfs's helpers hear it, with the server's challenge" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // Git's helper protocol gained authtype and state capabilities in 2.46.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
     const fx = try Fixture.init(gpa, io, .{ .users = &.{.{ .name = "ada", .password = "secret" }} });
     defer fx.deinit();
     const content = "behind a password\n";

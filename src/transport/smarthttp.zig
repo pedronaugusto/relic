@@ -1018,10 +1018,12 @@ test "an https proxy is checked against http.proxySSLCAInfo, or the system's, wh
     try tmp.dir.writeFile(io, .{ .sub_path = "key.pem", .data = @embedFile("../testing/certs/p256.sec1.pem") });
     const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(base);
+    const escaped = try config_mod.escapeValue(gpa, base);
+    defer gpa.free(escaped);
     const url = try url_mod.Url.parse("https://git.example.com/repo.git");
     for ([_]bool{ false, true }) |with_files| {
         const text = if (with_files)
-            try gpa.print("[http]\nproxy = https://proxy.example:3128\nsslVerify = false\nproxySSLCAInfo = {0s}/cert.pem\nproxySSLCert = {0s}/cert.pem\nproxySSLKey = {0s}/key.pem\n", .{base})
+            try gpa.print("[http]\nproxy = https://proxy.example:3128\nsslVerify = false\nproxySSLCAInfo = {0s}/cert.pem\nproxySSLCert = {0s}/cert.pem\nproxySSLKey = {0s}/key.pem\n", .{escaped})
         else
             try gpa.dupe(u8, "[http]\nproxy = https://proxy.example:3128\nsslVerify = false\n");
         defer gpa.free(text);

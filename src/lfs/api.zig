@@ -77,7 +77,9 @@ test "LFS checks an HTTP host's client certificate before dialing" {
     defer dir.cleanup();
     const base = try dir.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(base);
-    const text = try gpa.print("[http]\nsslCert = {0s}/missing.cert\nsslKey = {0s}/missing.key\n", .{base});
+    const escaped = try config_mod.escapeValue(gpa, base);
+    defer gpa.free(escaped);
+    const text = try gpa.print("[http]\nsslCert = {0s}/missing.cert\nsslKey = {0s}/missing.key\n", .{escaped});
     defer gpa.free(text);
     const t = try testSettings(text, null);
     defer freeSettings(t);
@@ -2643,7 +2645,9 @@ const testing = std.testing;
 
 fn testSettings(text: []const u8, file_text: ?[]const u8) !struct { config: *Config, settings: Settings } {
     const config = try testing.allocator.create(Config);
+    errdefer testing.allocator.destroy(config);
     config.* = try Config.parseText(testing.allocator, text, .local);
+    errdefer config.deinit();
     var settings: Settings = .{ .gpa = testing.allocator, .config = config };
     if (file_text) |t| settings.file = try Config.parseText(testing.allocator, t, .local);
     return .{ .config = config, .settings = settings };
