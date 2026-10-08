@@ -87,6 +87,29 @@ pub const Options = struct {
     directory_renames: ?ort.DirectoryRenames = null,
 };
 
+/// The index and tree identities for one working-tree merge.
+pub const TreeInputs = struct {
+    index: *Index,
+    base: ?Oid = null,
+    ours: Oid,
+    theirs: Oid,
+};
+
+/// The index and commits for a recursive working-tree merge.
+pub const CommitInputs = struct {
+    index: *Index,
+    ours: Oid,
+    theirs: Oid,
+    bases: ?[]const Oid = null,
+};
+
+/// The index and heads for an octopus working-tree merge.
+pub const OctopusInputs = struct {
+    index: *Index,
+    head: Oid,
+    heads: []const Oid,
+};
+
 /// One conflicted path.
 pub const Conflict = struct {
     /// Owned by the outcome.
@@ -143,13 +166,10 @@ pub fn apply(
     gpa: Allocator,
     io: Io,
     repo: *Repository,
-    index: *Index,
-    base: ?Oid,
-    ours: Oid,
-    theirs: Oid,
+    inputs: TreeInputs,
     options: Options,
 ) Self.Error!Outcome {
-    return run(gpa, io, repo, index, .{ .trees = .{ .base = base, .ours = ours, .theirs = theirs } }, options);
+    return run(gpa, io, repo, inputs.index, .{ .trees = .{ .base = inputs.base, .ours = inputs.ours, .theirs = inputs.theirs } }, options);
 }
 
 /// Merge the commit `theirs` into the commit `ours`, their merge bases
@@ -161,13 +181,10 @@ pub fn applyCommits(
     gpa: Allocator,
     io: Io,
     repo: *Repository,
-    index: *Index,
-    ours: Oid,
-    theirs: Oid,
-    bases: ?[]const Oid,
+    inputs: CommitInputs,
     options: Options,
 ) Self.Error!Outcome {
-    return run(gpa, io, repo, index, .{ .commits = .{ .ours = ours, .theirs = theirs, .bases = bases } }, options);
+    return run(gpa, io, repo, inputs.index, .{ .commits = .{ .ours = inputs.ours, .theirs = inputs.theirs, .bases = inputs.bases } }, options);
 }
 
 const Sides = union(enum) {
@@ -275,11 +292,12 @@ pub fn applyOctopus(
     gpa: Allocator,
     io: Io,
     repo: *Repository,
-    index: *Index,
-    head: Oid,
-    heads: []const Oid,
+    inputs: OctopusInputs,
     options: Options,
 ) Self.Error!Outcome {
+    const index = inputs.index;
+    const head = inputs.head;
+    const heads = inputs.heads;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();

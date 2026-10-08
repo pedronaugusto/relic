@@ -40,6 +40,14 @@ pub const Mode = enum {
     hard,
 };
 
+/// Target state and overwrite policy for a reset.
+pub const Options = struct {
+    index: *Index,
+    tree: Oid,
+    mode: Mode = .merge,
+    blocked: ?*threeway.Blocked = null,
+};
+
 /// Make `index` and the working tree hold `tree`, as `mode` allows.
 /// `blocked`, when given, is where a refusal writes the path that caused it.
 /// The caller writes the index.
@@ -47,11 +55,12 @@ pub fn toTree(
     gpa: Allocator,
     io: Io,
     repo: *Repository,
-    index: *Index,
-    tree: Oid,
-    mode: Mode,
-    blocked: ?*threeway.Blocked,
+    options: Options,
 ) Error!void {
+    const index = options.index;
+    const tree = options.tree;
+    const mode = options.mode;
+    const blocked = options.blocked;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -243,7 +252,7 @@ test "reset writes through the target tree's attributes as git reset hard does" 
     defer repo.deinit(io);
     var idx = try repo.openIndex(io);
     defer idx.deinit();
-    try toTree(gpa, io, &repo, &idx, tree, .hard, null);
+    try toTree(gpa, io, &repo, .{ .index = &idx, .tree = tree, .mode = .hard, .blocked = null });
     const actual = try fixture.dir.readFileAlloc(io, "file", gpa, .limited(100));
     defer gpa.free(actual);
     try std.testing.expectEqualSlices(u8, expected, actual);

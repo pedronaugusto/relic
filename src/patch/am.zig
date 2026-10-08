@@ -758,7 +758,7 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
 
     const our_tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(s);
     const label = try s.a.print("{s}", .{subjectOf(s.msg.?)});
-    var outcome = try threeway.apply(gpa, io, repo, &current, base_tree, our_tree, their_tree, .{
+    var outcome = try threeway.apply(gpa, io, repo, .{ .index = &current, .base = base_tree, .ours = our_tree, .theirs = their_tree }, .{
         .blob = .{ .algorithm = .histogram, .labels = .{ .ours = "HEAD", .base = "constructed fake ancestor", .theirs = label } },
         .directory_renames = .off,
     });
@@ -956,7 +956,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     const tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(&s);
     var index = try repo.openIndex(io);
     defer index.deinit();
-    try reset.toTree(gpa, io, repo, &index, tree, .merge, null);
+    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = tree, .mode = .merge, .blocked = null });
     try repo.writeIndex(io, &index);
     try next(&s);
     try reload(&s);
@@ -990,7 +990,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     const target_tree = if (orig) |o| try repo.commitTree(io, o) else try emptyTree(&s);
     var index = try repo.openIndex(io);
     defer index.deinit();
-    reset.toTree(gpa, io, repo, &index, target_tree, .merge, null) catch |err| switch (err) {
+    reset.toTree(gpa, io, repo, .{ .index = &index, .tree = target_tree, .mode = .merge, .blocked = null }) catch |err| switch (err) {
         error.LocalChangesWouldBeOverwritten => return error.LocalChangesWouldBeOverwritten,
         else => |e| return e,
     };

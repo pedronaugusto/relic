@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: working-tree merges take TreeInputs, CommitInputs or OctopusInputs,
+  including their mutable index. Reset takes Options for its index, target tree
+  and overwrite policy; sequencer.resetMerge takes ResetOptions for ref identity
+  and refusal diagnostics. Unrelated edits and abort restoration keep their
+  existing behavior.
+
 - Breaking: merge trees/commits and diff tree pairs take named input groups;
   ancestry and merge-base walks take Pair, Many or Ancestry plus BaseOptions.
   Options and all semantic outcomes are preserved in their canonical operations.

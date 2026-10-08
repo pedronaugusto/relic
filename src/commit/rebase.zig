@@ -1043,7 +1043,7 @@ fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error
     var index = try r.repo.openIndex(r.io);
     defer index.deinit();
     const from_tree = if (h.oid) |oid| try r.repo.commitTree(r.io, oid) else try r.repo.objectDatabase().write(r.io, .tree, "");
-    var outcome = try threeway.apply(r.gpa, r.io, r.repo, &index, from_tree, from_tree, try r.repo.commitTree(r.io, base), .{ .blocked = r.options.blocked });
+    var outcome = try threeway.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, base) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
     try index.write(r.io, r.repo.gitDirectory(), "index", .{});
     try r.repo.refStore().root().write(r.repo.allocator(), r.io, .orig_head, orig_head);
@@ -1061,7 +1061,7 @@ fn checkoutTip(r: *Run, tip: Tip, name: []const u8) Error!void {
     var index = try r.repo.openIndex(r.io);
     defer index.deinit();
     const from_tree = try r.repo.commitTree(r.io, h.oid orelse return error.UnbornBranch);
-    var outcome = try threeway.apply(r.gpa, r.io, r.repo, &index, from_tree, from_tree, try r.repo.commitTree(r.io, tip.orig_head), .{ .blocked = r.options.blocked });
+    var outcome = try threeway.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, tip.orig_head) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
     try index.write(r.io, r.repo.gitDirectory(), "index", .{});
     const log = try r.arena.print("rebase: checkout {s}", .{name});
@@ -1430,7 +1430,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     // The commit sits on `HEAD` already: reuse it.
     if (r.allow_ff and !is_fixup and parent != null and parent.?.eql(head_oid)) {
         try writeAuthorScript(r, commit.author);
-        var outcome = try threeway.apply(gpa, io, repo, &index, head_tree, head_tree, commit.tree, .{ .blocked = r.options.blocked });
+        var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = commit.tree }, .{ .blocked = r.options.blocked });
         outcome.deinit();
         try repo.writeIndex(io, &index);
         try head_mod.advance(io, repo, head, source.oid, .{ .who = r.options.who, .message = "rebase: fast-forward" });
@@ -1456,7 +1456,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
 
     const base_tree = if (parent) |p| try repo.commitTree(io, p) else null;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var outcome = try threeway.apply(gpa, io, repo, &index, base_tree, head_tree, commit.tree, .{
+    var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = commit.tree }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = if (parent != null) parent_label else "(empty tree)", .theirs = label },
@@ -1981,7 +1981,7 @@ fn doReset(r: *Run, arg: []const u8) Error!void {
     const target = try lookupLabel(r, name);
     var index = try r.repo.openIndex(r.io);
     defer index.deinit();
-    try reset.toTree(r.gpa, r.io, r.repo, &index, try r.repo.commitTree(r.io, target), .merge, r.options.blocked);
+    try reset.toTree(r.gpa, r.io, r.repo, .{ .index = &index, .tree = try r.repo.commitTree(r.io, target), .mode = .merge, .blocked = r.options.blocked });
     try index.write(r.io, r.repo.gitDirectory(), "index", .{});
     var h = try r.head();
     defer h.deinit(r.gpa);
@@ -2271,7 +2271,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
     const ref_name = try r.arena.print("refs/rewritten/{s}", .{name});
-    var outcome = try threeway.applyCommits(gpa, io, repo, &index, head_oid, merge_head, reversed, .{
+    var outcome = try threeway.applyCommits(gpa, io, repo, .{ .index = &index, .ours = head_oid, .theirs = merge_head, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .theirs = if (lookupRewritten(r, name)) ref_name else name },
@@ -2327,7 +2327,7 @@ fn reuseMerge(r: *Run, h: head_mod.Head, original: Oid, merge_heads: []const Oid
     var index = try repo.openIndex(io);
     defer index.deinit();
     const head_tree = try repo.commitTree(io, head_oid);
-    var outcome = try threeway.apply(r.gpa, io, repo, &index, head_tree, head_tree, source.commit.tree, .{ .blocked = r.options.blocked });
+    var outcome = try threeway.apply(r.gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = source.commit.tree }, .{ .blocked = r.options.blocked });
     outcome.deinit();
     try repo.writeIndex(io, &index);
     try head_mod.advance(io, repo, h, original, .{ .who = r.options.who, .message = "rebase: fast-forward" });
@@ -2615,7 +2615,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         const current = try r.headOid();
         var index = try repo.openIndex(io);
         defer index.deinit();
-        try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, current), .hard, options.blocked);
+        try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, current), .mode = .hard, .blocked = options.blocked });
         try repo.writeIndex(io, &index);
         try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
         try repo.refStore().root().delete(repo.allocator(), io, .revert_head);
@@ -2635,7 +2635,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     defer h.deinit(gpa);
     var index = try repo.openIndex(io);
     defer index.deinit();
-    try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, tip.orig_head), .hard, null);
+    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, tip.orig_head), .mode = .hard, .blocked = null });
     try repo.writeIndex(io, &index);
     const target = tip.head_name orelse try r.hex(tip.orig_head);
     const log = try r.arena.print("rebase (abort): returning to {s}", .{target});

@@ -496,7 +496,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         const ff = if (parent) |p| (head.oid != null and p.eql(head.oid.?)) else head.oid == null;
         if (ff) {
             const their_tree = commit.tree;
-            var outcome = try threeway.apply(gpa, io, repo, &index, head_tree, head_tree, their_tree, .{ .blocked = r.options.blocked });
+            var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = their_tree }, .{ .blocked = r.options.blocked });
             defer outcome.deinit();
             try repo.writeIndex(io, &index);
             const log = try arena.print("{s}: fast-forward", .{r.action.name()});
@@ -538,7 +538,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.trailers);
 
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var outcome = try threeway.apply(gpa, io, repo, &index, base_tree, head_tree, next_tree orelse try emptyTree(io, repo), .{
+    var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse try emptyTree(io, repo) }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = base_label, .theirs = next_label },
@@ -982,7 +982,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     if (!repo.refStore().root().exists(repo.allocator(), io, action.headRef())) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
-    try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), options.who, options.blocked);
+    try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = options.who, .blocked = options.blocked });
     if (!head_mod.stateExists(io, repo.gitDirectory(), seq_dir)) {
         const arena_instance: std.heap.ArenaAllocator = .init(gpa);
         return .{ .gpa = gpa, .arena = arena_instance.state };
@@ -998,13 +998,13 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), head_path)) orelse {
         if (!repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) and
             !repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.NoSequencerInProgress;
-        return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), who, blocked);
+        return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = who, .blocked = blocked });
     };
     defer gpa.free(text);
     const trimmed = std.mem.trimEnd(u8, text, "\n");
     const start_oid = Oid.parse(repo.objectFormat(), trimmed) catch return error.MalformedState;
     if (start_oid.isZero()) return error.UnbornBranch;
-    if (try abortIsSafe(gpa, io, repo)) try resetMerge(gpa, io, repo, start_oid, who, blocked);
+    if (try abortIsSafe(gpa, io, repo)) try resetMerge(gpa, io, repo, start_oid, .{ .who = who, .blocked = blocked });
     try removeSequencerState(io, repo);
 }
 
@@ -1035,6 +1035,12 @@ fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
     return head.oid != null and head.oid.?.eql(expected);
 }
 
+/// Ref identity and diagnostics for a merge reset.
+pub const ResetOptions = struct {
+    who: object.Signature,
+    blocked: ?*threeway.Blocked = null,
+};
+
 /// `git reset --merge <commit>`, `HEAD` when `target` is `null`: the index
 /// and the working tree go back to the commit, keeping changes that were
 /// never part of what is undone, `HEAD` moves there, `ORIG_HEAD` records
@@ -1044,16 +1050,17 @@ pub fn resetMerge(
     io: Io,
     repo: *Repository,
     target: ?Oid,
-    who: object.Signature,
-    blocked: ?*threeway.Blocked,
+    options: ResetOptions,
 ) Self.Error!void {
+    const who = options.who;
+    const blocked = options.blocked;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const current = head.oid orelse return error.UnbornBranch;
     const to = target orelse current;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, to), .merge, blocked);
+    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, to), .mode = .merge, .blocked = blocked });
     try repo.writeIndex(io, &index);
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, current);
     var buf: ["reset: moving to ".len + hash.max_hex_len]u8 = undefined;
@@ -1164,7 +1171,7 @@ test "a reset to a SHA-256 commit records its whole name in the reflog" {
     var repo = try Repository.open(gpa, io, fixture.dir, .{});
     defer repo.deinit(io);
     const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1700000000, .offset_minutes = 0 };
-    try resetMerge(gpa, io, &repo, try Oid.parse(.sha256, hex), who, null);
+    try resetMerge(gpa, io, &repo, try Oid.parse(.sha256, hex), .{ .who = who, .blocked = null });
     const subject = try fixture.line(io, &.{ "reflog", "-1", "--format=%gs" });
     defer gpa.free(subject);
     const expected = try gpa.print("reset: moving to {s}", .{hex});

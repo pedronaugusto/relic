@@ -131,3 +131,9 @@ test "phase2 tree and ancestry requests stay within five positional inputs" {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
+
+test "phase2 worktree merge and reset requests stay within five positional inputs" {
+    inline for (.{ relic.merge.threeway.apply, relic.merge.threeway.applyCommits, relic.merge.threeway.applyOctopus, relic.commit.reset.toTree, relic.commit.sequencer.resetMerge }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}

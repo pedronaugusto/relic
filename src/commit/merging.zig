@@ -338,7 +338,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const their_tree = try repo.commitTree(io, target.oid);
 
     if (fast_forward != .never and bases.len == 1 and bases[0].eql(ours)) {
-        var outcome = try threeway.apply(gpa, io, repo, &index, our_tree, our_tree, their_tree, .{ .blocked = options.blocked });
+        var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = our_tree, .ours = our_tree, .theirs = their_tree }, .{ .blocked = options.blocked });
         defer outcome.deinit();
         try repo.writeIndex(io, &index);
         const log_message = try arena.print("{s}: Fast-forward", .{reflog_action});
@@ -353,7 +353,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const reversed = try arena.alloc(Oid, bases.len);
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = options.conflict_style orelse configuredStyle(repo);
-    var outcome = try threeway.applyCommits(gpa, io, repo, &index, ours, target.oid, reversed, .{
+    var outcome = try threeway.applyCommits(gpa, io, repo, .{ .index = &index, .ours = ours, .theirs = target.oid, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .theirs = target.name },
@@ -452,7 +452,7 @@ fn octopus(
     } else return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     if (fast_forward == .only) return error.NotFastForward;
 
-    var outcome = try threeway.applyOctopus(gpa, io, repo, index, ours, heads, .{
+    var outcome = try threeway.applyOctopus(gpa, io, repo, .{ .index = index, .head = ours, .heads = heads }, .{
         .blob = .{ .conflict_style = options.conflict_style orelse configuredStyle(repo) },
         .filters = options.filters,
         .programs = options.programs,
@@ -686,7 +686,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     const current = head.oid orelse return error.UnbornBranch;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, current), .merge, blocked);
+    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, current), .mode = .merge, .blocked = blocked });
     try repo.writeIndex(io, &index);
     try removeMergeState(io, repo);
     // `git reset` records where it moved from and logs the move, even to

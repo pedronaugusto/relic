@@ -943,7 +943,7 @@ fn switchTo(c: *Ctx, target: Oid, branch: ?[]const u8, given: []const u8) Error!
     var index = try c.repo.openIndex(c.io);
     defer index.deinit();
     const from_tree = if (h.oid) |oid| try c.repo.commitTree(c.io, oid) else try c.repo.objectDatabase().write(c.io, .tree, "");
-    var outcome = try threeway.apply(c.gpa, c.io, c.repo, &index, from_tree, from_tree, try c.repo.commitTree(c.io, target), .{ .blocked = c.options.blocked });
+    var outcome = try threeway.apply(c.gpa, c.io, c.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try c.repo.commitTree(c.io, target) }, .{ .blocked = c.options.blocked });
     outcome.deinit();
     try c.repo.writeIndex(c.io, &index);
     const msg = try c.a.print("checkout: moving from {s} to {s}", .{ old_desc, given });

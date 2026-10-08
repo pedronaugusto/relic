@@ -93,3 +93,10 @@ Contract tests exercise publication failure, cancellation, pagination, parser
 semantics, ownership and allocation failures. Benchmarks live in bench and compile
 in CI; timing is measured separately in ReleaseFast with interleaved comparisons
 against the previous main. CI owns platform and complete-suite verification.
+
+Working-tree merges group the index with their tree or commit inputs; the
+index remains borrowed and the caller owns publication. Reset groups its target
+index/tree and overwrite policy in Options. Neither operation moves HEAD;
+sequencer.resetMerge owns HEAD/ORIG_HEAD publication and its ResetOptions carry
+the ref identity and optional refusal diagnostics. The same merge and reset
+engines preserve unrelated working-tree edits and refuse destructive overwrites.
