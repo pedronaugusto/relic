@@ -113,3 +113,9 @@ OpenInputs count selects header patching at finish, while openStream requires a
 known count before output begins. Index/reverse-index options retain the same
 checksums, entry order and durability policy. Indexpack Inputs borrow the receive
 directory and input reader; Result still owns its keep token through publication.
+
+Merge strategy aliases change only the selected algorithm; an existing minimal
+policy survives bare patience/histogram. The shared algorithm grammar still
+replaces both fields for diff-algorithm= and configured values. Durability tests
+count logical directory barriers exactly, accounting for Airlock's Linux O_PATH
+EBADF/reopen recovery through its published getfl and sync_dir seam calls.

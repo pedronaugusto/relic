@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Bare merge strategy aliases patience/histogram preserve the existing minimal
+  policy, as Git does; diff-algorithm= still replaces it. Durability contracts
+  account for Airlock's Linux O_PATH recovery before the successful directory sync.
+
 - Breaking: pack/index opening and pack decode requests take named inputs and
   options. Pack Writer.open replaces init and initCounting, with a nullable count
   in OpenInputs; openStream takes StreamInputs before its output writer. Index

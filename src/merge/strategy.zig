@@ -75,10 +75,8 @@ pub const Settings = struct {
             s.resolve = .theirs;
         } else if (std.mem.eql(u8, word, "patience")) {
             s.algorithm = .patience;
-            s.minimal = false;
         } else if (std.mem.eql(u8, word, "histogram")) {
             s.algorithm = .histogram;
-            s.minimal = false;
         } else if (std.mem.startsWith(u8, word, "diff-algorithm=")) {
             const diff = LineDiff.parse(word["diff-algorithm=".len..]) orelse return error.UnknownStrategyOption;
             s.algorithm = diff.algorithm;
@@ -220,6 +218,9 @@ test "strategy options set what git's parse_merge_opt sets, the later word winni
     // `patience` keeps `minimal`; `diff-algorithm=` clears it.
     try s.apply("patience");
     try std.testing.expectEqual(parallax.Algorithm.patience, s.algorithm);
+    try std.testing.expect(s.minimal);
+    try s.apply("histogram");
+    try std.testing.expectEqual(parallax.Algorithm.histogram, s.algorithm);
     try std.testing.expect(s.minimal);
     try s.apply("diff-algorithm=Histogram");
     try std.testing.expect(!s.minimal);

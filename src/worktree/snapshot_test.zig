@@ -427,6 +427,14 @@ fn expectSyncOrder(h: *airlock_testing.Seam) !void {
     };
 }
 
+fn expectDirectorySyncs(h: *airlock_testing.Seam, expected: usize) !void {
+    // Airlock retries Linux O_PATH descriptors after EBADF: the failed fsync
+    // is recorded too, and each getfl identifies that recovery attempt.
+    const recovered = if (builtin.os.tag == .linux) h.count(.getfl) else 0;
+    try testing.expect(recovered <= expected);
+    try testing.expectEqual(expected + recovered, h.count(.sync_dir));
+}
+
 fn resetSyncs(h: *airlock_testing.Seam) void {
     h.setPlan(&.{});
     h.reset();
@@ -469,7 +477,7 @@ test "durable snapshots sync their closure and restored files before directories
     resetSyncs(h);
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
     try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
-    try testing.expectEqual(@as(usize, 3), h.count(.sync_dir));
+    try expectDirectorySyncs(h, 3);
     try expectSyncOrder(h);
     try expectFile(dest.dir, "nested/deep/file", "kept");
     // The same barrier covers a stat-shortcut checkout's existing bytes.
@@ -509,7 +517,7 @@ test "selected object durability syncs a used pack and index once" {
     resetSyncs(h);
     try store.db.makeDurable(io, &.{ saved.snapshot.tree, saved.snapshot.tree });
     try testing.expectEqual(@as(usize, 2), h.syncs() - h.count(.sync_dir));
-    try testing.expectEqual(@as(usize, 2), h.count(.sync_dir));
+    try expectDirectorySyncs(h, 2);
     try expectSyncOrder(h);
 }
 
