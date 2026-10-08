@@ -1742,11 +1742,11 @@ pub const Compression = enum {
     /// zlib's level 9.
     best,
 
-    fn options(c: Compression) flate.Compress.Options {
+    fn level(c: Compression) u4 {
         return switch (c) {
-            .fast => .level_1,
-            .default => .level_6,
-            .best => .level_9,
+            .fast => 1,
+            .default => 6,
+            .best => 9,
         };
     }
 };
@@ -1799,46 +1799,33 @@ const WrittenEntry = IndexEntry;
 pub const Deflater = struct {
     pub const Error = ErrorNamespace.Error;
 
-    window: []u8,
-    compress: *flate.Compress,
+    workspace: []align(64) u8,
+    compress: warp.Deflate,
+    compression: Compression = .default,
 
     pub fn init(gpa: Allocator) Allocator.Error!Deflater {
-        const window = try gpa.alloc(u8, flate.max_window_len);
-        errdefer gpa.free(window);
-        return .{ .window = window, .compress = try gpa.create(flate.Compress) };
+        const workspace = try gpa.alignedAlloc(u8, .@"64", warp.Deflate.memory(.{}));
+        return .{ .workspace = workspace, .compress = .initBuffer(workspace, .{}) };
     }
 
     pub fn deinit(d: *Deflater, gpa: Allocator) void {
-        gpa.free(d.window);
-        gpa.destroy(d.compress);
+        d.compress.deinit();
+        gpa.free(d.workspace);
         d.* = undefined;
     }
 
-    /// Write `payload` to `out` as one zlib stream at `compression`. `out`
-    /// is not flushed.
+    /// Write one independent zlib stream without flushing `out`.
     pub fn deflate(d: *Deflater, out: *Io.Writer, payload: []const u8, compression: Compression) Io.Writer.Error!void {
-        const fresh = try flate.Compress.init(out, d.window, .zlib, compression.options());
-        // std's initial chain and token bytes are undefined: their heads
-        // and counts make them unreachable until filled. Copy only the
-        // defined state, rather than moving 224 KiB for every small entry.
-        inline for (@typeInfo(flate.Compress).@"struct".field_names) |field| {
-            if (comptime std.mem.eql(u8, field, "lookup")) {
-                inline for (@typeInfo(@TypeOf(fresh.lookup)).@"struct".field_names) |part| {
-                    if (comptime !std.mem.eql(u8, part, "chain"))
-                        @field(d.compress.lookup, part) = @field(fresh.lookup, part);
-                }
-            } else if (comptime std.mem.eql(u8, field, "buffered_tokens")) {
-                inline for (@typeInfo(@TypeOf(fresh.buffered_tokens)).@"struct".field_names) |part| {
-                    if (comptime !std.mem.eql(u8, part, "list"))
-                        @field(d.compress.buffered_tokens, part) = @field(fresh.buffered_tokens, part);
-                }
-            } else {
-                @field(d.compress, field) = @field(fresh, field);
-            }
+        if (d.compression == compression) {
+            d.compress.reset(.nothing);
+        } else {
+            d.compress = .initBuffer(d.workspace, .{ .level = compression.level() });
+            d.compression = compression;
         }
-        try d.compress.writer.writeAll(payload);
-        try d.compress.writer.flush();
-        try d.compress.finish();
+        var buffer: [4096]u8 = undefined;
+        var writer: warp.Deflate.Writer = .init(&d.compress, out, &buffer);
+        try writer.interface.writeAll(payload);
+        try writer.finish();
     }
 
     /// The most bytes `deflate` is given room for ahead of the writer, for a

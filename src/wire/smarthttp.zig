@@ -39,6 +39,7 @@
 const Self = @This();
 
 const std = @import("std");
+const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
@@ -958,13 +959,13 @@ const Http = struct {
     }
 
     fn gzip(arena: Allocator, bytes: []const u8) Allocator.Error![]const u8 {
-        var out: Io.Writer.Allocating = try .initCapacity(arena, bytes.len / 2 + 64);
-        const window = try arena.alloc(u8, std.compress.flate.max_window_len);
-        var compress = std.compress.flate.Compress.init(&out.writer, window, .gzip, .best) catch return error.OutOfMemory;
-        compress.writer.writeAll(bytes) catch return error.OutOfMemory;
-        compress.writer.flush() catch return error.OutOfMemory;
-        compress.finish() catch return error.OutOfMemory;
-        return out.written();
+        var compress = try warp.Compressor.init(arena, .{ .level = 9, .max_input = bytes.len });
+        defer compress.deinit();
+        const frame: warp.Compressor.Frame = .{ .container = .gzip };
+        const out = try arena.alloc(u8, warp.Compressor.bound(bytes.len, frame));
+        errdefer arena.free(out);
+        const n = compress.compress(bytes, out, frame) catch unreachable; // bound reserves the complete stream
+        return arena.realloc(out, n);
     }
 
     fn failure(context: *anyopaque, c: *Connection) connection.Error {

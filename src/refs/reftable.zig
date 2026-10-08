@@ -29,7 +29,6 @@ const std = @import("std");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const flate = std.compress.flate;
 
 const hash = @import("../hash/hash.zig");
 const varint = @import("../codec/varint.zig");
@@ -423,19 +422,12 @@ pub const Table = struct {
             const out = try gpa.alloc(u8, len);
             errdefer gpa.free(out);
             @memcpy(out[0..skip], data[0..skip]);
-            const window = try gpa.alloc(u8, flate.max_window_len);
-            defer gpa.free(window);
-            var input: Io.Reader = .fixed(data[skip..]);
-            var inflate: flate.Decompress = .init(&input, .zlib, window);
-            inflate.reader.readSliceAll(out[skip..]) catch return error.CorruptBlock;
-            // The stream has to end exactly there: the footer and the
-            // checksum read, and nothing more to inflate.
-            var extra: [1]u8 = undefined;
-            const more = inflate.reader.readSliceShort(&extra) catch return error.CorruptBlock;
-            if (more != 0) return error.CorruptBlock;
+            var decoder: warp.Decompressor = .init;
+            const inflated = decoder.inflate(data[skip..], out[skip..], .{}) catch return error.CorruptBlock;
+            if (inflated.out_len != len - skip) return error.CorruptBlock;
             block.data = out;
             block.owned = out;
-            block.full_size = skip + input.seek;
+            block.full_size = skip + inflated.in_len;
         } else {
             if (len > data.len) return error.CorruptBlock;
             block.data = data[0..len];
@@ -1044,13 +1036,11 @@ const Writer = struct {
         const skip = o.header_off + 4;
         var compressed: Io.Writer.Allocating = try .initCapacity(w.gpa, 64 + o.next);
         defer compressed.deinit();
-        const window = try w.gpa.alloc(u8, flate.max_window_len);
-        defer w.gpa.free(window);
-        const state = try w.gpa.create(flate.Compress);
-        defer w.gpa.destroy(state);
-        state.* = flate.Compress.init(&compressed.writer, window, .zlib, .level_9) catch return error.OutOfMemory;
-        state.writer.writeAll(w.block[skip..o.next]) catch return error.OutOfMemory;
-        state.finish() catch return error.OutOfMemory;
+        var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = o.next - skip });
+        defer state.deinit();
+        const output = compressed.writer.writableSliceGreedy(warp.Compressor.bound(o.next - skip, .{})) catch return error.OutOfMemory;
+        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // bound reserves the complete stream
+        compressed.writer.advance(n);
         const bytes = compressed.written();
         // A log block is not bounded by the block size once deflated, and
         // is never padded; it is written from its own buffer.

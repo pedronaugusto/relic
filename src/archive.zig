@@ -24,7 +24,6 @@ const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
-const flate = std.compress.flate;
 
 const hash = @import("hash/hash.zig");
 const object = @import("object/object.zig");
@@ -355,28 +354,13 @@ const Zip = struct {
 };
 
 fn deflateRaw(gpa: Allocator, data: []const u8, level: ?u4) Allocator.Error![]u8 {
-    var out: Io.Writer.Allocating = try .initCapacity(gpa, data.len / 2 + 64);
-    defer out.deinit();
-    const window = try gpa.alloc(u8, flate.max_window_len);
-    defer gpa.free(window);
-    const compress = try gpa.create(flate.Compress);
-    defer gpa.destroy(compress);
-    const options: flate.Compress.Options = switch (level orelse 6) {
-        1 => .level_1,
-        2 => .level_2,
-        3 => .level_3,
-        4 => .level_4,
-        5 => .level_5,
-        6 => .level_6,
-        7 => .level_7,
-        8 => .level_8,
-        else => .level_9,
-    };
-    compress.* = flate.Compress.init(&out.writer, window, .raw, options) catch return error.OutOfMemory;
-    compress.writer.writeAll(data) catch return error.OutOfMemory;
-    compress.writer.flush() catch return error.OutOfMemory;
-    compress.finish() catch return error.OutOfMemory;
-    return out.toOwnedSlice();
+    var compress = try warp.Compressor.init(gpa, .{ .level = level orelse 6, .max_input = data.len });
+    defer compress.deinit();
+    const frame: warp.Compressor.Frame = .{ .container = .raw };
+    const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, frame));
+    errdefer gpa.free(out);
+    const n = compress.compress(data, out, frame) catch unreachable; // bound reserves the complete stream
+    return gpa.realloc(out, n);
 }
 
 fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary: bool) Error!void {

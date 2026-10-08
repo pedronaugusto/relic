@@ -650,7 +650,6 @@ const Indexer = struct {
     file: Io.File,
     options: Options,
     read_buffer: []u8,
-    window: []u8,
     /// How the stream's entries are decoded while it is parsed.
     inflater: Inflater,
     reader: Io.File.Reader,
@@ -680,8 +679,6 @@ const Indexer = struct {
     fn init(gpa: Allocator, io: Io, db: Database, file: Io.File, options: Options) Allocator.Error!Indexer {
         const read_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(read_buffer);
-        const window = try gpa.alloc(u8, flate.max_window_len);
-        errdefer gpa.free(window);
         const inflater: Inflater = try .init(gpa);
         return .{
             .gpa = gpa,
@@ -691,7 +688,6 @@ const Indexer = struct {
             .file = file,
             .options = options,
             .read_buffer = read_buffer,
-            .window = window,
             .inflater = inflater,
             .reader = file.reader(io, read_buffer),
         };
@@ -703,7 +699,6 @@ const Indexer = struct {
         x.ref_bases.deinit(x.gpa);
         x.thin_bases.deinit(x.gpa);
         x.gpa.free(x.read_buffer);
-        x.gpa.free(x.window);
         x.inflater.deinit();
         x.gpa.free(x.roots);
         x.found.deinit(x.gpa);
@@ -1211,8 +1206,8 @@ const Indexer = struct {
         var end = body_end;
         var compressed: Io.Writer.Allocating = try .initCapacity(x.gpa, 4096);
         defer compressed.deinit();
-        const compressor = try x.gpa.create(flate.Compress);
-        defer x.gpa.destroy(compressor);
+        var compressor = try pack.Deflater.init(x.gpa);
+        defer compressor.deinit(x.gpa);
         for (x.thin_bases.items) |oid| {
             const found = try x.db.read(io, oid);
             defer x.db.allocator().free(found.bytes);
@@ -1220,10 +1215,7 @@ const Indexer = struct {
             var head: [16]u8 = undefined;
             const head_len = encodeTypeAndSize(&head, found.type, found.bytes.len);
             compressed.clearRetainingCapacity();
-            compressor.* = try flate.Compress.init(&compressed.writer, x.window, .zlib, .level_6);
-            try compressor.writer.writeAll(found.bytes);
-            try compressor.writer.flush();
-            try compressor.finish();
+            try compressor.deflate(&compressed.writer, found.bytes, .default);
 
             var crc: crc32.Crc32 = .init;
             crc.update(head[0..head_len]);
@@ -1298,7 +1290,7 @@ const Inflater = struct {
     /// Where an entry whose bytes are not kept is decoded: a blob being
     /// named, a delta being measured.
     scratch: std.ArrayList(u8) = .empty,
-    /// The standard library's window, for an entry too large to hold,
+    /// Warp's reader buffer, for an entry too large to hold,
     /// made when one comes.
     window: ?[]u8 = null,
 

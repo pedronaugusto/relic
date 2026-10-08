@@ -22,7 +22,6 @@ const testbytes = @import("../testing/bytes.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
-const flate = std.compress.flate;
 
 const delta = @import("../codec/delta.zig");
 const warp = @import("warp");
@@ -129,17 +128,12 @@ pub fn inflate(gpa: Allocator, data: []const u8, size: usize) Self.InflateError!
 /// Deflate `data` as one zlib stream at zlib's level 1, which is
 /// `core.compression`'s default and what git deflates a hunk with.
 pub fn deflate(gpa: Allocator, data: []const u8) Allocator.Error![]u8 {
-    var out: Io.Writer.Allocating = try .initCapacity(gpa, data.len / 2 + 64);
-    defer out.deinit();
-    const window = try gpa.alloc(u8, flate.max_window_len);
-    defer gpa.free(window);
-    const compress = try gpa.create(flate.Compress);
-    defer gpa.destroy(compress);
-    compress.* = flate.Compress.init(&out.writer, window, .zlib, .level_1) catch return error.OutOfMemory;
-    compress.writer.writeAll(data) catch return error.OutOfMemory;
-    compress.writer.flush() catch return error.OutOfMemory;
-    compress.finish() catch return error.OutOfMemory;
-    return out.toOwnedSlice();
+    var compress = try warp.Compressor.init(gpa, .{ .level = 1, .max_input = data.len });
+    defer compress.deinit();
+    const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, .{}));
+    errdefer gpa.free(out);
+    const n = compress.compress(data, out, .{}) catch unreachable; // bound reserves the complete stream
+    return gpa.realloc(out, n);
 }
 
 /// One side's hunk: the smaller of a deflated delta from `from` and the
