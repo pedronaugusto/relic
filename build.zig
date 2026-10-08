@@ -1,19 +1,20 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const std_tls_client = b.graph.path(.zig_lib, "std/crypto/tls/Client.zig");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
     // The module. Conduit runs programs and carries its platform linkage;
     // command preparation and the permission to run remain here. sweep
-    // matches git's globs, and parallax diffs and merges lines.
+    // matches git's globs, parallax diffs and merges lines, and uplink
+    // speaks HTTP and TLS.
     //=====================================================================
 
     const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
     const parallax = b.dependency("parallax", .{ .target = target, .optimize = optimize }).module("parallax");
+    const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize }).module("uplink");
 
     const module = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
@@ -24,6 +25,7 @@ pub fn build(b: *std.Build) void {
     module.addImport("conduit", conduit);
     module.addImport("sweep", sweep);
     module.addImport("parallax", parallax);
+    module.addImport("uplink", uplink);
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -168,18 +170,6 @@ pub fn build(b: *std.Build) void {
     build_options.addOptionPath("process_fixture_path", process_fixture.getEmittedBin());
     build_options.addOptionPath("remote_helper_path", remote_helper.getEmittedBin());
     build_options.addOptionPath("lfs_agent_path", lfs_agent.getEmittedBin());
-    // The standard library's TLS client, which `src/transport/tls/Client.zig` is a copy
-    // of with client authentication added: `src/testing/tls_fork.zig` holds the
-    // copy to it, and fails when the compiler building this ships another.
-    // Hosted Zig installations use a fresh temporary path on every job, so the
-    // suite embeds a copy of the file rather than its path: a copy's path
-    // follows its bytes, and the test binaries stay cached across CI runs.
-    const std_client = b.addWriteFiles();
-    _ = std_client.addCopyFile(std_tls_client, "Client.zig.txt");
-    const std_client_module = b.createModule(.{
-        .root_source_file = std_client.add("std_tls_client.zig", "pub const source = @embedFile(\"Client.zig.txt\");\n"),
-    });
-
     // The delta search runs its candidates on the caller's executor when
     // `PackOptions.threads` asks for more than one, and the suite writes
     // the same repository from two processes and two tasks at once. Whether
@@ -200,7 +190,12 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("conduit", conduit);
     test_module.addImport("sweep", sweep);
     test_module.addImport("parallax", parallax);
-    test_module.addImport("std_tls_client", std_client_module);
+    test_module.addImport("uplink", uplink);
+    if (b.pkg_hash.len == 0) {
+        if (b.lazyDependency("shakedown", .{ .target = target, .optimize = optimize })) |dep| {
+            test_module.addImport("shakedown", dep.module("shakedown"));
+        }
+    }
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
     hook_fixture.root_module.addImport("relic", module);
@@ -302,7 +297,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "bench_options", .module = bench_options.createModule() },
                 },
             }),
-            .filters = &.{"benchmark:"},
+            .filters = if (b.option([]const u8, "bench-filter", "Select benchmark rows by name")) |filter| &.{filter} else &.{"benchmark:"},
         });
         bench_step.dependOn(&b.addInstallArtifact(regressions, .{ .dest_dir = .{ .override = .{ .custom = "bench" } } }).step);
         check_step.dependOn(&regressions.step);
@@ -320,14 +315,6 @@ pub fn build(b: *std.Build) void {
     // The installer runs only on a hosted runner; its version reading is
     // proved everywhere.
     b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module })).step);
-    // Keep the package root at src so the moved check can embed its TLS sibling.
-    const tls_test = b.addTest(.{ .root_module = test_module, .filters = &.{"the TLS client is std's, with the recorded diff and nothing else"} });
-    b.step("check-tls-fork", "Verify the TLS fork against std and its recorded patch").dependOn(&b.addRunArtifact(tls_test).step);
-    const tls_writer = b.addExecutable(.{ .name = "tls-fork", .root_module = b.createModule(.{ .root_source_file = b.path("ci/tls_fork.zig"), .target = b.graph.host, .optimize = .safe }) });
-    const tls_writer_options = b.addOptions();
-    tls_writer_options.addOptionPath("std_tls_client", std_tls_client);
-    tls_writer.root_module.addOptions("build_options", tls_writer_options);
-    b.step("tls-fork", "Re-record the TLS client's patch against std").dependOn(&b.addRunArtifact(tls_writer).step);
 }
 
 /// Every example, listed rather than globbed: a build graph that scans a

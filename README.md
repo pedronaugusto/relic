@@ -204,10 +204,11 @@ exe.root_module.addImport("relic", relic_dep.module("relic"));
 ```
 
 One module, with [conduit](https://github.com/pedronaugusto/conduit) for
-running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's globs and
-[parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges. Conduit carries its libc linkage on POSIX; Windows needs
-no C runtime. SHA-256 and the TLS primitives come from `std.crypto`; SHA-1,
-inflate and the TLS client are in the package. There is no build option to
+running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's globs,
+[parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges and
+[uplink](https://github.com/pedronaugusto/uplink) for HTTP and TLS. Conduit carries its libc linkage on POSIX; Windows needs
+no C runtime. SHA-256 comes from `std.crypto`; SHA-1 and inflate are in the
+package. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — reading
 objects and deflating entries while a pack is written
@@ -220,7 +221,7 @@ refusal. Relic prepares git commands, scrubs the supplied environment and
 keeps the caller's launcher and execution policy; conduit spawns, feeds,
 collects, waits and kills. `program.run` applies one deadline to input, output,
 waiting and cleanup, and refuses unavailable concurrency. Clocks are read
-for program deadlines and the HTTP client's certificates and timeouts.
+for program deadlines, and uplink reads them for certificates and timeouts.
 Everything else that needs the time takes it from the caller, with the identity. One word outlives a call without a caller holding
 it, and it is the answer to which SHA-1 instructions this processor has,
 asked once.
@@ -297,8 +298,8 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `transport` | `Session`: a remote, open — the one thing a fetch, a clone or a push talks to. |
 | `transport.fetch`, `transport.clone`, `transport.push` | The commands. Protocol v2 and v0, refspecs, `FETCH_HEAD`, atomic updates, `insteadOf`; a clone into either ref format. |
 | `transport.remote`, `transport.url`, `transport.refspec` | Remotes as the configuration describes them, what a URL names, and which refs a fetch takes. |
-| `transport.smarthttp`, `transport.ssh`, `transport.local`, `transport.httpclient`, `transport.tls`, `transport.clientcert` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, HTTP(S) and SOCKS4/4a/5/5h proxies, the person's `ssh`, and `file://` and paths. |
-| `transport.credential`, `transport.auth`, `transport.httpsettings`, `transport.httpauth` | The person's own setup: credential helpers, why a remote refused, git's `http.*`, proxy authentication. |
+| `transport.smarthttp`, `transport.ssh`, `transport.local` | The transports: HTTP(S) through uplink, HTTP(S) and SOCKS4/4a/5/5h proxies and client certificates as git's settings name them, the person's `ssh`, and `file://` and paths. |
+| `transport.credential`, `transport.auth`, `transport.httpsettings` | The person's own setup: credential helpers, why a remote refused, git's `http.*`. |
 | `transport.protocol`, `transport.connection`, `transport.pktline`, `transport.sideband`, `transport.fetchpack`, `transport.sendpack`, `transport.progress` | The wire underneath the commands. |
 | `transport.remotehelper` | `Helper`, `Spec`, `allowed` — `git-remote-<name>` run as git runs it: capabilities, options, `list`, `connect`, `fetch`, `import` (through `fastimport`, `bidi-import` answered), `push`, `export` (through `fastexport`, with the helper's marks), private refs by its `refspec`. |
 | `transport.uploadpack` | `Server` — serving fetches, with shallow and every filter. |
@@ -441,41 +442,21 @@ Decoding precedes splitting, including home paths and encoded delimiters.
 Scp shorthand and plain paths keep percent signs literal, HTTP keeps its
 encoded request path, and `identity.url.raw` always retains the original.
 
-**TLS, HTTP and inflate are relic's own, each for something the standard
-library cannot do.** Every https connection goes through relic's TLS and HTTP
-clients; a test fails if any other file names the standard library's HTTP or
-TLS client, and another checks that what crosses a proxy's tunnel is TLS.
+**HTTP and TLS are [uplink](https://github.com/pedronaugusto/uplink)'s.** relic reads git's
+`http.*` settings, its environment and git-lfs's own settings, and hands
+uplink what they say: the authorities trusted (`http.sslCAInfo` in place
+of the system's, `http.sslCAPath` besides them), whether a server is checked
+at all, the client certificate and the passphrase its helpers give, the
+proxy with the answer curl or Go would give it, and git-lfs's timeouts.
+uplink keeps connections, goes through proxies with TLS to the server inside
+the tunnel, and answers client-certificate requests, which the standard
+library's client cannot. relic's API names no uplink type.
 
-- **TLS** is the standard library's client with client authentication added.
-  std's client runs the whole handshake inside `init`, takes no client
-  certificate, and refuses a server's CertificateRequest, so nothing outside
-  it could add one: the answer has to be written into the handshake.
-  `src/transport/tls/Client.zig` is therefore a copy of Zig 0.17.0's file, and
-  `src/transport/tls/Client.zig.diff` is everything the copy adds — the two options,
-  the CertificateRequest arm, the client's Certificate and CertificateVerify
-  for TLS 1.2 and 1.3 — with the code they call in `src/transport/tls/auth_wire.zig`.
-  The copy is held to std on every `zig build test`: the std file the
-  compiler ships is hashed against the one the diff was taken from, and the
-  diff applied to it must give the copy byte for byte. A Zig release that
-  changes std's client fails the build until its fixes are brought across;
-  the header of `src/transport/tls/Client.zig` says how, and `zig build tls-fork` takes the
-  diff again.
-- **HTTP/1.1** is relic's because std's client builds its TLS inside a
-  private connect path: verification cannot be turned off for
-  `http.sslVerify=false`, there is one trust store where git has
-  `http.sslCAInfo`, `http.sslCAPath` and a proxy's own `http.proxySSLCAInfo`,
-  there is no client certificate for `http.sslCert`, and a CONNECT tunnel
-  carries no TLS of its own, so an https remote behind an http proxy would
-  be spoken to in the clear. It answers a proxy only with Basic
-  authentication from the URL, where git's curl answers a 407 with Basic or
-  Digest, and it applies no connect, handshake or activity timeout, which
-  git-lfs's settings need. Heads, chunked bodies and compression are read
-  with std's `http.Reader`.
-- **inflate** is relic's because std's zlib decoder reads the Adler-32 at the
-  end of a stream and does not check it, so a corrupt object would be taken
-  as it came; relic's checks it and refuses what zlib refuses. It decodes a
-  pack entry into one buffer of known size and is fuzzed against std's
-  decoder and compressor.
+**inflate is relic's own**, because std's zlib decoder reads the Adler-32 at
+the end of a stream and does not check it, so a corrupt object would be
+taken as it came; relic's checks it and refuses what zlib refuses. It
+decodes a pack entry into one buffer of known size and is fuzzed against
+std's decoder and compressor.
 
 HTTP(S) remotes and LFS accept `socks4://`, `socks4a://`, `socks5://` and
 `socks5h://` proxies, with port 1080 when none is given. SOCKS4 and SOCKS5
@@ -485,19 +466,6 @@ SOCKS4. HTTPS starts TLS to the origin inside the SOCKS tunnel. A named
 remote's `remote.<name>.proxy` overrides `http.proxy`; `no_proxy` still applies.
 A fetch, clone or push given a `proxy` (`transport.Proxy`) goes through that
 one, or none, whatever these say.
-
-The HTTP client's `connect`, `send` and `stream` take an optional caller-owned
-`transport.httpclient.Diagnostic` as their last argument. Initialize it with
-`Diagnostic.init(allocator)` and release it with `deinit`. Each exchange clears
-its diagnostic before starting. Keep it alive through connection release,
-response cleanup, streaming abort or a failed finish; separate simultaneous
-exchanges use separate diagnostics. Its TLS error, proxy status and owned
-offered schemes remain available after a failed exchange, even after the
-client is closed.
-
-A streaming request ends with `finish` or `abort`. `finish` consumes the stream
-on every outcome: the response owns the connection on success, and failure
-closes it. Abort only when giving up before finish.
 
 **A merge is git's merge-ort.** Renames, directory renames, directory/file and
 type conflicts, submodules and criss-cross histories resolve as git resolves
@@ -766,7 +734,6 @@ zig build check         # compile everything, including the tests, run nothing
 zig build check-imports # named source layers and dependency owners
 zig build test --fuzz   # the fuzz tests, until stopped
 zig build docs -- usage --check   # the Usage block against the example
-zig build tls-fork --check       # the TLS client's recorded diff against std's
 ```
 
 Every test runs under `std.testing.allocator` and `std.testing.io`, against

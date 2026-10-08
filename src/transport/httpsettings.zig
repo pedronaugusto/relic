@@ -28,6 +28,8 @@ const Environ = std.process.Environ;
 
 const config_mod = @import("../config.zig");
 const url_mod = @import("url.zig");
+const uplink = @import("../dependencies.zig").uplink;
+const shakedown = @import("../dependencies.zig").shakedown;
 
 /// What an HTTP conversation with one URL is configured to do.
 pub const Settings = struct {
@@ -157,24 +159,10 @@ pub const Settings = struct {
         if (env.get("GIT_PROXY_SSL_KEY")) |v| settings.proxy_ssl_key = v;
         if (env.get("GIT_PROXY_SSL_CAINFO")) |v| settings.proxy_ssl_ca_info = v;
         if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) settings.proxy_ssl_cert_password_protected = true;
-        if (!proxy_set) {
-            const names: []const []const u8 = if (url.scheme == .https)
-                &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }
-            else
-                &.{ "http_proxy", "all_proxy", "ALL_PROXY" };
-            for (names) |name| {
-                const value = env.get(name) orelse continue;
-                if (value.len == 0) continue;
-                settings.proxy = value;
-                break;
-            }
-        }
+        if (!proxy_set) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .curl);
         if (settings.proxy) |_| {
-            for ([_][]const u8{ "no_proxy", "NO_PROXY" }) |name| {
-                const list = env.get(name) orelse continue;
-                if (noProxy(list, url.host)) settings.proxy = null;
-                break;
-            }
+            const port = url.port orelse @as(u16, if (url.scheme == .https) 443 else 80);
+            if (uplink.Proxy.bypassed(uplink.Proxy.noProxyValue(env, .curl), url.host, port, .curl)) settings.proxy = null;
         }
     }
 };
@@ -321,19 +309,6 @@ fn scoreOf(pattern: []const u8, url: url_mod.Url) ?Score {
     return score;
 }
 
-/// Whether a `no_proxy` list names `host`: `*`, the host itself, or a
-/// domain it lies in, with or without a leading dot — curl's reading.
-pub fn noProxy(list: []const u8, host: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, list, ", ");
-    while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry, "*")) return true;
-        const domain = std.mem.trimStart(u8, entry, ".");
-        if (std.ascii.eqlIgnoreCase(host, domain)) return true;
-        if (host.len > domain.len and std.ascii.endsWithIgnoreCase(host, domain) and host[host.len - domain.len - 1] == '.') return true;
-    }
-    return false;
-}
-
 const testing = std.testing;
 
 test "the closest http.<url> section wins, and a looser one after it does not" {
@@ -427,26 +402,20 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
     try testing.expectEqualStrings("http://secure:3128", secure.proxy.?);
     const inside = try resolve(arena, &config, &env, try url_mod.Url.parse("https://git.internal.example.com/r.git"));
     try testing.expect(inside.proxy == null);
-    try testing.expect(noProxy("*", "anything"));
-    try testing.expect(!noProxy("example.com", "badexample.com"));
 }
 
 test "HTTP settings preserve allocation resource failures" {
     var config = try config_mod.Config.parseText(testing.allocator, "[http]\nproxy = http://proxy:3128\n", .local);
     defer config.deinit();
-    var failure_index: usize = 0;
-    while (true) : (failure_index += 1) {
-        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-        defer arena.deinit();
-        var failing = testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = failure_index });
-        const settings = resolve(failing.allocator(), &config, null, try url_mod.Url.parse("https://example.com/repo")) catch |err| {
-            try testing.expectEqual(error.OutOfMemory, err);
-            continue;
-        };
-        try testing.expectEqualStrings("http://proxy:3128", settings.proxy.?);
-        try testing.expect(!failing.has_induced_failure);
-        return;
-    }
+    var no_resize = shakedown.alloc.NoResize.init(testing.allocator);
+    try testing.checkAllAllocationFailures(no_resize.allocator(), allocationSettings, .{&config});
+}
+
+fn allocationSettings(gpa: Allocator, config: *const config_mod.Config) !void {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const settings = try resolve(arena.allocator(), config, null, try url_mod.Url.parse("https://example.com/repo"));
+    try testing.expectEqualStrings("http://proxy:3128", settings.proxy.?);
 }
 
 test "a remote's SOCKS proxy overrides http.proxy and remains subject to no_proxy" {

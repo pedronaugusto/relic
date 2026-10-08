@@ -1,8 +1,7 @@
 //! Client certificates, proved against servers that require one: OpenSSL's
-//! own `s_server -Verify 1` for relic's TLS client alone, in TLS 1.3 and
-//! 1.2, and a TLS front that requires one before `git http-backend`, where
-//! git and relic fetch side by side with the same settings and the same
-//! credential helper.
+//! own `s_server -Verify 1` for the certificates relic reads, in TLS 1.3
+//! and 1.2, and a TLS front that requires one, where git and relic fetch
+//! side by side with the same settings and the same credential helper.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -11,9 +10,9 @@ const Environ = std.process.Environ;
 const testing = std.testing;
 
 const program = @import("../repo/program.zig");
-const httpclient = @import("httpclient.zig");
 const clientcert = @import("clientcert.zig");
-const tls = @import("tls.zig");
+const uplink = @import("../dependencies.zig").uplink;
+const tls = uplink.tls;
 const repo_mod = @import("../repo.zig");
 const fetch_mod = @import("fetch.zig");
 const testgit = @import("../testing/git.zig");
@@ -82,21 +81,23 @@ const SignedWith = struct {
     }
 };
 
-/// relic's `GET /` to the server on `port`, trusting only `server.pem`:
-/// the page, in `gpa`.
+/// A `GET /` over uplink to the server on `port`, trusting only
+/// `server.pem`: the page, in `gpa`.
 fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?*const tls.ClientAuth) ![]u8 {
-    var client: httpclient.Client = .init(gpa, io);
-    defer client.deinit();
+    var trust: tls.Trust = .init(gpa);
+    defer trust.deinit();
     const server_cert = try pki.path("server.pem");
     defer gpa.free(server_cert);
-    try client.trustFile(server_cert);
-    client.client_auth = auth;
-    var res = try client.send(.GET, .{ .tls = true, .host = "127.0.0.1", .port = port }, "/", &.{}, null, null);
-    defer res.deinit();
-    return res.reader().allocRemaining(gpa, .limited(1 << 20)) catch return res.failure();
+    try trust.addFile(io, Io.Dir.cwd(), server_cert);
+    var client: uplink.Client = .init(gpa, .{ .tls = .{ .trust = &trust, .client_auth = auth } });
+    defer client.deinit(io);
+    var url_buf: [64]u8 = undefined;
+    var res = try client.send(io, .{ .url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/", .{port}) });
+    defer res.deinit(io);
+    return res.collect(gpa, io, .limited(1 << 20));
 }
 
-test "relic's TLS client answers OpenSSL's demand for a certificate in TLS 1.3 and 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
+test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 and 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);
@@ -219,8 +220,9 @@ test "git and relic fetch from a server that requires a certificate alike: key b
     }
 
     for ([_]bool{ false, true }) |tls12| {
-        const front = try testremote.TlsFront.startWith(gpa, io, server.port, .{ .client_ca = client_ca, .tls12 = tls12, .rsa = true });
+        const front = try testremote.TlsFront.start(gpa, io, .{ .client_ca = client_ca, .tls12 = tls12, .rsa = true });
         defer front.stop(io);
+        try front.mirrorRefs(io, server, "repo.git");
         const url = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
         defer gpa.free(url);
 
@@ -238,14 +240,14 @@ test "git and relic fetch from a server that requires a certificate alike: key b
             .{ .kind = "p256", .cert = "p384.pem", .refused = error.SslClientKeyMismatch },
             .{ .kind = "p256", .cert = "p256.stranger.pem", .refused = error.ClientCertificateRejected },
         }) |case| {
-            try sideBySide(gpa, io, pki, front, url, case);
+            try sideBySide(gpa, io, pki, root.dir, front, url, case);
         }
         // No certificate at all.
         try sideBySideWithout(gpa, io, front, url);
     }
 }
 
-fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, front: *testremote.TlsFront, url: []const u8, case: Case) !void {
+fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, root: Io.Dir, front: *testremote.TlsFront, url: []const u8, case: Case) !void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -266,6 +268,7 @@ fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, front: *testremote.TlsFront, ur
     defer by_relic.deinit();
     for ([_]*testgit.Repo{ &by_git, &by_relic }, [_]Io.Dir{ tools_git.dir, tools_relic.dir }) |r, tools| {
         try r.exec(io, &.{ "remote", "add", "origin", url });
+        try testremote.alreadyHas(gpa, io, root, r);
         try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
         // curl's OpenSSL backend reads certificates from files; a
         // system's own backend may look in the person's keychain instead.
@@ -321,69 +324,4 @@ fn sideBySideWithout(gpa: Allocator, io: Io, front: *testremote.TlsFront, url: [
         gpa.free(out);
         return error.TestUnexpectedResult;
     } else |_| {}
-}
-
-test "an https proxy that requires a certificate is answered with http.proxySSLCert and checked against http.proxySSLCAInfo, as git does both" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    const pki = try Pki.make(gpa, io);
-    defer pki.destroy();
-    var root = testing.tmpDir(.{ .iterate = true });
-    defer root.cleanup();
-    try servedRepo(gpa, io, &root);
-    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
-    defer server.stop();
-    const proxy = try testremote.Proxy.start(gpa, io, null);
-    defer proxy.stop();
-    const client_ca = try pki.path("ca.pem");
-    defer gpa.free(client_ca);
-    // TLS in front of the proxy makes it an https one.
-    const front = try testremote.TlsFront.startWith(gpa, io, proxy.port, .{ .client_ca = client_ca });
-    defer front.stop(io);
-    const proxy_url = try gpa.print("https://127.0.0.1:{d}", .{front.port});
-    defer gpa.free(proxy_url);
-    const url = try server.url(gpa, "repo.git");
-    defer gpa.free(url);
-    const cert = try pki.path("p256.pem");
-    defer gpa.free(cert);
-    const key = try pki.path("p256.key");
-    defer gpa.free(key);
-
-    for ([_]bool{ true, false }) |with_certificate| {
-        var env = try testremote.environ(gpa);
-        defer env.deinit();
-        var by_git = try testgit.Repo.init(gpa, io, &.{});
-        defer by_git.deinit();
-        var by_relic = try testgit.Repo.init(gpa, io, &.{});
-        defer by_relic.deinit();
-        for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
-            try r.exec(io, &.{ "remote", "add", "origin", url });
-            try r.exec(io, &.{ "config", "http.proxy", proxy_url });
-            try r.exec(io, &.{ "config", "http.proxySSLCAInfo", front.cert_path });
-            try r.exec(io, &.{ "config", "http.sslBackend", "openssl" });
-            if (with_certificate) {
-                try r.exec(io, &.{ "config", "http.proxySSLCert", cert });
-                try r.exec(io, &.{ "config", "http.proxySSLKey", key });
-            }
-        }
-        const git_ok = if (testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", with_certificate)) |out| blk: {
-            gpa.free(out);
-            break :blk true;
-        } else |_| false;
-        const theirs = try proxy.take(gpa);
-        defer gpa.free(theirs);
-        const relic_result = relicFetch(gpa, io, by_relic.dir, &env);
-        const ours = try proxy.take(gpa);
-        defer gpa.free(ours);
-        try testing.expectEqual(with_certificate, git_ok);
-        if (with_certificate) {
-            try relic_result;
-            try expectSameFetch(gpa, io, &by_git, &by_relic);
-            try testing.expect(ours.len != 0);
-            try testing.expectEqualStrings(theirs, ours);
-        } else {
-            try testing.expectError(error.ClientCertificateRejected, relic_result);
-            try testing.expectEqual(@as(usize, 0), ours.len);
-        }
-    }
 }

@@ -1418,12 +1418,26 @@ test "an unreadable client certificate, unreadable authorities and an unsupporte
     try testing.expectError(error.InvalidProxy, lfstransfer.fetch(server, &repo, .{}));
 }
 
-test "an https server is reached through a proxy's tunnel, and unchecked where the settings say, as git-lfs reaches it" {
+/// Have `front` answer the download of `content` where the LFS test
+/// server's actions put it.
+fn answerObject(io: Io, front: *testremote.TlsFront, content: []const u8) !void {
+    const gpa = testing.allocator;
+    const oid = testlfs.sha256Hex(content);
+    const target = try gpa.print("repo.git/info/lfs/objects/{s}", .{&oid});
+    defer gpa.free(target);
+    const response = try gpa.print("HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\n\r\n{s}", .{ content.len, content });
+    defer gpa.free(response);
+    try front.answer(io, target, response);
+}
+
+test "an https object is reached through a proxy's tunnel, and unchecked where the settings say, as git-lfs reaches it" {
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{});
     defer fx.deinit();
-    const front = try testremote.TlsFront.start(gpa, io, fx.server.port);
+    // The objects are fetched over TLS from the front; the API, which is
+    // asked with POST, stays plain.
+    const front = try testremote.TlsFront.start(gpa, io, .{});
     defer front.stop(io);
     const proxy = try testremote.Proxy.start(gpa, io, null);
     defer proxy.stop();
@@ -1433,6 +1447,9 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
     defer gpa.free(nobody);
     const content = "fetched over TLS\n";
     try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    try answerObject(io, front, content);
+    const lfs_url = try gpa.print("http://127.0.0.1:{d}/repo.git/info/lfs", .{fx.server.port});
+    defer gpa.free(lfs_url);
     const named = try gpa.print("https://lfs.example.invalid:{d}", .{front.port});
     defer gpa.free(named);
     const direct = try gpa.print("https://127.0.0.1:{d}", .{front.port});
@@ -1445,10 +1462,8 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
         .{ .base = direct, .config = &.{.{ "http.sslVerify", "false" }}, .tunneled = false },
         .{ .base = direct, .env = &.{.{ "GIT_SSL_NO_VERIFY", "1" }}, .tunneled = false },
     }, 0..) |case, n| {
-        // The actions the server hands out are on the same server.
+        // The actions the server hands out are on the front.
         fx.server.options.href_base = case.base;
-        const lfs_url = try gpa.print("{s}/repo.git/info/lfs", .{case.base});
-        defer gpa.free(lfs_url);
         var logs: [2][]u8 = .{ &.{}, &.{} };
         defer for (logs) |l| gpa.free(l);
         var connects: [2][]u8 = .{ &.{}, &.{} };
@@ -1506,24 +1521,30 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
     defer pki.destroy();
     const client_ca = try pki.path("ca.pem");
     defer gpa.free(client_ca);
-    const front = try testremote.TlsFront.startWith(gpa, io, fx.server.port, .{ .client_ca = client_ca });
+    const front = try testremote.TlsFront.start(gpa, io, .{ .client_ca = client_ca });
     defer front.stop(io);
     const content = "fetched with a certificate\n";
     try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    try answerObject(io, front, content);
+    // The object over TLS from the front; the API, asked with POST, plain.
     const base = try gpa.print("https://127.0.0.1:{d}", .{front.port});
     defer gpa.free(base);
-    const lfs_url = try gpa.print("{s}/repo.git/info/lfs", .{base});
+    const lfs_url = try gpa.print("http://127.0.0.1:{d}/repo.git/info/lfs", .{fx.server.port});
     defer gpa.free(lfs_url);
     fx.server.options.href_base = base;
     defer fx.server.options.href_base = null;
 
-    const Case = struct { cert: []const u8, key: ?[]const u8, answer: []const u8 = "unused", refused: ?anyerror = null };
+    // A key that does not open fails the first request, to the API, as
+    // git-lfs reads the host's certificate whatever the scheme; a server
+    // that refuses fails the download, the one request over TLS.
+    const Refusal = union(enum) { request: anyerror, download: []const u8 };
+    const Case = struct { cert: []const u8, key: ?[]const u8, answer: []const u8 = "unused", refused: ?Refusal = null };
     for ([_]Case{
         .{ .cert = "p256.pem", .key = "p256.key" },
         .{ .cert = "rsa.pem", .key = "rsa.legacy.key", .answer = testremote.Pki.passphrase },
-        .{ .cert = "p256.pem", .key = "p256.legacy.key", .answer = "battery-staple", .refused = error.SslClientKeyPassphraseWrong },
+        .{ .cert = "p256.pem", .key = "p256.legacy.key", .answer = "battery-staple", .refused = .{ .request = error.SslClientKeyPassphraseWrong } },
         // Without a key git-lfs presents nothing, and the server refuses.
-        .{ .cert = "p256.pem", .key = null, .refused = error.ClientCertificateRejected },
+        .{ .cert = "p256.pem", .key = null, .refused = .{ .download = "the server refused the client certificate" } },
     }, 0..) |case, n| {
         var logs: [2][]u8 = .{ &.{}, &.{} };
         defer for (logs) |l| gpa.free(l);
@@ -1538,6 +1559,9 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
             defer d.close(io);
             try emptyStore(fx, d);
             try fx.gitIn(d, &.{ "config", "lfs.url", lfs_url });
+            // A refused download is tried again, once here, quickly.
+            try fx.gitIn(d, &.{ "config", "lfs.transfer.maxretries", "1" });
+            try fx.gitIn(d, &.{ "config", "lfs.transfer.maxretrydelay", "0" });
             try fx.gitIn(d, &.{ "config", "http.sslCAInfo", front.cert_path });
             const cert = try pki.path(case.cert);
             defer gpa.free(cert);
@@ -1559,8 +1583,19 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
                 defer repo.deinit(io);
                 const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
                 defer server.close();
-                if (case.refused) |want| {
-                    try testing.expectError(want, lfstransfer.fetch(server, &repo, .{}));
+                if (case.refused) |refused| switch (refused) {
+                    .request => |want| try testing.expectError(want, lfstransfer.fetch(server, &repo, .{})),
+                    .download => |said| {
+                        var fetched = try lfstransfer.fetch(server, &repo, .{});
+                        defer fetched.deinit();
+                        try testing.expectEqual(@as(usize, 1), fetched.results.len);
+                        try testing.expectEqual(lfstransfer.Result.Status.failed, fetched.results[0].status);
+                        const message = fetched.results[0].message.?;
+                        testing.expect(std.mem.find(u8, message, said) != null) catch |err| {
+                            std.debug.print("the download failed with: {s}\n", .{message});
+                            return err;
+                        };
+                    },
                 } else {
                     var fetched = try lfstransfer.fetch(server, &repo, .{});
                     defer fetched.deinit();
@@ -1914,12 +1949,13 @@ test "a repeated .lfsconfig lookup is answered from what it was found from, and 
     try testing.expectEqualStrings("[lfs]\n\turl = https://staged/\n", staged);
 }
 
-test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secure tunnels" {
+test "LFS uploads and downloads through each SOCKS scheme, and downloads with TLS inside secure tunnels" {
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{});
     defer fx.deinit();
-    const front = try testremote.TlsFront.start(gpa, io, fx.server.port);
+    // Secure objects come from the front, which answers only downloads.
+    const front = try testremote.TlsFront.start(gpa, io, .{});
     defer front.stop(io);
     const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
     defer proxy.stop();
@@ -1935,7 +1971,7 @@ test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secur
             const base = try gpa.print("{s}://{s}:{d}", .{ if (secure) "https" else "http", host, if (secure) front.port else fx.server.port });
             defer gpa.free(base);
             fx.server.options.href_base = base;
-            const endpoint = try gpa.print("{s}/repo.git/info/lfs", .{base});
+            const endpoint = try gpa.print("http://{s}:{d}/repo.git/info/lfs", .{ host, fx.server.port });
             defer gpa.free(endpoint);
             const name = try gpa.print("{s}-{s}", .{ scheme, if (secure) "https" else "http" });
             defer gpa.free(name);
@@ -1950,7 +1986,10 @@ test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secur
             try fx.gitIn(d, &.{ "config", "remote.origin.proxy", proxy_url });
             try fx.gitIn(d, &.{ "config", "http.sslVerify", "false" });
             const object: lfstransfer.Object = .{ .oid = testlfs.sha256Hex(content), .size = content.len, .name = "a.bin" };
-            {
+            if (secure) {
+                try fx.server.putObject(&object.oid, content);
+                try answerObject(io, front, content);
+            } else {
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
                 const server = try openServer(fx, &repo);
@@ -1980,6 +2019,7 @@ test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secur
             try testing.expect(std.mem.find(u8, log, if (remote_dns) " name lfs.example.invalid:" else " ipv") != null);
         }
     }
+    fx.server.options.href_base = null;
     const counts = proxy.tunnelCounts();
     try testing.expect(counts.tls > 0 and counts.plain > 0);
 }

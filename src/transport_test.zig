@@ -19,7 +19,7 @@ const repo_mod = @import("repo.zig");
 const fetch_mod = @import("transport/fetch.zig");
 const clone_mod = @import("transport/clone.zig");
 const transport = @import("transport.zig");
-const httpclient = @import("transport/httpclient.zig");
+const uplink = @import("dependencies.zig").uplink;
 const testgit = @import("testing/git.zig");
 const testremote = @import("testing/remote.zig");
 const testlfs = @import("testing/lfs.zig");
@@ -561,6 +561,14 @@ fn relicFetch(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Envir
     outcome.deinit();
 }
 
+/// The TLS front, answering for the served `repo.git` as `server` does.
+fn tlsFront(gpa: Allocator, io: Io, server: *testremote.HttpServer, options: testremote.TlsFront.Options) !*testremote.TlsFront {
+    const front = try testremote.TlsFront.start(gpa, io, options);
+    errdefer front.stop(io);
+    try front.mirrorRefs(io, server, "repo.git");
+    return front;
+}
+
 test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted as git trusts it, and nothing else is" {
     const gpa = testing.allocator;
     const io = testing.io;
@@ -569,7 +577,7 @@ test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted 
     try servedRepo(gpa, io, &root, 2);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer server.stop();
-    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    const front = try tlsFront(gpa, io, server, .{});
     defer front.stop(io);
     const url = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(url);
@@ -603,6 +611,7 @@ test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted 
         defer case_env.deinit();
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
             try r.exec(io, &.{ "remote", "add", "origin", url });
+            try testremote.alreadyHas(gpa, io, root.dir, r);
             if (case.key) |key| try r.exec(io, &.{ "config", key, case.value });
         }
         if (case.env) |name| try case_env.put(name, case.value);
@@ -639,7 +648,7 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
     try servedRepo(gpa, io, &root, 2);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer server.stop();
-    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    const front = try tlsFront(gpa, io, server, .{});
     defer front.stop(io);
     const proxy = try testremote.Proxy.start(gpa, io, null);
     defer proxy.stop();
@@ -677,6 +686,7 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
             try r.exec(io, &.{ "remote", "add", "origin", case.url });
             try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
+            if (case.url.ptr == secure.ptr) try testremote.alreadyHas(gpa, io, root.dir, r);
             for (case.config) |pair| try r.exec(io, &.{ "config", pair[0], pair[1] });
         }
         const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
@@ -785,7 +795,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
     try servedRepo(gpa, io, &root, 2);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer server.stop();
-    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    const front = try tlsFront(gpa, io, server, .{});
     defer front.stop(io);
     const plain = try server.url(gpa, "repo.git");
     defer gpa.free(plain);
@@ -823,6 +833,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
         for ([_]*testgit.Repo{ &by_git, &by_relic }, 0..) |r, who| {
             try r.exec(io, &.{ "remote", "add", "origin", url });
             try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
+            if (url.ptr == secure.ptr) try testremote.alreadyHas(gpa, io, root.dir, r);
             if (case.method) |m| try r.exec(io, &.{ "config", "http.proxyAuthMethod", m });
             if (who == 0) {
                 results[0] = if (testremote.gitInputEnv(gpa, io, r.dir, &env, &.{ "fetch", "-q", "origin" }, "", git_ok)) |out| blk: {
@@ -872,7 +883,7 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
     try servedRepo(gpa, io, &root, 2);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer server.stop();
-    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    const front = try tlsFront(gpa, io, server, .{});
     defer front.stop(io);
     const proxy = try testremote.Proxy.start(gpa, io, "ada:secret");
     defer proxy.stop();
@@ -909,6 +920,7 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
         for ([_]*testgit.Repo{ &by_git, &by_relic }, 0..) |r, who| {
             try r.exec(io, &.{ "remote", "add", "origin", case.url });
             try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
+            if (case.url.ptr == secure.ptr) try testremote.alreadyHas(gpa, io, root.dir, r);
             if (case.helper_password) |password| {
                 const helper = try helperScript(gpa, io, tools.dir, password);
                 defer gpa.free(helper);
@@ -948,7 +960,7 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
     try servedRepo(gpa, io, &root, 2);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer server.stop();
-    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    const front = try tlsFront(gpa, io, server, .{});
     defer front.stop(io);
     const url = try gpa.print("https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(url);
@@ -962,6 +974,7 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
         defer by_relic.deinit();
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
             try r.exec(io, &.{ "remote", "add", "origin", url });
+            try testremote.alreadyHas(gpa, io, root.dir, r);
             if (!through_env) try r.exec(io, &.{ "config", "http.sslVerify", "false" });
         }
         const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
@@ -978,7 +991,7 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
     }
 }
 
-test "an idle HTTPS connection does not block another client" {
+test "an idle kept connection does not block another client" {
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -986,33 +999,31 @@ test "an idle HTTPS connection does not block another client" {
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .keep_alive = true, .redirect = true });
     var stopped = false;
     defer if (!stopped) server.stop();
-    const front = try testremote.TlsFront.start(gpa, io, server.port);
-    defer front.stop(io);
-    const target: httpclient.Target = .{ .tls = true, .host = "127.0.0.1", .port = front.port };
-    var idle: httpclient.Client = .init(gpa, io);
-    defer idle.deinit();
-    idle.verify = false;
-    idle.timeouts = .{ .handshake = .fromSeconds(10), .activity = .fromSeconds(10) };
+    const first = try server.url(gpa, "moved/first");
+    defer gpa.free(first);
+    const second = try server.url(gpa, "moved/second");
+    defer gpa.free(second);
+    var idle: uplink.Client = .init(gpa, .{ .timeouts = .{ .activity = .fromSeconds(10) }, .redirects = .none });
+    defer idle.deinit(io);
     {
-        var response = try idle.send(.GET, target, "/moved/first", &.{}, null, null);
-        defer response.deinit();
-        try testing.expectEqual(std.http.Status.found, response.head.status);
-        _ = try response.reader().discardRemaining();
+        var response = try idle.send(io, .{ .url = first });
+        defer response.deinit(io);
+        try testing.expectEqual(std.http.Status.found, response.status);
+        _ = try response.reader(io).discardRemaining();
     }
     // The first client's connection stays pooled while the second makes a
     // request. Closing it before this request would hide a serialized server.
-    var active: httpclient.Client = .init(gpa, io);
-    defer active.deinit();
-    active.verify = false;
-    active.timeouts = .{ .handshake = .fromSeconds(10), .activity = .fromSeconds(10) };
+    var active: uplink.Client = .init(gpa, .{ .timeouts = .{ .activity = .fromSeconds(10) }, .redirects = .none });
+    defer active.deinit(io);
     {
-        var response = try active.send(.GET, target, "/moved/second", &.{}, null, null);
-        defer response.deinit();
-        try testing.expectEqual(std.http.Status.found, response.head.status);
-        _ = try response.reader().discardRemaining();
+        var response = try active.send(io, .{ .url = second });
+        defer response.deinit(io);
+        try testing.expectEqual(std.http.Status.found, response.status);
+        _ = try response.reader(io).discardRemaining();
     }
-    try testing.expectEqual(@as(u32, 1), idle.connections);
-    try testing.expectEqual(@as(u32, 1), active.connections);
+    try testing.expectEqual(@as(u32, 1), idle.stats().idle);
+    try testing.expectEqual(@as(u64, 1), idle.stats().connections_opened);
+    try testing.expectEqual(@as(u64, 1), active.stats().connections_opened);
     // Shutdown must also release handlers waiting on pooled connections.
     server.stop();
     stopped = true;
@@ -1269,7 +1280,53 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     try testing.expect(state.reaped);
 }
 
-test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS to the origin" {
+/// The kind of target each SOCKS scheme names `localhost` as: a name where
+/// the proxy looks it up, an IPv4 address for SOCKS4, either family for
+/// SOCKS5.
+fn socksKind(scheme: []const u8) []const u8 {
+    if (std.mem.eql(u8, scheme, "socks4a") or std.mem.eql(u8, scheme, "socks5h")) return " name localhost:";
+    if (std.mem.eql(u8, scheme, "socks4")) return " ipv4 127.0.0.1:";
+    return " ipv";
+}
+
+/// git's fetch and relic's from the TLS front through the SOCKS proxy as
+/// `scheme`, into repositories that have every object already: TLS to the
+/// origin from the tunnel's first byte, the target named as the scheme
+/// names it, and the same refs fetched.
+fn socksHttpsFetch(gpa: Allocator, io: Io, root: *testing.TmpDir, proxy: *testremote.SocksProxy, front: *testremote.TlsFront, scheme: []const u8) !void {
+    errdefer std.debug.print("SOCKS transfer case: {s} over https\n", .{scheme});
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const proxy_url = try proxy.url(gpa, scheme, "ada:secret@");
+    defer gpa.free(proxy_url);
+    const url = try gpa.print("https://localhost:{d}/repo.git", .{front.port});
+    defer gpa.free(url);
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
+        try r.exec(io, &.{ "remote", "add", "origin", url });
+        try testremote.alreadyHas(gpa, io, root.dir, r);
+        try r.exec(io, &.{ "config", "http.proxy", proxy_url });
+        // What is trusted is proved elsewhere; this proves TLS on the wire.
+        try r.exec(io, &.{ "config", "http.sslVerify", "false" });
+    }
+    const tunnels = proxy.tunnelCounts().tls;
+    const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
+    gpa.free(fetched);
+    const theirs = try proxy.take(gpa);
+    defer gpa.free(theirs);
+    try relicFetch(gpa, io, by_relic.dir, &env);
+    const ours = try proxy.take(gpa);
+    defer gpa.free(ours);
+    try expectSameFetch(gpa, io, &by_git, &by_relic);
+    try testing.expect(std.mem.find(u8, theirs, socksKind(scheme)) != null);
+    try testing.expect(std.mem.find(u8, ours, socksKind(scheme)) != null);
+    try testing.expectEqual(tunnels + 2, proxy.tunnelCounts().tls);
+}
+
+test "clone fetch and push cross each SOCKS tunnel as git crosses it, and a fetch TLS to the origin inside it" {
     const gpa = testing.allocator;
     const io = testing.io;
     try testgit.requireGitVersion(gpa, io, 2, 48);
@@ -1282,30 +1339,30 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
     gpa.free(enabled);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer server.stop();
-    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    const front = try tlsFront(gpa, io, server, .{});
     defer front.stop(io);
     const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
     defer proxy.stop();
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
-        for ([_]bool{ false, true }) |secure| {
-            errdefer std.debug.print("SOCKS transfer case: {s} over {s}\n", .{ scheme, if (secure) "https" else "http" });
+        try socksHttpsFetch(gpa, io, &root, proxy, front, scheme);
+        {
+            errdefer std.debug.print("SOCKS transfer case: {s} over http\n", .{scheme});
             var env = try testremote.environ(gpa);
             defer env.deinit();
             const proxy_url = try proxy.url(gpa, scheme, "ada:secret@");
             defer gpa.free(proxy_url);
-            const url = try gpa.print("{s}://localhost:{d}/repo.git", .{ if (secure) "https" else "http", if (secure) front.port else server.port });
+            const url = try gpa.print("http://localhost:{d}/repo.git", .{server.port});
             defer gpa.free(url);
-            // The same explicit -c spelling works with git's curl. SSL
-            // verification is covered elsewhere; this test checks TLS on wire.
+            // The same explicit -c spelling works with git's curl.
             const setting = try gpa.print("http.proxy={s}", .{proxy_url});
             defer gpa.free(setting);
-            const config_text = try gpa.print("[http]\nproxy = {s}\nsslVerify = false\n", .{proxy_url});
+            const config_text = try gpa.print("[http]\nproxy = {s}\n", .{proxy_url});
             defer gpa.free(config_text);
             var config = try config_mod.Config.parseText(gpa, config_text, .command);
             defer config.deinit();
             var git_work = testing.tmpDir(.{ .iterate = true });
             defer git_work.cleanup();
-            const cloned = try testremote.gitInputEnv(gpa, io, git_work.dir, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "clone", "-q", url, "clone" }, "", true);
+            const cloned = try testremote.gitInputEnv(gpa, io, git_work.dir, &env, &.{ "-c", setting, "clone", "-q", url, "clone" }, "", true);
             gpa.free(cloned);
             const theirs = try proxy.take(gpa);
             defer gpa.free(theirs);
@@ -1316,18 +1373,18 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             const our_log = try proxy.take(gpa);
             defer gpa.free(our_log);
             try testing.expect(theirs.len != 0 and our_log.len != 0);
-            const expected_kind = if (std.mem.eql(u8, scheme, "socks4a") or std.mem.eql(u8, scheme, "socks5h")) " name localhost:" else if (std.mem.eql(u8, scheme, "socks4")) " ipv4 127.0.0.1:" else " ipv";
+            const expected_kind = socksKind(scheme);
             try testing.expect(std.mem.find(u8, theirs, expected_kind) != null);
             try testing.expect(std.mem.find(u8, our_log, expected_kind) != null);
             var by_git = try git_work.dir.openDir(io, "clone", .{});
             defer by_git.close(io);
-            try repo.editConfig(io, &.{ .{ .name = "http.proxy", .value = "http://127.0.0.1:9" }, .{ .name = "remote.origin.proxy", .value = proxy_url }, .{ .name = "http.sslVerify", .value = "false" } }, null);
+            try repo.editConfig(io, &.{ .{ .name = "http.proxy", .value = "http://127.0.0.1:9" }, .{ .name = "remote.origin.proxy", .value = proxy_url } }, null);
             var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
             defer fetched.deinit();
-            const fetched_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "fetch", "-q", "origin" }, "", true);
+            const fetched_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "fetch", "-q", "origin" }, "", true);
             gpa.free(fetched_git);
             // Both clients push new objects, from identical commits.
-            const commit_text = try gpa.print("{s} {s}\n", .{ scheme, if (secure) "https" else "http" });
+            const commit_text = try gpa.print("{s} http\n", .{scheme});
             defer gpa.free(commit_text);
             for ([_]Io.Dir{ by_git, ours.dir }) |dir| {
                 try dir.writeFile(io, .{ .sub_path = "socks.txt", .data = commit_text });
@@ -1336,15 +1393,15 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
                 const committed = try testremote.gitInput(gpa, io, dir, &.{ "commit", "-q", "-m", commit_text }, "");
                 gpa.free(committed);
             }
-            const git_ref = try gpa.print("refs/heads/socks-git-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            const git_ref = try gpa.print("refs/heads/socks-git-{s}", .{scheme});
             defer gpa.free(git_ref);
-            const relic_ref = try gpa.print("refs/heads/socks-relic-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            const relic_ref = try gpa.print("refs/heads/socks-relic-{s}", .{scheme});
             defer gpa.free(relic_ref);
             const git_spec = try gpa.print("HEAD:{s}", .{git_ref});
             defer gpa.free(git_spec);
             const relic_spec = try gpa.print("HEAD:{s}", .{relic_ref});
             defer gpa.free(relic_spec);
-            const pushed_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "push", "-q", "origin", git_spec }, "", true);
+            const pushed_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "push", "-q", "origin", git_spec }, "", true);
             gpa.free(pushed_git);
             var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });
             defer pushed.deinit();
@@ -1363,53 +1420,29 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
     try testing.expect(counts.tls > 0 and counts.plain > 0);
 }
 
-test "SOCKS authentication failures, refused commands and unreachable hosts keep their names" {
+test "a SOCKS proxy's refusals reach a fetch by name: credentials refused, commands refused, hosts unreachable" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const target: httpclient.Target = .{ .tls = false, .host = "remote.invalid", .port = 80 };
+    const url = "http://remote.invalid/repo.git";
     for ([_][]const u8{ "socks4a", "socks5h" }) |scheme| {
         const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
         defer proxy.stop();
         for ([_][]const u8{ "wrong:secret@", "ada:wrong@", "" }) |userinfo| {
             // SOCKS4 authenticates the userid; its password is not sent.
             if (std.mem.eql(u8, scheme, "socks4a") and std.mem.eql(u8, userinfo, "ada:wrong@")) continue;
-            var arena: std.heap.ArenaAllocator = .init(gpa);
-            defer arena.deinit();
-            const text = try proxy.url(arena.allocator(), scheme, userinfo);
-            var client: httpclient.Client = .init(gpa, io);
-            defer client.deinit();
-            client.proxy = try httpclient.Proxy.parse(arena.allocator(), text, 1080);
-            try testing.expectError(error.ProxyAuthenticationRequired, client.connect(target, null));
+            const text = try proxy.url(gpa, scheme, userinfo);
+            defer gpa.free(text);
+            try testing.expectError(error.ProxyAuthenticationFailed, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .proxy = .{ .url = text } }));
         }
     }
-    const errors = [_]httpclient.Error{ error.ProxyRefused, error.ProxyRefused, error.ProxyNetworkUnreachable, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyTtlExpired, error.ProxyCommandUnsupported, error.ProxyAddressUnsupported };
+    // RFC 1928's reply codes, 1 to 8.
+    const errors = [_]transport.Error{ error.ProxyRefused, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyAddressUnsupported };
     for (errors, 1..) |expected, code| {
         const proxy = try testremote.SocksProxy.start(gpa, io, .{ .reply_code = @intCast(code) });
         defer proxy.stop();
-        var client: httpclient.Client = .init(gpa, io);
-        defer client.deinit();
-        client.proxy = .{ .host = "127.0.0.1", .port = proxy.port, .socks_version = .socks5h };
-        var diagnostic: httpclient.Diagnostic = .init(gpa);
-        defer diagnostic.deinit();
-        try testing.expectError(expected, client.connect(target, &diagnostic));
-        try testing.expectEqual(code, diagnostic.proxy_status.?);
-    }
-}
-
-test "a stalled SOCKS negotiation is bounded by connect and handshake timeouts" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    for ([_]httpclient.Timeouts{
-        .{ .connect = .fromMilliseconds(20) },
-        .{ .handshake = .fromMilliseconds(20) },
-    }) |timeouts| {
-        const proxy = try testremote.SocksProxy.start(gpa, io, .{ .stall = true });
-        defer proxy.stop();
-        var client: httpclient.Client = .init(gpa, io);
-        defer client.deinit();
-        client.proxy = .{ .host = "127.0.0.1", .port = proxy.port, .socks_version = .socks5h };
-        client.timeouts = timeouts;
-        try testing.expectError(error.TimedOut, client.connect(.{ .tls = false, .host = "remote.invalid", .port = 80 }, null));
+        const text = try proxy.url(gpa, "socks5h", "");
+        defer gpa.free(text);
+        try testing.expectError(expected, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .proxy = .{ .url = text } }));
     }
 }
 

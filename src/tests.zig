@@ -30,6 +30,11 @@ test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(worktree, "platstat"));
     try std.testing.expect(!@hasDecl(lfs, "timetext"));
     try std.testing.expect(!@hasDecl(lfs, "mimesniff"));
+    try std.testing.expect(!@hasDecl(transport, "httpclient"));
+    try std.testing.expect(!@hasDecl(transport, "httpauth"));
+    try std.testing.expect(!@hasDecl(transport, "tls"));
+    try std.testing.expect(!@hasDecl(transport, "clientcert"));
+    try std.testing.expect(!@hasDecl(lfs.lfsapi, "timeoutsFor"));
 }
 
 test {
@@ -94,7 +99,6 @@ test {
         _ = @import("transport/clientcert_test.zig");
         _ = @import("odb/inflate_test.zig");
         _ = @import("merge/strategy_test.zig");
-        _ = @import("testing/tls_fork.zig");
         _ = @import("transport/bundle_test.zig");
         _ = @import("patch/apply_test.zig");
         _ = @import("patch/format_test.zig");
@@ -166,7 +170,6 @@ test {
     _ = @import("transport/connection.zig");
     _ = @import("transport/fetchpack.zig");
     _ = @import("transport/filterspec.zig");
-    _ = @import("transport/httpauth.zig");
     _ = @import("transport/httpsettings.zig");
     _ = @import("transport/pktline.zig");
     _ = @import("transport/protocol.zig");
@@ -174,9 +177,8 @@ test {
     _ = @import("transport/remote.zig");
     _ = @import("transport/sendpack.zig");
     _ = @import("transport/sideband.zig");
-    _ = @import("transport/socks.zig");
+    _ = @import("transport/smarthttp.zig");
     _ = @import("transport/ssh.zig");
-    _ = @import("transport/tls/auth_wire.zig");
     _ = @import("transport/uploadpack.zig");
     _ = @import("unicodewidth.zig");
     _ = @import("worktree/convert.zig");

@@ -8,6 +8,9 @@ zig build bench -Doptimize=ReleaseFast
 ./zig-out/bench/relic-regressions
 ```
 
+Select one row with `zig build bench -Doptimize=ReleaseFast
+-Dbench-filter="smart HTTP"`, then run the same executable.
+
 `relic-regressions` builds its repositories with the `git` on the path, in
 temporary directories, and prints each measurement with the condition it is
 held to:
@@ -25,7 +28,11 @@ held to:
 - `status` over a tree with an ignore file in every directory;
 - `for-each-ref` choosing among 20,000 packed refs by pattern;
 - unified bodies, line counts and content merges of 400 files, and a blame
-  through 200 commits.
+  through 200 commits;
+- smart HTTP on loopback over one kept connection, against a server that
+  answers from memory: a 256 MiB answer read through its pkt-lines, and
+  small exchanges per second.
+  LFS downloads also time a 256 MiB object through SHA-256 and its store.
 
 A Debug build measures a smaller tree with the same ratios. `-Dbench-smoke`
 builds it to run every measurement once on a tiny tree without reading a

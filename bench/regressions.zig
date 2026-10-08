@@ -854,6 +854,193 @@ test "benchmark: blame follows a file through a long history" {
     , .{ @tagName(builtin.optimize), rounds, blame_ms });
 }
 
+/// A smart HTTP server on loopback that answers from memory: the same
+/// advertisement to every `GET`, the same answer to every `POST`, on a
+/// kept connection. What is timed is the client.
+const CannedServer = struct {
+    io: Io,
+    listener: Io.net.Server,
+    port: u16,
+    answer: []const u8,
+    mode: enum { smart, lfs },
+    oid: [64]u8 = undefined,
+    task: Io.Future(void) = undefined,
+    stopping: std.atomic.Value(bool) = .init(false),
+
+    const advertisement = "001e# service=git-upload-pack\n0000" ++ "0000";
+
+    fn start(io: Io, answer: []const u8, mode: @FieldType(CannedServer, "mode")) !*CannedServer {
+        const s = try std.heap.smp_allocator.create(CannedServer);
+        errdefer std.heap.smp_allocator.destroy(s);
+        var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+        errdefer listener.deinit(io);
+        s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .answer = answer, .mode = mode };
+        if (mode == .lfs) {
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(answer, &digest, .{});
+            s.oid = std.fmt.bytesToHex(digest, .lower);
+        }
+        s.task = try io.concurrent(serve, .{s});
+        return s;
+    }
+
+    fn stop(s: *CannedServer) void {
+        // The accept is woken by a connection of the server's own.
+        s.stopping.store(true, .release);
+        const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable; // unreachable: a literal address
+        if (address.connect(s.io, .{ .mode = .stream })) |stream| stream.close(s.io) else |_| {}
+        s.task.await(s.io);
+        s.listener.deinit(s.io);
+        std.heap.smp_allocator.destroy(s);
+    }
+
+    /// One client at a time, as the bench has.
+    fn serve(s: *CannedServer) void {
+        while (true) {
+            const stream = s.listener.accept(s.io) catch return;
+            defer stream.close(s.io);
+            if (s.stopping.load(.acquire)) return;
+            s.handle(stream) catch {};
+        }
+    }
+
+    fn handle(s: *CannedServer, stream: Io.net.Stream) !void {
+        var read_buffer: [64 * 1024]u8 = undefined;
+        var write_buffer: [64 * 1024]u8 = undefined;
+        var reader = stream.reader(s.io, &read_buffer);
+        var writer = stream.writer(s.io, &write_buffer);
+        var server = std.http.Server.init(&reader.interface, &writer.interface);
+        while (true) {
+            var request = try server.receiveHead();
+            if (s.mode == .lfs) {
+                if (request.head.method == .GET) {
+                    try request.respond(s.answer, .{ .keep_alive = false });
+                } else {
+                    var body_buffer: [4096]u8 = undefined;
+                    _ = try (try request.readerExpectContinue(&body_buffer)).discardRemaining();
+                    const batch = try std.heap.smp_allocator.print(
+                        "{{\"objects\":[{{\"oid\":\"{s}\",\"size\":{d},\"actions\":{{\"download\":{{\"href\":\"http://127.0.0.1:{d}/object\"}}}}}}]}}",
+                        .{ &s.oid, s.answer.len, s.port },
+                    );
+                    defer std.heap.smp_allocator.free(batch);
+                    try request.respond(batch, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/vnd.git-lfs+json" }} });
+                }
+                return;
+            }
+            if (request.head.method == .GET) {
+                try request.respond(advertisement, .{ .extra_headers = &.{.{ .name = "Content-Type", .value = "application/x-git-upload-pack-advertisement" }} });
+                continue;
+            }
+            var body_buffer: [4096]u8 = undefined;
+            _ = try (try request.readerExpectContinue(&body_buffer)).discardRemaining();
+            try request.respond(s.answer, .{ .extra_headers = &.{.{ .name = "Content-Type", .value = "application/x-git-upload-pack-result" }} });
+        }
+    }
+};
+
+/// An upload-pack answer carrying `size` bytes of pack on side-band 1, in
+/// git's largest packets.
+fn sidebandAnswer(gpa: std.mem.Allocator, size: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "0008NAK\n");
+    const chunk = 65515;
+    var left = size;
+    while (left > 0) {
+        const n = @min(left, chunk);
+        try out.print(gpa, "{x:0>4}\x01", .{n + 5});
+        try out.appendNTimes(gpa, 'P', n);
+        left -= n;
+    }
+    try out.appendSlice(gpa, "0000");
+    return out.toOwnedSlice(gpa);
+}
+
+/// Send a request on `conn` and read its answer's pkt-lines to the flush:
+/// the bytes they carried.
+fn exchange(conn: *relic.transport.connection.Connection) !usize {
+    const w = try conn.request();
+    try w.writeAll("0032want 0000000000000000000000000000000000000000\n00000009done\n");
+    const r = try conn.response();
+    var carried: usize = 0;
+    while (true) switch (try conn.readPacket(r)) {
+        .data => |d| carried += d.len,
+        .flush => return carried,
+        .delim, .response_end => {},
+    };
+}
+
+test "benchmark: smart HTTP carries a large answer, and many small ones, over one connection" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    const size: usize = if (smoke) 1 << 20 else 256 << 20;
+    const big = try sidebandAnswer(gpa, size);
+    defer gpa.free(big);
+    var timings: [2]f64 = undefined;
+    for ([_][]const u8{ big, "0008NAK\n0000" }, 0..) |answer, row| {
+        const server = try CannedServer.start(io, answer, .smart);
+        defer server.stop();
+        var url_buf: [64]u8 = undefined;
+        const url = try relic.transport.url.Url.parse(try std.mem.print(&url_buf, "http://127.0.0.1:{d}/repo.git", .{server.port}));
+        const conn = try relic.transport.smarthttp.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
+        defer conn.close(io);
+        const Pass = struct {
+            conn: *relic.transport.connection.Connection,
+            rounds: usize,
+            fn run(p: @This()) void {
+                for (0..p.rounds) |_| std.mem.doNotOptimizeAway(exchange(p.conn) catch unreachable);
+            }
+        };
+        const rounds: usize = if (row == 0) 1 else if (smoke) 10 else 20_000;
+        timings[row] = bestMs(io, if (smoke) 1 else 5, Pass{ .conn = conn, .rounds = rounds }, Pass.run);
+    }
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, smart HTTP on loopback, one kept connection)
+        \\    {d} MiB answer   {d: >8.1} MB/s
+        \\    small exchanges  {d: >8.0} per second
+        \\
+    , .{ @tagName(builtin.optimize), size >> 20, @as(f64, @floatFromInt(size)) / 1e6 / (timings[0] / 1000), 20_000 / (timings[1] / 1000) });
+}
+
+test "benchmark: LFS downloads hash and store a large object" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    const size: usize = if (smoke) 1 << 20 else 256 << 20;
+    const content = try gpa.alloc(u8, size);
+    defer gpa.free(content);
+    @memset(content, 'L');
+    const server = try CannedServer.start(io, content, .lfs);
+    defer server.stop();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
+    const objects = [_]relic.lfs.lfstransfer.Object{.{ .oid = std.fmt.bytesToHex(digest, .lower), .size = size }};
+    var repo_git = try testgit.Repo.init(gpa, io);
+    defer repo_git.deinit();
+    const url = try gpa.print("http://127.0.0.1:{d}/repo.git", .{server.port});
+    defer gpa.free(url);
+    try repo_git.exec(io, &.{ "remote", "add", "origin", url });
+    var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
+    defer repo.deinit(io);
+    const lfs_server = try relic.lfs.lfsapi.Server.open(gpa, io, &repo, "origin", .{});
+    defer lfs_server.close();
+    const Pass = struct {
+        server: *relic.lfs.lfsapi.Server,
+        dir: Io.Dir,
+        io: Io,
+        objects: []const relic.lfs.lfstransfer.Object,
+        fn run(p: @This()) void {
+            p.dir.deleteTree(p.io, ".git/lfs/objects") catch unreachable;
+            var outcome = relic.lfs.lfstransfer.download(p.server, p.objects, .{ .concurrency = 1 }) catch unreachable;
+            defer outcome.deinit();
+            std.debug.assert(outcome.failures() == 0);
+            std.debug.assert(outcome.results[0].status == .transferred);
+        }
+    };
+    const ms = bestMs(io, if (smoke) 1 else 5, Pass{ .server = lfs_server, .dir = repo_git.dir, .io = io, .objects = &objects }, Pass.run);
+    if (!smoke) std.debug.print("\n  relic benchmark ({s}, LFS download, SHA-256 and store)\n    {d} MiB object {d:.1} MB/s\n", .{ @tagName(builtin.optimize), size >> 20, @as(f64, @floatFromInt(size)) / 1e6 / (ms / 1000) });
+}
+
 // Smoke exercises correctness without sampling a benchmark clock.
 var smoke_ticks = std.atomic.Value(i64).init(0);
 fn benchmarkNow(io: std.Io) std.Io.Timestamp {

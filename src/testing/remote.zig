@@ -16,6 +16,7 @@ const Environ = std.process.Environ;
 
 const program = @import("../repo/program.zig");
 const testgit = @import("git.zig");
+const uplink = @import("../dependencies.zig").uplink;
 
 /// The environment a program started by a test sees: the test's own `PATH`
 /// and what Windows needs (`testgit.keepSystemVariables`), isolated as
@@ -155,7 +156,7 @@ pub fn capturingSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
 /// An HTTP server on 127.0.0.1 that hands every request to
 /// `git http-backend` as a CGI program, which is git's own smart HTTP
 /// server. Connections are served independently so an idle client cannot
-/// hold up another, including when the TLS front connects before a request.
+/// hold up another.
 pub const HttpServer = struct {
     gpa: Allocator,
     io: Io,
@@ -449,16 +450,21 @@ pub const HttpServer = struct {
     }
 };
 
-/// A TLS front for a server on this machine: `python3`'s `ssl` module
-/// terminating TLS on 127.0.0.1 with a certificate made here by `openssl`
-/// for `127.0.0.1`, and handing the bytes to `backend_port`. The standard
-/// library has a TLS client and no TLS server, and a test of what a client
-/// trusts needs one. `error.SkipZigTest` where either program is missing.
+/// TLS on 127.0.0.1 in front of answers a test writes beforehand:
+/// `openssl s_server -HTTP` answers each `GET /<target>` with the file
+/// `<target>` under its directory, which holds a whole HTTP response, and
+/// then closes the connection. The standard library has a TLS client and no
+/// TLS server, and a test of what a client trusts and presents needs one;
+/// OpenSSL's answers only `GET`, so what goes through it asks nothing more:
+/// a fetch whose objects are already here, an object's download. One
+/// connection at a time. `error.SkipZigTest` without `openssl`.
 pub const TlsFront = struct {
     gpa: Allocator,
     running: program.Running,
     env: Environ.Map,
     dir: std.testing.TmpDir,
+    /// The directory the answers are read from.
+    www: Io.Dir,
     /// The port TLS is served on.
     port: u16,
     /// The certificate, which is its own authority: a PEM file.
@@ -466,59 +472,6 @@ pub const TlsFront = struct {
     /// A directory holding the certificate under its OpenSSL hash name,
     /// as `http.sslCAPath` wants one.
     ca_dir: []u8,
-
-    const script =
-        \\import os, select, socket, ssl, sys, threading
-        \\cert, key, backend = sys.argv[1], sys.argv[2], int(sys.argv[3])
-        \\client_ca, version = sys.argv[4], sys.argv[5]
-        \\ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        \\ctx.load_cert_chain(cert, key)
-        \\if client_ca:
-        \\    ctx.verify_mode = ssl.CERT_REQUIRED
-        \\    ctx.load_verify_locations(client_ca)
-        \\if version == "1.2":
-        \\    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-        \\ls = socket.socket()
-        \\ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        \\ls.bind(("127.0.0.1", 0))
-        \\ls.listen(16)
-        \\print(ls.getsockname()[1], flush=True)
-        \\# The test process owns stdin. Even an assertion panic closes the
-        \\# pipe, so a front orphaned by a failed test cannot keep serving.
-        \\def end_with_parent():
-        \\    sys.stdin.buffer.read()
-        \\    os._exit(0)
-        \\threading.Thread(target=end_with_parent, daemon=True).start()
-        \\# One thread per connection, and one TLS state used by it alone.
-        \\def serve(c):
-        \\    try: s = ctx.wrap_socket(c, server_side=True)
-        \\    except Exception:
-        \\        # The alert is sent; close without a reset, which would
-        \\        # take it from the client before it is read.
-        \\        try:
-        \\            c.shutdown(socket.SHUT_WR); c.settimeout(5)
-        \\            while c.recv(65536): pass
-        \\        except Exception: pass
-        \\        c.close(); return
-        \\    u = socket.create_connection(("127.0.0.1", backend))
-        \\    try:
-        \\        while True:
-        \\            ready = [s] if s.pending() else select.select([s, u], [], [])[0]
-        \\            if s in ready:
-        \\                d = s.recv(65536)
-        \\                if not d: break
-        \\                u.sendall(d)
-        \\            if u in ready:
-        \\                d = u.recv(65536)
-        \\                if not d: break
-        \\                s.sendall(d)
-        \\    except Exception: pass
-        \\    s.close(); u.close()
-        \\while True:
-        \\    c, _ = ls.accept()
-        \\    threading.Thread(target=serve, args=(c,), daemon=True).start()
-        \\
-    ;
 
     /// How the front is set up besides its certificate.
     pub const Options = struct {
@@ -528,20 +481,15 @@ pub const TlsFront = struct {
         /// Speak TLS 1.2 at most.
         tls12: bool = false,
         /// An RSA key for the front's own certificate, which TLS 1.2 needs
-        /// for the ECDHE-RSA suites relic's client speaks.
+        /// for the ECDHE-RSA suites the standard library's client speaks.
         rsa: bool = false,
     };
 
-    /// Make a certificate and start serving TLS in front of `backend_port`.
-    pub fn start(gpa: Allocator, io: Io, backend_port: u16) !*TlsFront {
-        return startWith(gpa, io, backend_port, .{});
-    }
-
-    /// `start`, set up as `options` says.
-    pub fn startWith(gpa: Allocator, io: Io, backend_port: u16, options: Options) !*TlsFront {
+    /// Make a certificate and start serving TLS.
+    pub fn start(gpa: Allocator, io: Io, options: Options) !*TlsFront {
         const f = try gpa.create(TlsFront);
         errdefer gpa.destroy(f);
-        var env = try environ(gpa);
+        var env = try opensslEnviron(gpa);
         errdefer env.deinit();
         var dir = std.testing.tmpDir(.{ .iterate = true });
         errdefer dir.cleanup();
@@ -580,25 +528,68 @@ pub const TlsFront = struct {
         defer gpa.free(ca_name);
         try dir.dir.copyFile("cert.pem", dir.dir, ca_name, io, .{});
 
-        var port_buf: [8]u8 = undefined;
-        const backend = try std.mem.print(&port_buf, "{d}", .{backend_port});
+        try dir.dir.createDirPath(io, "www");
+        var www = try dir.dir.openDir(io, "www", .{});
+        errdefer www.close(io);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        // The answers are read as bytes, which Windows would read as text.
+        try argv.appendSlice(gpa, &.{ "openssl", "s_server", "-accept", "127.0.0.1:0", "-cert", cert_path, "-key", key_path, "-HTTP", "-http_server_binmode" });
+        if (options.client_ca) |ca| try argv.appendSlice(gpa, &.{ "-Verify", "1", "-verify_return_error", "-CAfile", ca });
+        if (options.tls12) try argv.append(gpa, "-tls1_2");
         var running = program.start(.{ .environ = &env }, gpa, io, .{
-            .argv = &.{ "python3", "-c", script, cert_path, key_path, backend, options.client_ca orelse "", if (options.tls12) "1.2" else "" },
+            .argv = argv.items,
+            .cwd = .{ .dir = www },
             .stderr = .ignore,
         }) catch return error.SkipZigTest;
         errdefer running.deinit(io);
-        var line_buf: [32]u8 = undefined;
+        var line_buf: [256]u8 = undefined;
         var reader = running.child.stdoutFile().?.readerStreaming(io, &line_buf);
-        const line = reader.interface.takeDelimiterExclusive('\n') catch return error.SkipZigTest;
-        const port = std.fmt.parseUnsigned(u16, std.mem.trim(u8, line, " \r"), 10) catch return error.SkipZigTest;
-        f.* = .{ .gpa = gpa, .running = running, .env = env, .dir = dir, .port = port, .cert_path = cert_path, .ca_dir = ca_dir };
+        const port = while (true) {
+            const line = reader.interface.takeDelimiterExclusive('\n') catch return error.SkipZigTest;
+            reader.interface.toss(1);
+            const prefix = "ACCEPT 127.0.0.1:";
+            if (!std.mem.startsWith(u8, line, prefix)) continue;
+            break std.fmt.parseUnsigned(u16, std.mem.trim(u8, line[prefix.len..], " \r"), 10) catch return error.SkipZigTest;
+        };
+        f.* = .{ .gpa = gpa, .running = running, .env = env, .dir = dir, .www = www, .port = port, .cert_path = cert_path, .ca_dir = ca_dir };
         return f;
+    }
+
+    /// Answer `GET /<target>` with `response`, a whole HTTP response.
+    /// `error.SkipZigTest` for a target with a query on Windows, where a
+    /// `?` cannot name a file.
+    pub fn answer(f: *TlsFront, io: Io, target: []const u8, response: []const u8) !void {
+        if (builtin.target.os.tag == .windows and std.mem.findScalar(u8, target, '?') != null) return error.SkipZigTest;
+        if (std.Io.Dir.path.dirname(target)) |parent| try f.www.createDirPath(io, parent);
+        try f.www.writeFile(io, .{ .sub_path = target, .data = response });
+    }
+
+    /// Answer git's request for the refs of `repo`, a path under `server`,
+    /// as `server` answers it in protocol v0: the only request a fetch
+    /// makes whose objects are already here.
+    pub fn mirrorRefs(f: *TlsFront, io: Io, server: *HttpServer, repo: []const u8) !void {
+        const gpa = f.gpa;
+        const target = try gpa.print("{s}/info/refs?service=git-upload-pack", .{repo});
+        defer gpa.free(target);
+        const url = try server.url(gpa, target);
+        defer gpa.free(url);
+        var client: uplink.Client = .init(gpa, .{ .decompress = false });
+        defer client.deinit(io);
+        var response = try client.send(io, .{ .url = url });
+        defer response.deinit(io);
+        if (response.status != .ok) return error.TestUnexpectedResult;
+        const body = try response.collect(gpa, io, .limited(1 << 20));
+        defer gpa.free(body);
+        const whole = try gpa.print("HTTP/1.0 200 OK\r\nContent-Type: {s}\r\nCache-Control: no-cache\r\n\r\n{s}", .{ response.headers.get("content-type") orelse "", body });
+        defer gpa.free(whole);
+        try f.answer(io, target, whole);
     }
 
     /// Stop serving and release everything.
     pub fn stop(f: *TlsFront, io: Io) void {
-        f.running.child.closeStdin(io);
         f.running.deinit(io);
+        f.www.close(io);
         f.env.deinit();
         f.gpa.free(f.cert_path);
         f.gpa.free(f.ca_dir);
@@ -607,62 +598,34 @@ pub const TlsFront = struct {
     }
 };
 
-test "a TLS helper exits when a parent test fails without cleanup" {
-    // This test inspects another process with POSIX signals and `ps`.
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
-    const io = std.testing.io;
-    const gpa = std.testing.allocator;
-    const front = try TlsFront.start(gpa, io, 1);
-    defer front.stop(io);
-    const base = try absolutePath(gpa, io, front.dir.dir);
-    defer gpa.free(base);
-    const key = try std.Io.Dir.path.join(gpa, &.{ base, "key.pem" });
-    defer gpa.free(key);
+/// Give `r` every object of `repo.git` under `root`, the directory a test
+/// server serves, through its alternates, and have it speak protocol v0: a
+/// fetch over `TlsFront` then makes the one request the front answers, a
+/// `GET` of the refs.
+pub fn alreadyHas(gpa: Allocator, io: Io, root: Io.Dir, r: *testgit.Repo) !void {
+    const root_path = try absolutePath(gpa, io, root);
+    defer gpa.free(root_path);
+    const objects = try gpa.print("{s}/repo.git/objects\n", .{root_path});
+    defer gpa.free(objects);
+    try r.writeFile(io, ".git/objects/info/alternates", objects);
+    try r.exec(io, &.{ "config", "protocol.version", "0" });
+}
+
+/// `environ`, with OpenSSL 3's own directory first on `PATH` where a
+/// package manager keeps it apart from the system's LibreSSL (macOS), and
+/// on Windows where Git for Windows keeps its `openssl.exe`.
+fn opensslEnviron(gpa: Allocator) !Environ.Map {
     var env = try environ(gpa);
-    defer env.deinit();
-    const failing_parent =
-        \\import os, subprocess, sys
-        \\child = subprocess.Popen(["python3", "-c", sys.argv[1], sys.argv[2], sys.argv[3], "1", "", ""], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        \\if not child.stdout.readline(): sys.exit(2)
-        \\print(child.pid, flush=True)
-        \\os._exit(1)
-    ;
-    var parent = try program.run(.{ .environ = &env }, gpa, io, .{
-        .argv = &.{ "python3", "-c", failing_parent, TlsFront.script, front.cert_path, key },
-    }, "", .{});
-    defer parent.deinit(gpa);
-    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, parent.term);
-    const pid = std.mem.trim(u8, parent.stdout, "\r\n");
-    const check =
-        \\import os, signal, subprocess, sys, time
-        \\pid = int(sys.argv[1])
-        \\certificate = sys.argv[2]
-        \\def alive():
-        \\    try: os.kill(pid, 0)
-        \\    except ProcessLookupError: return False
-        \\    if sys.platform.startswith("linux"):
-        \\        try:
-        \\            with open(f"/proc/{pid}/stat") as stat:
-        \\                if stat.read().split(") ", 1)[1][0] == "Z": return False
-        \\            with open(f"/proc/{pid}/cmdline", "rb") as command:
-        \\                return os.fsencode(certificate) in command.read()
-        \\        except FileNotFoundError: return False
-        \\    state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
-        \\    if state.returncode != 0 or state.stdout.strip().startswith("Z"): return False
-        \\    command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
-        \\    return command.returncode == 0 and certificate in command.stdout
-        \\for _ in range(200):
-        \\    if not alive(): sys.exit(0)
-        \\    time.sleep(.01)
-        \\try: os.kill(pid, signal.SIGKILL)
-        \\except ProcessLookupError: sys.exit(0)
-        \\sys.exit(1)
-    ;
-    var result = try program.run(.{ .environ = &env }, gpa, io, .{
-        .argv = &.{ "python3", "-c", check, pid, front.cert_path },
-    }, "", .{});
-    defer result.deinit(gpa);
-    try std.testing.expect(result.succeeded());
+    errdefer env.deinit();
+    const before: []const u8 = switch (builtin.target.os.tag) {
+        .macos => "/opt/homebrew/opt/openssl@3/bin:/usr/local/opt/openssl@3/bin:",
+        .windows => "C:\\Program Files\\Git\\usr\\bin;",
+        else => return env,
+    };
+    const path = try std.mem.concat(gpa, u8, &.{ before, env.get("PATH") orelse "" });
+    defer gpa.free(path);
+    try env.put("PATH", path);
+    return env;
 }
 
 /// Certificates made for one test by `openssl`: an authority for clients,
@@ -685,7 +648,7 @@ pub const Pki = struct {
     pub fn make(gpa: Allocator, io: Io) !*Pki {
         const p = try gpa.create(Pki);
         errdefer gpa.destroy(p);
-        var env = try environ(gpa);
+        var env = try opensslEnviron(gpa);
         errdefer env.deinit();
         var dir = std.testing.tmpDir(.{ .iterate = true });
         errdefer dir.cleanup();

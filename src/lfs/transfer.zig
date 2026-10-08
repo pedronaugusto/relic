@@ -1359,16 +1359,30 @@ const Partial = struct {
         var buf: [64 * 1024]u8 = undefined;
         var at = p.from;
         while (true) {
-            const n = counting.interface.readSliceShort(&buf) catch {
-                // Broken off: what came is kept for the next attempt.
-                p.keep = at > 0;
-                return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } };
-            };
-            if (n == 0) break;
+            // Filled as far as the body goes, and what came before a break
+            // is kept like the rest.
+            var n: usize = 0;
+            var broken = false;
+            while (n < buf.len) {
+                var w: Io.Writer = .fixed(buf[n..]);
+                n += counting.interface.stream(&w, .limited(buf.len - n)) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.ReadFailed => {
+                        broken = true;
+                        break;
+                    },
+                    error.WriteFailed => unreachable, // unreachable: the limit is the room the writer has
+                };
+            }
             if (at + n > size) return .{ .fail = "the server sent more than the object's size" };
             p.sha.update(buf[0..n]);
             try p.file.writePositionalAll(io, buf[0..n], at);
             at += n;
+            if (broken) {
+                // Broken off: what came is kept for the next attempt.
+                p.keep = at > 0;
+                return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } };
+            }
             if (n < buf.len) break;
         }
         counting.flush();
@@ -1424,7 +1438,10 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
             // asks for gzip itself without one.
             .accept = if (attempt_range) .none else req.accept,
         }) catch |err| switch (err) {
-            error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects => {
+            // Nothing answered: git-lfs tries a request again whenever no
+            // response came, the TLS handshake and the proxy refusing it
+            // as much as the connection failing.
+            error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects, error.ClientCertificateRejected, error.ClientCertificateSchemeUnsupported, error.ProxyRefused, error.ProxyAuthenticationRequired, error.ProxyAuthMethodUnsupported, error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError, error.MalformedResponse => {
                 partial.keep = partial.from > 0;
                 return .{ .done = .{ .retry = .{ .message = try state.dupe(server.client.message()) } } };
             },
@@ -1479,7 +1496,8 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
         .on_bytes = .{ .context = state, .add = addBytes },
         .sent = &sent,
     }) catch |err| switch (err) {
-        error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects => {
+        // Nothing answered, as for a download.
+        error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects, error.ClientCertificateRejected, error.ClientCertificateSchemeUnsupported, error.ProxyRefused, error.ProxyAuthenticationRequired, error.ProxyAuthMethodUnsupported, error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError, error.MalformedResponse => {
             // What went out of an attempt that failed is taken back off the
             // count, as git-lfs rewinds its meter.
             state.say(.{ .unsent = sent });

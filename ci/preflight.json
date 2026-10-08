@@ -5,6 +5,7 @@
   "test_roots": [
     "src/tests.zig"
   ],
+  "test_dependencies": ["shakedown"],
   "test_support": [
     "src/testing/**",
     "bench/scratchgit.zig"
@@ -34,19 +35,11 @@
     }
   },
   "ziglint_exceptions": "ci/ziglint-exceptions.json",
-  "vendored": {
-    "src/transport/tls/Client.zig": "Zig standard-library TLS client fork, held byte for byte to its recorded patch by src/testing/tls_fork.zig and zig build check-tls-fork."
-  },
   "extra_checks": [
     [
       "zig",
       "build",
       "check-ci-setup"
-    ],
-    [
-      "zig",
-      "build",
-      "check-tls-fork"
     ]
   ],
   "unreachable_exceptions": "ci/unreachable-exceptions.json",

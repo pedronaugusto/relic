@@ -27,10 +27,6 @@ pub const hidden = @import("transport/hidden.zig");
 pub const promisors = @import("transport/promisors.zig");
 /// Which proxy an HTTP remote is reached through.
 pub const Proxy = httpsettings.Proxy;
-pub const httpauth = @import("transport/httpauth.zig");
-pub const clientcert = @import("transport/clientcert.zig");
-pub const tls = @import("transport/tls.zig");
-pub const httpclient = @import("transport/httpclient.zig");
 pub const push = @import("transport/push.zig");
 pub const clone = @import("transport/clone.zig");
 pub const fetch = @import("transport/fetch.zig");
