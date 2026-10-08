@@ -214,7 +214,7 @@ pub const Agent = struct {
         w.writeAll(",\"remote\":") catch return error.OutOfMemory;
         writeString(w, init.remote) catch return error.OutOfMemory;
         w.print(",\"concurrent\":{},\"concurrenttransfers\":{d}}}\n", .{ init.concurrent, init.concurrent_transfers }) catch return error.OutOfMemory;
-        try a.send(msg.written());
+        try a.send(io, msg.written());
         const answer = try a.receive(io);
         if (answer.@"error") |e| {
             a.conn.setMessage(e.message);
@@ -234,7 +234,7 @@ pub const Agent = struct {
         var msg: Io.Writer.Allocating = .init(a.gpa);
         defer msg.deinit();
         writeRequest(&msg.writer, request) catch return error.OutOfMemory;
-        try a.send(msg.written());
+        try a.send(io, msg.written());
         while (true) {
             const answer = try a.receive(io);
             if (!std.mem.eql(u8, answer.oid, request.oid)) return error.LfsAdapterProtocolError;
@@ -251,7 +251,7 @@ pub const Agent = struct {
     /// `terminate`, and the process waited for.
     pub fn deinit(a: *Agent, io: Io) void {
         // ziglint-ignore: Z026 terminate is a courtesy; abort, next, ends the agent whether or not it heard it
-        a.send("{\"event\":\"terminate\"}\n") catch {};
+        a.send(io, "{\"event\":\"terminate\"}\n") catch {};
         a.abort(io);
     }
 
@@ -262,8 +262,8 @@ pub const Agent = struct {
         a.gpa.destroy(a);
     }
 
-    fn send(a: *Agent, text: []const u8) ErrorNamespace.Error!void {
-        const w = try a.conn.request();
+    fn send(a: *Agent, io: Io, text: []const u8) ErrorNamespace.Error!void {
+        const w = (try connection.Process.streams(a.conn, io)).writer;
         w.writeAll(text) catch return a.conn.failure();
         w.flush() catch return a.conn.failure();
     }
@@ -278,7 +278,7 @@ pub const Agent = struct {
     };
 
     fn receive(a: *Agent, io: Io) ErrorNamespace.Error!Answer {
-        const r = try a.conn.advertisement();
+        const r = (try connection.Process.streams(a.conn, io)).reader;
         a.line.clearRetainingCapacity();
         _ = r.streamDelimiterEnding(&a.line.writer, '\n') catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,

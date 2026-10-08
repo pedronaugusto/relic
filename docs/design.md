@@ -18,7 +18,8 @@ owning mutable state. Production implementation imports point downward rather
 than through publishing facades. Test fixtures live in testing modules and do not
 create production dependencies upward. Stateful owners release their resources
 through deinit. Public functions group policy and optional inputs in named options, with one
-canonical operation instead of parallel With variants. Index read options carry
+canonical operation instead of parallel With variants. Index.read is the
+constructor exception: reading describes its creation operation. Index read options carry
 a premeasured timestamp resolution when a repository already has one. Public
 functions name error sets and distinguish refusal from an
 empty successful result.
@@ -28,7 +29,11 @@ cache. Checkout accepts neutral native-filter providers and drivers; it does not
 know LFS commands or storage. Clone and push accept neutral callbacks that upper
 LFS composition supplies. A native filter session owns its resources and copies
 configuration needed after the caller returns. Snapshot redirects object writes
-through the same provider contract. Operation I/O is supplied by the caller.
+through the same provider contract. Operation I/O is supplied by the caller. Cached native process buffers preserve
+unconsumed bytes, but each exclusive stream borrow binds reads and writes to the
+current operation. SSH holds its mutex through the request and answer; custom
+adapters have one caller per conversation. Read/write failures and cancellation
+return explicitly and never publish a partial lock cache.
 
 ## Publication and failure
 

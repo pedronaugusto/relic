@@ -284,3 +284,72 @@ test "concurrent agents start as many as git-lfs starts, one when not concurrent
     try fx.git(refusing, &.{ "config", "lfs.customtransfer.agent.args", args });
     try testing.expectError(error.LfsAdapterInitFailed, relicUpload(&fx, refusing));
 }
+
+test "phase2 cached custom adapter uses the transfer Io for pipe reads and writes" {
+    const custom = @import("custom.zig");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects");
+    try tmp.dir.createDirPath(io, "logs");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const args = try gpa.print("'{s}/objects' '{s}/logs'", .{ root, root });
+    defer gpa.free(args);
+    var env = try testlfs.environ(gpa, root);
+    defer env.deinit();
+    const agent = try custom.Agent.open(gpa, io, .{ .environ = &env }, .{
+        .adapter = .{ .name = "agent", .path = suite.path(.lfs_agent), .args = args },
+        .init = .{ .operation = .download, .remote = "origin", .concurrent = false, .concurrent_transfers = 1 },
+    });
+    defer agent.deinit(io);
+    const faults = try @import("shakedown").FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const Progress = struct {
+        pub fn bytes(_: @This(), _: usize) void {}
+    };
+    const result = try agent.transfer(faults.io(), .{ .operation = .download, .oid = "missing", .size = 1 }, Progress{});
+    try testing.expect(result == .failed);
+    try testing.expectEqual(@as(i64, 404), result.failed.code);
+    try testing.expect(faults.count(.file_read_streaming) > 0);
+    try testing.expect(faults.count(.file_write_streaming) > 0);
+}
+
+test "phase2 cached custom adapter refuses pipe failure and cancellation through the transfer Io" {
+    const custom = @import("custom.zig");
+    const shakedown = @import("shakedown");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cases = [_]struct { call: shakedown.IoCall, fault: error{ InputOutput, Canceled }, expected: custom.Error }{
+        .{ .call = .file_read_streaming, .fault = error.InputOutput, .expected = error.ConnectionFailed },
+        .{ .call = .file_write_streaming, .fault = error.InputOutput, .expected = error.ConnectionFailed },
+        .{ .call = .file_read_streaming, .fault = error.Canceled, .expected = error.Canceled },
+        .{ .call = .file_write_streaming, .fault = error.Canceled, .expected = error.Canceled },
+    };
+    for (cases) |case| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDirPath(io, "objects");
+        try tmp.dir.createDirPath(io, "logs");
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+        const args = try gpa.print("'{s}/objects' '{s}/logs'", .{ root, root });
+        defer gpa.free(args);
+        var env = try testlfs.environ(gpa, root);
+        defer env.deinit();
+        const agent = try custom.Agent.open(gpa, io, .{ .environ = &env }, .{
+            .adapter = .{ .name = "agent", .path = suite.path(.lfs_agent), .args = args },
+            .init = .{ .operation = .download, .remote = "origin", .concurrent = false, .concurrent_transfers = 1 },
+        });
+        defer agent.deinit(io);
+        const plan = [_]shakedown.FaultIo.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = case.call, .n = 1 } }, .fault = .{ .fail = case.fault } }};
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+        defer faults.deinit();
+        const Progress = struct {
+            pub fn bytes(_: @This(), _: usize) void {}
+        };
+        try testing.expectError(case.expected, agent.transfer(faults.io(), .{ .operation = .download, .oid = "missing", .size = 1 }, Progress{}));
+        try testing.expect(faults.count(case.call) > 0);
+    }
+}

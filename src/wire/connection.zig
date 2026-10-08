@@ -215,7 +215,6 @@ const Tail = struct {
 /// program that stops when it fills.
 pub const Process = struct {
     gpa: Allocator,
-    io: Io,
     running: program.Running,
     read_buffer: []u8,
     write_buffer: []u8,
@@ -284,7 +283,6 @@ pub const Process = struct {
         }
         p.* = .{
             .gpa = gpa,
-            .io = io,
             .running = running,
             .read_buffer = read_buffer,
             .write_buffer = write_buffer,
@@ -348,6 +346,7 @@ pub const Process = struct {
 
     fn close(io: Io, context: *anyopaque) void {
         const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
+        p.writer.io = io;
         if (!p.exited) {
             // The end of the conversation: the program's input ends, and so
             // does this side's interest in its output, so a program still
@@ -391,6 +390,17 @@ pub const Process = struct {
         return @ptrCast(@alignCast(c.context)); // safe: the vtable is this type's, which only start installs, beside a Process
     }
 
+    /// Borrow a native process's buffered streams for one exclusive operation.
+    /// Buffer contents survive between operations, while reads and writes use
+    /// this operation's Io. The caller serializes the entire borrow, including
+    /// consumption of any returned bytes. A foreign transport is refused.
+    pub fn streams(c: *Connection, io: Io) Self.Error!struct { reader: *Io.Reader, writer: *Io.Writer } {
+        const p = of(c) orelse return error.ConnectionFailed;
+        p.reader.io = io;
+        p.writer.io = io;
+        return .{ .reader = &p.reader.interface, .writer = &p.writer.interface };
+    }
+
     /// Have what the program writes on its standard error handed to `sink`
     /// as `ssh_said` when the conversation ends well.
     pub fn sayTo(c: *Connection, sink: ?*warning.Warnings) void {
@@ -403,6 +413,7 @@ pub const Process = struct {
     pub fn finish(c: *Connection, io: Io) Self.Error!void {
         const p = of(c) orelse return;
         if (p.exited) return;
+        p.writer.io = io;
         // ziglint-ignore: Z026 a program that stopped reading has ended or will; its exit status, waited for next, is the answer
         p.writer.interface.flush() catch {};
         p.exited = true;
@@ -483,6 +494,7 @@ test "a conversation that is not a program's is not read as one" {
         .close = undefined,
     };
     var c: Connection = .{ .context = &other, .vtable = &vtable, .stateless = false };
+    try std.testing.expectError(error.ConnectionFailed, Process.streams(&c, std.testing.io));
     Process.sayTo(&c, null);
     for (other) |byte| try std.testing.expectEqual(0xaa, byte);
     try Process.finish(&c, std.testing.io);

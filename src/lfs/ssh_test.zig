@@ -589,3 +589,60 @@ test "phase2 LFS SSH pagination ends or explicitly refuses a repeated cursor" {
         }
     }
 }
+
+test "phase2 cached SSH lock connection uses the request Io for pipe reads and writes" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var s = try Ssh.init("");
+    defer s.deinit();
+    var d = try s.repo("ours", &.{});
+    defer d.close(io);
+    var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+    defer repo.deinit(io);
+    const server = try t.openServer(s.fx, &repo);
+    defer server.deinit(io);
+    var warm = try lfslocks.list(io, server, &repo, .{}, .{});
+    warm.deinit();
+    const faults = try @import("shakedown").FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    var result = try lfslocks.list(faults.io(), server, &repo, .{}, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 0), result.locks.len);
+    try testing.expect(faults.count(.file_read_streaming) > 0);
+    try testing.expect(faults.count(.file_write_streaming) > 0);
+}
+
+test "phase2 cached SSH lock connection refuses pipe failure and cancellation without replacing its cache" {
+    const shakedown = @import("shakedown");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cases = [_]struct { call: shakedown.IoCall, fault: error{ InputOutput, Canceled }, expected: lfslocks.Error }{
+        .{ .call = .file_read_streaming, .fault = error.InputOutput, .expected = error.ConnectionFailed },
+        .{ .call = .file_write_streaming, .fault = error.InputOutput, .expected = error.ConnectionFailed },
+        .{ .call = .file_read_streaming, .fault = error.Canceled, .expected = error.Canceled },
+        .{ .call = .file_write_streaming, .fault = error.Canceled, .expected = error.Canceled },
+    };
+    for (cases) |case| {
+        var s = try Ssh.init("");
+        defer s.deinit();
+        var d = try s.repo("ours", &.{});
+        defer d.close(io);
+        var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+        defer repo.deinit(io);
+        const server = try t.openServer(s.fx, &repo);
+        defer server.deinit(io);
+        var warm = try lfslocks.list(io, server, &repo, .{}, .{ .ref = "refs/heads/main" });
+        warm.deinit();
+        const path = "lfs/cache/locks/refs/heads/main/remote";
+        const previous = "[{\"id\":\"old\",\"path\":\"old.bin\"}]\n";
+        try repo.commonDirectory().writeFile(io, .{ .sub_path = path, .data = previous });
+        const plan = [_]shakedown.FaultIo.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = case.call, .n = 1 } }, .fault = .{ .fail = case.fault } }};
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+        defer faults.deinit();
+        try testing.expectError(case.expected, lfslocks.list(faults.io(), server, &repo, .{}, .{ .ref = "refs/heads/main" }));
+        try testing.expect(faults.count(case.call) > 0);
+        const after = try repo.commonDirectory().readFileAlloc(io, path, gpa, .unlimited);
+        defer gpa.free(after);
+        try testing.expectEqualStrings(previous, after);
+    }
+}

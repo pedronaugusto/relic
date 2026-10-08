@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Native LFS operations use the supplied Io for cached process pipe reads and
+  writes, including failures and cancellation. Breaking: SSH connection stream
+  operations take Io per call. Process.streams borrows native buffered streams
+  for an exclusive operation; a foreign transport is explicitly refused.
+
 - Breaking: index reads take ReadOptions, including optional measured timestamp
   resolution. Object walks use MissingOptions, ConnectedOptions and ReceivedOptions
   in their canonical operations; the With variants are removed. Top-level note copy

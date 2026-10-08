@@ -1695,8 +1695,8 @@ fn sshBatch(a: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, o
     if (ref) |r| try args.append(a, try a.print("refname={s}", .{r}));
     var lines: std.ArrayList([]const u8) = .empty;
     for (objects) |o| try lines.append(a, try a.print("{s} {d}", .{ &o.oid, o.size }));
-    conn.sendLines("batch", args.items, lines.items) catch |err| return sshBatchFailed(io, server, err, "");
-    const status = conn.readStatus(a) catch |err| return sshBatchFailed(io, server, err, "");
+    conn.sendLines(io, "batch", args.items, lines.items) catch |err| return sshBatchFailed(io, server, err, "");
+    const status = conn.readStatus(io, a) catch |err| return sshBatchFailed(io, server, err, "");
     if (status.code != 200) {
         var buf: [512]u8 = undefined;
         server.client.setMessage(io, std.mem.print(&buf, "batch response: status {d} from server ({s})", .{
@@ -1805,30 +1805,30 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
     try conn.mutex.lock(io);
     defer conn.mutex.unlock(io);
     const command = try scratch.print("get-object {s}", .{&r.oid});
-    conn.send(command, try sshObjectArgs(scratch, r, action)) catch |err| return sshRetry(state, err);
-    const head = conn.readStatusWithData(scratch) catch |err| return sshRetry(state, err);
+    conn.send(io, command, try sshObjectArgs(scratch, r, action)) catch |err| return sshRetry(state, err);
+    const head = conn.readStatusWithData(io, scratch) catch |err| return sshRetry(state, err);
     if (head.code < 200 or head.code > 299) {
         var said: std.ArrayList(u8) = .empty;
-        while (conn.nextData() catch |err| return sshRetry(state, err)) |bytes| {
+        while (conn.nextData(io) catch |err| return sshRetry(state, err)) |bytes| {
             if (said.items.len < 1024) try said.appendSlice(scratch, bytes[0..@min(bytes.len, 1024 - said.items.len)]);
         }
         return .{ .retry = .{ .message = try state.dupe(try scratch.print("got status {d} when fetching OID {s}: {s}", .{ head.code, &r.oid, said.items })) } };
     }
     const size_text = lfsssh.argValue(head.args, "size") orelse {
-        conn.skipData() catch |err| return sshRetry(state, err);
+        conn.skipData(io) catch |err| return sshRetry(state, err);
         return .{ .fail = "the server's answer gave no size" };
     };
     _ = std.fmt.parseInt(u64, size_text, 10) catch {
-        conn.skipData() catch |err| return sshRetry(state, err);
+        conn.skipData(io) catch |err| return sshRetry(state, err);
         return .{ .fail = "the server's answer gave a size that is not one" };
     };
-    var data: SshData = .init(conn);
+    var data: SshData = .init(conn, state);
     var counting: Counting = .init(&data.interface, state);
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
     const installed = state.server.store().install(io, &counting.interface, &pointer);
     counting.flush();
     if (data.failed) |err| return sshRetry(state, err);
-    if (!data.done) conn.skipData() catch |err| return sshRetry(state, err);
+    if (!data.done) conn.skipData(io) catch |err| return sshRetry(state, err);
     _ = installed catch |err| switch (err) {
         error.LfsObjectMismatch => return .{ .fail = "the bytes the server sent are not the object" },
         error.ReadFailed => return .{ .retry = .{ .message = "the download broke off" } },
@@ -1853,7 +1853,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     var sent: u64 = 0;
     const put = try scratch.print("put-object {s}", .{&r.oid});
     {
-        conn.beginData(put, args) catch |err| return sshRetry(state, err);
+        conn.beginData(io, put, args) catch |err| return sshRetry(state, err);
         var chunk: [32 * 1024]u8 = undefined;
         var fr = file.reader(io, &.{});
         var left = r.size;
@@ -1861,7 +1861,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
             const want: usize = @intCast(@min(left, chunk.len));
             const n = fr.interface.readSliceShort(chunk[0..want]) catch return .{ .fail = "upload: reading the object" };
             if (n == 0) return .{ .fail = "upload: the object is shorter than its pointer" };
-            conn.writeData(chunk[0..n]) catch |err| {
+            conn.writeData(io, chunk[0..n]) catch |err| {
                 state.say(.{ .unsent = sent });
                 return sshRetry(state, err);
             };
@@ -1869,12 +1869,12 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
             sent += n;
             state.say(.{ .bytes = n });
         }
-        conn.endData() catch |err| {
+        conn.endData(io) catch |err| {
             state.say(.{ .unsent = sent });
             return sshRetry(state, err);
         };
     }
-    const status = conn.readStatus(scratch) catch |err| {
+    const status = conn.readStatus(io, scratch) catch |err| {
         state.say(.{ .unsent = sent });
         return sshRetry(state, err);
     };
@@ -1894,8 +1894,8 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     // git-lfs verifies every upload over ssh, with the upload's own
     // arguments.
     const verify = try scratch.print("verify-object {s}", .{&r.oid});
-    conn.send(verify, args) catch |err| return sshRetry(state, err);
-    const verified = conn.readStatus(scratch) catch |err| return sshRetry(state, err);
+    conn.send(io, verify, args) catch |err| return sshRetry(state, err);
+    const verified = conn.readStatus(io, scratch) catch |err| return sshRetry(state, err);
     if (!verified.ok()) {
         return .{ .fail = try state.dupe(try scratch.print("got status {d} when verifying upload OID {s}{s}{s}", .{
             verified.code,
@@ -1910,14 +1910,16 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
 /// The data of a `get-object` answer, as a reader, to its flush.
 const SshData = struct {
     conn: *lfsssh.Connection,
+    operation: *Run,
     pending: []const u8 = &.{},
     done: bool = false,
     failed: ?lfsssh.Error = null,
     interface: Io.Reader,
 
-    fn init(conn: *lfsssh.Connection) SshData {
+    fn init(conn: *lfsssh.Connection, operation: *Run) SshData {
         return .{
             .conn = conn,
+            .operation = operation,
             .interface = .{ .vtable = &.{ .stream = stream }, .buffer = &.{}, .seek = 0, .end = 0 },
         };
     }
@@ -1926,7 +1928,7 @@ const SshData = struct {
         const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a SshData's interface
         while (d.pending.len == 0) {
             if (d.done) return error.EndOfStream;
-            const next = d.conn.nextData() catch |err| {
+            const next = d.conn.nextData(d.operation.io()) catch |err| {
                 d.failed = err;
                 return error.ReadFailed;
             };

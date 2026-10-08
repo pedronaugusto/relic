@@ -76,8 +76,6 @@ pub const Connection = struct {
 
     gpa: Allocator,
     conn: *connection.Connection,
-    reader: *Io.Reader,
-    writer: *Io.Writer,
     mutex: Io.Mutex = .init,
     ended: bool = false,
 
@@ -93,10 +91,8 @@ pub const Connection = struct {
         c.* = .{
             .gpa = gpa,
             .conn = conn,
-            .reader = try conn.advertisement(),
-            .writer = try conn.request(),
         };
-        c.negotiate() catch |err| {
+        c.negotiate(io) catch |err| {
             const said = try connection.Process.diagnose(conn, io);
             message.clearRetainingCapacity();
             try message.appendSlice(gpa, std.mem.trim(u8, said.stderr, " \t\r\n"));
@@ -105,12 +101,12 @@ pub const Connection = struct {
         return c;
     }
 
-    fn negotiate(c: *Connection) ErrorNamespace.Error!void {
+    fn negotiate(c: *Connection, io: Io) ErrorNamespace.Error!void {
         var scratch: std.heap.ArenaAllocator = .init(c.gpa);
         defer scratch.deinit();
         var version = false;
         while (true) {
-            switch (try c.conn.readPacket(c.reader)) {
+            switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
                 .flush => break,
                 .data => |d| {
                     if (std.mem.eql(u8, text(d), "version=1")) version = true;
@@ -119,66 +115,67 @@ pub const Connection = struct {
             }
         }
         if (!version) return error.LfsSshVersionRefused;
-        try c.send("version 1", &.{});
-        const status = try c.readStatus(scratch.allocator());
+        try c.send(io, "version 1", &.{});
+        const status = try c.readStatus(io, scratch.allocator());
         if (status.code != 200) return error.LfsSshVersionRefused;
     }
 
     /// Send `command` and its arguments.
-    pub fn send(c: *Connection, command: []const u8, args: []const []const u8) Self.Error!void {
-        try c.writeHead(command, args);
-        pktline.flush(c.writer) catch |err| return c.conn.writeFailed(err);
+    pub fn send(c: *Connection, io: Io, command: []const u8, args: []const []const u8) Self.Error!void {
+        try c.writeHead(io, command, args);
+        pktline.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// Send `command`, its arguments, a delimiter, and `lines`.
-    pub fn sendLines(c: *Connection, command: []const u8, args: []const []const u8, lines: []const []const u8) Self.Error!void {
-        try c.writeHead(command, args);
-        pktline.delim(c.writer) catch |err| return c.conn.writeFailed(err);
-        for (lines) |line| pktline.print("{s}\n", .{line}, c.writer) catch |err| return c.conn.writeFailed(err);
-        pktline.flush(c.writer) catch |err| return c.conn.writeFailed(err);
+    pub fn sendLines(c: *Connection, io: Io, command: []const u8, args: []const []const u8, lines: []const []const u8) Self.Error!void {
+        try c.writeHead(io, command, args);
+        pktline.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        for (lines) |line| pktline.print("{s}\n", .{line}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pktline.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// Start `command` with its arguments and a delimiter; the data follows
     /// through `writeData` and ends with `endData`.
-    pub fn beginData(c: *Connection, command: []const u8, args: []const []const u8) Self.Error!void {
-        try c.writeHead(command, args);
-        pktline.delim(c.writer) catch |err| return c.conn.writeFailed(err);
+    pub fn beginData(c: *Connection, io: Io, command: []const u8, args: []const []const u8) Self.Error!void {
+        try c.writeHead(io, command, args);
+        pktline.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// A piece of data, in lines of at most `pktline.max_data` bytes.
-    pub fn writeData(c: *Connection, bytes: []const u8) Self.Error!void {
+    pub fn writeData(c: *Connection, io: Io, bytes: []const u8) Self.Error!void {
         var rest = bytes;
         while (rest.len != 0) {
             const n = @min(rest.len, pktline.max_data);
-            pktline.write(c.writer, rest[0..n]) catch |err| return c.conn.writeFailed(err);
+            pktline.write((try connection.Process.streams(c.conn, io)).writer, rest[0..n]) catch |err| return c.conn.writeFailed(err);
             rest = rest[n..];
         }
     }
 
     /// The end of the data.
-    pub fn endData(c: *Connection) Self.Error!void {
-        pktline.flush(c.writer) catch |err| return c.conn.writeFailed(err);
+    pub fn endData(c: *Connection, io: Io) Self.Error!void {
+        pktline.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
-    fn writeHead(c: *Connection, command: []const u8, args: []const []const u8) ErrorNamespace.Error!void {
-        pktline.print("{s}\n", .{command}, c.writer) catch |err| return c.conn.writeFailed(err);
-        for (args) |a| pktline.print("{s}\n", .{a}, c.writer) catch |err| return c.conn.writeFailed(err);
+    fn writeHead(c: *Connection, io: Io, command: []const u8, args: []const []const u8) ErrorNamespace.Error!void {
+        pktline.print("{s}\n", .{command}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        for (args) |a| pktline.print("{s}\n", .{a}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
-    fn flushOut(c: *Connection) ErrorNamespace.Error!void {
-        _ = try c.conn.response();
+    fn flushOut(c: *Connection, io: Io) ErrorNamespace.Error!void {
+        const w = (try connection.Process.streams(c.conn, io)).writer;
+        w.flush() catch return c.conn.failure();
     }
 
     /// Read an answer made of a status, arguments, and lines after a
     /// delimiter, to its flush. Everything is copied into `arena`.
-    pub fn readStatus(c: *Connection, arena: Allocator) Self.Error!Status {
-        try c.flushOut();
+    pub fn readStatus(c: *Connection, io: Io, arena: Allocator) Self.Error!Status {
+        try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var lines: std.ArrayList([]const u8) = .empty;
         var code: ?u16 = null;
         var delimited = false;
         while (true) {
-            switch (try c.conn.readPacket(c.reader)) {
+            switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
                 .flush => return .{ .code = code orelse return error.LfsSshProtocolError, .args = args.items, .lines = lines.items },
                 .delim => {
                     if (code == null or delimited) return error.LfsSshProtocolError;
@@ -199,12 +196,12 @@ pub const Connection = struct {
 
     /// Read the status and arguments of an answer that carries data after
     /// its delimiter; the data is then read with `nextData`.
-    pub fn readStatusWithData(c: *Connection, arena: Allocator) Self.Error!struct { code: u16, args: []const []const u8 } {
-        try c.flushOut();
+    pub fn readStatusWithData(c: *Connection, io: Io, arena: Allocator) Self.Error!struct { code: u16, args: []const []const u8 } {
+        try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var code: ?u16 = null;
         while (true) {
-            switch (try c.conn.readPacket(c.reader)) {
+            switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
                 .flush, .response_end => return error.LfsSshProtocolError,
                 .delim => {
                     if (code == null) return error.LfsSshProtocolError;
@@ -222,8 +219,8 @@ pub const Connection = struct {
 
     /// The next piece of an answer's data, valid until the next read, or
     /// `null` at its end.
-    pub fn nextData(c: *Connection) Self.Error!?[]const u8 {
-        return switch (try c.conn.readPacket(c.reader)) {
+    pub fn nextData(c: *Connection, io: Io) Self.Error!?[]const u8 {
+        return switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
             .flush => null,
             .data => |d| d,
             else => error.LfsSshProtocolError,
@@ -231,13 +228,13 @@ pub const Connection = struct {
     }
 
     /// Read the rest of an answer's data and let it go.
-    pub fn skipData(c: *Connection) Self.Error!void {
-        while (try c.nextData()) |_| {}
+    pub fn skipData(c: *Connection, io: Io) Self.Error!void {
+        while (try c.nextData(io)) |_| {}
     }
 
-    fn sayQuit(c: *Connection, arena: Allocator) ErrorNamespace.Error!void {
-        try c.send("quit", &.{});
-        _ = try c.readStatus(arena);
+    fn sayQuit(c: *Connection, io: Io, arena: Allocator) ErrorNamespace.Error!void {
+        try c.send(io, "quit", &.{});
+        _ = try c.readStatus(io, arena);
     }
 
     /// Say `quit`, read its answer, and close the connection. A connection
@@ -248,7 +245,7 @@ pub const Connection = struct {
             var scratch: std.heap.ArenaAllocator = .init(c.gpa);
             defer scratch.deinit();
             // ziglint-ignore: Z026 quit is a courtesy; the connection is closed next whether or not the server answered
-            c.sayQuit(scratch.allocator()) catch {};
+            c.sayQuit(io, scratch.allocator()) catch {};
         }
         c.conn.deinit(io);
         c.gpa.destroy(c);
