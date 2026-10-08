@@ -47,3 +47,7 @@ Construction and teardown are outside timing. `--smoke` checks its object count,
 accepted report and final ref without reporting timing. Compare ReleaseFast
 executables in paired, interleaved order; fixture filesystem work remains visible
 in the timing spread.
+
+`relic-ere` measures boolean and span compile/search adapters on one bounded
+interval expression through shakedown.bench. It checks the boolean result and
+exact longest span on every operation; `--smoke` checks both without timing.

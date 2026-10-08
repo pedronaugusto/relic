@@ -295,7 +295,7 @@ pub fn build(b: *std.Build) void {
         if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{
             .tests = test_step,
             .bench = .{
-                .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-phase2", .source = "bench/phase2.zig" }, .{ .name = "relic-native", .source = "bench/native.zig" }, .{ .name = "relic-local-push", .source = "bench/local_push.zig" } },
+                .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-phase2", .source = "bench/phase2.zig" }, .{ .name = "relic-native", .source = "bench/native.zig" }, .{ .name = "relic-local-push", .source = "bench/local_push.zig" }, .{ .name = "relic-ere", .source = "bench/ere.zig" } },
                 .imports = benchImports,
                 .target = target,
                 .optimize = optimize,
