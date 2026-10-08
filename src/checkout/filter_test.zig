@@ -56,7 +56,7 @@ pub fn relicAdd(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !Oid {
     rules.filters = &drivers;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    _ = try worktree.addAll(gpa, io, dir, &index, repo.objectDatabase(), .{
+    _ = try worktree.addAll(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .programs = run.programs,
         .filter_report = run.report,
@@ -80,7 +80,7 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
     rules.filters = &drivers;
     var index = index_mod.Index.initEmpty(gpa, repo.objectFormat());
     defer index.deinit();
-    const outcome = try worktree.checkout(gpa, io, dir, &index, repo.objectDatabase(), tree, .{
+    const outcome = try worktree.checkout(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{
         .rules = rules,
         .programs = run.programs,
         .filter_report = run.report,
@@ -105,7 +105,7 @@ pub fn relicStatus(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !workt
     rules.filters = &drivers;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    return worktree.status(gpa, io, dir, &index, repo.objectDatabase(), .{
+    return worktree.status(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try repo.headTree(io),
         .untracked = .no,
@@ -630,7 +630,7 @@ test "status compares a filtered file through what it would be stored as" {
     rules.filters = &drivers;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    var result = try worktree.status(gpa, io, r.dir, &index, repo.objectDatabase(), .{
+    var result = try worktree.status(gpa, io, r.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try repo.headTree(io),
         .programs = .{ .environ = &env },

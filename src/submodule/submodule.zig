@@ -837,7 +837,7 @@ fn inspectRepository(
 
     var child = try StatusProbe.initAt(gpa, io, sub, &index, .{ .open = options.open }, depth);
     defer child.deinit();
-    var result = worktree.status(gpa, io, sub.workDirectory() orelse return error.BareRepository, &index, sub.objectDatabase(), .{
+    var result = worktree.status(gpa, io, sub.workDirectory() orelse return error.BareRepository, .{ .index = &index, .db = sub.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try sub.headTree(io),
         .untracked = if (ignore == .untracked) .no else .normal,
@@ -1570,7 +1570,7 @@ fn checkoutCommit(
     rules.required_filters = required;
 
     if (!force) {
-        var current = try worktree.status(gpa, io, work, &index, sub.objectDatabase(), .{
+        var current = try worktree.status(gpa, io, work, .{ .index = &index, .db = sub.objectDatabase() }, .{
             .rules = rules,
             .head_tree = try sub.headTree(io),
             .untracked = .no,
@@ -1588,7 +1588,7 @@ fn checkoutCommit(
     var refusal: worktree.Refusal = .{};
     // `git checkout`, or with `--force` `git checkout -f`, as git's
     // submodule update runs it.
-    _ = worktree.checkout(gpa, io, work, &index, sub.objectDatabase(), tree, .{ .rules = rules, .refusal = &refusal, .force = force }) catch |err| switch (err) {
+    _ = worktree.checkout(gpa, io, work, .{ .index = &index, .db = sub.objectDatabase(), .tree = tree }, .{ .rules = rules, .refusal = &refusal, .force = force }) catch |err| switch (err) {
         error.UnsafePath => return refuse(options.refusal, display, refusal.path(), error.UnsafePath),
         else => |e| return e,
     };

@@ -62,7 +62,7 @@ pub const Harness = struct {
     /// it, or `null` when it was written.
     pub fn checkout(h: *Harness, gpa: Allocator, io: Io, root: Oid) !?@import("../../names/path.zig").Reason {
         var refusal: worktree.Refusal = .{};
-        _ = worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, root, .{
+        _ = worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = root }, .{
             .rules = h.worktreeRules(),
             .refusal = &refusal,
         }) catch |err| switch (err) {

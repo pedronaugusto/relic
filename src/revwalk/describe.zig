@@ -527,7 +527,7 @@ fn isDirty(gpa: Allocator, io: Io, repo: *Repository, head_oid: Oid) Error!bool 
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
     rules.attrs = &attrs;
-    var status = try worktree.status(gpa, io, wt, &index, repo.objectDatabase(), .{
+    var status = try worktree.status(gpa, io, wt, .{ .index = &index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try repo.commitTree(io, head_oid),
         .untracked = .no,

@@ -827,7 +827,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     defer index.deinit();
     // A new clone's working tree has nothing in it to lose, as git's
     // clone takes it.
-    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), tree, .{
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{
         .rules = rules,
         .programs = programs,
         .force = true,

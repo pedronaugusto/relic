@@ -73,7 +73,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
     // costs a walk and nothing else.
     var index = try repo.openIndex(io);
     defer index.deinit();
-    const staged = try relic.worktree.addAll(gpa, io, dir, &index, repo.objectDatabase(), .{ .rules = rules });
+    const staged = try relic.worktree.addAll(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
     std.debug.assert(staged.added == 3);
 
     // Write the tree, through the cache tree, and the index that describes
@@ -104,7 +104,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
 
     // Change a file, stage it, and write a second tree.
     try dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {\n    work();\n}\n" });
-    _ = try relic.worktree.addAll(gpa, io, dir, &index, repo.objectDatabase(), .{ .rules = rules });
+    _ = try relic.worktree.addAll(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
     const second = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
 
     // What changed, as values rather than as text.
@@ -122,7 +122,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
 
     // Put the first tree back: files the tree lacks go, changed ones are
     // rewritten, and untracked and ignored files are left alone.
-    const restored = try relic.worktree.checkout(gpa, io, dir, &index, repo.objectDatabase(), tree, .{ .rules = rules });
+    const restored = try relic.worktree.checkout(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{ .rules = rules });
     std.debug.assert(restored.written == 1);
 
     // --- README:usage ---

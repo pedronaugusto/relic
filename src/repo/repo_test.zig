@@ -102,7 +102,7 @@ test "a whole commit cycle, and git agrees with every part of it" {
     wt_rules.ignore = &rules;
     wt_rules.attrs = &attrs;
 
-    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
+    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try index.write(io, repo.gitDirectory(), "index", .{});
 
@@ -181,7 +181,7 @@ test "a sha256 repository this creates is one git uses" {
     defer rules.deinit();
     var wt_rules = try repo.worktreeRules();
     wt_rules.ignore = &rules;
-    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
+    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try index.write(io, repo.gitDirectory(), "index", .{});
 
@@ -380,7 +380,7 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
         try std.testing.expect(linked.isLinkedWorktree());
         var linked_index = try linked.openIndex(io);
         defer linked_index.deinit();
-        _ = try worktree.checkout(gpa, io, added.work_dir, &linked_index, linked.objectDatabase(), tree, .{});
+        _ = try worktree.checkout(gpa, io, added.work_dir, .{ .index = &linked_index, .db = linked.objectDatabase(), .tree = tree }, .{});
         try linked_index.write(io, linked.gitDirectory(), "index", .{});
     }
     var buf: [64]u8 = undefined;

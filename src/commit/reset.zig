@@ -219,7 +219,7 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
 /// Whether the file for `entry` is something other than the index says. A
 /// missing file loses nothing.
 fn differs(gpa: Allocator, io: Io, wt: Io.Dir, index: *const Index, entry: index_mod.Entry, rules: worktree.Rules) Error!bool {
-    return worktree.differsFromIndex(gpa, io, wt, index, entry, rules);
+    return worktree.differsFromIndex(gpa, io, wt, .{ .index = index, .entry = entry }, rules);
 }
 
 test "reset writes through the target tree's attributes as git reset hard does" {

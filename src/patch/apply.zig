@@ -1494,7 +1494,7 @@ fn loadCurrent(st: *State, img: *Image, entry: *Entry) Error!bool {
     if (found == null) {
         found = try checkoutTarget(st, ce);
     }
-    if (try worktree.differsFromIndex(st.gpa, st.io, wt, ix, ce, st.rules)) return false;
+    if (try worktree.differsFromIndex(st.gpa, st.io, wt, .{ .index = ix, .entry = ce }, st.rules)) return false;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(st.gpa);
     switch (try loadPatchTarget(st, &buf, ce, found, entry, name, entry.p.new_mode)) {
@@ -1681,7 +1681,7 @@ fn checkPreimage(st: *State, entry: *Entry) Error!PreimageCheck {
             if (out.found) |f| {
                 if (e.mode == .gitlink) {
                     if (f.kind != .directory) return .{ .reason = .does_not_match_index };
-                } else if (try worktree.differsFromIndex(st.gpa, st.io, st.wt.?, st.index.?, e.*, st.rules)) {
+                } else if (try worktree.differsFromIndex(st.gpa, st.io, st.wt.?, .{ .index = st.index.?, .entry = e.* }, st.rules)) {
                     return .{ .reason = .does_not_match_index };
                 }
             }

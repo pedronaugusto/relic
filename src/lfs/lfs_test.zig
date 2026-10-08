@@ -343,7 +343,7 @@ test "status names an LFS file by hashing it, and stores nothing" {
     rules.filters = &drivers;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    var result = try worktree.status(gpa, io, r.dir, &index, repo.objectDatabase(), .{
+    var result = try worktree.status(gpa, io, r.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try repo.headTree(io),
     });

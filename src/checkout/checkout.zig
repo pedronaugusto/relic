@@ -248,6 +248,13 @@ pub const AddErrorReport = struct {
     }
 };
 
+pub const Inputs = struct { index: *Index, db: *Odb };
+pub const CheckoutInputs = struct { index: *Index, db: *Odb, tree: Oid };
+pub const PathInputs = struct { index: *Index, db: *Odb, writes: []const PathWrite };
+pub const VerifyInputs = struct { index: *const Index, updates: *const std.array_hash_map.String(?TreeEntry) };
+pub const CompareInputs = struct { index: *const Index, entry: index_mod.Entry };
+pub const SparseInputs = struct { index: *Index, db: *Odb, patterns: *const sparse.Patterns };
+
 /// `git add -A`: walk the working tree, stage what changed, stage deletions,
 /// and keep the cache tree true.
 ///
@@ -265,10 +272,11 @@ pub fn addAll(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
-    index: *Index,
-    db: *Odb,
+    inputs: Inputs,
     options: AddOptions,
 ) Self.Error!AddOutcome {
+    const index = inputs.index;
+    const db = inputs.db;
     var outcome: AddOutcome = .{};
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -842,10 +850,11 @@ pub fn status(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
-    index: *Index,
-    db: *Odb,
+    inputs: Inputs,
     options: StatusOptions,
 ) Self.Error!Status {
+    const index = inputs.index;
+    const db = inputs.db;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -1711,11 +1720,12 @@ pub fn checkout(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
-    index: *Index,
-    db: *Odb,
-    tree_oid: Oid,
+    inputs: CheckoutInputs,
     options: CheckoutOptions,
 ) Self.Error!CheckoutOutcome {
+    const index = inputs.index;
+    const db = inputs.db;
+    const tree_oid = inputs.tree;
     var outcome: CheckoutOutcome = .{};
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -1868,7 +1878,7 @@ fn verifyCheckout(
         if (index.find(item.key_ptr.*) != null) continue;
         try updates.put(arena, item.key_ptr.*, item.value_ptr.*);
     }
-    try verifyUpdates(gpa, io, wt, index, &updates, .{
+    try verifyUpdates(gpa, io, wt, .{ .index = index, .updates = &updates }, .{
         .rules = options.rules,
         .ignore = options.ignore,
         .obstructions = options.obstructions,
@@ -2453,11 +2463,12 @@ pub fn writePaths(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
-    index: *Index,
-    db: *Odb,
-    writes: []const PathWrite,
+    inputs: PathInputs,
     options: CheckoutOptions,
 ) Self.Error!CheckoutOutcome {
+    const index = inputs.index;
+    const db = inputs.db;
+    const writes = inputs.writes;
     var outcome: CheckoutOutcome = .{};
     defer if (options.rules.attrs) |attrs| attrs.leave();
     for (writes) |w| {
@@ -2768,10 +2779,11 @@ pub fn verifyUpdates(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
-    index: *const Index,
-    updates: *const std.array_hash_map.String(?TreeEntry),
+    inputs: VerifyInputs,
     options: VerifyOptions,
 ) Self.Error!void {
+    const index = inputs.index;
+    const updates = inputs.updates;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -2791,7 +2803,7 @@ pub fn verifyUpdates(
         const want = updates.get(path).?;
         if (index.find(path)) |entry| {
             if (entry.skip_worktree) continue;
-            if (try differsFromIndex(gpa, io, wt, index, entry.*, options.rules)) try changed.append(arena, path);
+            if (try differsFromIndex(gpa, io, wt, .{ .index = index, .entry = entry.* }, options.rules)) try changed.append(arena, path);
             continue;
         }
         if (want == null) continue;
@@ -2865,7 +2877,7 @@ pub const RacyCheck = struct {
 
     fn changed(context: *anyopaque, index: *const Index, entry: index_mod.Entry) bool {
         const c: *RacyCheck = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a RacyCheck
-        return differsFromIndex(c.gpa, c.io, c.wt, index, entry, c.rules) catch true;
+        return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch true;
     }
 };
 
@@ -2876,10 +2888,11 @@ pub fn differsFromIndex(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
-    index: *const Index,
-    entry: index_mod.Entry,
+    inputs: CompareInputs,
     rules: Rules,
 ) Self.Error!bool {
+    const index = inputs.index;
+    const entry = inputs.entry;
     if (entry.mode == .gitlink) return false;
     const found = (try fs.statAt(io, wt, entry.path)) orelse return false;
     if (found.kind == .directory) return true;
@@ -3059,11 +3072,12 @@ pub fn applySparse(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
-    index: *Index,
-    db: *Odb,
-    patterns: *const sparse.Patterns,
+    inputs: SparseInputs,
     options: CheckoutOptions,
 ) Self.Error!SparseOutcome {
+    const index = inputs.index;
+    const db = inputs.db;
+    const patterns = inputs.patterns;
     var outcome: SparseOutcome = .{};
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();

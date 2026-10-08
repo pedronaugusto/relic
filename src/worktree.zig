@@ -55,3 +55,10 @@ pub const Listing = @import("checkout/checkout.zig").Listing;
 pub const list = @import("checkout/checkout.zig").list;
 pub const WriteEntryOptions = @import("checkout/checkout.zig").WriteEntryOptions;
 pub const WriteBytesOptions = @import("checkout/checkout.zig").WriteBytesOptions;
+
+pub const Inputs = @import("checkout/checkout.zig").Inputs;
+pub const CheckoutInputs = @import("checkout/checkout.zig").CheckoutInputs;
+pub const PathInputs = @import("checkout/checkout.zig").PathInputs;
+pub const VerifyInputs = @import("checkout/checkout.zig").VerifyInputs;
+pub const CompareInputs = @import("checkout/checkout.zig").CompareInputs;
+pub const SparseInputs = @import("checkout/checkout.zig").SparseInputs;

@@ -112,7 +112,7 @@ const Pair = struct {
         var index = try repo.openIndex(io);
         defer index.deinit();
         const source = (try fsmonitor.configured(repo.configuration(), .{ .environ = &pair.env })).?;
-        var result = try worktree.status(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
+        var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
             .rules = try repo.worktreeRules(),
             .head_tree = try repo.headTree(io),
             .untracked = untracked,
@@ -327,7 +327,7 @@ test "a program's own change source decides what status looks at" {
             defer repo.deinit(io_);
             var index = try repo.openIndex(io_);
             defer index.deinit();
-            var result = try worktree.status(g, io_, repo.workDirectory().?, &index, repo.objectDatabase(), .{
+            var result = try worktree.status(g, io_, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
                 .rules = try repo.worktreeRules(),
                 .head_tree = try repo.headTree(io_),
                 .untracked = untracked,

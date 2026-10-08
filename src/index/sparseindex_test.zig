@@ -221,7 +221,7 @@ fn relicStatus(gpa: Allocator, io: Io, repo: *repo_mod.Repository, index: *Index
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    var status = try worktree.status(gpa, io, repo.workDirectory().?, index, repo.objectDatabase(), .{
+    var status = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try repo.headTree(io),
     });
@@ -287,8 +287,8 @@ test "status, write-tree and add on a sparse index say what they say on the full
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    _ = try worktree.addAll(gpa, io, git.dir, &index, repo.objectDatabase(), .{ .rules = rules });
-    _ = try worktree.addAll(gpa, io, git.dir, &full, repo.objectDatabase(), .{ .rules = rules });
+    _ = try worktree.addAll(gpa, io, git.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
+    _ = try worktree.addAll(gpa, io, git.dir, .{ .index = &full, .db = repo.objectDatabase() }, .{ .rules = rules });
     try std.testing.expect(index.sparse);
     try std.testing.expect(index.find("D/E/stray.txt") != null);
     try std.testing.expect(index.find("A/X/") != null);
@@ -337,7 +337,7 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     var checked_out = try repo.openIndex(io);
     defer checked_out.deinit();
     // Every path written, as `read-tree --reset -u` writes them.
-    _ = try worktree.checkout(gpa, io, git.dir, &checked_out, repo.objectDatabase(), head, .{ .force = true });
+    _ = try worktree.checkout(gpa, io, git.dir, .{ .index = &checked_out, .db = repo.objectDatabase(), .tree = head }, .{ .force = true });
     try std.testing.expect(!checked_out.sparse and !hasSparseDirectories(&checked_out));
     try git.dir.access(io, "D/E/F/f.txt", .{});
     try checked_out.write(io, repo.gitDirectory(), "index", .{});

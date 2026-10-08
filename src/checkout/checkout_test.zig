@@ -96,7 +96,7 @@ test "addAll then writeTree equals git add -A and git write-tree" {
     try h.repo.writeFile(io, ".gitignore", "*.log\n");
     try h.repo.writeFile(io, "skip.log", "ignored\n");
 
-    const outcome = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{
+    const outcome = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{
         .rules = h.worktreeRules(),
     });
     try std.testing.expect(outcome.added >= 6);
@@ -153,7 +153,7 @@ test "ignore-errors reports unreadable files, keeps their entries and stages the
         var h = try Harness.init(gpa, io, &.{});
         defer h.deinit(io);
         try h.repo.writeFile(io, "a-unreadable", "old\n");
-        _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{});
+        _ = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{});
         const old = h.index.find("a-unreadable").?.*;
         try h.index.write(io, h.git_dir, "index", .{});
 
@@ -168,7 +168,7 @@ test "ignore-errors reports unreadable files, keeps their entries and stages the
 
         var report: worktree.AddErrorReport = .init(gpa);
         defer report.deinit();
-        const outcome = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{
+        const outcome = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{
             .rules = h.worktreeRules(),
             .new_blobs = new_blobs,
             .ignore_errors = true,
@@ -217,7 +217,7 @@ test "without ignore-errors the first unreadable file stops add" {
     defer h.repo.dir.setFilePermissions(io, "a-unreadable", .default_file, .{}) catch {};
     var report: worktree.AddErrorReport = .init(gpa);
     defer report.deinit();
-    try std.testing.expectError(read_error, worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{
+    try std.testing.expectError(read_error, worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{
         .error_report = &report,
     }));
     try std.testing.expectEqual(@as(usize, 0), report.failures.items.len);
@@ -242,7 +242,7 @@ test "the stat shortcut means a warm addAll hashes nothing" {
         });
     }
 
-    const cold = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    const cold = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     try std.testing.expectEqual(@as(u32, 60), cold.added);
     try std.testing.expectEqual(@as(u32, 60), cold.hashed);
 
@@ -251,7 +251,7 @@ test "the stat shortcut means a warm addAll hashes nothing" {
     try h.index.write(io, h.git_dir, "index", .{});
     try h.reload(gpa, io);
 
-    const warm = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    const warm = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     try std.testing.expectEqual(@as(u32, 0), warm.added);
     try std.testing.expectEqual(@as(u32, 0), warm.modified);
     try std.testing.expectEqual(@as(u32, 60), warm.unchanged);
@@ -267,14 +267,14 @@ test "the racy rule notices a file rewritten inside one second" {
     // Same length, different content, written without waiting: the stat
     // alone cannot tell them apart.
     try h.repo.writeFile(io, "racy.txt", "AAAA\n");
-    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    _ = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     try h.index.write(io, h.git_dir, "index", .{});
     try h.reload(gpa, io);
 
     const before = h.index.find("racy.txt").?.oid;
     try h.repo.writeFile(io, "racy.txt", "BBBB\n");
 
-    const outcome = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    const outcome = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     const after = h.index.find("racy.txt").?.oid;
     try std.testing.expect(!before.eql(after));
     try std.testing.expectEqual(@as(u32, 1), outcome.modified);
@@ -291,7 +291,7 @@ test "a racily clean entry is smudged on the way out only when its file changed,
 
     try h.repo.writeFile(io, "same.txt", "AAAA\n");
     try h.repo.writeFile(io, "other.txt", "CCCC\n");
-    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    _ = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     // Both entries racy: the index is dated to their own second.
     const same = h.index.find("same.txt").?.stat;
     h.index.racy_cutoff_sec = same.mtime_sec;
@@ -329,7 +329,7 @@ test "sparse checkout keeps a racily clean modified file" {
     defer h.deinit(io);
 
     try h.repo.writeFile(io, "outside.txt", "AAAA\n");
-    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    _ = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     try h.index.write(io, h.git_dir, "index", .{});
     try h.reload(gpa, io);
 
@@ -343,7 +343,7 @@ test "sparse checkout keeps a racily clean modified file" {
 
     var patterns = try sparse.Patterns.init(gpa, false);
     defer patterns.deinit();
-    const out = try worktree.applySparse(gpa, io, h.repo.dir, &h.index, &h.db, &patterns, .{});
+    const out = try worktree.applySparse(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .patterns = &patterns }, .{});
 
     try std.testing.expectEqual(@as(u32, 1), out.kept_dirty);
     var buf: [16]u8 = undefined;
@@ -360,11 +360,11 @@ test "a deletion is staged and the cache tree stays true" {
     try h.repo.writeFile(io, "keep.txt", "keep\n");
     try h.repo.writeFile(io, "dir/gone.txt", "gone\n");
     try h.repo.writeFile(io, "dir/stay.txt", "stay\n");
-    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    _ = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     _ = try worktree.writeTree(gpa, io, &h.index, &h.db);
 
     try h.repo.dir.deleteFile(io, "dir/gone.txt");
-    const outcome = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    const outcome = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
     try std.testing.expectEqual(@as(u32, 1), outcome.removed);
     try std.testing.expect(h.index.find("dir/gone.txt") == null);
 
@@ -406,7 +406,7 @@ test "checkout sets the tree and leaves untracked and ignored files alone" {
     try h.repo.writeFile(io, "build.log", "noise\n");
 
     try h.reload(gpa, io);
-    const outcome = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, first_tree, .{
+    const outcome = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = first_tree }, .{
         .rules = h.worktreeRules(),
     });
     try std.testing.expect(outcome.written >= 2);
@@ -453,7 +453,7 @@ test "checkout replaces a tracked directory with a file" {
 
     try h.repo.exec(io, &.{ "reset", "-q", "--hard", "HEAD~1" });
     try h.reload(gpa, io);
-    const out = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{});
+    const out = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = target }, .{});
 
     try std.testing.expectEqual(@as(u32, 1), out.written);
     try std.testing.expectEqual(@as(u32, 1), out.removed);
@@ -486,7 +486,7 @@ test "checkout refuses a directory-to-file conflict before deleting tracked file
     try h.reload(gpa, io);
     try std.testing.expectError(
         error.UntrackedWouldBeOverwritten,
-        worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{}),
+        worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = target }, .{}),
     );
 
     var buf: [32]u8 = undefined;
@@ -522,7 +522,7 @@ test "status agrees with git on every path" {
     const head_tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
     defer gpa.free(head_tree_text);
 
-    var result = try worktree.status(gpa, io, h.repo.dir, &h.index, &h.db, .{
+    var result = try worktree.status(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{
         .rules = h.worktreeRules(),
         .head_tree = try Oid.parse(.sha1, head_tree_text),
     });
@@ -622,7 +622,7 @@ test "core.autocrlf with text=auto stores the blob git stores" {
     var attrs = try attributes.Attrs.init(gpa, false);
     defer attrs.deinit();
 
-    _ = try worktree.addAll(gpa, io, repo.dir, &index, &db, .{
+    _ = try worktree.addAll(gpa, io, repo.dir, .{ .index = &index, .db = &db }, .{
         .rules = .{
             .ignore = &rules,
             .attrs = &attrs,
@@ -658,12 +658,12 @@ test "core.safecrlf refuses irreversible staging and reports warnings" {
     rules.core.safecrlf = .true;
     try std.testing.expectError(
         error.IrreversibleConversion,
-        worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules }),
+        worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = rules }),
     );
     try std.testing.expect(h.index.find("mixed.txt") == null);
 
     rules.core.safecrlf = .warn;
-    const warned = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules });
+    const warned = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = rules });
     try std.testing.expectEqual(@as(u32, 1), warned.safecrlf_warnings);
     try std.testing.expect(h.index.find("mixed.txt") != null);
 }
@@ -691,15 +691,7 @@ test "a tree naming .git is refused rather than written" {
     defer gpa.free(outer_bytes);
     const outer_tree = try h.db.write(io, .tree, outer_bytes);
 
-    try std.testing.expectError(error.UnsafePath, worktree.checkout(
-        gpa,
-        io,
-        h.repo.dir,
-        &h.index,
-        &h.db,
-        outer_tree,
-        .{ .rules = h.worktreeRules() },
-    ));
+    try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = outer_tree }, .{ .rules = h.worktreeRules() }));
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "git~1/config", .{}));
 }
 
@@ -720,7 +712,7 @@ test "resetIndex puts the index back and leaves the files alone" {
     try h.repo.writeFile(io, "changed.txt", "two\n");
     try h.repo.writeFile(io, "added.txt", "new\n");
     try h.reload(gpa, io);
-    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    _ = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = h.worktreeRules() });
 
     const outcome = try worktree.resetIndex(gpa, io, &h.index, &h.db, try Oid.parse(.sha1, head_tree_text));
     try std.testing.expectEqual(@as(u32, 1), outcome.removed);
@@ -782,7 +774,7 @@ test "checkout and writePaths apply every .gitattributes on the way down, as git
     defer index.deinit();
     const tree = (try repo.headTree(io)).?;
     // The deleted files come back, as `git checkout -- .` brings them.
-    _ = try worktree.checkout(gpa, io, here.dir, &index, repo.objectDatabase(), tree, .{ .rules = rules, .force = true });
+    _ = try worktree.checkout(gpa, io, here.dir, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{ .rules = rules, .force = true });
     // What `enter` loaded is given back.
     try std.testing.expectEqual(@as(usize, 0), attrs.levels.items.len);
 
@@ -805,9 +797,9 @@ test "checkout and writePaths apply every .gitattributes on the way down, as git
     try git.exec(io, &.{ "checkout", "--", "sub/deeper/c.txt" });
     try here.dir.deleteFile(io, "sub/deeper/c.txt");
     const entry = index.find("sub/deeper/c.txt").?;
-    _ = try worktree.writePaths(gpa, io, here.dir, &index, repo.objectDatabase(), &.{
+    _ = try worktree.writePaths(gpa, io, here.dir, .{ .index = &index, .db = repo.objectDatabase(), .writes = &.{
         .{ .path = "sub/deeper/c.txt", .blob = .{ .mode = entry.mode, .oid = entry.oid } },
-    }, .{ .rules = rules });
+    } }, .{ .rules = rules });
     const a = try git.readFile(io, "sub/deeper/c.txt");
     defer gpa.free(a);
     const b = try here.readFile(io, "sub/deeper/c.txt");
@@ -887,7 +879,7 @@ test "checkout refuses to lose local changes or untracked files, lists them as g
     defer ignore_rules.deinit();
     var obstructions: worktree.Obstructions = .init(gpa);
     defer obstructions.deinit();
-    try std.testing.expectError(error.LocalChangesWouldBeOverwritten, worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{
+    try std.testing.expectError(error.LocalChangesWouldBeOverwritten, worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = target }, .{
         .force = false,
         .ignore = &ignore_rules,
         .obstructions = &obstructions,
@@ -910,7 +902,7 @@ test "checkout refuses to lose local changes or untracked files, lists them as g
     try h.repo.writeFile(io, "change", "one\n");
     try h.repo.dir.deleteFile(io, "new.txt");
     try h.repo.dir.deleteFile(io, "dir");
-    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{ .force = false, .ignore = &ignore_rules });
+    _ = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = target }, .{ .force = false, .ignore = &ignore_rules });
     try std.testing.expectEqualStrings("mine too\n", try h.repo.dir.readFile(io, "keep", &buf));
     try std.testing.expectEqualStrings("tracked log\n", try h.repo.dir.readFile(io, "build.log", &buf));
     try std.testing.expectEqualStrings("two\n", try h.repo.dir.readFile(io, "change", &buf));
@@ -937,7 +929,7 @@ test "a forced checkout overwrites local changes and untracked files, as read-tr
     try h.repo.writeFile(io, "new.txt", "mine\n");
 
     try h.reload(gpa, io);
-    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{ .force = true });
+    _ = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = target }, .{ .force = true });
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("two\n", try h.repo.dir.readFile(io, "change", &buf));
     try std.testing.expectEqualStrings("new\n", try h.repo.dir.readFile(io, "new.txt", &buf));
@@ -980,7 +972,7 @@ test "a file whose stat went stale is compared as it would be added, under the a
     for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| {
         const entry = h.index.find(path).?;
         try std.testing.expect(!entry.stat.matches(try statOf(io, h.repo.dir, path), .full, .nanosecond));
-        try std.testing.expect(!try worktree.differsFromIndex(gpa, io, h.repo.dir, &h.index, entry.*, h.worktreeRules()));
+        try std.testing.expect(!try worktree.differsFromIndex(gpa, io, h.repo.dir, .{ .index = &h.index, .entry = entry.* }, h.worktreeRules()));
     }
     // What it entered to read them, it gave back.
     try std.testing.expect(!h.attrs.entered_any);
@@ -990,7 +982,7 @@ test "a file whose stat went stale is compared as it would be added, under the a
 
     try h.repo.writeFile(io, "sub/crlf.txt", "one\r\nTWO\r\n");
     const changed = h.index.find("sub/crlf.txt").?;
-    try std.testing.expect(try worktree.differsFromIndex(gpa, io, h.repo.dir, &h.index, changed.*, h.worktreeRules()));
+    try std.testing.expect(try worktree.differsFromIndex(gpa, io, h.repo.dir, .{ .index = &h.index, .entry = changed.* }, h.worktreeRules()));
 }
 
 fn statOf(io: Io, dir: Io.Dir, path: []const u8) !fs.Stat {
@@ -1017,7 +1009,7 @@ fn stagingAllocationCase(gpa: std.mem.Allocator, wt: Io.Dir) !void {
     defer db.deinit(io);
     var staged = index_mod.Index.initEmpty(gpa, .sha1);
     defer staged.deinit();
-    _ = try worktree.addAll(gpa, io, wt, &staged, &db, .{});
+    _ = try worktree.addAll(gpa, io, wt, .{ .index = &staged, .db = &db }, .{});
 }
 
 test "a directory that staging cannot open is not reported as deleted" {
@@ -1034,7 +1026,7 @@ test "a directory that staging cannot open is not reported as deleted" {
     defer db.deinit(io);
     var staged = index_mod.Index.initEmpty(gpa, .sha1);
     defer staged.deinit();
-    _ = try worktree.addAll(gpa, io, folder.dir, &staged, &db, .{});
+    _ = try worktree.addAll(gpa, io, folder.dir, .{ .index = &staged, .db = &db }, .{});
     const Refused = struct {
         fn openDir(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
             if (std.mem.eql(u8, path, "blocked")) return error.AccessDenied;
@@ -1044,7 +1036,7 @@ test "a directory that staging cannot open is not reported as deleted" {
     var vtable = io.vtable.*;
     vtable.dirOpenDir = Refused.openDir;
     const refused: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    try std.testing.expectError(error.AccessDenied, worktree.addAll(gpa, refused, folder.dir, &staged, &db, .{}));
+    try std.testing.expectError(error.AccessDenied, worktree.addAll(gpa, refused, folder.dir, .{ .index = &staged, .db = &db }, .{}));
     try std.testing.expect(staged.find("blocked/file") != null);
 }
 
@@ -1063,8 +1055,8 @@ test "a filesystem walk that reaches its depth limit refuses a partial result" {
     defer db.deinit(io);
     var staged = index_mod.Index.initEmpty(gpa, .sha1);
     defer staged.deinit();
-    try std.testing.expectError(error.TreeTooDeep, worktree.addAll(gpa, io, folder.dir, &staged, &db, .{}));
-    try std.testing.expectError(error.TreeTooDeep, worktree.status(gpa, io, folder.dir, &staged, &db, .{}));
+    try std.testing.expectError(error.TreeTooDeep, worktree.addAll(gpa, io, folder.dir, .{ .index = &staged, .db = &db }, .{}));
+    try std.testing.expectError(error.TreeTooDeep, worktree.status(gpa, io, folder.dir, .{ .index = &staged, .db = &db }, .{}));
     try std.testing.expectError(error.TreeTooDeep, worktree.list(gpa, io, folder.dir, &staged, .{}));
 }
 
@@ -1091,7 +1083,7 @@ test "status and listing refuse a directory they could not read" {
     var vtable = io.vtable.*;
     vtable.dirOpenDir = Refused.openDir;
     const refused: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    try std.testing.expectError(error.AccessDenied, worktree.status(gpa, refused, folder.dir, &staged, &db, .{}));
+    try std.testing.expectError(error.AccessDenied, worktree.status(gpa, refused, folder.dir, .{ .index = &staged, .db = &db }, .{}));
     try std.testing.expectError(error.AccessDenied, worktree.list(gpa, refused, folder.dir, &staged, .{}));
 }
 
@@ -1115,7 +1107,7 @@ test "checkout writes files with git's modes, trimmed by the umask as git's are"
 
     const mask: std.posix.mode_t = std.c.umask(0o027);
     defer _ = std.c.umask(mask);
-    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, try Oid.parse(.sha1, tree_text), .{ .rules = h.worktreeRules() });
+    _ = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = try Oid.parse(.sha1, tree_text) }, .{ .rules = h.worktreeRules() });
     const plain = try h.repo.dir.statFile(io, "plain.txt", .{});
     const run = try h.repo.dir.statFile(io, "run.sh", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), @as(std.posix.mode_t, @intCast(@backingInt(plain.permissions))) & 0o777);
@@ -1156,7 +1148,7 @@ test "checkout writes the same files, index and error whatever the number of tas
         for (0..7) |d| {
             try h.repo.dir.setFilePermissions(io, try std.mem.print(&name, "locked/d{d}", .{d}), @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o555))), .{});
         }
-        const result = worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, first, .{ .rules = h.worktreeRules(), .workers = workers });
+        const result = worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = first }, .{ .rules = h.worktreeRules(), .workers = workers });
         for (0..7) |d| {
             try h.repo.dir.setFilePermissions(io, try std.mem.print(&name, "locked/d{d}", .{d}), @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o755))), .{});
         }
@@ -1217,7 +1209,7 @@ test "a tree holding a link and a directory of one name is refused before anythi
         .{ .mode = "40000", .name = "a", .oid = a },
     });
     var refusal: worktree.Refusal = .{};
-    try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{
+    try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, .{
         .rules = h.worktreeRules(),
         .refusal = &refusal,
     }));
@@ -1247,7 +1239,7 @@ test "a link and a directory whose names a folding filesystem makes one are refu
         var rules = h.worktreeRules();
         rules.ignore_case = ignore_case;
         var refusal: worktree.Refusal = .{};
-        const result = worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{ .rules = rules, .refusal = &refusal });
+        const result = worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, .{ .rules = rules, .refusal = &refusal });
         if (ignore_case) {
             try std.testing.expectError(error.UnsafePath, result);
             try std.testing.expectEqual(@import("../names/path.zig").Reason.path_collision, refusal.reason.?);
@@ -1289,9 +1281,9 @@ test "nothing is written or removed past a symbolic link in the working tree, an
     const options: worktree.CheckoutOptions = .{ .rules = h.worktreeRules(), .refusal = &refusal, .force = true };
     var unforced = options;
     unforced.force = false;
-    try std.testing.expectError(error.UnsafePath, worktree.writePaths(gpa, io, h.repo.dir, &h.index, &h.db, &.{
+    try std.testing.expectError(error.UnsafePath, worktree.writePaths(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .writes = &.{
         .{ .path = "d/f", .blob = .{ .mode = .file, .oid = (try h.db.write(io, .blob, "tracked\n")) } },
-    }, unforced));
+    } }, unforced));
     try std.testing.expectEqual(@import("../names/path.zig").Reason.beyond_symlink, refusal.reason.?);
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "elsewhere/f", .{}));
 
@@ -1299,7 +1291,7 @@ test "nothing is written or removed past a symbolic link in the working tree, an
     try worktree.removeEntry(io, h.repo.dir, "d/keep");
     try h.repo.dir.access(io, "elsewhere/keep", .{});
 
-    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, options);
+    _ = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, options);
     const d = (try fs.statAt(io, h.repo.dir, "d")).?;
     try std.testing.expectEqual(Io.File.Kind.directory, d.kind);
     try h.repo.dir.access(io, "d/f", .{});
@@ -1327,14 +1319,14 @@ test "a wider sparse pattern brings a link back as a link and a submodule back a
     try h.git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n!/dir/\n" });
     var narrow = (try sparse.Patterns.load(gpa, io, h.git_dir, false)).?;
     defer narrow.deinit();
-    _ = try worktree.applySparse(gpa, io, h.repo.dir, &h.index, &h.db, &narrow, .{});
+    _ = try worktree.applySparse(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .patterns = &narrow }, .{});
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "dir/file", .{}));
     try h.repo.dir.deleteTree(io, "dir");
 
     try h.git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n" });
     var wide = (try sparse.Patterns.load(gpa, io, h.git_dir, false)).?;
     defer wide.deinit();
-    const back = try worktree.applySparse(gpa, io, h.repo.dir, &h.index, &h.db, &wide, .{ .rules = h.worktreeRules() });
+    const back = try worktree.applySparse(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .patterns = &wide }, .{ .rules = h.worktreeRules() });
     try std.testing.expectEqual(@as(u32, if (links) 3 else 2), back.restored);
     try std.testing.expectEqual(Io.File.Kind.directory, (try fs.statAt(io, h.repo.dir, "dir/sub")).?.kind);
     if (links) {
@@ -1368,7 +1360,7 @@ test "a tree with names only Windows refuses checks out elsewhere as git checks 
     try h.repo.exec(io, &.{ "rm", "-q", "--cached", "-r", "." });
     try h.reload(gpa, io);
 
-    const out = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, try Oid.parse(.sha1, tree_text), .{ .rules = h.worktreeRules() });
+    const out = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = try Oid.parse(.sha1, tree_text) }, .{ .rules = h.worktreeRules() });
     try std.testing.expectEqual(@as(u32, names.len), out.written);
     try h.index.write(io, h.git_dir, "index", .{});
     const status = try h.repo.run(io, &.{ "status", "--porcelain" });
@@ -1614,15 +1606,15 @@ test "without core.symlinks a link written as a file stays a link to status and 
 
     var rules = h.worktreeRules();
     rules.symlinks = false;
-    const out = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{ .rules = rules, .force = true });
+    const out = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, .{ .rules = rules, .force = true });
     try std.testing.expectEqual(@as(u32, 1), out.symlinks_as_files);
     // Every stat stale, so the content is what decides.
     for (h.index.entries.items) |*entry| entry.stat = .none;
 
-    var st = try worktree.status(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules, .head_tree = tree });
+    var st = try worktree.status(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = rules, .head_tree = tree });
     defer st.deinit();
     try std.testing.expect(st.isClean());
-    const added = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules });
+    const added = try worktree.addAll(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db }, .{ .rules = rules });
     try std.testing.expectEqual(@as(u32, 0), added.modified);
     try std.testing.expectEqual(object.Mode.symlink, h.index.find("link").?.mode);
 

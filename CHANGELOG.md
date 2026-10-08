@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Breaking: working-tree staging/status, checkout, path writes, verification,
+  comparisons and sparse application take named input groups after the working
+  directory. The index and object database stay borrowed; path selection,
+  refusal diagnostics, local edits and durability keep their behavior.
+
 - Breaking: transport session, fetch/send pack, local receive and bundle APIs
   group their named inputs; bundle creation takes Target. LFS pre-push and SSH
   invocation take input groups and options. Object retention, protocol bytes,

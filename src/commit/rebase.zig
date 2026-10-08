@@ -736,7 +736,7 @@ fn requireClean(r: *Run) Error!void {
     defer attrs.deinit();
     rules.attrs = &attrs;
     const head_tree = try r.repo.headTree(r.io);
-    var status = try worktree.status(r.gpa, r.io, wt, &index, r.repo.objectDatabase(), .{
+    var status = try worktree.status(r.gpa, r.io, wt, .{ .index = &index, .db = r.repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = head_tree,
         .untracked = .no,
@@ -2527,7 +2527,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     defer h.deinit(r.gpa);
     const head_oid = h.oid orelse return error.UnbornBranch;
     const head_tree = try repo.commitTree(io, head_oid);
-    var status = try worktree.status(r.gpa, io, wt, &index, repo.objectDatabase(), .{ .rules = rules, .head_tree = head_tree, .untracked = .no });
+    var status = try worktree.status(r.gpa, io, wt, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules, .head_tree = head_tree, .untracked = .no });
     defer status.deinit();
     var staged = false;
     for (status.entries) |entry| {

@@ -96,7 +96,7 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     defer repo.deinit(io);
     var index = try repo.openIndex(io);
     defer index.deinit();
-    _ = try relic.worktree.addAll(gpa, io, git.dir, &index, repo.objectDatabase(), .{ .rules = try repo.worktreeRules() });
+    _ = try relic.worktree.addAll(gpa, io, git.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
     const tree = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try repo.writeIndex(io, &index);
     const commit = try repo.writeCommit(io, .{ .tree = tree, .author = who, .committer = who, .message = "first\n" }, null);

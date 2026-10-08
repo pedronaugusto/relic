@@ -168,3 +168,9 @@ test "phase2 transport and LFS requests stay within five positional inputs" {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
+
+test "phase2 working tree requests stay within five positional inputs" {
+    inline for (.{ relic.worktree.addAll, relic.worktree.status, relic.worktree.checkout, relic.worktree.writePaths, relic.worktree.verifyUpdates, relic.worktree.differsFromIndex, relic.worktree.applySparse }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
+    }
+}

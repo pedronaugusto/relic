@@ -673,7 +673,7 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
     var patterns = (try sparse_mod.Patterns.load(gpa, io, git_dir, false)).?;
     defer patterns.deinit();
 
-    const out = try worktree.applySparse(gpa, io, repo.dir, &index, &db, &patterns, .{});
+    const out = try worktree.applySparse(gpa, io, repo.dir, .{ .index = &index, .db = &db, .patterns = &patterns }, .{});
     try std.testing.expectEqual(@as(u32, 1), out.skipped);
     try std.testing.expectError(error.FileNotFound, repo.dir.access(io, "docs/page.md", .{}));
     var buf: [16]u8 = undefined;
@@ -692,7 +692,7 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
     try git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n" });
     var wider = (try sparse_mod.Patterns.load(gpa, io, git_dir, false)).?;
     defer wider.deinit();
-    const back = try worktree.applySparse(gpa, io, repo.dir, &index, &db, &wider, .{});
+    const back = try worktree.applySparse(gpa, io, repo.dir, .{ .index = &index, .db = &db, .patterns = &wider }, .{});
     try std.testing.expectEqual(@as(u32, 1), back.restored);
     try std.testing.expectEqualStrings("docs\n", try repo.dir.readFile(io, "docs/page.md", &buf));
     try std.testing.expect(!index.find("docs/page.md").?.skip_worktree);
@@ -1693,7 +1693,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
 
         var index = try repo.openIndex(io);
         defer index.deinit();
-        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
+        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
             .rules = wt_rules,
             .new_blobs = where,
         });

@@ -54,7 +54,7 @@ test "staging and cache-tree reuse count only the work they need" {
     var index = try repo.openIndex(io);
     defer index.deinit();
 
-    const cold = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
+    const cold = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
     const cold_stats = repo.objectDatabase().stats;
 
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
@@ -63,7 +63,7 @@ test "staging and cache-tree reuse count only the work they need" {
     index.deinit();
     index = try repo.openIndex(io);
 
-    const warm = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{ .rules = wt_rules });
+    const warm = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
 
     const before_tree = repo.objectDatabase().stats;
     const same_tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
@@ -76,7 +76,7 @@ test "staging and cache-tree reuse count only the work they need" {
         const text = try std.mem.print(&content, "file {d} changed\n", .{i * 10});
         try repo_git.writeFile(io, path, text);
     }
-    var result = try worktree.status(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
+    var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
         .rules = wt_rules,
         .head_tree = null,
     });
@@ -385,7 +385,7 @@ test "loose and packed staging count object writes and deltas reduce pack bytes"
         var index = try repo.openIndex(io);
         defer index.deinit();
 
-        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, &index, repo.objectDatabase(), .{
+        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
             .rules = wt_rules,
             .new_blobs = where,
         });

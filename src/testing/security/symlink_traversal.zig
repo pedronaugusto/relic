@@ -193,7 +193,7 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
             defer index.deinit();
             // Refused, or written with the delayed file kept inside: what
             // must never be is a file in `target-dir`.
-            if (worktree.checkout(gpa, io, git.dir, &index, repo.objectDatabase(), try hash.Oid.parse(.sha1, tree_text), .{
+            if (worktree.checkout(gpa, io, git.dir, .{ .index = &index, .db = repo.objectDatabase(), .tree = try hash.Oid.parse(.sha1, tree_text) }, .{
                 .rules = rules,
                 .programs = .{ .environ = &env },
             })) |_| {} else |_| {}
@@ -415,7 +415,7 @@ test "CVE-2024-32002, t7423-submodule-symlinks 'git submodule update must not cr
     var rules = h.worktreeRules();
     rules.ignore_case = true;
     var why: worktree.Refusal = .{};
-    try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{ .rules = rules, .refusal = &why }));
+    try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, .{ .rules = rules, .refusal = &why }));
     try std.testing.expectEqual(@import("../../names/path.zig").Reason.path_collision, why.reason.?);
     try std.testing.expectError(error.FileNotFound, h.git_dir.access(io, "modules/x", .{}));
 }

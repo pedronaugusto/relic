@@ -555,7 +555,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
     defer index.deinit();
     const tree = (try repo.headTree(io)).?;
     // Every file is written again, as `git checkout -f` writes it.
-    const outcome = try worktree.checkout(gpa, io, ours, &index, repo.objectDatabase(), tree, .{ .rules = rules, .force = true });
+    const outcome = try worktree.checkout(gpa, io, ours, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{ .rules = rules, .force = true });
     try testing.expectEqual(@as(u32, 0), outcome.native_fallbacks);
     for (files) |f| try expectFile(fx, ours, f[0], f[1]);
     try testing.expectEqual(@as(u64, files.len), heard.objects);
@@ -1241,7 +1241,7 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 defer index.deinit();
                 const tree = (try repo.headTree(io)).?;
                 // Every file is written again, as `git checkout -f` writes it.
-                const done = worktree.checkout(gpa, io, d, &index, repo.objectDatabase(), tree, .{ .rules = rules, .force = true });
+                const done = worktree.checkout(gpa, io, d, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{ .rules = rules, .force = true });
                 if (skip) {
                     try testing.expectEqual(@as(u32, 1), (try done).native_fallbacks);
                 } else {

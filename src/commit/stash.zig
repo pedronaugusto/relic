@@ -600,7 +600,7 @@ fn workTree(ctx: *Ctx, updates: []const Update) Error!Oid {
 }
 
 fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const u8)) Error!void {
-    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt, &ctx.index, ctx.repo.objectDatabase(), .{
+    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt, .{ .index = &ctx.index, .db = ctx.repo.objectDatabase() }, .{
         .rules = ctx.rules,
         .programs = ctx.programs,
         .untracked = .all,
@@ -671,9 +671,9 @@ fn resetAfterPush(
             };
             if (std.Io.Dir.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, ctx.wt, parent);
         }
-        _ = try worktree.checkout(ctx.gpa, io, ctx.wt, &ctx.index, db, head_tree, checkout_options);
+        _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .tree = head_tree }, checkout_options);
         if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
-            _ = try worktree.checkout(ctx.gpa, io, ctx.wt, &ctx.index, db, index_tree, checkout_options);
+            _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .tree = index_tree }, checkout_options);
         }
         return;
     }
@@ -692,7 +692,7 @@ fn resetAfterPush(
         if (sameSide(entrySide(entry), want) and sameSide(on_disk, want)) continue;
         try writes.append(ctx.arena, .{ .path = path, .blob = if (want) |w| .{ .mode = w.mode, .oid = w.oid } else null });
     }
-    _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, &ctx.index, db, writes.items, checkout_options);
+    _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = writes.items }, checkout_options);
 
     if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
         var index_map = try worktree.flatten(ctx.arena, io, db, index_tree);
@@ -706,7 +706,7 @@ fn resetAfterPush(
             if (sameSide(entrySide(ctx.stage0(path)), want)) continue;
             try writes.append(ctx.arena, .{ .path = path, .blob = if (want) |w| .{ .mode = w.mode, .oid = w.oid } else null });
         }
-        _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, &ctx.index, db, writes.items, checkout_options);
+        _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = writes.items }, checkout_options);
     }
 }
 
@@ -865,7 +865,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     if (stash.untracked_tree) |tree| try untrackedWrites(arena, io, ctx.wt, db, tree, options.refusal, &untracked_writes);
 
     const checkout_options = ctx.checkoutOptions();
-    _ = try worktree.writePaths(gpa, io, ctx.wt, &ctx.index, db, writes.items, checkout_options);
+    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = writes.items }, checkout_options);
 
     const result_alloc = result_arena.allocator();
     var conflicts: std.ArrayList([]const u8) = .empty;
@@ -891,7 +891,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         try unstageUnlessNew(&ctx, &current_map);
     }
 
-    _ = try worktree.writePaths(gpa, io, ctx.wt, &ctx.index, db, untracked_writes.items, checkout_options);
+    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = untracked_writes.items }, checkout_options);
     try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = .{ .shared = repo.sharedPermissions() } });
 
     return .{

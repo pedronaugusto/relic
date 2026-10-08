@@ -163,7 +163,7 @@ pub const Store = struct {
         // The first capture of a large tree writes every blob in it, and
         // as loose objects that is a create and a rename each: past git's
         // unpack limit the rest go into one pack, and the trees after them.
-        const outcome = try worktree.addAll(store.gpa, io, wt, &staged, &store.db, .{
+        const outcome = try worktree.addAll(store.gpa, io, wt, .{ .index = &staged, .db = &store.db }, .{
             .rules = rules,
             .new_blobs = .auto,
             .programs = options.programs,
@@ -258,7 +258,7 @@ pub const Store = struct {
         var checkout = options.checkout;
         if (store.durability == .durable) checkout.durability = .durable;
         if (checkout.rules.attrs == null) checkout.rules.attrs = &attrs;
-        return worktree.checkout(store.gpa, io, wt, &staged, &store.db, snapshot.tree, checkout);
+        return worktree.checkout(store.gpa, io, wt, .{ .index = &staged, .db = &store.db, .tree = snapshot.tree }, checkout);
     }
 
     /// Compare snapshot trees; null names an empty tree. The returned

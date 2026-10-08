@@ -466,7 +466,7 @@ const Op = struct {
         defer attrs.deinit();
         rules.attrs = &attrs;
 
-        const update = try worktree.applySparse(repo.allocator(), io, repo.workDirectory().?, &index, repo.objectDatabase(), patterns, .{ .rules = rules });
+        const update = try worktree.applySparse(repo.allocator(), io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .patterns = patterns }, .{ .rules = rules });
 
         // git decides at every write whether the index may be sparse: sparse
         // checkout on, in cone mode, with `index.sparse`, and patterns that

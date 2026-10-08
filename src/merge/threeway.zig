@@ -391,7 +391,7 @@ fn carry(
     defer ignore_rules.deinit();
     var obstructions: worktree.Obstructions = .init(gpa);
     defer obstructions.deinit();
-    worktree.verifyUpdates(gpa, io, wt, index, &updates, .{ .rules = rules, .ignore = &ignore_rules, .obstructions = &obstructions }) catch |err| {
+    worktree.verifyUpdates(gpa, io, wt, .{ .index = index, .updates = &updates }, .{ .rules = rules, .ignore = &ignore_rules, .obstructions = &obstructions }) catch |err| {
         if (obstructions.first()) |path| {
             if (options.blocked) |b| b.set(path);
         }
