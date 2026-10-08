@@ -31,7 +31,6 @@ const std = @import("std");
 const crc32 = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const flate = std.compress.flate;
 const warp = @import("warp");
 const config_mod = @import("../config/config.zig");
 
@@ -1613,8 +1612,8 @@ fn buildPack(gpa: Allocator, kind: Kind, entries: []const TestEntry) ![]u8 {
     try out.appendSlice(gpa, &header);
     const offsets = try gpa.alloc(usize, entries.len);
     defer gpa.free(offsets);
-    const window = try gpa.alloc(u8, flate.max_window_len);
-    defer gpa.free(window);
+    var compressor = try pack.Deflater.init(gpa);
+    defer compressor.deinit(gpa);
     for (entries, 0..) |entry, i| {
         offsets[i] = out.items.len;
         var head: [16]u8 = undefined;
@@ -1652,10 +1651,7 @@ fn buildPack(gpa: Allocator, kind: Kind, entries: []const TestEntry) ![]u8 {
         };
         var compressed: Io.Writer.Allocating = try .initCapacity(gpa, 256);
         defer compressed.deinit();
-        var compress = try flate.Compress.init(&compressed.writer, window, .zlib, .level_1);
-        try compress.writer.writeAll(payload);
-        try compress.writer.flush();
-        try compress.finish();
+        try compressor.deflate(&compressed.writer, payload, .fast);
         try out.appendSlice(gpa, compressed.written());
     }
     var hasher: hash.Hasher = .init(kind);
@@ -2273,12 +2269,9 @@ test "an object the database holds under the same name with other bytes is refus
     {
         var compressed: Io.Writer.Allocating = try .initCapacity(gpa, 256);
         defer compressed.deinit();
-        const window = try gpa.alloc(u8, flate.max_window_len);
-        defer gpa.free(window);
-        var compress = try flate.Compress.init(&compressed.writer, window, .zlib, .level_1);
-        try compress.writer.writeAll("blob 4\x00evil");
-        try compress.writer.flush();
-        try compress.finish();
+        var compressor = try pack.Deflater.init(gpa);
+        defer compressor.deinit(gpa);
+        try compressor.deflate(&compressed.writer, "blob 4\x00evil", .fast);
         try tmp.dir.writeFile(io, .{ .sub_path = loose_path, .data = compressed.written() });
     }
 

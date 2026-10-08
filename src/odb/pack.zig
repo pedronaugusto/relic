@@ -16,7 +16,6 @@ const std = @import("std");
 const crc32 = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const flate = std.compress.flate;
 const warp = @import("warp");
 
 const hash = @import("../hash/hash.zig");
@@ -1448,16 +1447,13 @@ const TestPack = struct {
     }
 
     fn deflate(p: *TestPack, bytes: []const u8) !void {
-        const window = try p.gpa.alloc(u8, flate.max_window_len);
-        defer p.gpa.free(window);
+        var compress = try Deflater.init(p.gpa);
+        defer compress.deinit(p.gpa);
         // The compressor needs somewhere to put its output; an allocating
         // writer starts with no buffer at all and it asserts against that.
         var out: std.Io.Writer.Allocating = try .initCapacity(p.gpa, 4096);
         defer out.deinit();
-        var compress = try flate.Compress.init(&out.writer, window, .zlib, .level_1);
-        try compress.writer.writeAll(bytes);
-        try compress.writer.flush();
-        try compress.finish();
+        try compress.deflate(&out.writer, bytes, .fast);
         try p.body.appendSlice(p.gpa, out.written());
     }
 
@@ -3083,7 +3079,7 @@ test "a reused deflater makes the stream a fresh one makes, wherever it goes" {
             0 => 0,
             1 => random.uintLessThan(usize, 300),
             2 => random.intRangeAtMost(usize, 30_000, 70_000),
-            3 => flate.max_window_len,
+            3 => 1 << 15,
             else => random.uintLessThan(usize, 100_000),
         };
         payload.* = try gpa.alloc(u8, len);

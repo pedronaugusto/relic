@@ -8,6 +8,7 @@
 //! reaches all of them through the same code a real remote meets.
 
 const std = @import("std");
+const warp = @import("warp");
 const suite = @import("helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -321,9 +322,9 @@ pub const HttpServer = struct {
         var input = body;
         if (content_encoding) |ce| if (std.ascii.eqlIgnoreCase(ce, "gzip")) {
             var in: Io.Reader = .fixed(body);
-            var window: [std.compress.flate.max_window_len]u8 = undefined;
-            var inflate: std.compress.flate.Decompress = .init(&in, .gzip, &window);
-            input = try inflate.reader.allocRemaining(arena, .limited(1 << 30));
+            var window: [(1 << 15) + 4096]u8 = undefined;
+            var inflate: warp.Inflate.Reader = .init(&in, &window, .{ .accept = .gzip });
+            input = try inflate.interface.allocRemaining(arena, .limited(1 << 30));
         };
         var outcome = try program.run(s.gpa, io, .{ .environ = &env }, .{
             .argv = &.{ program_path, if (info_refs) "--advertise-refs" else "--stateless-rpc", full },

@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Warp decodes LFS zstd bodies with the frame-declared window and the existing 512 MiB refusal. Test fixtures use the adopted codecs, while external zlib and Git parity remain checked.
+
 - Loose reads verify the Adler checksum before returning content. Warp owns loose-object streaming and compression; partial header reads decode only their bounded output. Compressor and writer buffers have one database or stream owner.
 
 - **Breaking:** object and binary-patch decoding use Warp directly; the internal `odb.inflate` namespace and copied decoder are removed. Pack resource failures retain their I/O causes.

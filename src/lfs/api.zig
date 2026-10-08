@@ -71,6 +71,7 @@ const config_mod = @import("../config/config.zig");
 const Self = @This();
 
 const std = @import("std");
+const warp = @import("warp");
 test "phase2 LFS checks certificates with the request Io before dialing" {
     const gpa = testing.allocator;
     const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
@@ -2300,7 +2301,7 @@ pub const Exchange = struct {
     url: []const u8 = "",
     in_flight: bool = false,
     /// A zstd body's decoder, over the client's undecoded bytes.
-    decompress: std.compress.zstd.Decompress = undefined,
+    decompress: warp.zstd.Decompress.Reader = undefined,
     decompress_buffer: []u8 = &.{},
     body: ?*Io.Reader = null,
 
@@ -2385,23 +2386,26 @@ pub const Exchange = struct {
             return raw;
         }
         const window = try zstdWindow(raw);
-        ex.decompress_buffer = try ex.arena.allocator().alloc(u8, window + std.compress.zstd.block_size_max);
-        ex.decompress = .init(raw, ex.decompress_buffer, .{ .window_len = window });
-        ex.body = &ex.decompress.reader;
-        return &ex.decompress.reader;
+        ex.decompress_buffer = try ex.arena.allocator().alloc(u8, window + (1 << 17) + 4096);
+        ex.decompress = .init(raw, ex.decompress_buffer, .{});
+        ex.body = &ex.decompress.interface;
+        return &ex.decompress.interface;
     }
 
     /// The window a zstd body's first frame needs, read from its header
     /// without taking it off the stream: at least the standard's 8 MiB,
     /// and at most `zstd_window_max`, past which the body is refused.
     fn zstdWindow(raw: *Io.Reader) ErrorNamespace.Error!u32 {
-        const Header = std.compress.zstd.Decompress.Frame.Zstandard.Header;
         const head = raw.peek(18) catch raw.buffered();
-        const default: u32 = std.compress.zstd.default_window_len;
-        if (head.len < 5 or std.mem.readInt(u32, head[0..4], .little) != 0xFD2FB528) return default;
-        var fixed: Io.Reader = .fixed(head[4..]);
-        const frame = Header.decode(&fixed) catch return default;
-        const size = frame.windowSize() orelse return default;
+        const default: u32 = 8 << 20;
+        const frame = warp.zstd.frameHeader(head, .standard) catch |err| return switch (err) {
+            error.WindowTooLarge => error.LfsZstdWindowTooLarge,
+            error.InvalidStream, error.Truncated => default,
+        };
+        const size = switch (frame) {
+            .zstd => |frame_header| frame_header.window_size,
+            .skippable => return default,
+        };
         if (size > zstd_window_max) return error.LfsZstdWindowTooLarge;
         return @intCast(@max(size, default));
     }

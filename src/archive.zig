@@ -9,7 +9,7 @@
 //! is. The zip is git's too — DOS times, the extended-time field, the
 //! executable and symlink bits, the text flag, the commit's name as the
 //! archive comment — and is byte for byte git's when stored (`level = 0`);
-//! a deflated entry is this package's deflate, which decodes to the same
+//! a deflated entry uses Warp's deflate, which decodes to the same
 //! file while its compressed bytes are not zlib's.
 //!
 //! Attributes come from the tree being archived, as git reads them, or the
