@@ -1079,7 +1079,7 @@ pub const Client = struct {
     options: Options,
     /// One HTTP client for each set of connection settings the operation's
     /// URLs need: `transportFor`.
-    transports: std.ArrayList(*Transport) = .empty,
+    transports: ?*Transports = null,
     transport_mutex: Io.Mutex = .init,
     /// The passphrases that opened client keys, by the key's path, as
     /// git-lfs keeps them in memory: a key is asked for once, however
@@ -1177,11 +1177,15 @@ pub const Client = struct {
             else => {},
         };
         c.ssh_failure.deinit(c.gpa);
-        for (c.transports.items) |t| {
-            t.client.deinit(c.io);
-            t.free(c.gpa);
+        if (c.transports) |handle| {
+            const pool: *TransportPool = @ptrCast(@alignCast(handle)); // safe: transportFor installs a TransportPool
+            for (pool.items.items) |t| {
+                t.client.deinit(c.io);
+                t.free(c.gpa);
+            }
+            pool.items.deinit(c.gpa);
+            c.gpa.destroy(pool);
         }
-        c.transports.deinit(c.gpa);
         c.arena.deinit();
         c.* = undefined;
     }
@@ -1750,9 +1754,10 @@ pub const Client = struct {
     }
 
     fn exchangeOnce(c: *Client, request: Request, url: []const u8, auth_header: ?[]const u8) Error!*Exchange {
-        const ex = try c.gpa.create(Exchange);
-        errdefer c.gpa.destroy(ex);
-        ex.* = .{ .client = c, .arena = .init(c.gpa) };
+        const state = try c.gpa.create(ExchangeState);
+        errdefer c.gpa.destroy(state);
+        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa), .wire = @ptrCast(state) } }; // safe: the opaque handle points back to its owning ExchangeState
+        const ex = &state.exchange;
         errdefer ex.arena.deinit();
         const a = ex.arena.allocator();
 
@@ -1815,8 +1820,8 @@ pub const Client = struct {
                     .url = request_url,
                     .headers = headers.items,
                     .body = .{ .streamed = .{ .length = if (chunked) null else o.pointer.size } },
-                    .diagnostics = &ex.diagnostics,
-                }) catch |err| return c.clientFailed(&ex.diagnostics, err, request_url);
+                    .diagnostics = &ex.state().diagnostics,
+                }) catch |err| return c.clientFailed(&ex.state().diagnostics, err, request_url);
                 defer outgoing.deinit(c.io);
                 var chunk: [64 * 1024]u8 = undefined;
                 var fr = file.reader(c.io, &.{});
@@ -1830,7 +1835,7 @@ pub const Client = struct {
                     if (request.sent) |count| count.* += n;
                     if (request.on_bytes) |cb| cb.add(cb.context, n);
                 }
-                ex.response = outgoing.finish(c.io) catch |err| return c.clientFailed(&ex.diagnostics, err, request_url);
+                ex.state().response = outgoing.finish(c.io) catch |err| return c.clientFailed(&ex.state().diagnostics, err, request_url);
             },
         }
         ex.in_flight = true;
@@ -1839,13 +1844,13 @@ pub const Client = struct {
 
     /// Send `ex`'s request with a body given whole, and read its answer's head.
     fn sendWhole(c: *Client, ex: *Exchange, transport: *uplink.Client, method: uplink.Method, headers: []const http.Header, body: uplink.Request.Body) Error!void {
-        ex.response = transport.send(c.io, .{
+        ex.state().response = transport.send(c.io, .{
             .method = method,
             .url = ex.url,
             .headers = headers,
             .body = body,
-            .diagnostics = &ex.diagnostics,
-        }) catch |err| return c.clientFailed(&ex.diagnostics, err, ex.url);
+            .diagnostics = &ex.state().diagnostics,
+        }) catch |err| return c.clientFailed(&ex.state().diagnostics, err, ex.url);
     }
 
     /// What an uplink client can fail with: a request, or the end of one
@@ -1951,7 +1956,13 @@ pub const Client = struct {
 
         try c.transport_mutex.lock(c.io);
         defer c.transport_mutex.unlock(c.io);
-        for (c.transports.items) |t| {
+        if (c.transports == null) {
+            const pool = try c.gpa.create(TransportPool);
+            pool.* = .{};
+            c.transports = @ptrCast(pool); // safe: the opaque handle owns this TransportPool until deinit
+        }
+        const pool: *TransportPool = @ptrCast(@alignCast(c.transports.?)); // safe: the handle above owns a TransportPool
+        for (pool.items.items) |t| {
             if (std.mem.eql(u8, t.key, key)) return &t.client;
         }
         const t = try c.gpa.create(Transport);
@@ -1998,7 +2009,7 @@ pub const Client = struct {
             .retries = .none,
         });
         errdefer t.client.deinit(c.io);
-        try c.transports.append(c.gpa, t);
+        try pool.items.append(c.gpa, t);
         return &t.client;
     }
 
@@ -2232,33 +2243,49 @@ const Transport = struct {
     }
 };
 
+const Transports = opaque {};
+const TransportPool = struct {
+    items: std.ArrayList(*Transport) = .empty,
+};
+
+const Wire = opaque {};
+const ExchangeState = struct {
+    exchange: Exchange,
+    diagnostics: uplink.Diagnostics = .{},
+    response: uplink.Response = undefined,
+};
+
 /// A request made and its answer, open for the body.
 pub const Exchange = struct {
     client: *Client,
-    diagnostics: uplink.Diagnostics = .{},
+    /// Private: the network state, owned with this exchange in one allocation.
+    wire: *Wire,
     arena: std.heap.ArenaAllocator,
     /// Where the request went, without a credential, in the exchange's
     /// arena.
     url: []const u8 = "",
-    response: uplink.Response = undefined,
     in_flight: bool = false,
     /// A zstd body's decoder, over the client's undecoded bytes.
     decompress: std.compress.zstd.Decompress = undefined,
     decompress_buffer: []u8 = &.{},
     body: ?*Io.Reader = null,
 
+    fn state(ex: *const Exchange) *ExchangeState {
+        return @ptrCast(@alignCast(ex.wire)); // safe: exchangeOnce pairs every handle with its ExchangeState
+    }
+
     /// The answer's status.
     pub fn status(ex: *const Exchange) http.Status {
-        return ex.response.status;
+        return ex.state().response.status;
     }
 
     /// A header of the answer, or `null`.
     pub fn header(ex: *const Exchange, name: []const u8) ?[]const u8 {
-        return ex.response.headers.get(name);
+        return ex.state().response.headers.get(name);
     }
 
     fn location(ex: *const Exchange) ?[]const u8 {
-        return ex.response.headers.get("location");
+        return ex.state().response.headers.get("location");
     }
 
     const Offers = struct { basic: bool = false, other: bool = false };
@@ -2268,7 +2295,7 @@ pub const Exchange = struct {
     fn challenges(ex: *const Exchange, a: Allocator) Allocator.Error![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         for ([_][]const u8{ "lfs-authenticate", "www-authenticate" }) |name| {
-            var it = ex.response.headers.iterator();
+            var it = ex.state().response.headers.iterator();
             while (it.next()) |h| {
                 if (std.ascii.eqlIgnoreCase(h.name, name)) try out.append(a, try a.dupe(u8, h.value));
             }
@@ -2291,7 +2318,7 @@ pub const Exchange = struct {
 
     fn authenticateOffers(ex: *const Exchange) Offers {
         var offers: Offers = .{};
-        var it = ex.response.headers.iterator();
+        var it = ex.state().response.headers.iterator();
         while (it.next()) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "www-authenticate") and !std.ascii.eqlIgnoreCase(h.name, "lfs-authenticate")) continue;
             const value = std.mem.trim(u8, h.value, " \t");
@@ -2312,13 +2339,13 @@ pub const Exchange = struct {
     /// `Content-Encoding` says.
     pub fn reader(ex: *Exchange) Self.Error!*Io.Reader {
         if (ex.body) |r| return r;
-        const raw = ex.response.reader(ex.client.io);
+        const raw = ex.state().response.reader(ex.client.io);
         // A zstd body is asked for by `Request.Accept.zstd`, whose client
         // leaves content codings undecoded. The window is the one the
         // first frame's header asks for, as git-lfs's decoder gives it, up
         // to the same limit. Any other coding is the HTTP client's to have
         // decoded, or is handed over as it came.
-        const codings = uplink.wire.coding.Codings.of(&ex.response.headers) catch uplink.wire.coding.Codings{};
+        const codings = uplink.wire.coding.Codings.of(&ex.state().response.headers) catch uplink.wire.coding.Codings{};
         if (codings.len != 1 or codings.items[0] != .zstd) {
             ex.body = raw;
             return raw;
@@ -2357,7 +2384,7 @@ pub const Exchange = struct {
 
     /// The reason a read of the body failed.
     pub fn bodyError(ex: *const Exchange) []const u8 {
-        return switch (ex.response.failure()) {
+        return switch (ex.state().response.failure()) {
             error.TimedOut => "timed out",
             else => |err| @errorName(err),
         };
@@ -2366,9 +2393,9 @@ pub const Exchange = struct {
     /// Give the connection back and release everything.
     pub fn close(ex: *Exchange) void {
         const c = ex.client;
-        if (ex.in_flight) ex.response.deinit(c.io);
+        if (ex.in_flight) ex.state().response.deinit(c.io);
         ex.arena.deinit();
-        c.gpa.destroy(ex);
+        c.gpa.destroy(ex.state());
     }
 };
 

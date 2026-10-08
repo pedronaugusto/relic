@@ -35,6 +35,12 @@ test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(transport, "tls"));
     try std.testing.expect(!@hasDecl(transport, "clientcert"));
     try std.testing.expect(!@hasDecl(lfs.lfsapi, "timeoutsFor"));
+    try std.testing.expect(!@hasField(lfs.lfsapi.Exchange, "response"));
+    try std.testing.expect(!@hasField(lfs.lfsapi.Exchange, "diagnostics"));
+    const wire = @typeInfo(@FieldType(lfs.lfsapi.Exchange, "wire")).pointer.child;
+    try std.testing.expect(@typeInfo(wire) == .@"opaque");
+    const pool = @typeInfo(@FieldType(lfs.lfsapi.Client, "transports")).optional.child;
+    try std.testing.expect(@typeInfo(@typeInfo(pool).pointer.child) == .@"opaque");
 }
 
 test {
