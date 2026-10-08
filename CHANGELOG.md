@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Local push retains the copied pack until all receiver ref transactions and
+  shallow updates finish, including rollback. Cancellation propagates after ref
+  locks are released; the keep token's uncancelable cleanup then runs.
+
 - Bare merge strategy aliases patience/histogram preserve the existing minimal
   policy, as Git does; diff-algorithm= still replaces it. Durability contracts
   account for Airlock's Linux O_PATH recovery before the successful directory sync.

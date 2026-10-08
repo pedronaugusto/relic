@@ -230,3 +230,7 @@ test "phase2 local receive owns a keep token with default receive options" {
         }
     }
 }
+
+test {
+    _ = @import("local_push_keep.zig");
+}

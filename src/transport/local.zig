@@ -288,10 +288,14 @@ pub const Remote = struct {
         for (commands) |command| {
             if (!command.new.isZero()) needs_pack = true;
         }
+        var retained: ?pack.WriteReport = null;
+        defer if (retained) |*written| {
+            if (written.keep) |*token| token.deinit(io);
+        };
         if (needs_pack and objects.len != 0) {
             var pack_dir = try r.repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
             defer pack_dir.close(io);
-            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = revindex.wanted(r.repo.configuration()) });
+            retained = try from.writePack(io, pack_dir, objects, .{ .keep = true, .reverse_index = revindex.wanted(r.repo.configuration()) });
             try r.repo.objectDatabase().refresh(io);
         }
 
@@ -358,7 +362,8 @@ pub const Remote = struct {
                 var tx = r.repo.beginRefs();
                 defer tx.deinit(io);
                 for (commands) |command| try stage(&tx, command);
-                if (tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() })) |_| {} else |_| {
+                if (tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() })) |_| {} else |err| {
+                    if (err == error.Canceled) return error.Canceled;
                     for (refs.items) |*ref| {
                         ref.ok = false;
                         ref.message = "failed to update ref";
@@ -371,7 +376,8 @@ pub const Remote = struct {
                 var tx = r.repo.beginRefs();
                 defer tx.deinit(io);
                 try stage(&tx, command);
-                tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() }) catch {
+                tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() }) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
                     ref.ok = false;
                     ref.message = "failed to update ref";
                 };

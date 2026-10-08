@@ -119,3 +119,10 @@ policy survives bare patience/histogram. The shared algorithm grammar still
 replaces both fields for diff-algorithm= and configured values. Durability tests
 count logical directory barriers exactly, accounting for Airlock's Linux O_PATH
 EBADF/reopen recovery through its published getfl and sync_dir seam calls.
+
+Local receivePush owns the copied pack's keep token before publication and
+retains it through every atomic or per-ref transaction and shallow update.
+Transaction cleanup precedes token release on success, failure and cancellation;
+cancellation remains an operation error rather than a successful refusal report.
+Concurrent Git collection cannot remove the received object closure before refs
+make it reachable. Tokens own their directory handle independently of the writer.
