@@ -25,7 +25,7 @@ const Context = struct {
     }
 };
 
-fn echo(io: Io) !void {
+pub fn echo(io: Io) !void {
     var in_buffer: [4096]u8 = undefined;
     var input = Io.File.stdin().readerStreaming(io, &in_buffer);
     var out_buffer: [4096]u8 = undefined;
@@ -42,11 +42,9 @@ fn echo(io: Io) !void {
 
 const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.run)).@"fn".return_type.?).error_union.error_set;
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len > 1 and std.mem.eql(u8, args[1], "--echo")) return echo(io);
     const smoke = args.len > 1 and std.mem.eql(u8, args[1], "--smoke");
     var env = try init.minimal.environ.createMap(gpa);
     defer env.deinit();

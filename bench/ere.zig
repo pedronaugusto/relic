@@ -32,10 +32,9 @@ const Context = struct {
 const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.boolean)).@"fn".return_type.?).error_union.error_set ||
     @typeInfo(@typeInfo(@TypeOf(Context.span)).@"fn".return_type.?).error_union.error_set;
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
     const smoke = args.len > 1 and std.mem.eql(u8, args[1], "--smoke");
     var context: Context = .{ .gpa = gpa };
     var buffer: [4096]u8 = undefined;

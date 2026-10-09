@@ -37,22 +37,24 @@ A Debug build measures a smaller tree with the same ratios. `relic-regressions -
 runs every measurement once on a tiny tree without reading a clock, to check
 that each still works.
 
-`relic-native` measures cached 256-byte native pipe round trips through
-Shakedown, with process startup outside the clock and exact answer checking.
-`relic-native --smoke` runs the protocol without sampling timings.
+`relic-rows` is one program, so the library compiles once for all of its groups.
+It times each through shakedown.bench and prints its rows as JSON lines;
+`--smoke` runs every row once without a clock. The groups:
 
-`relic-local-push` uses shakedown.bench for a repeated local push of one commit,
-one tree and one blob, including pack writing and receiver ref publication.
-Construction and teardown are outside timing. `--smoke` checks its object count,
-accepted report and final ref without reporting timing. Compare ReleaseFast
-executables in paired, interleaved order; fixture filesystem work remains visible
-in the timing spread.
+- rules: loading and matching a 32-line ignore file, an includeIf condition,
+  loading an attributes file and looking one path up, and the CRC kernel over 1 MiB;
+- ere: boolean and span compile/search on one bounded interval expression,
+  checking the boolean result and the exact longest span on every operation;
+- pack codec: reused compression of 32 KiB text and noise at each pack level;
+- zstd: the 128 KiB RLE-frame reader LFS uses, checking exact output and stream
+  termination;
+- local push: a repeated local push of one commit, one tree and one blob,
+  including pack writing and receiver ref publication, with construction and
+  teardown outside the timing and the object count, accepted report and final
+  ref checked;
+- native: cached 256-byte native pipe round trips, with process startup outside
+  the clock and exact answer checking.
 
-`relic-ere` measures boolean and span compile/search adapters on one bounded
-interval expression through shakedown.bench. It checks the boolean result and
-exact longest span on every operation; `--smoke` checks both without timing.
-
-`relic-pack-codec` measures reused compression of 32 KiB text and noise at
-each supported pack level. `relic-zstd` measures the 128 KiB RLE-frame reader
-used by LFS, checking exact output and stream termination. Both use Shakedown
-and support `--smoke`; fixture and buffer allocation stay outside the clock.
+Compare ReleaseFast executables in paired, interleaved order (`zig build bench-ab`);
+fixture filesystem work remains visible in the timing spread. Fixture and buffer
+allocation stay outside the clock.

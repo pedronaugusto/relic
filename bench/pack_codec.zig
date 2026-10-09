@@ -43,9 +43,8 @@ const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.fastText)).@"fn".retur
     @typeInfo(@typeInfo(@TypeOf(Context.defaultNoise)).@"fn".return_type.?).error_union.error_set ||
     @typeInfo(@typeInfo(@TypeOf(Context.bestNoise)).@"fn".return_type.?).error_union.error_set;
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const gpa = init.gpa;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
     const smoke = args.len > 1 and std.mem.eql(u8, args[1], "--smoke");
     const text = try gpa.alloc(u8, 32 << 10);
     defer gpa.free(text);
