@@ -844,32 +844,33 @@ test "the way in is git's, a collapse that leaves a keyword for the next one inc
 
 test "phase2 conversion cleanup passes its supplied Io to the native owner once" {
     const Probe = struct {
+        const ProbeSelf = @This();
         calls: usize = 0,
         received: ?Io = null,
-        fn clean(_: *anyopaque, _: Allocator, _: Io, _: native.CleanInput) native.Error![]const u8 {
+        fn clean(_: Allocator, _: Io, _: *anyopaque, _: native.CleanInput) native.Error![]const u8 {
             unreachable;
         }
-        fn cleanFile(_: *anyopaque, _: Allocator, _: Io, _: native.FileInput) native.Error![]const u8 {
+        fn cleanFile(_: Allocator, _: Io, _: *anyopaque, _: native.FileInput) native.Error![]const u8 {
             unreachable;
         }
-        fn smudge(_: *anyopaque, _: Allocator, _: Io, _: native.SmudgeInput) native.Error!native.Content {
+        fn smudge(_: Allocator, _: Io, _: *anyopaque, _: native.SmudgeInput) native.Error!native.Content {
             unreachable;
         }
-        fn canonical(_: *anyopaque, _: Allocator, _: []const u8) native.Error!?[]const u8 {
+        fn canonical(_: Allocator, _: *anyopaque, _: []const u8) native.Error!?[]const u8 {
             unreachable;
         }
-        fn nextReady(_: *anyopaque, _: Allocator, _: Io) native.Error!?native.Ready {
+        fn nextReady(_: Allocator, _: Io, _: *anyopaque) native.Error!?native.Ready {
             unreachable;
         }
         fn fallbacks(_: *const anyopaque) u32 {
             return 0;
         }
-        fn deinit(context: *anyopaque, io: Io) void {
-            const p: *@This() = @ptrCast(@alignCast(context));
+        fn recordRelease(io: Io, context: *anyopaque) void {
+            const p: *ProbeSelf = @ptrCast(@alignCast(context));
             p.calls += 1;
             p.received = io;
         }
-        const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = deinit };
+        const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = recordRelease };
     };
     const io = std.testing.io;
     var cleanup_vtable = io.vtable.*;

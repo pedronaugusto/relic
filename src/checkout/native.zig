@@ -59,35 +59,35 @@ pub const Session = struct {
 
     pub const Error = Self.Error;
     pub const VTable = struct {
-        clean: *const fn (*anyopaque, Allocator, Io, CleanInput) Self.Error![]const u8,
-        clean_file: *const fn (*anyopaque, Allocator, Io, FileInput) Self.Error![]const u8,
-        smudge: *const fn (*anyopaque, Allocator, Io, SmudgeInput) Self.Error!Content,
-        canonical: *const fn (*anyopaque, Allocator, []const u8) Self.Error!?[]const u8,
-        next_ready: *const fn (*anyopaque, Allocator, Io) Self.Error!?Ready,
+        clean: *const fn (Allocator, Io, *anyopaque, CleanInput) Self.Error![]const u8,
+        clean_file: *const fn (Allocator, Io, *anyopaque, FileInput) Self.Error![]const u8,
+        smudge: *const fn (Allocator, Io, *anyopaque, SmudgeInput) Self.Error!Content,
+        canonical: *const fn (Allocator, *anyopaque, []const u8) Self.Error!?[]const u8,
+        next_ready: *const fn (Allocator, Io, *anyopaque) Self.Error!?Ready,
         fallbacks: *const fn (*const anyopaque) u32,
-        deinit: *const fn (*anyopaque, Io) void,
+        deinit: *const fn (Io, *anyopaque) void,
     };
 
     pub fn clean(s: Session, gpa: Allocator, io: Io, input: CleanInput) Self.Error![]const u8 {
-        return s.vtable.clean(s.context, gpa, io, input);
+        return s.vtable.clean(gpa, io, s.context, input);
     }
     pub fn cleanFile(s: Session, gpa: Allocator, io: Io, input: FileInput) Self.Error![]const u8 {
-        return s.vtable.clean_file(s.context, gpa, io, input);
+        return s.vtable.clean_file(gpa, io, s.context, input);
     }
     pub fn smudge(s: Session, gpa: Allocator, io: Io, input: SmudgeInput) Self.Error!Content {
-        return s.vtable.smudge(s.context, gpa, io, input);
+        return s.vtable.smudge(gpa, io, s.context, input);
     }
     pub fn canonical(s: Session, gpa: Allocator, bytes: []const u8) Self.Error!?[]const u8 {
-        return s.vtable.canonical(s.context, gpa, bytes);
+        return s.vtable.canonical(gpa, s.context, bytes);
     }
     pub fn nextReady(s: Session, gpa: Allocator, io: Io) Self.Error!?Ready {
-        return s.vtable.next_ready(s.context, gpa, io);
+        return s.vtable.next_ready(gpa, io, s.context);
     }
     pub fn fallbacks(s: Session) u32 {
         return s.vtable.fallbacks(s.context);
     }
     pub fn deinit(s: Session, io: Io) void {
-        s.vtable.deinit(s.context, io);
+        s.vtable.deinit(io, s.context);
     }
 };
 
@@ -101,23 +101,23 @@ pub const Driver = struct {
     pub const Error = Self.Error;
     pub const VTable = struct {
         accepts: *const fn (*const anyopaque, Commands) bool,
-        open: *const fn (*anyopaque, Allocator, Io, SessionOptions) Self.Error!Session,
+        open: *const fn (Allocator, Io, *anyopaque, SessionOptions) Self.Error!Session,
         /// Redirect an isolated operation's writes to its private store.
         retarget: *const fn (*anyopaque, Io.Dir) void,
-        deinit: *const fn (*anyopaque, Io) void,
+        deinit: *const fn (Io, *anyopaque) void,
     };
 
     pub fn accepts(d: Driver, commands: Commands) bool {
         return d.vtable.accepts(d.context, commands);
     }
     pub fn open(d: Driver, gpa: Allocator, io: Io, options: SessionOptions) Self.Error!Session {
-        return d.vtable.open(d.context, gpa, io, options);
+        return d.vtable.open(gpa, io, d.context, options);
     }
     pub fn retarget(d: Driver, dir: Io.Dir) void {
         d.vtable.retarget(d.context, dir);
     }
     pub fn deinit(d: Driver, io: Io) void {
-        d.vtable.deinit(d.context, io);
+        d.vtable.deinit(io, d.context);
     }
 };
 
@@ -125,10 +125,10 @@ pub const Driver = struct {
 /// The optional context is borrowed only for `load`, never by the result.
 pub const Provider = struct {
     context: ?*const anyopaque = null,
-    load_fn: *const fn (?*const anyopaque, Allocator, Io, *const config.Config, LoadOptions) Self.Error!Driver,
+    load_fn: *const fn (Allocator, Io, ?*const anyopaque, *const config.Config, LoadOptions) Self.Error!Driver,
 
     pub fn load(p: Provider, gpa: Allocator, io: Io, settings: *const config.Config, options: LoadOptions) Self.Error!Driver {
-        return p.load_fn(p.context, gpa, io, settings, options);
+        return p.load_fn(gpa, io, p.context, settings, options);
     }
 };
 

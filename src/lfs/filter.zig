@@ -31,7 +31,7 @@ pub fn provider(options: *const Options) native.Provider {
     return .{ .context = options, .load_fn = loadDriver };
 }
 
-fn loadDriver(context: ?*const anyopaque, gpa: Allocator, io: Io, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
+fn loadDriver(gpa: Allocator, io: Io, context: ?*const anyopaque, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
     const with: *const Options = @ptrCast(@alignCast(context.?));
     const backend = try gpa.create(Backend);
     errdefer gpa.destroy(backend);
@@ -56,11 +56,11 @@ const Backend = struct {
     gpa: Allocator,
     lfs: lfs.Lfs,
     fetch: ?lfs.Fetcher,
-    const vtable: native.Driver.VTable = .{ .accepts = accepts, .open = open, .retarget = retarget, .deinit = deinit };
+    const vtable: native.Driver.VTable = .{ .accepts = accepts, .open = open, .retarget = retarget, .deinit = releaseContext };
     fn accepts(_: *const anyopaque, commands: native.Commands) bool {
         return isGitLfs(commands);
     }
-    fn open(context: *anyopaque, gpa: Allocator, _: Io, options: native.SessionOptions) native.Error!native.Session {
+    fn open(gpa: Allocator, _: Io, context: *anyopaque, options: native.SessionOptions) native.Error!native.Session {
         const session = try gpa.create(Session);
         session.* = .{ .gpa = gpa, .backend = @ptrCast(@alignCast(context)), .options = options, .arena = .init(gpa) };
         return .{ .context = session, .vtable = &Session.vtable };
@@ -69,7 +69,7 @@ const Backend = struct {
         const b: *Backend = @ptrCast(@alignCast(context));
         b.lfs.store = .{ .base = dir, .root = "lfs" };
     }
-    fn deinit(context: *anyopaque, _: Io) void {
+    fn releaseContext(_: Io, context: *anyopaque) void {
         const b: *Backend = @ptrCast(@alignCast(context));
         const gpa = b.gpa;
         b.lfs.deinit();
@@ -87,33 +87,34 @@ const Session = struct {
     next_deferred: usize = 0,
     lfs_pointers: u32 = 0,
     const Deferred = struct { path: []const u8, pointer: lfs.Pointer, pointer_bytes: []const u8 };
-    const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = deinit };
+    const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = releaseContext };
     fn get(context: *anyopaque) *Session {
         const s: *Session = @ptrCast(@alignCast(context));
         return s;
     }
-    fn clean(context: *anyopaque, a: Allocator, io: Io, input: native.CleanInput) native.Error![]const u8 {
+    fn clean(a: Allocator, io: Io, context: *anyopaque, input: native.CleanInput) native.Error![]const u8 {
         return get(context).lfsClean(a, io, input.bytes, input.storing);
     }
-    fn cleanFile(context: *anyopaque, a: Allocator, io: Io, input: native.FileInput) native.Error![]const u8 {
+    fn cleanFile(a: Allocator, io: Io, context: *anyopaque, input: native.FileInput) native.Error![]const u8 {
         return get(context).lfsCleanFile(a, io, input.path, input.storing);
     }
-    fn smudge(context: *anyopaque, a: Allocator, io: Io, input: native.SmudgeInput) native.Error!native.Content {
+    fn smudge(a: Allocator, io: Io, context: *anyopaque, input: native.SmudgeInput) native.Error!native.Content {
         return get(context).lfsSmudge(a, io, input.path, input.bytes, input.can_delay);
     }
-    fn canonical(_: *anyopaque, a: Allocator, bytes: []const u8) native.Error!?[]const u8 {
+    fn canonical(a: Allocator, _: *anyopaque, bytes: []const u8) native.Error!?[]const u8 {
         const pointer = lfs.Pointer.decode(bytes) catch return null;
         if (pointer.extension_count != 0) return error.NativeFilterExtensionUnsupported;
-        return try encodePointer(a, &pointer);
+        const encoded = try encodePointer(a, &pointer);
+        return encoded;
     }
-    fn nextReady(context: *anyopaque, _: Allocator, io: Io) native.Error!?native.Ready {
+    fn nextReady(_: Allocator, io: Io, context: *anyopaque) native.Error!?native.Ready {
         return get(context).nextDeferred(io);
     }
     fn fallbacks(context: *const anyopaque) u32 {
         const s: *const Session = @ptrCast(@alignCast(context));
         return s.lfs_pointers;
     }
-    fn deinit(context: *anyopaque, _: Io) void {
+    fn releaseContext(_: Io, context: *anyopaque) void {
         const s: *Session = @ptrCast(@alignCast(context));
         const gpa = s.gpa;
         s.deferred.deinit(gpa);
@@ -336,9 +337,10 @@ test "phase2 native LFS batches delayed files once and isolates session state" {
     var cfg = try config.Config.parseText(gpa, "", .local);
     defer cfg.deinit();
     const Fetch = struct {
+        const Self = @This();
         calls: usize = 0,
         fn fetch(io_: Io, context: *anyopaque, store: *const lfs.Store, _: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
-            const f: *@This() = @ptrCast(@alignCast(context));
+            const f: *Self = @ptrCast(@alignCast(context));
             f.calls += 1;
             if (wanted.len != 2) return error.LfsFetchFailed;
             for (wanted) |w| {
@@ -381,9 +383,10 @@ test "phase2 native LFS propagates batched cancellation and releases pending sta
     var cfg = try config.Config.parseText(gpa, "", .local);
     defer cfg.deinit();
     const Fetch = struct {
+        const Self = @This();
         calls: usize = 0,
         fn fetch(_: Io, context: *anyopaque, _: *const lfs.Store, _: *const lfs.Settings, _: []const lfs.Wanted) lfs.FetchError!void {
-            const f: *@This() = @ptrCast(@alignCast(context));
+            const f: *Self = @ptrCast(@alignCast(context));
             f.calls += 1;
             return error.Canceled;
         }
