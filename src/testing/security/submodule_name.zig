@@ -6,7 +6,6 @@
 //! layout, and `worktree/safepath.zig` with `object/fsck.zig` for a
 //! `.gitmodules` that is a symbolic link.
 
-const worktree = @import("../../checkout/checkout.zig");
 const std = @import("std");
 const Io = std.Io;
 

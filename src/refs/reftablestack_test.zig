@@ -1,56 +1,23 @@
 const std = @import("std");
+const hash_mod = @import("../hash/hash.zig");
+const cache_mod = @import("reftablestack/cache.zig");
+const reftablestack_mod = @import("reftablestack.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Oid = @import("../hash/hash.zig").Oid;
-const Kind = @import("../hash/hash.zig").Kind;
-const hash = @import("reftablestack/cache.zig").internal.hash;
 const object = @import("../object/object.zig");
-const fs = @import("reftablestack/cache.zig").internal.fs;
-const reftable = @import("reftablestack/cache.zig").internal.reftable;
 const refs = @import("refs.zig");
 const reflog = @import("reflog.zig");
-const Options = @import("reftablestack.zig").Options;
-const Error = @import("reftablestack.zig").Error;
-const max_reload_attempts = @import("reftablestack/cache.zig").internal.max_reload_attempts;
-const Stack = @import("reftablestack.zig").Stack;
-const mergedRefs = @import("reftablestack/cache.zig").internal.mergedRefs;
-const allLogs = @import("reftablestack/cache.zig").internal.allLogs;
-const copyLog = @import("reftablestack/cache.zig").internal.copyLog;
-const lessThanRef = @import("reftablestack/cache.zig").internal.lessThanRef;
-const newerFirst = @import("reftablestack/cache.zig").internal.newerFirst;
-const logOrder = @import("reftablestack/cache.zig").internal.logOrder;
-const isTableName = @import("reftablestack/cache.zig").internal.isTableName;
-const tableName = @import("reftablestack/cache.zig").internal.tableName;
-const Cache = @import("reftablestack.zig").Cache;
-const Validity = @import("reftablestack/cache.zig").internal.Validity;
-const Stacks = @import("reftablestack/cache.zig").internal.Stacks;
-const loadIn = @import("reftablestack/cache.zig").internal.loadIn;
-const reloadIn = @import("reftablestack/cache.zig").internal.reloadIn;
-const isLinked = @import("reftablestack/cache.zig").internal.isLinked;
-const read = @import("reftablestack.zig").read;
-const list = @import("reftablestack.zig").list;
-const readLog = @import("reftablestack.zig").readLog;
-const logExists = @import("reftablestack.zig").logExists;
-const minutesFromZone = @import("reftablestack.zig").minutesFromZone;
-const zoneFromMinutes = @import("reftablestack.zig").zoneFromMinutes;
-const Pending = @import("reftablestack.zig").Pending;
-const prepare = @import("reftablestack.zig").prepare;
-const commit = @import("reftablestack.zig").commit;
-const appendLog = @import("reftablestack.zig").appendLog;
-const releasePending = @import("reftablestack.zig").releasePending;
-const Compaction = @import("reftablestack.zig").Compaction;
-const compactIn = @import("reftablestack.zig").compactIn;
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const state_mod = @import("state.zig");
 const config_mod = @import("../config/config.zig");
 
 test "a zone is git's hhmm number both ways" {
-    try std.testing.expectEqual(@as(i16, 130), zoneFromMinutes(90));
-    try std.testing.expectEqual(@as(i16, -500), zoneFromMinutes(-300));
-    try std.testing.expectEqual(@as(i16, 90), minutesFromZone(130));
-    try std.testing.expectEqual(@as(i16, -300), minutesFromZone(-500));
-    try std.testing.expectEqual(@as(i16, 0), minutesFromZone(0));
+    try std.testing.expectEqual(@as(i16, 130), reftablestack_mod.zoneFromMinutes(90));
+    try std.testing.expectEqual(@as(i16, -500), reftablestack_mod.zoneFromMinutes(-300));
+    try std.testing.expectEqual(@as(i16, 90), reftablestack_mod.minutesFromZone(130));
+    try std.testing.expectEqual(@as(i16, -300), reftablestack_mod.minutesFromZone(-500));
+    try std.testing.expectEqual(@as(i16, 0), reftablestack_mod.minutesFromZone(0));
 }
 
 fn requireReftableGit(gpa: Allocator, io: Io) !void {
@@ -66,7 +33,7 @@ fn fixtureWho(when: i64) object.Signature {
 fn forEachRef(gpa: Allocator, listing: *const refs.Store.Listing) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    var hex: [hash.max_hex_len]u8 = undefined;
+    var hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
     for (listing.entries) |entry| {
         switch (entry.target) {
             .direct => |oid| try out.print(gpa, "{s} {s}\n", .{ entry.name, oid.hex(&hex) }),
@@ -85,7 +52,7 @@ fn gitForEachRef(io: Io, repo: *testgit.Repo) ![]u8 {
 fn reflogText(gpa: Allocator, log: *const reflog.Log) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    var hex: [hash.max_hex_len]u8 = undefined;
+    var hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
     var i = log.entries.len;
     while (i > 0) {
         i -= 1;
@@ -162,8 +129,8 @@ test "what this writes into a reftable repository git reads, logs and all" {
     defer repo.deinit(io);
 
     const tree = try repo.objectDatabase().write(io, .tree, "");
-    var commits: [12]Oid = undefined;
-    var parent: ?Oid = null;
+    var commits: [12]hash_mod.Oid = undefined;
+    var parent: ?hash_mod.Oid = null;
     for (&commits, 0..) |*c, i| {
         c.* = try repo.writeCommit(io, .{
             .tree = tree,
@@ -211,7 +178,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
     {
         var dir = try repo.gitDirectory().openDir(io, "reftable", .{});
         defer dir.close(io);
-        var stack = try Stack.load(gpa, io, dir, .sha1);
+        var stack = try reftablestack_mod.Stack.load(gpa, io, dir, .sha1);
         defer stack.deinit();
         try std.testing.expect(stack.tables.len < 6);
         for (stack.tables) |*t| try t.verify(gpa);
@@ -222,10 +189,10 @@ test "what this writes into a reftable repository git reads, logs and all" {
     try refsVerify(io, &git, &.{});
     const shown = try git.run(io, &.{ "show-ref", "--head", "-d" });
     defer gpa.free(shown);
-    var hex: [hash.max_hex_len]u8 = undefined;
-    var tag_hex: [hash.max_hex_len]u8 = undefined;
-    var peel_hex: [hash.max_hex_len]u8 = undefined;
-    var topic_hex: [hash.max_hex_len]u8 = undefined;
+    var hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
+    var tag_hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
+    var peel_hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
+    var topic_hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
     const want = try gpa.print("{s} HEAD\n{s} refs/heads/link\n{s} refs/heads/main\n{s} refs/heads/topic\n{s} refs/tags/v1\n{s} refs/tags/v1^{{}}\n", .{
         commits[11].hex(&hex),
         commits[5].hex(&topic_hex),
@@ -305,8 +272,8 @@ test "a table written for a transaction is the table git writes for it" {
     var repo = try repo_mod.Repository.open(gpa, io, twins[1].dir, .{});
     defer repo.deinit(io);
     {
-        const blob_oid = try Oid.parse(.sha1, blob_text);
-        const tag_oid = try Oid.parse(.sha1, tag_text);
+        const blob_oid = try hash_mod.Oid.parse(.sha1, blob_text);
+        const tag_oid = try hash_mod.Oid.parse(.sha1, tag_text);
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         var names: [120][16]u8 = undefined;
@@ -357,7 +324,7 @@ test "a held tables.list.lock refuses the transaction and changes nothing" {
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
-        try tx.create("refs/heads/main", .{ .direct = Oid.zero(.sha1) });
+        try tx.create("refs/heads/main", .{ .direct = hash_mod.Oid.zero(.sha1) });
         try std.testing.expectError(error.LockHeld, tx.commit(io, null));
     }
     try tmp.dir.access(io, ".git/reftable/tables.list.lock", .{});
@@ -374,7 +341,7 @@ test "a name and a directory of names conflict with what is already there" {
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
     defer repo.deinit(io);
-    const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
+    const one = try hash_mod.Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
@@ -409,7 +376,7 @@ test "FETCH_HEAD and MERGE_HEAD are files no transaction writes, and the other p
     try git.exec(io, &.{ "commit", "-q", "-m", "one" });
     const tip_text = try git.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(tip_text);
-    const tip = try Oid.parse(.sha1, tip_text);
+    const tip = try hash_mod.Oid.parse(.sha1, tip_text);
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
@@ -475,7 +442,7 @@ test "git waits on the lock a prepared transaction holds, and reads the result" 
     try git.exec(io, &.{ "commit", "-q", "-m", "one" });
     const tip_text = try git.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(tip_text);
-    const tip = try Oid.parse(.sha1, tip_text);
+    const tip = try hash_mod.Oid.parse(.sha1, tip_text);
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
@@ -545,7 +512,7 @@ test "a log entry goes into the stack, where git looks for it, and no file is wr
     try git.exec(io, &.{ "commit", "-q", "-m", "one" });
     const tip_text = try git.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(tip_text);
-    const tip = try Oid.parse(.sha1, tip_text);
+    const tip = try hash_mod.Oid.parse(.sha1, tip_text);
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
@@ -564,7 +531,7 @@ test "a log entry goes into the stack, where git looks for it, and no file is wr
 fn createMain(io: Io, repo: *repo_mod.Repository) refs.TransactionError!void {
     var tx = repo.beginRefs();
     defer tx.deinit(io);
-    try tx.create("refs/heads/main", .{ .direct = Oid.zero(.sha1) });
+    try tx.create("refs/heads/main", .{ .direct = hash_mod.Oid.zero(.sha1) });
     try tx.commit(io, null);
 }
 
@@ -651,8 +618,8 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     defer gpa.free(first_text);
     const second_text = try twins[0].line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(second_text);
-    const first = try Oid.parse(.sha1, first_text);
-    const second = try Oid.parse(.sha1, second_text);
+    const first = try hash_mod.Oid.parse(.sha1, first_text);
+    const second = try hash_mod.Oid.parse(.sha1, second_text);
 
     const git_steps = [_][]const []const u8{
         &.{ "update-ref", "-m", "through HEAD", "HEAD", first_text, second_text },
@@ -772,7 +739,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     try git.exec(io, &.{ "worktree", "add", "-q", "-b", "theirs", "trees/theirs" });
     const commit_text = try git.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(commit_text);
-    const tip = try Oid.parse(.sha1, commit_text);
+    const tip = try hash_mod.Oid.parse(.sha1, commit_text);
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);

@@ -1,29 +1,12 @@
 const std = @import("std");
+const refs_mod = @import("../refs/refs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Expected = @import("../refs/refs.zig").Expected;
-const Format = @import("../refs/refs.zig").Format;
-const LogEntry = @import("../refs/refs.zig").LogEntry;
-const LogMessage = @import("../refs/refs.zig").LogMessage;
-const Named = @import("../refs/refs.zig").Named;
-const Peeler = @import("../refs/refs.zig").Peeler;
-const ReadError = @import("../refs/refs.zig").ReadError;
-const Ref = @import("../refs/refs.zig").Ref;
-const Resolved = @import("../refs/refs.zig").Resolved;
-const Store = @import("../refs/refs.zig").Store;
-const Transaction = @import("../refs/refs.zig").Transaction;
-const TransactionError = @import("../refs/refs.zig").TransactionError;
-const max_symbolic_depth = @import("../refs/refs.zig").max_symbolic_depth;
-const packed_header = @import("../refs/refs.zig").packed_header;
-const reftable = @import("../refs/refs.zig").reftable;
-const reftablestack = @import("../refs/refs.zig").reftablestack;
 const testgit = @import("git.zig");
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
 const head = @import("../repo/head.zig");
 const object = @import("../object/object.zig");
-const Oid = hash.Oid;
-const Kind = hash.Kind;
 test "one transaction logs each ref in its own words when its edits say so, as git's atomic fetch does, in files and reftable" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -39,7 +22,7 @@ test "one transaction logs each ref in its own words when its edits say so, as g
         defer gpa.free(head_text);
         var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
         defer repo.deinit(io);
-        const oid = try Oid.parse(repo.objectFormat(), head_text);
+        const oid = try hash.Oid.parse(repo.objectFormat(), head_text);
         {
             var tx = repo.beginRefs();
             defer tx.deinit(io);
@@ -126,7 +109,7 @@ test "HEAD's log gains a detach where it exists already and core.logAllRefUpdate
         defer gpa.free(tip_text);
         var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
         defer repo.deinit(io);
-        const tip = try Oid.parse(repo.objectFormat(), tip_text);
+        const tip = try hash.Oid.parse(repo.objectFormat(), tip_text);
         try head.detach(io, &repo, tip, tip, .{ .who = fixture_who, .message = "checkout: moving from main to HEAD" });
         const said = try r.run(io, &.{ "reflog", "show", "--format=%gs", "HEAD" });
         defer gpa.free(said);
@@ -138,7 +121,7 @@ test "HEAD's log gains a detach where it exists already and core.logAllRefUpdate
 const DropOne = struct {
     nth: usize,
 
-    pub fn keep(d: *const DropOne, entry: LogEntry, nth: usize) bool {
+    pub fn keep(d: *const DropOne, entry: refs_mod.LogEntry, nth: usize) bool {
         _ = entry;
         return nth != d.nth;
     }

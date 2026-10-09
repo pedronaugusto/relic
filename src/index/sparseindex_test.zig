@@ -1,23 +1,11 @@
 const std = @import("std");
+const sparseindex_mod = @import("sparseindex.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Oid = @import("../hash/hash.zig").Oid;
-const Kind = @import("../hash/hash.zig").Kind;
 const hash = @import("../hash/hash.zig");
-const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("index.zig");
 const sparse = @import("../patterns/sparse.zig");
-const fs = @import("../fs/fs.zig");
-const Index = index_mod.Index;
-const Entry = index_mod.Entry;
-const Odb = odb_mod.Odb;
-const Error = @import("sparseindex.zig").Error;
-const hasSparseDirectories = @import("sparseindex.zig").hasSparseDirectories;
-const containing = @import("sparseindex.zig").containing;
-const expand = @import("sparseindex.zig").expand;
-const expandPresent = @import("sparseindex.zig").expandPresent;
-const collapse = @import("sparseindex.zig").collapse;
 const testgit = @import("../testing/git.zig");
 
 fn requireSparseIndexGit(gpa: Allocator, io: Io) !void {
@@ -45,7 +33,7 @@ fn readIndexBytes(io: Io, repo: *testgit.Repo) ![]u8 {
     return repo.readFile(io, ".git/index");
 }
 
-fn expectSameEntries(want: *const Index, got: *const Index) !void {
+fn expectSameEntries(want: *const index_mod.Index, got: *const index_mod.Index) !void {
     try std.testing.expectEqual(want.entries.items.len, got.entries.items.len);
     for (want.entries.items, got.entries.items) |a, b| {
         errdefer std.debug.print("at {s}\n", .{a.path});
@@ -72,7 +60,7 @@ fn expectSameNode(want: *const index_mod.CacheTreeNode, got: *const index_mod.Ca
     for (want.children.items, got.children.items) |*a, *b| try expectSameNode(a, b);
 }
 
-fn expectSameTree(gpa: Allocator, want: *Index, got: *Index) !void {
+fn expectSameTree(gpa: Allocator, want: *index_mod.Index, got: *index_mod.Index) !void {
     _ = gpa;
     try expectSameNode(&want.cache_tree.?.root, &got.cache_tree.?.root);
 }
@@ -88,7 +76,7 @@ test "an index git wrote sparse is read and written back byte for byte" {
 
     const bytes = try readIndexBytes(io, &repo);
     defer gpa.free(bytes);
-    var index = try Index.parse(gpa, .sha1, bytes);
+    var index = try index_mod.Index.parse(gpa, .sha1, bytes);
     defer index.deinit();
     try std.testing.expect(index.sparse);
     try std.testing.expect(index.find("D/").?.isSparseDirectory());
@@ -96,8 +84,8 @@ test "an index git wrote sparse is read and written back byte for byte" {
     try std.testing.expect(index.find("A/B/b.txt") != null);
     // The gitlink keeps its directory expanded.
     try std.testing.expect(index.find("G/sub") != null);
-    try std.testing.expect(containing(&index, "D/E/e.txt") != null);
-    try std.testing.expect(containing(&index, "A/B/b.txt") == null);
+    try std.testing.expect(sparseindex_mod.containing(&index, "D/E/e.txt") != null);
+    try std.testing.expect(sparseindex_mod.containing(&index, "A/B/b.txt") == null);
 
     const again = try index.toBytes(.{});
     defer gpa.free(again);
@@ -120,36 +108,36 @@ test "expanding is what git's ensure_full_index writes, and collapsing is what i
 
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var db = try Odb.open(gpa, io, git_dir, .sha1, .{});
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
     var patterns = (try sparse.Patterns.load(gpa, io, git_dir, .{ .cone = true })).?;
     defer patterns.deinit();
 
-    var git_sparse = try Index.parse(gpa, .sha1, sparse_bytes);
+    var git_sparse = try index_mod.Index.parse(gpa, .sha1, sparse_bytes);
     defer git_sparse.deinit();
-    var git_full = try Index.parse(gpa, .sha1, full_bytes);
+    var git_full = try index_mod.Index.parse(gpa, .sha1, full_bytes);
     defer git_full.deinit();
     try std.testing.expect(!git_full.sparse);
 
     // Expanded here, from git's sparse index: git's full one.
-    var expanded = try Index.parse(gpa, .sha1, sparse_bytes);
+    var expanded = try index_mod.Index.parse(gpa, .sha1, sparse_bytes);
     defer expanded.deinit();
-    try expand(gpa, io, &expanded, &db, null);
+    try sparseindex_mod.expand(gpa, io, &expanded, &db, null);
     try expectSameEntries(&git_full, &expanded);
     try expectSameTree(gpa, &git_full, &expanded);
 
     // Collapsed here, from git's full index: git's sparse one.
-    var collapsed = try Index.parse(gpa, .sha1, full_bytes);
+    var collapsed = try index_mod.Index.parse(gpa, .sha1, full_bytes);
     defer collapsed.deinit();
-    try std.testing.expect(try collapse(gpa, io, &collapsed, &db, &patterns));
+    try std.testing.expect(try sparseindex_mod.collapse(gpa, io, &collapsed, &db, &patterns));
     try expectSameEntries(&git_sparse, &collapsed);
     try expectSameTree(gpa, &git_sparse, &collapsed);
 
     // Expanding only as far as the cone reaches changes nothing that the
     // cone still leaves out.
-    var partial = try Index.parse(gpa, .sha1, sparse_bytes);
+    var partial = try index_mod.Index.parse(gpa, .sha1, sparse_bytes);
     defer partial.deinit();
-    try expand(gpa, io, &partial, &db, &patterns);
+    try sparseindex_mod.expand(gpa, io, &partial, &db, &patterns);
     try expectSameEntries(&git_sparse, &partial);
 }
 
@@ -164,22 +152,22 @@ test "patterns that are not a cone, or an unmerged entry, leave the index full" 
 
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var db = try Odb.open(gpa, io, git_dir, .sha1, .{});
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    var index = try Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
 
     var plain = try sparse.Patterns.fromText(gpa, "/A/\n", .{});
     defer plain.deinit();
-    try std.testing.expect(!try collapse(gpa, io, &index, &db, &plain));
+    try std.testing.expect(!try sparseindex_mod.collapse(gpa, io, &index, &db, &plain));
     try std.testing.expect(!index.sparse);
 
     var cone = try sparse.Patterns.fromText(gpa, "/*\n!/*/\n/A/\n", .{ .cone = true });
     defer cone.deinit();
     const conflicted = index.entries.items[0];
     try index.add(.{ .path = conflicted.path, .oid = conflicted.oid, .mode = conflicted.mode, .stage = 2 });
-    try std.testing.expect(!try collapse(gpa, io, &index, &db, &cone));
-    try std.testing.expect(!hasSparseDirectories(&index));
+    try std.testing.expect(!try sparseindex_mod.collapse(gpa, io, &index, &db, &cone));
+    try std.testing.expect(!sparseindex_mod.hasSparseDirectories(&index));
 }
 
 const worktree = @import("../checkout/checkout.zig");
@@ -216,7 +204,7 @@ fn code(change: worktree.Change) u8 {
     };
 }
 
-fn relicStatus(gpa: Allocator, io: Io, repo: *repo_mod.Repository, index: *Index) ![]u8 {
+fn relicStatus(gpa: Allocator, io: Io, repo: *repo_mod.Repository, index: *index_mod.Index) ![]u8 {
     var ignore_rules = try repo.loadIgnore(io);
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
@@ -256,12 +244,12 @@ test "status, write-tree and add on a sparse index say what they say on the full
     // index says are not there.
     const bytes = try readIndexBytes(io, &git);
     defer gpa.free(bytes);
-    var index = try Index.parse(gpa, .sha1, bytes);
+    var index = try index_mod.Index.parse(gpa, .sha1, bytes);
     defer index.deinit();
     try std.testing.expect(index.sparse);
-    var full = try Index.parse(gpa, .sha1, bytes);
+    var full = try index_mod.Index.parse(gpa, .sha1, bytes);
     defer full.deinit();
-    try expand(gpa, io, &full, repo.objectDatabase(), null);
+    try sparseindex_mod.expand(gpa, io, &full, repo.objectDatabase(), null);
 
     const expected = try git.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
     defer gpa.free(expected);
@@ -294,9 +282,9 @@ test "status, write-tree and add on a sparse index say what they say on the full
     try std.testing.expect(index.find("A/X/") != null);
     const staged_bytes = try index.toBytes(.{});
     defer gpa.free(staged_bytes);
-    var widened = try Index.parse(gpa, .sha1, staged_bytes);
+    var widened = try index_mod.Index.parse(gpa, .sha1, staged_bytes);
     defer widened.deinit();
-    try expand(gpa, io, &widened, repo.objectDatabase(), null);
+    try sparseindex_mod.expand(gpa, io, &widened, repo.objectDatabase(), null);
     try expectSameEntries(&full, &widened);
 
     try repo.writeIndex(io, &index);
@@ -325,7 +313,7 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     defer sparse_index.deinit();
     var full = try repo.openIndex(io);
     defer full.deinit();
-    try expand(gpa, io, &full, repo.objectDatabase(), null);
+    try sparseindex_mod.expand(gpa, io, &full, repo.objectDatabase(), null);
 
     _ = try worktree.resetIndex(gpa, io, &sparse_index, repo.objectDatabase(), head);
     _ = try worktree.resetIndex(gpa, io, &full, repo.objectDatabase(), head);
@@ -338,7 +326,7 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     defer checked_out.deinit();
     // Every path written, as `read-tree --reset -u` writes them.
     _ = try worktree.checkout(gpa, io, git.dir, .{ .index = &checked_out, .db = repo.objectDatabase(), .tree = head }, .{ .force = true });
-    try std.testing.expect(!checked_out.sparse and !hasSparseDirectories(&checked_out));
+    try std.testing.expect(!checked_out.sparse and !sparseindex_mod.hasSparseDirectories(&checked_out));
     try git.dir.access(io, "D/E/F/f.txt", .{});
     try checked_out.write(io, repo.gitDirectory(), "index", .{});
     try git.exec(io, &.{ "sparse-checkout", "disable" });
