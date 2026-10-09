@@ -113,7 +113,7 @@ pub const Lease = struct {
 pub const BeforeSendError = Allocator.Error || Io.Cancelable || error{BeforeSendFailed};
 pub const BeforeSend = struct {
     context: *anyopaque,
-    run: *const fn (*anyopaque, Allocator, Io, *Repository, BeforeSendInput) BeforeSendError!void,
+    run: *const fn (Allocator, Io, *anyopaque, *Repository, BeforeSendInput) BeforeSendError!void,
 };
 pub const BeforeSendInput = struct {
     remote: []const u8,
@@ -459,7 +459,7 @@ fn send(
     for (request.commands) |c| {
         if (!c.new.isZero()) try remote_refs_pushed.append(arena, c.name);
     }
-    if (options.before_send) |prepare| try prepare.run(prepare.context, gpa, io, repo, .{
+    if (options.before_send) |prepare| try prepare.run(gpa, io, prepare.context, repo, .{
         .remote = remote_name,
         .refs = remote_refs_pushed.items,
         .objects = objects.entries,

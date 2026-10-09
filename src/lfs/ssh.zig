@@ -116,7 +116,7 @@ pub const Connection = struct {
         }
         if (!version) return error.LfsSshVersionRefused;
         try c.send(io, "version 1", &.{});
-        const status = try c.readStatus(io, scratch.allocator());
+        const status = try c.readStatus(scratch.allocator(), io);
         if (status.code != 200) return error.LfsSshVersionRefused;
     }
 
@@ -168,7 +168,7 @@ pub const Connection = struct {
 
     /// Read an answer made of a status, arguments, and lines after a
     /// delimiter, to its flush. Everything is copied into `arena`.
-    pub fn readStatus(c: *Connection, io: Io, arena: Allocator) Self.Error!Status {
+    pub fn readStatus(c: *Connection, arena: Allocator, io: Io) Self.Error!Status {
         try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var lines: std.ArrayList([]const u8) = .empty;
@@ -196,7 +196,7 @@ pub const Connection = struct {
 
     /// Read the status and arguments of an answer that carries data after
     /// its delimiter; the data is then read with `nextData`.
-    pub fn readStatusWithData(c: *Connection, io: Io, arena: Allocator) Self.Error!struct { code: u16, args: []const []const u8 } {
+    pub fn readStatusWithData(c: *Connection, arena: Allocator, io: Io) Self.Error!struct { code: u16, args: []const []const u8 } {
         try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var code: ?u16 = null;
@@ -232,9 +232,9 @@ pub const Connection = struct {
         while (try c.nextData(io)) |_| {}
     }
 
-    fn sayQuit(c: *Connection, io: Io, arena: Allocator) ErrorNamespace.Error!void {
+    fn sayQuit(c: *Connection, arena: Allocator, io: Io) ErrorNamespace.Error!void {
         try c.send(io, "quit", &.{});
-        _ = try c.readStatus(io, arena);
+        _ = try c.readStatus(arena, io);
     }
 
     /// Say `quit`, read its answer, and close the connection. A connection
@@ -245,7 +245,7 @@ pub const Connection = struct {
             var scratch: std.heap.ArenaAllocator = .init(c.gpa);
             defer scratch.deinit();
             // ziglint-ignore: Z026 quit is a courtesy; the connection is closed next whether or not the server answered
-            c.sayQuit(io, scratch.allocator()) catch {};
+            c.sayQuit(scratch.allocator(), io) catch {};
         }
         c.conn.deinit(io);
         c.gpa.destroy(c);

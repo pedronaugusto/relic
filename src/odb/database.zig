@@ -13,23 +13,23 @@ pub const Database = struct {
     gpa: Allocator,
     kind: hash.Kind,
     detect_collisions: bool,
-    read_fn: *const fn (*anyopaque, Io, hash.Oid) policy.Error!Read,
-    header_fn: *const fn (*anyopaque, Io, hash.Oid) policy.Error!object.Header,
-    exists_fn: *const fn (*anyopaque, Io, hash.Oid) policy.Error!bool,
+    read_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!Read,
+    header_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!object.Header,
+    exists_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!bool,
 
     pub fn from(db: anytype) Database {
         const T = @TypeOf(db);
         const Adapter = struct {
-            fn read(raw: *anyopaque, io: Io, oid: hash.Oid) policy.Error!Read {
+            fn read(io: Io, raw: *anyopaque, oid: hash.Oid) policy.Error!Read {
                 const owner: T = @ptrCast(@alignCast(raw));
                 const result = try owner.read(io, oid);
                 return .{ .type = result.type, .bytes = result.bytes };
             }
-            fn header(raw: *anyopaque, io: Io, oid: hash.Oid) policy.Error!object.Header {
+            fn header(io: Io, raw: *anyopaque, oid: hash.Oid) policy.Error!object.Header {
                 const owner: T = @ptrCast(@alignCast(raw));
                 return owner.readHeader(io, oid);
             }
-            fn exists(raw: *anyopaque, io: Io, oid: hash.Oid) policy.Error!bool {
+            fn exists(io: Io, raw: *anyopaque, oid: hash.Oid) policy.Error!bool {
                 const owner: T = @ptrCast(@alignCast(raw));
                 return owner.exists(io, oid);
             }
@@ -54,15 +54,15 @@ pub const Database = struct {
     }
 
     pub fn read(db: Database, io: Io, oid: hash.Oid) policy.Error!Read {
-        return db.read_fn(db.context, io, oid);
+        return db.read_fn(io, db.context, oid);
     }
 
     pub fn readHeader(db: Database, io: Io, oid: hash.Oid) policy.Error!object.Header {
-        return db.header_fn(db.context, io, oid);
+        return db.header_fn(io, db.context, oid);
     }
 
     pub fn exists(db: Database, io: Io, oid: hash.Oid) policy.Error!bool {
-        return db.exists_fn(db.context, io, oid);
+        return db.exists_fn(io, db.context, oid);
     }
 };
 

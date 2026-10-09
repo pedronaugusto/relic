@@ -84,10 +84,10 @@ pub const Filters = struct {
 
     drivers: filter.Drivers,
     context: ?*anyopaque = null,
-    release_fn: ?*const fn (*anyopaque, Io) void = null,
+    release_fn: ?*const fn (Io, *anyopaque) void = null,
     pub fn deinit(f: *Filters, io: Io) void {
         f.drivers.deinit(io);
-        if (f.release_fn) |release| release(f.context.?, io);
+        if (f.release_fn) |release| release(io, f.context.?);
         f.* = undefined;
     }
 };
@@ -100,7 +100,7 @@ pub const FilterOptions = struct {
 };
 pub const FilterLoader = struct {
     context: ?*const anyopaque = null,
-    load_fn: *const fn (?*const anyopaque, Allocator, Io, *Repository, FilterOptions) Repository.LoadFiltersError!Filters,
+    load_fn: *const fn (Allocator, Io, ?*const anyopaque, *Repository, FilterOptions) Repository.LoadFiltersError!Filters,
 };
 
 /// How a clone runs.
@@ -809,7 +809,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     else
         false;
     var filters = if (options.native_filters) |loader|
-        try loader.load_fn(loader.context, gpa, io, repo, .{
+        try loader.load_fn(gpa, io, loader.context, repo, .{
             .remote = options.origin,
             .programs = programs,
             .prompt = options.prompt,

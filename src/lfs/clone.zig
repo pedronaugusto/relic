@@ -74,7 +74,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: clon
     if (with.native_filters == null) with.native_filters = .{ .load_fn = loadFilters };
     return clone_mod.clone(gpa, io, url, dir, with);
 }
-fn loadFilters(_: ?*const anyopaque, gpa: Allocator, io: Io, repository: *repo_mod.Repository, options: clone_mod.FilterOptions) repo_mod.Repository.LoadFiltersError!clone_mod.Filters {
+fn loadFilters(gpa: Allocator, io: Io, _: ?*const anyopaque, repository: *repo_mod.Repository, options: clone_mod.FilterOptions) repo_mod.Repository.LoadFiltersError!clone_mod.Filters {
     const fetch = try gpa.create(Fetcher);
     errdefer gpa.destroy(fetch);
     fetch.* = .{
@@ -90,7 +90,7 @@ fn loadFilters(_: ?*const anyopaque, gpa: Allocator, io: Io, repository: *repo_m
         .release_fn = releaseFetcher,
     };
 }
-fn releaseFetcher(context: *anyopaque, io: Io) void {
+fn releaseFetcher(io: Io, context: *anyopaque) void {
     const fetch: *Fetcher = @ptrCast(@alignCast(context));
     const gpa = fetch.gpa;
     fetch.deinit(io);

@@ -1696,7 +1696,7 @@ fn sshBatch(a: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, o
     var lines: std.ArrayList([]const u8) = .empty;
     for (objects) |o| try lines.append(a, try a.print("{s} {d}", .{ &o.oid, o.size }));
     conn.sendLines(io, "batch", args.items, lines.items) catch |err| return sshBatchFailed(io, server, err, "");
-    const status = conn.readStatus(io, a) catch |err| return sshBatchFailed(io, server, err, "");
+    const status = conn.readStatus(a, io) catch |err| return sshBatchFailed(io, server, err, "");
     if (status.code != 200) {
         var buf: [512]u8 = undefined;
         server.client.setMessage(io, std.mem.print(&buf, "batch response: status {d} from server ({s})", .{
@@ -1806,7 +1806,7 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
     defer conn.mutex.unlock(io);
     const command = try scratch.print("get-object {s}", .{&r.oid});
     conn.send(io, command, try sshObjectArgs(scratch, r, action)) catch |err| return sshRetry(state, err);
-    const head = conn.readStatusWithData(io, scratch) catch |err| return sshRetry(state, err);
+    const head = conn.readStatusWithData(scratch, io) catch |err| return sshRetry(state, err);
     if (head.code < 200 or head.code > 299) {
         var said: std.ArrayList(u8) = .empty;
         while (conn.nextData(io) catch |err| return sshRetry(state, err)) |bytes| {
@@ -1874,7 +1874,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
             return sshRetry(state, err);
         };
     }
-    const status = conn.readStatus(io, scratch) catch |err| {
+    const status = conn.readStatus(scratch, io) catch |err| {
         state.say(.{ .unsent = sent });
         return sshRetry(state, err);
     };
@@ -1895,7 +1895,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     // arguments.
     const verify = try scratch.print("verify-object {s}", .{&r.oid});
     conn.send(io, verify, args) catch |err| return sshRetry(state, err);
-    const verified = conn.readStatus(io, scratch) catch |err| return sshRetry(state, err);
+    const verified = conn.readStatus(scratch, io) catch |err| return sshRetry(state, err);
     if (!verified.ok()) {
         return .{ .fail = try state.dupe(try scratch.print("got status {d} when verifying upload OID {s}{s}{s}", .{
             verified.code,

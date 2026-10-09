@@ -617,7 +617,7 @@ fn sshLock(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer
     try args.append(arena, try arena.print("path={s}", .{path}));
     if (ref) |r| try args.append(arena, try arena.print("refname={s}", .{r}));
     try conn.send(io, "lock", args.items);
-    const status = try conn.readStatus(io, arena);
+    const status = try conn.readStatus(arena, io);
     if (status.code == 409) return .{ .held = try sshLockOf(arena, status) };
     if (!status.ok()) return sshFailed(io, server, status, "lock");
     return .{ .locked = try sshLockOf(arena, status) };
@@ -640,7 +640,7 @@ fn sshUnlock(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transf
         try args.append(arena, try arena.print("refname={s}", .{short}));
     }
     try conn.send(io, try arena.print("unlock {s}", .{id}), args.items);
-    const status = try conn.readStatus(io, arena);
+    const status = try conn.readStatus(arena, io);
     if (!status.ok()) {
         sshSay(io, server, status, "unlock");
         return switch (status.code) {
@@ -686,7 +686,7 @@ fn sshListPage(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Tran
         if (q.refspec) |v| try args.append(arena, try arena.print("refspec={s}", .{v}));
     }
     try conn.send(io, "list-lock", args.items);
-    const status = try conn.readStatus(io, arena);
+    const status = try conn.readStatus(arena, io);
     if (!status.ok()) return sshFailed(io, server, status, if (q.verify) "locks/verify" else "locks");
     return .{ .locks = try parseSshLocks(arena, status.lines), .next_cursor = status.arg("next-cursor") };
 }
