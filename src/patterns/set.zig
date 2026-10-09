@@ -12,11 +12,14 @@ pub const Builder = struct {
     inner: sweep.Set.Builder,
     transferred: bool = false,
 
-    pub fn init(gpa: Allocator) Allocator.Error!Builder {
+    pub const InitOptions = struct { arena: ?Allocator = null };
+
+    pub fn init(gpa: Allocator, options: InitOptions) Allocator.Error!Builder {
         const owner = try gpa.create(Matcher);
-        owner.* = .{ .gpa = gpa, .arena = .init(gpa), .set = undefined, .cache = undefined };
+        owner.* = .{ .gpa = gpa, .arena = .init(gpa), .set = undefined, .cache = null };
         const arena = &owner.arena;
-        return .{ .gpa = gpa, .arena = arena, .owner = owner, .inner = .init(arena.allocator()) };
+        const compilation = options.arena orelse arena.allocator();
+        return .{ .gpa = gpa, .arena = arena, .owner = owner, .inner = .init(compilation) };
     }
 
     pub fn deinit(b: *Builder) void {
@@ -46,16 +49,18 @@ pub const Matcher = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     set: sweep.Set,
-    cache: sweep.Set.Cache,
+    cache: ?sweep.Set.Cache,
     turn: std.atomic.Mutex = .unlocked,
     walking: ?sweep.Set.Ancestors = null,
 
-    pub fn build(builder: *Builder) Allocator.Error!*Matcher {
+    pub const BuildOptions = struct { cache: enum { retained, temporary } = .retained };
+
+    pub fn build(builder: *Builder, options: BuildOptions) Allocator.Error!*Matcher {
         const m = builder.owner;
         var compiled = try builder.inner.build();
         errdefer compiled.deinit();
         m.set = compiled;
-        m.cache = try .init(m.gpa, &m.set, .{ .capacity = 1 << 16 });
+        if (options.cache == .retained) m.cache = try .init(m.gpa, &m.set, .{ .capacity = 1 << 16 });
         builder.inner.deinit();
         builder.transferred = true;
         return m;
@@ -63,7 +68,8 @@ pub const Matcher = struct {
 
     pub fn deinit(m: *Matcher) void {
         const gpa = m.gpa;
-        m.cache.deinit();
+        if (m.cache) |*cache| cache.deinit();
+        // Compiled storage belongs to this arena or the construction owner.
         m.arena.deinit();
         gpa.destroy(m);
     }
@@ -79,16 +85,26 @@ pub const Matcher = struct {
     pub fn last(m: *Matcher, path: []const u8, is_dir: bool) ?u32 {
         m.lock();
         defer m.unlock();
-        return m.set.last(&m.cache, path, if (is_dir) .dir else .file);
+        return m.set.last(&m.cache.?, path, if (is_dir) .dir else .file);
     }
 
     pub fn all(m: *Matcher, a: Allocator, path: []const u8, is_dir: bool, out: *std.ArrayList(u32)) Allocator.Error!void {
-        m.lock();
-        defer m.unlock();
-        try m.set.all(a, &m.cache, path, if (is_dir) .dir else .file, out);
+        if (m.cache) |*cache| {
+            m.lock();
+            defer m.unlock();
+            try m.set.all(a, cache, path, if (is_dir) .dir else .file, out);
+        } else {
+            // One query owns its scratch. Typical git sets fit on the stack;
+            // larger automata use the caller's allocator. The set is immutable.
+            var buffer: [80 * 1024]u8 = undefined;
+            var scratch: std.heap.BufferFirstAllocator = .init(&buffer, a);
+            var cache = try sweep.Set.Cache.init(scratch.allocator(), &m.set, .{ .capacity = 1 << 16 });
+            defer cache.deinit();
+            try m.set.all(a, &cache, path, if (is_dir) .dir else .file, out);
+        }
     }
 
     pub fn begin(m: *Matcher, path: []const u8, is_dir: bool) void {
-        m.walking = m.set.ancestors(&m.cache, path, if (is_dir) .dir else .file);
+        m.walking = m.set.ancestors(&m.cache.?, path, if (is_dir) .dir else .file);
     }
 };

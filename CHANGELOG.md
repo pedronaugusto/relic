@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Attribute pattern sets compile into their attributes owner. Queries own temporary
+  matching scratch with allocator fallback; short-lived loads no longer allocate
+  a retained DFA cache. Assignment parsing and macro expansion avoid temporary
+  growth where their sizes or continuations are already known.
+
+- **Breaking:** `Attrs.Macro.assignments` is read-only; the built-in binary macro
+  borrows static assignments.
+
+- Shared ERE parsing allocates nodes in stable blocks and avoids clearing
+  search marks twice.
+
 - **Breaking:** native filter, clone-filter and before-send callbacks receive allocator and Io before their opaque context; LFS SSH status readers receive allocator before Io.
 
 - **Breaking:** conversion sessions use `open(gpa, io, Options)` and `deinit(io)`. Filter processes and native providers receive the teardown call’s I/O.

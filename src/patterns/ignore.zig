@@ -164,7 +164,7 @@ pub const Rules = struct {
     pub fn addText(rules: *Rules, text: []const u8, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
         const a = rules.arena.allocator();
         var patterns: std.ArrayList(Pattern) = .empty;
-        var builder: sets.Builder = try .init(rules.gpa);
+        var builder: sets.Builder = try .init(rules.gpa, .{});
         defer builder.deinit();
         var line_number: u32 = 0;
         var lines = std.mem.splitScalar(u8, text, '\n');
@@ -181,7 +181,7 @@ pub const Rules = struct {
             try patterns.append(a, pattern);
         }
         if (patterns.items.len == 0) return;
-        const compiled = try sets.Matcher.build(&builder);
+        const compiled = try sets.Matcher.build(&builder, .{});
         errdefer compiled.deinit();
         try rules.levels.append(rules.gpa, .{
             .base = base,

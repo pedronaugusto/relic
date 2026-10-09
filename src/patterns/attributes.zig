@@ -56,6 +56,12 @@ pub const Assignment = struct {
     state: State,
 };
 
+const builtin_binary = [_]Assignment{
+    .{ .name = "diff", .state = .unset },
+    .{ .name = "merge", .state = .unset },
+    .{ .name = "text", .state = .unset },
+};
+
 /// One line of an attributes file.
 pub const Rule = struct {
     /// The glob, with a leading `/` removed.
@@ -142,7 +148,7 @@ pub const Attrs = struct {
     /// assignments.
     pub const Macro = struct {
         name: []const u8,
-        assignments: []Assignment,
+        assignments: []const Assignment,
         /// The precedence of the file that defined it: of two definitions
         /// the higher file's holds, and within a file the later line's, as
         /// git's `determine_macros` picks.
@@ -170,11 +176,10 @@ pub const Attrs = struct {
             .case_fold = options.case_fold,
         };
         const a = arena.allocator();
-        const builtin_binary = try a.alloc(Assignment, 3);
-        builtin_binary[0] = .{ .name = "diff", .state = .unset };
-        builtin_binary[1] = .{ .name = "merge", .state = .unset };
-        builtin_binary[2] = .{ .name = "text", .state = .unset };
-        try attrs.macros.append(gpa, .{ .name = "binary", .assignments = builtin_binary });
+        // Start with one construction block; larger files grow normally.
+        const page = try a.alloc(u8, 4096);
+        a.free(page);
+        try attrs.macros.append(a, .{ .name = "binary", .assignments = &builtin_binary });
         return attrs;
     }
 
@@ -183,8 +188,6 @@ pub const Attrs = struct {
         for (attrs.levels.items) |level| levelMatcher(level).deinit();
         attrs.arena.deinit();
         attrs.gpa.destroy(attrs.arena);
-        attrs.levels.deinit(attrs.gpa);
-        attrs.macros.deinit(attrs.gpa);
         attrs.entered_dir.deinit(attrs.gpa);
         attrs.* = undefined;
     }
@@ -354,7 +357,7 @@ pub const Attrs = struct {
     pub fn addText(attrs: *Attrs, text: []const u8, base: []const u8, source: []const u8, precedence: u32) Self.Error!void {
         const a = attrs.arena.allocator();
         var rules: std.ArrayList(Rule) = .empty;
-        var builder: sets.Builder = try .init(attrs.gpa);
+        var builder: sets.Builder = try .init(a, .{ .arena = a });
         defer builder.deinit();
         var line_number: u32 = 0;
         var lines = std.mem.splitScalar(u8, text, '\n');
@@ -375,7 +378,7 @@ pub const Attrs = struct {
                 const space = std.mem.findAny(u8, rest, " \t") orelse continue;
                 const name = rest[0..space];
                 const assignments = try parseAssignments(a, rest[space + 1 ..]);
-                try attrs.macros.append(attrs.gpa, .{ .name = name, .assignments = assignments, .precedence = precedence });
+                try attrs.macros.append(a, .{ .name = name, .assignments = assignments, .precedence = precedence });
                 continue;
             }
 
@@ -394,9 +397,9 @@ pub const Attrs = struct {
             });
         }
         if (rules.items.len == 0) return;
-        const compiled = try sets.Matcher.build(&builder);
+        const compiled = try sets.Matcher.build(&builder, .{ .cache = .temporary });
         errdefer compiled.deinit();
-        try attrs.levels.append(attrs.gpa, .{
+        try attrs.levels.append(a, .{
             .base = base,
             .rules = rules.items,
             ._matcher = compiled,
@@ -436,16 +439,23 @@ pub const Attrs = struct {
         // Highest precedence first, and within a file the last line first:
         // the first assignment found for an attribute is the one that holds,
         // which is how git resolves it.
-        var order = try a.alloc(*const Level, attrs.levels.items.len);
-        defer a.free(order);
+        var order_buffer: [16]*const Level = undefined;
+        const order = if (attrs.levels.items.len <= order_buffer.len)
+            order_buffer[0..attrs.levels.items.len]
+        else
+            try a.alloc(*const Level, attrs.levels.items.len);
+        defer if (order.ptr != &order_buffer) a.free(order);
         for (attrs.levels.items, 0..) |*level, i| order[i] = level;
         std.mem.sort(*const Level, order, {}, higherPrecedenceFirst);
 
         for (order) |level| {
             const relative = relativeTo(level.base, path) orelse continue;
+            var hit_buffer: [16]u32 = undefined;
+            var hit_scratch: std.heap.BufferFirstAllocator = .init(std.mem.asBytes(&hit_buffer), a);
+            const hit_allocator = hit_scratch.allocator();
             var hits: std.ArrayList(u32) = .empty;
-            defer hits.deinit(a);
-            try levelMatcher(level.*).all(a, relative, is_dir, &hits);
+            defer hits.deinit(hit_allocator);
+            try levelMatcher(level.*).all(hit_allocator, relative, is_dir, &hits);
             var i = hits.items.len;
             while (i > 0) {
                 i -= 1;
@@ -465,19 +475,21 @@ pub const Attrs = struct {
     fn fill(attrs: *const Attrs, a: Allocator, out: *std.ArrayList(Assignment), assignments: []const Assignment) Allocator.Error!void {
         var pending: std.ArrayList([]const Assignment) = .empty;
         defer pending.deinit(a);
-        try pending.append(a, assignments);
-        while (pending.items.len != 0) {
-            const top = &pending.items[pending.items.len - 1];
-            if (top.len == 0) {
-                _ = pending.pop();
+        var current = assignments;
+        while (true) {
+            if (current.len == 0) {
+                current = pending.pop() orelse break;
                 continue;
             }
-            const assignment = top.*[top.len - 1];
-            top.* = top.*[0 .. top.len - 1];
+            const assignment = current[current.len - 1];
+            current = current[0 .. current.len - 1];
             if (decided(out.items, assignment.name)) continue;
             try out.append(a, assignment);
             if (assignment.state != .set) continue;
-            if (attrs.macroNamed(assignment.name)) |macro| try pending.append(a, macro.assignments);
+            if (attrs.macroNamed(assignment.name)) |macro| {
+                if (current.len != 0) try pending.append(a, current);
+                current = macro.assignments;
+            }
         }
     }
 
@@ -549,22 +561,23 @@ fn parsePattern(a: Allocator, line: []const u8) Allocator.Error!?ParsedPattern {
 }
 
 fn parseAssignments(a: Allocator, text: []const u8) Allocator.Error![]Assignment {
-    var out: std.ArrayList(Assignment) = .empty;
-    errdefer out.deinit(a);
-    var it = std.mem.tokenizeAny(u8, text, " \t");
-    while (it.next()) |word| {
-        if (word.len == 0) continue;
-        if (word[0] == '-') {
-            try out.append(a, .{ .name = word[1..], .state = .unset });
-        } else if (word[0] == '!') {
-            try out.append(a, .{ .name = word[1..], .state = .unspecified });
-        } else if (std.mem.findScalar(u8, word, '=')) |eq| {
-            try out.append(a, .{ .name = word[0..eq], .state = .{ .value = word[eq + 1 ..] } });
-        } else {
-            try out.append(a, .{ .name = word, .state = .set });
-        }
+    var count: usize = 0;
+    var words = std.mem.tokenizeAny(u8, text, " \t");
+    while (words.next() != null) count += 1;
+    const out = try a.alloc(Assignment, count);
+    words.reset();
+    for (out) |*assignment| {
+        const word = words.next().?;
+        assignment.* = if (word[0] == '-')
+            .{ .name = word[1..], .state = .unset }
+        else if (word[0] == '!')
+            .{ .name = word[1..], .state = .unspecified }
+        else if (std.mem.findScalar(u8, word, '=')) |eq|
+            .{ .name = word[0..eq], .state = .{ .value = word[eq + 1 ..] } }
+        else
+            .{ .name = word, .state = .set };
     }
-    return out.toOwnedSlice(a);
+    return out;
 }
 
 /// The settings from `core` that take part in line-ending conversion.
@@ -1139,4 +1152,22 @@ test "phase2 attribute sets survive every allocation failure and keep precedence
             try std.testing.expectEqual(State.unset, binary.get("diff").?);
         }
     }.exercise, .{});
+}
+
+test "attributes query scratch falls back without leaking on allocation failure" {
+    const gpa = std.testing.allocator;
+    var attrs = try Attrs.init(gpa, .{});
+    defer attrs.deinit();
+    const pattern = &@as([1800]u8, @splat('?'));
+    try attrs.addText(pattern ++ " text\n" ++ pattern ++ " diff=long\n", "", ".gitattributes", 1);
+    var no_resize = shakedown_mod.alloc.NoResize.init(gpa);
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
+        fn query(a: Allocator, loaded: *const Attrs) !void {
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            const result = try loaded.lookup(arena.allocator(), &@as([1800]u8, @splat('a')), false);
+            try std.testing.expect(result.isSet("text"));
+            try std.testing.expectEqualStrings("long", result.value("diff").?);
+        }
+    }.query, .{&attrs});
 }

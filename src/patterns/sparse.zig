@@ -106,7 +106,7 @@ pub const Patterns = struct {
     pub fn addText(p: *Patterns, text: []const u8) Allocator.Error!void {
         // Build a replacement first, so allocation failure leaves the old
         // decisions intact. Metadata commits only once compilation succeeds.
-        var builder: sets.Builder = try .init(p.gpa);
+        var builder: sets.Builder = try .init(p.gpa, .{});
         defer builder.deinit();
         for (p.items.items) |item| _ = try sets.add(&builder, item.glob, item.anchored, item.dir_only, p.case_fold);
         var added: std.ArrayList(ignore.Pattern) = .empty;
@@ -120,7 +120,7 @@ pub const Patterns = struct {
             if (!try sets.add(&builder, pattern.glob, pattern.anchored, pattern.dir_only, p.case_fold)) continue;
             try added.append(p.gpa, pattern);
         }
-        const compiled = try sets.Matcher.build(&builder);
+        const compiled = try sets.Matcher.build(&builder, .{});
         errdefer compiled.deinit();
         try p.items.appendSlice(p.gpa, added.items);
         if (p._matcher) |m| matcher(m).deinit();
