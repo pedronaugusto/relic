@@ -4,6 +4,8 @@
 //! and an agent that refuses to start.
 
 const std = @import("std");
+const custom_mod = @import("custom.zig");
+const shakedown_mod = @import("shakedown");
 const suite = @import("../testing/helpers.zig");
 const testbytes = @import("../testing/bytes.zig");
 const builtin = @import("builtin");
@@ -286,7 +288,7 @@ test "concurrent agents start as many as git-lfs starts, one when not concurrent
 }
 
 test "phase2 cached custom adapter uses the transfer Io for pipe reads and writes" {
-    const custom = @import("custom.zig");
+    const custom = custom_mod;
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
@@ -304,7 +306,7 @@ test "phase2 cached custom adapter uses the transfer Io for pipe reads and write
         .init = .{ .operation = .download, .remote = "origin", .concurrent = false, .concurrent_transfers = 1 },
     });
     defer agent.deinit(io);
-    const faults = try @import("shakedown").FaultIo.init(gpa, io, .{});
+    const faults = try shakedown_mod.FaultIo.init(gpa, io, .{});
     defer faults.deinit();
     const Progress = struct {
         pub fn bytes(_: @This(), _: usize) void {}
@@ -317,8 +319,8 @@ test "phase2 cached custom adapter uses the transfer Io for pipe reads and write
 }
 
 test "phase2 cached custom adapter refuses pipe failure and cancellation through the transfer Io" {
-    const custom = @import("custom.zig");
-    const shakedown = @import("shakedown");
+    const custom = custom_mod;
+    const shakedown = shakedown_mod;
     const gpa = testing.allocator;
     const io = testing.io;
     const cases = [_]struct { call: shakedown.IoCall, fault: error{ InputOutput, Canceled }, expected: custom.Error }{

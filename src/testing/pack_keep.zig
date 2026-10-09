@@ -1,5 +1,7 @@
 //! Received-pack retention through reference publication, against Git collection.
 const std = @import("std");
+const shakedown_mod = @import("shakedown");
+const transport_mod = @import("../transport/transport.zig");
 const testing = std.testing;
 const Io = std.Io;
 const testgit = @import("git.zig");
@@ -87,7 +89,7 @@ test "phase2 received pack retention and rollback survive a ref commit fault" {
         defer gpa.free(args);
         var target = try testgit.Repo.init(gpa, io, args);
         defer target.deinit();
-        const fault = try @import("shakedown").FaultIo.init(gpa, io, .{});
+        const fault = try shakedown_mod.FaultIo.init(gpa, io, .{});
         defer fault.deinit();
         const fault_io = fault.io();
         // Reftable read caches retain their Io until the repository closes.
@@ -204,7 +206,7 @@ test "phase2 local receive owns a keep token with default receive options" {
             defer repository.deinit(io);
             const path = try source.dir.realPathFileAlloc(io, ".", gpa);
             defer gpa.free(path);
-            var session = try @import("../transport/transport.zig").Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = repository.objectFormat() }, .{ .local_copy = true });
+            var session = try transport_mod.Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = repository.objectFormat() }, .{ .local_copy = true });
             defer session.deinit(io);
             var pack_dir = try repository.objectDatabase().objectsDirectory().openDir(io, "pack", .{ .iterate = true });
             defer pack_dir.close(io);

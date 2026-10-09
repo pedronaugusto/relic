@@ -8,6 +8,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 /// Errors from compiling or searching.
@@ -1127,7 +1128,7 @@ test "phase2 boolean ERE uses git extensions and captures" {
 }
 
 test "phase2 regex allocation failures release compile and search state" {
-    var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
+    var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
             var p = try Pattern.compile(gpa, "(ab|a)+c");

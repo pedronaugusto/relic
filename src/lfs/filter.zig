@@ -1,6 +1,7 @@
 //! Native LFS filtering. Checkout knows only the native filter protocol;
 //! this provider owns LFS commands, pointers, stores and batched fetches.
 const std = @import("std");
+const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -409,7 +410,7 @@ test "phase2 native LFS allocator failures release driver and pending delivery" 
     defer tmp.cleanup();
     var cfg = try config.Config.parseText(testing.allocator, "", .local);
     defer cfg.deinit();
-    var no_resize = @import("shakedown").alloc.NoResize.init(testing.allocator);
+    var no_resize = shakedown_mod.alloc.NoResize.init(testing.allocator);
     try testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator, dir: Io.Dir, configuration: *const config.Config) !void {
             const fetch = struct {

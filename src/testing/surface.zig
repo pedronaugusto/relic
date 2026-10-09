@@ -1,5 +1,24 @@
 //! Contracts for the namespaces users import.
 const std = @import("std");
+const repo_mod = @import("../repo/repo.zig");
+const hash_mod = @import("../hash/hash.zig");
+const object_mod = @import("../object/object.zig");
+const odb_mod = @import("../odb/odb.zig");
+const refs_mod = @import("../refs/refs.zig");
+const config_mod = @import("../config/config.zig");
+const index_mod = @import("../index/index.zig");
+const checkout_mod = @import("../checkout/checkout.zig");
+const diff_mod = @import("../diff/diff.zig");
+const walk_mod = @import("../walk/walk.zig");
+const merge_mod = @import("../merge/merge.zig");
+const commit_mod = @import("../commit/commit.zig");
+const transport_mod = @import("../transport/transport.zig");
+const submodule_mod = @import("../submodule/submodule.zig");
+const lfs_mod = @import("../lfs/lfs.zig");
+const patch_mod = @import("../patch/patch.zig");
+const pretty_mod = @import("../pretty/pretty.zig");
+const maintenance_mod = @import("../maintenance/maintenance.zig");
+const reflog_mod = @import("../refs/reflog.zig");
 const relic = @import("../relic.zig");
 
 fn isNamespace(comptime ns: type, comptime name: []const u8) bool {
@@ -66,24 +85,24 @@ fn covers(comptime facade: type, comptime implementation: type) !void {
 }
 
 test "phase2 publishing facades cover every implementation declaration" {
-    try covers(relic.repo, @import("../repo/repo.zig"));
-    try covers(relic.hash, @import("../hash/hash.zig"));
-    try covers(relic.object, @import("../object/object.zig"));
-    try covers(relic.odb, @import("../odb/odb.zig"));
-    try covers(relic.refs, @import("../refs/refs.zig"));
-    try covers(relic.config, @import("../config/config.zig"));
-    try covers(relic.index, @import("../index/index.zig"));
-    try covers(relic.worktree, @import("../checkout/checkout.zig"));
-    try covers(relic.diff, @import("../diff/diff.zig"));
-    try covers(relic.revwalk, @import("../walk/walk.zig"));
-    try covers(relic.merge, @import("../merge/merge.zig"));
-    try covers(relic.commit, @import("../commit/commit.zig"));
-    try covers(relic.transport, @import("../transport/transport.zig"));
-    try covers(relic.submodule, @import("../submodule/submodule.zig"));
-    try covers(relic.lfs, @import("../lfs/lfs.zig"));
-    try covers(relic.patch, @import("../patch/patch.zig"));
-    try covers(relic.pretty, @import("../pretty/pretty.zig"));
-    try covers(relic.maintenance, @import("../maintenance/maintenance.zig"));
+    try covers(relic.repo, repo_mod);
+    try covers(relic.hash, hash_mod);
+    try covers(relic.object, object_mod);
+    try covers(relic.odb, odb_mod);
+    try covers(relic.refs, refs_mod);
+    try covers(relic.config, config_mod);
+    try covers(relic.index, index_mod);
+    try covers(relic.worktree, checkout_mod);
+    try covers(relic.diff, diff_mod);
+    try covers(relic.revwalk, walk_mod);
+    try covers(relic.merge, merge_mod);
+    try covers(relic.commit, commit_mod);
+    try covers(relic.transport, transport_mod);
+    try covers(relic.submodule, submodule_mod);
+    try covers(relic.lfs, lfs_mod);
+    try covers(relic.patch, patch_mod);
+    try covers(relic.pretty, pretty_mod);
+    try covers(relic.maintenance, maintenance_mod);
 }
 
 fn checkErrors(comptime ns: type, comptime depth: usize) !void {
@@ -176,7 +195,7 @@ test "phase2 working tree requests stay within five positional inputs" {
 }
 
 test "phase2 ref log and table requests stay within five positional inputs" {
-    inline for (.{ relic.refs.Store.appendLog, relic.refs.Store.expireLog, relic.refs.reftablestack.appendLog, relic.refs.reftablestack.compactIn, relic.refs.reftable.write, @import("../refs/reflog.zig").expire }) |operation| {
+    inline for (.{ relic.refs.Store.appendLog, relic.refs.Store.expireLog, relic.refs.reftablestack.appendLog, relic.refs.reftablestack.compactIn, relic.refs.reftable.write, reflog_mod.expire }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }

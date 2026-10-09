@@ -5,8 +5,6 @@
 //! object never meet and a reader never sees half of one.
 
 const ErrorNamespace = @This();
-const durability = @import("../fs/fs.zig");
-const crc32 = @import("warp");
 const fs = @import("../fs/fs.zig");
 const opening = @import("open.zig");
 const reachability = @import("bitmap/reachability.zig");
@@ -16,6 +14,8 @@ const pack = @import("pack.zig");
 const delta = @import("../codec/delta.zig");
 
 const std = @import("std");
+const policy_mod = @import("policy.zig");
+const indexpack_mod = @import("indexpack.zig");
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -30,10 +30,10 @@ const Kind = hash.Kind;
 
 /// How the object database behaves. The only caches in this package are
 /// named here.
-pub const Options = @import("policy.zig").Options;
+pub const Options = policy_mod.Options;
 
 /// Errors from the object database.
-pub const Error = @import("policy.zig").Error;
+pub const Error = policy_mod.Error;
 
 /// Paths named directly by one `objects/info/alternates` file. `paths` hold
 /// decoded names, and `text` holds the original file; release both with
@@ -146,7 +146,7 @@ const deflate_output_buffer_len = 64 * 1024;
 /// Counters saying how lookups resolved and what writing cost. Nothing
 /// depends on them; they are how a caller, or a test, sees that an
 /// accelerator is being used and that a batch of writes stayed cheap.
-pub const Stats = @import("policy.zig").Stats;
+pub const Stats = policy_mod.Stats;
 const testgit = @import("../testing/git.zig");
 
 /// The object database.
@@ -1127,9 +1127,9 @@ pub const Odb = struct {
         return db.shallow.contains(oid);
     }
 
-    pub const ReceiveOptions = @import("indexpack.zig").Options;
-    pub const ReceiveError = @import("indexpack.zig").Error;
-    pub const ReceivedPack = @import("indexpack.zig").Result;
+    pub const ReceiveOptions = indexpack_mod.Options;
+    pub const ReceiveError = indexpack_mod.Error;
+    pub const ReceivedPack = indexpack_mod.Result;
 
     /// Publish a received pack under objects/pack. The returned retention
     /// token must outlive the ref transaction: deinit it only after commit
@@ -1140,7 +1140,7 @@ pub const Odb = struct {
         defer dir.close(io);
         var receiving = options;
         receiving.keep = true;
-        return @import("indexpack.zig").receive(db.allocator(), io, db, .{ .pack_dir = dir, .in = input }, receiving);
+        return indexpack_mod.receive(db.allocator(), io, db, .{ .pack_dir = dir, .in = input }, receiving);
     }
 
     pub fn sharedPermissions(odb: *const Odb) fs.Shared {
@@ -1400,7 +1400,7 @@ pub const Odb = struct {
             if (i == c.items.len) return c.checksum.update(c.span);
             const item = &c.items[i];
             const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
-            if (crc32.Crc32.hash(stored) != c.p.index.crcAt(item.position)) return error.ChecksumMismatch;
+            if (warp.Crc32.hash(stored) != c.p.index.crcAt(item.position)) return error.ChecksumMismatch;
             if (item.body.len == 0) return;
             const len: usize = @intCast(item.header.size);
             var stream: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
@@ -1542,14 +1542,14 @@ pub const Odb = struct {
                 var path_buf: [512]u8 = undefined;
                 // unreachable: the pack opened, so its `.pack` name fits 512 bytes
                 const pack_path = std.mem.print(&path_buf, "{s}.pack", .{named.name}) catch unreachable;
-                try durability.syncPath(io, source.pack_dir.?, pack_path);
+                try fs.syncPath(io, source.pack_dir.?, pack_path);
                 // unreachable: `.idx` is shorter than `.pack`, which fits
                 const idx_path = std.mem.print(&path_buf, "{s}.idx", .{named.name}) catch unreachable;
-                try durability.syncPath(io, source.pack_dir.?, idx_path);
+                try fs.syncPath(io, source.pack_dir.?, idx_path);
             } else {
                 var path_buf: [hash.max_hex_len + 2]u8 = undefined;
                 const path = odb.loosePath(oid.*, &path_buf);
-                try durability.syncPath(io, source.dir, path);
+                try fs.syncPath(io, source.dir, path);
                 fanouts[oid.raw()[0]] = true;
             }
         }
@@ -1557,10 +1557,10 @@ pub const Odb = struct {
             var path: [2]u8 = undefined;
             // unreachable: a byte is two hex digits
             _ = std.mem.print(&path, "{x:0>2}", .{byte}) catch unreachable;
-            try durability.syncDirectory(io, source.dir, &path);
+            try fs.syncDirectory(io, source.dir, &path);
         };
-        if (packs.count() != 0) try durability.syncDirectory(io, source.dir, "pack");
-        try durability.syncDirectory(io, source.dir, ".");
+        if (packs.count() != 0) try fs.syncDirectory(io, source.dir, "pack");
+        try fs.syncDirectory(io, source.dir, ".");
     }
 
     /// Put one durability barrier at the end of a batch of object writes.
@@ -3702,7 +3702,7 @@ const Stored = struct {
     /// The entry, into `out`, `len` bytes, checked against its CRC.
     fn read(st: Stored, io: Io, out: []u8) Error!void {
         try st.pack.readStored(io, st.entry_at, out);
-        if (crc32.Crc32.hash(out) != st.crc) return error.CorruptPackEntry;
+        if (warp.Crc32.hash(out) != st.crc) return error.CorruptPackEntry;
     }
 };
 

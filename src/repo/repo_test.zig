@@ -4,6 +4,7 @@
 const builtin = @import("builtin");
 const config_mod = @import("../config/config.zig");
 const std = @import("std");
+const fs_mod = @import("../fs/fs.zig");
 const shakedown = @import("shakedown");
 const Io = std.Io;
 
@@ -932,7 +933,7 @@ test "a refresh updates reftable write settings together with the configuration"
     try std.testing.expectEqual(@as(u16, 32), options.write.restart_interval);
     try std.testing.expect(!options.write.index_objects);
     try std.testing.expectEqual(@as(u8, 4), options.geometric_factor);
-    try std.testing.expectEqual(@import("../fs/fs.zig").OnContention.fail, options.lock);
+    try std.testing.expectEqual(fs_mod.OnContention.fail, options.lock);
     try std.testing.expectEqual(cache, refs_state.get(repo.refStore()._state).cache);
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
     try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, null));
@@ -1430,7 +1431,7 @@ fn freeTree(gpa: std.mem.Allocator, tree: *std.array_hash_map.String([]u8)) void
 
 /// `git init --template=<template>` in one directory and `init` with the
 /// same template in another, compared path by path and byte by byte.
-fn compareInit(gpa: std.mem.Allocator, io: Io, scratch: *testgit.Repo, template: []const u8, git_args: []const []const u8, shared: ?@import("../fs/fs.zig").Shared) !void {
+fn compareInit(gpa: std.mem.Allocator, io: Io, scratch: *testgit.Repo, template: []const u8, git_args: []const []const u8, shared: ?fs_mod.Shared) !void {
     const by_git = try gpa.print("by-git-{s}", .{template});
     defer gpa.free(by_git);
     const by_relic = try gpa.print("by-relic-{s}", .{template});

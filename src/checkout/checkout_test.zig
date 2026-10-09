@@ -2,6 +2,8 @@
 //! out, and a working tree git calls clean.
 
 const std = @import("std");
+const repo_mod = @import("../repo/repo.zig");
+const path_mod = @import("../names/path.zig");
 const shakedown = @import("shakedown");
 const testbytes = @import("../testing/bytes.zig");
 const builtin = @import("builtin");
@@ -741,7 +743,7 @@ test "resetIndex puts the index back and leaves the files alone" {
 test "checkout and writePaths apply every .gitattributes on the way down, as git does" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    const Repository = @import("../repo/repo.zig").Repository;
+    const Repository = repo_mod.Repository;
     const files = [_]struct { path: []const u8, bytes: []const u8 }{
         .{ .path = ".gitattributes", .bytes = "*.txt text\n" },
         .{ .path = "sub/.gitattributes", .bytes = "*.txt eol=crlf\n" },
@@ -1213,7 +1215,7 @@ test "a tree holding a link and a directory of one name is refused before anythi
         .rules = h.worktreeRules(),
         .refusal = &refusal,
     }));
-    try std.testing.expectEqual(@import("../names/path.zig").Reason.path_collision, refusal.reason.?);
+    try std.testing.expectEqual(path_mod.Reason.path_collision, refusal.reason.?);
     try std.testing.expectEqualStrings("a", refusal.path());
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "a", .{}));
     try expectNoHook(io, &h);
@@ -1242,13 +1244,13 @@ test "a link and a directory whose names a folding filesystem makes one are refu
         const result = worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, .{ .rules = rules, .refusal = &refusal });
         if (ignore_case) {
             try std.testing.expectError(error.UnsafePath, result);
-            try std.testing.expectEqual(@import("../names/path.zig").Reason.path_collision, refusal.reason.?);
+            try std.testing.expectEqual(path_mod.Reason.path_collision, refusal.reason.?);
         } else if (result) |_| {} else |err| switch (err) {
             // A filesystem that folds case anyway: the link is found on the
             // way down and the write past it refused, or, where a link
             // could not be made, the file written in its place stands in
             // the way.
-            error.UnsafePath => try std.testing.expectEqual(@import("../names/path.zig").Reason.beyond_symlink, refusal.reason.?),
+            error.UnsafePath => try std.testing.expectEqual(path_mod.Reason.beyond_symlink, refusal.reason.?),
             error.NotDir => {},
             else => return err,
         }
@@ -1284,7 +1286,7 @@ test "nothing is written or removed past a symbolic link in the working tree, an
     try std.testing.expectError(error.UnsafePath, worktree.writePaths(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .writes = &.{
         .{ .path = "d/f", .blob = .{ .mode = .file, .oid = (try h.db.write(io, .blob, "tracked\n")) } },
     } }, unforced));
-    try std.testing.expectEqual(@import("../names/path.zig").Reason.beyond_symlink, refusal.reason.?);
+    try std.testing.expectEqual(path_mod.Reason.beyond_symlink, refusal.reason.?);
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "elsewhere/f", .{}));
 
     // Removing `d/keep` removes nothing: it is not the working tree's.

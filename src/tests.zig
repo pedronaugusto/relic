@@ -23,6 +23,7 @@ pub const fastexport = @import("fastexport.zig");
 pub const maintenance = @import("maintenance/maintenance.zig");
 
 const std = @import("std");
+const api_mod = @import("lfs/api.zig");
 const builtin = @import("builtin");
 const relic = @import("relic.zig");
 
@@ -37,12 +38,12 @@ test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(transport, "httpauth"));
     try std.testing.expect(!@hasDecl(transport, "tls"));
     try std.testing.expect(!@hasDecl(transport, "clientcert"));
-    try std.testing.expect(!@hasDecl(@import("lfs/api.zig"), "timeoutsFor"));
-    try std.testing.expect(!@hasField(@import("lfs/api.zig").Exchange, "response"));
-    try std.testing.expect(!@hasField(@import("lfs/api.zig").Exchange, "diagnostics"));
-    const wire = @typeInfo(@FieldType(@import("lfs/api.zig").Exchange, "wire")).pointer.child;
+    try std.testing.expect(!@hasDecl(api_mod, "timeoutsFor"));
+    try std.testing.expect(!@hasField(api_mod.Exchange, "response"));
+    try std.testing.expect(!@hasField(api_mod.Exchange, "diagnostics"));
+    const wire = @typeInfo(@FieldType(api_mod.Exchange, "wire")).pointer.child;
     try std.testing.expect(@typeInfo(wire) == .@"opaque");
-    const pool = @typeInfo(@FieldType(@import("lfs/api.zig").Client, "transports")).optional.child;
+    const pool = @typeInfo(@FieldType(api_mod.Client, "transports")).optional.child;
     try std.testing.expect(@typeInfo(@typeInfo(pool).pointer.child) == .@"opaque");
 }
 

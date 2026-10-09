@@ -17,6 +17,7 @@ const cquote = @import("../text/cquote.zig");
 const Self = @This();
 
 const std = @import("std");
+const shakedown_mod = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1122,7 +1123,7 @@ test "phase2 extraction quoted attributes decode C escapes once" {
 }
 
 test "phase2 attribute sets survive every allocation failure and keep precedence" {
-    var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
+    var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
             var attrs = try Attrs.init(gpa, .{ .case_fold = true });

@@ -18,6 +18,7 @@
 
 const Namespace = @This();
 const std = @import("std");
+const odb_mod = @import("../odb/odb.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -36,7 +37,7 @@ const repo_mod = @import("../repo/repo.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
-pub const Error = clone_mod.Error || fetch_mod.Error || @import("../odb/odb.zig").Error;
+pub const Error = clone_mod.Error || fetch_mod.Error || odb_mod.Error;
 
 /// What every clone and fetch is made with.
 pub const Options = struct {

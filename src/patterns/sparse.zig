@@ -19,6 +19,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -488,7 +489,7 @@ fn fuzzCone(_: void, smith: *std.testing.Smith) anyerror!void {
 }
 
 test "phase2 sparse set rebuilding survives every allocation failure" {
-    var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
+    var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
             var patterns = try Patterns.init(gpa, .{ .case_fold = true });

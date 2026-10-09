@@ -2,6 +2,7 @@
 //! share it under the marker's lock. A foreign marker is never removed.
 const ErrorNamespace = @This();
 const std = @import("std");
+const shakedown_mod = @import("shakedown");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
@@ -108,7 +109,7 @@ test "phase2 keep tokens retain shared and foreign markers" {
 }
 
 test "phase2 keep acquisition allocation failures abandon no lock or marker" {
-    var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
+    var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
             const io = std.testing.io;

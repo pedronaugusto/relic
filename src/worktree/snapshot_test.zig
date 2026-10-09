@@ -1,4 +1,5 @@
 const std = @import("std");
+const filter_mod = @import("../lfs/filter.zig");
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const testing = std.testing;
@@ -242,7 +243,7 @@ test "snapshot keeps native LFS writes inside the private store" {
     defer private.cleanup();
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
-    const captured = try store.capture(io, .{ .repository = &r }, .{ .native_provider = @import("../lfs/filter.zig").provider(&.{}) });
+    const captured = try store.capture(io, .{ .repository = &r }, .{ .native_provider = filter_mod.provider(&.{}) });
     try testing.expectError(error.FileNotFound, source.dir.access(io, "external-lfs", .{}));
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();

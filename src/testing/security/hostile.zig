@@ -4,6 +4,7 @@
 //! still reach relic the way a crafted history delivers it.
 
 const std = @import("std");
+const path_mod = @import("../../names/path.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -60,7 +61,7 @@ pub const Harness = struct {
 
     /// Check `root` out into the working tree, and say which rule refused
     /// it, or `null` when it was written.
-    pub fn checkout(h: *Harness, gpa: Allocator, io: Io, root: Oid) !?@import("../../names/path.zig").Reason {
+    pub fn checkout(h: *Harness, gpa: Allocator, io: Io, root: Oid) !?path_mod.Reason {
         var refusal: worktree.Refusal = .{};
         _ = worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = root }, .{
             .rules = h.worktreeRules(),

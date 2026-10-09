@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -598,7 +599,7 @@ fn fuzzIgnore(_: void, smith: *std.testing.Smith) anyerror!void {
 }
 
 test "phase2 level sets retain negation, precedence and ancestor decisions under allocation failure" {
-    var no_resize = @import("shakedown").alloc.NoResize.init(std.testing.allocator);
+    var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
             var rules = try Rules.init(gpa, .{ .case_fold = true });

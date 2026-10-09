@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const path_mod = @import("../names/path.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -437,7 +438,7 @@ fn parseMergeRr(arena: Allocator, text: []const u8, kind: hash.Kind) (Allocator.
         }
         if (rest[0] != '\t') return error.MalformedMergeRr;
         // The path is read and rewritten in the working tree.
-        if (!@import("../names/path.zig").isSafeStoredPath(rest[1..])) return error.MalformedMergeRr;
+        if (!path_mod.isSafeStoredPath(rest[1..])) return error.MalformedMergeRr;
         try rr.put(arena, try arena.dupe(u8, rest[1..]), .{ .hex = try arena.dupe(u8, hex), .variant = variant });
     }
     return rr;

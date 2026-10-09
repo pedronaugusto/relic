@@ -8,6 +8,8 @@
 //! the files themselves — is compared with what git left in the other twin.
 
 const std = @import("std");
+const ref_mod = @import("../names/ref.zig");
+const filter_mod = @import("../lfs/filter.zig");
 const suite = @import("../testing/helpers.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -79,9 +81,9 @@ const Twin = struct {
                 defer a.deinit(io);
                 var b = try Repository.open(gpa, io, t.relic.dir, .{});
                 defer b.deinit(io);
-                var by_git = try a.readLog(io, @import("../names/ref.zig").stash);
+                var by_git = try a.readLog(io, ref_mod.stash);
                 defer by_git.deinit();
-                var by_relic = try b.readLog(io, @import("../names/ref.zig").stash);
+                var by_relic = try b.readLog(io, ref_mod.stash);
                 defer by_relic.deinit();
                 try testing.expectEqual(by_git.entries.len, by_relic.entries.len);
                 for (by_git.entries, by_relic.entries) |x, y| {
@@ -552,7 +554,7 @@ test "a stash goes through the clean and smudge filters as git's does" {
         try twin.git.exec(io, &.{ "stash", "push", "-q", "-u" });
         var repo = try twin.open(gpa, io);
         defer repo.deinit(io);
-        var drivers = try @import("../lfs/filter.zig").load(gpa, io, &repo, .{});
+        var drivers = try filter_mod.load(gpa, io, &repo, .{});
         defer drivers.deinit(io);
         const programs: program.Programs = .{ .environ = &twin.environ };
         // Without the permission to run the required filter, nothing is stashed.

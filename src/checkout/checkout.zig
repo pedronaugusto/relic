@@ -32,7 +32,6 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
 const fs = @import("../fs/fs.zig");
-const durability = @import("../fs/fs.zig");
 const sparseindex = @import("../index/sparseindex.zig");
 const pack_mod = @import("../odb/pack.zig");
 const gitlink = @import("../discover/gitlink.zig");
@@ -81,7 +80,7 @@ pub const Error = error{
     index_mod.WriteError || fs.StatError || Io.Dir.Iterator.Error ||
     Io.Dir.OpenError || Io.Dir.DeleteFileError || Io.Dir.DeleteDirError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.SymLinkError ||
-    Io.Dir.ReadLinkError || Io.Writer.Error || @import("../fs/fs.zig").SyncError ||
+    Io.Dir.ReadLinkError || Io.Writer.Error || fs.SyncError ||
     Io.File.SetPermissionsError || object.Tree.Builder.AddError ||
     object.TreeParseError || convert.Error || sparseindex.Error || gitlink.Error;
 
@@ -2211,7 +2210,7 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
         const path = entry.key_ptr.*;
         if (entry.value_ptr.mode != .gitlink) {
             const st = (try fs.statAt(io, wt, path)) orelse return error.FileNotFound;
-            if (st.kind == .file) try durability.syncPath(io, wt, path);
+            if (st.kind == .file) try fs.syncPath(io, wt, path);
         }
         try addSyncParents(&dirs, path, true);
     }
@@ -2234,7 +2233,7 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
         }
     }.less);
     for (ordered.items) |path| {
-        durability.syncDirectory(io, wt, path) catch |err| switch (err) {
+        fs.syncDirectory(io, wt, path) catch |err| switch (err) {
             error.FileNotFound => if (dirs.get(path).?) return err,
             else => return err,
         };

@@ -9,6 +9,7 @@
 
 const suite = @import("../testing/helpers.zig");
 const std = @import("std");
+const fs_mod = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -473,10 +474,10 @@ test "checkout makes an empty directory for a gitlink and takes an empty one awa
     var index = try repo.openIndex(io);
     defer index.deinit();
     _ = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = before }, .{ .rules = try repo.worktreeRules() });
-    try testing.expect((try @import("../fs/fs.zig").statAt(io, repo.workDirectory().?, "vendor/lib")) == null);
+    try testing.expect((try fs_mod.statAt(io, repo.workDirectory().?, "vendor/lib")) == null);
     const outcome = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = with_lib }, .{ .rules = try repo.worktreeRules() });
     try testing.expectEqual(@as(u32, 1), outcome.gitlinks);
-    const found = (try @import("../fs/fs.zig").statAt(io, repo.workDirectory().?, "vendor/lib")).?;
+    const found = (try fs_mod.statAt(io, repo.workDirectory().?, "vendor/lib")).?;
     try testing.expectEqual(Io.File.Kind.directory, found.kind);
     try index.write(io, repo.gitDirectory(), "index", .{});
     try expectPorcelainV2Agrees(gpa, io, &c.git, .{});

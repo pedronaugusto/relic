@@ -22,6 +22,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const odb_mod = @import("../odb/odb.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -44,7 +45,7 @@ const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 
 /// Errors from lazy object acquisition and partial-clone configuration.
-pub const Error = error{NotAPartialClone} || transport.Error || remote_mod.Error || repo_mod.Error || Repository.WriteConfigError || @import("../odb/odb.zig").Error || fsck.LoadError || Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error || std.fmt.BufPrintError;
+pub const Error = error{NotAPartialClone} || transport.Error || remote_mod.Error || repo_mod.Error || Repository.WriteConfigError || odb_mod.Error || fsck.LoadError || Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error || std.fmt.BufPrintError;
 
 /// Errors from reading a filter.
 pub const FilterError = filterspec.Error;

@@ -26,6 +26,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const httpsettings_mod = @import("../wire/httpsettings.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -142,7 +143,7 @@ pub const Options = struct {
     programs: ?program.Programs = null,
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
-    proxy: @import("../wire/httpsettings.zig").Proxy = .auto,
+    proxy: httpsettings_mod.Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.

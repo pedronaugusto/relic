@@ -8,6 +8,7 @@
 const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const std = @import("std");
+const filter_mod = @import("filter.zig");
 const Io = std.Io;
 
 const testgit = @import("../testing/git.zig");
@@ -336,7 +337,7 @@ test "status names an LFS file by hashing it, and stores nothing" {
     defer repo.deinit(io);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try @import("filter.zig").load(gpa, io, &repo, .{});
+    var drivers = try filter_mod.load(gpa, io, &repo, .{});
     defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;

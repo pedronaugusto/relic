@@ -11,6 +11,8 @@
 
 const local = @import("../../transport/local.zig");
 const std = @import("std");
+const filter_mod = @import("../../lfs/filter.zig");
+const path_mod = @import("../../names/path.zig");
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -184,7 +186,7 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
             defer repo.deinit(io);
             var attrs = try repo.loadAttrs(io);
             defer attrs.deinit();
-            var drivers = try @import("../../lfs/filter.zig").load(gpa, io, &repo, .{});
+            var drivers = try filter_mod.load(gpa, io, &repo, .{});
             defer drivers.deinit(io);
             var rules = try repo.worktreeRules();
             rules.attrs = &attrs;
@@ -416,6 +418,6 @@ test "CVE-2024-32002, t7423-submodule-symlinks 'git submodule update must not cr
     rules.ignore_case = true;
     var why: worktree.Refusal = .{};
     try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, .{ .rules = rules, .refusal = &why }));
-    try std.testing.expectEqual(@import("../../names/path.zig").Reason.path_collision, why.reason.?);
+    try std.testing.expectEqual(path_mod.Reason.path_collision, why.reason.?);
     try std.testing.expectError(error.FileNotFound, h.git_dir.access(io, "modules/x", .{}));
 }

@@ -12,6 +12,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const airlock_mod = @import("airlock.testing");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -1401,7 +1402,7 @@ test "a lock names its holder in its own bytes, and no file but the lock is made
 }
 
 test "a lock syncs the target's directory after rename only when asked" {
-    const seam = @import("airlock.testing");
+    const seam = airlock_mod;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "nested", .default_dir);
@@ -1432,7 +1433,7 @@ test "a lock syncs the target's directory after rename only when asked" {
 }
 
 test "phase2 airlock file failure prevents lock publication and directory failure is explicit" {
-    const seam = @import("airlock.testing");
+    const seam = airlock_mod;
     const gpa = std.testing.allocator;
     for ([_]bool{ false, true }) |directory_failure| {
         var tmp = std.testing.tmpDir(.{});
@@ -1459,7 +1460,7 @@ test "phase2 airlock file failure prevents lock publication and directory failur
 }
 
 test "phase2 airlock refused durability never publishes weaker file data" {
-    const seam = @import("airlock.testing");
+    const seam = airlock_mod;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "thing", .data = "old\n" });

@@ -23,6 +23,8 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const httpsettings_mod = @import("../wire/httpsettings.zig");
+const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -168,7 +170,7 @@ pub const Options = struct {
     home: ?[]const u8 = null,
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
-    proxy: @import("../wire/httpsettings.zig").Proxy = .auto,
+    proxy: httpsettings_mod.Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -985,7 +987,7 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
 
 test "a local clone writes its pack on the tasks pack.threads asks for, as git's pack-objects does" {
     const gpa = testing.allocator;
-    const Tasks = @import("../testing/io.zig");
+    const Tasks = io_mod;
     const io = testing.io;
     var single: Io.Threaded = .init_single_threaded;
 

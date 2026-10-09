@@ -7,6 +7,8 @@
 //! `lfstransfer.Fetcher`'s, the same as a fetch's.
 
 const std = @import("std");
+const transfer_test_mod = @import("transfer_test.zig");
+const lfs_mod = @import("../testing/lfs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -99,10 +101,10 @@ test "phase2 native LFS clone fetches content and skip-smudge leaves pointers" {
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;
-    const lt = @import("transfer_test.zig");
+    const lt = transfer_test_mod;
     const fx = try lt.Fixture.init(gpa, io, .{});
     defer fx.deinit();
-    const helper = try @import("../testing/lfs.zig").credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    const helper = try lfs_mod.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
     defer gpa.free(helper);
     var source = try fx.workRepo("seed", helper);
     defer source.close(io);

@@ -100,7 +100,7 @@ pub const Error = error{
 } || pack.Error || pack.WriteError || object.HeaderParseError ||
     object.ParseError || object.TreeParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
-    Io.File.Reader.Error || Io.Reader.Error || @import("../fs/fs.zig").SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
+    Io.File.Reader.Error || Io.Reader.Error || fs.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
 
 /// Counters saying how lookups resolved and what writing cost. Nothing

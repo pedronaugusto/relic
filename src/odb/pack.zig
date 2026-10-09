@@ -13,7 +13,7 @@ const Self = @This();
 const retention = @import("keep.zig");
 
 const std = @import("std");
-const crc32 = @import("warp");
+const entry_mod = @import("pack/entry.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const warp = @import("warp");
@@ -1180,7 +1180,7 @@ pub const Pack = struct {
             const span = try p.gpa.alloc(u8, @intCast(end - offset));
             defer p.gpa.free(span);
             try p.readAtExact(io, offset, span);
-            if (crc32.Crc32.hash(span) != p.index.crcAt(position)) return error.ChecksumMismatch;
+            if (warp.Crc32.hash(span) != p.index.crcAt(position)) return error.ChecksumMismatch;
 
             const obj = try p.readAt(io, offset, cache, pack_id);
             defer p.gpa.free(obj.bytes);
@@ -1460,7 +1460,7 @@ const TestPack = struct {
     fn finishEntry(p: *TestPack, start: usize, name: Oid) !void {
         try p.names.append(p.gpa, name);
         try p.offsets.append(p.gpa, start);
-        try p.crcs.append(p.gpa, crc32.Crc32.hash(p.body.items[start..]));
+        try p.crcs.append(p.gpa, warp.Crc32.hash(p.body.items[start..]));
     }
 
     /// A whole object, with the name the caller chooses rather than the one
@@ -1713,7 +1713,7 @@ pub const WriteError = error{
     /// pack cannot hold one twice; `Writer.holds` says whether it does.
     DuplicateObject,
 } || retention.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
-    @import("../fs/fs.zig").SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
+    fs.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirError || Io.File.WritePositionalError ||
     Io.File.ReadPositionalError;
 
@@ -1776,7 +1776,7 @@ pub const WriteReport = struct {
 
 /// One entry, as the index will need it: its name, where it begins in the
 /// pack, and the CRC32 of its bytes there.
-pub const IndexEntry = @import("pack/entry.zig").IndexEntry;
+pub const IndexEntry = entry_mod.IndexEntry;
 
 const WrittenEntry = IndexEntry;
 
@@ -1872,7 +1872,7 @@ pub const Writer = struct {
     const Sink = struct {
         out: *Io.Writer,
         hasher: hash.Hasher,
-        crc: crc32.Crc32,
+        crc: warp.Crc32,
         count: u64,
         writer: Io.Writer,
         buffer: [sink_buffer_len]u8,

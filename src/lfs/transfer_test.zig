@@ -12,6 +12,7 @@ const fs = @import("../fs/fs.zig");
 const progress_mod = @import("../report/progress.zig");
 const testgit = @import("../testing/git.zig");
 const std = @import("std");
+const filter_mod = @import("filter.zig");
 const suite = @import("../testing/helpers.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -546,7 +547,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
 
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try @import("filter.zig").load(gpa, io, &repo, .{ .fetch = fetcher.fetcher() });
+    var drivers = try filter_mod.load(gpa, io, &repo, .{ .fetch = fetcher.fetcher() });
     defer drivers.deinit(io);
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
@@ -735,9 +736,9 @@ test "an .lfsconfig missing from the working tree is read from the index, then f
         try testing.expectEqualStrings(stage.want, (try server.client.endpoint(io, .download)).url);
         // Checkout's own LFS, which smudges with `lfs.fetchinclude` and
         // `lfs.fetchexclude` from there, finds the same file.
-        var drivers = try @import("filter.zig").load(gpa, io, &repo, .{});
+        var drivers = try filter_mod.load(gpa, io, &repo, .{});
         defer drivers.deinit(io);
-        try testing.expectEqualStrings(stage.want, @import("filter.zig").settings(&drivers).url.?);
+        try testing.expectEqualStrings(stage.want, filter_mod.settings(&drivers).url.?);
     }
 }
 
@@ -1232,7 +1233,7 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 defer fetcher.deinit();
                 var attrs = try repo.loadAttrs(io);
                 defer attrs.deinit();
-                var drivers = try @import("filter.zig").load(gpa, io, &repo, .{ .fetch = fetcher.fetcher() });
+                var drivers = try filter_mod.load(gpa, io, &repo, .{ .fetch = fetcher.fetcher() });
                 defer drivers.deinit(io);
                 var rules = try repo.worktreeRules();
                 rules.attrs = &attrs;

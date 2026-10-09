@@ -13,6 +13,8 @@
 //! Neither moves `HEAD`.
 
 const std = @import("std");
+const path_mod = @import("../names/path.zig");
+const git_mod = @import("../testing/git.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -144,7 +146,7 @@ pub fn toTree(
             if (found.kind == .directory) try wt.deleteTree(io, path);
         }
         // Validate before `enter` consults a directory in the working tree.
-        if (@import("../names/path.zig").checkEntry(path, .worktree, want.mode == .symlink) != null) return error.UnsafePath;
+        if (path_mod.checkEntry(path, .worktree, want.mode == .symlink) != null) return error.UnsafePath;
         try write_attrs.enter(io, wt, path);
         const written = try worktree.writeEntry(gpa, io, wt, .{ .db = db, .conv = &conv, .path = path, .mode = want.mode, .oid = want.oid, .rules = rules });
         try stats.put(arena, path, written.stat);
@@ -223,7 +225,7 @@ fn differs(gpa: Allocator, io: Io, wt: Io.Dir, index: *const Index, entry: index
 }
 
 test "reset writes through the target tree's attributes as git reset hard does" {
-    const testgit = @import("../testing/git.zig");
+    const testgit = git_mod;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var fixture = try testgit.Repo.init(gpa, io, &.{});

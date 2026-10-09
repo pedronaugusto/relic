@@ -10,6 +10,9 @@ const lfspush = @import("push.zig");
 const testremote = @import("../testing/remote.zig");
 const objectwalk = @import("../walk/objectwalk.zig");
 const std = @import("std");
+const build_options_mod = @import("build_options");
+const lfs_mod = @import("lfs.zig");
+const shakedown_mod = @import("shakedown");
 const Io = std.Io;
 const testing = std.testing;
 
@@ -423,7 +426,7 @@ test "each transfer worker has its own git-lfs-transfer, sharing the first's ssh
 }
 
 test "against a real git-lfs-transfer server, what git-lfs puts there relic gets, what relic puts there git-lfs gets, and the locks are shared" {
-    const server_program = @import("build_options").lfs_transfer_server;
+    const server_program = build_options_mod.lfs_transfer_server;
     if (server_program.len == 0) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -572,7 +575,7 @@ test "phase2 LFS SSH pagination ends or explicitly refuses a repeated cursor" {
                     result.deinit();
                 }
             }
-            const store: @import("lfs.zig").Store = .{ .base = repo.commonDirectory(), .root = "lfs" };
+            const store: lfs_mod.Store = .{ .base = repo.commonDirectory(), .root = "lfs" };
             var cached = try lfslocks.Table.cached(testing.allocator, testing.io, &store, "refs/heads/main");
             defer cached.deinit();
             try testing.expectEqual(i < 4, cached.find("a.bin") != null);
@@ -603,7 +606,7 @@ test "phase2 cached SSH lock connection uses the request Io for pipe reads and w
     defer server.deinit(io);
     var warm = try lfslocks.list(io, server, &repo, .{}, .{});
     warm.deinit();
-    const faults = try @import("shakedown").FaultIo.init(gpa, io, .{});
+    const faults = try shakedown_mod.FaultIo.init(gpa, io, .{});
     defer faults.deinit();
     var result = try lfslocks.list(faults.io(), server, &repo, .{}, .{});
     defer result.deinit();
@@ -613,7 +616,7 @@ test "phase2 cached SSH lock connection uses the request Io for pipe reads and w
 }
 
 test "phase2 cached SSH lock connection refuses pipe failure and cancellation without replacing its cache" {
-    const shakedown = @import("shakedown");
+    const shakedown = shakedown_mod;
     const gpa = testing.allocator;
     const io = testing.io;
     const cases = [_]struct { call: shakedown.IoCall, fault: error{ InputOutput, Canceled }, expected: lfslocks.Error }{

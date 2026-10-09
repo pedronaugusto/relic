@@ -47,6 +47,7 @@ const remotehelper = @import("remotehelper.zig");
 const policy = @import("../wire/policy.zig");
 
 const std = @import("std");
+const keep_mod = @import("../odb/keep.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -567,7 +568,7 @@ pub const Session = struct {
     pub const Fetched = struct {
         pub const Error = ErrorNamespace.Error;
 
-        keep: ?@import("../odb/keep.zig").Token = null,
+        keep: ?keep_mod.Token = null,
         /// The new pack's name, or `null` when nothing new came.
         pack: ?Oid,
         objects: u32,

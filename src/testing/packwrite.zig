@@ -2,6 +2,7 @@
 //! of `std.Io` writes the bytes the serial writer writes.
 
 const std = @import("std");
+const warp_mod = @import("warp");
 const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
@@ -217,7 +218,7 @@ test "the tasks allocate nothing, and a batch holds no more than its budget" {
     // object. The small budget fits one 64 KiB object at a time, so its
     // batches hold at most twice that; the large one takes everything at
     // once.
-    const deflater = @sizeOf(pack_mod.Deflater) + @import("warp").Deflate.memory(.{});
+    const deflater = @sizeOf(pack_mod.Deflater) + warp_mod.Deflate.memory(.{});
     const fixed = (workers + 1) * deflater + 64 * 1024 + 64 * 1024;
     const one_object = 64 * 1024 + pack_mod.Deflater.room(64 * 1024);
     if (runs[0].peak > fixed + 2 * one_object) {

@@ -1644,7 +1644,7 @@ test "reading a signing policy allocates nothing of the configuration's" {
 
 test "worktree configuration adapters refuse malformed settings, and read a quoted one without allocating" {
     const Adapter = struct {
-        fn core(r: *const Self.Repository) !@import("../patterns/attributes.zig").CoreSettings {
+        fn core(r: *const Self.Repository) !attributes.CoreSettings {
             return r.coreSettings();
         }
         fn rules(r: *const Self.Repository) !worktree.Rules {
@@ -1670,13 +1670,13 @@ test "worktree configuration adapters refuse malformed settings, and read a quot
     try tmp.dir.writeFile(io, .{ .sub_path = ".git/config", .data = "[core]\n autocrlf = \"input\"\n" });
     var reread = try Self.Repository.open(gpa, io, tmp.dir, .{});
     defer reread.deinit(io);
-    try std.testing.expectEqual(@import("../patterns/attributes.zig").CoreSettings.AutoCrlf.input, (try Adapter.core(&reread)).autocrlf);
+    try std.testing.expectEqual(attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&reread)).autocrlf);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     const config_gpa = &config_owner.get(reread.data()._config).gpa;
     config_gpa.* = failing.allocator();
     defer config_gpa.* = gpa;
     // The value was read once, quotes and all, when the file was.
-    try std.testing.expectEqual(@import("../patterns/attributes.zig").CoreSettings.AutoCrlf.input, (try Adapter.core(&reread)).autocrlf);
+    try std.testing.expectEqual(attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&reread)).autocrlf);
 }
 
 test "rule loaders refuse a malformed case policy, and read one without the configuration allocating" {

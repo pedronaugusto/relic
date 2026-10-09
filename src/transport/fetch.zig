@@ -22,6 +22,8 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const httpsettings_mod = @import("../wire/httpsettings.zig");
+const keep_mod = @import("../odb/keep.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -142,7 +144,7 @@ pub const Options = struct {
     /// askpass runs only when it says so.
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
-    proxy: @import("../wire/httpsettings.zig").Proxy = .auto,
+    proxy: httpsettings_mod.Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -412,7 +414,7 @@ const Brought = struct {
     pack: ?Oid,
     objects: u32,
     backfill: []MapEntry,
-    tokens: [2]?@import("../odb/keep.zig").Token = .{ null, null },
+    tokens: [2]?keep_mod.Token = .{ null, null },
 
     fn deinit(b: *Brought, io: Io) void {
         for (&b.tokens) |*token| if (token.*) |*t| t.deinit(io);
@@ -471,7 +473,7 @@ fn bringObjects(
     try boundary_change.take(arena, gpa, repo, &shallow_info, session.advertisedShallow(), b.deepen != null);
 
     // Tags that point at what the fetch brought.
-    var tag_keep: ?@import("../odb/keep.zig").Token = null;
+    var tag_keep: ?keep_mod.Token = null;
     errdefer if (tag_keep) |*t| t.deinit(io);
     const backfill: []MapEntry = if (b.tags == .auto and b.autotags)
         try followTags(arena, gpa, io, repo, session, pack_dir, .{
@@ -562,7 +564,7 @@ const Following = struct {
     tips: Tips,
     progress: ?progress_mod.Progress,
     receive: indexpack.Options,
-    keep: *?@import("../odb/keep.zig").Token,
+    keep: *?keep_mod.Token,
 };
 
 /// git's automatic tag following: the remote tags that point at what the

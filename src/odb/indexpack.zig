@@ -28,7 +28,7 @@ const Self = @This();
 const retention = @import("keep.zig");
 
 const std = @import("std");
-const crc32 = @import("warp");
+const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const warp = @import("warp");
@@ -1027,7 +1027,7 @@ const Indexer = struct {
     }
 
     fn crcOf(x: *Indexer, start: u64, end: u64) Error!u32 {
-        var crc: crc32.Crc32 = .init;
+        var crc: warp.Crc32 = .init;
         var buf: [16 * 1024]u8 = undefined;
         var at = start;
         while (at < end) {
@@ -1216,7 +1216,7 @@ const Indexer = struct {
             compressed.clearRetainingCapacity();
             try compressor.deflate(&compressed.writer, found.bytes, .default);
 
-            var crc: crc32.Crc32 = .init;
+            var crc: warp.Crc32 = .init;
             crc.update(head[0..head_len]);
             crc.update(compressed.written());
             try x.file.writePositionalAll(io, head[0..head_len], end);
@@ -1798,7 +1798,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
 
     // git chooses the shape of the fixture above. Four independent bases
     // with one delta each give this test control over the task count.
-    const Tasks = @import("../testing/io.zig");
+    const Tasks = io_mod;
     var single: Io.Threaded = .init_single_threaded;
     const bases = [_][]const u8{ "base 0", "base 1", "base 2", "base 3" };
     const patch = try appendDelta(gpa, bases[0].len, "more\n");
