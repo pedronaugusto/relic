@@ -20,10 +20,12 @@ pub const Builder = struct {
     }
 
     pub fn deinit(b: *Builder) void {
-        if (b.transferred) return;
-        b.inner.deinit();
-        b.arena.deinit();
-        b.gpa.destroy(b.owner);
+        if (!b.transferred) {
+            b.inner.deinit();
+            b.arena.deinit();
+            b.gpa.destroy(b.owner);
+        }
+        b.* = undefined;
     }
 };
 

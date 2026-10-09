@@ -2436,6 +2436,7 @@ pub const Exchange = struct {
         if (ex.in_flight) ex.state().response.deinit(io);
         ex.arena.deinit();
         c.gpa.destroy(ex.state());
+        ex.* = undefined;
     }
 };
 

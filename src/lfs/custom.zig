@@ -205,7 +205,10 @@ pub const Agent = struct {
             return err;
         };
         a.* = .{ .gpa = gpa, .conn = conn, .line = .init(gpa), .arena_state = .init(gpa) };
-        errdefer a.abort(io);
+        errdefer {
+            a.releaseResources(io);
+            gpa.destroy(a);
+        }
         var msg: Io.Writer.Allocating = .init(gpa);
         defer msg.deinit();
         const w = &msg.writer;
@@ -250,16 +253,18 @@ pub const Agent = struct {
 
     /// `terminate`, and the process waited for.
     pub fn deinit(a: *Agent, io: Io) void {
-        // ziglint-ignore: Z026 terminate is a courtesy; abort, next, ends the agent whether or not it heard it
+        // ziglint-ignore: Z026 terminate is a courtesy; resource release ends the agent whether or not it heard it
         a.send(io, "{\"event\":\"terminate\"}\n") catch {};
-        a.abort(io);
+        a.releaseResources(io);
+        const gpa = a.gpa;
+        a.* = undefined;
+        gpa.destroy(a);
     }
 
-    fn abort(a: *Agent, io: Io) void {
+    fn releaseResources(a: *Agent, io: Io) void {
         a.conn.deinit(io);
         a.line.deinit();
         a.arena_state.deinit();
-        a.gpa.destroy(a);
     }
 
     fn send(a: *Agent, io: Io, text: []const u8) ErrorNamespace.Error!void {

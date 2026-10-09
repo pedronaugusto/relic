@@ -575,7 +575,7 @@ pub const Session = struct {
 
         pub fn deinit(f: *Fetched, io: Io) void {
             if (f.keep) |*token| token.deinit(io);
-            f.keep = null;
+            f.* = undefined;
         }
     };
 

@@ -122,7 +122,10 @@ pub const Connection = struct {
     /// End the conversation. The connection is released with it and is
     /// not used again.
     pub fn deinit(c: *Connection, io: Io) void {
-        c.vtable.close(io, c.context);
+        const context = c.context;
+        const vtable = c.vtable;
+        c.* = undefined;
+        vtable.close(io, context);
     }
 
     /// Read one pkt-line, turning a transport failure into its own error

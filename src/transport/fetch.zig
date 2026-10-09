@@ -418,6 +418,7 @@ const Brought = struct {
 
     fn deinit(b: *Brought, io: Io) void {
         for (&b.tokens) |*token| if (token.*) |*t| t.deinit(io);
+        b.* = undefined;
     }
 };
 

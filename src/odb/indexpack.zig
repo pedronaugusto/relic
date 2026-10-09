@@ -287,7 +287,7 @@ pub const Result = struct {
 
     pub fn deinit(result: *Result, io: Io) void {
         if (result.keep) |*token| token.deinit(io);
-        result.keep = null;
+        result.* = undefined;
     }
 };
 

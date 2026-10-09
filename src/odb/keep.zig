@@ -31,6 +31,7 @@ pub const Token = struct {
         errdefer dir.close(io);
         var t: Token = .{ .gpa = gpa, .dir = dir, .name = undefined, .name_len = 0, .id = undefined, .managed = true };
         var hex: [hash.max_hex_len]u8 = undefined;
+        // unreachable: the buffer holds the maximum hex name and the fixed pack/keep affixes.
         const name = std.mem.print(&t.name, "pack-{s}.keep", .{oid.hex(&hex)}) catch unreachable;
         t.name_len = name.len;
         var random: [12]u8 = undefined;
@@ -57,6 +58,7 @@ pub const Token = struct {
     /// Release after ref commit or controlled rollback. Cleanup cannot be
     /// canceled. If cleanup fails, retain the protective marker on disk.
     pub fn deinit(t: *Token, io: Io) void {
+        defer t.* = undefined;
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         defer t.dir.close(io);
