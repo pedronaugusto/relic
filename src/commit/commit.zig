@@ -163,7 +163,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
 
     // The files named as git names them to a hook: `.git/index` and
     // `.git/COMMIT_EDITMSG` from the top of the working tree.
-    const names = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
+    const names = try commithooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const message_path = try names.path(arena, "COMMIT_EDITMSG");
     const env = try names.env(arena, request.author);
 

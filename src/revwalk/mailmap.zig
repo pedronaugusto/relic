@@ -218,7 +218,7 @@ pub const Mailmap = struct {
         const config = repo.configuration();
 
         if (!repo.isBare()) if (repo.workDirectory()) |wt| {
-            try m.addFileAt(io, wt, ".mailmap", false);
+            try m.addFileAt(io, wt, ".mailmap", .{ .follow_symlinks = false });
         };
 
         var blob_name: ?[]u8 = null;
@@ -245,7 +245,7 @@ pub const Mailmap = struct {
         if (try config.getPath(gpa, "mailmap.file")) |path| {
             defer gpa.free(path);
             const dir = repo.workDirectory() orelse Io.Dir.cwd();
-            try m.addFileAt(io, dir, path, true);
+            try m.addFileAt(io, dir, path, .{ .follow_symlinks = true });
         }
         return m;
     }
@@ -258,8 +258,10 @@ pub const Mailmap = struct {
     /// symbolic link adds nothing, as git's `open_nofollow` refuses one;
     /// git for Windows has no such open and follows it, and so does this
     /// there.
-    pub fn addFileAt(m: *Mailmap, io: Io, dir: Io.Dir, path: []const u8, follow_symlinks: bool) AddFileAtError!void {
-        if (!follow_symlinks and builtin.target.os.tag != .windows) {
+    pub const AddFileAtOptions = struct { follow_symlinks: bool = false };
+
+    pub fn addFileAt(m: *Mailmap, io: Io, dir: Io.Dir, path: []const u8, options: AddFileAtOptions) AddFileAtError!void {
+        if (!options.follow_symlinks and builtin.target.os.tag != .windows) {
             const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
             if (st.kind == .sym_link) return;
         }

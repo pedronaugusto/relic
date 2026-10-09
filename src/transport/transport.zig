@@ -338,7 +338,7 @@ pub const Session = struct {
 
     fn checkAllowed(options: Options, name: []const u8) ErrorNamespace.Error!void {
         const environ = if (options.programs) |p| p.environ else null;
-        if (!policy.allowed(options.config, environ, name, options.from_user)) return error.TransportNotAllowed;
+        if (!policy.allowed(name, .{ .config = options.config, .environ = environ, .from_user = options.from_user })) return error.TransportNotAllowed;
     }
 
     /// A session through the remote helper `remote_url` names, or `null`
@@ -469,7 +469,7 @@ pub const Session = struct {
             .local => |here| here.listRefs(gpa, io, prefixes),
             .bundle => |f| bundleRefs(gpa, f),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes }),
-            .helper => |helper| helper.h.list(gpa, helper.repository, s.service == .receive_pack),
+            .helper => |helper| helper.h.list(gpa, helper.repository, .{ .for_push = s.service == .receive_pack }),
         };
     }
 

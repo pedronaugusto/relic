@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Breaking:** hook, trailer, mailmap, remote URL, LFS pattern and helper operations take defaulted policy options. Ref listing writes take the output writer before `WriteOptions`; transport policy takes a name and `Options`.
+
 - **Breaking:** ignore, attribute and sparse pattern constructors take defaulted `InitOptions`. Sparse file loading has one `load` operation with `LoadOptions`; `loadMode` is removed.
 
 - Warp decodes LFS zstd bodies with the frame-declared window and the existing 512 MiB refusal. Test fixtures use the adopted codecs, while external zlib and Git parity remain checked.

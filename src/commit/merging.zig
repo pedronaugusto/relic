@@ -343,7 +343,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         try repo.writeIndex(io, &index);
         const log_message = try arena.print("{s}: Fast-forward", .{reflog_action});
         try head_mod.advance(io, repo, head, target.oid, .{ .who = options.who, .message = log_message });
-        if (options.hooks) |runner| _ = try runner.postMerge(io, false);
+        if (options.hooks) |runner| _ = try runner.postMerge(io, .{ .squash = false });
         try removeMergeState(io, repo);
         return .{ .gpa = gpa, .arena = arena_instance.state, .result = .fast_forward, .commit = target.oid };
     }
@@ -536,7 +536,7 @@ fn commitOrStop(
         // `prepare_to_commit`: `pre-merge-commit` first, then the message,
         // signed off, into `MERGE_MSG` beside `MERGE_HEAD` for the message
         // hooks, and back out of it.
-        const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
+        const h = try commithooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
         if (options.signoff) try message.appendSignoff(arena, &msg, options.who, try message.trailerSettings(arena, repo.configuration()));
         var text: []const u8 = msg.items;
         if (h.runner) |runner| {
@@ -565,7 +565,7 @@ fn commitOrStop(
         const log_message = try arena.print("{s}: Merge made by the '{s}' strategy.", .{ made.reflog_action, made.strategy });
         try head_mod.advance(io, repo, made.head, commit, .{ .who = options.who, .message = log_message });
         // `post-merge` runs before the merge's files go, as in git.
-        if (options.hooks) |runner| _ = try runner.postMerge(io, false);
+        if (options.hooks) |runner| _ = try runner.postMerge(io, .{ .squash = false });
         try removeMergeState(io, repo);
         return .{ .gpa = gpa, .arena = arena_instance.state, .result = .merged, .commit = commit, .messages = messages };
     }
@@ -654,7 +654,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try repo.writeIndex(io, &index);
 
-    const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
+    const h = try commithooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const author = options.author orelse options.who;
     const given = options.message orelse ((try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
     const raw = try h.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });

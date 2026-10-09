@@ -41,8 +41,11 @@ pub const Hooks = struct {
     git_dir: []const u8,
 
     /// The hooks of `repo`, with paths named as git names them.
-    pub fn init(arena: Allocator, io: Io, repo: *Repository, runner: ?*hooks.Runner, verify: bool) Self.Error!Hooks {
-        var h: Hooks = .{ .runner = runner, .verify = verify, .git_dir = ".git" };
+    pub const InitOptions = struct { runner: ?*hooks.Runner = null, verify: bool = true };
+
+    pub fn init(arena: Allocator, io: Io, repo: *Repository, options: InitOptions) Self.Error!Hooks {
+        const runner = options.runner;
+        var h: Hooks = .{ .runner = runner, .verify = options.verify, .git_dir = ".git" };
         if (runner == null) return h;
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const git_path = try arena.dupe(u8, buf[0..try repo.gitDirectory().realPath(io, &buf)]);

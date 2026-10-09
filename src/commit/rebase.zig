@@ -1547,7 +1547,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
     // sign-off, unless `commit.cleanup` says otherwise; an edited message
     // is cleaned of comments as an editor's is.
     const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else configuredCleanup(repo);
-    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
+    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     // An edited message is `git commit -n -e`'s: its hooks see the author
     // and the editor the person has.
     var edit_env = try commit_hooks.env(arena, author);
@@ -1696,7 +1696,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     const current = try readSource(r, head.oid.?);
     // `git commit --amend` behind an editor: all four of its hooks, told
     // the commit it amends, with the author it keeps.
-    const commit_hooks = try commithooks.Hooks.init(r.arena, r.io, r.repo, r.options.hooks, true);
+    const commit_hooks = try commithooks.Hooks.init(r.arena, r.io, r.repo, .{ .runner = r.options.hooks, .verify = true });
     var e = try commit_hooks.env(r.arena, current.commit.author);
     e.editor = true;
     var proposed = message.fromSubject(current.commit.message);
@@ -2571,7 +2571,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     const proposed = (try r.readState("message")).?;
     // `git commit -n -e -F message`: only the message hooks around it, an
     // editor's as the person's editor left it.
-    const commit_hooks = try commithooks.Hooks.init(r.arena, io, repo, r.options.hooks, false);
+    const commit_hooks = try commithooks.Hooks.init(r.arena, io, repo, .{ .runner = r.options.hooks, .verify = false });
     var hook_env: hooksEnv = null;
     var shown = proposed;
     if (commit_hooks.runner) |runner| {

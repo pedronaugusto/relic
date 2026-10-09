@@ -642,7 +642,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         if (r.options.signoff or r.options.record_origin) .whitespace else configuredCleanup(repo);
     // `try_to_commit`: `prepare-commit-msg` sees the message before it is
     // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
-    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
+    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     var text: []const u8 = msg;
     if (commit_hooks.exists(io, "prepare-commit-msg")) {
         try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", text);
@@ -893,7 +893,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
-    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
+    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     const given = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
     const raw = try commit_hooks.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
     const cleaned = try message.cleanup(arena, raw, .strip, r.comment);

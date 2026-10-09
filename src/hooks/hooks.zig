@@ -634,8 +634,10 @@ pub const Runner = struct {
     }
 
     /// `post-merge <squash>`, after a merge that succeeded.
-    pub fn postMerge(runner: *Runner, io: Io, squash: bool) Self.Error!Ran {
-        return runner.run(io, "post-merge", .{ .args = &.{if (squash) "1" else "0"} });
+    pub const PostMergeOptions = struct { squash: bool = false };
+
+    pub fn postMerge(runner: *Runner, io: Io, options: PostMergeOptions) Self.Error!Ran {
+        return runner.run(io, "post-merge", .{ .args = &.{if (options.squash) "1" else "0"} });
     }
 
     /// `pre-rebase <upstream> [<branch>]`, which may refuse the rebase.
@@ -980,7 +982,7 @@ test "a hook runs from the top of the working tree with git's arguments, and not
     defer opened.git_dir.close(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
-    const ran = try opened.runner.postMerge(io, true);
+    const ran = try opened.runner.postMerge(io, .{ .squash = true });
     try testing.expectEqual(@as(u32, 1), ran.count);
     try testing.expect(ran.succeeded());
     try testing.expectEqualStrings(
@@ -1043,7 +1045,7 @@ test "core.hooksPath moves the hooks, relative to where they run" {
     defer opened.git_dir.close(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
-    _ = try opened.runner.postMerge(io, false);
+    _ = try opened.runner.postMerge(io, .{ .squash = false });
     try testing.expectEqualStrings("moved\n", opened.runner.captured.items);
 }
 
@@ -1075,7 +1077,7 @@ test "configured hooks run first, in the order last named, through the shell" {
     defer opened.git_dir.close(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
-    const ran = try opened.runner.postMerge(io, true);
+    const ran = try opened.runner.postMerge(io, .{ .squash = true });
     try testing.expectEqual(@as(u32, 3), ran.count);
     try testing.expectEqualStrings("first 1\nsecond 1 1\nfile 1\n", opened.runner.captured.items);
 
@@ -1115,7 +1117,7 @@ test "an event's configured hooks can be turned off while its file still runs" {
     defer opened.git_dir.close(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
-    _ = try opened.runner.postMerge(io, false);
+    _ = try opened.runner.postMerge(io, .{ .squash = false });
     try testing.expectEqualStrings("file\n", opened.runner.captured.items);
 }
 
@@ -1130,7 +1132,7 @@ test "a configured hook named after an event is refused by name" {
     defer opened.git_dir.close(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
-    try testing.expectError(error.HookNameIsAnEvent, opened.runner.postMerge(io, false));
+    try testing.expectError(error.HookNameIsAnEvent, opened.runner.postMerge(io, .{ .squash = false }));
     try testing.expectEqualStrings("pre-commit", opened.runner.refused);
 }
 

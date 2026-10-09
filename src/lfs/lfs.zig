@@ -493,7 +493,9 @@ pub const FetchPattern = struct {
 
     /// `text`, which is borrowed, compiled in `a`, which holds the result.
     /// `case_fold` is `core.ignoreCase`.
-    pub fn compile(a: Allocator, text: []const u8, case_fold: bool) Allocator.Error!FetchPattern {
+    pub const CompileOptions = struct { case_fold: bool = false };
+
+    pub fn compile(a: Allocator, text: []const u8, options: CompileOptions) Allocator.Error!FetchPattern {
         var glob: std.ArrayList(u8) = try .initCapacity(a, text.len);
         var i: usize = 0;
         while (i < text.len) : (i += 1) {
@@ -510,7 +512,7 @@ pub const FetchPattern = struct {
         if (pattern.len == 0) return .{ .text = text, .matcher = .never };
         const anchored = std.mem.findScalar(u8, pattern, '/') != null;
         if (pattern[0] == '/') pattern = pattern[1..];
-        return .{ .text = text, .matcher = try .compile(a, pattern, .{ .case_fold = case_fold, .anywhere = !anchored }) };
+        return .{ .text = text, .matcher = try .compile(a, pattern, .{ .case_fold = options.case_fold, .anywhere = !anchored }) };
     }
 
     /// Whether the pattern names `path` or a directory above it.
@@ -523,7 +525,7 @@ pub const FetchPattern = struct {
 fn compilePatterns(a: Allocator, value: []const u8, case_fold: bool) Allocator.Error![]const FetchPattern {
     const texts = try splitPatterns(a, value);
     const patterns = try a.alloc(FetchPattern, texts.len);
-    for (texts, patterns) |text, *pattern| pattern.* = try .compile(a, text, case_fold);
+    for (texts, patterns) |text, *pattern| pattern.* = try .compile(a, text, .{ .case_fold = case_fold });
     return patterns;
 }
 
@@ -832,7 +834,7 @@ test "the store names an object by its SHA-256 and gives it back at the right si
 fn fetchPatternMatches(text: []const u8, path: []const u8, case_fold: bool) !bool {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const pattern: FetchPattern = try .compile(arena.allocator(), text, case_fold);
+    const pattern: FetchPattern = try .compile(arena.allocator(), text, .{ .case_fold = case_fold });
     return pattern.matches(path);
 }
 
@@ -855,8 +857,8 @@ test "fetch patterns name a path, a directory above it, or a component anywhere"
     defer arena.deinit();
     const a = arena.allocator();
     const settings: Settings = .{
-        .fetch_include = &.{try .compile(a, "images", false)},
-        .fetch_exclude = &.{try .compile(a, "*.psd", false)},
+        .fetch_include = &.{try .compile(a, "images", .{ .case_fold = false })},
+        .fetch_exclude = &.{try .compile(a, "*.psd", .{ .case_fold = false })},
     };
     try testing.expect(settings.fetchAllowed("images/a.png"));
     try testing.expect(!settings.fetchAllowed("images/a.psd"));

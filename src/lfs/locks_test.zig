@@ -346,7 +346,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     defer runner.deinit();
     for ([_]hooks.Ran{
         try runner.postCheckout(io, zero, head.oid, .branch),
-        try runner.postMerge(io, false),
+        try runner.postMerge(io, .{ .squash = false }),
         try runner.prePush(io, "origin", "http://unused.invalid/", &.{}),
     }) |ran| {
         try testing.expect(ran.succeeded());

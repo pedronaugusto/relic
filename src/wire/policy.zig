@@ -34,7 +34,16 @@ pub fn nameOf(scheme: url_mod.Scheme) []const u8 {
 /// person named the remote themselves; `null` takes
 /// `GIT_PROTOCOL_FROM_USER` from `environ`, true when it is not set, as git
 /// takes it.
-pub fn allowed(config: ?*const config_mod.Config, environ: ?*const Environ.Map, name: []const u8, from_user: ?bool) bool {
+pub const Options = struct {
+    config: ?*const config_mod.Config = null,
+    environ: ?*const Environ.Map = null,
+    from_user: ?bool = null,
+};
+
+pub fn allowed(name: []const u8, options: Options) bool {
+    const config = options.config;
+    const environ = options.environ;
+    const from_user = options.from_user;
     if (environ) |env| if (env.get("GIT_ALLOW_PROTOCOL")) |list| {
         var names = std.mem.splitScalar(u8, list, ':');
         while (names.next()) |allowed_name| if (std.mem.eql(u8, allowed_name, name)) return true;
@@ -71,31 +80,31 @@ test "a transport is allowed as git's is_transport_allowed allows it" {
     defer env.deinit();
     // The defaults.
     for ([_][]const u8{ "http", "https", "git", "ssh", "file", "testgit" }) |name| {
-        try testing.expect(allowed(null, &env, name, null));
+        try testing.expect(allowed(name, .{ .config = null, .environ = &env, .from_user = null }));
     }
-    try testing.expect(!allowed(null, &env, "ext", null));
-    try testing.expect(!allowed(null, &env, "file", false));
-    try testing.expect(!allowed(null, &env, "testgit", false));
-    try testing.expect(allowed(null, &env, "https", false));
+    try testing.expect(!allowed("ext", .{ .config = null, .environ = &env, .from_user = null }));
+    try testing.expect(!allowed("file", .{ .config = null, .environ = &env, .from_user = false }));
+    try testing.expect(!allowed("testgit", .{ .config = null, .environ = &env, .from_user = false }));
+    try testing.expect(allowed("https", .{ .config = null, .environ = &env, .from_user = false }));
     try env.put("GIT_PROTOCOL_FROM_USER", "0");
-    try testing.expect(!allowed(null, &env, "file", null));
-    try testing.expect(allowed(null, &env, "file", true));
-    try testing.expect(allowed(null, &env, "ssh", null));
+    try testing.expect(!allowed("file", .{ .config = null, .environ = &env, .from_user = null }));
+    try testing.expect(allowed("file", .{ .config = null, .environ = &env, .from_user = true }));
+    try testing.expect(allowed("ssh", .{ .config = null, .environ = &env, .from_user = null }));
 
     // protocol.<name>.allow, then protocol.allow.
     var config = try config_mod.Config.parseText(testing.allocator, "[protocol \"ext\"]\nallow = always\n[protocol \"file\"]\nallow = always\n[protocol]\nallow = never\n", .local);
     defer config.deinit();
-    try testing.expect(allowed(&config, &env, "ext", null));
-    try testing.expect(allowed(&config, &env, "file", false));
-    try testing.expect(!allowed(&config, &env, "testgit", null));
-    try testing.expect(!allowed(&config, &env, "https", null));
+    try testing.expect(allowed("ext", .{ .config = &config, .environ = &env, .from_user = null }));
+    try testing.expect(allowed("file", .{ .config = &config, .environ = &env, .from_user = false }));
+    try testing.expect(!allowed("testgit", .{ .config = &config, .environ = &env, .from_user = null }));
+    try testing.expect(!allowed("https", .{ .config = &config, .environ = &env, .from_user = null }));
 
     // GIT_ALLOW_PROTOCOL over everything.
     try env.put("GIT_ALLOW_PROTOCOL", "https:ssh");
-    try testing.expect(allowed(&config, &env, "https", null));
-    try testing.expect(allowed(&config, &env, "ssh", false));
-    try testing.expect(!allowed(&config, &env, "ext", null));
-    try testing.expect(!allowed(&config, &env, "file", true));
+    try testing.expect(allowed("https", .{ .config = &config, .environ = &env, .from_user = null }));
+    try testing.expect(allowed("ssh", .{ .config = &config, .environ = &env, .from_user = false }));
+    try testing.expect(!allowed("ext", .{ .config = &config, .environ = &env, .from_user = null }));
+    try testing.expect(!allowed("file", .{ .config = &config, .environ = &env, .from_user = true }));
 }
 
 /// All errors reported by this namespace.

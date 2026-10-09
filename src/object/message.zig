@@ -322,7 +322,7 @@ fn fuzzMessage(_: void, smith: *std.testing.Smith) anyerror!void {
     const text = buf[0..smith.slice(&buf)];
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    const block = try trailer.block(arena_state.allocator(), .{}, text, true);
+    const block = try trailer.block(arena_state.allocator(), .{}, text, .{ .no_divider = true });
     try std.testing.expect(block.start <= text.len);
     try std.testing.expect(block.end <= text.len);
     _ = try conformingFooter(gpa, text, "Signed-off-by: A <a@b>\n", .{});

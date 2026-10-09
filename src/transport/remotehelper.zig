@@ -406,9 +406,11 @@ pub const Helper = struct {
     /// `list`, or `list for-push` for a push to a helper that pushes: the
     /// refs, a symbolic one given its target's value. `repo` is read for
     /// a ref the helper says is `unchanged`. The list is the caller's.
-    pub fn list(h: *Helper, gpa: Allocator, repo: ?*Repository, for_push: bool) Self.Error!protocol.RefList {
+    pub const ListOptions = struct { for_push: bool = false };
+
+    pub fn list(h: *Helper, gpa: Allocator, repo: ?*Repository, options: ListOptions) Self.Error!protocol.RefList {
         if (h.caps.object_format) _ = try h.option("object-format", "true", .raw);
-        try h.send(if (h.caps.push and for_push) "list for-push\n" else "list\n");
+        try h.send(if (h.caps.push and options.for_push) "list for-push\n" else "list\n");
         var out: protocol.RefList = .{ .arena = .init(gpa), .refs = &.{} };
         errdefer out.arena.deinit();
         const a = out.arena.allocator();

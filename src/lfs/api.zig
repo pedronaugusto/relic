@@ -676,15 +676,17 @@ fn remoteEndpoint(arena: Allocator, settings: *const Settings, remote: []const u
         const endpoint = try newEndpoint(arena, settings, operation, u, base);
         return endpoint;
     }
-    const git_url = (try gitRemoteUrl(arena, settings, remote, operation == .upload)) orelse return null;
+    const git_url = (try gitRemoteUrl(arena, settings, remote, .{ .for_push = operation == .upload })) orelse return null;
     const endpoint = try endpointFromCloneUrl(arena, settings, operation, git_url, base);
     return endpoint;
 }
 
 /// The remote's own URL, as git-lfs asks for it: `pushurl` for a push, else
 /// `url`, else the name itself when it is a URL.
-pub fn gitRemoteUrl(arena: Allocator, settings: *const Settings, remote: []const u8, for_push: bool) Self.Error!?[]const u8 {
-    if (for_push) {
+pub const RemoteUrlOptions = struct { for_push: bool = false };
+
+pub fn gitRemoteUrl(arena: Allocator, settings: *const Settings, remote: []const u8, options: RemoteUrlOptions) Self.Error!?[]const u8 {
+    if (options.for_push) {
         const key = try arena.print("remote.{s}.pushurl", .{remote});
         if (try settings.get(arena, key)) |u| return u;
     }
@@ -1460,7 +1462,7 @@ pub const Client = struct {
             return .{ .url = request_url, .inline_auth = null };
         }
         if (api_url.password) |password| return .{ .url = null, .inline_auth = try basicHeader(arena, api_url.user orelse "", password) };
-        if (try gitRemoteUrl(arena, c.settings, c.remote, operation == .upload)) |remote_url| {
+        if (try gitRemoteUrl(arena, c.settings, c.remote, .{ .for_push = operation == .upload })) |remote_url| {
             if (UrlParts.parse(remote_url)) |r| {
                 if (std.mem.eql(u8, r.scheme, api_url.scheme) and std.mem.eql(u8, r.authority, api_url.authority)) {
                     if (r.password) |password| return .{ .url = null, .inline_auth = try basicHeader(arena, r.user orelse "", password) };

@@ -719,7 +719,7 @@ const Http = struct {
             const to = url_mod.Url.parse(text) catch return h.fail(error.HttpStatus, "a redirect to a URL that does not parse");
             if (to.scheme != .http and to.scheme != .https) return h.fail(error.HttpStatus, "a redirect to another protocol");
             const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
-            if (!policy.allowed(h.options.config, environ, policy.nameOf(to.scheme), h.options.from_user)) {
+            if (!policy.allowed(policy.nameOf(to.scheme), .{ .config = h.options.config, .environ = environ, .from_user = h.options.from_user })) {
                 return h.fail(error.TransportNotAllowed, policy.nameOf(to.scheme));
             }
             const moved: Origin = .of(to);

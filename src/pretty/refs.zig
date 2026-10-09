@@ -2197,14 +2197,17 @@ pub const Listing = struct {
     /// git's `print_formatted_ref_array`: every item (or the first
     /// `count`), each followed by a newline, an empty one left out under
     /// `omit_empty`.
-    pub fn write(l: *Listing, format: Format, count: usize, omit_empty: bool, writer: *Io.Writer) WriteError!void {
+    pub const WriteOptions = struct { count: usize = 0, omit_empty: bool = false };
+
+    pub fn write(l: *Listing, format: Format, writer: *Io.Writer, options: WriteOptions) WriteError!void {
+        const count = options.count;
         const total = if (count == 0 or l.items.items.len < count) l.items.items.len else count;
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(l.gpa);
         for (0..total) |i| {
             line.clearRetainingCapacity();
             try l.formatItem(l.gpa, i, format, &line);
-            if (line.items.len != 0 or !omit_empty) {
+            if (line.items.len != 0 or !options.omit_empty) {
                 try writer.writeAll(line.items);
                 try writer.writeByte('\n');
             }
@@ -2751,7 +2754,7 @@ pub fn listRefs(gpa: Allocator, io: Io, repo: *Repository, options: Options, wri
     const format = try l.parseFormat(options.format orelse for_each_ref_format, options.quote);
     try l.collect(options.filter);
     try l.sort(options.sort, options.sort_options);
-    try l.write(format, options.count, options.omit_empty, writer);
+    try l.write(format, writer, .{ .count = options.count, .omit_empty = options.omit_empty });
 }
 
 /// Which branches `listBranches` lists: `git branch`, `-r` or `-a`.
@@ -2828,7 +2831,7 @@ pub fn listBranches(gpa: Allocator, io: Io, repo: *Repository, options: BranchLi
         try keys.appendSlice(l.a(), options.sort);
         try l.sort(keys.items, .{ .ignore_case = options.ignore_case, .detached_head_first = true });
     }
-    try l.write(format, 0, options.omit_empty, writer);
+    try l.write(format, writer, .{ .count = 0, .omit_empty = options.omit_empty });
 }
 
 /// What `listTags` is asked: `git tag --list`'s options.
@@ -2879,7 +2882,7 @@ pub fn listTags(gpa: Allocator, io: Io, repo: *Repository, options: TagListOptio
         try keys.appendSlice(l.a(), options.sort);
         try l.sort(keys.items, .{ .ignore_case = options.ignore_case });
     }
-    try l.write(format, 0, options.omit_empty, writer);
+    try l.write(format, writer, .{ .count = 0, .omit_empty = options.omit_empty });
 }
 
 test "version sort orders numbers by value and prerelease suffixes before their release" {

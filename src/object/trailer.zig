@@ -466,9 +466,11 @@ pub const Block = struct {
 };
 
 /// git's `trailer_block_get`.
-pub fn block(arena: Allocator, settings: Settings, msg_in: []const u8, no_divider: bool) Allocator.Error!Block {
+pub const BlockOptions = struct { no_divider: bool = false };
+
+pub fn block(arena: Allocator, settings: Settings, msg_in: []const u8, options: BlockOptions) Allocator.Error!Block {
     const msg = cStr(msg_in);
-    const end = endOfLogMessage(msg, no_divider, settings.comment);
+    const end = endOfLogMessage(msg, options.no_divider, settings.comment);
     const start = blockStart(settings, msg, end);
     var lines: std.ArrayList([]const u8) = .empty;
     var last: ?usize = null;
@@ -541,7 +543,7 @@ pub const Trailer = struct {
 /// and its unfolded value, read with no `---` divider. Everything is
 /// `arena`'s.
 pub fn iterate(arena: Allocator, settings: Settings, msg: []const u8) Allocator.Error![]Trailer {
-    const b = try block(arena, settings, msg, true);
+    const b = try block(arena, settings, msg, .{ .no_divider = true });
     const out = try arena.alloc(Trailer, b.lines.len);
     for (b.lines, out) |line, *t| {
         const parsed = parseTrailer(settings, line, findSeparator(line, settings.separators));
@@ -640,7 +642,7 @@ pub fn format(gpa: Allocator, settings: Settings, options: Options, msg: []const
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const b = try block(arena, settings, msg, options.no_divider);
+    const b = try block(arena, settings, msg, .{ .no_divider = options.no_divider });
     if (!options.only_trailers and !options.unfold and options.keys == null and options.separator == null and
         !options.key_only and !options.value_only and options.key_value_separator == null)
     {
@@ -798,7 +800,7 @@ pub fn process(gpa: Allocator, io: Io, input: []const u8, out: *std.ArrayList(u8
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const b = try block(arena, settings, input, options.no_divider);
+    const b = try block(arena, settings, input, .{ .no_divider = options.no_divider });
     var items = try parseItems(arena, settings, options, b);
     if (!options.only_trailers) try out.appendSlice(gpa, input[0..b.start]);
     if (!options.only_trailers and !b.blank_line_before) try out.append(gpa, '\n');

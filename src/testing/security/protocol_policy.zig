@@ -19,23 +19,23 @@ test "CVE-2015-7545, t5812..t5815-proto-disable: ext:: is never allowed, file://
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // git's defaults.
-    try std.testing.expect(!policy.allowed(null, null, "ext", true));
-    try std.testing.expect(policy.allowed(null, null, "file", true));
-    try std.testing.expect(!policy.allowed(null, null, "file", false));
-    for ([_][]const u8{ "http", "https", "ssh", "git" }) |name| try std.testing.expect(policy.allowed(null, null, name, false));
+    try std.testing.expect(!policy.allowed("ext", .{ .config = null, .environ = null, .from_user = true }));
+    try std.testing.expect(policy.allowed("file", .{ .config = null, .environ = null, .from_user = true }));
+    try std.testing.expect(!policy.allowed("file", .{ .config = null, .environ = null, .from_user = false }));
+    for ([_][]const u8{ "http", "https", "ssh", "git" }) |name| try std.testing.expect(policy.allowed(name, .{ .config = null, .environ = null, .from_user = false }));
     // `GIT_ALLOW_PROTOCOL` is the whole answer, configuration or not.
     var env: std.process.Environ.Map = .init(gpa);
     defer env.deinit();
     try env.put("GIT_ALLOW_PROTOCOL", "https:file");
     var always = try config_mod.Config.parseText(gpa, "[protocol]\n\tallow = always\n", .local);
     defer always.deinit();
-    try std.testing.expect(!policy.allowed(&always, &env, "ssh", true));
-    try std.testing.expect(policy.allowed(&always, &env, "https", true));
+    try std.testing.expect(!policy.allowed("ssh", .{ .config = &always, .environ = &env, .from_user = true }));
+    try std.testing.expect(policy.allowed("https", .{ .config = &always, .environ = &env, .from_user = true }));
     // `protocol.<name>.allow` over `protocol.allow`.
     var config = try config_mod.Config.parseText(gpa, "[protocol]\n\tallow = never\n[protocol \"https\"]\n\tallow = always\n", .local);
     defer config.deinit();
-    try std.testing.expect(policy.allowed(&config, null, "https", false));
-    try std.testing.expect(!policy.allowed(&config, null, "ssh", true));
+    try std.testing.expect(policy.allowed("https", .{ .config = &config, .environ = null, .from_user = false }));
+    try std.testing.expect(!policy.allowed("ssh", .{ .config = &config, .environ = null, .from_user = true }));
 
     // An `ext::` URL runs nothing: it is refused before a helper starts.
     var tmp = std.testing.tmpDir(.{});
