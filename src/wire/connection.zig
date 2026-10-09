@@ -124,8 +124,9 @@ pub const Connection = struct {
     pub fn deinit(c: *Connection, io: Io) void {
         const context = c.context;
         const vtable = c.vtable;
+        // Closing may free this connection's embedded storage.
+        defer vtable.close(io, context);
         c.* = undefined;
-        vtable.close(io, context);
     }
 
     /// Read one pkt-line, turning a transport failure into its own error

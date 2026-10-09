@@ -309,7 +309,8 @@ test "phase2 cached custom adapter uses the transfer Io for pipe reads and write
     const faults = try shakedown_mod.FaultIo.init(gpa, io, .{});
     defer faults.deinit();
     const Progress = struct {
-        pub fn bytes(_: @This(), _: usize) void {}
+        pub const Self = @This();
+        pub fn bytes(_: Self, _: usize) void {}
     };
     const result = try agent.transfer(faults.io(), .{ .operation = .download, .oid = "missing", .size = 1 }, Progress{});
     try testing.expect(result == .failed);
@@ -349,7 +350,8 @@ test "phase2 cached custom adapter refuses pipe failure and cancellation through
         const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
         defer faults.deinit();
         const Progress = struct {
-            pub fn bytes(_: @This(), _: usize) void {}
+            pub const Self = @This();
+            pub fn bytes(_: Self, _: usize) void {}
         };
         try testing.expectError(case.expected, agent.transfer(faults.io(), .{ .operation = .download, .oid = "missing", .size = 1 }, Progress{}));
         try testing.expect(faults.count(case.call) > 0);

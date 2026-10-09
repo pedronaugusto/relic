@@ -1039,7 +1039,7 @@ const Writer = struct {
         var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = o.next - skip });
         defer state.deinit();
         const output = compressed.writer.writableSliceGreedy(warp.Compressor.bound(o.next - skip, .{})) catch return error.OutOfMemory;
-        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // bound reserves the complete stream
+        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // unreachable: bound reserves the complete stream
         compressed.writer.advance(n);
         const bytes = compressed.written();
         // A log block is not bounded by the block size once deflated, and

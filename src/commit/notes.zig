@@ -1016,7 +1016,8 @@ pub fn show(gpa: Allocator, io: Io, repo: *Repository, ref: ?[]const u8, obj: Oi
     const note = (try t.get(io, obj)) orelse return null;
     const found = try repo.objectDatabase().read(io, note);
     defer repo.objectDatabase().allocator().free(found.bytes);
-    return try gpa.dupe(u8, found.bytes);
+    const bytes = try gpa.dupe(u8, found.bytes);
+    return bytes;
 }
 
 /// Errors from `formatNote`.

@@ -359,7 +359,7 @@ fn deflateRaw(gpa: Allocator, data: []const u8, level: ?u4) Allocator.Error![]u8
     const frame: warp.Compressor.Frame = .{ .container = .raw };
     const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, frame));
     errdefer gpa.free(out);
-    const n = compress.compress(data, out, frame) catch unreachable; // bound reserves the complete stream
+    const n = compress.compress(data, out, frame) catch unreachable; // unreachable: bound reserves the complete stream
     return gpa.realloc(out, n);
 }
 

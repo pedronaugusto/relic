@@ -8,9 +8,11 @@ merge, cherry-pick, revert and rebase; hooks, filters, signing, submodules,
 stash; LFS with locks. What it lays down is what git reads back, so a program
 that needs a repository can have one in process.
 
-Architecture phase 2 is work in progress. Published dependency APIs, layering,
-public API cleanup and performance validation still have open work; this branch
-is not release complete. Its architecture is described in [docs/design.md](docs/design.md).
+Architecture phase 2 is work in progress. Phase 2a covers grouped public inputs,
+Warp codecs and checksums, received-pack retention, shared expression parsing and
+LFS I/O ownership. Phase 2b continues the remaining concern moves and dependency
+seams, durability, hunk grammar, termination types, allocation checks and extraction
+findings. The package is not release complete. Its architecture is described in [docs/design.md](docs/design.md).
 
 ## Usage
 

@@ -174,7 +174,8 @@ pub const Running = struct {
     /// Close standard input, then wait for its end.
     pub fn wait(running: *Running, io: Io) Child.WaitError!Term {
         running.child.closeStdin(io);
-        return try running.child.wait(io);
+        const term = try running.child.wait(io);
+        return term;
     }
 
     /// The caller's termination policy, or conduit's immediate kill and reap.

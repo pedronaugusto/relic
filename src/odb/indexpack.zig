@@ -1798,7 +1798,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
 
     // git chooses the shape of the fixture above. Four independent bases
     // with one delta each give this test control over the task count.
-    const Tasks = io_mod;
+    const tasks = io_mod;
     var single: Io.Threaded = .init_single_threaded;
     const bases = [_][]const u8{ "base 0", "base 1", "base 2", "base 3" };
     const patch = try appendDelta(gpa, bases[0].len, "more\n");
@@ -1826,10 +1826,10 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
                 var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
                 defer pack_dir.close(io);
                 var in: Io.Reader = .fixed(bytes);
-                const counted = if (executor == 0) Tasks.wrap(each_io) else Tasks.wrapInline(each_io);
+                const counted = if (executor == 0) tasks.wrap(each_io) else tasks.wrapInline(each_io);
                 const result = try receive(gpa, counted, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads });
                 // The caller resolves too, and there are only four roots.
-                try Tasks.expect(0, @min(threads, 4) - 1);
+                try tasks.expect(0, @min(threads, 4) - 1);
                 try testing.expectEqual(@as(u32, 8), result.objects);
                 try testing.expectEqual(@as(u32, 4), result.deltas);
                 try testing.expectEqual(@as(u32, 0), result.appended);

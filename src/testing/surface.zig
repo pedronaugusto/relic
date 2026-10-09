@@ -31,7 +31,7 @@ fn isNamespace(comptime ns: type, comptime name: []const u8) bool {
     };
 }
 
-fn tableCount(text: []const u8, comptime path: []const u8) usize {
+fn tableCount(comptime path: []const u8, text: []const u8) usize {
     const needle = "| `" ++ path ++ "` |";
     var count: usize = 0;
     var rest = text;
@@ -47,8 +47,8 @@ fn checkTree(comptime ns: type, comptime prefix: []const u8, comptime depth: usi
     inline for (@typeInfo(ns).@"struct".decl_names) |name| {
         if (comptime isNamespace(ns, name)) {
             const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
-            try std.testing.expectEqual(@as(usize, 1), comptime tableCount(@embedFile("../relic.zig"), path));
-            try std.testing.expectEqual(@as(usize, 1), tableCount(readme, path));
+            try std.testing.expectEqual(@as(usize, 1), comptime tableCount(path, @embedFile("../relic.zig")));
+            try std.testing.expectEqual(@as(usize, 1), tableCount(path, readme));
             try std.testing.expect(!@hasDecl(@field(ns, name), "test_access"));
             inline for (@typeInfo(ns).@"struct".decl_names) |other| {
                 if (comptime isNamespace(ns, other) and !std.mem.eql(u8, name, other))

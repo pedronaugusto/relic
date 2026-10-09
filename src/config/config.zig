@@ -939,11 +939,13 @@ pub const Config = struct {
         const suffix = if (std.mem.endsWith(u8, pattern, "/")) "**" else "";
         if (std.mem.startsWith(u8, pattern, "~/")) {
             const home = config.context.home orelse return null;
-            return try joinCondition(config.gpa, buffer, &.{ home, "/", pattern[2..], suffix });
+            const joined = try joinCondition(config.gpa, buffer, &.{ home, "/", pattern[2..], suffix });
+            return joined;
         }
         const prefix = if (!std.mem.startsWith(u8, pattern, "/") and !std.mem.startsWith(u8, pattern, "**") and
             !(pattern.len >= 2 and pattern[1] == ':')) "**/" else "";
-        return try joinCondition(config.gpa, buffer, &.{ prefix, pattern, suffix });
+        const joined = try joinCondition(config.gpa, buffer, &.{ prefix, pattern, suffix });
+        return joined;
     }
 
     // Common conditions use caller scratch; long conditions allocate rather

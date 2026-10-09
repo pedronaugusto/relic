@@ -26,7 +26,6 @@
 //! | `odb.indexpack` | Module within `odb`. |
 //! | `odb.pack` | Module within `odb`. |
 //! | `odb.delta` | Module within `odb`. |
-//! | `odb.inflate` | Module within `odb`. |
 //! | `odb.midx` | Module within `odb`. |
 //! | `refs` | Public concern. |
 //! | `refs.reftablestack` | Module within `refs`. |

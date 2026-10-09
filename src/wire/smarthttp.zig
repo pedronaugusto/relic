@@ -964,7 +964,7 @@ const Http = struct {
         const frame: warp.Compressor.Frame = .{ .container = .gzip };
         const out = try arena.alloc(u8, warp.Compressor.bound(bytes.len, frame));
         errdefer arena.free(out);
-        const n = compress.compress(bytes, out, frame) catch unreachable; // bound reserves the complete stream
+        const n = compress.compress(bytes, out, frame) catch unreachable; // unreachable: bound reserves the complete stream
         return arena.realloc(out, n);
     }
 

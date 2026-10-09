@@ -19,7 +19,6 @@
 //! `applySparse` each run one.
 
 const ErrorNamespace = @This();
-const Self = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -195,7 +194,7 @@ pub const Session = struct {
     /// is what a stat said, a hint for the read. A file relic's own LFS
     /// keeps is streamed into the store, or only hashed, and never held
     /// whole.
-    pub fn toGitFile(s: *Session, a: Allocator, inputs: FileInputs, options: ToGitOptions) Self.Error!ToGit {
+    pub fn toGitFile(s: *Session, a: Allocator, inputs: FileInputs, options: ToGitOptions) ErrorNamespace.Error!ToGit {
         const path = inputs.path;
         const size = inputs.size;
         const applied = inputs.applied;
@@ -211,7 +210,7 @@ pub const Session = struct {
     }
 
     /// Convert bytes already in memory for storage.
-    pub fn toGit(s: *Session, a: Allocator, inputs: GitInputs, options: ToGitOptions) Self.Error!ToGit {
+    pub fn toGit(s: *Session, a: Allocator, inputs: GitInputs, options: ToGitOptions) ErrorNamespace.Error!ToGit {
         const path = inputs.path;
         const bytes = inputs.bytes;
         const applied = inputs.applied;
@@ -275,7 +274,7 @@ pub const Session = struct {
     }
 
     /// Convert a blob for the working tree.
-    pub fn toWorktree(s: *Session, a: Allocator, inputs: WorktreeInputs, meta: Meta) Self.Error!native.Content {
+    pub fn toWorktree(s: *Session, a: Allocator, inputs: WorktreeInputs, meta: Meta) ErrorNamespace.Error!native.Content {
         const path = inputs.path;
         const blob = inputs.blob;
         const applied = inputs.applied;
@@ -300,7 +299,7 @@ pub const Session = struct {
     /// its CRLF endings, which is what renormalizing means. A relic LFS
     /// pointer comes back as its canonical form, which is what the round
     /// trip through the object gives. Nothing is stored.
-    pub fn renormalize(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, applied: attributes.Attributes) Self.Error![]const u8 {
+    pub fn renormalize(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, applied: attributes.Attributes) ErrorNamespace.Error![]const u8 {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         var out: []const u8 = bytes;
@@ -574,7 +573,7 @@ pub const Session = struct {
     /// file it names is asked for again. A delayed file never handed over,
     /// or one handed over that was never delayed, is `error.FilterFailed`
     /// once every other file has been given back.
-    pub fn nextReady(s: *Session, a: Allocator) Self.Error!?native.Ready {
+    pub fn nextReady(s: *Session, a: Allocator) ErrorNamespace.Error!?native.Ready {
         if (s.native_session) |implementation| {
             if (try implementation.nextReady(a, s.io)) |ready| return ready;
         }
@@ -844,7 +843,7 @@ test "the way in is git's, a collapse that leaves a keyword for the next one inc
 
 test "phase2 conversion cleanup passes its supplied Io to the native owner once" {
     const Probe = struct {
-        const ProbeSelf = @This();
+        const Self = @This();
         calls: usize = 0,
         received: ?Io = null,
         fn clean(_: Allocator, _: Io, _: *anyopaque, _: native.CleanInput) native.Error![]const u8 {
@@ -866,7 +865,7 @@ test "phase2 conversion cleanup passes its supplied Io to the native owner once"
             return 0;
         }
         fn recordRelease(io: Io, context: *anyopaque) void {
-            const p: *ProbeSelf = @ptrCast(@alignCast(context));
+            const p: *Self = @ptrCast(@alignCast(context));
             p.calls += 1;
             p.received = io;
         }

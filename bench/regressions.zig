@@ -48,14 +48,22 @@ fn elapsedMs(io: Io, from: Io.Timestamp) f64 {
 /// can take less time than the work itself, and every pass that was
 /// interrupted took more, so the smallest of several is the rate the
 /// processor gives and the ones above it are what else the runner was doing.
-fn bestMs(io: Io, passes: usize, context: anytype, comptime pass: fn (@TypeOf(context)) void) f64 {
+fn bestMs(io: Io, passes: usize, context: anytype, comptime pass: anytype) !f64 {
     var best: f64 = std.math.floatMax(f64);
     for (0..passes) |_| {
         const start = benchmarkNow(io);
-        pass(context);
+        const result = pass(context);
+        if (@typeInfo(@TypeOf(result)) == .error_union) try result;
         best = @min(best, elapsedMs(io, start));
     }
     return best;
+}
+
+fn report(comptime fmt: []const u8, args: anytype) Io.Writer.Error!void {
+    var buffer: [4096]u8 = undefined;
+    var output = Io.File.stderr().writerStreaming(benchmark_io, &buffer);
+    try output.interface.print(fmt, args);
+    try output.interface.flush();
 }
 
 fn row0() !void {
@@ -124,7 +132,7 @@ fn row0() !void {
     defer result.deinit();
     const status_ms = elapsedMs(io, status_start);
 
-    if (!smoke) std.debug.print(
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, {d} files over {d} directories)
         \\    walk {s}, timestamps to {d} ns
@@ -167,7 +175,7 @@ fn row0() !void {
     // The cache tree: a warm write-tree writes no tree object at all, so it
     // is far faster than the cold one and gives the same name.
     try std.testing.expect(same_tree.eql(tree));
-    if (!smoke) std.debug.print("speed condition warm_tree_ms <= cold_tree_ms + 1.0: {s}\n", .{if (warm_tree_ms <= cold_tree_ms + 1.0) "within" else "over"});
+    if (!smoke) try report("speed condition warm_tree_ms <= cold_tree_ms + 1.0: {s}\n", .{if (warm_tree_ms <= cold_tree_ms + 1.0) "within" else "over"});
 
     // The ratio that breaks when the stat shortcut is lost. A machine under
     // load moves the absolute numbers; it does not make a pass that hashed
@@ -179,7 +187,7 @@ fn row0() !void {
         .Debug => 1.2,
         else => 2.0,
     };
-    if (!smoke) std.debug.print("speed condition warm_add_ms * ratio < cold_add_ms + 1.0: {s}\n", .{if (warm_add_ms * ratio < cold_add_ms + 1.0) "within" else "over"});
+    if (!smoke) try report("speed condition warm_add_ms * ratio < cold_add_ms + 1.0: {s}\n", .{if (warm_add_ms * ratio < cold_add_ms + 1.0) "within" else "over"});
 
     // Loose ceilings, so a busy runner does not fail the build but a real
     // regression does.
@@ -187,9 +195,9 @@ fn row0() !void {
         .Debug => 60_000,
         else => 20_000,
     };
-    if (!smoke) std.debug.print("speed condition cold_add_ms < budget_ms: {s}\n", .{if (cold_add_ms < budget_ms) "within" else "over"});
-    if (!smoke) std.debug.print("speed condition warm_add_ms < budget_ms: {s}\n", .{if (warm_add_ms < budget_ms) "within" else "over"});
-    if (!smoke) std.debug.print("speed condition status_ms < budget_ms: {s}\n", .{if (status_ms < budget_ms) "within" else "over"});
+    if (!smoke) try report("speed condition cold_add_ms < budget_ms: {s}\n", .{if (cold_add_ms < budget_ms) "within" else "over"});
+    if (!smoke) try report("speed condition warm_add_ms < budget_ms: {s}\n", .{if (warm_add_ms < budget_ms) "within" else "over"});
+    if (!smoke) try report("speed condition status_ms < budget_ms: {s}\n", .{if (status_ms < budget_ms) "within" else "over"});
     try std.testing.expect(result.entries.len >= fileCount() / 10);
 }
 
@@ -244,7 +252,7 @@ fn row1() !void {
     }
     const warm_ms = elapsedMs(io, warm_start);
 
-    if (!smoke) std.debug.print(
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, {d} packed objects, {d} bytes)
         \\    read all     cold {d: >8.1} ms   warm {d: >8.1} ms
@@ -256,7 +264,7 @@ fn row1() !void {
         .Debug => 60_000,
         else => 20_000,
     };
-    if (!smoke) std.debug.print("speed condition ms < budget_ms: {s}\n", .{if (ms < budget_ms) "within" else "over"});
+    if (!smoke) try report("speed condition ms < budget_ms: {s}\n", .{if (ms < budget_ms) "within" else "over"});
 }
 
 fn row2() !void {
@@ -321,15 +329,15 @@ fn row2() !void {
     };
 
     var pass: Pass = .{ .buf = buf };
-    const mine_ms = bestMs(io, passes, &pass, Pass.relicSha1);
-    const ref_ms = bestMs(io, passes, &pass, Pass.librarySha1);
-    const sha256_ms = bestMs(io, passes, &pass, Pass.relicSha256);
-    const checked_ms = bestMs(io, passes, &pass, Pass.checkedSha1);
+    const mine_ms = try bestMs(io, passes, &pass, Pass.relicSha1);
+    const ref_ms = try bestMs(io, passes, &pass, Pass.librarySha1);
+    const sha256_ms = try bestMs(io, passes, &pass, Pass.relicSha256);
+    const checked_ms = try bestMs(io, passes, &pass, Pass.checkedSha1);
     const mine_oid = pass.mine;
     const checked_oid = pass.checked;
     const reference = pass.reference;
 
-    if (!smoke) std.debug.print(
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, {d} MiB hashed, SHA-1 arm: {s})
         \\    SHA-1        relic {d: >6.2} GiB/s   library {d: >6.2} GiB/s
@@ -462,7 +470,7 @@ fn row3() !void {
 
     const seconds = @max(delta_ms, 0.001) / 1000.0;
     const megabytes = @as(f64, @floatFromInt(loose_bytes)) / (1024.0 * 1024.0);
-    if (!smoke) std.debug.print(
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, {d} files staged, {d} objects packed)
         \\    add -A       loose {d: >8.1} ms   into a pack {d: >8.1} ms
@@ -495,14 +503,14 @@ fn row3() !void {
     // A pack is one file where loose objects are one file each, so a staging
     // pass into a pack cannot be the slower of the two by any margin worth
     // the name. A ratio, because a busy runner moves both.
-    if (!smoke) std.debug.print("speed condition ms[1] < ms[0] * 1.5 + 5.0: {s}\n", .{if (ms[1] < ms[0] * 1.5 + 5.0) "within" else "over"});
+    if (!smoke) try report("speed condition ms[1] < ms[0] * 1.5 + 5.0: {s}\n", .{if (ms[1] < ms[0] * 1.5 + 5.0) "within" else "over"});
 
     const budget_ms: f64 = switch (builtin.optimize) {
         .Debug => 120_000,
         else => 40_000,
     };
-    if (!smoke) std.debug.print("speed condition delta_ms < budget_ms: {s}\n", .{if (delta_ms < budget_ms) "within" else "over"});
-    if (!smoke) std.debug.print("speed condition whole_ms < budget_ms: {s}\n", .{if (whole_ms < budget_ms) "within" else "over"});
+    if (!smoke) try report("speed condition delta_ms < budget_ms: {s}\n", .{if (delta_ms < budget_ms) "within" else "over"});
+    if (!smoke) try report("speed condition whole_ms < budget_ms: {s}\n", .{if (whole_ms < budget_ms) "within" else "over"});
 }
 
 /// Lines of the shape real ignore files hold: names, extensions, anchored
@@ -556,13 +564,13 @@ fn row4() !void {
 
     const Load = struct {
         text: []const u8,
-        fn ignoreRules(l: @This()) void {
-            var rules = worktree.ignore.Rules.init(std.heap.smp_allocator, .{ .case_fold = false }) catch unreachable;
+        fn ignoreRules(l: @This()) !void {
+            var rules = try worktree.ignore.Rules.init(std.heap.smp_allocator, .{ .case_fold = false });
             defer rules.deinit();
-            for (levels, 0..) |base, depth| rules.addText(l.text, base, ".gitignore", @intCast(depth + 2)) catch unreachable;
+            for (levels, 0..) |base, depth| try rules.addText(l.text, base, ".gitignore", @intCast(depth + 2));
         }
     };
-    const load_ms = bestMs(io, 20, Load{ .text = ignore_text.items }, Load.ignoreRules);
+    const load_ms = try bestMs(io, 20, Load{ .text = ignore_text.items }, Load.ignoreRules);
 
     var rules = try worktree.ignore.Rules.init(gpa, .{ .case_fold = false });
     defer rules.deinit();
@@ -578,7 +586,7 @@ fn row4() !void {
             std.mem.doNotOptimizeAway(excluded);
         }
     };
-    const match_ms = bestMs(io, 5, Ask{ .rules = &rules, .paths = paths }, Ask.all);
+    const match_ms = try bestMs(io, 5, Ask{ .rules = &rules, .paths = paths }, Ask.all);
 
     var attrs = try worktree.attributes.Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
@@ -586,20 +594,20 @@ fn row4() !void {
     const Lookup = struct {
         attrs: *const worktree.attributes.Attrs,
         paths: []const []const u8,
-        fn all(l: @This()) void {
+        fn all(l: @This()) !void {
             var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
             defer arena.deinit();
             var found: usize = 0;
             for (l.paths) |p| {
-                found += (l.attrs.lookup(arena.allocator(), p, false) catch unreachable).items.len;
+                found += (try l.attrs.lookup(arena.allocator(), p, false)).items.len;
                 _ = arena.reset(.retain_capacity);
             }
             std.mem.doNotOptimizeAway(found);
         }
     };
-    const lookup_ms = bestMs(io, 5, Lookup{ .attrs = &attrs, .paths = paths }, Lookup.all);
+    const lookup_ms = try bestMs(io, 5, Lookup{ .attrs = &attrs, .paths = paths }, Lookup.all);
 
-    if (!smoke) std.debug.print(
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, {d} ignore lines over {d} levels, {d} attribute lines, {d} paths)
         \\    ignore load  {d: >8.3} ms
@@ -652,24 +660,24 @@ fn row5() !void {
     const Pass = struct {
         repo: *repo_mod.Repository,
         index: *relic.index.Index,
-        fn status(p: @This()) void {
-            var rules = p.repo.loadIgnore(benchmark_io) catch unreachable;
+        fn status(p: @This()) !void {
+            var rules = try p.repo.loadIgnore(benchmark_io);
             defer rules.deinit();
-            var attrs = p.repo.loadAttrs(benchmark_io) catch unreachable;
+            var attrs = try p.repo.loadAttrs(benchmark_io);
             defer attrs.deinit();
-            var wt_rules = p.repo.worktreeRules() catch unreachable;
+            var wt_rules = try p.repo.worktreeRules();
             wt_rules.ignore = &rules;
             wt_rules.attrs = &attrs;
-            var result = worktree.status(std.heap.smp_allocator, benchmark_io, p.repo.workDirectory().?, .{ .index = p.index, .db = p.repo.objectDatabase() }, .{
+            var result = try worktree.status(std.heap.smp_allocator, benchmark_io, p.repo.workDirectory().?, .{ .index = p.index, .db = p.repo.objectDatabase() }, .{
                 .rules = wt_rules,
                 .head_tree = null,
-            }) catch unreachable;
+            });
             defer result.deinit();
             std.mem.doNotOptimizeAway(result.entries.len);
         }
     };
-    const status_ms = bestMs(io, if (smoke) 1 else 10, Pass{ .repo = &repo, .index = &index }, Pass.status);
-    if (!smoke) std.debug.print(
+    const status_ms = try bestMs(io, if (smoke) 1 else 10, Pass{ .repo = &repo, .index = &index }, Pass.status);
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, status over {d} directories with an ignore file each, {d} files)
         \\    status       {d: >8.2} ms
@@ -720,17 +728,17 @@ fn row6() !void {
     defer repo.deinit(io);
     const List = struct {
         repo: *repo_mod.Repository,
-        fn pass(l: @This()) void {
+        fn pass(l: @This()) !void {
             var sink: std.Io.Writer.Discarding = .init(&.{});
-            relic.pretty.refs.listRefs(std.heap.smp_allocator, benchmark_io, l.repo, .{
+            try relic.pretty.refs.listRefs(std.heap.smp_allocator, benchmark_io, l.repo, .{
                 .filter = .{ .patterns = &.{ "refs/heads/f*/1[0-9].*", "refs/tags/v*" }, .exclude = &.{"refs/tags/v1?.*"} },
                 .format = "%(refname)",
-            }, &sink.writer) catch unreachable;
+            }, &sink.writer);
             std.mem.doNotOptimizeAway(sink.count);
         }
     };
-    const list_ms = bestMs(io, if (smoke) 1 else 10, List{ .repo = &repo }, List.pass);
-    if (!smoke) std.debug.print(
+    const list_ms = try bestMs(io, if (smoke) 1 else 10, List{ .repo = &repo }, List.pass);
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, for-each-ref over {d} packed refs, two patterns and an exclusion)
         \\    list         {d: >8.2} ms
@@ -779,26 +787,26 @@ fn row7() !void {
 
     const Work = struct {
         pairs: []const Pair,
-        fn bodies(w: @This()) void {
+        fn bodies(w: @This()) !void {
             var out: std.Io.Writer.Allocating = .init(std.heap.smp_allocator);
             defer out.deinit();
             for (w.pairs) |p| {
-                relic.diff.unifiedBody(std.heap.smp_allocator, &out.writer, p.old, p.new, .{}) catch unreachable;
+                try relic.diff.unifiedBody(std.heap.smp_allocator, &out.writer, p.old, p.new, .{});
                 out.clearRetainingCapacity();
             }
         }
-        fn counts(w: @This()) void {
+        fn counts(w: @This()) !void {
             var lines: usize = 0;
             for (w.pairs) |p| {
-                const n = relic.diff.blobNumStat(std.heap.smp_allocator, p.old, p.new, .{}) catch unreachable;
+                const n = try relic.diff.blobNumStat(std.heap.smp_allocator, p.old, p.new, .{});
                 lines += n.plus + n.minus;
             }
             std.mem.doNotOptimizeAway(lines);
         }
-        fn merges(w: @This()) void {
+        fn merges(w: @This()) !void {
             var conflicts: usize = 0;
             for (w.pairs) |p| {
-                var r = relic.merge.blobs(std.heap.smp_allocator, p.old, p.new, p.theirs, .{ .algorithm = .histogram }) catch unreachable;
+                var r = try relic.merge.blobs(std.heap.smp_allocator, p.old, p.new, p.theirs, .{ .algorithm = .histogram });
                 if (!r.isClean()) conflicts += 1;
                 r.deinit();
             }
@@ -807,10 +815,10 @@ fn row7() !void {
     };
     const work: Work = .{ .pairs = pairs };
     const passes: usize = if (smoke) 1 else 7;
-    const bodies_ms = bestMs(io, passes, work, Work.bodies);
-    const counts_ms = bestMs(io, passes, work, Work.counts);
-    const merges_ms = bestMs(io, passes, work, Work.merges);
-    if (!smoke) std.debug.print(
+    const bodies_ms = try bestMs(io, passes, work, Work.bodies);
+    const counts_ms = try bestMs(io, passes, work, Work.counts);
+    const merges_ms = try bestMs(io, passes, work, Work.merges);
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, {d} files of 300 to 500 lines, a few lines changed on each side)
         \\    unified      {d: >8.2} ms
@@ -844,14 +852,14 @@ fn row8() !void {
     const Pass = struct {
         repo: *repo_mod.Repository,
         commit: hash.Oid,
-        fn blame(p: @This()) void {
-            var b = relic.diff.blame.file(std.heap.smp_allocator, benchmark_io, p.repo.objectDatabase(), .{ .commit = p.commit, .path = "file.zig" }, .{}) catch unreachable;
+        fn blame(p: @This()) !void {
+            var b = try relic.diff.blame.file(std.heap.smp_allocator, benchmark_io, p.repo.objectDatabase(), .{ .commit = p.commit, .path = "file.zig" }, .{});
             std.mem.doNotOptimizeAway(b.hunks.len);
             b.deinit();
         }
     };
-    const blame_ms = bestMs(io, if (smoke) 1 else 5, Pass{ .repo = &repo, .commit = head.oid }, Pass.blame);
-    if (!smoke) std.debug.print(
+    const blame_ms = try bestMs(io, if (smoke) 1 else 5, Pass{ .repo = &repo, .commit = head.oid }, Pass.blame);
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, blame of a 2,000-line file through {d} commits)
         \\    blame        {d: >8.2} ms
@@ -992,14 +1000,14 @@ fn row9() !void {
         const Pass = struct {
             conn: *relic.transport.connection.Connection,
             rounds: usize,
-            fn run(p: @This()) void {
-                for (0..p.rounds) |_| std.mem.doNotOptimizeAway(exchange(p.conn) catch unreachable);
+            fn run(p: @This()) !void {
+                for (0..p.rounds) |_| std.mem.doNotOptimizeAway(try exchange(p.conn));
             }
         };
         const rounds: usize = if (row == 0) 1 else if (smoke) 10 else 20_000;
-        timings[row] = bestMs(io, if (smoke) 1 else 5, Pass{ .conn = conn, .rounds = rounds }, Pass.run);
+        timings[row] = try bestMs(io, if (smoke) 1 else 5, Pass{ .conn = conn, .rounds = rounds }, Pass.run);
     }
-    if (!smoke) std.debug.print(
+    if (!smoke) try report(
         \\
         \\  relic benchmark ({s}, smart HTTP on loopback, one kept connection)
         \\    {d} MiB answer   {d: >8.1} MB/s
@@ -1034,16 +1042,16 @@ fn row10() !void {
         dir: Io.Dir,
         io: Io,
         objects: []const relic.lfs.transfer.Object,
-        fn run(p: @This()) void {
-            p.dir.deleteTree(p.io, ".git/lfs/objects") catch unreachable;
-            var outcome = relic.lfs.transfer.download(p.io, p.server, p.objects, .{ .concurrency = 1 }) catch unreachable;
+        fn run(p: @This()) !void {
+            try p.dir.deleteTree(p.io, ".git/lfs/objects");
+            var outcome = try relic.lfs.transfer.download(p.io, p.server, p.objects, .{ .concurrency = 1 });
             defer outcome.deinit();
             std.debug.assert(outcome.failures() == 0);
             std.debug.assert(outcome.results[0].status == .transferred);
         }
     };
-    const ms = bestMs(io, if (smoke) 1 else 5, Pass{ .server = lfs_server, .dir = repo_git.dir, .io = io, .objects = &objects }, Pass.run);
-    if (!smoke) std.debug.print("\n  relic benchmark ({s}, LFS download, SHA-256 and store)\n    {d} MiB object {d:.1} MB/s\n", .{ @tagName(builtin.optimize), size >> 20, @as(f64, @floatFromInt(size)) / 1e6 / (ms / 1000) });
+    const ms = try bestMs(io, if (smoke) 1 else 5, Pass{ .server = lfs_server, .dir = repo_git.dir, .io = io, .objects = &objects }, Pass.run);
+    if (!smoke) try report("\n  relic benchmark ({s}, LFS download, SHA-256 and store)\n    {d} MiB object {d:.1} MB/s\n", .{ @tagName(builtin.optimize), size >> 20, @as(f64, @floatFromInt(size)) / 1e6 / (ms / 1000) });
 }
 
 // Smoke exercises correctness without sampling a benchmark clock.

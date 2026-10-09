@@ -2394,8 +2394,8 @@ pub const Odb = struct {
                 // same name: the new pack *is* the old one, and removing it
                 // would remove the repository.
                 if (std.mem.eql(u8, old_base, base)) continue;
-                var keep_name: [hash.max_hex_len + 16]u8 = undefined;
-                const marker = std.mem.print(&keep_name, "{s}.keep", .{old_base}) catch unreachable;
+                var keep_name: [128]u8 = undefined;
+                const marker = std.mem.print(&keep_name, "{s}.keep", .{old_base}) catch return error.NameTooLong;
                 if (pack_dir.access(io, marker, .{})) |_| continue else |err| if (err != error.FileNotFound) return err;
                 var name_buf: [128]u8 = undefined;
                 var removed = false;

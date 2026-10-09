@@ -1230,7 +1230,7 @@ pub const Client = struct {
         @memcpy(c.message_buf[0..c.message_len], text[0..c.message_len]);
     }
 
-    fn fail(c: *Client, io: Io, comptime fmt: []const u8, args: anytype, err: ErrorNamespace.Error) ErrorNamespace.Error {
+    fn fail(c: *Client, comptime fmt: []const u8, io: Io, args: anytype, err: ErrorNamespace.Error) ErrorNamespace.Error {
         var buf: [512]u8 = undefined;
         c.setMessage(io, std.mem.print(&buf, fmt, args) catch fmt);
         return err;
@@ -1313,7 +1313,7 @@ pub const Client = struct {
             // git-lfs runs git-lfs-authenticate only for `negotiate` and
             // `never`; `always` is the pure-ssh protocol or nothing.
             if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "never")) {
-                return c.fail(io, "git-lfs-authenticate has been disabled by request (lfs.sshtransfer={s}){s}{s}", .{
+                return c.fail("git-lfs-authenticate has been disabled by request (lfs.sshtransfer={s}){s}{s}", io, .{
                     mode,
                     if (c.ssh_failure.items.len != 0) ": " else "",
                     c.ssh_failure.items,
@@ -1609,7 +1609,7 @@ pub const Client = struct {
                 .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => {
                     const location = ex.location() orelse {
                         ex.deinit(io);
-                        return c.fail(io, "redirect with no location from {s}", .{stripQuery(url)}, error.HttpStatus);
+                        return c.fail("redirect with no location from {s}", io, .{stripQuery(url)}, error.HttpStatus);
                     };
                     const next = try resolveLocation(scratch, url, location);
                     ex.deinit(io);
@@ -1719,12 +1719,12 @@ pub const Client = struct {
                     else => if (refusal.attempts > 0) .refused else .no_credential,
                 }, 401, url, refusal.said, cr);
                 if (err == error.CredentialsUnavailable)
-                    return c.fail(io, "no credential for {s}", .{stripQuery(cred_url)}, error.AuthenticationFailed);
+                    return c.fail("no credential for {s}", io, .{stripQuery(cred_url)}, error.AuthenticationFailed);
                 return err;
             };
             if (!filled) {
                 c.describeRefusal(.declined, 401, url, refusal.said, cr);
-                return c.fail(io, "no credential for {s}", .{stripQuery(cred_url)}, error.AuthenticationFailed);
+                return c.fail("no credential for {s}", io, .{stripQuery(cred_url)}, error.AuthenticationFailed);
             }
         }
         const h = cr.session.authorization() orelse return error.AuthenticationFailed;
@@ -1768,7 +1768,7 @@ pub const Client = struct {
             // git-lfs-authenticate's — that it no longer takes.
             c.dropSshAuth(operation);
             c.describeRefusal(.refused, 401, url, refusal.said, null);
-            return c.fail(io, "HTTP 401 from {s}", .{stripQuery(url)}, error.AuthenticationFailed);
+            return c.fail("HTTP 401 from {s}", io, .{stripQuery(url)}, error.AuthenticationFailed);
         }
         if (attempt.access == .none) {
             if (!offers.basic and offers.other) return error.LfsAccessUnsupported;
@@ -1778,7 +1778,7 @@ pub const Client = struct {
         refusal.attempts += 1;
         if (refusal.attempts >= 3) {
             c.describeRefusal(.refused, 401, url, refusal.said, attempt.cred);
-            return c.fail(io, "HTTP 401 from {s}", .{stripQuery(url)}, error.AuthenticationFailed);
+            return c.fail("HTTP 401 from {s}", io, .{stripQuery(url)}, error.AuthenticationFailed);
         }
     }
 
@@ -1791,9 +1791,9 @@ pub const Client = struct {
         const a = ex.arena.allocator();
 
         const request_url = try a.dupe(u8, try stripUserinfo(a, url));
-        const parsed = url_mod.Url.parse(request_url) catch return c.fail(io, "malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
+        const parsed = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", io, .{stripQuery(request_url)}, error.MalformedUrl);
         if ((parsed.scheme != .http and parsed.scheme != .https) or parsed.host.len == 0) {
-            return c.fail(io, "malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
+            return c.fail("malformed URL {s}", io, .{stripQuery(request_url)}, error.MalformedUrl);
         }
 
         // Go's order, as git-lfs's client writes a request: its user
@@ -1841,8 +1841,8 @@ pub const Client = struct {
             .none => try c.sendWhole(io, ex, transport, method, headers.items, if (request.method.requestHasBody()) .{ .bytes = "" } else .none),
             .bytes => |bytes| try c.sendWhole(io, ex, transport, method, headers.items, .{ .bytes = bytes }),
             .object => |o| {
-                const file = (o.store.open(io, &o.pointer) catch |err| return c.fail(io, "{s}", .{@errorName(err)}, error.ConnectionFailed)) orelse
-                    return c.fail(io, "object {s} is not in the store", .{&o.pointer.oid}, error.HttpStatus);
+                const file = (o.store.open(io, &o.pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
+                    return c.fail("object {s} is not in the store", io, .{&o.pointer.oid}, error.HttpStatus);
                 defer file.close(io);
                 var outgoing = transport.begin(io, .{
                     .method = method,
@@ -1857,9 +1857,9 @@ pub const Client = struct {
                 var left = o.pointer.size;
                 while (left > 0) {
                     const want: usize = @intCast(@min(left, chunk.len));
-                    const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail(io, "upload: reading the object", .{}, error.ConnectionFailed);
-                    if (n == 0) return c.fail(io, "upload: the object is shorter than its pointer", .{}, error.ConnectionFailed);
-                    outgoing.writer().writeAll(chunk[0..n]) catch return c.fail(io, "upload: the connection broke", .{}, error.ConnectionFailed);
+                    const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
+                    if (n == 0) return c.fail("upload: the object is shorter than its pointer", io, .{}, error.ConnectionFailed);
+                    outgoing.writer().writeAll(chunk[0..n]) catch return c.fail("upload: the connection broke", io, .{}, error.ConnectionFailed);
                     left -= n;
                     if (request.sent) |count| count.* += n;
                     if (request.on_bytes) |cb| cb.add(cb.context, n);
@@ -1894,26 +1894,26 @@ pub const Client = struct {
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
-            error.ConnectionFailed => c.fail(io, "the connection failed ({t}): {s}", .{ diagnostics.stage, where }, error.ConnectionFailed),
-            error.NameNotResolved => c.fail(io, "no such host: {s}", .{where}, error.ConnectionFailed),
-            error.ConcurrencyUnavailable => c.fail(io, "no task to look the host up with: {s}", .{where}, error.ConnectionFailed),
-            error.TimedOut => c.fail(io, "timed out: {s}", .{where}, error.ConnectionFailed),
-            error.BodyIncomplete, error.BodyTooLong => c.fail(io, "upload cut short: {s}", .{where}, error.ConnectionFailed),
-            error.TlsFailed => c.fail(io, "TLS: {s}: {s}", .{ if (diagnostics.tls_error) |e| @errorName(e) else "handshake failed", where }, error.ConnectionFailed),
-            error.ProxyAuthenticationRequired => c.fail(io, "the proxy wants credentials: {s}", .{where}, error.ProxyAuthenticationRequired),
-            error.ProxyRefused => c.fail(io, "the proxy answered {d}: {s}", .{ diagnostics.proxy_status orelse 0, where }, error.ProxyRefused),
-            error.ProxyAuthMethodUnsupported => c.fail(io, "the proxy asks for {s}: {s}", .{ if (diagnostics.proxy_offered.len != 0) diagnostics.proxy_offered.slice() else "?", where }, error.ProxyAuthMethodUnsupported),
-            error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError => |named| c.fail(io, "{s}: {s}", .{ @errorName(named), where }, switch (named) {
+            error.ConnectionFailed => c.fail("the connection failed ({t}): {s}", io, .{ diagnostics.stage, where }, error.ConnectionFailed),
+            error.NameNotResolved => c.fail("no such host: {s}", io, .{where}, error.ConnectionFailed),
+            error.ConcurrencyUnavailable => c.fail("no task to look the host up with: {s}", io, .{where}, error.ConnectionFailed),
+            error.TimedOut => c.fail("timed out: {s}", io, .{where}, error.ConnectionFailed),
+            error.BodyIncomplete, error.BodyTooLong => c.fail("upload cut short: {s}", io, .{where}, error.ConnectionFailed),
+            error.TlsFailed => c.fail("TLS: {s}: {s}", io, .{ if (diagnostics.tls_error) |e| @errorName(e) else "handshake failed", where }, error.ConnectionFailed),
+            error.ProxyAuthenticationRequired => c.fail("the proxy wants credentials: {s}", io, .{where}, error.ProxyAuthenticationRequired),
+            error.ProxyRefused => c.fail("the proxy answered {d}: {s}", io, .{ diagnostics.proxy_status orelse 0, where }, error.ProxyRefused),
+            error.ProxyAuthMethodUnsupported => c.fail("the proxy asks for {s}: {s}", io, .{ if (diagnostics.proxy_offered.len != 0) diagnostics.proxy_offered.slice() else "?", where }, error.ProxyAuthMethodUnsupported),
+            error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError => |named| c.fail("{s}: {s}", io, .{ @errorName(named), where }, switch (named) {
                 error.ProxyHostUnreachable => error.ProxyHostUnreachable,
                 error.ProxyAddressUnsupported => error.ProxyAddressUnsupported,
                 else => error.ProxyProtocolError,
             }),
-            error.HttpProtocolError => c.fail(io, "not an HTTP answer, or an encoding it cannot read: {s}", .{where}, error.MalformedResponse),
-            error.CertificateBundleUnreadable => c.fail(io, "the system's certificates", .{}, error.SslCertificateUnreadable),
-            error.ClientCertificateRejected => c.fail(io, "the server refused the client certificate ({s}): {s}", .{ if (diagnostics.tls_error) |e| @errorName(e) else "?", where }, error.ClientCertificateRejected),
-            error.ClientCertificateSchemeUnsupported => c.fail(io, "no signature scheme the server takes: {s}", .{where}, error.ClientCertificateSchemeUnsupported),
-            error.InvalidUrl, error.UnsupportedScheme => c.fail(io, "malformed URL {s}", .{where}, error.MalformedUrl),
-            error.InvalidHeader => c.fail(io, "a header no request can carry: {s}", .{where}, error.InvalidHttpHeader),
+            error.HttpProtocolError => c.fail("not an HTTP answer, or an encoding it cannot read: {s}", io, .{where}, error.MalformedResponse),
+            error.CertificateBundleUnreadable => c.fail("the system's certificates", io, .{}, error.SslCertificateUnreadable),
+            error.ClientCertificateRejected => c.fail("the server refused the client certificate ({s}): {s}", io, .{ if (diagnostics.tls_error) |e| @errorName(e) else "?", where }, error.ClientCertificateRejected),
+            error.ClientCertificateSchemeUnsupported => c.fail("no signature scheme the server takes: {s}", io, .{where}, error.ClientCertificateSchemeUnsupported),
+            error.InvalidUrl, error.UnsupportedScheme => c.fail("malformed URL {s}", io, .{where}, error.MalformedUrl),
+            error.InvalidHeader => c.fail("a header no request can carry: {s}", io, .{where}, error.InvalidHttpHeader),
             // unreachable: a whole body is bytes, an object's is written as it comes, `finish` runs once, the proxy is fixed, and no redirect, retry, credential or hook is uplink's
             error.InvalidBody, error.BodyReadFailed, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed => unreachable,
         };
@@ -1925,11 +1925,11 @@ pub const Client = struct {
     fn objectContentType(c: *Client, a: Allocator, io: Io, url: []const u8, store: *const lfs.Store, pointer: *const lfs.Pointer) ErrorNamespace.Error![]const u8 {
         const setting = try c.settings.urlGet(a, "lfs", url, "contenttype");
         if (!gitLfsBool(setting, true)) return "application/octet-stream";
-        const file = (store.open(io, pointer) catch |err| return c.fail(io, "{s}", .{@errorName(err)}, error.ConnectionFailed)) orelse
-            return c.fail(io, "object {s} is not in the store", .{&pointer.oid}, error.HttpStatus);
+        const file = (store.open(io, pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
+            return c.fail("object {s} is not in the store", io, .{&pointer.oid}, error.HttpStatus);
         defer file.close(io);
         var head: [mimesniff.sniff_len]u8 = undefined;
-        const n = file.readPositionalAll(io, &head, 0) catch return c.fail(io, "upload: reading the object", .{}, error.ConnectionFailed);
+        const n = file.readPositionalAll(io, &head, 0) catch return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
         return mimesniff.contentType(head[0..n]);
     }
 
@@ -1953,11 +1953,11 @@ pub const Client = struct {
     /// (`timeoutsFor`), and git-lfs's client certificate for the host
     /// (`clientCertificate`).
     fn transportFor(c: *Client, scratch: Allocator, io: Io, request_url: []const u8, decompress: bool) ErrorNamespace.Error!*uplink.Client {
-        const url = url_mod.Url.parse(request_url) catch return c.fail(io, "malformed URL {s}", .{stripQuery(request_url)}, error.MalformedUrl);
+        const url = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", io, .{stripQuery(request_url)}, error.MalformedUrl);
         const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
         const settings = httpsettings.resolve(scratch, c.settings.config, environ, url) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidHttpSetting => return c.fail(io, "an http.* setting for {s} does not parse", .{stripQuery(request_url)}, error.InvalidHttpSetting),
+            error.InvalidHttpSetting => return c.fail("an http.* setting for {s} does not parse", io, .{stripQuery(request_url)}, error.InvalidHttpSetting),
         };
         var ca_info: ?[]const u8 = null;
         var ca_path: ?[]const u8 = null;
@@ -2086,8 +2086,8 @@ pub const Client = struct {
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Canceled => error.Canceled,
-                error.SslClientCertificateUnreadable => c.fail(io, "error reading client cert file {s}", .{files.cert}, err),
-                else => c.fail(io, "error reading client key file {s}: {s}", .{ key_path, @errorName(err) }, err),
+                error.SslClientCertificateUnreadable => c.fail("error reading client cert file {s}", io, .{files.cert}, err),
+                else => c.fail("error reading client key file {s}: {s}", io, .{ key_path, @errorName(err) }, err),
             };
         };
         if (session != null) if (passphrase) |p| {
@@ -2116,13 +2116,13 @@ pub const Client = struct {
             authorities.addFile(io, Io.Dir.cwd(), file) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
-                else => return c.fail(io, "{s}", .{settings.ca_info_from orelse "http.sslCAInfo"}, error.SslCertificateUnreadable),
+                else => return c.fail("{s}", io, .{settings.ca_info_from orelse "http.sslCAInfo"}, error.SslCertificateUnreadable),
             };
         } else {
             authorities.addSystem(io) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
-                else => return c.fail(io, "the system's certificates", .{}, error.SslCertificateUnreadable),
+                else => return c.fail("the system's certificates", io, .{}, error.SslCertificateUnreadable),
             };
         }
         if (settings.ca_path) |raw| {
@@ -2130,7 +2130,7 @@ pub const Client = struct {
             authorities.addDir(io, Io.Dir.cwd(), dir_path) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
-                else => return c.fail(io, "http.sslCAPath", .{}, error.SslCertificateUnreadable),
+                else => return c.fail("http.sslCAPath", io, .{}, error.SslCertificateUnreadable),
             };
         }
     }
@@ -2142,7 +2142,7 @@ pub const Client = struct {
     fn useProxy(c: *Client, arena: Allocator, io: Io, text: []const u8) ErrorNamespace.Error!uplink.Proxy {
         var proxy = uplink.Proxy.parse(arena, text, .go) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidProxy => c.fail(io, "unsupported proxy URL", .{}, error.InvalidProxy),
+            error.InvalidProxy => c.fail("unsupported proxy URL", io, .{}, error.InvalidProxy),
         };
         if (proxy.credential) |*cred| cred.method = .basic;
         // Go's CONNECT: its user agent, then the answer.
@@ -2195,7 +2195,7 @@ pub const Client = struct {
         while (true) {
             const base = try c.apiBase(io, operation);
             const e = try c.endpoint(io, operation);
-            if (e.isLocal()) return c.fail(io, "{s} is a repository on this machine and has no LFS API", .{e.url}, error.LfsEndpointUnknown);
+            if (e.isLocal()) return c.fail("{s} is a repository on this machine and has no LFS API", io, .{e.url}, error.LfsEndpointUnknown);
             const url = try joinUrl(c.arena.allocator(), base.url, suffix);
             const ex = c.send(io, .{
                 .method = method,
@@ -2418,7 +2418,7 @@ pub const Exchange = struct {
         return r.allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.StreamTooLong => error.StreamTooLong,
-            error.ReadFailed => ex.client.fail(io, "reading the answer: {s}", .{ex.bodyError()}, error.ConnectionFailed),
+            error.ReadFailed => ex.client.fail("reading the answer: {s}", io, .{ex.bodyError()}, error.ConnectionFailed),
         };
     }
 
@@ -2433,9 +2433,11 @@ pub const Exchange = struct {
     /// Give the connection back and release everything.
     pub fn deinit(ex: *Exchange, io: Io) void {
         const c = ex.client;
-        if (ex.in_flight) ex.state().response.deinit(io);
+        const owned = ex.state();
+        // The allocation also contains ex, so free it after invalidation.
+        defer c.gpa.destroy(owned);
+        if (ex.in_flight) owned.response.deinit(io);
         ex.arena.deinit();
-        c.gpa.destroy(ex.state());
         ex.* = undefined;
     }
 };
