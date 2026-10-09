@@ -303,7 +303,7 @@ pub fn addAll(
     if (options.new_blobs == .pack) filling = try db.beginPack(io, options.pack);
     // `.auto` opens it on the way, once enough new blobs have gone loose.
 
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = options.rules.core,
@@ -314,7 +314,7 @@ pub fn addAll(
         .index = index,
         .db = db,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
 
     var walker: Walker = .{
         .gpa = gpa,
@@ -995,7 +995,7 @@ fn recordUnstaged(
     options: StatusOptions,
     entries: *std.array_hash_map.String(StatusEntry),
 ) Error!void {
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = options.rules.core,
@@ -1006,7 +1006,7 @@ fn recordUnstaged(
         .index = index,
         .db = db,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
     if (options.fsmonitor) |source| try fsmonitor.refresh(gpa, io, wt, index, source);
     var scan: StatusScan = .{
         .gpa = gpa,
@@ -1740,7 +1740,7 @@ pub fn checkout(
     defer if (options.rules.attrs) |attrs| attrs.restore(attrs_before.?);
     if (options.rules.attrs) |attrs| try addTreeAttributes(arena, io, db, attrs, &wanted);
 
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = options.rules.core,
@@ -1749,7 +1749,7 @@ pub fn checkout(
         .programs = options.programs,
         .report = options.filter_report,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
 
     try refuseUnsafeTree(arena, &wanted, options);
     if (!options.force) try verifyCheckout(gpa, arena, io, wt, index, &wanted, options);
@@ -2479,7 +2479,7 @@ pub fn writePaths(
         }
     }
 
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = options.rules.core,
@@ -2488,7 +2488,7 @@ pub fn writePaths(
         .programs = options.programs,
         .report = options.filter_report,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
 
     try removePaths(io, wt, index, writes, options.remove_empty_directories, &outcome);
 
@@ -2920,7 +2920,7 @@ pub fn differsFromIndex(
             // or CRLF for a change whenever the stat stops matching, which a
             // touch does, and which a filesystem whose clock is coarser than
             // the time between writing a file and the index does to them all.
-            var conv: convert.Session = .init(gpa, io, .{
+            var conv: convert.Session = .open(gpa, io, .{
                 .wt = wt,
                 .kind = index.kind,
                 .core = rules.core,
@@ -2928,7 +2928,7 @@ pub fn differsFromIndex(
                 .drivers = rules.filters,
                 .index = index,
             });
-            defer conv.deinit();
+            defer conv.deinit(io);
             // The `.gitattributes` on the way down to the file, which a
             // lookup alone does not read. What this enters, it leaves; a
             // caller already going path by path keeps what it entered.
@@ -3081,7 +3081,7 @@ pub fn applySparse(
     var outcome: SparseOutcome = .{};
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = options.rules.core,
@@ -3092,7 +3092,7 @@ pub fn applySparse(
         .index = index,
         .db = db,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
     defer if (options.rules.attrs) |attrs| attrs.leave();
 
     // A sparse index is expanded as far as the new patterns reach into it,

@@ -129,14 +129,14 @@ pub fn toTree(
         i -= 1;
         try worktree.removeEntry(io, wt, remove.items[i]);
     }
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = rules.required_filters,
         .drivers = rules.filters,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
     var stats: std.StringHashMapUnmanaged(fs.Stat) = .empty;
     for (rewrite.items) |path| {
         const want = wanted.get(path).?;

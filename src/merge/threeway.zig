@@ -232,7 +232,7 @@ fn run(
     const settings = try configuredSettings(repo, options);
     // Renormalizing takes each side out and back in, and asks no index
     // whether a stored version kept its CRLF endings.
-    var normalizer: convert.Session = .init(gpa, io, .{
+    var normalizer: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = rules.core,
@@ -240,7 +240,7 @@ fn run(
         .drivers = rules.filters,
         .programs = options.programs,
     });
-    defer normalizer.deinit();
+    defer normalizer.deinit(io);
     var submodules: SubmoduleOpener = .{ .gpa = gpa, .io = io, .wt = wt };
     defer submodules.deinit();
     var ort_options: ort.Options = .{
@@ -405,7 +405,7 @@ fn carry(
     var write_rules = rules;
     write_rules.attrs = &write_attrs;
 
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
         .core = rules.core,
@@ -413,7 +413,7 @@ fn carry(
         .drivers = rules.filters,
         .programs = options.programs,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
     var stats: std.StringHashMapUnmanaged(fs.Stat) = .empty;
     const outcome_written = try writeChanged(.{
         .gpa = gpa,

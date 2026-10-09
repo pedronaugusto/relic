@@ -789,14 +789,14 @@ pub fn archive(gpa: Allocator, io: Io, inputs: Inputs, w: *Io.Writer, options: O
         try worktree.addTreeAttributes(a, io, db, &attrs, &flat);
     }
     const rules = try repo.worktreeRules();
-    var conv: convert.Session = .init(gpa, io, .{
+    var conv: convert.Session = .open(gpa, io, .{
         .wt = repo.workDirectory() orelse repo.gitDirectory(),
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = try repo.requiredFilters(a),
         .programs = options.programs,
     });
-    defer conv.deinit();
+    defer conv.deinit(io);
 
     var wk: Walk = .{
         .gpa = gpa,

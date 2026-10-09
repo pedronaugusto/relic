@@ -328,7 +328,7 @@ const Ctx = struct {
         ctx.rules.required_filters = try arena.dupe([]const u8, required);
         ctx.rules.filters = filters;
         ctx.index = try repo.openIndex(io);
-        ctx.conv = .init(repo.allocator(), io, .{
+        ctx.conv = .open(repo.allocator(), io, .{
             .wt = wt,
             .kind = repo.objectFormat(),
             .core = ctx.rules.core,
@@ -346,7 +346,7 @@ const Ctx = struct {
     }
 
     fn deinit(ctx: *Ctx) void {
-        ctx.conv.deinit();
+        ctx.conv.deinit(ctx.io);
         ctx.index.deinit();
         ctx.attrs.deinit();
         ctx.ignore_rules.deinit();

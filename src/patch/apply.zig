@@ -561,7 +561,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .options = options,
         .wt = wt,
         .rules = rules,
-        .conv = .init(gpa, io, .{
+        .conv = .open(gpa, io, .{
             .wt = wt orelse repo.gitDirectory(),
             .kind = repo.objectFormat(),
             .core = rules.core,
@@ -577,7 +577,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .cached = cached,
         .p_context = options.min_context orelse std.math.maxInt(usize),
     };
-    defer st.conv.deinit();
+    defer st.conv.deinit(io);
     defer if (st.owned_index) |*ix| ix.deinit();
     defer if (rules.attrs) |attrs| attrs.leave();
     _ = &rules;

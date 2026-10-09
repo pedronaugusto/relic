@@ -17,3 +17,10 @@ test "phase2 public operations keep policy in option fields" {
         }
     }
 }
+
+test "phase2 conversion handles use open and explicit cleanup Io" {
+    const Session = relic.worktree.convert.Session;
+    try std.testing.expect(@hasDecl(Session, "open"));
+    try std.testing.expect(!@hasDecl(Session, "init"));
+    try std.testing.expectEqual(@as(usize, 2), @typeInfo(@TypeOf(Session.deinit)).@"fn".param_types.len);
+}

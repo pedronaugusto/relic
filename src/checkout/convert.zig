@@ -141,18 +141,18 @@ pub const Session = struct {
     };
 
     /// A session with nothing started. Nothing runs until a file needs it.
-    pub fn init(gpa: Allocator, io: Io, options: Options) Session {
+    pub fn open(gpa: Allocator, io: Io, options: Options) Session {
         return .{ .gpa = gpa, .io = io, .options = options, .arena = .init(gpa) };
     }
 
     /// Finish every filter process — close its input and wait for it, which
     /// is how git ends one — and release everything.
-    pub fn deinit(s: *Session) void {
-        for (s.processes.items) |p| p.deinit(s.io);
+    pub fn deinit(s: *Session, io: Io) void {
+        for (s.processes.items) |p| p.deinit(io);
         s.processes.deinit(s.gpa);
         s.delayed.deinit(s.gpa);
         s.delaying.deinit(s.gpa);
-        if (s.native_session) |implementation| implementation.deinit(s.io);
+        if (s.native_session) |implementation| implementation.deinit(io);
         s.available.deinit(s.gpa);
         s.arena.deinit();
         s.* = undefined;
@@ -840,4 +840,46 @@ test "the way in is git's, a collapse that leaves a keyword for the next one inc
     const once = (try identToGit(a, "$Id: a $Id: b $Id: c $")).?;
     try testing.expectEqualStrings("$Id$Id: b $Id$", once);
     try testing.expectEqualStrings("$Id$Id$Id$", (try identToGit(a, once)).?);
+}
+
+test "phase2 conversion cleanup passes its supplied Io to the native owner once" {
+    const Probe = struct {
+        calls: usize = 0,
+        received: ?Io = null,
+        fn clean(_: *anyopaque, _: Allocator, _: Io, _: native.CleanInput) native.Error![]const u8 {
+            unreachable;
+        }
+        fn cleanFile(_: *anyopaque, _: Allocator, _: Io, _: native.FileInput) native.Error![]const u8 {
+            unreachable;
+        }
+        fn smudge(_: *anyopaque, _: Allocator, _: Io, _: native.SmudgeInput) native.Error!native.Content {
+            unreachable;
+        }
+        fn canonical(_: *anyopaque, _: Allocator, _: []const u8) native.Error!?[]const u8 {
+            unreachable;
+        }
+        fn nextReady(_: *anyopaque, _: Allocator, _: Io) native.Error!?native.Ready {
+            unreachable;
+        }
+        fn fallbacks(_: *const anyopaque) u32 {
+            return 0;
+        }
+        fn deinit(context: *anyopaque, io: Io) void {
+            const p: *@This() = @ptrCast(@alignCast(context));
+            p.calls += 1;
+            p.received = io;
+        }
+        const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = deinit };
+    };
+    const io = std.testing.io;
+    var cleanup_vtable = io.vtable.*;
+    const cleanup_io: Io = .{ .userdata = io.userdata, .vtable = &cleanup_vtable };
+    var probe: Probe = .{};
+    var session: Session = .open(std.testing.allocator, io, .{ .wt = Io.Dir.cwd(), .kind = .sha1 });
+    session.native_session = .{ .context = &probe, .vtable = &Probe.vtable };
+    session.deinit(cleanup_io);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(probe.received.?.vtable == cleanup_io.vtable);
+    try std.testing.expect(probe.received.?.userdata == cleanup_io.userdata);
+    try std.testing.expect(probe.received.?.vtable != io.vtable);
 }
