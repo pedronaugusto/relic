@@ -176,9 +176,6 @@ pub const Attrs = struct {
             .case_fold = options.case_fold,
         };
         const a = arena.allocator();
-        // Start with one construction block; larger files grow normally.
-        const page = try a.alloc(u8, 4096);
-        a.free(page);
         try attrs.macros.append(a, .{ .name = "binary", .assignments = &builtin_binary });
         return attrs;
     }
@@ -357,7 +354,7 @@ pub const Attrs = struct {
     pub fn addText(attrs: *Attrs, text: []const u8, base: []const u8, source: []const u8, precedence: u32) Self.Error!void {
         const a = attrs.arena.allocator();
         var rules: std.ArrayList(Rule) = .empty;
-        var builder: sets.Builder = try .init(a, .{ .arena = a });
+        var builder: sets.Builder = try .init(attrs.gpa);
         defer builder.deinit();
         var line_number: u32 = 0;
         var lines = std.mem.splitScalar(u8, text, '\n');
@@ -397,7 +394,7 @@ pub const Attrs = struct {
             });
         }
         if (rules.items.len == 0) return;
-        const compiled = try sets.Matcher.build(&builder, .{ .cache = .temporary });
+        const compiled = try sets.Matcher.build(&builder);
         errdefer compiled.deinit();
         try attrs.levels.append(a, .{
             .base = base,
@@ -1154,7 +1151,7 @@ test "phase2 attribute sets survive every allocation failure and keep precedence
     }.exercise, .{});
 }
 
-test "attributes query scratch falls back without leaking on allocation failure" {
+test "attribute queries release their scratch on every allocation failure" {
     const gpa = std.testing.allocator;
     var attrs = try Attrs.init(gpa, .{});
     defer attrs.deinit();

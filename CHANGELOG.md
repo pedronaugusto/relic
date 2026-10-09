@@ -6,10 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- Attribute pattern sets compile into their attributes owner. Queries own temporary
-  matching scratch with allocator fallback; short-lived loads no longer allocate
-  a retained DFA cache. Assignment parsing and macro expansion avoid temporary
-  growth where their sizes or continuations are already known.
+- Attribute pattern sets compile once per file and keep one matching cache, so
+  repeated lookups reuse the states earlier paths built. Assignment parsing and
+  macro expansion avoid temporary growth where their sizes or continuations are
+  already known.
 
 - **Breaking:** `Attrs.Macro.assignments` is read-only; the built-in binary macro
   borrows static assignments.
