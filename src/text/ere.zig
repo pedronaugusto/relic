@@ -391,8 +391,6 @@ pub const Vm = struct {
         stack: [capacity * 2 + 2]u32,
 
         fn vm(s: *Scratch, n: usize) Vm {
-            @memset(s.cur_marks[0..n], std.math.maxInt(u64));
-            @memset(s.next_marks[0..n], std.math.maxInt(u64));
             return .{
                 .cur = .{ .pcs = s.cur_pcs[0..n], .starts = s.cur_starts[0..n], .mark = s.cur_marks[0..n] },
                 .next = .{ .pcs = s.next_pcs[0..n], .starts = s.next_starts[0..n], .mark = s.next_marks[0..n] },
@@ -415,8 +413,6 @@ pub const Vm = struct {
         errdefer gpa.free(vm.next.starts);
         vm.next.mark = try gpa.alloc(u64, n);
         errdefer gpa.free(vm.next.mark);
-        @memset(vm.cur.mark, std.math.maxInt(u64));
-        @memset(vm.next.mark, std.math.maxInt(u64));
         vm.cur.len = 0;
         vm.next.len = 0;
         vm.stack = try gpa.alloc(u32, n * 2 + 2);
@@ -618,9 +614,14 @@ const RParser = struct {
     groups: u32 = 0,
     closed: u16 = 0,
     backrefs: bool = false,
+    // Allocate nodes in stable blocks instead of growing the arena for each
+    // individual node. Pointers remain valid through compilation and matching.
+    nodes: []RNode = &.{},
 
     fn node(p: *RParser, n: RNode) Allocator.Error!*const RNode {
-        const out = try p.a.create(RNode);
+        if (p.nodes.len == 0) p.nodes = try p.a.alloc(RNode, 16);
+        const out = &p.nodes[0];
+        p.nodes = p.nodes[1..];
         out.* = n;
         return out;
     }
