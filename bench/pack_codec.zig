@@ -36,6 +36,13 @@ const Context = struct {
         try c.compress(units, .best, true);
     }
 };
+const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.fastText)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(Context.defaultText)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(Context.bestText)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(Context.fastNoise)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(Context.defaultNoise)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(Context.bestNoise)).@"fn".return_type.?).error_union.error_set;
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -55,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
     var context: Context = .{ .deflater = &deflater, .text = text, .noise = noise, .out = out };
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
-    const rows = [_]benchmark.Row(Context){
+    const rows = [_]benchmark.Row(Context, WorkloadError){
         .{ .name = "pack_fast_text", .unit = "32KiB_stream", .initial = 1, .run = Context.fastText },
         .{ .name = "pack_default_text", .unit = "32KiB_stream", .initial = 1, .run = Context.defaultText },
         .{ .name = "pack_best_text", .unit = "32KiB_stream", .initial = 1, .run = Context.bestText },
@@ -63,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "pack_default_noise", .unit = "32KiB_stream", .initial = 1, .run = Context.defaultNoise },
         .{ .name = "pack_best_noise", .unit = "32KiB_stream", .initial = 1, .run = Context.bestNoise },
     };
-    try benchmark.run(gpa, init.io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    try benchmark.run(WorkloadError, gpa, init.io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
     try output.interface.flush();
     if (context.checksum == 0) return error.NoWork;
 }

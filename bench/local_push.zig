@@ -29,6 +29,8 @@ const Context = struct {
     }
 };
 
+const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.run)).@"fn".return_type.?).error_union.error_set;
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
@@ -55,8 +57,8 @@ pub fn main(init: std.process.Init) !void {
     var context: Context = .{ .gpa = gpa, .io = io, .remote = &remote, .from = from.objectDatabase(), .entries = objects.entries, .command = .{ .name = "refs/heads/arrived", .old = api.hash.Oid.zero(.sha1), .new = oid } };
     var out_buffer: [4096]u8 = undefined;
     var output = Io.File.stdout().writer(io, &out_buffer);
-    const rows = [_]benchmark.Row(Context){.{ .name = "local_push_three_objects", .unit = "push", .initial = 1, .run = Context.run }};
-    try benchmark.run(gpa, io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    const rows = [_]benchmark.Row(Context, WorkloadError){.{ .name = "local_push_three_objects", .unit = "push", .initial = 1, .run = Context.run }};
+    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
     try output.interface.flush();
     if (context.checksum == 0) return error.NoWork;
     const received = try remote.repo.refStore().readOid(gpa, io, "refs/heads/arrived");

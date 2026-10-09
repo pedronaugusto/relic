@@ -20,6 +20,8 @@ const Context = struct {
         }
     }
 };
+const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.decode)).@"fn".return_type.?).error_union.error_set;
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -31,8 +33,8 @@ pub fn main(init: std.process.Init) !void {
     var context: Context = .{ .window = window, .out = out };
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
-    const rows = [_]benchmark.Row(Context){.{ .name = "lfs_zstd_reader_rle", .unit = "128KiB_frame", .initial = 1, .run = Context.decode }};
-    try benchmark.run(gpa, init.io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    const rows = [_]benchmark.Row(Context, WorkloadError){.{ .name = "lfs_zstd_reader_rle", .unit = "128KiB_frame", .initial = 1, .run = Context.decode }};
+    try benchmark.run(WorkloadError, gpa, init.io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
     try output.interface.flush();
     if (context.checksum == 0) return error.NoWork;
 }

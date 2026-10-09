@@ -29,6 +29,9 @@ const Context = struct {
     }
 };
 
+const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.boolean)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(Context.span)).@"fn".return_type.?).error_union.error_set;
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
@@ -37,11 +40,11 @@ pub fn main(init: std.process.Init) !void {
     var context: Context = .{ .gpa = gpa };
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(io, &buffer);
-    const rows = [_]benchmark.Row(Context){
+    const rows = [_]benchmark.Row(Context, WorkloadError){
         .{ .name = "ere_interval_boolean", .unit = "compile_search", .initial = 64, .run = Context.boolean },
         .{ .name = "ere_interval_span", .unit = "compile_search", .initial = 64, .run = Context.span },
     };
-    try benchmark.run(gpa, io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
     try output.interface.flush();
     if (context.checksum == 0) return error.NoWork;
 }

@@ -1,6 +1,5 @@
 const std = @import("std");
 const hash_mod = @import("../hash/hash.zig");
-const cache_mod = @import("reftablestack/cache.zig");
 const reftablestack_mod = @import("reftablestack.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -33,7 +32,7 @@ fn fixtureWho(when: i64) object.Signature {
 fn forEachRef(gpa: Allocator, listing: *const refs.Store.Listing) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    var hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
+    var hex: [hash_mod.max_hex_len]u8 = undefined;
     for (listing.entries) |entry| {
         switch (entry.target) {
             .direct => |oid| try out.print(gpa, "{s} {s}\n", .{ entry.name, oid.hex(&hex) }),
@@ -52,7 +51,7 @@ fn gitForEachRef(io: Io, repo: *testgit.Repo) ![]u8 {
 fn reflogText(gpa: Allocator, log: *const reflog.Log) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    var hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
+    var hex: [hash_mod.max_hex_len]u8 = undefined;
     var i = log.entries.len;
     while (i > 0) {
         i -= 1;
@@ -189,10 +188,10 @@ test "what this writes into a reftable repository git reads, logs and all" {
     try refsVerify(io, &git, &.{});
     const shown = try git.run(io, &.{ "show-ref", "--head", "-d" });
     defer gpa.free(shown);
-    var hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
-    var tag_hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
-    var peel_hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
-    var topic_hex: [cache_mod.internal.hash.max_hex_len]u8 = undefined;
+    var hex: [hash_mod.max_hex_len]u8 = undefined;
+    var tag_hex: [hash_mod.max_hex_len]u8 = undefined;
+    var peel_hex: [hash_mod.max_hex_len]u8 = undefined;
+    var topic_hex: [hash_mod.max_hex_len]u8 = undefined;
     const want = try gpa.print("{s} HEAD\n{s} refs/heads/link\n{s} refs/heads/main\n{s} refs/heads/topic\n{s} refs/tags/v1\n{s} refs/tags/v1^{{}}\n", .{
         commits[11].hex(&hex),
         commits[5].hex(&topic_hex),
