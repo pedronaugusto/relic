@@ -841,7 +841,7 @@ test "the way in is git's, a collapse that leaves a keyword for the next one inc
     try testing.expectEqualStrings("$Id$Id$Id$", (try identToGit(a, once)).?);
 }
 
-test "phase2 conversion cleanup passes its supplied Io to the native owner once" {
+test "conversion cleanup passes its supplied Io to the native owner once" {
     const Probe = struct {
         const Self = @This();
         calls: usize = 0,

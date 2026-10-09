@@ -65,7 +65,7 @@ fn rows(text: []const u8) usize {
     return std.mem.count(u8, text, "\n| `") + std.mem.count(u8, text, "\n//! | `");
 }
 
-test "phase2 module tables equal the exported namespace tree" {
+test "module tables equal the exported namespace tree" {
     @setEvalBranchQuota(500000);
     const readme = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "README.md", std.testing.allocator, .limited(1 << 20));
     defer std.testing.allocator.free(readme);
@@ -84,7 +84,7 @@ fn covers(comptime facade: type, comptime implementation: type) !void {
     }
 }
 
-test "phase2 publishing facades cover every implementation declaration" {
+test "publishing facades cover every implementation declaration" {
     try covers(relic.repo, repo_mod);
     try covers(relic.hash, hash_mod);
     try covers(relic.object, object_mod);
@@ -126,7 +126,7 @@ fn checkErrors(comptime ns: type, comptime depth: usize) !void {
     }
 }
 
-test "phase2 every public namespace and owned type names its errors" {
+test "every public namespace and owned type names its errors" {
     @setEvalBranchQuota(500000);
     try checkErrors(relic, 3);
 }
@@ -136,7 +136,7 @@ const objectwalk = relic.revwalk.objectwalk;
 const notes = relic.commit.notes;
 const trailer = relic.commit.trailer;
 
-test "phase2 public options signatures stay within five positional inputs" {
+test "public options signatures stay within five positional inputs" {
     inline for (.{ index.Index.read, objectwalk.missing, objectwalk.checkConnected, objectwalk.checkReceived, notes.copy, trailer.process, trailer.amend }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
@@ -145,25 +145,25 @@ test "phase2 public options signatures stay within five positional inputs" {
     try std.testing.expect(!@hasDecl(objectwalk, "checkConnectedWith"));
 }
 
-test "phase2 tree and ancestry requests stay within five positional inputs" {
+test "tree and ancestry requests stay within five positional inputs" {
     inline for (.{ relic.merge.trees, relic.merge.ort.trees, relic.merge.ort.commits, relic.merge.octopus.commits, relic.revwalk.mergeBases, relic.revwalk.mergeBasesMany, relic.revwalk.isAncestor, relic.diff.tree }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
-test "phase2 worktree merge and reset requests stay within five positional inputs" {
+test "worktree merge and reset requests stay within five positional inputs" {
     inline for (.{ relic.merge.threeway.apply, relic.merge.threeway.applyCommits, relic.merge.threeway.applyOctopus, relic.commit.reset.toTree, relic.commit.sequencer.resetMerge }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
-test "phase2 diff output and attribution requests stay within five positional inputs" {
+test "diff output and attribution requests stay within five positional inputs" {
     inline for (.{ relic.diff.unified, relic.diff.blame.file, relic.diff.patchid.ofTrees }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
-test "phase2 pack storage requests stay within five positional inputs" {
+test "pack storage requests stay within five positional inputs" {
     inline for (.{ relic.odb.pack.Index.open, relic.odb.pack.Pack.open, relic.odb.pack.Pack.inflateWith, relic.odb.pack.Pack.readAtInto, relic.odb.pack.Writer.open, relic.odb.pack.Writer.openStream, relic.odb.pack.writeIndexFile, relic.odb.revindex.write, relic.odb.indexpack.receive, relic.odb.bitmap.encode }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
@@ -171,36 +171,36 @@ test "phase2 pack storage requests stay within five positional inputs" {
     try std.testing.expect(!@hasDecl(relic.odb.pack.Writer, "initCounting"));
 }
 
-test "phase2 filesystem requests stay within five positional inputs" {
+test "filesystem requests stay within five positional inputs" {
     inline for (.{ relic.repo.fs.LockFile.open, relic.repo.fs.atomicWrite, relic.repo.fs.readFileSized }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
-test "phase2 program invocation owns its working directory type" {
+test "program invocation owns its working directory type" {
     try std.testing.expect(@FieldType(relic.repo.program.Invocation, "cwd") == relic.repo.program.Cwd);
     try std.testing.expect(@FieldType(relic.repo.program.Invocation, "cwd") != std.process.Child.Cwd);
     try std.testing.expect(@FieldType(relic.commit.trailer.Commands, "cwd") == relic.repo.program.Cwd);
 }
 
-test "phase2 transport and LFS requests stay within five positional inputs" {
+test "transport and LFS requests stay within five positional inputs" {
     inline for (.{ relic.transport.Session.open, relic.transport.Session.fetch, relic.transport.fetchpack.fetch, relic.transport.sendpack.send, relic.transport.local.Remote.receivePush, relic.transport.bundle.receive, relic.transport.bundle.create, relic.lfs.api.sshInvocation, relic.lfs.push.beforePush }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
-test "phase2 working tree requests stay within five positional inputs" {
+test "working tree requests stay within five positional inputs" {
     inline for (.{ relic.worktree.addAll, relic.worktree.status, relic.worktree.checkout, relic.worktree.writePaths, relic.worktree.verifyUpdates, relic.worktree.differsFromIndex, relic.worktree.applySparse }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
-test "phase2 ref log and table requests stay within five positional inputs" {
+test "ref log and table requests stay within five positional inputs" {
     inline for (.{ relic.refs.Store.appendLog, relic.refs.Store.expireLog, relic.refs.reftablestack.appendLog, relic.refs.reftablestack.compactIn, relic.refs.reftable.write, reflog_mod.expire }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
-test "phase2 history archive and maintenance requests stay within five positional inputs" {
+test "history archive and maintenance requests stay within five positional inputs" {
     inline for (.{ relic.archive.archive, relic.patch.rangediff.compute, relic.patch.rangediff.write, relic.worktree.linked.add, relic.worktree.linked.move, relic.revwalk.bisect.mark, relic.maintenance.writePackBitmap, relic.maintenance.writeMidxBitmap, relic.merge.subtreeshift.shift }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }

@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The package ships `build.zig`, `build.zig.zon`, `src`, the license, README and changelog, which is all a consumer's build reads.
+
 - Attribute pattern sets compile once per file and keep one matching cache, so
   repeated lookups reuse the states earlier paths built. Assignment parsing and
   macro expansion avoid temporary growth where their sizes or continuations are
@@ -107,7 +109,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   native LFS selection is explicit. Checkout's missing-content diagnostics use
   `native_fallbacks` and `Report.native_missing`.
 
-Architecture phase 2 is work in progress on the phase2 branch. Its dependency,
+Architecture phase 2 is work in progress; phase 2a is below. Its dependency,
 layering and API work remain open; this is not a release-complete claim.
 
 - Breaking (phase 2): `Repository.create` replaces `Repository.init`; repository

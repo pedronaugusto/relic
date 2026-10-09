@@ -97,7 +97,7 @@ fn releaseFetcher(io: Io, context: *anyopaque) void {
     gpa.destroy(fetch);
 }
 
-test "phase2 native LFS clone fetches content and skip-smudge leaves pointers" {
+test "native LFS clone fetches content and skip-smudge leaves pointers" {
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;

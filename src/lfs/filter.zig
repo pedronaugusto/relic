@@ -292,7 +292,7 @@ pub fn settings(drivers: *const filter.Drivers) *const lfs.Settings {
     return &b.lfs.settings;
 }
 
-test "phase2 native LFS selection owns settings, preserves custom commands and hash-only storage" {
+test "native LFS selection owns settings, preserves custom commands and hash-only storage" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
@@ -329,7 +329,7 @@ test "phase2 native LFS selection owns settings, preserves custom commands and h
     try testing.expectEqualStrings("large content", buffer[0..n]);
 }
 
-test "phase2 native LFS batches delayed files once and isolates session state" {
+test "native LFS batches delayed files once and isolates session state" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
@@ -375,7 +375,7 @@ test "phase2 native LFS batches delayed files once and isolates session state" {
     try testing.expectEqual(@as(u32, 0), fresh.fallbacks());
 }
 
-test "phase2 native LFS propagates batched cancellation and releases pending state" {
+test "native LFS propagates batched cancellation and releases pending state" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
@@ -408,7 +408,7 @@ test "phase2 native LFS propagates batched cancellation and releases pending sta
     try testing.expect((try fresh.nextReady(gpa, io)) == null);
 }
 
-test "phase2 native LFS allocator failures release driver and pending delivery" {
+test "native LFS allocator failures release driver and pending delivery" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var cfg = try config.Config.parseText(testing.allocator, "", .local);

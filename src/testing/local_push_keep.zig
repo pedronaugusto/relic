@@ -53,7 +53,7 @@ fn keeps(io: Io, dir: Io.Dir) !usize {
     return count;
 }
 
-test "phase2 local push retains its pack through collection failure and cancellation" {
+test "local push retains its pack through collection failure and cancellation" {
     const gpa = testing.allocator;
     var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(4) });
     defer threaded.deinit();

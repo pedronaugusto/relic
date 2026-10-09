@@ -89,7 +89,7 @@ pub const Token = struct {
     }
 };
 
-test "phase2 keep tokens retain shared and foreign markers" {
+test "keep tokens retain shared and foreign markers" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -110,7 +110,7 @@ test "phase2 keep tokens retain shared and foreign markers" {
     try std.testing.expectEqualStrings("external keep\n", bytes);
 }
 
-test "phase2 keep acquisition allocation failures abandon no lock or marker" {
+test "keep acquisition allocation failures abandon no lock or marker" {
     var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
@@ -128,7 +128,7 @@ test "phase2 keep acquisition allocation failures abandon no lock or marker" {
     }.exercise, .{});
 }
 
-test "phase2 keep cleanup survives cancellation of its owner" {
+test "keep cleanup survives cancellation of its owner" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -153,7 +153,7 @@ test "phase2 keep cleanup survives cancellation of its owner" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "pack-1111111111111111111111111111111111111111.keep.lock", .{}));
 }
 
-test "phase2 keep cleanup failure preserves the marker rather than exposing objects" {
+test "keep cleanup failure preserves the marker rather than exposing objects" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});

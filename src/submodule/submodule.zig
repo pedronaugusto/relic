@@ -1821,7 +1821,7 @@ pub fn walk(gpa: Allocator, io: Io, repo: *Repository, options: WalkOptions) Sel
     return w;
 }
 
-test "phase2 extraction shared pathspec magic and exclusions" {
+test "shared pathspec magic and exclusions" {
     const gpa = std.testing.allocator;
     const specs: []const []const u8 = &.{ ":(icase)SRC/**", ":(exclude)src/private/**" };
     try std.testing.expect(try pathspecMatches(gpa, specs, "src/public/main.zig"));

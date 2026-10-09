@@ -598,7 +598,7 @@ fn fuzzIgnore(_: void, smith: *std.testing.Smith) anyerror!void {
     _ = rules.matchPath(path, true);
 }
 
-test "phase2 level sets retain negation, precedence and ancestor decisions under allocation failure" {
+test "level sets retain negation, precedence and ancestor decisions under allocation failure" {
     var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {

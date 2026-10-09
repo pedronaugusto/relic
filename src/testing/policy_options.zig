@@ -1,6 +1,6 @@
 const std = @import("std");
 const relic = @import("../relic.zig");
-test "phase2 pattern constructors take defaulted policy options" {
+test "pattern constructors take defaulted policy options" {
     inline for (.{ relic.worktree.ignore.Rules, relic.worktree.attributes.Attrs, relic.worktree.sparse.Patterns }) |T| {
         const options = @typeInfo(@TypeOf(T.init)).@"fn".param_types[1].?;
         try std.testing.expect(@typeInfo(options) == .@"struct");
@@ -10,7 +10,7 @@ test "phase2 pattern constructors take defaulted policy options" {
     try std.testing.expect(@typeInfo(options) == .@"struct");
 }
 
-test "phase2 public operations keep policy in option fields" {
+test "public operations keep policy in option fields" {
     inline for (.{ relic.repo.hooks.Runner.postMerge, relic.commit.hooks.Hooks.init, relic.commit.trailer.block, relic.revwalk.mailmap.Mailmap.addFileAt, relic.lfs.api.gitRemoteUrl, relic.lfs.FetchPattern.compile, relic.transport.remotehelper.Helper.list, relic.pretty.refs.Listing.write, relic.transport.policy.allowed }) |operation| {
         inline for (@typeInfo(@TypeOf(operation)).@"fn".param_types) |parameter| {
             if (parameter) |T| try std.testing.expect(T != bool and T != ?bool);
@@ -18,7 +18,7 @@ test "phase2 public operations keep policy in option fields" {
     }
 }
 
-test "phase2 conversion handles use open and explicit cleanup Io" {
+test "conversion handles use open and explicit cleanup Io" {
     const Session = relic.worktree.convert.Session;
     try std.testing.expect(@hasDecl(Session, "open"));
     try std.testing.expect(!@hasDecl(Session, "init"));

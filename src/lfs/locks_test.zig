@@ -368,7 +368,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     try testing.expectEqualStrings("", runner.captured.items);
 }
 
-test "phase2 LFS HTTP pagination ends or fails without publishing partial caches" {
+test "LFS HTTP pagination ends or fails without publishing partial caches" {
     const scripts = [_][]const ?[]const u8{
         &.{null},       &.{""},              &.{ "a", null }, &.{ "a", "" },
         &.{ "a", "a" }, &.{ "a", "b", "a" },

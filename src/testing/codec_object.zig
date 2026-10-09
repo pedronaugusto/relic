@@ -1,7 +1,7 @@
 const std = @import("std");
 const relic = @import("../relic.zig");
 
-test "phase2 a loose object's Adler checksum is verified before returning content" {
+test "a loose object's Adler checksum is verified before returning content" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     for ([_]relic.hash.Kind{ .sha1, .sha256 }) |kind| {

@@ -2078,7 +2078,7 @@ test "an index read from a disk measures the filesystem it was read from" {
     try std.testing.expect(index.timestamp_resolution.ns <= std.time.ns_per_s);
 }
 
-test "phase2 index read options preserve a measured resolution for both object formats" {
+test "index read options preserve a measured resolution for both object formats" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

@@ -535,7 +535,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     }
 }
 
-test "phase2 LFS SSH pagination ends or explicitly refuses a repeated cursor" {
+test "LFS SSH pagination ends or explicitly refuses a repeated cursor" {
     for ([_][]const u8{ "null", "", "a,null", "a,", "a,a", "a,b,a" }, 0..) |script, i| {
         for ([_]bool{ false, true }) |verify| {
             const extra = try testing.allocator.print("--lock-cursors={s}", .{script});
@@ -593,7 +593,7 @@ test "phase2 LFS SSH pagination ends or explicitly refuses a repeated cursor" {
     }
 }
 
-test "phase2 cached SSH lock connection uses the request Io for pipe reads and writes" {
+test "cached SSH lock connection uses the request Io for pipe reads and writes" {
     const gpa = testing.allocator;
     const io = testing.io;
     var s = try Ssh.init("");
@@ -615,7 +615,7 @@ test "phase2 cached SSH lock connection uses the request Io for pipe reads and w
     try testing.expect(faults.count(.file_write_streaming) > 0);
 }
 
-test "phase2 cached SSH lock connection refuses pipe failure and cancellation without replacing its cache" {
+test "cached SSH lock connection refuses pipe failure and cancellation without replacing its cache" {
     const shakedown = shakedown_mod;
     const gpa = testing.allocator;
     const io = testing.io;

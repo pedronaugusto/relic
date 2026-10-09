@@ -9,7 +9,7 @@ const repo_mod = @import("../repo/repo.zig");
 const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
 
-test "phase2 received pack survives prune before references are published" {
+test "received pack survives prune before references are published" {
     const gpa = testing.allocator;
     const io = testing.io;
     for (try testgit.refFormats(gpa, io)) |ref_format| {
@@ -72,7 +72,7 @@ test "phase2 received pack survives prune before references are published" {
     }
 }
 
-test "phase2 received pack retention and rollback survive a ref commit fault" {
+test "received pack retention and rollback survive a ref commit fault" {
     const gpa = testing.allocator;
     const io = testing.io;
     var source = try testgit.Repo.init(gpa, io, &.{});
@@ -142,7 +142,7 @@ const WaitingPublication = struct {
     }
 };
 
-test "phase2 canceled publication releases ref locks before its received pack keep" {
+test "canceled publication releases ref locks before its received pack keep" {
     const gpa = testing.allocator;
     var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(2) });
     defer threaded.deinit();
@@ -184,7 +184,7 @@ test "phase2 canceled publication releases ref locks before its received pack ke
     }
 }
 
-test "phase2 local receive owns a keep token with default receive options" {
+test "local receive owns a keep token with default receive options" {
     const gpa = testing.allocator;
     const io = testing.io;
     for (try testgit.refFormats(gpa, io)) |ref_format| {

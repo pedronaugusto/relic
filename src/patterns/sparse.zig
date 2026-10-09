@@ -488,7 +488,7 @@ fn fuzzCone(_: void, smith: *std.testing.Smith) anyerror!void {
     _ = patterns.includes(path, false);
 }
 
-test "phase2 sparse set rebuilding survives every allocation failure" {
+test "sparse set rebuilding survives every allocation failure" {
     var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {

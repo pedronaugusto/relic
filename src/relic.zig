@@ -1,7 +1,7 @@
 //! relic — read and write a git repository from Zig.
 //!
-//! Architecture phase 2 is work in progress. The table below describes this
-//! branch's exported namespaces; its contract is checked against the API.
+//! The table below describes the exported namespaces; its contract is checked against
+//! the API.
 //!
 //! | Module | Purpose |
 //! |---|---|

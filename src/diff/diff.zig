@@ -831,7 +831,7 @@ test "the binary rule is the diff one" {
     try std.testing.expect(!isBinary("a\rb"));
 }
 
-test "phase2 extraction diff refuses over Git's byte limit before binary scanning" {
+test "diff refuses over Git's byte limit before binary scanning" {
     // A NUL makes the pre-fix binary scanner return without reading past
     // this buffer. The input limit is a length contract, before content access.
     const prefix: [8000]u8 = @splat(0);

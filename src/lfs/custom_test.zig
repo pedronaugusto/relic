@@ -287,7 +287,7 @@ test "concurrent agents start as many as git-lfs starts, one when not concurrent
     try testing.expectError(error.LfsAdapterInitFailed, relicUpload(&fx, refusing));
 }
 
-test "phase2 cached custom adapter uses the transfer Io for pipe reads and writes" {
+test "cached custom adapter uses the transfer Io for pipe reads and writes" {
     const custom = custom_mod;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -319,7 +319,7 @@ test "phase2 cached custom adapter uses the transfer Io for pipe reads and write
     try testing.expect(faults.count(.file_write_streaming) > 0);
 }
 
-test "phase2 cached custom adapter refuses pipe failure and cancellation through the transfer Io" {
+test "cached custom adapter refuses pipe failure and cancellation through the transfer Io" {
     const custom = custom_mod;
     const shakedown = shakedown_mod;
     const gpa = testing.allocator;

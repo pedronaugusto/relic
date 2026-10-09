@@ -1114,7 +1114,7 @@ test "fuzz: any regex compiles or is refused, and any match is within the line" 
     }.one, .{ .corpus = &.{ "\\(a\\|b\\)*c", "[[:alpha:]]{2,}x9" } });
 }
 
-test "phase2 boolean ERE uses git extensions and captures" {
+test "boolean ERE uses git extensions and captures" {
     for ([_]struct { []const u8, []const u8, bool }{
         .{ "\\w+", "word", true },
         .{ "\\bcat\\b", "a cat!", true },
@@ -1128,7 +1128,7 @@ test "phase2 boolean ERE uses git extensions and captures" {
     }
 }
 
-test "phase2 regex allocation failures release compile and search state" {
+test "regex allocation failures release compile and search state" {
     var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {
@@ -1145,7 +1145,7 @@ test "phase2 regex allocation failures release compile and search state" {
     }.exercise, .{});
 }
 
-test "phase2 regex adapters share newline policy and bounded backreferences" {
+test "regex adapters share newline policy and bounded backreferences" {
     const gpa = std.testing.allocator;
     var whole = try Pattern.compile(gpa, "one.two");
     defer whole.deinit();
@@ -1162,7 +1162,7 @@ test "phase2 regex adapters share newline policy and bounded backreferences" {
     try std.testing.expectError(error.PatternTooComplex, backref.search(gpa, &text));
 }
 
-test "phase2 ERE adapters refuse repetition operators with no operand" {
+test "ERE adapters refuse repetition operators with no operand" {
     for ([_][]const u8{ "*a", "+a", "?a", "a|*b", "(*a)" }) |pattern| {
         if (Pattern.compile(testing.allocator, pattern)) |compiled| {
             var p = compiled;
@@ -1180,7 +1180,7 @@ test "phase2 ERE adapters refuse repetition operators with no operand" {
     try testing.expect((try literal.find(testing.allocator, "x*a", false)) != null);
 }
 
-test "phase2 ERE adapters reject reversed and oversized intervals" {
+test "ERE adapters reject reversed and oversized intervals" {
     for ([_][]const u8{ "a{3,2}", "a{32768}", "a{1,32768}", "a{4294967296}", "a{1,4294967296}" }) |pattern| {
         if (Pattern.compile(testing.allocator, pattern)) |compiled| {
             var p = compiled;

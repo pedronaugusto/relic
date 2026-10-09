@@ -1432,7 +1432,7 @@ test "a lock syncs the target's directory after rename only when asked" {
     }
 }
 
-test "phase2 airlock file failure prevents lock publication and directory failure is explicit" {
+test "airlock file failure prevents lock publication and directory failure is explicit" {
     const seam = airlock_mod;
     const gpa = std.testing.allocator;
     for ([_]bool{ false, true }) |directory_failure| {
@@ -1459,7 +1459,7 @@ test "phase2 airlock file failure prevents lock publication and directory failur
     }
 }
 
-test "phase2 airlock refused durability never publishes weaker file data" {
+test "airlock refused durability never publishes weaker file data" {
     const seam = airlock_mod;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1587,7 +1587,7 @@ test "a read-only file is replaced and removed, as a lockable one nobody holds m
 /// All errors reported by this namespace.
 pub const Error = SyncError || StatError || BarrierError || LockError || CommitError || LockFile.OpenError || Shared.ParseError || SetTimestampsError || HardLinkError || AtomicWriteError || ReadSizedError || Self.StatError || Self.CommitError || Io.Dir.RenameError || Io.Dir.CreateDirPathError || Io.Dir.SetFilePermissionsError || Io.Dir.DeleteFileError || Self.AtomicWriteError || Self.ReadSizedError || Allocator.Error;
 
-test "phase2 sized read releases its hint allocation when a grown file exceeds the limit" {
+test "sized read releases its hint allocation when a grown file exceeds the limit" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "grown", .data = "twelve bytes" });

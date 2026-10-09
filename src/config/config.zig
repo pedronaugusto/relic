@@ -2769,7 +2769,7 @@ test "replacing an inserted setting keeps its name under the new line owner" {
     try std.testing.expect(!try config.getBool("core.ignorecase", true));
 }
 
-test "phase2 extraction long includeIf patterns expand without a fixed buffer" {
+test "long includeIf patterns expand without a fixed buffer" {
     const gpa = std.testing.allocator;
     const name = try gpa.alloc(u8, 4200);
     defer gpa.free(name);

@@ -297,7 +297,7 @@ test "fuzz: any strategy_opts line splits or is a named failure, and round-trips
     try std.testing.fuzz({}, fuzzSplit, .{});
 }
 
-test "phase2 extraction strategy flags preserve bare aliases and replace explicit algorithms" {
+test "strategy flags preserve bare aliases and replace explicit algorithms" {
     var settings: Settings = .{};
     inline for (.{ "patience", "histogram", "diff-algorithm=myers" }) |word| {
         try settings.apply("diff-algorithm=minimal");

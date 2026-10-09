@@ -1118,7 +1118,7 @@ fn fuzzAttrs(_: void, smith: *std.testing.Smith) anyerror!void {
     converted.deinit(gpa);
 }
 
-test "phase2 extraction quoted attributes decode C escapes once" {
+test "quoted attributes decode C escapes once" {
     const gpa = std.testing.allocator;
     var attrs = try Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
@@ -1132,7 +1132,7 @@ test "phase2 extraction quoted attributes decode C escapes once" {
     }
 }
 
-test "phase2 attribute sets survive every allocation failure and keep precedence" {
+test "attribute sets survive every allocation failure and keep precedence" {
     var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator) !void {

@@ -24,7 +24,7 @@ fn inspect(comptime ns: type, comptime prefix: []const u8, comptime depth: usize
     }
     return bad;
 }
-test "phase2 entire public surface stays within five positional inputs" {
+test "entire public surface stays within five positional inputs" {
     @setEvalBranchQuota(1000000);
     try std.testing.expectEqual(@as(usize, 0), inspect(relic, "", 7));
 }

@@ -72,7 +72,7 @@ const Self = @This();
 
 const std = @import("std");
 const warp = @import("warp");
-test "phase2 LFS checks certificates with the request Io before dialing" {
+test "LFS checks certificates with the request Io before dialing" {
     const gpa = testing.allocator;
     const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
     defer faults.deinit();
