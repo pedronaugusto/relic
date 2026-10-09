@@ -38,26 +38,26 @@ const object = @import("../object/object.zig");
 const index_mod = @import("../index/index.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const merge = @import("../merge/merge.zig");
 const diff = @import("../diff/diff.zig");
 const hooks = @import("../hooks/hooks.zig");
-const fs = @import("../fs/fs.zig");
-const ignore = @import("../patterns/ignore.zig");
-const attributes = @import("../patterns/attributes.zig");
-const pathspec_mod = @import("../patterns/pathspec.zig");
+const fs = @import("../fs.zig");
+const ignore = @import("../patterns.zig").ignore;
+const attributes = @import("../patterns.zig").attributes;
+const pathspec_mod = @import("../patterns.zig").pathspec;
 const odb_mod = @import("../odb/odb.zig");
 const parallax = @import("parallax");
 const convert = @import("../checkout/convert.zig");
 const filter = @import("../checkout/filter.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 const Index = index_mod.Index;
 
 /// The ref every stash hangs from.
-const ref_name = @import("../names/ref.zig").stash;
+const ref_name = @import("../names.zig").ref.stash;
 
 /// Errors from stashing.
 pub const Error = error{

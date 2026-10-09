@@ -13,7 +13,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
-const pathspec = @import("../patterns/pathspec.zig");
+const pathspec = @import("../patterns.zig").pathspec;
 
 const Oid = hash.Oid;
 

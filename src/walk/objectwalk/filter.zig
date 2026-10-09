@@ -3,7 +3,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const object = @import("../../object/object.zig");
 const odb_mod = @import("../../odb/odb.zig");
-const ignore = @import("../../patterns/ignore.zig");
+const ignore = @import("../../patterns.zig").ignore;
 /// Errors from walking objects.
 pub const Error = error{
     /// An object below a tip is not in the database. `missing_out` names

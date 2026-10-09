@@ -19,7 +19,7 @@
 //! repository's `trailer.*` settings say.
 
 const ErrorNamespace = @This();
-const unicodewidth = @import("../text/unicodewidth.zig");
+const unicodewidth = @import("../text.zig").unicodewidth;
 const builtin = @import("builtin");
 const std = @import("std");
 const revparse_mod = @import("../revwalk/revparse.zig");
@@ -30,19 +30,19 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
-const ref_names = @import("../names/ref.zig");
+const ref_names = @import("../names.zig").ref;
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
-const revwalk = @import("../walk/walk.zig");
+const revwalk = @import("../walk.zig");
 const describe_mod = @import("../revwalk/describe.zig");
 const mailmap_mod = @import("../revwalk/mailmap.zig");
 const abbrev_mod = @import("../odb/abbrev.zig");
 const signing = @import("../object/signing.zig");
-const gitdate = @import("../text/date.zig");
-const glob_mod = @import("../text/glob.zig");
+const gitdate = @import("../text.zig").date;
+const glob_mod = @import("../text.zig").glob;
 const worktrees = @import("../checkout/worktrees.zig");
-const remote_mod = @import("../wire/remote.zig");
-const refspec = @import("../wire/refspec.zig");
+const remote_mod = @import("../wire.zig").remote;
+const refspec = @import("../wire.zig").refspec;
 const pretty = @import("pretty.zig");
 const trailer = @import("../object/trailer.zig");
 const message = @import("../object/message.zig");

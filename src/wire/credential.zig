@@ -32,7 +32,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const url_mod = @import("url.zig");
 const auth = @import("auth.zig");
 

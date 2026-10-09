@@ -23,7 +23,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const cquote = @import("../text/cquote.zig");
+const cquote = @import("../text.zig").cquote;
 const binarypatch = @import("binary.zig");
 
 /// Errors from reading a patch.

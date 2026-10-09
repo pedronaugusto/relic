@@ -18,33 +18,33 @@
 const ErrorNamespace = @This();
 const Self = @This();
 
-const httpsettings = @import("../wire/httpsettings.zig");
-const promisors = @import("../wire/promisors.zig");
+const httpsettings = @import("../wire.zig").httpsettings;
+const promisors = @import("../wire.zig").promisors;
 /// Which proxy an HTTP remote is reached through.
 const Proxy = httpsettings.Proxy;
 // The modules relic's API puts under this one, as `relic.transport.<name>`.
 
-const url = @import("../wire/url.zig");
+const url = @import("../wire.zig").url;
 
-const fetchpack = @import("../wire/fetchpack.zig");
+const fetchpack = @import("../wire.zig").fetchpack;
 
-const sendpack = @import("../wire/sendpack.zig");
+const sendpack = @import("../wire.zig").sendpack;
 const local = @import("local.zig");
-const ssh = @import("../wire/ssh.zig");
-const smarthttp = @import("../wire/smarthttp.zig");
+const ssh = @import("../wire.zig").ssh;
+const smarthttp = @import("../wire.zig").smarthttp;
 
-const credential = @import("../wire/credential.zig");
-const auth = @import("../wire/auth.zig");
-const protocol = @import("../wire/protocol.zig");
-const connection = @import("../wire/connection.zig");
-const pktline = @import("../codec/pktline.zig");
+const credential = @import("../wire.zig").credential;
+const auth = @import("../wire.zig").auth;
+const protocol = @import("../wire.zig").protocol;
+const connection = @import("../wire.zig").connection;
+const pktline = @import("../codec.zig").pktline;
 
 const uploadpack = @import("uploadpack.zig");
 const bundle = @import("bundle.zig");
 
-const progress = @import("../report/progress.zig");
+const progress = @import("../report.zig").progress;
 const remotehelper = @import("remotehelper.zig");
-const policy = @import("../wire/policy.zig");
+const policy = @import("../wire.zig").policy;
 
 const std = @import("std");
 const keep_mod = @import("../odb/keep.zig");
@@ -54,9 +54,9 @@ const assert = std.debug.assert;
 
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 

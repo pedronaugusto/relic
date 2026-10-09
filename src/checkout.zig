@@ -10,16 +10,16 @@ const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.worktree.<name>`.
 
-const sparse = @import("../patterns/sparse.zig");
+const sparse = @import("patterns.zig").sparse;
 
-const ignore = @import("../patterns/ignore.zig");
-const attributes = @import("../patterns/attributes.zig");
+const ignore = @import("patterns.zig").ignore;
+const attributes = @import("patterns.zig").attributes;
 
-const convert = @import("convert.zig");
-const fsmonitor = @import("fsmonitor.zig");
-const filter = @import("filter.zig");
-const dirscan = @import("dirscan.zig");
-const safepath = @import("../names/path.zig");
+const convert = @import("checkout/convert.zig");
+const fsmonitor = @import("checkout/fsmonitor.zig");
+const filter = @import("checkout/filter.zig");
+const dirscan = @import("checkout/dirscan.zig");
+const safepath = @import("names.zig").path;
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -27,16 +27,16 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash/hash.zig");
-const object = @import("../object/object.zig");
-const odb_mod = @import("../odb/odb.zig");
-const index_mod = @import("../index/index.zig");
-const fs = @import("../fs/fs.zig");
-const sparseindex = @import("../index/sparseindex.zig");
-const pack_mod = @import("../odb/pack.zig");
-const gitlink = @import("../discover/gitlink.zig");
-const native = @import("native.zig");
-const program = @import("../process/program.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const odb_mod = @import("odb/odb.zig");
+const index_mod = @import("index/index.zig");
+const fs = @import("fs.zig");
+const sparseindex = @import("index/sparseindex.zig");
+const pack_mod = @import("odb/pack.zig");
+const gitlink = @import("discover.zig").gitlink;
+const native = @import("checkout/native.zig");
+const program = @import("process.zig").program;
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;

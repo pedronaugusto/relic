@@ -6,7 +6,7 @@ const shakedown_mod = @import("shakedown");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 
 pub const Error = fs.LockError || fs.CommitError || Io.Dir.OpenError || Io.Dir.ReadFileAllocError || Io.Dir.DeleteFileError || Allocator.Error;
 

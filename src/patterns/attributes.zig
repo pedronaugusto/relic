@@ -13,7 +13,7 @@
 //! different tree.
 
 const ErrorNamespace = @This();
-const cquote = @import("../text/cquote.zig");
+const cquote = @import("../text.zig").cquote;
 const Self = @This();
 
 const std = @import("std");
@@ -23,8 +23,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const sets = @import("set.zig");
-const encoding = @import("../text/encoding.zig");
-const fs = @import("../fs/fs.zig");
+const encoding = @import("../text.zig").encoding;
+const fs = @import("../fs.zig");
 
 /// Errors from loading attributes.
 pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
@@ -515,7 +515,7 @@ pub const Attrs = struct {
 };
 
 fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level._matcher));
+    return @ptrCast(@alignCast(level._matcher)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
 }
 
 fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {

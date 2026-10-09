@@ -6,7 +6,7 @@
 //! git-lfs as relic's filter process, because relic's own LFS runs none.
 
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const std = @import("std");
 const filter_mod = @import("filter.zig");
 const Io = std.Io;

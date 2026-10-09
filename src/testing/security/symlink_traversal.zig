@@ -12,14 +12,14 @@
 const local = @import("../../transport/local.zig");
 const std = @import("std");
 const filter_mod = @import("../../lfs/filter.zig");
-const path_mod = @import("../../names/path.zig");
+const path_mod = @import("../../names.zig").path;
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 
 const apply = @import("../../patch/apply.zig");
 const repo_mod = @import("../../repo/repo.zig");
-const worktree = @import("../../checkout/checkout.zig");
+const worktree = @import("../../checkout.zig");
 const index_mod = @import("../../index/index.zig");
 const clone_mod = @import("../../transport/clone.zig");
 const transport = @import("../../transport/transport.zig");

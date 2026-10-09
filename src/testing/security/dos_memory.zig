@@ -8,8 +8,8 @@ const Io = std.Io;
 
 const local = @import("../../transport/local.zig");
 const uploadpack = @import("../../transport/uploadpack.zig");
-const pktline = @import("../../codec/pktline.zig");
-const protocol = @import("../../wire/protocol.zig");
+const pktline = @import("../../codec.zig").pktline;
+const protocol = @import("../../wire.zig").protocol;
 const testgit = @import("../git.zig");
 
 /// How many `ACK <tree>` lines relic's upload-pack answers a request that

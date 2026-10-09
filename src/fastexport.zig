@@ -26,13 +26,13 @@ const hash = @import("hash/hash.zig");
 const object = @import("object/object.zig");
 const odb_mod = @import("odb/odb.zig");
 const repo_mod = @import("repo/repo.zig");
-const revwalk = @import("walk/walk.zig");
+const revwalk = @import("walk.zig");
 const diff = @import("diff/diff.zig");
-const cquote = @import("text/cquote.zig");
+const cquote = @import("text.zig").cquote;
 const signing = @import("object/signing.zig");
-const refspec_mod = @import("wire/refspec.zig");
+const refspec_mod = @import("wire.zig").refspec;
 const fastimport = @import("fastimport.zig");
-const fs = @import("fs/fs.zig");
+const fs = @import("fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

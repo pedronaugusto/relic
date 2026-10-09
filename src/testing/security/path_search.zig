@@ -11,7 +11,7 @@ const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 
-const program = @import("../../process/program.zig");
+const program = @import("../../process.zig").program;
 const testgit = @import("../git.zig");
 
 const exe = if (builtin.target.os.tag == .windows) ".exe" else "";

@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
 const config_mod = @import("../config/config.zig");
-const gitdate = @import("../text/date.zig");
+const gitdate = @import("../text.zig").date;
 
 /// Whose identity: the commit's author or its committer.
 pub const Role = enum { author, committer };

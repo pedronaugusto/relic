@@ -12,8 +12,8 @@ const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
 
-const pktline = @import("../codec/pktline.zig");
-const progress_mod = @import("../report/progress.zig");
+const pktline = @import("../codec.zig").pktline;
+const progress_mod = @import("../report.zig").progress;
 
 /// Why a side-band stream stopped.
 pub const Error = error{

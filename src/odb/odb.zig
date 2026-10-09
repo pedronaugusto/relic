@@ -5,13 +5,13 @@
 //! object never meet and a reader never sees half of one.
 
 const ErrorNamespace = @This();
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const opening = @import("open.zig");
 const reachability = @import("bitmap/reachability.zig");
 const midx = @import("midx.zig");
 // The modules relic's API puts under this one, as `relic.odb.<name>`.
 const pack = @import("pack.zig");
-const delta = @import("../codec/delta.zig");
+const delta = @import("../codec.zig").delta;
 
 const std = @import("std");
 const policy_mod = @import("policy.zig");

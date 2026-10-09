@@ -91,7 +91,7 @@ fn loadFilters(gpa: Allocator, io: Io, _: ?*const anyopaque, repository: *repo_m
     };
 }
 fn releaseFetcher(io: Io, context: *anyopaque) void {
-    const fetch: *Fetcher = @ptrCast(@alignCast(context));
+    const fetch: *Fetcher = @ptrCast(@alignCast(context)); // safe: the callback context is the Fetcher this function was registered with
     const gpa = fetch.gpa;
     fetch.deinit(io);
     gpa.destroy(fetch);

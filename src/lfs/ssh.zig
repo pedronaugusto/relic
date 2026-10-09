@@ -30,9 +30,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const program = @import("../process/program.zig");
-const pktline = @import("../codec/pktline.zig");
-const connection = @import("../wire/connection.zig");
+const program = @import("../process.zig").program;
+const pktline = @import("../codec.zig").pktline;
+const connection = @import("../wire.zig").connection;
 
 /// Errors from the protocol.
 pub const Error = error{

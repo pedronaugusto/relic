@@ -23,7 +23,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
-const ignore = @import("../patterns/ignore.zig");
+const ignore = @import("../patterns.zig").ignore;
 const objectwalk = @import("objectwalk/filter.zig");
 
 const Oid = hash.Oid;

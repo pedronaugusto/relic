@@ -9,8 +9,8 @@ const std = @import("std");
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 
-const credential = @import("../../wire/credential.zig");
-const url_mod = @import("../../wire/url.zig");
+const credential = @import("../../wire.zig").credential;
+const url_mod = @import("../../wire.zig").url;
 const config_mod = @import("../../config/config.zig");
 const testgit = @import("../git.zig");
 

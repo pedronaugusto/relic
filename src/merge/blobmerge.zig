@@ -10,7 +10,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const parallax = @import("parallax");
-const attributes = @import("../patterns/attributes.zig");
+const attributes = @import("../patterns.zig").attributes;
 
 /// A content merge refuses data git classifies as binary.
 pub const BlobError = error{BinaryBlob} || Allocator.Error;

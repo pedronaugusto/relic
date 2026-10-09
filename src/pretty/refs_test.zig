@@ -10,7 +10,7 @@ const Io = std.Io;
 const filter = @import("refs.zig");
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
-const gitdate = @import("../text/date.zig");
+const gitdate = @import("../text.zig").date;
 const testgit = @import("../testing/git.zig");
 
 const Repository = repo_mod.Repository;

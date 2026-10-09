@@ -14,8 +14,8 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const config_mod = @import("../config/config.zig");
-const fs = @import("../fs/fs.zig");
-const diagnostic_mod = @import("../report/diagnostic.zig");
+const fs = @import("../fs.zig");
+const diagnostic_mod = @import("../report.zig").diagnostic;
 const refs = @import("../refs/value.zig");
 
 const Diagnostic = diagnostic_mod.Diagnostic;

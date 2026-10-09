@@ -10,9 +10,9 @@ const Io = std.Io;
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const uploadpack = @import("../transport/uploadpack.zig");
-const pktline = @import("../codec/pktline.zig");
+const pktline = @import("../codec.zig").pktline;
 const fetch_mod = @import("../transport/fetch.zig");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 

@@ -9,7 +9,7 @@
 
 const suite = @import("../testing/helpers.zig");
 const std = @import("std");
-const fs_mod = @import("../fs/fs.zig");
+const fs_mod = @import("../fs.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -18,7 +18,7 @@ const testgit = @import("../testing/git.zig");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const submodule = @import("submodule.zig");
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

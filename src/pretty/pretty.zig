@@ -30,7 +30,7 @@ const refs_mod = @import("../refs/refs.zig");
 const shallow = @import("../walk/shallow.zig");
 const signing = @import("../object/signing.zig");
 const trailer = @import("../object/trailer.zig");
-const ref_names = @import("../names/ref.zig");
+const ref_names = @import("../names.zig").ref;
 const mailmap_mod = @import("../revwalk/mailmap.zig");
 
 const Oid = hash.Oid;

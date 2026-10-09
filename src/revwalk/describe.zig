@@ -35,12 +35,12 @@ const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const revparse = @import("revparse.zig");
-const revwalk = @import("../walk/walk.zig");
+const revwalk = @import("../walk.zig");
 const abbrev_mod = @import("../odb/abbrev.zig");
-const glob_mod = @import("../text/glob.zig");
-const worktree = @import("../checkout/checkout.zig");
+const glob_mod = @import("../text.zig").glob;
+const worktree = @import("../checkout.zig");
 const commitgraph = @import("../odb/commitgraph.zig");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

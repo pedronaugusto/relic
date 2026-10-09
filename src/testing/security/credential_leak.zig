@@ -8,7 +8,7 @@ const std = @import("std");
 
 const transport = @import("../../transport/transport.zig");
 const config_mod = @import("../../config/config.zig");
-const warning = @import("../../report/warning.zig");
+const warning = @import("../../report.zig").warning;
 
 /// Open `url` with `transfer.credentialsInUrl` set to `value`, warning
 /// into `warnings`. No programs are granted, so an ssh URL that passes the

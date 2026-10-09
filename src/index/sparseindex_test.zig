@@ -5,7 +5,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("index.zig");
-const sparse = @import("../patterns/sparse.zig");
+const sparse = @import("../patterns.zig").sparse;
 const testgit = @import("../testing/git.zig");
 
 fn requireSparseIndexGit(gpa: Allocator, io: Io) !void {
@@ -170,7 +170,7 @@ test "patterns that are not a cone, or an unmerged entry, leave the index full" 
     try std.testing.expect(!sparseindex_mod.hasSparseDirectories(&index));
 }
 
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const repo_mod = @import("../repo/repo.zig");
 
 /// `git status --porcelain` as text, from a status: changes first, then

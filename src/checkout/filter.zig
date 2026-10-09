@@ -32,8 +32,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
-const program = @import("../process/program.zig");
-const pktline = @import("../codec/pktline.zig");
+const program = @import("../process.zig").program;
+const pktline = @import("../codec.zig").pktline;
 pub const native = @import("native.zig");
 pub const Error = Drivers.LoadError || RunCommandError || ProtocolError || Process.OpenError;
 

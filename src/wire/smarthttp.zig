@@ -45,8 +45,8 @@ const Io = std.Io;
 const http = std.http;
 
 const config_mod = @import("../config/config.zig");
-const program = @import("../process/program.zig");
-const pktline = @import("../codec/pktline.zig");
+const program = @import("../process.zig").program;
+const pktline = @import("../codec.zig").pktline;
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
 const credential = @import("credential.zig");
@@ -56,7 +56,7 @@ const policy = @import("policy.zig");
 const clientcert = @import("clientcert.zig");
 const uplink = @import("uplink");
 const tls = uplink.tls;
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 const builtin = @import("builtin");
 
 const Connection = connection.Connection;

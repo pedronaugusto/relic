@@ -13,7 +13,7 @@ const builtin = @import("builtin");
 
 const gitmodules = @import("../../config/gitmodules.zig");
 const fsck = @import("../../object/fsck.zig");
-const program = @import("../../process/program.zig");
+const program = @import("../../process.zig").program;
 const testgit = @import("../git.zig");
 
 test "CVE-2017-1000117, t5813-proto-disable-ssh 'hostnames starting with dash are rejected' and 'repo names starting with dash are rejected': ssh never sees an option a URL wrote" {

@@ -14,7 +14,7 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const glob_mod = @import("../text/glob.zig");
+const glob_mod = @import("../text.zig").glob;
 
 /// Errors from reading a pathspec.
 pub const Error = error{

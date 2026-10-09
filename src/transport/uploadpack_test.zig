@@ -16,7 +16,7 @@ const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 

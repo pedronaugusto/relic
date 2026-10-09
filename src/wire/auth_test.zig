@@ -23,7 +23,7 @@ const testing = std.testing;
 const auth = @import("auth.zig");
 const credential = @import("credential.zig");
 const fetch_mod = @import("../transport/fetch.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const repo_mod = @import("../repo/repo.zig");
 const userconfig = @import("../config/userconfig.zig");
 const testgit = @import("../testing/git.zig");
@@ -31,7 +31,7 @@ const testremote = @import("../testing/remote.zig");
 const testlfs = @import("../testing/lfs.zig");
 const object = @import("../object/object.zig");
 const url_mod = @import("url.zig");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 

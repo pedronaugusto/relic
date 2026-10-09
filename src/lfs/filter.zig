@@ -32,7 +32,7 @@ pub fn provider(options: *const Options) native.Provider {
 }
 
 fn loadDriver(gpa: Allocator, io: Io, context: ?*const anyopaque, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
-    const with: *const Options = @ptrCast(@alignCast(context.?));
+    const with: *const Options = @ptrCast(@alignCast(context.?)); // safe: the provider context is the Options passed to provider
     const backend = try gpa.create(Backend);
     errdefer gpa.destroy(backend);
     var commands: native.Commands = .{};
@@ -62,15 +62,15 @@ const Backend = struct {
     }
     fn open(gpa: Allocator, _: Io, context: *anyopaque, options: native.SessionOptions) native.Error!native.Session {
         const session = try gpa.create(Session);
-        session.* = .{ .gpa = gpa, .backend = @ptrCast(@alignCast(context)), .options = options, .arena = .init(gpa) };
+        session.* = .{ .gpa = gpa, .backend = @ptrCast(@alignCast(context)), .options = options, .arena = .init(gpa) }; // safe: the driver context is the Backend its loader created
         return .{ .context = session, .vtable = &Session.vtable };
     }
     fn retarget(context: *anyopaque, dir: Io.Dir) void {
-        const b: *Backend = @ptrCast(@alignCast(context));
+        const b: *Backend = @ptrCast(@alignCast(context)); // safe: the driver context is the Backend its loader created
         b.lfs.store = .{ .base = dir, .root = "lfs" };
     }
     fn releaseContext(_: Io, context: *anyopaque) void {
-        const b: *Backend = @ptrCast(@alignCast(context));
+        const b: *Backend = @ptrCast(@alignCast(context)); // safe: the driver context is the Backend its loader created
         const gpa = b.gpa;
         b.lfs.deinit();
         gpa.destroy(b);
@@ -89,7 +89,7 @@ const Session = struct {
     const Deferred = struct { path: []const u8, pointer: lfs.Pointer, pointer_bytes: []const u8 };
     const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = releaseContext };
     fn get(context: *anyopaque) *Session {
-        const s: *Session = @ptrCast(@alignCast(context));
+        const s: *Session = @ptrCast(@alignCast(context)); // safe: the session context is the Session open created
         return s;
     }
     fn clean(a: Allocator, io: Io, context: *anyopaque, input: native.CleanInput) native.Error![]const u8 {
@@ -111,11 +111,11 @@ const Session = struct {
         return get(context).nextDeferred(io);
     }
     fn fallbacks(context: *const anyopaque) u32 {
-        const s: *const Session = @ptrCast(@alignCast(context));
+        const s: *const Session = @ptrCast(@alignCast(context)); // safe: the session context is the Session open created
         return s.lfs_pointers;
     }
     fn releaseContext(_: Io, context: *anyopaque) void {
-        const s: *Session = @ptrCast(@alignCast(context));
+        const s: *Session = @ptrCast(@alignCast(context)); // safe: the session context is the Session open created
         const gpa = s.gpa;
         s.deferred.deinit(gpa);
         s.arena.deinit();
@@ -288,7 +288,7 @@ test "git-lfs's own commands are recognised and a person's own are not" {
 pub fn settings(drivers: *const filter.Drivers) *const lfs.Settings {
     const driver = drivers.native_driver.?;
     assert(driver.vtable == &Backend.vtable);
-    const b: *const Backend = @ptrCast(@alignCast(driver.context));
+    const b: *const Backend = @ptrCast(@alignCast(driver.context)); // safe: the driver was checked against Backend.vtable, so its context is a Backend
     return &b.lfs.settings;
 }
 

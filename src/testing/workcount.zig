@@ -9,8 +9,8 @@ const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
 const odb_state = @import("../odb/state.zig");
 const pack_mod = @import("../odb/pack.zig");
-const fs = @import("../fs/fs.zig");
-const worktree = @import("../checkout/checkout.zig");
+const fs = @import("../fs.zig");
+const worktree = @import("../checkout.zig");
 const repo_mod = @import("../repo/repo.zig");
 
 /// How many files the generated tree holds.

@@ -27,8 +27,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
-const program = @import("../process/program.zig");
-const connection = @import("../wire/connection.zig");
+const program = @import("../process.zig").program;
+const connection = @import("../wire.zig").connection;
 const lfsapi = @import("api.zig");
 
 /// Errors from an adapter's process.

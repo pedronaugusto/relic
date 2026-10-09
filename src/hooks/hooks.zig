@@ -39,7 +39,7 @@ const Child = std.process.Child;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const config_mod = @import("../config/config.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 
 const Oid = hash.Oid;
 

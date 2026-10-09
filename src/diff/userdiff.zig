@@ -9,7 +9,7 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const ere = @import("../text/ere.zig");
+const ere = @import("../text.zig").ere;
 const config_mod = @import("../config/config.zig");
 
 /// Errors from reading a driver's patterns.

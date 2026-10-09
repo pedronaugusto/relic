@@ -18,7 +18,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
-const platstat = @import("stat.zig");
+const platstat = @import("fs/stat.zig");
 const conduit = @import("conduit");
 
 /// The end-of-operation policy for selected objects and checkout.

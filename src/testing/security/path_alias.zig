@@ -8,7 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const hostile = @import("hostile.zig");
-const safepath = @import("../../names/path.zig");
+const safepath = @import("../../names.zig").path;
 const fsck = @import("../../object/fsck.zig");
 const hash = @import("../../hash/hash.zig");
 

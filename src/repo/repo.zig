@@ -8,9 +8,9 @@ const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.repo.<name>`.
 const hooks = @import("../hooks/hooks.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const safe = @import("safe.zig");
 
 const std = @import("std");
@@ -28,15 +28,15 @@ const config_mod = @import("../config/config.zig");
 const config_write = @import("../config/write.zig");
 const commit_cache = @import("cache.zig");
 const shallow = @import("../walk/shallow.zig");
-const ignore = @import("../patterns/ignore.zig");
-const attributes = @import("../patterns/attributes.zig");
-const worktree = @import("../checkout/checkout.zig");
+const ignore = @import("../patterns.zig").ignore;
+const attributes = @import("../patterns.zig").attributes;
+const worktree = @import("../checkout.zig");
 const worktrees = @import("../checkout/worktrees.zig");
 const filter = @import("../checkout/filter.zig");
 const reftablestack = @import("../refs/reftablestack.zig");
 const signing = @import("../object/signing.zig");
-const diagnostic_mod = @import("../report/diagnostic.zig");
-const repository_format = @import("../discover/format.zig");
+const diagnostic_mod = @import("../report.zig").diagnostic;
+const repository_format = @import("../discover.zig").format;
 const RepositoryFormat = repository_format.Format;
 
 const Oid = hash.Oid;
@@ -275,7 +275,7 @@ pub const Repository = struct {
     _state: *anyopaque,
 
     fn data(repo: *const Repository) *RepositoryData {
-        return @ptrCast(@alignCast(repo._state));
+        return @ptrCast(@alignCast(repo._state)); // safe: a Repository's state is the RepositoryData its open allocated
     }
 
     pub fn allocator(repo: *const Repository) Allocator {

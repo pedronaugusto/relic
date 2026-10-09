@@ -35,7 +35,7 @@ const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const revparse = @import("../revwalk/revparse.zig");
-const revwalk = @import("../walk/walk.zig");
+const revwalk = @import("../walk.zig");
 const message = @import("../object/message.zig");
 const diff = @import("../diff/diff.zig");
 const blobmerge = @import("../merge/blobmerge.zig");
@@ -1457,7 +1457,7 @@ pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
 }
 
 const testgit = @import("../testing/git.zig");
-const ref_names = @import("../names/ref.zig");
+const ref_names = @import("../names.zig").ref;
 
 const fixture_when: i64 = 1_700_000_000;
 const fixture_who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = fixture_when, .offset_minutes = 0 };

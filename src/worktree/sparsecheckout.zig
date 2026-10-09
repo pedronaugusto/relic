@@ -25,11 +25,11 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const sparse = @import("../patterns/sparse.zig");
+const sparse = @import("../patterns.zig").sparse;
 const sparseindex = @import("../index/sparseindex.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 
 const Config = config_mod.Config;
 const Repository = repo_mod.Repository;

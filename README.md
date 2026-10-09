@@ -21,6 +21,8 @@ which `zig build examples` builds and runs. CI compares the two.
 
 <!-- BEGIN GENERATED zig build docs -- usage -->
 ```zig
+const relic = @import("relic");
+
 // Create a repository. `HEAD`, `config`, `objects/` and `refs/` land on
 // the disk and git reads what is written.
 var repo = try relic.repo.Repository.create(gpa, io, dir, .{

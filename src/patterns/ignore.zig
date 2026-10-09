@@ -20,7 +20,7 @@ const Io = std.Io;
 
 const sets = @import("set.zig");
 const sweep = @import("sweep");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 
 /// Errors from loading ignore rules.
 pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
@@ -349,7 +349,7 @@ pub const Checker = struct {
 };
 
 fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level._matcher));
+    return @ptrCast(@alignCast(level._matcher)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
 }
 
 fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {

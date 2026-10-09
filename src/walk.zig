@@ -23,12 +23,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash/hash.zig");
-const object = @import("../object/object.zig");
-const odb_mod = @import("../odb/odb.zig");
-const commitgraph = @import("../odb/commitgraph.zig");
-const pathspec = @import("../patterns/pathspec.zig");
-const simplify = @import("simplify.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const odb_mod = @import("odb/odb.zig");
+const commitgraph = @import("odb/commitgraph.zig");
+const pathspec = @import("patterns.zig").pathspec;
+const simplify = @import("walk/simplify.zig");
 
 const Oid = hash.Oid;
 
@@ -792,7 +792,7 @@ test "ancestry reports a missing commit instead of a negative answer" {
     try std.testing.expectError(error.ObjectNotFound, isAncestor(gpa, io, &db, .{ .ancestor = ancestor, .descendant = missing }, .{}));
 }
 
-const testgit = @import("../testing/git.zig");
+const testgit = @import("testing/git.zig");
 
 test "first-parent walks and merge bases of many are git's" {
     const io = std.testing.io;

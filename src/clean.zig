@@ -31,13 +31,13 @@ const Io = std.Io;
 
 const repo_mod = @import("repo/repo.zig");
 const index_mod = @import("index/index.zig");
-const ignore = @import("patterns/ignore.zig");
-const pathspec_mod = @import("patterns/pathspec.zig");
-const gitlink = @import("discover/gitlink.zig");
+const ignore = @import("patterns.zig").ignore;
+const pathspec_mod = @import("patterns.zig").pathspec;
+const gitlink = @import("discover.zig").gitlink;
 const dirscan = @import("checkout/dirscan.zig");
-const cquote = @import("text/cquote.zig");
+const cquote = @import("text.zig").cquote;
 const config_core = @import("config/config.zig");
-const fs = @import("fs/fs.zig");
+const fs = @import("fs.zig");
 
 const Repository = repo_mod.Repository;
 const Index = index_mod.Index;

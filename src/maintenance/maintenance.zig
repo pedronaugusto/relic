@@ -6,13 +6,13 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const object = @import("../object/object.zig");
 const odb = @import("../odb/odb.zig");
 const graph_mod = @import("../odb/commitgraph.zig");
 const diff = @import("../diff/diff.zig");
 const Oid = hash.Oid;
-const revwalk_mod = @import("../walk/walk.zig");
+const revwalk_mod = @import("../walk.zig");
 const odb_open = @import("../odb/open.zig");
 const storage = @import("../odb/state.zig");
 

@@ -18,7 +18,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const hash = @import("../hash/hash.zig");
-const ref_names = @import("../names/ref.zig");
+const ref_names = @import("../names.zig").ref;
 
 const Oid = hash.Oid;
 

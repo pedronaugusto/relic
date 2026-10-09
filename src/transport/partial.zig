@@ -28,18 +28,18 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
-const credential = @import("../wire/credential.zig");
-const auth = @import("../wire/auth.zig");
+const credential = @import("../wire.zig").credential;
+const auth = @import("../wire.zig").auth;
 const transport = @import("transport.zig");
 const repo_mod = @import("../repo/repo.zig");
 const fsck = @import("../object/fsck.zig");
-const promisors = @import("../wire/promisors.zig");
-const warning = @import("../report/warning.zig");
+const promisors = @import("../wire.zig").promisors;
+const warning = @import("../report.zig").warning;
 const revindex = @import("../odb/revindex.zig");
-const filterspec = @import("../wire/filterspec.zig");
-const remote_mod = @import("../wire/remote.zig");
+const filterspec = @import("../wire.zig").filterspec;
+const remote_mod = @import("../wire.zig").remote;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

@@ -26,14 +26,14 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const attributes = @import("../patterns/attributes.zig");
-const fs = @import("../fs/fs.zig");
-const program = @import("../process/program.zig");
+const attributes = @import("../patterns.zig").attributes;
+const fs = @import("../fs.zig");
+const program = @import("../process.zig").program;
 const filter = @import("filter.zig");
 const native = @import("native.zig");
 const index_mod = @import("../index/index.zig");
 const odb_mod = @import("../odb/odb.zig");
-const encoding = @import("../text/encoding.zig");
+const encoding = @import("../text.zig").encoding;
 
 /// Errors from converting.
 pub const Error = error{
@@ -167,7 +167,7 @@ pub const Session = struct {
         return s.native_session.?;
     }
     fn observeMissing(context: *anyopaque, path: []const u8, object: native.Object, declined: bool) Allocator.Error!void {
-        const r: *filter.Report = @ptrCast(@alignCast(context));
+        const r: *filter.Report = @ptrCast(@alignCast(context)); // safe: the report context is the filter.Report this callback was registered with
         return r.missing(path, object, declined);
     }
     pub fn fallbackCount(s: *const Session) u32 {

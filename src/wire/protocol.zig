@@ -18,7 +18,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const pktline = @import("../codec/pktline.zig");
+const pktline = @import("../codec.zig").pktline;
 const connection = @import("connection.zig");
 
 const Oid = hash.Oid;

@@ -20,7 +20,7 @@ const parallax = @import("parallax");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
-const attributes = @import("../patterns/attributes.zig");
+const attributes = @import("../patterns.zig").attributes;
 const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;

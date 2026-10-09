@@ -12,13 +12,13 @@ const testing = std.testing;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
-const revwalk = @import("walk.zig");
+const revwalk = @import("../walk.zig");
 const clone_mod = @import("../transport/clone.zig");
 const fetch_mod = @import("../transport/fetch.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const builtin = @import("builtin");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 const push_mod = @import("../transport/push.zig");
 
 const Oid = hash.Oid;

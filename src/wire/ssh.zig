@@ -25,12 +25,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
 const auth = @import("auth.zig");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 
 const Connection = connection.Connection;
 

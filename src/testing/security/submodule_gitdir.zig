@@ -12,7 +12,7 @@ const Io = std.Io;
 
 const submodule = @import("../../submodule/submodule.zig");
 const repo_mod = @import("../../repo/repo.zig");
-const safepath = @import("../../names/path.zig");
+const safepath = @import("../../names.zig").path;
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 

@@ -29,14 +29,14 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const ref_names = @import("../names/ref.zig");
+const ref_names = @import("../names.zig").ref;
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
-const revwalk = @import("../walk/walk.zig");
-const remote_mod = @import("../wire/remote.zig");
-const ere = @import("../text/ere.zig");
-const gitdate = @import("../text/date.zig");
+const revwalk = @import("../walk.zig");
+const remote_mod = @import("../wire.zig").remote;
+const ere = @import("../text.zig").ere;
+const gitdate = @import("../text.zig").date;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

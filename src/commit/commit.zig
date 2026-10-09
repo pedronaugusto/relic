@@ -37,10 +37,10 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const index_mod = @import("../index/index.zig");
 const hooks = @import("../hooks/hooks.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -412,7 +412,7 @@ pub fn stripspace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Alloca
 
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
-const diagnostic = @import("../report/diagnostic.zig");
+const diagnostic = @import("../report.zig").diagnostic;
 
 test "a message is cleaned the way git's stripspace cleans it" {
     const gpa = testing.allocator;

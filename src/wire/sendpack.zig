@@ -20,11 +20,11 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
-const pktline = @import("../codec/pktline.zig");
+const pktline = @import("../codec.zig").pktline;
 const connection = @import("connection.zig");
 const protocol = @import("protocol.zig");
 const sideband = @import("sideband.zig");
-const progress_mod = @import("../report/progress.zig");
+const progress_mod = @import("../report.zig").progress;
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;

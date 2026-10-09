@@ -25,8 +25,8 @@ const Io = std.Io;
 
 const sets = @import("set.zig");
 const ignore = @import("ignore.zig");
-const glob_mod = @import("../text/glob.zig");
-const fs = @import("../fs/fs.zig");
+const glob_mod = @import("../text.zig").glob;
+const fs = @import("../fs.zig");
 
 /// Errors from loading sparse patterns.
 pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
@@ -375,7 +375,7 @@ fn onlyEscapedGlobs(pattern: []const u8) bool {
 }
 
 fn matcher(ptr: *anyopaque) *sets.Matcher {
-    return @ptrCast(@alignCast(ptr));
+    return @ptrCast(@alignCast(ptr)); // safe: the pointer stored in a pattern set is always a sets.Matcher
 }
 
 test "the last matching pattern decides, and nothing is in by default" {

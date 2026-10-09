@@ -8,7 +8,7 @@ const config_mod = @import("../../config/config.zig");
 const std = @import("std");
 const Io = std.Io;
 
-const policy = @import("../../wire/policy.zig");
+const policy = @import("../../wire.zig").policy;
 const transport = @import("../../transport/transport.zig");
 const object = @import("../../object/object.zig");
 const sub_transport = @import("../../submodule/transport.zig");

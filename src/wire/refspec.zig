@@ -18,7 +18,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const hash = @import("../hash/hash.zig");
-const ref_names = @import("../names/ref.zig");
+const ref_names = @import("../names.zig").ref;
 
 /// Which operation a refspec is read for. The two read the same syntax with
 /// different rules: a fetch may leave the destination out, a push may leave

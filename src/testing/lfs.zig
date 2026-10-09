@@ -24,7 +24,7 @@ const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 const http = std.http;
 
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const testgit = @import("git.zig");
 const testremote = @import("remote.zig");
 

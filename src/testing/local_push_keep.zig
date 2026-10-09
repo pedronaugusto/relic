@@ -7,7 +7,7 @@ const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const local = @import("../transport/local.zig");
 const odb_mod = @import("../odb/odb.zig");
-const sendpack = @import("../wire/sendpack.zig");
+const sendpack = @import("../wire.zig").sendpack;
 const hash = @import("../hash/hash.zig");
 
 const PausedPush = struct {

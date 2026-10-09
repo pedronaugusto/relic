@@ -15,7 +15,7 @@ const ErrorNamespace = @This();
 // The modules relic's API puts under this one, as `relic.refs.<name>`.
 const reftable = @import("reftable.zig");
 /// What a ref may be named, and the names git treats apart.
-const names = @import("../names/ref.zig");
+const names = @import("../names.zig").ref;
 const stack_engine = @import("reftablestack/transaction.zig");
 
 const std = @import("std");
@@ -25,7 +25,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const hooks = @import("../hooks/hooks.zig");
 const testgit = @import("../testing/git.zig");
 

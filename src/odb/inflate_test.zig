@@ -5,7 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const warp = @import("warp");
 const testremote = @import("../testing/remote.zig");
 

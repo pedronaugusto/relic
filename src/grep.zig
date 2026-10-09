@@ -31,10 +31,10 @@ const object = @import("object/object.zig");
 const repo_mod = @import("repo/repo.zig");
 const index_mod = @import("index/index.zig");
 const odb_mod = @import("odb/odb.zig");
-const attributes = @import("patterns/attributes.zig");
-const ere = @import("text/ere.zig");
-const pathspec_mod = @import("patterns/pathspec.zig");
-const fs = @import("fs/fs.zig");
+const attributes = @import("patterns.zig").attributes;
+const ere = @import("text.zig").ere;
+const pathspec_mod = @import("patterns.zig").pathspec;
+const fs = @import("fs.zig");
 const userdiff = @import("diff/userdiff.zig");
 
 const Oid = hash.Oid;

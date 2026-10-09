@@ -23,7 +23,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
-const httpsettings_mod = @import("../wire/httpsettings.zig");
+const httpsettings_mod = @import("../wire.zig").httpsettings;
 const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -35,29 +35,29 @@ const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
-const fetchpack = @import("../wire/fetchpack.zig");
+const fetchpack = @import("../wire.zig").fetchpack;
 const shallow_mod = @import("../walk/shallow.zig");
 const indexpack = @import("../odb/indexpack.zig");
 const revindex = @import("../odb/revindex.zig");
 const partial = @import("partial.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const filter = @import("../checkout/filter.zig");
-const url_mod = @import("../wire/url.zig");
-const program = @import("../process/program.zig");
+const url_mod = @import("../wire.zig").url;
+const program = @import("../process.zig").program;
 const transport = @import("transport.zig");
 const objectwalk = @import("../walk/objectwalk.zig");
-const protocol = @import("../wire/protocol.zig");
-const credential = @import("../wire/credential.zig");
-const auth = @import("../wire/auth.zig");
-const remote_mod = @import("../wire/remote.zig");
-const warning = @import("../report/warning.zig");
+const protocol = @import("../wire.zig").protocol;
+const credential = @import("../wire.zig").credential;
+const auth = @import("../wire.zig").auth;
+const remote_mod = @import("../wire.zig").remote;
+const warning = @import("../report.zig").warning;
 
-const progress_mod = @import("../report/progress.zig");
+const progress_mod = @import("../report.zig").progress;
 const config_mod = @import("../config/config.zig");
 const fsck = @import("../object/fsck.zig");
-const promisors = @import("../wire/promisors.zig");
+const promisors = @import("../wire.zig").promisors;
 const odb_mod = @import("../odb/odb.zig");
-const ref_names = @import("../names/ref.zig");
+const ref_names = @import("../names.zig").ref;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -300,10 +300,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     }
 
     // One branch, or one tag, when that is all that is fetched.
-    const single_tag: ?[]const u8 = if (single_branch and head.branch == null and head.detached != null and options.branch != null)
-        try arena.print("refs/tags/{s}", .{options.branch.?})
-    else
-        null;
+    const single_tag = try singleTagRef(arena, head, single_branch, options);
     try configureRemote(arena, io, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
 
     var chosen = try chooseRefs(arena, remote_refs.refs, head, single_branch, single_tag, options);
@@ -345,6 +342,15 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         if (head_commit) |commit| try checkOutCloned(arena, gpa, io, &repo, &session, commit, send_filter != null, options);
     }
     return repo;
+}
+
+/// The tag a single-branch clone fetches when the branch asked for turned
+/// out to be a tag.
+fn singleTagRef(arena: Allocator, head: Head, single_branch: bool, options: Options) Allocator.Error!?[]const u8 {
+    if (!single_branch or head.branch != null or head.detached == null) return null;
+    const name = options.branch orelse return null;
+    const tag: []const u8 = try arena.print("refs/tags/{s}", .{name});
+    return tag;
 }
 
 /// A remote helper's repository, made before the helper said where

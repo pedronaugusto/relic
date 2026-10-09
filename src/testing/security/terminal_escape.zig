@@ -5,15 +5,15 @@
 //! is what the side-band and every remote message go through; a credential
 //! prompt is percent-encoded by `transport/credential.zig`.
 
-const pktline = @import("../../codec/pktline.zig");
+const pktline = @import("../../codec.zig").pktline;
 const std = @import("std");
 const Io = std.Io;
 
-const credential = @import("../../wire/credential.zig");
-const url_mod = @import("../../wire/url.zig");
+const credential = @import("../../wire.zig").credential;
+const url_mod = @import("../../wire.zig").url;
 const config_mod = @import("../../config/config.zig");
-const sideband = @import("../../wire/sideband.zig");
-const progress = @import("../../report/progress.zig");
+const sideband = @import("../../wire.zig").sideband;
+const progress = @import("../../report.zig").progress;
 
 /// The prompts a fill showed, one after another.
 const Prompts = struct {

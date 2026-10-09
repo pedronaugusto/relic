@@ -22,7 +22,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
-const attributes = @import("../patterns/attributes.zig");
+const attributes = @import("../patterns.zig").attributes;
 const blobmerge = @import("blobmerge.zig");
 
 const Oid = hash.Oid;

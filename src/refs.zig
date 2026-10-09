@@ -2,7 +2,7 @@
 
 pub const reftablestack = @import("refs/reftablestack.zig");
 pub const reftable = @import("refs/reftable.zig");
-pub const names = @import("names/ref.zig");
+pub const names = @import("names.zig").ref;
 pub const packed_header = @import("refs/refs.zig").packed_header;
 pub const max_symbolic_depth = @import("refs/refs.zig").max_symbolic_depth;
 pub const ReadError = @import("refs/refs.zig").ReadError;

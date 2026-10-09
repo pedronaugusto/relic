@@ -20,13 +20,13 @@ const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const merging = @import("../commit/merging.zig");
 const rerere = @import("../merge/rerere.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const threeway = @import("../merge/threeway.zig");
 const ort = @import("../merge/ort.zig");
 const signing = @import("../object/signing.zig");
-const program = @import("../process/program.zig");
-const fs = @import("../fs/fs.zig");
-const ref_names = @import("../names/ref.zig");
+const program = @import("../process.zig").program;
+const fs = @import("../fs.zig");
+const ref_names = @import("../names.zig").ref;
 
 const Oid = hash.Oid;
 

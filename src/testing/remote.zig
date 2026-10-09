@@ -15,7 +15,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const testgit = @import("git.zig");
 const uplink = @import("uplink");
 

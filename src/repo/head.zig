@@ -22,7 +22,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("repo.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

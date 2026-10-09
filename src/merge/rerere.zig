@@ -27,7 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
-const path_mod = @import("../names/path.zig");
+const path_mod = @import("../names.zig").path;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -36,13 +36,13 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const index_mod = @import("../index/index.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout/checkout.zig");
-const attributes = @import("../patterns/attributes.zig");
+const worktree = @import("../checkout.zig");
+const attributes = @import("../patterns.zig").attributes;
 const blobmerge = @import("blobmerge.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const head_mod = @import("../repo/head.zig");
 const diff_mod = @import("../diff/diff.zig");
-const pathspec_mod = @import("../patterns/pathspec.zig");
+const pathspec_mod = @import("../patterns.zig").pathspec;
 const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;

@@ -5,7 +5,7 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
-const ewah = @import("../codec/ewah.zig");
+const ewah = @import("../codec.zig").ewah;
 const format = @import("accelerators/chunks.zig");
 const Oid = hash.Oid;
 

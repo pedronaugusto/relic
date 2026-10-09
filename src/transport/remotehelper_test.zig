@@ -20,7 +20,7 @@ const push_mod = @import("push.zig");
 const transport = @import("transport.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 
 const Repository = repo_mod.Repository;
 

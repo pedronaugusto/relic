@@ -4,7 +4,7 @@
 const builtin = @import("builtin");
 const config_mod = @import("../config/config.zig");
 const std = @import("std");
-const fs_mod = @import("../fs/fs.zig");
+const fs_mod = @import("../fs.zig");
 const shakedown = @import("shakedown");
 const Io = std.Io;
 
@@ -17,7 +17,7 @@ const refs_state = @import("../refs/state.zig");
 const reftablestack = @import("../refs/reftablestack.zig");
 const signing = @import("../object/signing.zig");
 const repo_mod = @import("repo.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const worktrees = @import("../checkout/worktrees.zig");
 const Oid = hash.Oid;
 

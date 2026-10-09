@@ -3,7 +3,7 @@
 const Self = @This();
 const std = @import("std");
 const config = @import("../config/config.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 

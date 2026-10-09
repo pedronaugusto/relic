@@ -23,7 +23,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const delta = @import("../codec/delta.zig");
+const delta = @import("../codec.zig").delta;
 const warp = @import("warp");
 
 /// Which kind a hunk is.

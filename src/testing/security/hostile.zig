@@ -4,7 +4,7 @@
 //! still reach relic the way a crafted history delivers it.
 
 const std = @import("std");
-const path_mod = @import("../../names/path.zig");
+const path_mod = @import("../../names.zig").path;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -12,9 +12,9 @@ const testgit = @import("../git.zig");
 const hash = @import("../../hash/hash.zig");
 const odb_mod = @import("../../odb/odb.zig");
 const index_mod = @import("../../index/index.zig");
-const worktree = @import("../../checkout/checkout.zig");
-const ignore = @import("../../patterns/ignore.zig");
-const attributes = @import("../../patterns/attributes.zig");
+const worktree = @import("../../checkout.zig");
+const ignore = @import("../../patterns.zig").ignore;
+const attributes = @import("../../patterns.zig").attributes;
 const repo_mod = @import("../../repo/repo.zig");
 const submodule = @import("../../submodule/submodule.zig");
 

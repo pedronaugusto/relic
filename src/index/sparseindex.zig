@@ -27,8 +27,8 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("index.zig");
-const sparse = @import("../patterns/sparse.zig");
-const fs = @import("../fs/fs.zig");
+const sparse = @import("../patterns.zig").sparse;
+const fs = @import("../fs.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;

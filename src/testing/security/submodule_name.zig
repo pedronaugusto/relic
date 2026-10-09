@@ -7,7 +7,7 @@
 //! `.gitmodules` that is a symbolic link.
 
 const std = @import("std");
-const path_mod = @import("../../names/path.zig");
+const path_mod = @import("../../names.zig").path;
 const Io = std.Io;
 
 const gitmodules = @import("../../config/gitmodules.zig");

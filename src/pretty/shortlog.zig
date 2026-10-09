@@ -30,7 +30,7 @@ const odb_mod = @import("../odb/odb.zig");
 const message = @import("../object/message.zig");
 const trailer = @import("../object/trailer.zig");
 const mailmap_mod = @import("../revwalk/mailmap.zig");
-const unicodewidth = @import("../text/unicodewidth.zig");
+const unicodewidth = @import("../text.zig").unicodewidth;
 const config_mod = @import("../config/config.zig");
 const pretty = @import("pretty.zig");
 
@@ -473,7 +473,7 @@ test "a subject folds where git's -w folds it" {
 
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
-const revwalk = @import("../walk/walk.zig");
+const revwalk = @import("../walk.zig");
 
 fn commitAs(io: Io, r: *testgit.Repo, author: []const u8, committer: []const u8, msg: []const u8) !void {
     const lt = std.mem.findScalar(u8, committer, '<').?;

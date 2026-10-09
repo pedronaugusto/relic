@@ -7,7 +7,7 @@ const Io = std.Io;
 
 const testgit = @import("git.zig");
 const ft = @import("../checkout/filter_test.zig");
-const encoding = @import("../text/encoding.zig");
+const encoding = @import("../text.zig").encoding;
 
 const testing = std.testing;
 

@@ -7,7 +7,7 @@
 //! operations above those modules, which the modules themselves do not
 //! import.
 
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 const std = @import("std");
 const suite = @import("../testing/helpers.zig");
 const Allocator = std.mem.Allocator;
@@ -15,7 +15,7 @@ const Io = std.Io;
 const testing = std.testing;
 
 const config_mod = @import("../config/config.zig");
-const credential = @import("../wire/credential.zig");
+const credential = @import("../wire.zig").credential;
 const repo_mod = @import("../repo/repo.zig");
 const fetch_mod = @import("fetch.zig");
 const clone_mod = @import("clone.zig");
@@ -25,7 +25,7 @@ const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const testlfs = @import("../testing/lfs.zig");
 const object = @import("../object/object.zig");
-const progress_mod = @import("../report/progress.zig");
+const progress_mod = @import("../report.zig").progress;
 const builtin = @import("builtin");
 const push_mod = @import("push.zig");
 
@@ -1188,7 +1188,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     // the stand-in is a shell script; Windows has no /bin/sh to run it
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
-    const Child = @import("../process/program.zig").Child;
+    const Child = @import("../process.zig").program.Child;
     const Controlled = struct {
         const Self = @This();
         threadlocal var active: ?*Self = null;

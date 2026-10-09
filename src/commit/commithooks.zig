@@ -22,7 +22,7 @@ const Io = std.Io;
 const object = @import("../object/object.zig");
 const hooks = @import("../hooks/hooks.zig");
 const repo_mod = @import("../repo/repo.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 const builtin = @import("builtin");
 
 const Repository = repo_mod.Repository;

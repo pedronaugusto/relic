@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const refs = @import("refs.zig");
-const names = @import("../names/ref.zig");
+const names = @import("../names.zig").ref;
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
 const revparse = @import("../revwalk/revparse.zig");

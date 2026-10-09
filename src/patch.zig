@@ -1,7 +1,7 @@
 //! Public patch namespace. Implementation is in `patch/patch.zig`.
 
 pub const am = @import("patch/am.zig");
-pub const mail = @import("mail/mail.zig");
+pub const mail = @import("mail.zig");
 pub const format = @import("patch/format.zig");
 pub const apply = @import("patch/apply.zig");
 pub const rangediff = @import("patch/rangediff.zig");

@@ -19,7 +19,7 @@ pub const Child = struct {
     pub const Error = SpawnError || WaitError || KillWaitError || OutputError || ExchangeError;
 
     fn native(child: Child) Native {
-        return .{ .state = @ptrCast(@alignCast(child._state)) };
+        return .{ .state = @ptrCast(@alignCast(child._state)) }; // safe: a Child's state is the Native state its spawn allocated
     }
 
     pub fn spawn(gpa: Allocator, io: Io, options: SpawnOptions) SpawnError!Child {

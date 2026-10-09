@@ -23,13 +23,13 @@ const abbrev = @import("../odb/abbrev.zig");
 const repo_mod = @import("../repo/repo.zig");
 const diff = @import("../diff/diff.zig");
 const parallax = @import("parallax");
-const revwalk = @import("../walk/walk.zig");
+const revwalk = @import("../walk.zig");
 const pretty = @import("../pretty/pretty.zig");
 const notes_mod = @import("../commit/notes.zig");
 const mailmap_mod = @import("../revwalk/mailmap.zig");
-const attributes = @import("../patterns/attributes.zig");
-const cquote = @import("../text/cquote.zig");
-const unicodewidth = @import("../text/unicodewidth.zig");
+const attributes = @import("../patterns.zig").attributes;
+const cquote = @import("../text.zig").cquote;
+const unicodewidth = @import("../text.zig").unicodewidth;
 const formatpatch = @import("format.zig");
 
 const Oid = hash.Oid;

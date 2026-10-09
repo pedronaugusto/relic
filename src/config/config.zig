@@ -20,8 +20,8 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const fs = @import("../fs/fs.zig");
-const glob_mod = @import("../text/glob.zig");
+const fs = @import("../fs.zig");
+const glob_mod = @import("../text.zig").glob;
 
 /// Errors from reading a configuration file.
 pub const ParseError = error{
@@ -2774,18 +2774,18 @@ test "phase2 extraction long includeIf patterns expand without a fixed buffer" {
     const name = try gpa.alloc(u8, 4200);
     defer gpa.free(name);
     @memset(name, 'a');
-    const directory = try std.fmt.allocPrint(gpa, "/home/{s}/repo/.git", .{name});
+    const directory = try gpa.print("/home/{s}/repo/.git", .{name});
     defer gpa.free(directory);
     var config = Config.initEmpty(gpa);
     defer config.deinit();
     try config.keepContext(.{ .git_dir = directory, .home = "/home", .branch = directory });
-    const home_pattern = try std.fmt.allocPrint(gpa, "gitdir:~/{s}/", .{name});
+    const home_pattern = try gpa.print("gitdir:~/{s}/", .{name});
     defer gpa.free(home_pattern);
     try std.testing.expect(try config.conditionHolds(home_pattern));
-    const relative = try std.fmt.allocPrint(gpa, "gitdir:./{s}/", .{name});
+    const relative = try gpa.print("gitdir:./{s}/", .{name});
     defer gpa.free(relative);
     try std.testing.expect(try config.conditionHoldsFrom(relative, "/home"));
-    const branch = try std.fmt.allocPrint(gpa, "onbranch:/home/{s}/", .{name});
+    const branch = try gpa.print("onbranch:/home/{s}/", .{name});
     defer gpa.free(branch);
     try std.testing.expect(try config.conditionHolds(branch));
 }

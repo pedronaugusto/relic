@@ -18,10 +18,10 @@ const Io = std.Io;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
-const program = @import("../process/program.zig");
-const warning = @import("../report/warning.zig");
-const pktline = @import("../codec/pktline.zig");
-const progress = @import("../report/progress.zig");
+const program = @import("../process.zig").program;
+const warning = @import("../report.zig").warning;
+const pktline = @import("../codec.zig").pktline;
+const progress = @import("../report.zig").progress;
 
 /// Which service is asked for.
 pub const Service = enum {

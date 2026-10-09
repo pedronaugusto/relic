@@ -19,15 +19,15 @@ const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const odb_mod = @import("../odb/odb.zig");
 const pack = @import("../odb/pack.zig");
-const protocol = @import("../wire/protocol.zig");
+const protocol = @import("../wire.zig").protocol;
 const objectwalk = @import("../walk/objectwalk.zig");
-const url_mod = @import("../wire/url.zig");
+const url_mod = @import("../wire.zig").url;
 const object = @import("../object/object.zig");
-const revwalk = @import("../walk/walk.zig");
+const revwalk = @import("../walk.zig");
 const shallow_mod = @import("../walk/shallow.zig");
-const ref_names = @import("../names/ref.zig");
-const sendpack = @import("../wire/sendpack.zig");
-const hidden_refs = @import("../wire/hidden.zig");
+const ref_names = @import("../names.zig").ref;
+const sendpack = @import("../wire.zig").sendpack;
+const hidden_refs = @import("../wire.zig").hidden;
 const builtin = @import("builtin");
 const revindex = @import("../odb/revindex.zig");
 const config_mod = @import("../config/config.zig");
@@ -353,9 +353,23 @@ pub const Remote = struct {
             try refs.append(arena, .{ .name = name, .ok = reason == null, .message = reason });
         }
 
+        try r.commitCommands(io, commands, refs.items, refused, options);
+        if (new_roots.count() != 0) {
+            var it = new_roots.keyIterator();
+            while (it.next()) |root| try r.repo.objectDatabase().shallow.put(r.repo.allocator(), root.*, {});
+            try shallow_mod.write(gpa, io, r.repo.commonDirectory(), &r.repo.objectDatabase().shallow);
+        }
+        report.refs = refs.items;
+        return report;
+    }
+
+    /// Write the commands that were accepted: all of them in one transaction
+    /// when the push is atomic (and none if any was refused), otherwise each
+    /// in a transaction of its own. What fails is reported against its ref.
+    fn commitCommands(r: *Remote, io: Io, commands: []const sendpack.Command, refs: []sendpack.RefReport, refused: bool, options: ReceiveOptions) ReceivePushError!void {
         if (options.atomic) {
             if (refused) {
-                for (refs.items) |*ref| {
+                for (refs) |*ref| {
                     if (ref.ok) {
                         ref.ok = false;
                         ref.message = "atomic transaction failed";
@@ -367,14 +381,14 @@ pub const Remote = struct {
                 for (commands) |command| try stage(&tx, command);
                 if (tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() })) |_| {} else |err| {
                     if (err == error.Canceled) return error.Canceled;
-                    for (refs.items) |*ref| {
+                    for (refs) |*ref| {
                         ref.ok = false;
                         ref.message = "failed to update ref";
                     }
                 }
             }
         } else {
-            for (commands, refs.items) |command, *ref| {
+            for (commands, refs) |command, *ref| {
                 if (!ref.ok) continue;
                 var tx = r.repo.beginRefs();
                 defer tx.deinit(io);
@@ -386,13 +400,6 @@ pub const Remote = struct {
                 };
             }
         }
-        if (new_roots.count() != 0) {
-            var it = new_roots.keyIterator();
-            while (it.next()) |root| try r.repo.objectDatabase().shallow.put(r.repo.allocator(), root.*, {});
-            try shallow_mod.write(gpa, io, r.repo.commonDirectory(), &r.repo.objectDatabase().shallow);
-        }
-        report.refs = refs.items;
-        return report;
     }
 
     fn hiddenPushReason(r: *Remote, io: Io, command: sendpack.Command) ErrorNamespace.Error![]const u8 {

@@ -17,7 +17,7 @@ const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const attributes = @import("../patterns/attributes.zig");
+const attributes = @import("../patterns.zig").attributes;
 
 /// A perfect score: the whole of the larger blob is shared.
 pub const max_score: u32 = 60000;

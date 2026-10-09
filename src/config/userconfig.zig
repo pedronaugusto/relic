@@ -29,7 +29,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Environ = std.process.Environ;
 
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const config_mod = @import("config.zig");
 
 /// Errors from finding the configuration.

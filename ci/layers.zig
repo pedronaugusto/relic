@@ -2,26 +2,26 @@
 const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
-    .{ .name = "text", .patterns = &.{"src/text/**"} },
-    .{ .name = "codec", .patterns = &.{"src/codec/**"} },
+    .{ .name = "text", .patterns = &.{ "src/text/**", "src/text.zig" } },
+    .{ .name = "codec", .patterns = &.{ "src/codec/**", "src/codec.zig" } },
     .{ .name = "hash", .patterns = &.{"src/hash/**"} },
-    .{ .name = "report", .patterns = &.{"src/report/**"} },
-    .{ .name = "mail", .patterns = &.{"src/mail/**"} },
-    .{ .name = "process", .patterns = &.{"src/process/**"} },
-    .{ .name = "fs", .patterns = &.{"src/fs/**"} },
-    .{ .name = "names", .patterns = &.{"src/names/**"} },
+    .{ .name = "report", .patterns = &.{ "src/report/**", "src/report.zig" } },
+    .{ .name = "mail", .patterns = &.{ "src/mail/**", "src/mail.zig" } },
+    .{ .name = "process", .patterns = &.{ "src/process/**", "src/process.zig" } },
+    .{ .name = "fs", .patterns = &.{ "src/fs/**", "src/fs.zig" } },
+    .{ .name = "names", .patterns = &.{ "src/names/**", "src/names.zig" } },
     .{ .name = "config", .patterns = &.{"src/config/**"} },
-    .{ .name = "patterns", .patterns = &.{"src/patterns/**"} },
+    .{ .name = "patterns", .patterns = &.{ "src/patterns/**", "src/patterns.zig" } },
     .{ .name = "object", .patterns = &.{"src/object/**"} },
     .{ .name = "hooks", .patterns = &.{"src/hooks/**"} },
     .{ .name = "odb", .patterns = &.{"src/odb/**"} },
     .{ .name = "refs", .patterns = &.{"src/refs/**"} },
     .{ .name = "index", .patterns = &.{"src/index/**"} },
-    .{ .name = "discover", .patterns = &.{"src/discover/**"} },
-    .{ .name = "checkout", .patterns = &.{"src/checkout/**"} },
-    .{ .name = "walk", .patterns = &.{"src/walk/**"} },
+    .{ .name = "discover", .patterns = &.{ "src/discover/**", "src/discover.zig" } },
+    .{ .name = "checkout", .patterns = &.{ "src/checkout/**", "src/checkout.zig" } },
+    .{ .name = "walk", .patterns = &.{ "src/walk/**", "src/walk.zig" } },
     .{ .name = "diff", .patterns = &.{"src/diff/**"} },
-    .{ .name = "wire", .patterns = &.{"src/wire/**"} },
+    .{ .name = "wire", .patterns = &.{ "src/wire/**", "src/wire.zig" } },
     .{ .name = "repo", .patterns = &.{"src/repo/**"} },
     .{ .name = "merge", .patterns = &.{"src/merge/**"} },
     .{ .name = "maintenance", .patterns = &.{"src/maintenance/**"} },
@@ -74,7 +74,7 @@ const tests = [_][]const u8{ "src/testing/**", "src/**/*_test.zig" };
 pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "process owner", .tokens = &.{ "waitpid", "wait4", "execve", "posix_spawn", "setsid", "CreateProcessW" } },
     // the ssh stand-in is another program, holding its handles as ssh does
-    .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/fs/fs.zig", "src/testing/fake_ssh.zig" } },
+    .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/fs.zig", "src/testing/fake_ssh.zig" } },
     // what a ref may be named is decided once, in `names/ref.zig`
     .{ .name = "one ref-name rule", .tokens = &.{ "checkRefFormat", "checkRefName", "isValidRefName", "isPseudoRef" } },
     // the root and special refs are spelled once, and reached through the

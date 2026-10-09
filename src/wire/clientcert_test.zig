@@ -12,7 +12,7 @@ const Io = std.Io;
 const Environ = std.process.Environ;
 const testing = std.testing;
 
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const uplink = @import("uplink");
 const tls = uplink.tls;
 const testgit = @import("../testing/git.zig");

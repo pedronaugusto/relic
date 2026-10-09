@@ -31,8 +31,8 @@
 //! smudged without it.
 
 const ErrorNamespace = @This();
-const glob_mod = @import("../text/glob.zig");
-const fs = @import("../fs/fs.zig");
+const glob_mod = @import("../text.zig").glob;
+const fs = @import("../fs.zig");
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.lfs.<name>`.

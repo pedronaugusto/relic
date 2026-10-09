@@ -11,8 +11,8 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
-const ignore_mod = @import("../patterns/ignore.zig");
-const attributes_mod = @import("../patterns/attributes.zig");
+const ignore_mod = @import("../patterns.zig").ignore;
+const attributes_mod = @import("../patterns.zig").attributes;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const hash = @import("../hash/hash.zig");
@@ -21,11 +21,11 @@ const odb = @import("../odb/odb.zig");
 const index = @import("../index/index.zig");
 const sparseindex = @import("../index/sparseindex.zig");
 const repo = @import("../repo/repo.zig");
-const worktree = @import("../checkout/checkout.zig");
+const worktree = @import("../checkout.zig");
 const diff_mod = @import("../diff/diff.zig");
 const filter = @import("../checkout/filter.zig");
-const program = @import("../process/program.zig");
-const fs = @import("../fs/fs.zig");
+const program = @import("../process.zig").program;
+const fs = @import("../fs.zig");
 const opening = @import("../odb/open.zig");
 
 pub const Error = worktree.Error || repo.Error || repo.Repository.LoadFiltersError ||

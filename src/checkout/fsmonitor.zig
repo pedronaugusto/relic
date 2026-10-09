@@ -24,7 +24,7 @@ const Io = std.Io;
 
 const index_mod = @import("../index/index.zig");
 const hash = @import("../hash/hash.zig");
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
 
 const Index = index_mod.Index;

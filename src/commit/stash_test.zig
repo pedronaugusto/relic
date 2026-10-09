@@ -8,7 +8,7 @@
 //! the files themselves — is compared with what git left in the other twin.
 
 const std = @import("std");
-const ref_mod = @import("../names/ref.zig");
+const ref_mod = @import("../names.zig").ref;
 const filter_mod = @import("../lfs/filter.zig");
 const suite = @import("../testing/helpers.zig");
 const Allocator = std.mem.Allocator;
@@ -19,7 +19,7 @@ const testgit = @import("../testing/git.zig");
 const stash = @import("stash.zig");
 const object = @import("../object/object.zig");
 const Repository = @import("../repo/repo.zig").Repository;
-const program = @import("../process/program.zig");
+const program = @import("../process.zig").program;
 
 const who: object.Signature = .{
     .name = "Fixture",

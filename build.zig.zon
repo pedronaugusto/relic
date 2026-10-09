@@ -42,10 +42,6 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "ci",
-        "examples",
-        "docs/design.md",
-        ".github",
         "src",
         "CHANGELOG.md",
         "LICENSE",

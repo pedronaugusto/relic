@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const repo_mod = @import("../repo/repo.zig");
-const path_mod = @import("../names/path.zig");
+const path_mod = @import("../names.zig").path;
 const shakedown = @import("shakedown");
 const testbytes = @import("../testing/bytes.zig");
 const builtin = @import("builtin");
@@ -14,12 +14,12 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
-const worktree = @import("checkout.zig");
-const ignore = @import("../patterns/ignore.zig");
-const attributes = @import("../patterns/attributes.zig");
-const fs = @import("../fs/fs.zig");
-const sparse = @import("../patterns/sparse.zig");
-const pathspec = @import("../patterns/pathspec.zig");
+const worktree = @import("../checkout.zig");
+const ignore = @import("../patterns.zig").ignore;
+const attributes = @import("../patterns.zig").attributes;
+const fs = @import("../fs.zig");
+const sparse = @import("../patterns.zig").sparse;
+const pathspec = @import("../patterns.zig").pathspec;
 
 const Oid = hash.Oid;
 

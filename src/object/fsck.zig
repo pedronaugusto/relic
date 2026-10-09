@@ -32,9 +32,9 @@ const hash = @import("../hash/hash.zig");
 const object = @import("object.zig");
 const config_mod = @import("../config/config.zig");
 const gitmodules = @import("../config/gitmodules.zig");
-const safepath = @import("../names/path.zig");
-const ref_names = @import("../names/ref.zig");
-const warning = @import("../report/warning.zig");
+const safepath = @import("../names.zig").path;
+const ref_names = @import("../names.zig").ref;
+const warning = @import("../report.zig").warning;
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;

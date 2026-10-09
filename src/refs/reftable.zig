@@ -31,7 +31,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const varint = @import("../codec/varint.zig");
+const varint = @import("../codec.zig").varint;
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;

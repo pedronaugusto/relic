@@ -16,7 +16,7 @@ const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.index.<name>`.
 
-const ewah = @import("../codec/ewah.zig");
+const ewah = @import("../codec.zig").ewah;
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -25,9 +25,9 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const fs = @import("../fs/fs.zig");
-const safepath = @import("../names/path.zig");
-const varint = @import("../codec/varint.zig");
+const fs = @import("../fs.zig");
+const safepath = @import("../names.zig").path;
+const varint = @import("../codec.zig").varint;
 const odb_mod = @import("../odb/odb.zig");
 const testgit = @import("../testing/git.zig");
 

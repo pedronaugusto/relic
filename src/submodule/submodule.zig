@@ -32,7 +32,7 @@ const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.submodule.<name>`.
 const gitmodules = @import("../config/gitmodules.zig");
-const gitlink = @import("../discover/gitlink.zig");
+const gitlink = @import("../discover.zig").gitlink;
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -42,15 +42,15 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const fs = @import("../fs/fs.zig");
-const safepath = @import("../names/path.zig");
+const fs = @import("../fs.zig");
+const safepath = @import("../names.zig").path;
 const index_mod = @import("../index/index.zig");
 const config_mod = @import("../config/config.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout/checkout.zig");
-const program = @import("../process/program.zig");
-const pathspec_mod = @import("../patterns/pathspec.zig");
+const worktree = @import("../checkout.zig");
+const program = @import("../process.zig").program;
+const pathspec_mod = @import("../patterns.zig").pathspec;
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;

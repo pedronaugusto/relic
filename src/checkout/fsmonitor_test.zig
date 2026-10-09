@@ -9,10 +9,10 @@ const Allocator = std.mem.Allocator;
 
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("checkout.zig");
+const worktree = @import("../checkout.zig");
 const index_mod = @import("../index/index.zig");
 const fsmonitor = @import("fsmonitor.zig");
-const fs = @import("../fs/fs.zig");
+const fs = @import("../fs.zig");
 
 /// testgit's settings without its `core.fsmonitor=`, so the repository's
 /// own decides.

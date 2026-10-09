@@ -21,7 +21,7 @@ const Allocator = std.mem.Allocator;
 
 const config_mod = @import("../config/config.zig");
 const filterspec = @import("filterspec.zig");
-const warning = @import("../report/warning.zig");
+const warning = @import("../report.zig").warning;
 
 /// A field beyond the name and URL.
 pub const Field = enum {
