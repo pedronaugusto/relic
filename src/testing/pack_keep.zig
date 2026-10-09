@@ -109,8 +109,9 @@ test "received pack retention and rollback survive a ref commit fault" {
             defer tx.deinit(fault_io);
             try tx.create("refs/heads/faulted", .{ .direct = try Oid.parse(.sha1, head) });
             try tx.prepare(fault_io);
-            try fault.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirRename, .n = 1 } }, .fault = .{ .fail = error.AccessDenied } }});
-            try testing.expectError(error.AccessDenied, tx.commit(fault_io, null));
+            // A fault Windows' replace-retry does not absorb.
+            try fault.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirRename, .n = 1 } }, .fault = .{ .fail = error.NoSpaceLeft } }});
+            try testing.expectError(error.NoSpaceLeft, tx.commit(fault_io, null));
             try testing.expectEqual(@as(usize, 1), fault.fired().len);
             try target.dir.access(io, marker, .{});
         }

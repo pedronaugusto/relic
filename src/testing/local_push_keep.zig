@@ -108,7 +108,7 @@ test "local push retains its pack through collection failure and cancellation" {
                     if (outcome == .cancellation) {
                         try testing.expectError(error.Canceled, publication.cancel(io));
                     } else {
-                        if (outcome == .failure) try fault.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirCreateFile, .n = 1, .path = .{ .suffix = layer.state.lock_path } } }, .fault = .{ .fail = error.AccessDenied } }});
+                        if (outcome == .failure) try fault.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirCreateFile, .n = 1, .path = .{ .suffix = layer.state.lock_path } } }, .fault = .{ .fail = error.NoSpaceLeft } }});
                         layer.state.release.set(io);
                         try publication.await(io);
                         try testing.expectEqual(outcome == .success, layer.state.accepted);
