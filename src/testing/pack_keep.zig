@@ -35,7 +35,8 @@ test "received pack survives prune before references are published" {
             defer dir.close(io);
             var reader: Io.Reader = .fixed(bytes);
             var received = try repo.objectDatabase().receivePack(io, &reader, .{});
-            defer received.deinit(io);
+            var released = false;
+            defer if (!released) received.deinit(io);
             var hex: [hash.max_hex_len]u8 = undefined;
             const marker = try gpa.print("pack-{s}.keep", .{received.name.?.hex(&hex)});
             defer gpa.free(marker);
@@ -66,6 +67,7 @@ test "received pack survives prune before references are published" {
             try target.exec(io, &.{ "cat-file", "-e", head });
             try tx.commit(io, null);
             received.deinit(io);
+            released = true;
             try testing.expectError(error.FileNotFound, dir.access(io, marker, .{}));
             try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
         }
@@ -97,7 +99,8 @@ test "received pack retention and rollback survive a ref commit fault" {
         defer repo.deinit(fault_io);
         var reader: Io.Reader = .fixed(bytes);
         var received = try repo.objectDatabase().receivePack(fault_io, &reader, .{});
-        defer received.deinit(fault_io);
+        var released = false;
+        defer if (!released) received.deinit(fault_io);
         var hex: [hash.max_hex_len]u8 = undefined;
         const marker = try gpa.print("objects/pack/pack-{s}.keep", .{received.name.?.hex(&hex)});
         defer gpa.free(marker);
@@ -113,6 +116,7 @@ test "received pack retention and rollback survive a ref commit fault" {
         }
         try testing.expect((try repo.refStore().readOid(gpa, io, "refs/heads/faulted")) == null);
         received.deinit(fault_io);
+        released = true;
         try testing.expectError(error.FileNotFound, target.dir.access(io, marker, .{}));
         try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
     }
@@ -212,7 +216,8 @@ test "local receive owns a keep token with default receive options" {
             defer pack_dir.close(io);
             const oid = try Oid.parse(repository.objectFormat(), head);
             var fetched = try session.fetch(gpa, io, .{ .db = repository.objectDatabase(), .pack_dir = pack_dir, .request = .{ .wants = &.{oid}, .tips = &.{} } }, .{});
-            defer fetched.deinit(io);
+            var released = false;
+            defer if (!released) fetched.deinit(io);
             try testing.expect(fetched.keep != null);
             var hex: [hash.max_hex_len]u8 = undefined;
             const marker = try gpa.print("pack-{s}.keep", .{fetched.pack.?.hex(&hex)});
@@ -227,6 +232,7 @@ test "local receive owns a keep token with default receive options" {
             try target.exec(io, &.{ "cat-file", "-e", head });
             try tx.commit(io, null);
             fetched.deinit(io);
+            released = true;
             try testing.expectError(error.FileNotFound, pack_dir.access(io, marker, .{}));
             try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
         }
