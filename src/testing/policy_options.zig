@@ -24,3 +24,11 @@ test "phase2 conversion handles use open and explicit cleanup Io" {
     try std.testing.expect(!@hasDecl(Session, "init"));
     try std.testing.expectEqual(@as(usize, 2), @typeInfo(@TypeOf(Session.deinit)).@"fn".param_types.len);
 }
+
+test "phase2 conversion operations receive Io per call" {
+    const Session = relic.worktree.convert.Session;
+    try std.testing.expect(!@hasField(Session, "io"));
+    inline for (.{ Session.toGit, Session.toGitFile, Session.toWorktree, Session.renormalize, Session.nextReady }) |operation| {
+        try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types[2].? == std.Io);
+    }
+}
