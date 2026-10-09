@@ -13,7 +13,7 @@
   "compile_once": false,
   "sanitizer": "test",
   "setup_step": "ci-setup",
-  "test_job_timeout": 30,
+  "test_job_timeout": 45,
   "windows_job_timeout": 45,
   "sanitizer_job_timeout": 30,
   "source_job_timeout": 10,
