@@ -1,7 +1,7 @@
 //! `refs.filter` against `git for-each-ref`, `git branch --list` and `git
 //! tag --list`: the same repository, the same arguments, the same bytes.
 
-const testbytes = @import("../testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -495,7 +495,7 @@ test "patterns, exclusions and reachability choose refs as git chooses them" {
         &.{"refs/remo**/main"},
         &.{"refs/heads/[f]*"},
         &.{"refs/*/f?x*"},
-        &.{"refs/heads/" ++ testbytes.repeat("*", 1100)},
+        &.{"refs/heads/" ++ repeat("*", 1100)},
         &.{ "--ignore-case", "refs/tags/[U]pper" },
         &.{ "--ignore-case", "refs/tags/upper" },
         &.{"--points-at=main"},

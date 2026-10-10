@@ -38,7 +38,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.lfs.<name>`.
 
 const std = @import("std");
-const testbytes = @import("../testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -697,7 +697,7 @@ test "settings that outgrow the arena's first block are all freed with it" {
     // arena's state did not hold when it was taken before them.
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const many = testbytes.repeat("p,", 3000) ++ "p";
+    const many = repeat("p,", 3000) ++ "p";
     var config = try config_mod.Config.parseText(gpa, "[lfs]\n" ++
         "\tfetchinclude = " ++ many ++ "\n" ++
         "\tfetchexclude = " ++ many ++ "\n", .local);
@@ -868,7 +868,7 @@ test "fetch patterns name a path, a directory above it, or a component anywhere"
 test "a fetch pattern longer than a kilobyte names what it names" {
     // git-lfs reads a pattern of any length; one past the buffer the old
     // matcher copied it into named nothing at all.
-    const long = testbytes.repeat("d", 1500);
+    const long = repeat("d", 1500);
     try testing.expect(try fetchPatternMatches(long, "art/" ++ long ++ "/x.bin", false));
     try testing.expect(try fetchPatternMatches("/" ++ long, long ++ "/x.bin", false));
     try testing.expect(!try fetchPatternMatches(long, "art/" ++ long ++ "e/x.bin", false));
