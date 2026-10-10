@@ -526,8 +526,9 @@ pub const OnContention = union(enum) {
     fail,
     /// Retry with a quadratic backoff starting at one millisecond and capped
     /// at a thousandfold, each wait spread a quarter either way, for up to
-    /// this many milliseconds in total. git's own constants.
-    wait_ms: u32,
+    /// this long in total, counted in whole milliseconds as git counts it.
+    /// git's own constants; `Io.Duration.max` waits as long as there is.
+    wait: Io.Duration,
 };
 
 /// Errors from taking a lock.
@@ -699,7 +700,7 @@ fn createLock(
 ) LockError!airlock.Pending {
     const deadline_ms: u32 = switch (on_contention) {
         .fail => 0,
-        .wait_ms => |ms| ms,
+        .wait => |d| std.math.cast(u32, @max(0, d.toMilliseconds())) orelse std.math.maxInt(u32),
     };
     var waited: u32 = 0;
     var attempt: u32 = 0;
@@ -1630,7 +1631,7 @@ test "waiting for a lock gives up with the same named error" {
     var buf2: [64]u8 = undefined;
     try std.testing.expectError(
         error.LockHeld,
-        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .sync = .none, .on_contention = .{ .wait_ms = 5 } }),
+        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(5) } }),
     );
 }
 

@@ -116,7 +116,7 @@ pub const Cover = struct {
 pub const Thread = struct {
     style: enum { shallow, deep } = .shallow,
     /// The time git's message ids carry.
-    now: i64,
+    now: std.Io.Timestamp,
     /// The address they end in: git's committer email.
     email: []const u8,
 };
@@ -498,7 +498,7 @@ fn commitParents(gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error![]Oid
 }
 
 fn genMessageId(a: Allocator, base: []const u8, t: Thread) Allocator.Error![]const u8 {
-    return a.print("{s}.{d}.git.{s}", .{ base, t.now, t.email });
+    return a.print("{s}.{d}.git.{s}", .{ base, t.now.toSeconds(), t.email });
 }
 
 fn cleanMessageId(a: Allocator, id: []const u8) Allocator.Error![]const u8 {

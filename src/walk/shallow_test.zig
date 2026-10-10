@@ -152,7 +152,7 @@ test "a shallow clone is the one git makes, cut by depth, by date and by ref, in
         .{ .git_args = &.{"--depth=3"}, .options = .{ .who = test_who, .depth = 3 } },
         .{ .git_args = &.{ "--depth=2", "--no-single-branch" }, .options = .{ .who = test_who, .depth = 2, .single_branch = false } },
         .{ .git_args = &.{ "--depth=2", "--branch=side" }, .options = .{ .who = test_who, .depth = 2, .branch = "side" } },
-        .{ .git_args = &.{since_arg}, .options = .{ .who = test_who, .shallow_since = since } },
+        .{ .git_args = &.{since_arg}, .options = .{ .who = test_who, .shallow_since = @import("../text.zig").date.timestamp(since) } },
         .{ .git_args = &.{"--shallow-exclude=light"}, .options = .{ .who = test_who, .shallow_exclude = &.{"light"} } },
     };
     for ([_]bool{ true, false }) |v2| {

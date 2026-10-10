@@ -956,7 +956,8 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: u32) Error!Norma
 /// days from when it was recorded, 15 unless set. `never` keeps every
 /// one, `now` none. A conflict's directory goes once it is empty. Nothing
 /// happens when rerere is not enabled.
-pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Self.Error!void {
+pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.Error!void {
+    const now = now_at.toSeconds();
     if (!enabled(io, repo)) return;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();

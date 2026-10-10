@@ -465,7 +465,7 @@ test "merged split layers are marked at the write time before an older expiry cu
     var db = try odb.Odb.open(gpa, io, dir, .sha1, .{});
     defer db.deinit(io);
     const head = try tip(&repo, .sha1);
-    _ = try ops.writeCommitGraph(gpa, io, &db, &.{head}, .{ .split = .replace, .expire_time = 1 });
+    _ = try ops.writeCommitGraph(gpa, io, &db, &.{head}, .{ .split = .replace, .expire_time = .fromNanoseconds(std.time.ns_per_s) });
     try repo.dir.access(io, path, .{});
     const native_time = (try repo.dir.statFile(io, path, .{})).mtime.toSeconds();
     try std.testing.expect(native_time > 1);

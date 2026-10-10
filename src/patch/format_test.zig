@@ -131,8 +131,8 @@ test "a series of commits is written as the mails git format-patch writes" {
         .headers = &.{"X-Extra: yes"},
     });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--no-encode-email-headers" }, "base..HEAD", range, .{ .encode_email_headers = false });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread=deep", "--in-reply-to=<start@example.com>" }, "base..HEAD", range, .{ .thread = .{ .style = .deep, .now = 0, .email = "fixture@example.com" }, .in_reply_to = "<start@example.com>" });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread" }, "base..HEAD", range, .{ .thread = .{ .now = 0, .email = "fixture@example.com" } });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread=deep", "--in-reply-to=<start@example.com>" }, "base..HEAD", range, .{ .thread = .{ .style = .deep, .now = .zero, .email = "fixture@example.com" }, .in_reply_to = "<start@example.com>" });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread" }, "base..HEAD", range, .{ .thread = .{ .now = .zero, .email = "fixture@example.com" } });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--attach=BOUNDARY" }, "base..HEAD", range, .{ .attach = .{ .boundary = "BOUNDARY" } });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--inline=BOUNDARY" }, "base..HEAD", range, .{ .attach = .{ .boundary = "BOUNDARY", .@"inline" = true } });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "-2" }, "HEAD", .{ .tip = head, .max_count = 2 }, .{});
@@ -157,7 +157,7 @@ test "a cover letter is written as git writes one, with its shortlog, its diffst
         .cover_letter = .{ .sender = sender },
         .base = base,
         .signature = "sig",
-        .thread = .{ .now = 0, .email = "fixture@example.com" },
+        .thread = .{ .now = .zero, .email = "fixture@example.com" },
     });
     // `--commit-list-format` came in 2.54
     if (try testgit.gitAtLeast(gpa, io, 2, 54))

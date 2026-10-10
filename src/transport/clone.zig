@@ -23,6 +23,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const gitdate = @import("../text.zig").date;
 const httpsettings_mod = @import("../wire.zig").httpsettings;
 const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
@@ -134,9 +135,8 @@ pub const Options = struct {
     /// `--depth`: the history cut to this many commits from each fetched
     /// tip, the boundary written to `.git/shallow`.
     depth: ?u32 = null,
-    /// `--shallow-since`: the history cut at commits older than this, in
-    /// seconds since the epoch.
-    shallow_since: ?i64 = null,
+    /// `--shallow-since`: the history cut at commits older than this.
+    shallow_since: ?Io.Timestamp = null,
     /// `--shallow-exclude`: the history cut where these refs of the
     /// remote's reach.
     shallow_exclude: []const []const u8 = &.{},
@@ -227,7 +227,7 @@ fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Self.Error!Repository {
     var deepen: ?fetchpack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
-        .{ .depth = options.depth, .since = options.shallow_since, .not = options.shallow_exclude }
+        .{ .depth = options.depth, .since = if (options.shallow_since) |t| t.toSeconds() else null, .not = options.shallow_exclude }
     else
         null;
     const single_branch = options.single_branch orelse (deepen != null);
@@ -490,7 +490,7 @@ fn openSession(
         .auth_failure = options.auth_failure,
         .warnings = options.warnings,
         // A credential's expiry is checked against the caller's time.
-        .now = options.who.when_secs,
+        .now = gitdate.timestamp(options.who.when_secs),
         .repository = repo,
         .who = options.who,
         .cloning = true,

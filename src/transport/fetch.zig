@@ -22,6 +22,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const gitdate = @import("../text.zig").date;
 const httpsettings_mod = @import("../wire.zig").httpsettings;
 const keep_mod = @import("../odb/keep.zig");
 const Allocator = std.mem.Allocator;
@@ -120,9 +121,8 @@ pub const Options = struct {
     depth: ?u32 = null,
     /// `--deepen`: the boundary moved this many commits further back.
     deepen: ?u32 = null,
-    /// `--shallow-since`: the history cut at commits older than this, in
-    /// seconds since the epoch.
-    shallow_since: ?i64 = null,
+    /// `--shallow-since`: the history cut at commits older than this.
+    shallow_since: ?Io.Timestamp = null,
     /// `--shallow-exclude`: the history cut where these refs of the
     /// remote's reach.
     shallow_exclude: []const []const u8 = &.{},
@@ -665,7 +665,7 @@ fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_
         .auth_failure = options.auth_failure,
         .warnings = options.warnings,
         // A credential's expiry is checked against the caller's time.
-        .now = options.who.when_secs,
+        .now = gitdate.timestamp(options.who.when_secs),
         .repository = repo,
         .who = options.who,
         .from_user = options.from_user,
@@ -1307,7 +1307,7 @@ fn deepenRequest(repo: *Repository, options: Options) Error!?fetchpack.Deepen {
     return .{
         .depth = options.depth orelse options.deepen,
         .relative = options.deepen != null,
-        .since = options.shallow_since,
+        .since = if (options.shallow_since) |t| t.toSeconds() else null,
         .not = options.shallow_exclude,
     };
 }

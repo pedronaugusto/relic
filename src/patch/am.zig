@@ -798,7 +798,7 @@ fn doCommit(s: *Session) Error!void {
     const committer = s.options.committer;
     var author: object.Signature = .{ .name = s.author_name.?, .email = s.author_email.?, .when_secs = committer.when_secs, .offset_minutes = committer.offset_minutes };
     if (!s.options.ignore_date and s.author_date.?.len > 0) {
-        const parsed = gitdate.parse(s.author_date.?, .{ .now = committer.when_secs, .local_offset_minutes = committer.offset_minutes }) orelse return error.InvalidDate;
+        const parsed = gitdate.parse(s.author_date.?, .{ .now = gitdate.timestamp(committer.when_secs), .local_offset_minutes = committer.offset_minutes }) orelse return error.InvalidDate;
         author.when_secs = parsed.secs;
         author.offset_minutes = @intCast(parsed.offset_minutes);
     }

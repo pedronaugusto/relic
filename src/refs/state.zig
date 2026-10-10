@@ -27,7 +27,7 @@ pub const Data = struct {
     fsync: fs.Fsync = .default,
     /// `core.packedRefsTimeout`: how long a writer waits for
     /// `packed-refs.lock`. git waits a second unless told otherwise.
-    packed_lock: fs.OnContention = .{ .wait_ms = 1000 },
+    packed_lock: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
 };
 
 pub fn get(state: *State) *Data {

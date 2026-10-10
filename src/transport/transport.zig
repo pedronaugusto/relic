@@ -115,7 +115,7 @@ pub const Options = struct {
     /// what a person needs to put it right: see `auth.Failure`.
     auth_failure: ?*auth.Failure = null,
     /// The caller's time, for a credential's expiry: `credential.Options.now`.
-    now: ?i64 = null,
+    now: ?std.Io.Timestamp = null,
     /// Read a repository on this machine directly, as git's local clone
     /// copies one, rather than through upload-pack. Only a fetch reads it.
     local_copy: bool = false,

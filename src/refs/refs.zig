@@ -148,7 +148,7 @@ pub const Store = struct {
         fsync: fs.Fsync = .default,
         /// `core.packedRefsTimeout`: how long a writer waits for
         /// `packed-refs.lock`, with git's backoff. git waits a second.
-        packed_lock: fs.OnContention = .{ .wait_ms = 1000 },
+        packed_lock: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
     };
 
     /// Choose the backend and its cache once, before the store is published.
@@ -1051,7 +1051,7 @@ pub const SpecialRefs = struct {
     /// `<ref>.lock`, waiting as long as git waits on a ref's lock.
     fn takeLock(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, buffer: []u8) TransactionError!fs.LockFile {
         return fs.LockFile.open(gpa, io, s.store.gitDir(), .{ .sub_path = ref.name(), .buffer = buffer }, .{
-            .on_contention = .{ .wait_ms = 100 },
+            .on_contention = .{ .wait = .fromMilliseconds(100) },
             .sync = .none,
             .shared = s.store.sharedPermissions(),
         });

@@ -12,6 +12,7 @@ const fs = @import("../fs/fs.zig");
 const progress_mod = @import("../report.zig").progress;
 const testgit = @import("../testing/git.zig");
 const std = @import("std");
+const gitdate = @import("../text.zig").date;
 const filter_mod = @import("filter.zig");
 const suite = @import("../testing/helpers.zig");
 const Io = std.Io;
@@ -1027,7 +1028,7 @@ test "a recent fetch brings what git lfs fetch --recent brings, counted from the
             const server = try openServer(fx, &repo);
             defer server.deinit(io);
             try testing.expectError(error.LfsRecentNeedsTime, lfstransfer.fetch(io, server, &repo, .{ .recent = true }));
-            var fetched = try lfstransfer.fetch(io, server, &repo, .{ .recent = true, .now = now });
+            var fetched = try lfstransfer.fetch(io, server, &repo, .{ .recent = true, .now = gitdate.timestamp(now) });
             defer fetched.deinit();
             try expectNoFailures(&fetched);
         }
@@ -1734,7 +1735,7 @@ test "a zstd body is decoded with the window its frame asks for, up to git-lfs's
 }
 
 pub fn nowSeconds(io: Io) i64 {
-    return @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    return Io.Clock.real.now(io).toSeconds();
 }
 
 test "an action that expires within five seconds of the time given is not used, as git-lfs does not use it" {
@@ -1762,7 +1763,7 @@ test "an action that expires within five seconds of the time given is not used, 
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
-                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) nowSeconds(io) else null });
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) Io.Clock.real.now(io) else null });
                 defer server.deinit(io);
                 var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
@@ -1820,7 +1821,7 @@ test "a git-lfs-authenticate token is asked for again when it expires, lfs.defau
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
-                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = nowSeconds(io) });
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = Io.Clock.real.now(io) });
                 defer server.deinit(io);
                 var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
@@ -1873,7 +1874,7 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
         } else {
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
-            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) now else null });
+            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) gitdate.timestamp(now) else null });
             defer server.deinit(io);
             var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();

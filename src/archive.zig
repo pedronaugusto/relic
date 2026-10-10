@@ -76,9 +76,9 @@ pub const Options = struct {
     pathspecs: []const []const u8 = &.{},
     /// `--mtime`: the entries' time. By default a commit's committer time;
     /// a tree has none, and takes `now`.
-    mtime: ?i64 = null,
+    mtime: ?std.Io.Timestamp = null,
     /// The time now, for a tree archived without `mtime`.
-    now: i64 = 0,
+    now: std.Io.Timestamp = .zero,
     /// `--worktree-attributes`: the working tree's `.gitattributes`
     /// rather than the tree's.
     worktree_attributes: bool = false,
@@ -743,7 +743,7 @@ pub fn archive(gpa: Allocator, io: Io, inputs: Inputs, w: *Io.Writer, options: O
     // the tree, and the commit it came from
     var commit: ?Oid = null;
     var tree = treeish;
-    var time: i64 = options.now;
+    var time: i64 = options.now.toSeconds();
     var depth: usize = 0;
     while (depth < 64) : (depth += 1) {
         const header = try db.readHeader(io, tree);
@@ -768,7 +768,7 @@ pub fn archive(gpa: Allocator, io: Io, inputs: Inputs, w: *Io.Writer, options: O
             else => return error.NotATree,
         }
     } else return error.NotATree;
-    if (options.mtime) |m| time = m;
+    if (options.mtime) |m| time = m.toSeconds();
 
     // each pathspec must name something, as git checks
     for (options.pathspecs) |p| {

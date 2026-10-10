@@ -941,7 +941,7 @@ test "a refresh updates reftable write settings together with the configuration"
     try std.testing.expectEqualStrings("8192", repo.configuration().get("reftable.blocksize").?);
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
     try std.testing.expect(try repo.refreshConfig(io, null));
-    try std.testing.expectEqualDeep(reftablestack.Options{ .lock = .{ .wait_ms = 200 } }, repo.refStore().reftableOptions());
+    try std.testing.expectEqualDeep(reftablestack.Options{ .lock = .{ .wait = .fromMilliseconds(200) } }, repo.refStore().reftableOptions());
     try std.testing.expectEqual(cache, refs_state.get(repo.refStore()._state).cache);
 }
 

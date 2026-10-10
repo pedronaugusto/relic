@@ -26,6 +26,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const gitdate = @import("../text.zig").date;
 const httpsettings_mod = @import("../wire.zig").httpsettings;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -358,7 +359,7 @@ fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_
         .auth_failure = options.auth_failure,
         .warnings = options.warnings,
         // A credential's expiry is checked against the caller's time.
-        .now = options.who.when_secs,
+        .now = gitdate.timestamp(options.who.when_secs),
         .repository = repo,
         .who = options.who,
         .from_user = options.from_user,
