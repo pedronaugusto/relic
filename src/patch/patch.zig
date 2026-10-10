@@ -837,24 +837,11 @@ fn parseFragment(p: *Parser, at: usize, file: *FilePatch, frag: *Fragment) Error
     assert(deleted <= frag.old_lines);
     assert(frag.leading <= frag.old_lines - deleted);
     assert(frag.trailing <= frag.old_lines - deleted);
-    noteCrlf(file, text[linelen(text)..scanned.consumed], p.options.reverse);
+    // The old file's line endings are compared as they are when a line it has ends in CR LF.
+    if (scanned.crlf.context or (if (p.options.reverse) scanned.crlf.added else scanned.crlf.removed)) file.crlf_in_old = true;
     file.lines_added += added;
     file.lines_deleted += deleted;
     return scanned.consumed;
-}
-
-/// A context line, or a line the old file has, ends in CR LF: the old
-/// file's line endings are compared as they are.
-fn noteCrlf(file: *FilePatch, body: []const u8, reverse: bool) void {
-    var lines: hunks.HunkLines = .init(body, .git);
-    while (lines.next()) |line| {
-        const old = switch (line.kind) {
-            .context => true,
-            .removed => !reverse,
-            .added => reverse,
-        };
-        if (old and std.mem.endsWith(u8, line.text, "\r\n")) file.crlf_in_old = true;
-    }
 }
 
 fn parseSinglePatch(p: *Parser, at_in: usize, file: *FilePatch) Error!usize {
