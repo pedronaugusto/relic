@@ -18,6 +18,7 @@
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const testbytes = @import("../testing/bytes.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -227,18 +228,20 @@ test "a hunk that states a size past what a delta may make is refused before it 
 }
 
 test "fuzz: any base 85 line and any deflated hunk decode or are refused by name" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             const gpa = std.testing.allocator;
             var buf: [1024]u8 = undefined;
-            const len = smith.slice(&buf);
+            const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+            case.source.bytes(buf[0..len]);
             const input = buf[0..len];
             var dst: [52]u8 = undefined;
-            const want = @min(dst.len, input.len / 5 * 4);
+            // usize: @min with a comptime 52 is a u6, which `want / 4 * 5` overflows.
+            const want: usize = @min(dst.len, input.len / 5 * 4);
             decode85(dst[0..want], input[0 .. want / 4 * 5]) catch |err| switch (err) {
                 error.InvalidBase85 => {},
             };
-            const size = smith.value(u16) % 4096;
+            const size = shakedown.gen.int(case.source, u16) % 4096;
             const out = inflate(gpa, input, size) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 error.CorruptBinaryPatch => return,

@@ -21,6 +21,7 @@
 const ErrorNamespace = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -808,12 +809,13 @@ test "ident collapses on the way in and names the blob on the way out" {
 }
 
 test "fuzz: ident on the way in never grows a file, and undoes the way out" {
-    try testing.fuzz({}, fuzzIdent, .{});
+    try shakedown.check(testing.allocator, {}, fuzzIdent, .{});
 }
 
-fn fuzzIdent(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzIdent(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [512]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     const src = scratch[0..n];
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();

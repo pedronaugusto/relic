@@ -12,6 +12,7 @@
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 const blobmerge = @import("blobmerge.zig");
@@ -276,9 +277,10 @@ test "strategy options quote and split back as git's rebase keeps them" {
     try std.testing.expectError(error.MalformedStrategyOptions, split(arena, "\"open"));
 }
 
-fn fuzzSplit(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzSplit(_: void, case: *shakedown.Case) anyerror!void {
     var buf: [256]u8 = undefined;
-    const len = smith.slice(&buf);
+    const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+    case.source.bytes(buf[0..len]);
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const words = split(arena_state.allocator(), buf[0..len]) catch |err| switch (err) {
@@ -294,7 +296,7 @@ fn fuzzSplit(_: void, smith: *std.testing.Smith) anyerror!void {
 }
 
 test "fuzz: any strategy_opts line splits or is a named failure, and round-trips" {
-    try std.testing.fuzz({}, fuzzSplit, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzSplit, .{});
 }
 
 test "strategy flags preserve bare aliases and replace explicit algorithms" {
