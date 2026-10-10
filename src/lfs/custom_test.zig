@@ -7,7 +7,7 @@ const std = @import("std");
 const custom_mod = @import("custom.zig");
 const shakedown_mod = @import("shakedown");
 const suite = @import("../testing/helpers.zig");
-const testbytes = @import("../testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -91,7 +91,7 @@ const Fixture = struct {
         defer fx.gpa.free(bare_path);
         try fx.git(d, &.{ "remote", "add", "origin", bare_path });
         try d.writeFile(fx.io, .{ .sub_path = ".gitattributes", .data = "*.bin filter=lfs diff=lfs merge=lfs -text\n" });
-        try d.writeFile(fx.io, .{ .sub_path = "a.bin", .data = testbytes.repeat("the first object\n", 64) });
+        try d.writeFile(fx.io, .{ .sub_path = "a.bin", .data = repeat("the first object\n", 64) });
         try d.writeFile(fx.io, .{ .sub_path = "b.bin", .data = "the second object\n" });
         try fx.git(d, &.{ "add", "-A" });
         try fx.git(d, &.{ "commit", "-q", "-m", "files" });
@@ -233,7 +233,7 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
         .work_dir = null,
     });
     defer store.deinit();
-    const content = testbytes.repeat("the first object\n", 64);
+    const content = repeat("the first object\n", 64);
     const pointer: lfs.Pointer = .{ .oid = testlfs.sha256Hex(content), .size = content.len };
     try testing.expect(try store.store.contains(io, &pointer));
 }

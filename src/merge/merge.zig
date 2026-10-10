@@ -15,7 +15,7 @@ const ort = @import("ort.zig");
 
 const std = @import("std");
 const shakedown = @import("shakedown");
-const testbytes = @import("../testing/bytes.zig");
+const repeat = shakedown.corpus.repeat;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -893,7 +893,7 @@ test "the content merge takes blob.whitespace, and reads a file 66 directories d
     try testgit.requireGitVersion(gpa, io, 2, 40);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
-    const deep = testbytes.repeat("d/", 66) ++ "f";
+    const deep = repeat("d/", 66) ++ "f";
     try repo.writeFile(io, deep, "a\nb\nc\n");
     try repo.writeFile(io, "w", "x y\n");
     try repo.exec(io, &.{ "add", "-A" });

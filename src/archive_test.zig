@@ -2,7 +2,7 @@
 //! same bytes.
 
 const std = @import("std");
-const testbytes = @import("testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -62,7 +62,7 @@ fn fixture(io: Io, git: *testgit.Repo) !void {
     const strict = if (try testgit.gitAtLeast(git.gpa, io, 2, 45)) "|%aI" else "";
     var text_buf: [256]u8 = undefined;
     try git.writeFile(io, "version.txt", try std.mem.print(&text_buf, "Commit $Format:%H$ (%h) by $Format:%an <%ae>%n%ad|%ai{s}|%at$ $Format:%s%+b%-b$ $Format:%T %t %P %p %cn %ce %cd %ci%%x41$\n", .{strict}));
-    try git.writeFile(io, "data.bin", testbytes.repeat("\x00\x01\x02 binary ", 50));
+    try git.writeFile(io, "data.bin", repeat("\x00\x01\x02 binary ", 50));
     const long_dir = "a-directory-name-that-is-quite-long/another-directory-name-that-is-long-too/and-a-third-one";
     try git.writeFile(io, long_dir ++ "/file-with-a-long-name-as-well.txt", "long path\n");
     try git.writeFile(io, @as([120]u8, @splat('x')) ++ "/" ++ @as([120]u8, @splat('y')) ++ "/" ++ @as([30]u8, @splat('z')), "longer than ustar holds\n");

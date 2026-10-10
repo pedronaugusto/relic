@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const glob = @import("glob.zig");
-const testbytes = @import("../testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 
 const expect = std.testing.expect;
 
@@ -42,26 +42,26 @@ test "a pattern too long to match at once is compiled, and answers as a short on
     // refused a pattern this deep; git's own backtracking takes minutes
     // on it. The language is regular, and sweep answers in one pass.
     const unit = "**/*a/";
-    const pattern = testbytes.repeat(unit, 600) ++ "z";
-    const subject = testbytes.repeat("a/", 600) ++ "z";
+    const pattern = repeat(unit, 600) ++ "z";
+    const subject = repeat("a/", 600) ++ "z";
     try expect(pattern.len > 1024);
     try expect(try agree(pattern, subject, .{}));
     try expect(!try agree(pattern, subject[0 .. subject.len - 1] ++ "y", .{}));
     // More brackets than one call holds on the stack.
-    const brackets = testbytes.repeat("[ab]", 100);
-    try expect(try agree(brackets, testbytes.repeat("a", 100), .{}));
-    try expect(!try agree(brackets, testbytes.repeat("a", 99) ++ "c", .{}));
+    const brackets = repeat("[ab]", 100);
+    try expect(try agree(brackets, repeat("a", 100), .{}));
+    try expect(!try agree(brackets, repeat("a", 99) ++ "c", .{}));
 }
 
 test "a pattern too long for a compiled one is a set of one, and still exact" {
     // A run of stars is one wildcard, so this is `*x/end` written long.
-    const long = testbytes.repeat("*", 9000) ++ "x/end";
+    const long = repeat("*", 9000) ++ "x/end";
     try expect(long.len > 8192);
     try expect(try agree(long, "abx/end", .{}));
     try expect(!try agree(long, "abx/ends", .{}));
     try expect(!try agree(long, "a/bx/end", .{}));
     try expect(!try agree(long ++ "[", "abx/end[", .{}));
-    const name = testbytes.repeat("d", 9000);
+    const name = repeat("d", 9000);
     try expect(try agree(name, name, .{}));
     try expect(!try agree(name, name[1..], .{}));
 
@@ -72,7 +72,7 @@ test "a pattern too long for a compiled one is a set of one, and still exact" {
 }
 
 test "one long glob answers several threads at once" {
-    var compiled: glob.Glob = try .compile(std.testing.allocator, testbytes.repeat("*", 9000) ++ "x/end", .{});
+    var compiled: glob.Glob = try .compile(std.testing.allocator, repeat("*", 9000) ++ "x/end", .{});
     defer compiled.deinit();
     const Ask = struct {
         fn run(g: *const glob.Glob, wrong: *std.atomic.Value(u32)) void {
@@ -100,12 +100,12 @@ test "the prefix a pattern matches, in one pass" {
 }
 
 test "the shapes that made backtracking matchers slow answer at once" {
-    const text = testbytes.repeat("a", 400);
+    const text = repeat("a", 400);
     try expect(!try agree("*a*a*a*a*a*a*a*a*b", text, .{}));
     try expect(!try agree("*a*a*a*a*a*a*a*a*b", text, .{ .pathname = false }));
     try expect(try agree("*a*a*a*a*a*a*a*a*a", text, .{}));
-    const pattern = testbytes.repeat("**/x*/", 12) ++ "y";
-    const subject = testbytes.repeat("x/", 40);
+    const pattern = repeat("**/x*/", 12) ++ "y";
+    const subject = repeat("x/", 40);
     try expect(!try agree(pattern, subject ++ "z", .{}));
     try expect(try agree(pattern, subject ++ "y", .{}));
 }
