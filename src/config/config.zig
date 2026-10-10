@@ -2650,17 +2650,20 @@ test "a variable before any section is read as git reads it, under no name a loo
 }
 
 test "fuzz: any bytes are a configuration or a named error" {
-    try std.testing.fuzz({}, fuzzConfig, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzConfig, .{});
 }
 
-fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzConfig(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [2048]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var name_scratch: [64]u8 = undefined;
-    const subsection = name_scratch[0..smith.slice(&name_scratch)];
+    const subsection = name_scratch[0..shakedown.gen.intRange(case.source, usize, 0, name_scratch.len)];
+    case.source.bytes(subsection);
     var value_scratch: [64]u8 = undefined;
-    const value = value_scratch[0..smith.slice(&value_scratch)];
+    const value = value_scratch[0..shakedown.gen.intRange(case.source, usize, 0, value_scratch.len)];
+    case.source.bytes(value);
 
     var config = Config.parseText(gpa, input, .local) catch return;
     defer config.deinit();

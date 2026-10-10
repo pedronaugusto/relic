@@ -3,6 +3,7 @@
 const ErrorNamespace = @This();
 const Self = @This();
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
 const ewah = @import("../codec.zig").ewah;
@@ -280,11 +281,13 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, inputs: WriteInputs, options: Wri
 }
 
 test "fuzz: any bytes are a reachability bitmap or a named error" {
-    try std.testing.fuzz({}, fuzzOne, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{});
 }
-fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [2048]u8 = undefined;
-    const bytes = try std.testing.allocator.dupe(u8, scratch[0..smith.slice(&scratch)]);
+    const drawn = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(drawn);
+    const bytes = try std.testing.allocator.dupe(u8, drawn);
     var parsed = Index.parse(std.testing.allocator, .sha1, bytes, Oid.zero(.sha1), 1024) catch return;
     parsed.deinit();
 }

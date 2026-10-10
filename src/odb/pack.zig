@@ -13,6 +13,7 @@ const Self = @This();
 const retention = @import("keep.zig");
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const entry_mod = @import("pack/entry.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1384,13 +1385,14 @@ test "a pack index with a bad trailing checksum is refused" {
 }
 
 test "fuzz: any bytes are an index or a named error" {
-    try std.testing.fuzz({}, fuzzIndex, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzIndex, .{});
 }
 
-fn fuzzIndex(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzIndex(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [4096]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     const bytes = try gpa.dupe(u8, scratch[0..n]);
     var index = Index.parse(gpa, .sha1, bytes) catch return;
     defer index.deinit();
@@ -2477,16 +2479,16 @@ test "a written pack and its index read back, entry kind for entry kind" {
 }
 
 test "fuzz: a pack this writes is a pack this reads" {
-    try std.testing.fuzz({}, fuzzWriter, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzWriter, .{});
 }
 
-fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzWriter(_: void, case: *shakedown.Case) anyerror!void {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    const count = smith.valueRangeAtMost(u8, 1, 7);
+    const count = shakedown.gen.intRange(case.source, u8, 1, 7);
     var bodies: [7][]u8 = undefined;
     var names: [7]Oid = undefined;
     var kinds: [7]object.Type = undefined;
@@ -2502,8 +2504,9 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
 
     for (0..count) |i| {
         var scratch: [256]u8 = undefined;
-        const body = scratch[0..smith.slice(&scratch)];
-        kinds[i] = switch (smith.valueRangeAtMost(u8, 0, 3)) {
+        const body = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+        case.source.bytes(body);
+        kinds[i] = switch (shakedown.gen.intRange(case.source, u8, 0, 3)) {
             0 => .blob,
             1 => .tree,
             2 => .commit,
@@ -2516,7 +2519,7 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
 
         // Sometimes a delta against the entry before it, which is the other
         // way an object can be in a pack.
-        if (newest != null and smith.valueRangeAtMost(u8, 0, 1) == 0) {
+        if (newest != null and shakedown.gen.intRange(case.source, u8, 0, 1) == 0) {
             const base = bodies[newest.?];
             const encoded = (try delta.encode(gpa, base, bodies[i], .{})) orelse continue;
             defer gpa.free(encoded);

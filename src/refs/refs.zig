@@ -2702,13 +2702,14 @@ fn listTree(gpa: Allocator, io: Io, top: Io.Dir) ![]u8 {
 }
 
 test "fuzz: any packed-refs bytes are a listing or a named error" {
-    try std.testing.fuzz({}, fuzzPacked, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzPacked, .{});
 }
 
-fn fuzzPacked(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzPacked(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [2048]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     const bytes = try gpa.dupe(u8, scratch[0..n]);
     var listing = Store.parsePacked(gpa, .sha1, bytes) catch return;
     defer listing.deinit();
