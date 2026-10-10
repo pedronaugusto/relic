@@ -1133,6 +1133,7 @@ pub const Repository = struct {
     /// write policy, checked before anything is replaced.
     const ConfigPolicy = struct {
         ref_options: reftablestack.Options,
+        shared: fs.Shared,
         fsync: fs.Fsync,
     };
 
@@ -1153,6 +1154,7 @@ pub const Repository = struct {
                 try reftableOptions(next)
             else
                 repo.refStore().reftableOptions(),
+            .shared = try sharedOf(next),
             .fsync = try fsyncOf(next),
         };
     }
@@ -1163,8 +1165,11 @@ pub const Repository = struct {
         config_owner.get(repo.data()._config).deinit();
         config_owner.get(repo.data()._config).* = next;
         repo.refStore().configureReftable(policy.ref_options);
-        repo.refStore().configureFsync(policy.fsync);
-        repo.data().odb.configureFsync(policy.fsync);
+        // Every writer takes the new policy at once: a changed
+        // `core.sharedRepository` used to reach none of them.
+        repo.refStore().configureWrites(policy.shared, policy.fsync);
+        repo.data().odb.configureWrites(policy.shared, policy.fsync);
+        repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;
     }
 

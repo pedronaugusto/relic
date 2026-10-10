@@ -95,3 +95,19 @@ test "a refreshed configuration changes what is synced" {
     try testing.expectEqual(fs.Sync.batch, repo.objectDatabase().settings().fsync.sync(.loose_object));
     try testing.expectEqual(fs.Sync.per_file, repo.objectDatabase().settings().fsync.sync(.pack));
 }
+
+test "a refreshed core.sharedRepository reaches every writer" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var target = try testgit.Repo.init(gpa, io, &.{});
+    defer target.deinit();
+    var repo = try repo_mod.Repository.open(gpa, io, target.dir, .{});
+    defer repo.deinit(io);
+    try testing.expectEqual(fs.Shared.umask, repo.sharedPermissions());
+    try target.exec(io, &.{ "config", "core.sharedRepository", "group" });
+    _ = try repo.refreshConfig(io, null);
+    try testing.expectEqual(fs.Shared.group, repo.sharedPermissions());
+    try testing.expectEqual(fs.Shared.group, repo.refStore().sharedPermissions());
+    try testing.expectEqual(fs.Shared.group, repo.objectDatabase().sharedPermissions());
+    try testing.expectEqual(fs.Shared.group, repo.indexLock().shared);
+}
