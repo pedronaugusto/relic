@@ -23,6 +23,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -709,12 +710,13 @@ fn dwimRef(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateErro
 }
 
 test "fuzz: any bytes are a bundle header or a named error" {
-    try std.testing.fuzz({}, fuzzHeader, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzHeader, .{});
 }
 
-fn fuzzHeader(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzHeader(_: void, case: *shakedown.Case) anyerror!void {
     var buf: [512]u8 = undefined;
-    const input = buf[0..smith.slice(&buf)];
+    const input = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(input);
     for ([_][]const u8{ "", v2_signature, v3_signature }) |prefix| {
         var joined: [600]u8 = undefined;
         @memcpy(joined[0..prefix.len], prefix);

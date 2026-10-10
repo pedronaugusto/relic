@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -1060,12 +1061,13 @@ test "a lock path is inside the tree" {
 }
 
 test "fuzz: any locking answer is read or refused by name" {
-    try testing.fuzz({}, fuzzLocks, .{});
+    try shakedown.check(testing.allocator, {}, fuzzLocks, .{});
 }
 
-fn fuzzLocks(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzLocks(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [768]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1085,12 +1087,13 @@ fn fuzzLocks(_: void, smith: *testing.Smith) anyerror!void {
 }
 
 test "fuzz: any lines of an ssh lock listing are read or refused by name" {
-    try testing.fuzz({}, fuzzSshLocks, .{});
+    try shakedown.check(testing.allocator, {}, fuzzSshLocks, .{});
 }
 
-fn fuzzSshLocks(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzSshLocks(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [512]u8 = undefined;
-    const len = smith.slice(&scratch);
+    const len = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..len]);
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();

@@ -393,12 +393,13 @@ test "a URL shown to a person loses its credentials" {
 }
 
 test "fuzz: any bytes are a URL or a named error" {
-    try testing.fuzz({}, fuzzParse, .{});
+    try shakedown.check(testing.allocator, {}, fuzzParse, .{});
 }
 
-fn fuzzParse(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzParse(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [256]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     const url = Url.parse(input) catch |err| switch (err) {
         error.UnsupportedTransport, error.MalformedUrl => return,
     };

@@ -38,6 +38,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.lfs.<name>`.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const testbytes = @import("../testing/bytes.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -900,12 +901,13 @@ test "settings come from the configuration first and .lfsconfig second" {
 }
 
 test "fuzz: any bytes are a pointer or a named error, and a pointer survives its encoding" {
-    try testing.fuzz({}, fuzzPointer, .{});
+    try shakedown.check(testing.allocator, {}, fuzzPointer, .{});
 }
 
-fn fuzzPointer(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzPointer(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [1400]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     const p = Pointer.decode(scratch[0..n]) catch |err| switch (err) {
         error.NotAPointer, error.BadPointer => return,
     };

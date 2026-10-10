@@ -15,6 +15,7 @@ const Self = @This();
 
 const std = @import("std");
 const percent = @import("../text.zig").percent;
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 const object = @import("../object/object.zig");
@@ -201,10 +202,11 @@ test "a filter is read, and refused, where git's own reading reads and refuses i
 }
 
 test "fuzz: any filter is read or refused by name" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [128]u8 = undefined;
-            const text = buf[0..smith.slice(&buf)];
+            const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+            case.source.bytes(text);
             var arena: std.heap.ArenaAllocator = .init(testing.allocator);
             defer arena.deinit();
             _ = sendForm(arena.allocator(), text) catch |err| switch (err) {

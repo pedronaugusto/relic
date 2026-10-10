@@ -4,6 +4,7 @@
 //! when it uploads one, and a server may keep what it was told.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 
 /// How much of the bytes is looked at.
 pub const sniff_len = 512;
@@ -215,12 +216,13 @@ test "bytes are named as Go's DetectContentType names them" {
 }
 
 test "fuzz: any bytes are named" {
-    try testing.fuzz({}, fuzzSniff, .{});
+    try shakedown.check(testing.allocator, {}, fuzzSniff, .{});
 }
 
-fn fuzzSniff(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzSniff(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [600]u8 = undefined;
-    const len = smith.slice(&scratch);
+    const len = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..len]);
     try testing.expect(contentType(scratch[0..len]).len != 0);
 }
 

@@ -21,6 +21,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -841,12 +842,13 @@ const Negotiator = struct {
 
 const testing = std.testing;
 test "fuzz: a shallow-info line is a boundary commit or a named failure" {
-    try testing.fuzz({}, fuzzShallowInfo, .{});
+    try shakedown.check(testing.allocator, {}, fuzzShallowInfo, .{});
 }
 
-fn fuzzShallowInfo(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzShallowInfo(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [256]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var info: ShallowInfo = .{ .gpa = testing.allocator };
     defer info.deinit();
     _ = info.take(.sha1, input) catch |err| switch (err) {
@@ -856,12 +858,13 @@ fn fuzzShallowInfo(_: void, smith: *testing.Smith) anyerror!void {
 }
 
 test "fuzz: a v0 server's answer to haves is an acknowledgment or a named failure" {
-    try testing.fuzz({}, fuzzAck, .{});
+    try shakedown.check(testing.allocator, {}, fuzzAck, .{});
 }
 
-fn fuzzAck(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzAck(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [512]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var fake: protocol.Fake = .init(input);
     const in = try fake.connection.advertisement();
     var oid: Oid = undefined;
