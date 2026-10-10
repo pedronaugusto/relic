@@ -1503,6 +1503,56 @@ test "waiting for a lock gives up with the same named error" {
     );
 }
 
+test "a replacement keeps the permissions of the file it replaces only when asked" {
+    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "old", .flags = .{ .permissions = .fromMode(0o600) } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "fresh", .data = "old", .flags = .{ .permissions = .fromMode(0o600) } });
+    try atomicWrite(io, tmp.dir, "kept", "new", .{ .prefix = ".relic-test-", .permissions = .destination });
+    try atomicWrite(io, tmp.dir, "fresh", "new", .{ .prefix = ".relic-test-" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "plain", .data = "x" });
+    const kept = try tmp.dir.statFile(io, "kept", .{});
+    const fresh = try tmp.dir.statFile(io, "fresh", .{});
+    const plain = try tmp.dir.statFile(io, "plain", .{});
+    try std.testing.expectEqual(@as(u32, 0o600), kept.permissions.toMode() & 0o777);
+    // A new file has the umask's say, as one made beside it.
+    try std.testing.expectEqual(plain.permissions.toMode() & 0o777, fresh.permissions.toMode() & 0o777);
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("new", try tmp.dir.readFile(io, "kept", &buf));
+}
+
+test "files and directories are made durable together, and a missing one is the error" {
+    const seam = airlock_mod;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "a/b");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a/b/one", .data = "1" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "two", .data = "2" });
+    const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    try syncAll(std.testing.allocator, io, &.{
+        .{ .dir = tmp.dir, .sub_path = "a/b/one" },
+        .{ .dir = tmp.dir, .sub_path = "two" },
+    }, &.{
+        .{ .dir = tmp.dir, .sub_path = "a/b" },
+        .{ .dir = tmp.dir, .sub_path = "." },
+    });
+    // Linux syncs each file with a data sync of its own; elsewhere the batch writes each file and
+    // directory out and flushes the volume once.
+    if (builtin.target.os.tag == .linux) {
+        try std.testing.expectEqual(@as(u32, 2), h.count(.sync_data));
+    } else {
+        try std.testing.expect(h.count(.sync_writeout) >= 2);
+    }
+    h.reset();
+    try syncAll(std.testing.allocator, io, &.{}, &.{});
+    try std.testing.expectEqual(@as(u32, 0), h.syncs());
+    try std.testing.expectError(error.FileNotFound, syncAll(std.testing.allocator, io, &.{.{ .dir = tmp.dir, .sub_path = "missing" }}, &.{}));
+}
+
 test "a read-only file is replaced and removed, as a lockable one nobody holds must be" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
