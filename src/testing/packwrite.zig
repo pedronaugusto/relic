@@ -847,7 +847,7 @@ test "a stored delta whose bytes no longer match the pack index's CRC is refused
     const at = while (it.next()) |entry| {
         const t = theirs.map.get(entry.key_ptr.*).?;
         if (t.delta and entry.value_ptr.delta and std.mem.eql(u8, t.stream, entry.value_ptr.stream))
-            break @intFromPtr(t.stream.ptr) - @intFromPtr(theirs.bytes.ptr) + t.stream.len / 2;
+            break @intFromPtr(t.stream.ptr) - @intFromPtr(theirs.bytes.ptr) + t.stream.len / 2; // safe: both pointers are into one buffer, the stream inside the bytes
     } else return error.TestUnexpectedResult;
     theirs.bytes[at] ^= 0x10;
     var name: [128]u8 = undefined;

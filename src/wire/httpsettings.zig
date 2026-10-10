@@ -159,13 +159,13 @@ pub const Settings = struct {
         if (env.get("GIT_PROXY_SSL_KEY")) |v| settings.proxy_ssl_key = v;
         if (env.get("GIT_PROXY_SSL_CAINFO")) |v| settings.proxy_ssl_ca_info = v;
         if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) settings.proxy_ssl_cert_password_protected = true;
-        if (!proxy_set) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .curl);
+        if (!proxy_set) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .lowercase);
         if (settings.proxy) |_| {
             // git supplies an explicitly set lowercase list to curl even
             // when it is empty, overriding curl's environment fallback.
-            const list = env.get("no_proxy") orelse uplink.Proxy.noProxyValue(env, .curl);
+            const list = env.get("no_proxy") orelse uplink.Proxy.noProxyValue(env, .lowercase);
             const port = url.port orelse @as(u16, if (url.scheme == .https) 443 else 80);
-            if (uplink.Proxy.bypassed(list, url.host, port, .curl)) settings.proxy = null;
+            if (uplink.Proxy.bypassed(list, url.host, port, .lowercase)) settings.proxy = null;
         }
     }
 };

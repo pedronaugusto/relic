@@ -20,7 +20,7 @@ const filter = @import("filter.zig");
 const lfstransfer = @import("transfer.zig");
 
 /// A fetcher for one clone's checkout.
-const Fetcher = struct {
+pub const Fetcher = struct {
     gpa: Allocator,
     repo: *repo_mod.Repository,
     /// The remote the clone came from.

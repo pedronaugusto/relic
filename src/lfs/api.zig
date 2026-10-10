@@ -2140,7 +2140,7 @@ pub const Client = struct {
     /// `https` one through a `CONNECT` tunnel asked for in Go's words, the
     /// proxy's credential from its URL. Its strings are `arena`'s.
     fn useProxy(c: *Client, arena: Allocator, io: Io, text: []const u8) ErrorNamespace.Error!uplink.Proxy {
-        var proxy = uplink.Proxy.parse(arena, text, .go) catch |err| return switch (err) {
+        var proxy = uplink.Proxy.parse(arena, text, .uppercase) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidProxy => c.fail("unsupported proxy URL", io, .{}, error.InvalidProxy),
         };
@@ -2172,12 +2172,12 @@ pub const Client = struct {
             chosen = v;
         }
         if (chosen == null) {
-            if (environ) |env| chosen = uplink.Proxy.environmentValue(env, url.scheme == .https, .go);
+            if (environ) |env| chosen = uplink.Proxy.environmentValue(env, url.scheme == .https, .uppercase);
         }
         const proxy = chosen orelse return null;
-        const no_proxy = if (environ) |env| uplink.Proxy.noProxyValue(env, .go) else "";
+        const no_proxy = if (environ) |env| uplink.Proxy.noProxyValue(env, .uppercase) else "";
         const port = url.port orelse @as(u16, if (url.scheme == .https) 443 else 80);
-        if (uplink.Proxy.bypassed(no_proxy, url.host, port, .go)) return null;
+        if (uplink.Proxy.bypassed(no_proxy, url.host, port, .uppercase)) return null;
         return proxy;
     }
 

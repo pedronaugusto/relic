@@ -99,7 +99,7 @@ pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     defer source.deinit();
     for (0..files) |f| {
         var name_buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "f{d}.txt", .{f});
+        const name = try std.mem.print(&name_buf, "f{d}.txt", .{f});
         const body = try fileText(gpa, f);
         defer gpa.free(body);
         try source.writeFile(io, name, body);

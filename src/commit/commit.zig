@@ -23,8 +23,6 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.commit.<name>`.
 const message = @import("../object/message.zig");
 const trailer = @import("../object/trailer.zig");
-const head = @import("../repo/head.zig");
-const reset = @import("reset.zig");
 
 const signing = @import("../object/signing.zig");
 const commithooks = @import("commithooks.zig");

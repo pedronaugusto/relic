@@ -45,7 +45,7 @@ const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 
 /// Errors from lazy object acquisition and partial-clone configuration.
-pub const Error = error{NotAPartialClone} || transport.Error || remote_mod.Error || repo_mod.Error || Repository.WriteConfigError || odb_mod.Error || fsck.LoadError || Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error || std.fmt.BufPrintError;
+pub const Error = error{NotAPartialClone} || transport.Error || remote_mod.Error || repo_mod.Error || Repository.WriteConfigError || odb_mod.Error || fsck.LoadError || Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error || std.mem.PrintError;
 
 /// Errors from reading a filter.
 pub const FilterError = filterspec.Error;

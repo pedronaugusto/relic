@@ -118,7 +118,7 @@ test "HEAD's log gains a detach where it exists already and core.logAllRefUpdate
 }
 
 /// Keeps every entry but the one `nth` back.
-const DropOne = struct {
+pub const DropOne = struct {
     nth: usize,
 
     pub fn keep(d: *const DropOne, entry: refs_mod.LogEntry, nth: usize) bool {

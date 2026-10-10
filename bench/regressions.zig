@@ -536,7 +536,7 @@ fn rulePaths(gpa: std.mem.Allocator, count: usize) ![][]const u8 {
     const dirs = [_][]const u8{ "src", "src/net", "lib/core", "doc/api/v1", "vendor/pkg", "build", "test/fixtures/a", "tools" };
     const names = [_][]const u8{ "main.c", "util.h", "app.py", "x.pyc", "README.md", "logo.png", "keep.log", "run.log", "Makefile", "page.html", "lib.min.js", "a.o", "mod.ko", "data.json" };
     const paths = try gpa.alloc([]const u8, count);
-    for (paths, 0..) |*p, i| p.* = try std.fmt.allocPrint(gpa, "{s}/d{d}/{s}", .{ dirs[i % dirs.len], i % 97, names[(i / dirs.len) % names.len] });
+    for (paths, 0..) |*p, i| p.* = try gpa.print("{s}/d{d}/{s}", .{ dirs[i % dirs.len], i % 97, names[(i / dirs.len) % names.len] });
     return paths;
 }
 
@@ -713,7 +713,7 @@ fn row6() !void {
         names.deinit(gpa);
     }
     const kinds = [_][]const u8{ "refs/heads/feature/", "refs/heads/fix/", "refs/remotes/origin/", "refs/tags/v" };
-    for (0..ref_count) |i| try names.append(gpa, try std.fmt.allocPrint(gpa, "{s}{d}.{d}", .{ kinds[i % kinds.len], i / 100, i % 100 }));
+    for (0..ref_count) |i| try names.append(gpa, try gpa.print("{s}{d}.{d}", .{ kinds[i % kinds.len], i / 100, i % 100 }));
     std.mem.sort([]const u8, names.items, {}, struct {
         fn f(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.order(u8, x, y) == .lt;

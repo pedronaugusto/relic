@@ -269,7 +269,7 @@ test "another worktree's HEAD and logs are read as git reads them, and a transac
 }
 
 /// Keeps every entry of a log `expireLog` walks.
-const KeepAll = struct {
+pub const KeepAll = struct {
     pub fn keep(_: *const KeepAll, _: refs.LogEntry, _: usize) bool {
         return true;
     }

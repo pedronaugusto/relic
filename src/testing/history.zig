@@ -1744,7 +1744,7 @@ test "the messages a person would edit come from the caller, and land as an edit
                 seen: [4]rebase.MessageKind = undefined,
                 count: usize = 0,
                 fn edit(context: *anyopaque, kind: rebase.MessageKind, proposed: []const u8) ?[]const u8 {
-                    const self: *Self = @ptrCast(@alignCast(context));
+                    const self: *Self = @ptrCast(@alignCast(context)); // safe: the context is the Self this function was installed with
                     std.debug.assert(proposed.len != 0);
                     self.seen[self.count] = kind;
                     self.count += 1;

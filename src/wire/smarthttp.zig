@@ -475,7 +475,7 @@ const Http = struct {
     /// as git's `init_curl_proxy_auth` fills it.
     fn configureProxy(h: *Http, raw: []const u8, method_name: []const u8) Error!uplink.Proxy {
         const arena = h.arena.allocator();
-        var proxy = uplink.Proxy.parse(arena, raw, .curl) catch |err| return switch (err) {
+        var proxy = uplink.Proxy.parse(arena, raw, .lowercase) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidProxy => error.InvalidProxy,
         };

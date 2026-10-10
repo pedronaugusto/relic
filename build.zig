@@ -201,8 +201,11 @@ pub fn build(b: *std.Build) void {
         test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency) catch return);
     test_module.addImport("warp", warp);
     if (b.pkg_hash.len == 0) {
-        if (b.lazyDependency("shakedown", .{ .target = target, .optimize = optimize })) |dep| {
+        if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |dep| {
             test_module.addImport("shakedown", dep.module("shakedown"));
+        } else |err| switch (err) {
+            // The build asks again once the package is fetched.
+            error.LazyDependencyNeeded => {},
         }
     }
     filter_helper.root_module.addImport("relic", module);

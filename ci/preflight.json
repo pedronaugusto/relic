@@ -38,15 +38,11 @@
       ]
     }
   },
-  "ziglint_exceptions": "ci/ziglint-exceptions.json",
   "extra_checks": [
     [
       "zig",
       "build",
       "check-ci-setup"
     ]
-  ],
-  "unreachable_exceptions": "ci/unreachable-exceptions.json",
-  "debug_print_exceptions": "ci/debug-print-exceptions.json",
-  "file_name_exceptions": "ci/file-name-exceptions.json"
+  ]
 }

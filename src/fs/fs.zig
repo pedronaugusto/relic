@@ -826,7 +826,7 @@ pub fn setTimestamps(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File
 
 /// Link two paths in a directory. Zig 0.17's threaded I/O has no Windows
 /// implementation of `Dir.hardLink`, although the filesystem supports it.
-pub const HardLinkError = Io.Dir.HardLinkError || Io.Dir.RealPathError || std.fmt.BufPrintError || Io.Threaded.Wtf8ToPrefixedFileWError || error{OperationUnsupported};
+pub const HardLinkError = Io.Dir.HardLinkError || Io.Dir.RealPathError || std.mem.PrintError || Io.Threaded.Wtf8ToPrefixedFileWError || error{OperationUnsupported};
 
 pub fn hardLink(io: Io, dir: Io.Dir, old_path: []const u8, new_path: []const u8) HardLinkError!void {
     if (builtin.target.os.tag != .windows) return dir.hardLink(old_path, dir, new_path, io, .{});

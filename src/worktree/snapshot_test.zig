@@ -418,13 +418,13 @@ const airlock_testing = @import("airlock.testing");
 
 /// The call a batch ends with whatever it wrote out: Linux's data sync of each
 /// file, and the flush of the volume elsewhere.
-const batch_sync: airlock_testing.Call = if (builtin.os.tag == .linux) .sync_data else .sync_full;
+const batch_sync: airlock_testing.Call = if (builtin.target.os.tag == .linux) .sync_data else .sync_full;
 
 /// A batch syncs `files` one by one. Linux does it with a data sync each;
 /// macOS and Windows write each file and directory out and flush the volume
 /// once, so they show at least as many writeouts as files.
 fn expectFileSyncs(h: *airlock_testing.Seam, files: usize) !void {
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         try testing.expectEqual(files, h.count(.sync_data));
     } else {
         try testing.expect(h.count(.sync_writeout) >= files);
@@ -447,10 +447,10 @@ fn expectSyncOrder(h: *airlock_testing.Seam) !void {
 fn expectDirectorySyncs(h: *airlock_testing.Seam, expected: usize) !void {
     // Only Linux syncs a directory with a call of its own; elsewhere the batch
     // writes it out with its files.
-    if (builtin.os.tag != .linux) return;
+    if (builtin.target.os.tag != .linux) return;
     // Airlock retries Linux O_PATH descriptors after EBADF: the failed fsync
     // is recorded too, and each getfl identifies that recovery attempt.
-    const recovered = if (builtin.os.tag == .linux) h.count(.getfl) else 0;
+    const recovered = if (builtin.target.os.tag == .linux) h.count(.getfl) else 0;
     try testing.expect(recovered <= expected);
     try testing.expectEqual(expected + recovered, h.count(.sync_dir));
 }
@@ -479,7 +479,7 @@ test "durable snapshots sync their closure and restored files before directories
     const captured = try store.capture(io, .{ .folder = folder.dir }, .{});
     // Three trees and the blob; already present objects must be covered too.
     try expectFileSyncs(h, 4);
-    if (builtin.os.tag == .linux) try testing.expect(h.count(.sync_dir) >= 2);
+    if (builtin.target.os.tag == .linux) try testing.expect(h.count(.sync_dir) >= 2);
     try expectSyncOrder(h);
     resetSyncs(h);
     _ = try store.capture(io, .{ .folder = folder.dir }, .{});
@@ -509,7 +509,7 @@ test "durable snapshots sync their closure and restored files before directories
     h.setPlan(&.{airlock_testing.fail(batch_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
     resetSyncs(h);
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         h.setPlan(&.{airlock_testing.fail(.sync_dir, 1, airlock_testing.io_error)});
         try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
     }

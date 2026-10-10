@@ -1076,7 +1076,7 @@ pub fn drop(io: Io, repo: *Repository, n: usize, options: DropOptions) Self.Erro
 }
 
 /// Which entry of the list `drop` takes out, and what it learns doing so.
-const Dropping = struct {
+pub const Dropping = struct {
     n: usize,
     dropped: ?Oid = null,
     remaining: usize = 0,
