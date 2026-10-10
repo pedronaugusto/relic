@@ -17,6 +17,7 @@ const std = @import("std");
 const policy_mod = @import("policy.zig");
 const indexpack_mod = @import("indexpack.zig");
 const shakedown = @import("shakedown");
+const airlock_testing = @import("airlock.testing");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -4768,4 +4769,37 @@ test "an object read into a kept buffer is the object read, and borrows the buff
     // A miss is the miss `read` gives, and leaves the buffer the caller's.
     try std.testing.expectError(error.ObjectNotFound, odb.readInto(io, try Oid.parse(.sha1, &@as([40]u8, @splat('1'))), &buffer));
     _ = try odb.readInto(io, names.items[0], &buffer);
+}
+
+test "a batch of loose objects is made durable by one flush of each directory that received one" {
+    const gpa = std.testing.allocator;
+    const base = std.testing.io;
+    var repo = try testgit.Repo.init(gpa, base, &.{});
+    defer repo.deinit();
+    const git_dir = try repo.gitDir(base);
+    defer git_dir.close(base);
+    const seam = try airlock_testing.Seam.create(gpa, base, .{});
+    defer seam.destroy();
+    const io = seam.io();
+    var odb = try Odb.open(gpa, io, git_dir, .sha1, .{ .sync = .batch });
+    defer odb.deinit(io);
+    // Objects whose names begin with different bytes land in different fan-out directories.
+    var fanouts: std.bit_set.Static(256) = .empty;
+    for (0..40) |i| {
+        var body: [16]u8 = undefined;
+        const oid = try odb.write(io, .blob, std.mem.print(&body, "object {d}\n", .{i}) catch unreachable);
+        fanouts.set(oid.raw()[0]);
+    }
+    // Each object was ordered before its name appeared, and no directory was flushed.
+    try std.testing.expectEqual(@as(u32, 0), seam.count(.sync_dir));
+    seam.reset();
+    try odb.syncBatch(io);
+    // The directories that received an object, and `objects`, which received them.
+    // Linux hands airlock a handle it cannot sync and airlock syncs one it reopens, so the refused call is counted too.
+    const reopened: u32 = if (builtin.target.os.tag == .linux) seam.count(.getfl) else 0;
+    try std.testing.expectEqual(@as(u32, @intCast(fanouts.count())) + 1 + reopened, seam.count(.sync_dir));
+    // Nothing is left to flush.
+    seam.reset();
+    try odb.syncBatch(io);
+    try std.testing.expectEqual(@as(u32, 0), seam.count(.sync_dir));
 }
