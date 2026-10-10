@@ -223,6 +223,15 @@ fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod
     return user_settings;
 }
 
+/// Whether `dir` holds nothing. It is opened again to be read, so any handle
+/// will do, the current directory's included.
+fn isEmpty(io: Io, dir: Io.Dir) Self.Error!bool {
+    var listed = try dir.openDir(io, ".", .{ .iterate = true });
+    defer listed.close(io);
+    var it = listed.iterate();
+    return try it.next(io) == null;
+}
+
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Self.Error!Repository {
@@ -232,14 +241,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         null;
     const single_branch = options.single_branch orelse (deepen != null);
     if (!refspecNameOk(options.origin)) return error.InvalidRemoteName;
-    {
-        // Opened again to be read, so any handle will do, the current
-        // directory's included.
-        var listed = try dir.openDir(io, ".", .{ .iterate = true });
-        defer listed.close(io);
-        var it = listed.iterate();
-        if (try it.next(io) != null) return error.DestinationNotEmpty;
-    }
+    if (!try isEmpty(io, dir)) return error.DestinationNotEmpty;
 
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
