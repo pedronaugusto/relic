@@ -77,7 +77,9 @@ pub fn syncAll(gpa: Allocator, io: Io, files: []const Named, directories: []cons
     };
 }
 
-/// How hard a write is pushed towards the disk.
+/// How hard a write is pushed towards the disk. airlock does the syncing and
+/// says what the filesystem reached; a level the filesystem cannot keep is
+/// `error.LevelUnavailable`, never a weaker promise kept in silence.
 ///
 /// git's own default is looser than it looks: `core.fsync` defaults to
 /// `committed,-loose-object`, so stock git makes neither a loose object nor
@@ -88,13 +90,16 @@ pub const Sync = enum {
     /// Write and rename. The operating system decides when the bytes land.
     /// This is git's default for loose objects.
     none,
-    /// Flush each file towards the disk, and put one real barrier at the end
-    /// of a batch. This is git's `core.fsyncMethod = batch`: the barrier is a
-    /// throwaway file in the same directory, synced and then removed, which
-    /// makes every file flushed before it durable at the cost of one sync
-    /// rather than one per file.
+    /// Order each file's bytes before its name appears, and leave the end of
+    /// the batch to make them durable, once for the directories that
+    /// received them rather than once per file (`Odb.syncBatch`, and the
+    /// directory a written pack lands in). This is git's
+    /// `core.fsyncMethod = batch`, and where git leaves the barrier to a
+    /// throwaway file, airlock flushes the volume.
     batch,
-    /// Sync every file before its rename. The strictest and the slowest.
+    /// Make each file durable before its name appears, and with a lock or a
+    /// replacement the directory that receives the name. The strictest and
+    /// the slowest.
     per_file,
 
     /// git's own default for the objects and the index: neither is synced.
@@ -1036,7 +1041,7 @@ pub fn lockHeld(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
 }
 
 /// Errors from replacing a file whole.
-pub const AtomicWriteError = airlock.WriteFileError || error{PublishedNotDurable};
+pub const AtomicWriteError = airlock.WriteFileOrRefuseError || error{PublishedNotDurable};
 
 pub const AtomicWriteOptions = struct {
     prefix: []const u8,
@@ -1061,7 +1066,7 @@ pub fn atomicWrite(
     bytes: []const u8,
     options: AtomicWriteOptions,
 ) Self.AtomicWriteError!void {
-    _ = try airlock.writeFile(io, dir, sub_path, bytes, .{
+    _ = try airlock.writeFileOrRefuse(io, dir, sub_path, bytes, .{
         .create = .{ .temp = .{ .random = options.prefix }, .mode = switch (options.permissions) {
             .default => .default,
             .destination => .inherit,
