@@ -123,9 +123,6 @@ pub const Options = struct {
     promised: bool = false,
     /// Where what the rules make warnings goes, as git prints them.
     warnings: ?*warning.Warnings = null,
-    /// How hard the pack and its index are pushed to the disk before they
-    /// are renamed into place.
-    sync: fs.Sync = .none,
     /// The most bytes the stream may carry, or `null` for no bound.
     max_pack_bytes: ?u64 = null,
     /// The largest object, or delta, held in memory.
@@ -391,10 +388,10 @@ pub fn receive(
     const index_entries = try indexEntries(gpa, &indexer, options);
     defer gpa.free(index_entries);
 
-    switch (options.sync) {
-        .none => {},
-        .batch, .per_file => try fs.syncFile(io, file, .{ .policy = options.sync }),
-    }
+    // The pack and its indexes are synced as the database's `core.fsync`
+    // says: a received pack is a `pack`, its indexes `pack-metadata`.
+    const fsync = db.settings().fsync;
+    try fs.syncFile(io, file, .{ .policy = fsync.sync(.pack) });
     file.close(io);
     file_open = false;
 
@@ -425,12 +422,12 @@ pub fn receive(
 
     var idx_temp_buf: [64]u8 = undefined;
     const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
-    _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = options.sync });
+    _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = fsync.sync(.pack_metadata) });
     // glint-ignore: Z026 -- the receive's error is the one to report; a temporary index left behind is what git gc prunes
     errdefer pack_dir.deleteFile(io, idx_temp) catch {};
     var rev_temp_buf: [64]u8 = undefined;
     const rev_temp: ?[]const u8 = if (options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
-    if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = options.sync });
+    if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = fsync.sync(.pack_metadata) });
     // glint-ignore: Z026 -- the receive's error is the one to report; a temporary reverse index left behind is what git gc prunes
     errdefer if (rev_temp) |t| pack_dir.deleteFile(io, t) catch {};
 
@@ -450,7 +447,6 @@ pub fn receive(
         try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
     try renameBesidePack(io, pack_dir, idx_temp, idx_name, pack_name);
-    if (options.sync == .batch) try fs.syncDir(io, pack_dir);
     try db.refresh(io);
     return result;
 }

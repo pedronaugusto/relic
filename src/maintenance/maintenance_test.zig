@@ -344,7 +344,7 @@ test "configured maintenance writes full and split commit graphs and repack bitm
     try linearCommit(&repo, 6);
     _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .fetch);
     try repo.exec(io, &.{ "commit-graph", "verify" });
-    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 2, .sync = .none }, .remove_packs = true });
+    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 2 }, .remove_packs = true });
     try repo.exec(io, &.{ "commit-graph", "verify" });
     try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
 }
@@ -409,14 +409,14 @@ test "accelerator files are deterministic across pack worker counts" {
     for (0..16) |n| try linearCommit(&repo, n);
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
-    const first = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1, .sync = .none }, .remove_packs = true });
+    const first = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1 }, .remove_packs = true });
     const graph_bytes = try repo.readFile(io, ".git/objects/info/commit-graph");
     defer gpa.free(graph_bytes);
     const path = try bitmapPath(&repo, "pack-");
     defer gpa.free(path);
     const bitmap_bytes = try repo.readFile(io, path);
     defer gpa.free(bitmap_bytes);
-    const second = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 4, .sync = .none }, .remove_packs = true });
+    const second = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 4 }, .remove_packs = true });
     try std.testing.expect(first.written.?.name.eql(second.written.?.name));
     try sameFile(&repo, ".git/objects/info/commit-graph", graph_bytes);
     try sameFile(&repo, path, bitmap_bytes);
@@ -659,7 +659,7 @@ test "a repository with replace refs is repacked with a commit graph of the pare
     try repo.exec(io, &.{ "replace", "HEAD~1", "HEAD~2" });
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
-    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1, .sync = .none }, .remove_packs = true });
+    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1 }, .remove_packs = true });
     try repo.exec(io, &.{ "commit-graph", "verify" });
     // git writes these generation bytes from 2.43 on.
     if (!try testgit.gitAtLeast(gpa, io, 2, 43)) return;

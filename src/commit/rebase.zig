@@ -1045,7 +1045,7 @@ fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error
     const from_tree = if (h.oid) |oid| try r.repo.commitTree(r.io, oid) else try r.repo.objectDatabase().write(r.io, .tree, "");
     var outcome = try threeway.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, base) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
-    try index.write(r.io, r.repo.gitDirectory(), "index", .{});
+    try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
     try r.repo.refStore().root().write(r.repo.allocator(), r.io, .orig_head, orig_head);
     const log = try r.reflogMessage("start", try r.arena.print("checkout {s}", .{onto_name}));
     try head_mod.detach(r.io, r.repo, h.oid, base, .{ .who = r.options.who, .message = log });
@@ -1063,7 +1063,7 @@ fn checkoutTip(r: *Run, tip: Tip, name: []const u8) Error!void {
     const from_tree = try r.repo.commitTree(r.io, h.oid orelse return error.UnbornBranch);
     var outcome = try threeway.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, tip.orig_head) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
-    try index.write(r.io, r.repo.gitDirectory(), "index", .{});
+    try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
     const log = try r.arena.print("rebase: checkout {s}", .{name});
     if (tip.head_name) |branch| {
         try head_mod.attach(r.io, r.repo, branch, h.oid, .{ .who = r.options.who, .message = log });
@@ -1982,7 +1982,7 @@ fn doReset(r: *Run, arg: []const u8) Error!void {
     var index = try r.repo.openIndex(r.io);
     defer index.deinit();
     try reset.toTree(r.gpa, r.io, r.repo, .{ .index = &index, .tree = try r.repo.commitTree(r.io, target), .mode = .merge, .blocked = r.options.blocked });
-    try index.write(r.io, r.repo.gitDirectory(), "index", .{});
+    try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
     var h = try r.head();
     defer h.deinit(r.gpa);
     const log = try r.arena.print("rebase (reset): '{s}'", .{name});

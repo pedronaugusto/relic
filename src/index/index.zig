@@ -606,7 +606,10 @@ pub const WriteOptions = struct {
     entry_offset_blocks: ?u32 = null,
     /// How the lock behaves: whether to wait for a contended one, and how
     /// hard to push the bytes towards the disk before the rename.
-    lock: fs.LockFile.Options = .{},
+    /// How the lock is taken and synced. The default syncs the index, as
+    /// relic's `core.fsync` default does; `Repository.indexLock` gives what
+    /// the repository's configuration says.
+    lock: fs.LockFile.Options = .{ .sync = .per_file },
     /// Whether a racily clean entry's file holds something other than the
     /// entry says. Given, a racy entry is smudged only when it does, which
     /// is git's rule, and an index read and written back keeps its bytes;

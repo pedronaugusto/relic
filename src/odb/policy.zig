@@ -22,13 +22,13 @@ pub const Options = struct {
     /// against a `git gc` that wants to replace it. Both of those are the
     /// property this package exists to keep.
     map_packs: bool = false,
-    /// How hard a loose object is pushed towards the disk. git's own default
-    /// syncs neither loose objects nor the index. `per_file` syncs each
-    /// object's bytes before its name appears. `batch` orders each object's
-    /// bytes before its name, and `Odb.syncBatch` makes the objects and the
-    /// directories that received them durable at once, for one flush per
-    /// directory rather than one per object.
-    sync: fs.Sync = .none,
+    /// `core.fsync` and `core.fsyncMethod`: which of the objects, packs,
+    /// their indexes and the commit-graph are synced, and how. Under
+    /// `batch`, each loose object's bytes are ordered before its name and
+    /// `Odb.syncBatch` makes the objects and the directories that received
+    /// them durable at once, for one flush per directory rather than one
+    /// per object.
+    fsync: fs.Fsync = .default,
     /// The buffer size a streaming read uses.
     read_buffer_size: usize = 64 * 1024,
     /// How many bytes of each pack positional reads keep, in aligned blocks

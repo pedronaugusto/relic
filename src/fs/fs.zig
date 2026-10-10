@@ -43,7 +43,7 @@ pub const FileSyncOptions = struct { policy: Sync = .per_file };
 pub fn syncFile(io: Io, file: Io.File, options: FileSyncOptions) SyncError!void {
     switch (options.policy) {
         .none => {},
-        .batch => try syncFileLevel(io, file, .ordered),
+        .batch, .ordered => try syncFileLevel(io, file, .ordered),
         .per_file => try syncFileLevel(io, file, .data),
     }
 }
@@ -81,19 +81,19 @@ pub fn syncAll(gpa: Allocator, io: Io, files: []const Named, directories: []cons
     };
 }
 
-/// How hard a write is pushed towards the disk. airlock does the syncing and
-/// says what the filesystem reached; a level the filesystem cannot keep is
-/// `error.LevelUnavailable`, never a weaker promise kept in silence.
-///
-/// git's own default is looser than it looks: `core.fsync` defaults to
-/// `committed,-loose-object`, so stock git makes neither a loose object nor
-/// the index durable before returning. The cost of the strict choice is
-/// measurable — a single `fsync` per object turns a three-thousand-file `add`
-/// into seconds of waiting — so it is a policy here and not a constant.
+/// How hard one file is pushed towards the disk. airlock does the syncing
+/// and says what the filesystem reached; a level the filesystem cannot keep
+/// is `error.LevelUnavailable`, never a weaker promise kept in silence.
+/// Which writes are synced, and how, is `Fsync`: git's `core.fsync` and
+/// `core.fsyncMethod`.
 pub const Sync = enum {
     /// Write and rename. The operating system decides when the bytes land.
-    /// This is git's default for loose objects.
     none,
+    /// Order each file's bytes before its name appears, and nothing more:
+    /// after a power cut the old file or the whole new one, never a torn
+    /// one. git's `core.fsyncMethod = writeout-only` promises less; this is
+    /// the cheapest level that makes a promise at all.
+    ordered,
     /// Order each file's bytes before its name appears, and leave the end of
     /// the batch to make them durable, once for the directories that
     /// received them rather than once per file (`Odb.syncBatch`, and the
@@ -101,14 +101,135 @@ pub const Sync = enum {
     /// `core.fsyncMethod = batch`, and where git leaves the barrier to a
     /// throwaway file, airlock flushes the volume.
     batch,
-    /// Make each file durable before its name appears, as git's `core.fsync`
-    /// does; the name itself is the directory's to make durable, which a lock
-    /// asks for with `sync_directory`. The strictest and the slowest.
+    /// Make each file durable before its name appears, as git's
+    /// `core.fsyncMethod = fsync` does; the name itself is the directory's
+    /// to make durable, which a lock asks for with `sync_directory`.
     per_file,
-
-    /// git's own default for the objects and the index: neither is synced.
-    pub const default: Sync = .none;
 };
+
+/// Which of a repository's files are synced, and how: git's `core.fsync`,
+/// `core.fsyncMethod` and `core.fsyncObjectFiles`, read as git reads them.
+pub const Fsync = struct {
+    components: std.EnumSet(Component),
+    method: Method = .fsync,
+
+    /// What git names the files it may sync.
+    pub const Component = enum { loose_object, pack, pack_metadata, commit_graph, index, reference };
+
+    /// `core.fsyncMethod`.
+    pub const Method = enum { fsync, writeout_only, batch };
+
+    /// git's `FSYNC_COMPONENTS_DEFAULT`: packs, their metadata and the
+    /// commit-graph; what `core.fsync` is read against.
+    pub const git_default: Fsync = .{ .components = .initMany(&.{ .pack, .pack_metadata, .commit_graph }) };
+    /// relic's when nothing is set: git's, and the references and the index
+    /// besides, which git leaves unsynced and whose loss is the one the
+    /// field reports (an empty ref, a truncated index).
+    pub const default: Fsync = .{ .components = .initMany(&.{ .pack, .pack_metadata, .commit_graph, .index, .reference }) };
+    /// Nothing synced.
+    pub const off: Fsync = .{ .components = .empty };
+
+    /// The names `core.fsync` takes, each with what it stands for.
+    const names = [_]struct { []const u8, []const Component }{
+        .{ "loose-object", &.{.loose_object} },
+        .{ "pack", &.{.pack} },
+        .{ "pack-metadata", &.{.pack_metadata} },
+        .{ "commit-graph", &.{.commit_graph} },
+        .{ "index", &.{.index} },
+        .{ "reference", &.{.reference} },
+        .{ "objects", &.{ .loose_object, .pack } },
+        .{ "derived-metadata", &.{ .pack_metadata, .commit_graph } },
+        .{ "committed", &.{ .loose_object, .pack, .reference } },
+        .{ "added", &.{ .loose_object, .pack, .reference, .index } },
+        .{ "all", &.{ .loose_object, .pack, .reference, .index, .pack_metadata, .commit_graph } },
+    };
+
+    /// `core.fsync`'s value over git's default, as git's
+    /// `parse_fsync_components` reads it: comma-separated names, a `-`
+    /// before one taking it away from the default (never from what the value
+    /// itself adds), `none` (as the last word) starting from
+    /// nothing. A word selects every name it begins, as git compares only
+    /// its length (`pack` is `pack` and `pack-metadata`); one that begins no
+    /// name is ignored, as git ignores it after a warning.
+    pub fn parseComponents(value: []const u8) std.EnumSet(Component) {
+        var current = git_default.components;
+        var positive: std.EnumSet(Component) = .empty;
+        var negative: std.EnumSet(Component) = .empty;
+        var rest = value;
+        while (true) {
+            const skip = std.mem.findNone(u8, rest, ", \t\n\r") orelse rest.len;
+            rest = rest[skip..];
+            const end = std.mem.findScalar(u8, rest, ',') orelse rest.len;
+            // git compares the whole rest of the value with `none`.
+            if (std.mem.eql(u8, rest, "none")) {
+                current = .empty;
+            } else {
+                var word = rest[0..end];
+                const negated = word.len != 0 and word[0] == '-';
+                if (negated) word = word[1..];
+                if (word.len == 0) break;
+                for (names) |entry| {
+                    if (!std.mem.startsWith(u8, entry[0], word)) continue;
+                    for (entry[1]) |c| if (negated) negative.insert(c) else positive.insert(c);
+                }
+            }
+            if (end == rest.len) break;
+            rest = rest[end..];
+        }
+        return current.differenceWith(negative).unionWith(positive);
+    }
+
+    /// `core.fsyncMethod`'s value; `null` for one git ignores.
+    pub fn parseMethod(value: []const u8) ?Method {
+        if (std.mem.eql(u8, value, "fsync")) return .fsync;
+        if (std.mem.eql(u8, value, "writeout-only")) return .writeout_only;
+        if (std.mem.eql(u8, value, "batch")) return .batch;
+        return null;
+    }
+
+    /// How a file of `component` is synced. `batch` is git's for loose
+    /// objects alone; the rest are synced one by one under it, as git
+    /// syncs them.
+    pub fn sync(f: Fsync, component: Component) Sync {
+        if (!f.components.contains(component)) return .none;
+        return switch (f.method) {
+            .fsync => .per_file,
+            .writeout_only => .ordered,
+            .batch => if (component == .loose_object) .batch else .per_file,
+        };
+    }
+};
+
+test "core.fsync is read as git reads it" {
+    const testing = std.testing;
+    const C = Fsync.Component;
+    const set = struct {
+        fn of(items: []const C) std.EnumSet(C) {
+            return .initMany(items);
+        }
+    }.of;
+    try testing.expect(Fsync.parseComponents("").eql(Fsync.git_default.components));
+    try testing.expect(Fsync.parseComponents("reference").eql(set(&.{ .pack, .pack_metadata, .commit_graph, .reference })));
+    try testing.expect(Fsync.parseComponents("-pack-metadata, index").eql(set(&.{ .pack, .commit_graph, .index })));
+    // `pack` begins `pack-metadata` too; `commit` begins `commit-graph` and `committed`.
+    try testing.expect(Fsync.parseComponents("-pack").eql(set(&.{.commit_graph})));
+    try testing.expect(Fsync.parseComponents("-pack,commit").eql(set(&.{ .commit_graph, .loose_object, .pack, .reference })));
+    try testing.expect(Fsync.parseComponents("none").eql(set(&.{})));
+    try testing.expect(Fsync.parseComponents("reference,none").eql(set(&.{.reference})));
+    // `none` before another word is a word that begins no name.
+    try testing.expect(Fsync.parseComponents("none,reference").eql(set(&.{ .pack, .pack_metadata, .commit_graph, .reference })));
+    // A `-` takes from the default, never from what the value adds.
+    try testing.expect(Fsync.parseComponents("all,-loose-object").eql(.full));
+    try testing.expect(Fsync.parseComponents("-commit-graph,index").eql(set(&.{ .pack, .pack_metadata, .index })));
+    try testing.expect(Fsync.parseComponents("bogus").eql(Fsync.git_default.components));
+    try testing.expectEqual(Fsync.Method.writeout_only, Fsync.parseMethod("writeout-only").?);
+    try testing.expectEqual(@as(?Fsync.Method, null), Fsync.parseMethod("Fsync"));
+    const batch: Fsync = .{ .components = set(&.{ .loose_object, .reference }), .method = .batch };
+    try testing.expectEqual(Sync.batch, batch.sync(.loose_object));
+    try testing.expectEqual(Sync.per_file, batch.sync(.reference));
+    try testing.expectEqual(Sync.none, batch.sync(.index));
+    try testing.expectEqual(Sync.ordered, (Fsync{ .components = set(&.{.pack}), .method = .writeout_only }).sync(.pack));
+}
 
 /// How fine a modification time a filesystem records.
 ///
@@ -451,11 +572,10 @@ pub const LockFile = struct {
         /// What to do when the lock is already held.
         on_contention: OnContention = .fail,
         /// How hard to push the new bytes towards the disk before the
-        /// rename. A lock is how a file is replaced, so the default here is
-        /// stricter than for a loose object: the failures this prevents —
-        /// an empty ref, a truncated index — are the ones the field actually
-        /// reports.
-        sync: Sync = .per_file,
+        /// rename: what `Fsync` says for the file's component, and `.none`
+        /// for the files git syncs under none (config, state files), as git
+        /// writes them. No default, so every lock says which it is.
+        sync: Sync,
         /// Whether the lock names this process while it is held, so that a
         /// later writer that meets it can say who holds it (`staleReport`).
         /// The name is the lock's own first bytes, `pid <n>`, which the new
@@ -1320,13 +1440,13 @@ test "a lock is refused, not broken, and says who holds it" {
     try dir.writeFile(io, .{ .sub_path = "thing", .data = "old\n" });
 
     var buf: [64]u8 = undefined;
-    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
+    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
     defer lock.deinit(io);
 
     var buf2: [64]u8 = undefined;
     try std.testing.expectError(
         error.LockHeld,
-        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{}),
+        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .sync = .none }),
     );
     const report = staleReport(io, dir, "thing");
     try std.testing.expect(report.held);
@@ -1350,7 +1470,7 @@ test "a lock names its holder in its own bytes, and no file but the lock is made
     // Contents shorter than the name under them, and none at all.
     for ([_][]const u8{ "x", "" }) |contents| {
         var buf: [64]u8 = undefined;
-        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
+        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
         defer lock.deinit(io);
         var count: usize = 0;
         var it = dir.iterate();
@@ -1373,7 +1493,7 @@ test "a lock syncs the target's directory after rename only when asked" {
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "nested", .default_dir);
     for ([_][]const u8{ "thing", "nested/thing" }) |target| {
-        for ([_]Sync{ .none, .batch, .per_file }) |policy| {
+        for ([_]Sync{ .none, .ordered, .batch, .per_file }) |policy| {
             for ([_]bool{ false, true }) |sync_directory| {
                 const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{});
                 defer h.destroy();
@@ -1387,7 +1507,8 @@ test "a lock syncs the target's directory after rename only when asked" {
                 try lock.writer().writeAll("new\n");
                 try lock.commit(io);
                 try std.testing.expectEqual(@as(u32, @intFromBool(sync_directory)), h.count(.sync_dir));
-                const file_call: seam.Call = if (policy == .batch and builtin.target.os.tag.isDarwin()) .sync_barrier else seam.data_sync;
+                const ordered = policy == .batch or policy == .ordered;
+                const file_call: seam.Call = if (ordered and builtin.target.os.tag.isDarwin()) .sync_barrier else seam.data_sync;
                 try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(file_call));
                 try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none) + @as(u32, @intFromBool(sync_directory))), h.syncs());
                 var read_buf: [16]u8 = undefined;
@@ -1454,7 +1575,7 @@ test "a rolled-back lock changes nothing" {
     try dir.writeFile(io, .{ .sub_path = "thing", .data = "old\n" });
     {
         var buf: [64]u8 = undefined;
-        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
+        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
         defer lock.deinit(io);
         try lock.writer().writeAll("never\n");
     }
@@ -1472,7 +1593,7 @@ test "a failed lock rename removes the closed lock file" {
     try dir.createDir(io, "thing", .default_dir);
 
     var buf: [64]u8 = undefined;
-    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
+    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
     try lock.writer().writeAll("cannot replace a directory\n");
     try std.testing.expectError(error.IsDir, lock.commit(io));
     lock.deinit(io);
@@ -1489,7 +1610,7 @@ test "an allocation failure abandons no lock" {
 
     try std.testing.expectError(
         error.OutOfMemory,
-        LockFile.open(failing.allocator(), io, tmp.dir, .{ .sub_path = "thing", .buffer = &buf }, .{}),
+        LockFile.open(failing.allocator(), io, tmp.dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file }),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "thing.lock", .{}));
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
@@ -1503,13 +1624,13 @@ test "waiting for a lock gives up with the same named error" {
     const dir = tmp.dir;
 
     var buf: [64]u8 = undefined;
-    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{});
+    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
     defer lock.deinit(io);
 
     var buf2: [64]u8 = undefined;
     try std.testing.expectError(
         error.LockHeld,
-        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .on_contention = .{ .wait_ms = 5 } }),
+        LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .sync = .none, .on_contention = .{ .wait_ms = 5 } }),
     );
 }
 

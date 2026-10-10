@@ -143,6 +143,7 @@ test {
     _ = @import("testing/url_ownership.zig");
     _ = @import("testing/refs_ownership.zig");
     _ = @import("testing/pack_keep.zig");
+    _ = @import("testing/fsync.zig");
     _ = @import("testing/objectwalk.zig");
     _ = @import("testing/fetchpack.zig");
     _ = @import("refs/packed.zig");

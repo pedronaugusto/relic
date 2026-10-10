@@ -1588,7 +1588,7 @@ fn checkoutCommit(
         error.UnsafePath => return refuse(options.refusal, display, refusal.path(), error.UnsafePath),
         else => |e| return e,
     };
-    try index.write(io, sub.gitDirectory(), "index", .{});
+    try index.write(io, sub.gitDirectory(), "index", .{ .lock = sub.indexLock() });
 
     var hex: [hash.max_hex_len]u8 = undefined;
     var from_hex: [hash.max_hex_len]u8 = undefined;

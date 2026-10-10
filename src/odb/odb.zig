@@ -188,6 +188,17 @@ pub const Odb = struct {
         return db.backendData().options;
     }
 
+    /// How a loose object this database writes is synced.
+    fn looseSync(db: *const Odb) fs.Sync {
+        return db.backendData().options.fsync.sync(.loose_object);
+    }
+
+    /// Change which writes are synced, as a refreshed configuration says.
+    /// Objects a `batch` wrote before it are still synced by `syncBatch`.
+    pub fn configureFsync(db: *Odb, fsync: fs.Fsync) void {
+        db.backendData().options.fsync = fsync;
+    }
+
     /// The allocator that owns returned object bytes.
     pub fn allocator(db: *const Odb) Allocator {
         return db.backendData().gpa;
@@ -356,7 +367,8 @@ pub const Odb = struct {
         if (content.len > 1 << 20) return error.AlternatesTooLarge;
         const dir = odb.backendData().sources.items[0].dir;
         try dir.createDirPath(io, "info");
-        try fs.atomicWrite(io, dir, "info/alternates", content, .{ .prefix = "alternates-", .sync = odb.backendData().options.sync });
+        // git syncs `info/alternates` under no `core.fsync` component.
+        try fs.atomicWrite(io, dir, "info/alternates", content, .{ .prefix = "alternates-", .sync = .none });
         // The own source remains open; rebuild the chain below it so reads
         // immediately see additions and stop seeing removed alternates.
         for (odb.backendData().sources.items[1..]) |*source| odb.closeSource(io, source);
@@ -1096,12 +1108,9 @@ pub const Odb = struct {
         try writer.interface.writeAll(bytes);
         try writer.finish();
         try file_writer.interface.flush();
-        switch (odb.backendData().options.sync) {
-            .none => {},
-            // Batch and per-file both flush the object's own descriptor; the
-            // difference is the single barrier `syncBatch` puts at the end.
-            .batch, .per_file => try fs.syncFile(io, file, .{ .policy = odb.backendData().options.sync }),
-        }
+        // Batch and per-file both flush the object's own descriptor; the
+        // difference is the single barrier `syncBatch` puts at the end.
+        try fs.syncFile(io, file, .{ .policy = odb.looseSync() });
         file.close(io);
         failed = false;
 
@@ -1562,14 +1571,15 @@ pub const Odb = struct {
     /// Make the loose objects written since the last call durable, with the
     /// directories that received them.
     ///
-    /// Under `Options.sync = .batch` each object's bytes were ordered before
+    /// Under `core.fsyncMethod = batch` each object's bytes were ordered before
     /// its name appeared; this is what then makes the names survive a power
     /// cut, for one flush per fan-out directory rather than one per object.
-    /// Under the other two policies it does nothing, so a caller may always
-    /// call it.
+    /// With nothing written under a batch it does nothing, so a caller may
+    /// always call it.
     pub fn syncBatch(odb: *Odb, io: Io) ErrorNamespace.Error!void {
         const data = odb.backendData();
-        if (data.options.sync != .batch) return;
+        // What a batch wrote is noted below, so nothing noted is nothing to do,
+        // whatever the policy is now.
         const source = odb.writableSource();
         var fanouts = data.unsynced_fanouts.iterator(.{});
         while (fanouts.next()) |byte| {
@@ -1591,7 +1601,7 @@ pub const Odb = struct {
     /// `syncBatch`.
     fn noteLooseObject(odb: *Odb, oid: Oid, fan_out_made: bool) void {
         const data = odb.backendData();
-        if (data.options.sync != .batch) return;
+        if (odb.looseSync() != .batch) return;
         data.unsynced_fanouts.set(oid.raw()[0]);
         if (fan_out_made) data.unsynced_objects_dir = true;
     }
@@ -1709,7 +1719,12 @@ pub const Odb = struct {
 
         const write_options: pack.WriteOptions = .{
             .keep = options.keep,
-            .sync = options.sync,
+            // A pack written into the database is synced as `core.fsync`
+            // says; one streamed to a caller is the caller's.
+            .fsync = switch (target) {
+                .dir => odb.backendData().options.fsync,
+                .stream => .off,
+            },
             .compression = options.compression,
             .reverse_index = options.reverse_index,
             .shared = odb.backendData().options.shared,
@@ -2262,7 +2277,7 @@ pub const Odb = struct {
     /// How a repack behaves.
     pub const RepackOptions = struct {
         /// How the pack itself is built.
-        pack: PackOptions = .{ .sync = .batch },
+        pack: PackOptions = .{},
         /// Whether the loose objects the new pack now holds are removed.
         remove_loose: bool = true,
         /// Whether the packs the new one replaces are removed.
@@ -2350,7 +2365,6 @@ pub const Odb = struct {
         }
 
         const written = try odb.writePack(io, pack_dir, collected.entries, options.pack);
-        if (options.pack.sync == .batch) try fs.syncDir(io, pack_dir);
 
         // The new pack has to be readable here before anything is taken
         // away, because it is this database that will be asked for those
@@ -2474,7 +2488,7 @@ pub const Odb = struct {
         const dir = try source.dir.openDir(io, "pack", .{ .iterate = true });
         errdefer dir.close(io);
         const writer = try pack.Writer.open(odb.backendData().gpa, io, dir, .{ .kind = odb.backendData().kind }, .{
-            .sync = options.sync,
+            .fsync = odb.backendData().options.fsync,
             .compression = options.compression,
             .shared = odb.backendData().options.shared,
         });
@@ -2514,7 +2528,6 @@ pub const Odb = struct {
             return null;
         }
         const report = try filling.writer.finish(io);
-        if (filling.writer.options.sync == .batch) try fs.syncDir(io, filling.dir);
         try odb.refresh(io);
         return report;
     }
@@ -2605,10 +2618,7 @@ pub const ObjectStream = struct {
         if (s.remaining != 0) return error.CorruptLooseObject;
         try s.compressed_writer.finish();
         try s.file_writer.interface.flush();
-        switch (s.odb.backendData().options.sync) {
-            .none => {},
-            .batch, .per_file => try fs.syncFile(io, s.file, .{ .policy = s.odb.backendData().options.sync }),
-        }
+        try fs.syncFile(io, s.file, .{ .policy = s.odb.looseSync() });
         s.file.close(io);
         s.file_open = false;
 
@@ -2750,9 +2760,6 @@ pub const PackOptions = struct {
     /// An object this large or larger is written whole and never enters the
     /// window. git's `core.bigFileThreshold`, and the same default.
     big_file_bytes: u64 = 512 << 20,
-    /// How hard the two files are pushed towards the disk before they are
-    /// renamed into place.
-    sync: fs.Sync = .none,
     /// How hard the entries are compressed.
     compression: pack.Compression = .default,
     /// Write the pack's reverse index too: `pack.WriteOptions.reverse_index`.
@@ -4785,7 +4792,7 @@ test "a batch of loose objects is made durable by one flush of each directory th
     const seam = try airlock_testing.Seam.create(gpa, base, .{});
     defer seam.destroy();
     const io = seam.io();
-    var odb = try Odb.open(gpa, io, git_dir, .sha1, .{ .sync = .batch });
+    var odb = try Odb.open(gpa, io, git_dir, .sha1, .{ .fsync = .{ .components = .initOne(.loose_object), .method = .batch } });
     defer odb.deinit(io);
     // Objects whose names begin with different bytes land in different fan-out directories.
     var fanouts: std.bit_set.Static(256) = .empty;
