@@ -19,8 +19,12 @@ const clone_mod = @import("../transport/clone.zig");
 const filter = @import("filter.zig");
 const lfstransfer = @import("transfer.zig");
 
+const ErrorNamespace = @This();
+
 /// A fetcher for one clone's checkout.
 pub const Fetcher = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     repo: *repo_mod.Repository,
     /// The remote the clone came from.
