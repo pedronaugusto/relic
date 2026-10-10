@@ -14,6 +14,7 @@ const Self = @This();
 const ort = @import("ort.zig");
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const testbytes = @import("../testing/bytes.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -928,17 +929,20 @@ test "the content merge takes blob.whitespace, and reads a file 66 directories d
 }
 
 test "fuzz: three-way blob merges never crash and an unchanged theirs preserves ours" {
-    try std.testing.fuzz({}, fuzzBlobs, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzBlobs, .{});
 }
 
-fn fuzzBlobs(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzBlobs(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var ancestor_buf: [192]u8 = undefined;
     var ours_buf: [192]u8 = undefined;
     var theirs_buf: [192]u8 = undefined;
-    const ancestor = ancestor_buf[0..smith.slice(&ancestor_buf)];
-    const ours = ours_buf[0..smith.slice(&ours_buf)];
-    const theirs = theirs_buf[0..smith.slice(&theirs_buf)];
+    const ancestor = ancestor_buf[0..shakedown.gen.intRange(case.source, usize, 0, ancestor_buf.len)];
+    case.source.bytes(ancestor);
+    const ours = ours_buf[0..shakedown.gen.intRange(case.source, usize, 0, ours_buf.len)];
+    case.source.bytes(ours);
+    const theirs = theirs_buf[0..shakedown.gen.intRange(case.source, usize, 0, theirs_buf.len)];
+    case.source.bytes(theirs);
 
     if (blobs(gpa, ancestor, ours, theirs, .{})) |result_value| {
         var result = result_value;

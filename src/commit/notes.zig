@@ -25,6 +25,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -1781,20 +1782,27 @@ test "notes merge under every strategy leaves what git notes merge leaves, and a
 }
 
 test "fuzz: any tree reads as notes or a named error, and edits keep exactly the notes a map keeps" {
-    const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.create(gpa, io, tmp.dir, .{ .bare = true });
-    defer repo.deinit(io);
-    try std.testing.fuzz(&repo, fuzzNotes, .{});
+    // The repository outlives every case, and its object database keeps
+    // what its first write allocates, so it has an allocator of its own:
+    // the fuzzer checks `std.testing.allocator` for leaks after each input.
+    var repo_gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    {
+        var repo = try Repository.create(repo_gpa.allocator(), io, tmp.dir, .{ .bare = true });
+        defer repo.deinit(io);
+        try shakedown.check(std.testing.allocator, &repo, fuzzNotes, .{});
+    }
+    try std.testing.expectEqual(0, repo_gpa.deinit());
 }
 
-fn fuzzNotes(repo: *Repository, smith: *std.testing.Smith) anyerror!void {
+fn fuzzNotes(repo: *Repository, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var scratch: [512]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
 
     // The bytes as a tree, read as a notes tree's root.
     {

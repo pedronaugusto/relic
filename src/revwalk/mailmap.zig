@@ -31,6 +31,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -339,13 +340,14 @@ test "a line too long for git's buffer is read in pieces, as git reads it" {
 }
 
 test "fuzz: any bytes are a mailmap, and every lookup answers" {
-    try std.testing.fuzz({}, fuzzMailmap, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzMailmap, .{});
 }
 
-fn fuzzMailmap(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzMailmap(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var buf: [512]u8 = undefined;
-    const text = buf[0..smith.slice(&buf)];
+    const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(text);
     var m: Mailmap = .init(gpa);
     defer m.deinit();
     try m.addFileBytes(text);

@@ -1083,12 +1083,13 @@ fn removeBranchState(io: Io, repo: *Repository) Error!void {
 }
 
 test "fuzz: any bytes are an opts file or a named error" {
-    try std.testing.fuzz({}, fuzzOpts, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzOpts, .{});
 }
 
-fn fuzzOpts(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzOpts(_: void, case: *shakedown.Case) anyerror!void {
     var input: [256]u8 = undefined;
-    const text = input[0..smith.slice(&input)];
+    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
+    case.source.bytes(text);
     var options: Options = .{ .who = undefined };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -545,13 +546,14 @@ test "a bad line is refused with its number and why" {
 }
 
 test "fuzz: any bytes are a sheet or a named error, and a sheet writes back to one that reads the same" {
-    try std.testing.fuzz({}, fuzzTodo, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzTodo, .{});
 }
 
-fn fuzzTodo(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzTodo(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var buf: [512]u8 = undefined;
-    const text = buf[0..smith.slice(&buf)];
+    const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(text);
     var list = parse(gpa, text, test_resolver, .{ .fixup_first_ok = true }) catch |err| switch (err) {
         error.InvalidTodoLine, error.FixupWithoutCommit => return,
         error.OutOfMemory => return err,

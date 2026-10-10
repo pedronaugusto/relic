@@ -20,6 +20,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -1097,10 +1098,11 @@ test "a quoted name in a git header is unquoted" {
 }
 
 test "fuzz: any bytes are a patch or a named refusal" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [2048]u8 = undefined;
-            const len = smith.slice(&buf);
+            const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+            case.source.bytes(buf[0..len]);
             var patch = parse(std.testing.allocator, buf[0..len], .{}) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return,

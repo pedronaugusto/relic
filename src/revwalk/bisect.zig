@@ -30,6 +30,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -1440,15 +1441,16 @@ test "git's pseudo-random step and integer square root" {
 }
 
 test "fuzz: any log text replays to a value or a named error, and quoting round-trips" {
-    try std.testing.fuzz({}, fuzzQuote, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzQuote, .{});
 }
 
-fn fuzzQuote(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzQuote(_: void, case: *shakedown.Case) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var buf: [256]u8 = undefined;
-    const input = buf[0..smith.slice(&buf)];
+    const input = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(input);
     _ = try sqDequote(a, input);
     var words = std.mem.splitScalar(u8, input, 0);
     var quoted: std.ArrayList(u8) = .empty;

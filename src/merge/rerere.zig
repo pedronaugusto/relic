@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const path_mod = @import("../names.zig").path;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -1095,12 +1096,13 @@ test "a variant is digits, no sign, and no more than rerere keeps" {
 }
 
 test "fuzz: any bytes are a MERGE_RR or a named failure" {
-    try std.testing.fuzz({}, fuzzMergeRr, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzMergeRr, .{});
 }
 
-fn fuzzMergeRr(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzMergeRr(_: void, case: *shakedown.Case) anyerror!void {
     var input: [512]u8 = undefined;
-    const text = input[0..smith.slice(&input)];
+    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
+    case.source.bytes(text);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const rr = parseMergeRr(arena.allocator(), text, .sha1) catch |err| switch (err) {
@@ -1111,12 +1113,13 @@ fn fuzzMergeRr(_: void, smith: *std.testing.Smith) anyerror!void {
 }
 
 test "fuzz: any bytes normalize or are a named failure" {
-    try std.testing.fuzz({}, fuzzNormalize, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzNormalize, .{});
 }
 
-fn fuzzNormalize(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzNormalize(_: void, case: *shakedown.Case) anyerror!void {
     var input: [512]u8 = undefined;
-    const text = input[0..smith.slice(&input)];
+    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
+    case.source.bytes(text);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try normalize(arena.allocator(), text, 7, .sha1);
