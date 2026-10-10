@@ -1,5 +1,4 @@
 {
-  "package": "relic",
   "compile_step": "check",
   "targets": [
     "x86_64-linux-gnu",
@@ -11,16 +10,23 @@
     "aarch64-macos"
   ],
   "compile_once": false,
-  "sanitizer": "test",
   "setup_step": "ci-setup",
   "test_job_timeout": 45,
   "windows_job_timeout": 45,
-  "sanitizer_job_timeout": 30,
   "source_job_timeout": 10,
   "fast_shards": 2,
   "shards": {
     "macos": 2,
     "windows": 5
   },
-  "windows_git_latest": true
+  "windows_git_latest": true,
+  "jobs": [
+    {
+      "name": "ThreadSanitizer (Linux)",
+      "step": "test",
+      "args": ["-Dthread-sanitizer=true", "-Doptimize=debug", "-Dci-lint=false"],
+      "tiers": ["release"],
+      "timeout": 30
+    }
+  ]
 }
