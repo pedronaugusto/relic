@@ -79,8 +79,13 @@ pub const Lock = struct {
 const LockJson = struct {
     id: []const u8 = "",
     path: []const u8 = "",
-    owner: ?struct { name: []const u8 = "" } = null,
+    owner: ?struct {
+        name: []const u8 = "",
+        pub const strand = lfsapi.json_policy;
+    } = null,
     locked_at: ?[]const u8 = null,
+
+    pub const strand = lfsapi.json_policy;
 
     fn toLock(j: LockJson) Lock {
         return .{ .id = j.id, .path = j.path, .owner = if (j.owner) |o| o.name else null, .locked_at = j.locked_at };
@@ -91,6 +96,7 @@ const LockJson = struct {
 pub const LockAnswer = struct {
     lock: ?Lock = null,
     message: ?[]const u8 = null,
+    pub const strand = lfsapi.json_policy;
 };
 
 /// One page of a listing.
@@ -109,14 +115,7 @@ pub const VerifyPage = struct {
 };
 
 fn parseJson(comptime T: type, arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!T {
-    return std.json.parseFromSliceLeaky(T, arena, bytes, .{
-        .ignore_unknown_fields = true,
-        .duplicate_field_behavior = .use_last,
-        .allocate = .alloc_always,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.MalformedResponse,
-    };
+    return lfsapi.parseJson(T, arena, bytes);
 }
 
 fn toLocks(arena: Allocator, raw: []const LockJson) (Allocator.Error || error{MalformedResponse})![]const Lock {
@@ -152,7 +151,12 @@ pub fn parseListPage(arena: Allocator, bytes: []const u8) ParseListPageError!Lis
     if (trimmed.len != 0 and trimmed[0] == '[') {
         return .{ .locks = try toLocks(arena, try parseJson([]const LockJson, arena, trimmed)) };
     }
-    const Raw = struct { locks: ?[]const LockJson = null, next_cursor: ?[]const u8 = null, message: ?[]const u8 = null };
+    const Raw = struct {
+        locks: ?[]const LockJson = null,
+        next_cursor: ?[]const u8 = null,
+        message: ?[]const u8 = null,
+        pub const strand = lfsapi.json_policy;
+    };
     const raw = try parseJson(Raw, arena, bytes);
     return .{ .locks = try toLocks(arena, raw.locks orelse &.{}), .next_cursor = raw.next_cursor, .message = raw.message };
 }
@@ -162,7 +166,13 @@ pub const ParseVerifyPageError = Allocator.Error || error{MalformedResponse};
 
 /// Read a page of `POST /locks/verify`, or the `verifiable` cache.
 pub fn parseVerifyPage(arena: Allocator, bytes: []const u8) ParseVerifyPageError!VerifyPage {
-    const Raw = struct { ours: ?[]const LockJson = null, theirs: ?[]const LockJson = null, next_cursor: ?[]const u8 = null, message: ?[]const u8 = null };
+    const Raw = struct {
+        ours: ?[]const LockJson = null,
+        theirs: ?[]const LockJson = null,
+        next_cursor: ?[]const u8 = null,
+        message: ?[]const u8 = null,
+        pub const strand = lfsapi.json_policy;
+    };
     const raw = try parseJson(Raw, arena, bytes);
     return .{
         .ours = try toLocks(arena, raw.ours orelse &.{}),
