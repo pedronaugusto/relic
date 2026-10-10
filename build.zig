@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
     const airlock = airlock_dependency.module("airlock");
     var http_modules: [http_packages.len]?*std.Build.Module = @splat(null);
     if (http) for (http_packages, &http_modules) |name, *slot| {
-        if (b.lazyDependency(name, .{ .target = target, .optimize = optimize })) |dep| slot.* = dep.module(name);
+        slot.* = lazyModule(b, name, target, optimize);
     };
 
     const module = b.addModule("relic", .{
@@ -336,6 +336,15 @@ pub fn build(b: *std.Build) void {
 /// the `http` option is on.
 const http_packages = [_][]const u8{ "uplink", "cloak", "strand" };
 
+/// `name`'s module of the same name, or `null` until the build has fetched
+/// the package, when it asks again.
+fn lazyModule(b: *std.Build, name: []const u8, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) ?*std.Build.Module {
+    const dep = b.dependencyLazy(name, .{ .target = target, .optimize = optimize }) catch |err| switch (err) {
+        error.LazyDependencyNeeded => return null,
+    };
+    return dep.module(name);
+}
+
 /// Every example, listed rather than globbed: a build graph that scans a
 /// directory is not reproducible from the manifest alone.
 const example_sources = [_][]const u8{
@@ -348,7 +357,7 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const features = b.addOptions();
     features.addOption(bool, "http", true);
     module.addOptions("relic_options", features);
-    for (http_packages) |name| if (b.lazyDependency(name, .{ .target = target, .optimize = optimize })) |dep| module.addImport(name, dep.module(name));
+    for (http_packages) |name| if (lazyModule(b, name, target, optimize)) |m| module.addImport(name, m);
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
     return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown } }) catch @panic("out of memory");
 }
