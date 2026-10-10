@@ -44,11 +44,6 @@ pub fn syncFile(io: Io, file: Io.File, options: FileSyncOptions) SyncError!void 
     }
 }
 
-pub fn syncPath(io: Io, dir: Io.Dir, path: []const u8) SyncError!void {
-    const reached = try airlock.syncPath(io, dir, path, .{ .level = .data });
-    if (!reached.atLeast(.data)) return error.LevelUnavailable;
-}
-
 pub fn syncDirectory(io: Io, dir: Io.Dir, path: []const u8) SyncError!void {
     const opened = try dir.openDir(io, path, .{});
     defer opened.close(io);
@@ -413,7 +408,7 @@ pub const LockError = error{
 } || airlock.CreateError || Io.Cancelable;
 
 /// Errors from finishing a lock.
-pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.File.SetLengthError || airlock.Pending.CommitError || error{
+pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.File.SetLengthError || airlock.Pending.CommitOrRefuseError || error{
     /// The new file is in place, and the directory sync that makes its name
     /// survive a power cut failed.
     PublishedNotDurable,
@@ -534,7 +529,7 @@ pub const LockFile = struct {
         if (lock.file_writer.pos < lock.pid_len) try lock.pending.file().setLength(io, lock.file_writer.pos);
         // A commit that fails before the name is visible leaves the lock to
         // `deinit`, which gives it up; one that fails after has published.
-        _ = try lock.pending.commit(io, .{ .level = levelOf(lock.sync) });
+        _ = try lock.pending.commitOrRefuse(io, .{ .level = levelOf(lock.sync) });
         lock.finished = true;
     }
 
@@ -1349,6 +1344,10 @@ test "a lock names its holder in its own bytes, and no file but the lock is made
     }
 }
 
+/// How a lock's file is synced before its name: macOS orders it with a
+/// barrier and leaves the flush of the device to the directory's sync.
+const lock_file_sync: airlock_mod.Call = if (builtin.target.os.tag.isDarwin()) .sync_barrier else airlock_mod.data_sync;
+
 test "a lock syncs the file as its policy asks, and the directory when it is to be durable" {
     const seam = airlock_mod;
     var tmp = std.testing.tmpDir(.{});
@@ -1366,8 +1365,7 @@ test "a lock syncs the file as its policy asks, and the directory when it is to 
             try lock.commit(io);
             // none: nothing. batch: the file ordered, and the batch's end makes it durable.
             // per file: the file and the directory that received its name.
-            const file_call: seam.Call = if (policy == .batch and builtin.target.os.tag.isDarwin()) .sync_barrier else seam.data_sync;
-            try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(file_call));
+            try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(lock_file_sync));
             try std.testing.expectEqual(@as(u32, @intFromBool(policy == .per_file)), h.count(.sync_dir));
             var read_buf: [16]u8 = undefined;
             try std.testing.expectEqualStrings("new\n", try tmp.dir.readFile(io, target, &read_buf));
@@ -1384,7 +1382,7 @@ test "airlock file failure prevents lock publication and directory failure is ex
         defer tmp.cleanup();
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "thing", .data = "old\n" });
         const h = try seam.Seam.create(gpa, std.testing.io, .{
-            .plan = &.{seam.fail(if (directory_failure) .sync_dir else seam.data_sync, 1, seam.io_error)},
+            .plan = &.{seam.fail(if (directory_failure) .sync_dir else lock_file_sync, 1, seam.io_error)},
         });
         defer h.destroy();
         const io = h.io();
@@ -1401,7 +1399,7 @@ test "airlock file failure prevents lock publication and directory failure is ex
             try std.testing.expect(!lockHeld(io, tmp.dir, "thing"));
         }
         try std.testing.expect(!lockHeld(io, tmp.dir, "thing"));
-        try std.testing.expectEqual(@as(u32, 1), h.count(if (directory_failure) .sync_dir else seam.data_sync));
+        try std.testing.expectEqual(@as(u32, 1), h.count(if (directory_failure) .sync_dir else lock_file_sync));
     }
 }
 
@@ -1411,7 +1409,7 @@ test "airlock refused durability never publishes weaker file data" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "thing", .data = "old\n" });
     const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{
-        .plan = &.{ seam.always(seam.data_sync, seam.refused), seam.always(.sync_full, seam.refused), seam.always(.sync_plain, seam.refused) },
+        .plan = &.{ seam.always(seam.data_sync, seam.refused), seam.always(.sync_full, seam.refused), seam.always(.sync_barrier, seam.refused), seam.always(.sync_plain, seam.refused) },
     });
     defer h.destroy();
     const io = h.io();
