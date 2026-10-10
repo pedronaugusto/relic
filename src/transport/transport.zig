@@ -409,7 +409,7 @@ pub const Session = struct {
                 // ends with a flush, which it reads as nothing more wanted,
                 // as git's disconnect writes it.
                 if (!smart.conn.stateless and !smart.done) {
-                    // ziglint-ignore: Z026 the farewell is a courtesy; the session closes either way, and a server that has gone cannot read it
+                    // glint-ignore: Z026 -- the farewell is a courtesy; the session closes either way, and a server that has gone cannot read it
                     sayGoodbye(smart.conn) catch {};
                 }
                 smart.advertisement.deinit();

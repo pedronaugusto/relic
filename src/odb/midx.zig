@@ -303,7 +303,7 @@ fn fuzzMidx(_: void, smith: *std.testing.Smith) anyerror!void {
     const bytes = try gpa.dupe(u8, scratch[0..n]);
     var index = Index.parse(gpa, .sha1, bytes) catch return;
     defer index.deinit();
-    // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
+    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = index.find(Oid.zero(.sha1)) catch {};
     _ = index.packName(0);
 }

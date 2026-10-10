@@ -1261,7 +1261,7 @@ test "a repository with a multi-pack index looks objects up through it" {
     try repo.exec(io, &.{ "multi-pack-index", "--object-dir=.git/objects", "expire" });
     var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
-    // ziglint-ignore: Z026 the expire may have taken it, and Windows keeps a file the open database holds; the reads below agree either way
+    // glint-ignore: Z026 -- the expire may have taken it, and Windows keeps a file the open database holds; the reads below agree either way
     pack_dir.deleteFile(io, "multi-pack-index") catch {};
 
     var plain = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});

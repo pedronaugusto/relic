@@ -159,6 +159,7 @@ pub fn beforePush(
 
     const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure, .now = options.now });
     defer server.deinit(io);
+    // glint-ignore: Z026 -- remembering the endpoint's access is git-lfs's best-effort config write and never fails a push
     defer if (options.remember) server.client.remember(io, repo) catch {};
 
     // Other people's locks first: a push refused for one uploads nothing.

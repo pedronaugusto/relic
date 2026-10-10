@@ -20,6 +20,7 @@ pub fn main(init: std.process.Init) !void {
     const file = try cwd.createFile(io, args[1], .{ .exclusive = true });
     defer {
         file.close(io);
+        // glint-ignore: Z026 -- the helper's lock is removed when it exits; a leftover is the test's temporary directory's
         cwd.deleteFile(io, args[1]) catch {};
     }
 
@@ -30,6 +31,6 @@ pub fn main(init: std.process.Init) !void {
 
     var in_buffer: [64]u8 = undefined;
     var in = std.Io.File.stdin().readerStreaming(io, &in_buffer);
-    // ziglint-ignore: Z026 stdin ending, closed or broken, is the signal to let the lock go; the helper exits either way
+    // glint-ignore: Z026 -- stdin ending, closed or broken, is the signal to let the lock go; the helper exits either way
     _ = in.interface.discardRemaining() catch {};
 }

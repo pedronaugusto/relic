@@ -175,6 +175,7 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
         return .nanosecond;
     defer {
         file.close(io);
+        // glint-ignore: Z026 -- the probe's file is removed best effort; the granularity is already measured
         dir.deleteFile(io, name) catch {};
     }
 

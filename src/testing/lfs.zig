@@ -405,7 +405,7 @@ pub const Server = struct {
             const stream = s.listener.accept(s.io) catch return;
             defer stream.close(s.io);
             if (s.stopping.load(.acquire)) return;
-            // ziglint-ignore: Z026 a connection that fails is its client's to report; the server goes on to the next
+            // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
             s.handle(stream) catch {};
         }
     }

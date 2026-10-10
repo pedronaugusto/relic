@@ -680,7 +680,7 @@ pub const Process = struct {
 
     /// Close its input, wait for completion and release everything.
     pub fn deinit(p: *Process, io: Io) void {
-        // ziglint-ignore: Z026 each reply was already read, so its exit status changes nothing
+        // glint-ignore: Z026 -- each reply was already read, so its exit status changes nothing
         if (!p.running.terminated) _ = p.running.wait(io) catch {};
         p.running.deinit(io);
         const gpa = p.gpa;

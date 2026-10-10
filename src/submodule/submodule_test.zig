@@ -599,7 +599,7 @@ test "git submodule status and this agree in every state" {
     try c.git.exec(io, &.{ "add", "vendor/lib" });
     try c.git.exec(io, &.{ "commit", "-q", "-m", "other side" });
     c.git.report_failures = false;
-    // ziglint-ignore: Z026 the merge is meant to stop on the conflict; the unmerged entries below are what it must leave
+    // glint-ignore: Z026 -- the merge is meant to stop on the conflict; the unmerged entries below are what it must leave
     c.git.exec(io, &.{ "merge", "-q", "other" }) catch {};
     c.git.report_failures = true;
     const unmerged = try c.git.run(io, &.{ "ls-files", "-u" });

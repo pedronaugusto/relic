@@ -1075,6 +1075,7 @@ pub const Odb = struct {
         var failed = true;
         defer if (failed) {
             file.close(io);
+            // glint-ignore: Z026 -- the write's error is the one to report; a temporary object left behind is what git gc prunes
             source.dir.deleteFile(io, temp) catch {};
         };
 
@@ -1107,7 +1108,7 @@ pub const Odb = struct {
         // An object's name is the hash of its content, so a rename over an
         // object that is already there replaces it with the same bytes.
         fs.rename(io, source.dir, temp, final) catch |err| {
-            // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
+            // glint-ignore: Z026 -- the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
             source.dir.deleteFile(io, temp) catch {};
             return err;
         };
@@ -1198,6 +1199,7 @@ pub const Odb = struct {
         fs.adjustShared(io, source.dir, temp, odb.backendData().options.shared);
         errdefer {
             file.close(io);
+            // glint-ignore: Z026 -- the write's error is the one to report; a temporary object left behind is what git gc prunes
             source.dir.deleteFile(io, temp) catch {};
         }
         const window = try odb.allocator().alloc(u8, 4096);
@@ -2626,7 +2628,7 @@ pub const ObjectStream = struct {
         // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
         const final_path = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
         fs.rename(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
-            // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
+            // glint-ignore: Z026 -- the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
             s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
             return err;
         };
@@ -2639,7 +2641,7 @@ pub const ObjectStream = struct {
     pub fn abort(s: *ObjectStream, io: Io) void {
         if (!s.finished) {
             if (s.file_open) s.file.close(io);
-            // ziglint-ignore: Z026 abandoning cannot fail; a temporary object left behind is what `git gc` prunes
+            // glint-ignore: Z026 -- abandoning cannot fail; a temporary object left behind is what `git gc` prunes
             s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
             s.finished = true;
         }
@@ -4192,8 +4194,10 @@ test "a pack and an index that are not a pair are refused, as git refuses them" 
         const idx_name = try gpa.print("{s}.idx", .{base});
         defer gpa.free(idx_name);
         try pack_dir.copyFile(pack_name, pack_dir, "mixed.pack", io, .{});
+        // glint-ignore: Z026 -- the copies are scratch for this test; a leftover goes with the temporary repository
         defer pack_dir.deleteFile(io, "mixed.pack") catch {};
         try pack_dir.copyFile(idx_name, pack_dir, "mixed.idx", io, .{});
+        // glint-ignore: Z026 -- the copies are scratch for this test; a leftover goes with the temporary repository
         defer pack_dir.deleteFile(io, "mixed.idx") catch {};
         try std.testing.expectError(error.PackIndexMismatch, pack.Pack.open(gpa, io, pack_dir, .{ .base = "mixed", .kind = .sha1 }, .{}));
     }

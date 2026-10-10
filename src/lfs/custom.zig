@@ -253,7 +253,7 @@ pub const Agent = struct {
 
     /// `terminate`, and the process waited for.
     pub fn deinit(a: *Agent, io: Io) void {
-        // ziglint-ignore: Z026 terminate is a courtesy; resource release ends the agent whether or not it heard it
+        // glint-ignore: Z026 -- terminate is a courtesy; resource release ends the agent whether or not it heard it
         a.send(io, "{\"event\":\"terminate\"}\n") catch {};
         a.releaseResources(io);
         const gpa = a.gpa;

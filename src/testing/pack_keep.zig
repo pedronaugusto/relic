@@ -66,6 +66,7 @@ test "received pack survives prune before references are published" {
                 }
             };
             var collector = try io.concurrent(Collector.run, .{ io, &target });
+            // glint-ignore: Z026 -- the task is canceled to stop it; its outcome is checked through its state
             defer _ = collector.cancel(io) catch {};
             try collector.await(io);
             try target.exec(io, &.{ "cat-file", "-e", head });
@@ -172,6 +173,7 @@ test "canceled publication releases ref locks before its received pack keep" {
         defer target.deinit();
         var state: WaitingPublication = .{};
         var publication = try io.concurrent(WaitingPublication.receiveAndPrepare, .{ &state, io, target.dir, bytes, head });
+        // glint-ignore: Z026 -- the task is canceled to stop it; its outcome is checked through its state
         defer _ = publication.cancel(io) catch {};
         try state.ready.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(20) } });
         const marker = try gpa.print("objects/pack/pack-{s}.keep", .{state.pack_hex[0..state.pack_hex_len]});

@@ -44,5 +44,13 @@
       "build",
       "check-ci-setup"
     ]
-  ]
+  ],
+  "glint": {
+    "rules": [
+      {
+        "id": "Z026",
+        "level": "gate"
+      }
+    ]
+  }
 }

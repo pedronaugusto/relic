@@ -216,6 +216,7 @@ test "clean leaves a directory whose .git file cannot be read, as git takes it f
         try git.writeFile(io, "nested/work.txt", "someone's work\n");
         try git.writeFile(io, "nested/.git", "gitdir: ../.git/modules/nested\n");
         try git.dir.setFilePermissions(io, "nested/.git", @fromBackingInt(@intCast(@as(std.posix.mode_t, 0))), .{});
+        // glint-ignore: Z026 -- restoring the mode only lets the temporary directory be removed; the test's result is already decided
         defer git.dir.setFilePermissions(io, "nested/.git", @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o644))), .{}) catch {};
         if (side == 0) {
             outs[side] = try git.run(io, &.{ "clean", "-f", "-d" });

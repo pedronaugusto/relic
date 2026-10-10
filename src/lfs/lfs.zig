@@ -394,6 +394,7 @@ pub const Store = struct {
 
         const file = try store.base.createFile(io, tmp_path, .{ .exclusive = true });
         var installed = false;
+        // glint-ignore: Z026 -- the install's error is the one to report; a temporary left in the store is what git-lfs prune removes
         defer if (!installed) store.base.deleteFile(io, tmp_path) catch {};
 
         var pointer: Pointer = undefined;

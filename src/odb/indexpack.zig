@@ -357,6 +357,7 @@ pub fn receive(
     var kept = false;
     defer {
         if (file_open) file.close(io);
+        // glint-ignore: Z026 -- the receive's error is the one to report; a temporary pack left behind is what git gc prunes
         if (!kept) pack_dir.deleteFile(io, temp) catch {};
     }
 
@@ -425,10 +426,12 @@ pub fn receive(
     var idx_temp_buf: [64]u8 = undefined;
     const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
     _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = options.sync });
+    // glint-ignore: Z026 -- the receive's error is the one to report; a temporary index left behind is what git gc prunes
     errdefer pack_dir.deleteFile(io, idx_temp) catch {};
     var rev_temp_buf: [64]u8 = undefined;
     const rev_temp: ?[]const u8 = if (options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
     if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = options.sync });
+    // glint-ignore: Z026 -- the receive's error is the one to report; a temporary reverse index left behind is what git gc prunes
     errdefer if (rev_temp) |t| pack_dir.deleteFile(io, t) catch {};
 
     // read-only, as git leaves a pack and its indexes
@@ -505,7 +508,7 @@ fn indexEntries(gpa: Allocator, indexer: *const Indexer, options: Options) Error
 /// rename fails the pack goes too: a pack with no index is never read.
 fn renameBesidePack(io: Io, pack_dir: Io.Dir, from: []const u8, to: []const u8, pack_name: []const u8) Io.Dir.RenameError!void {
     fs.rename(io, pack_dir, from, to) catch |err| {
-        // ziglint-ignore: Z026 the rename's error is the one to report; a pack with no index is unreachable, and `git gc` prunes it
+        // glint-ignore: Z026 -- the rename's error is the one to report; a pack with no index is unreachable, and `git gc` prunes it
         pack_dir.deleteFile(io, pack_name) catch {};
         return err;
     };
@@ -2446,7 +2449,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
         if (Park.on_caller.load(.acquire)) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     } else {
-        // ziglint-ignore: Z026 the test fails next; a task that will not cancel is reported by the leak check
+        // glint-ignore: Z026 -- the test fails next; a task that will not cancel is reported by the leak check
         _ = future.cancel(io) catch {};
         std.debug.print("the calling task never read after another task parked (beside: {})\n", .{Park.beside.load(.acquire)});
         return error.TestUnexpectedResult;
