@@ -12,6 +12,7 @@
 //! git asks the C library's local time for.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 
 /// What a date came to.
 pub const Parsed = struct {
@@ -1195,10 +1196,11 @@ test "an approximate date is taken in the caller's zone" {
 }
 
 test "fuzz: any text is an approximate date or none, never a crash" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const len = smith.slice(&buf);
+            const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+            case.source.bytes(buf[0..len]);
             _ = approximate(buf[0..len], .{ .now = timestamp(1_700_000_000), .local_offset_minutes = -300 });
         }
     }.one, .{});
@@ -1214,10 +1216,11 @@ test "mail dates read as git reads them" {
 }
 
 test "fuzz: any text is a date or no date, never a crash" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const len = smith.slice(&buf);
+            const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+            case.source.bytes(buf[0..len]);
             if (parse(buf[0..len], .{ .now = timestamp(1_700_000_000) })) |p| {
                 try std.testing.expect(p.offset_minutes > -24 * 60 * 100 and p.offset_minutes < 24 * 60 * 100);
             }

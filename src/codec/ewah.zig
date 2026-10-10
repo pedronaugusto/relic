@@ -10,6 +10,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 /// Errors from reading a bitmap.
@@ -141,13 +142,14 @@ test "a literal word yields its set bits" {
 }
 
 test "fuzz: any bytes are a bitmap or a named error" {
-    try std.testing.fuzz({}, fuzzOne, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{});
 }
 
-fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [512]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var result = read(gpa, input) catch return;
     result.bits.deinit();
 }

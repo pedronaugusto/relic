@@ -19,6 +19,7 @@
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -258,10 +259,11 @@ test "the byte order mark is required, prohibited or written as git says" {
 }
 
 test "fuzz: any bytes convert in and back out to themselves, or are refused" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const len = smith.slice(&buf);
+            const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+            case.source.bytes(buf[0..len]);
             var arena: std.heap.ArenaAllocator = .init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
