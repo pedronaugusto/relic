@@ -7,8 +7,8 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
     // The module. Conduit runs programs and carries its platform linkage;
     // command preparation and the permission to run remain here. sweep
-    // matches git's globs, parallax diffs and merges lines, and uplink
-    // speaks HTTP and TLS.
+    // matches git's globs, parallax diffs and merges lines, uplink speaks
+    // HTTP, and cloak holds the certificates, keys and trust TLS uses.
     //=====================================================================
 
     const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
     const airlock_dependency = b.dependency("airlock", .{ .target = target, .optimize = optimize });
     const airlock = airlock_dependency.module("airlock");
     const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize }).module("uplink");
+    const cloak = b.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
 
     const module = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) void {
     module.addImport("sweep", sweep);
     module.addImport("parallax", parallax);
     module.addImport("uplink", uplink);
+    module.addImport("cloak", cloak);
     module.addImport("airlock", airlock);
     module.addImport("warp", warp);
 
@@ -196,6 +198,7 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("sweep", sweep);
     test_module.addImport("parallax", parallax);
     test_module.addImport("uplink", uplink);
+    test_module.addImport("cloak", cloak);
     test_module.addImport("airlock", airlock);
     if (b.lazyImport(@This(), "airlock")) |airlock_build|
         test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency) catch return);
@@ -322,7 +325,7 @@ const example_sources = [_][]const u8{
 
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const module = b.createModule(.{ .root_source_file = b.path("src/benchmark.zig"), .target = target, .optimize = optimize });
-    for ([_][]const u8{ "conduit", "sweep", "parallax", "uplink", "airlock", "warp" }) |name| module.addImport(name, b.dependency(name, .{ .target = target, .optimize = optimize }).module(name));
+    for ([_][]const u8{ "conduit", "sweep", "parallax", "uplink", "cloak", "airlock", "warp" }) |name| module.addImport(name, b.dependency(name, .{ .target = target, .optimize = optimize }).module(name));
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
     return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown } }) catch @panic("out of memory");
 }

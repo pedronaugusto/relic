@@ -1,6 +1,7 @@
 //! Everything a remote conversation is made of: URLs and refspecs, the connection and its authentication, the fetch and push commands, and the settings that govern them.
 
 pub const auth = @import("wire/auth.zig");
+pub const authorities = @import("wire/authorities.zig");
 pub const clientcert = @import("wire/clientcert.zig");
 pub const connection = @import("wire/connection.zig");
 pub const credential = @import("wire/credential.zig");

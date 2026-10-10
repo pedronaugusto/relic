@@ -48,7 +48,7 @@ pub const modules: []const gantry.NamedModule = &.{
     .{ .name = "relic", .path = "src/relic.zig", .from = "src/testing/**" },
 };
 pub const references: []const gantry.rules.ReferenceRule = &.{
-    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{ "build_options", "builtin", "conduit", "root", "std", "sweep", "parallax", "uplink", "airlock", "airlock.testing", "warp", "shakedown" } },
+    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{ "build_options", "builtin", "conduit", "root", "std", "sweep", "parallax", "uplink", "cloak", "airlock", "airlock.testing", "warp", "shakedown" } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
     .{ .name = "facade imports", .target = "src/commit.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/config.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },

@@ -114,9 +114,10 @@ const netrc_mod = @import("netrc.zig");
 const timetext = @import("timetext.zig");
 const lfsssh = @import("ssh.zig");
 const clientcert = @import("../wire.zig").clientcert;
+const authorities = @import("../wire.zig").authorities;
 const uplink = @import("uplink");
+const cloak = @import("cloak");
 const shakedown = @import("shakedown");
-const tls = uplink.tls;
 
 const Config = config_mod.Config;
 const assert = std.debug.assert;
@@ -1264,10 +1265,10 @@ pub const Client = struct {
         const scheme: url_mod.Scheme = if (url_mod.Url.parse(url)) |u| u.scheme else |_| .https;
         described.begin(c.gpa, reason, scheme, url) catch return;
         described.status = status;
-        // ziglint-ignore: Z026 the description is a courtesy to the caller; the refusal is reported whether or not it is complete
+        // glint-ignore: Z026 -- the description is a courtesy to the caller; the refusal is reported whether or not it is complete
         described.setServerMessage(said) catch {};
         described.prompt_available = c.options.prompt != null;
-        // ziglint-ignore: Z026 as above
+        // glint-ignore: Z026 -- as above
         if (cred) |cr| cr.session.describeFailure(described, c.options.prompt != null) catch {};
     }
 
@@ -1400,7 +1401,7 @@ pub const Client = struct {
             else => {
                 // Not there, or not speaking it: git-lfs-authenticate and
                 // HTTP, as git-lfs falls back.
-                // ziglint-ignore: Z026 a control directory left behind holds only a dead socket, in the system's temporary space
+                // glint-ignore: Z026 -- a control directory left behind holds only a dead socket, in the system's temporary space
                 if (control_dir) |d| Io.Dir.cwd().deleteTree(io, d) catch {};
                 return null;
             },
@@ -2005,14 +2006,14 @@ pub const Client = struct {
         };
         errdefer t.free(c.gpa);
         const arena = t.arena.allocator();
-        var tls_options: tls.ClientOptions = .{ .verify = if (verify) .full else .none };
+        var tls_options: uplink.tls.ClientOptions = .{ .verify = if (verify) .full else .none };
         if (cert_files) |files| {
             t.client_auth = try c.clientCertificate(arena, io, files);
-            tls_options.client_auth = &t.client_auth.?;
+            tls_options.client_auth = t.client_auth;
         }
         if (verify and (ca_info != null or ca_path != null)) {
-            try c.trust(arena, io, t, settings, environ);
-            tls_options.trust = &t.trust.?;
+            t.trust = try c.trust(arena, io, settings, environ);
+            tls_options.trust = t.trust;
         }
         var chosen: ?uplink.Proxy = null;
         if (proxy) |text| {
@@ -2064,7 +2065,7 @@ pub const Client = struct {
     /// which relic keeps as `key_passphrases`.
     /// relic opens an encrypted PKCS #8 key the same way, which git-lfs
     /// does not read at all.
-    fn clientCertificate(c: *Client, arena: Allocator, io: Io, files: clientcert.Files) ErrorNamespace.Error!tls.ClientAuth {
+    fn clientCertificate(c: *Client, arena: Allocator, io: Io, files: clientcert.Files) ErrorNamespace.Error!cloak.ClientAuth {
         const key_path = clientcert.keyPath(files);
         var session: ?credential.Session = null;
         defer if (session) |*s| s.deinit();
@@ -2108,31 +2109,20 @@ pub const Client = struct {
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
     /// `http.sslCAPath` besides them, as `smarthttp` does for git.
-    fn trust(c: *Client, arena: Allocator, io: Io, t: *Transport, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!void {
-        t.trust = .init(c.gpa);
-        const authorities = &t.trust.?;
-        if (settings.ca_info) |raw| {
-            const file = try expandHome(arena, raw, environ);
-            authorities.addFile(io, Io.Dir.cwd(), file) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                else => return c.fail("{s}", io, .{settings.ca_info_from orelse "http.sslCAInfo"}, error.SslCertificateUnreadable),
-            };
-        } else {
-            authorities.addSystem(io) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                else => return c.fail("the system's certificates", io, .{}, error.SslCertificateUnreadable),
-            };
-        }
-        if (settings.ca_path) |raw| {
-            const dir_path = try expandHome(arena, raw, environ);
-            authorities.addDir(io, Io.Dir.cwd(), dir_path) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                else => return c.fail("http.sslCAPath", io, .{}, error.SslCertificateUnreadable),
-            };
-        }
+    fn trust(c: *Client, arena: Allocator, io: Io, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!cloak.Trust.Snapshot {
+        const sources: authorities.Sources = .{
+            .ca_info = if (settings.ca_info) |raw| try expandHome(arena, raw, environ) else null,
+            .ca_path = if (settings.ca_path) |raw| try expandHome(arena, raw, environ) else null,
+        };
+        var failed: authorities.Failed = undefined;
+        return authorities.load(c.gpa, io, sources, &failed) catch |err| switch (err) {
+            error.SslCertificateUnreadable => switch (failed) {
+                .ca_info => c.fail("{s}", io, .{settings.ca_info_from orelse "http.sslCAInfo"}, error.SslCertificateUnreadable),
+                .system => c.fail("the system's certificates", io, .{}, error.SslCertificateUnreadable),
+                .ca_path => c.fail("http.sslCAPath", io, .{}, error.SslCertificateUnreadable),
+            },
+            else => |e| e,
+        };
     }
 
     /// The proxy `text` names, as Go's client — git-lfs's — goes through
@@ -2264,14 +2254,14 @@ const Transport = struct {
     arena: std.heap.ArenaAllocator,
     client: uplink.Client,
     /// `http.sslCAInfo` and `http.sslCAPath`, when they name authorities.
-    trust: ?tls.Trust = null,
-    client_auth: ?tls.ClientAuth = null,
+    trust: ?cloak.Trust.Snapshot = null,
+    client_auth: ?cloak.ClientAuth = null,
 
     /// Free what the client was made with, which no client uses any
     /// more.
     fn free(t: *Transport, gpa: Allocator) void {
-        if (t.trust) |*tr| tr.deinit();
-        if (t.client_auth) |*a| a.deinit();
+        if (t.trust) |tr| tr.deinit();
+        if (t.client_auth) |a| a.deinit();
         t.arena.deinit();
         gpa.free(t.key);
         gpa.destroy(t);

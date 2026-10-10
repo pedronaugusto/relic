@@ -1398,8 +1398,10 @@ test "an unreadable client certificate, unreadable authorities and an unsupporte
         .{ .config = .{ "http.proxy", "unsupported://127.0.0.1:9" }, .want = error.InvalidProxy },
     }) |case| {
         if (case.config) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
+        // glint-ignore: Z026 -- unsetting the case's setting is cleanup; the case's result is already checked
         defer if (case.config) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
         if (case.also) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
+        // glint-ignore: Z026 -- unsetting the case's setting is cleanup; the case's result is already checked
         defer if (case.also) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
         var env = try fx.env.clone(gpa);
         defer env.deinit();
@@ -1543,7 +1545,7 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
     const Case = struct { cert: []const u8, key: ?[]const u8, answer: []const u8 = "unused", refused: ?Refusal = null };
     for ([_]Case{
         .{ .cert = "p256.pem", .key = "p256.key" },
-        .{ .cert = "rsa.pem", .key = "rsa.legacy.key", .answer = testremote.Pki.passphrase },
+        .{ .cert = "p256.pem", .key = "p256.legacy.key", .answer = testremote.Pki.passphrase },
         .{ .cert = "p256.pem", .key = "p256.legacy.key", .answer = "battery-staple", .refused = .{ .request = error.SslClientKeyPassphraseWrong } },
         // Without a key git-lfs presents nothing, and the server refuses.
         .{ .cert = "p256.pem", .key = null, .refused = .{ .download = "the server refused the client certificate" } },

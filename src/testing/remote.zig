@@ -275,7 +275,7 @@ pub const HttpServer = struct {
 
     fn serveConnection(s: *HttpServer, stream: Io.net.Stream) void {
         defer stream.close(s.io);
-        // ziglint-ignore: Z026 a connection that fails is its client's to report; the server goes on to the next
+        // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
         s.handle(stream) catch {};
     }
 
@@ -462,9 +462,9 @@ pub const HttpServer = struct {
 /// TLS on 127.0.0.1 in front of answers a test writes beforehand:
 /// `openssl s_server -HTTP` answers each `GET /<target>` with the file
 /// `<target>` under its directory, which holds a whole HTTP response, and
-/// then closes the connection. The standard library has a TLS client and no
-/// TLS server, and a test of what a client trusts and presents needs one;
-/// OpenSSL's answers only `GET`, so what goes through it asks nothing more:
+/// then closes the connection. A test of what a client trusts and presents
+/// needs a server git's own TLS library talks to as well; OpenSSL's answers
+/// only `GET`, so what goes through it asks nothing more:
 /// a fetch whose objects are already here, an object's download. One
 /// connection at a time. `error.SkipZigTest` without `openssl`.
 pub const TlsFront = struct {
@@ -487,10 +487,7 @@ pub const TlsFront = struct {
         /// Require a client certificate signed by the authority in this
         /// PEM file.
         client_ca: ?[]const u8 = null,
-        /// Speak TLS 1.2 at most.
-        tls12: bool = false,
-        /// An RSA key for the front's own certificate, which TLS 1.2 needs
-        /// for the ECDHE-RSA suites the standard library's client speaks.
+        /// An RSA key for the front's own certificate, in place of an EC one.
         rsa: bool = false,
     };
 
@@ -511,10 +508,10 @@ pub const TlsFront = struct {
         const ca_dir = try std.Io.Dir.path.join(gpa, &.{ base, "ca" });
         errdefer gpa.free(ca_dir);
 
-        // An EC key, which the standard library's TLS client verifies, and
-        // the address as both an IP and a DNS name: curl matches the first,
-        // the standard library the second. `lfs.example.invalid` is the name
-        // a test reaches it by through a proxy.
+        // An EC key unless asked for RSA, and the address as both an IP and
+        // a DNS name, so a client matching either finds it.
+        // `lfs.example.invalid` is the name a test reaches it by through a
+        // proxy.
         var made = program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{
             "openssl",                             "req",                                                               "-x509",                                                                     "-newkey",
             if (options.rsa) "rsa:2048" else "ec", "-pkeyopt",                                                          if (options.rsa) "rsa_keygen_bits:2048" else "ec_paramgen_curve:prime256v1", "-nodes",
@@ -545,7 +542,6 @@ pub const TlsFront = struct {
         // The answers are read as bytes, which Windows would read as text.
         try argv.appendSlice(gpa, &.{ "openssl", "s_server", "-accept", "127.0.0.1:0", "-cert", cert_path, "-key", key_path, "-HTTP", "-http_server_binmode" });
         if (options.client_ca) |ca| try argv.appendSlice(gpa, &.{ "-Verify", "1", "-verify_return_error", "-CAfile", ca });
-        if (options.tls12) try argv.append(gpa, "-tls1_2");
         var running = program.start(gpa, io, .{ .environ = &env }, .{
             .argv = argv.items,
             .cwd = .{ .dir = www },
@@ -925,7 +921,7 @@ pub const Proxy = struct {
             const stream = p.listener.accept(p.io) catch return;
             defer stream.close(p.io);
             if (p.stopping.load(.acquire)) return;
-            // ziglint-ignore: Z026 a connection that fails is its client's to report; the server goes on to the next
+            // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
             p.handle(stream) catch {};
         }
     }
@@ -1140,7 +1136,7 @@ pub const SocksProxy = struct {
         while (!p.stopping.load(.acquire)) {
             const stream = p.listener.accept(p.io) catch return;
             defer stream.close(p.io);
-            // ziglint-ignore: Z026 a connection that fails is its client's to report; the server goes on to the next
+            // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
             p.handle(stream) catch {};
         }
     }
