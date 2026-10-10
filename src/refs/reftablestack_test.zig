@@ -559,7 +559,7 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
     }
     var repo = try openWithTimeout(gpa, io, tmp.dir, "10000");
     defer repo.deinit(io);
-    try std.testing.expectEqual(@as(u32, 10000), repo.refStore().reftableOptions().lock.wait_ms);
+    try std.testing.expectEqual(@as(i64, 10000), repo.refStore().reftableOptions().lock.wait.toMilliseconds());
 
     // Held, then let go while the writer is waiting on it: the writer gets
     // the lock and commits rather than giving up.

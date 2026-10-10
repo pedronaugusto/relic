@@ -140,7 +140,7 @@ pub const Options = struct {
     /// helper has the answer. Without it nothing is asked.
     prompt: ?credential.Prompt = null,
     /// The caller's time, for a credential's expiry: `credential.Options.now`.
-    now: ?i64 = null,
+    now: ?std.Io.Timestamp = null,
     /// Filled in when the conversation fails for want of a credential.
     auth_failure: ?*auth.Failure = null,
     /// Whether the person named the remote: `policy.allowed`'s, for where

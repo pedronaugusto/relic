@@ -1328,7 +1328,7 @@ const Importer = struct {
                 return text;
             },
             .rfc2822 => {
-                const parsed = gitdate.parse(when, .{ .now = 0 }) orelse return error.InvalidDate;
+                const parsed = gitdate.parse(when, .{ .now = .zero }) orelse return error.InvalidDate;
                 return imp.withDate(head, parsed.secs, parsed.offset_minutes);
             },
             .now => {

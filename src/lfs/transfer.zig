@@ -302,7 +302,7 @@ pub const Action = struct {
 
     /// Whether the action, answered at `now`, expires within five seconds
     /// of it.
-    pub fn expiredAt(a: Action, now: i64) bool {
+    pub fn expiredAt(a: Action, now: Io.Timestamp) bool {
         const at = if (a.expires_at) |t| timetext.parseRfc3339(t) else null;
         return lfsapi.expiresWithin(now, a.expires_in orelse 0, at, 5);
     }
@@ -597,7 +597,8 @@ pub const SweepError = Allocator.Error || Io.Dir.OpenError || Io.Dir.Iterator.Er
 /// other file last changed more than an hour before, except in a
 /// directory under it changed within the hour, whose files may be links
 /// something is still using. Directories stay.
-pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now: i64) transfer.SweepError!void {
+pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Timestamp) transfer.SweepError!void {
+    const now = now_at.toSeconds();
     var path_buf: [lfs.Store.max_path]u8 = undefined;
     const tmp_path = std.mem.print(&path_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
     var tmp = store.base.openDir(io, tmp_path, .{ .iterate = true }) catch |err| switch (err) {
@@ -1351,7 +1352,7 @@ const Partial = struct {
         if (status.class() != .success) {
             p.keep = p.from > 0;
             const why = try scratch.print("HTTP {d} from {s}", .{ @backingInt(status), lfsapi.stripQuery(href) });
-            if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after_s = ex.retryAfter() } };
+            if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after_s = if (ex.retryAfter()) |wait| @intCast(wait.toSeconds()) else null } };
             return .{ .retry = .{ .message = try state.dupe(why) } };
         }
         if (p.from > 0) state.say(.{ .bytes = p.from });
@@ -1647,7 +1648,8 @@ fn batchRequest(
         if (status == .too_many_requests and retries < limits.max_retries) {
             retries += 1;
             var delay_ms = limits.backoffMs(retries);
-            if (ex.retryAfter()) |seconds| {
+            if (ex.retryAfter()) |wait| {
+                const seconds: u64 = @intCast(wait.toSeconds());
                 if (seconds > limits.max_retry_time_s) {
                     server.client.noteStatus(io, ex, "batch");
                     return error.LfsBatchFailed;
@@ -2095,7 +2097,7 @@ pub const FetchOptions = struct {
     /// Now, in seconds since 1970, which the recent refs' days are counted
     /// back from. relic reads no clock, so a recent fetch that looks at
     /// refs needs the caller's.
-    now: ?i64 = null,
+    now: ?std.Io.Timestamp = null,
     transfer: Options = .{},
 };
 
@@ -2136,7 +2138,8 @@ pub fn fetch(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOp
 
 /// What `git lfs fetch --recent` adds: the tips of the recent refs, and the
 /// versions the recent commits before each tip replaced.
-fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository, tips: []const Oid, now: ?i64) FetchError![]Object {
+fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository, tips: []const Oid, now_at: ?Io.Timestamp) FetchError![]Object {
+    const now: ?i64 = if (now_at) |t| t.toSeconds() else null;
     const settings = &server.settings;
     const refs_days = settings.getInt("lfs.fetchrecentrefsdays", 7);
     const commits_days = settings.getInt("lfs.fetchrecentcommitsdays", 0);

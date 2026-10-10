@@ -2608,7 +2608,7 @@ test "rerere's status, remaining, diff, forget and gc answer as git's do" {
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                try rerere.gc(gpa, io, &repo, now_s);
+                try rerere.gc(gpa, io, &repo, @import("../text.zig").date.timestamp(now_s));
             }
             try expectSameRerere(&pair, io);
 
@@ -2652,7 +2652,7 @@ test "rerere's status, remaining, diff, forget and gc answer as git's do" {
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                try rerere.gc(gpa, io, &repo, now_s);
+                try rerere.gc(gpa, io, &repo, @import("../text.zig").date.timestamp(now_s));
             }
             try expectSameRerere(&pair, io);
 
@@ -2668,7 +2668,7 @@ test "rerere's status, remaining, diff, forget and gc answer as git's do" {
                 {
                     var repo = try pair.open(io);
                     defer repo.deinit(io);
-                    try rerere.gc(gpa, io, &repo, now_s);
+                    try rerere.gc(gpa, io, &repo, @import("../text.zig").date.timestamp(now_s));
                 }
                 try expectSameRerere(&pair, io);
             }
@@ -2760,7 +2760,7 @@ test "rerere refuses a forged MERGE_RR and variant, and a replay keeps its resol
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
                 const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
-                try rerere.gc(gpa, io, &repo, now_s);
+                try rerere.gc(gpa, io, &repo, @import("../text.zig").date.timestamp(now_s));
             }
             try expectSameRerere(&pair, io);
             const kept = try pair.ours.readFile(io, postimage);

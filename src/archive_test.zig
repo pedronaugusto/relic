@@ -94,9 +94,9 @@ test "a commit is archived as git archives it: tar with every kind of entry, att
     try compare(gpa, io, &git, &repo, &.{ "HEAD", "*.txt" }, head, .{ .pathspecs = &.{"*.txt"} });
     // `--mtime` came in 2.42
     if (try testgit.gitAtLeast(gpa, io, 2, 42)) {
-        try compare(gpa, io, &git, &repo, &.{ "--mtime=@1600000000", "HEAD" }, head, .{ .mtime = 1600000000 });
+        try compare(gpa, io, &git, &repo, &.{ "--mtime=@1600000000", "HEAD" }, head, .{ .mtime = @import("text.zig").date.timestamp(1600000000) });
         const tree = try oidOf(gpa, io, &git, "HEAD^{tree}");
-        try compare(gpa, io, &git, &repo, &.{ "--mtime=@1600000000", "HEAD^{tree}" }, tree, .{ .mtime = 1600000000 });
+        try compare(gpa, io, &git, &repo, &.{ "--mtime=@1600000000", "HEAD^{tree}" }, tree, .{ .mtime = @import("text.zig").date.timestamp(1600000000) });
     }
     try git.exec(io, &.{ "config", "tar.umask", "022" });
     var again = try Repository.open(gpa, io, git.dir, .{});

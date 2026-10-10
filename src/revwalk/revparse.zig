@@ -63,8 +63,8 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8) Self
 
 /// The time a reflog's `@{<date>}` is read against.
 pub const Clock = struct {
-    /// The time now, in seconds since the epoch.
-    now: i64,
+    /// The time now.
+    now: Io.Timestamp,
     /// Minutes east of UTC that a date naming no zone is taken in: git's
     /// local time.
     local_offset_minutes: i32 = 0,
@@ -268,7 +268,7 @@ const Resolver = struct {
     }
 
     fn approximate(r: *Resolver, text: []const u8) ?i64 {
-        const clock = r.clock orelse Clock{ .now = Io.Clock.real.now(r.io).toSeconds() };
+        const clock = r.clock orelse Clock{ .now = Io.Clock.real.now(r.io) };
         return gitdate.approximate(text, .{ .now = clock.now, .local_offset_minutes = clock.local_offset_minutes });
     }
 
@@ -719,7 +719,7 @@ test "a reflog entry chosen by a date is the one git rev-parse chooses" {
             return err;
         };
         defer gpa.free(theirs);
-        const ours = resolveAt(gpa, io, &repo, expr, .{ .now = now }) catch |err| {
+        const ours = resolveAt(gpa, io, &repo, expr, .{ .now = gitdate.timestamp(now) }) catch |err| {
             std.debug.print("relic refuses {s}: {}\n", .{ expr, err });
             return err;
         };
@@ -732,7 +732,7 @@ test "a reflog entry chosen by a date is the one git rev-parse chooses" {
     // Words that mean nothing are no date, for git and here.
     r.report_failures = false;
     try testing.expectError(error.GitFailed, r.run(io, &.{ "rev-parse", "--verify", "--quiet", "main@{whenever}" }));
-    try testing.expectError(error.BadRevision, resolveAt(gpa, io, &repo, "main@{whenever}", .{ .now = now }));
+    try testing.expectError(error.BadRevision, resolveAt(gpa, io, &repo, "main@{whenever}", .{ .now = gitdate.timestamp(now) }));
     // Without a clock the `Io`'s is read.
     _ = try resolve(gpa, io, &repo, "main@{yesterday}");
 }

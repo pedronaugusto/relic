@@ -38,7 +38,7 @@ pub const Token = struct {
         io.random(&random);
         t.id = std.fmt.bytesToHex(random, .lower);
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait_ms = 1000 } });
+        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);
         const previous = dir.readFileAlloc(io, name, gpa, .limited(1 << 20)) catch |err| switch (err) {
             error.FileNotFound => try gpa.dupe(u8, header),
@@ -69,7 +69,7 @@ pub const Token = struct {
     fn release(t: *Token, io: Io) ErrorNamespace.Error!void {
         const name = t.name[0..t.name_len];
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(t.gpa, io, t.dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait_ms = 1000 } });
+        var lock = try fs.LockFile.open(t.gpa, io, t.dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);
         const previous = try t.dir.readFileAlloc(io, name, t.gpa, .limited(1 << 20));
         defer t.gpa.free(previous);

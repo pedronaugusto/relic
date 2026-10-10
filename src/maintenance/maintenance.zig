@@ -28,8 +28,8 @@ pub const CommitGraphOptions = struct {
     split: Split = .none,
     size_multiple: u32 = 2,
     max_commits: u32 = 0,
-    /// Inactive layers at or before this Unix time expire; null uses Git's current-time default.
-    expire_time: ?i64 = null,
+    /// Inactive layers at or before this time expire; null uses git's default, now.
+    expire_time: ?Io.Timestamp = null,
     generations: bool = true,
     changed_paths: ?graph_mod.bloom.Settings = null,
     /// Existing commits are retained, as in git without --split=replace.
@@ -235,7 +235,7 @@ fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Gr
     // Git marks merged-out layers at this write's time, then expires
     // inactive layers no newer than expire_time. Keep future-dated files.
     const now = Io.Clock.real.now(io).toSeconds();
-    const expiry = options.expire_time orelse now;
+    const expiry = if (options.expire_time) |t| t.toSeconds() else now;
     const graph_dir = dir.openDir(io, "info/commit-graphs", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,

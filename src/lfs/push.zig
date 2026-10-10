@@ -76,7 +76,7 @@ pub const Options = struct {
     /// git-lfs writes it: basic access for its URL, no locking API.
     remember: bool = true,
     /// The time of the push, in seconds since the epoch: `lfsapi.Options.now`.
-    now: ?i64 = null,
+    now: ?std.Io.Timestamp = null,
 };
 
 /// What the lock check came to.

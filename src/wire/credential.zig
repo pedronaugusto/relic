@@ -90,7 +90,7 @@ pub const Options = struct {
     /// helper's password whose `password_expiry_utc` is before it is
     /// neither used nor stored, as git uses and stores neither. `null`
     /// checks nothing; relic reads no clock of its own.
-    now: ?i64 = null,
+    now: ?std.Io.Timestamp = null,
 };
 
 /// The credential for one URL, over the life of one conversation.
@@ -348,8 +348,8 @@ pub const Session = struct {
 
     /// A password past its `password_expiry_utc` is forgotten, as git's
     /// `credential_fill` forgets it after each helper.
-    fn dropExpired(s: *Session, now: ?i64) void {
-        const t = now orelse return;
+    fn dropExpired(s: *Session, now: ?Io.Timestamp) void {
+        const t = (now orelse return).toSeconds();
         const expiry = s.password_expiry_utc orelse return;
         if (expiry >= t) return;
         secretFree(s.gpa, s.password);
@@ -361,7 +361,7 @@ pub const Session = struct {
     /// it has expired, which git does not store.
     pub fn approve(s: *Session, io: Io, opts: Options) Self.Error!void {
         if (!s.hasCredential()) return;
-        if (opts.now) |t| if (s.password_expiry_utc) |expiry| if (expiry < t) return;
+        if (opts.now) |t| if (s.password_expiry_utc) |expiry| if (expiry < t.toSeconds()) return;
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const settings = try s.applyConfig(arena_state.allocator(), opts.config);

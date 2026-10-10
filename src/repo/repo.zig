@@ -791,8 +791,8 @@ pub const Repository = struct {
     fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: i64) ErrorNamespace.Error!fs.OnContention {
         const timeout = try config.getInt(key, default);
         if (timeout == 0) return .fail;
-        if (timeout < 0) return .{ .wait_ms = std.math.maxInt(u32) };
-        return .{ .wait_ms = std.math.cast(u32, timeout) orelse std.math.maxInt(u32) };
+        if (timeout < 0) return .{ .wait = .max };
+        return .{ .wait = .fromMilliseconds(timeout) };
     }
 
     fn refuseSetting(diagnostic: ?*Diagnostic, text: []const u8) Allocator.Error!void {

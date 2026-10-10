@@ -25,7 +25,7 @@ const Utc = struct {
     }
 };
 var utc_context: u8 = 0;
-const clock: gitdate.Clock = .{ .now = now, .local = .{ .context = &utc_context, .at = Utc.at } };
+const clock: gitdate.Clock = .{ .now = gitdate.timestamp(now), .local = .{ .context = &utc_context, .at = Utc.at } };
 
 fn oidOf(gpa: Allocator, io: Io, git: *testgit.Repo, rev: []const u8) !Oid {
     _ = gpa;

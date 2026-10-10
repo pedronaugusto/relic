@@ -21,10 +21,16 @@ pub const Parsed = struct {
     offset_minutes: i32,
 };
 
+/// The moment `secs` seconds after the epoch, as a time that git's
+/// seconds name.
+pub fn timestamp(secs: i64) std.Io.Timestamp {
+    return .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s);
+}
+
 /// Where a date without a zone is.
 pub const Context = struct {
-    /// The time now, in seconds since the epoch.
-    now: i64,
+    /// The time now; dates are reckoned from its whole seconds.
+    now: std.Io.Timestamp,
     /// Minutes east of UTC that a date naming no zone is taken in.
     local_offset_minutes: i32 = 0,
 };
@@ -249,14 +255,14 @@ fn matchMultiNumber(num: i64, c: u8, date: []const u8, end_in: usize, tm: *Tm, c
         },
         '-', '/', '.' => {
             var now_tm: Tm = .{};
-            gmtime(ctx.now, &now_tm);
+            gmtime(ctx.now.toSeconds(), &now_tm);
             if (num > 70) {
-                if (setDate(num, num2, num3, null, ctx.now, tm)) return end;
-                if (setDate(num, num3, num2, null, ctx.now, tm)) return end;
+                if (setDate(num, num2, num3, null, ctx.now.toSeconds(), tm)) return end;
+                if (setDate(num, num3, num2, null, ctx.now.toSeconds(), tm)) return end;
             }
-            if (c != '.' and setDate(num3, num, num2, &now_tm, ctx.now, tm)) return end;
-            if (setDate(num3, num2, num, &now_tm, ctx.now, tm)) return end;
-            if (c == '.' and setDate(num3, num, num2, &now_tm, ctx.now, tm)) return end;
+            if (c != '.' and setDate(num3, num, num2, &now_tm, ctx.now.toSeconds(), tm)) return end;
+            if (setDate(num3, num2, num, &now_tm, ctx.now.toSeconds(), tm)) return end;
+            if (c == '.' and setDate(num3, num, num2, &now_tm, ctx.now.toSeconds(), tm)) return end;
             return 0;
         },
         else => {},
@@ -298,7 +304,7 @@ fn matchDigit(date: []const u8, tm: *Tm, offset: *i32, tm_gmt: *bool, ctx: Conte
         const num2 = @divTrunc(@mod(num, 10000), 100);
         const num3 = @mod(num, 100);
         if (n == 8) {
-            _ = setDate(num1, num2, num3, null, ctx.now, tm);
+            _ = setDate(num1, num2, num3, null, ctx.now.toSeconds(), tm);
         } else if (n == 6 and setTime(num1, num2, num3, tm) and at(date, end) == '.' and isDigit(at(date, end + 1))) {
             end = strtol(date, end + 1).end;
         }
@@ -436,8 +442,8 @@ pub fn parse(text_in: []const u8, ctx: Context) ?Parsed {
 pub fn approximate(text_in: []const u8, ctx: Context) ?i64 {
     if (parse(text_in, ctx)) |p| return p.secs;
     const text = if (std.mem.findScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
-    var a: Approx = .{ .off = ctx.local_offset_minutes, .now_secs = ctx.now };
-    a.localtime(ctx.now, &a.tm);
+    var a: Approx = .{ .off = ctx.local_offset_minutes, .now_secs = ctx.now.toSeconds() };
+    a.localtime(ctx.now.toSeconds(), &a.tm);
     a.now = a.tm;
     a.tm.year = -1;
     a.tm.mon = -1;
@@ -791,7 +797,7 @@ pub const LocalZone = struct {
 /// `relative` and `human`, the local zone for `human` and `-local`, and
 /// the C locale's year width for `%x` (which varies between C libraries).
 pub const Clock = struct {
-    now: ?i64 = null,
+    now: ?std.Io.Timestamp = null,
     local: ?LocalZone = null,
     /// Whether `%x` uses a four-digit year; `%D` always uses two digits.
     locale_date_full_year: bool = false,
@@ -834,7 +840,8 @@ fn printTz(gpa: std.mem.Allocator, out: *std.ArrayList(u8), tz: i32) std.mem.All
 }
 
 /// git's `show_date_relative`.
-pub fn showRelative(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, now: i64) std.mem.Allocator.Error!void {
+pub fn showRelative(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, now_at: std.Io.Timestamp) std.mem.Allocator.Error!void {
+    const now = now_at.toSeconds();
     if (now < secs) return out.appendSlice(gpa, "in the future");
     // Saturating: a date an object carries may be as far back as an i64
     // goes, and the difference past it is still "many years ago".
@@ -884,7 +891,7 @@ pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i
     var human_tm: Tm = .{ .year = 0, .mon = 0, .mday = 0, .hour = 0, .min = 0, .sec = 0 };
     var human_tz: i32 = -1;
     if (mode.kind == .human) {
-        const now = clock.now orelse return error.DateNeedsClock;
+        const now = (clock.now orelse return error.DateNeedsClock).toSeconds();
         const zone = clock.local orelse return error.DateNeedsClock;
         human_tz = tzInt(zone.at(zone.context, now).offset_minutes);
         human_tm = tmIn(now, human_tz) orelse epoch: {
@@ -1102,7 +1109,7 @@ test "a date with no calendar day is shown as the epoch in UTC, and an extreme z
         for ([_]i64{ std.math.minInt(i64), -1, 0, std.math.maxInt(i64) }) |secs| {
             inline for (.{ Mode{ .kind = .iso8601 }, Mode{ .kind = .rfc2822 }, Mode{ .kind = .short }, Mode{ .kind = .raw }, Mode{ .kind = .iso8601_strict }, Mode{ .kind = .relative } }) |mode| {
                 out.clearRetainingCapacity();
-                try show(gpa, &out, secs, tz, mode, .{ .now = 1_700_000_000 });
+                try show(gpa, &out, secs, tz, mode, .{ .now = timestamp(1_700_000_000) });
             }
         }
     }
@@ -1161,7 +1168,7 @@ test "approximate dates read as git's t0006 reads them" {
         .{ .text = "@2000 +0000", .want = "1970-01-01 00:33:20" },
     };
     for (cases) |case| {
-        const got = approximate(case.text, .{ .now = now + case.shift }) orelse {
+        const got = approximate(case.text, .{ .now = timestamp(now + case.shift) }) orelse {
             std.debug.print("{s}: no date\n", .{case.text});
             return error.TestUnexpectedResult;
         };
@@ -1171,17 +1178,17 @@ test "approximate dates read as git's t0006 reads them" {
             return err;
         };
     }
-    try std.testing.expect(approximate("unrecognized words", .{ .now = now }) == null);
+    try std.testing.expect(approximate("unrecognized words", .{ .now = timestamp(now) }) == null);
     for ([_][]const u8{ "2147483647 months ago", "99999999999999999999 years ago", "4294967295.weeks.ago", "last 2147483647 sunday", "-1 days" }) |text| {
-        _ = approximate(text, .{ .now = now });
+        _ = approximate(text, .{ .now = timestamp(now) });
     }
-    try std.testing.expect(approximate("", .{ .now = now }) == null);
+    try std.testing.expect(approximate("", .{ .now = timestamp(now) }) == null);
 }
 
 test "an approximate date is taken in the caller's zone" {
     // 2009-08-30 19:20:00 UTC is 21:20 at +0200, so midnight there is
     // 22:00 the day before in UTC.
-    const ctx: Context = .{ .now = 1251660000, .local_offset_minutes = 120 };
+    const ctx: Context = .{ .now = timestamp(1251660000), .local_offset_minutes = 120 };
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("2009-08-29 22:00:00", formatUtc(&buf, approximate("today", ctx).?));
     try std.testing.expectEqualStrings("2009-08-30 10:00:00", formatUtc(&buf, approximate("noon", ctx).?));
@@ -1192,13 +1199,13 @@ test "fuzz: any text is an approximate date or none, never a crash" {
         fn one(_: void, smith: *std.testing.Smith) anyerror!void {
             var buf: [256]u8 = undefined;
             const len = smith.slice(&buf);
-            _ = approximate(buf[0..len], .{ .now = 1_700_000_000, .local_offset_minutes = -300 });
+            _ = approximate(buf[0..len], .{ .now = timestamp(1_700_000_000), .local_offset_minutes = -300 });
         }
     }.one, .{});
 }
 
 test "mail dates read as git reads them" {
-    const ctx: Context = .{ .now = 1_800_000_000 };
+    const ctx: Context = .{ .now = timestamp(1_800_000_000) };
     try std.testing.expectEqual(Parsed{ .secs = 1700000000, .offset_minutes = 60 }, parse("Tue, 14 Nov 2023 23:13:20 +0100", ctx).?);
     try std.testing.expectEqual(Parsed{ .secs = 1700000000, .offset_minutes = 0 }, parse("14 Nov 2023 22:13:20 GMT", ctx).?);
     try std.testing.expectEqual(Parsed{ .secs = 1700000000, .offset_minutes = -300 }, parse("2023-11-14 17:13:20 -0500", ctx).?);
@@ -1211,7 +1218,7 @@ test "fuzz: any text is a date or no date, never a crash" {
         fn one(_: void, smith: *std.testing.Smith) anyerror!void {
             var buf: [256]u8 = undefined;
             const len = smith.slice(&buf);
-            if (parse(buf[0..len], .{ .now = 1_700_000_000 })) |p| {
+            if (parse(buf[0..len], .{ .now = timestamp(1_700_000_000) })) |p| {
                 try std.testing.expect(p.offset_minutes > -24 * 60 * 100 and p.offset_minutes < 24 * 60 * 100);
             }
         }

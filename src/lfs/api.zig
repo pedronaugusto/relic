@@ -71,6 +71,7 @@ const config_mod = @import("../config/config.zig");
 const Self = @This();
 
 const std = @import("std");
+const gitdate = @import("../text.zig").date;
 const percent = @import("../text.zig").percent;
 const warp = @import("warp");
 test "a server's JSON is read as git-lfs reads it, within limits" {
@@ -852,14 +853,16 @@ pub const SshAuth = struct {
 
     /// Whether the answer, given at `now`, expires within five seconds of
     /// it, as git-lfs's cache asks before it reuses one.
-    pub fn expiredAt(a: SshAuth, now: i64) bool {
+    pub fn expiredAt(a: SshAuth, now: Io.Timestamp) bool {
         return expiresWithin(now, a.expires_in, a.expires_at, 5);
     }
 };
 
 /// git-lfs's `IsExpiredAtOrIn` with the start and the check both at `now`:
-/// an `in` that is not zero wins over `at`, and neither is no expiry.
-pub fn expiresWithin(now: i64, in_s: i64, at: ?i64, margin_s: i64) bool {
+/// an `in` that is not zero wins over `at`, and neither is no expiry. The
+/// server's `in` and `at` are in seconds, as it writes them.
+pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: ?i64, margin_s: i64) bool {
+    const now = now_at.toSeconds();
     if (in_s != 0) return now + in_s < now + margin_s;
     const when = at orelse return false;
     return when < now + margin_s;
@@ -1111,7 +1114,7 @@ pub const Options = struct {
     /// credential helper's password past its `password_expiry_utc` is
     /// neither used nor stored (`credential.Options.now`). Without it, none
     /// of that is done.
-    now: ?i64 = null,
+    now: ?std.Io.Timestamp = null,
 };
 
 /// An access mode git-lfs records for a URL.
@@ -2394,9 +2397,9 @@ pub const Exchange = struct {
 
     /// `Retry-After` in seconds: a number, or an HTTP date counted from
     /// `Options.now` when the caller gave one.
-    pub fn retryAfter(ex: *const Exchange) ?u64 {
+    pub fn retryAfter(ex: *const Exchange) ?Io.Duration {
         const value = ex.header("retry-after") orelse return null;
-        return retryAfterSeconds(value, ex.client.options.now);
+        return parseRetryAfter(value, ex.client.options.now);
     }
 
     /// The body, read as it arrives, decompressed as its
@@ -2609,14 +2612,14 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
     };
 }
 
-/// A `Retry-After` value in seconds, as git-lfs reads it: a whole number,
-/// or with `now` an HTTP date, a date gone by being no wait at all.
-pub fn retryAfterSeconds(value: []const u8, now: ?i64) ?u64 {
+/// How long a `Retry-After` value asks to wait, as git-lfs reads it: whole
+/// seconds, or with `now` an HTTP date, a date gone by being no wait at all.
+pub fn parseRetryAfter(value: []const u8, now: ?Io.Timestamp) ?Io.Duration {
     const text = std.mem.trim(u8, value, " \t");
-    if (std.fmt.parseInt(u64, text, 10)) |n| return n else |_| {}
+    if (std.fmt.parseInt(u32, text, 10)) |n| return .fromSeconds(n) else |_| {}
     const at = timetext.parseHttpDate(text) orelse return null;
-    const from = now orelse return null;
-    return @intCast(@max(0, at - from));
+    const from = (now orelse return null).toSeconds();
+    return .fromSeconds(@max(0, at - from));
 }
 
 /// A private directory for OpenSSH's control socket, as git-lfs makes one:
@@ -2931,17 +2934,18 @@ test "git-lfs's timeouts are read as git-lfs reads them: 30 seconds unless set, 
 }
 
 test "Retry-After is a number of seconds, or a date counted from the time the caller gives" {
-    try testing.expectEqual(@as(?u64, 120), retryAfterSeconds(" 120 ", null));
-    try testing.expectEqual(@as(?u64, null), retryAfterSeconds("Sun, 06 Nov 1994 08:49:37 GMT", null));
-    try testing.expectEqual(@as(?u64, 23), retryAfterSeconds("Sun, 06 Nov 1994 08:49:37 GMT", 784111777 - 23));
-    try testing.expectEqual(@as(?u64, 0), retryAfterSeconds("Sun, 06 Nov 1994 08:49:37 GMT", 784111777 + 60));
-    try testing.expectEqual(@as(?u64, null), retryAfterSeconds("soon", 0));
+    const at = gitdate.timestamp;
+    try testing.expectEqual(@as(i64, 120), parseRetryAfter(" 120 ", null).?.toSeconds());
+    try testing.expectEqual(@as(?Io.Duration, null), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", null));
+    try testing.expectEqual(@as(i64, 23), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", at(784111777 - 23)).?.toSeconds());
+    try testing.expectEqual(@as(i64, 0), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", at(784111777 + 60)).?.toSeconds());
+    try testing.expectEqual(@as(?Io.Duration, null), parseRetryAfter("soon", .zero));
     // An expiry wins by `in` over `at`, and five seconds' margin is kept.
-    try testing.expect(expiresWithin(1000, 4, null, 5));
-    try testing.expect(!expiresWithin(1000, 5, 0, 5));
-    try testing.expect(expiresWithin(1000, 0, 1004, 5));
-    try testing.expect(!expiresWithin(1000, 0, 1005, 5));
-    try testing.expect(!expiresWithin(1000, 0, null, 5));
+    try testing.expect(expiresWithin(at(1000), 4, null, 5));
+    try testing.expect(!expiresWithin(at(1000), 5, 0, 5));
+    try testing.expect(expiresWithin(at(1000), 0, 1004, 5));
+    try testing.expect(!expiresWithin(at(1000), 0, 1005, 5));
+    try testing.expect(!expiresWithin(at(1000), 0, null, 5));
 }
 
 test "LFS proxy parsing preserves allocation resource failures" {

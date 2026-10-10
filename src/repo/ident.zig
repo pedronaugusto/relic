@@ -168,7 +168,7 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
 
     var when = now;
     if (date_text) |text| if (text.len != 0) {
-        const parsed = gitdate.parse(text, .{ .now = now.secs, .local_offset_minutes = now.offset_minutes }) orelse return error.InvalidDate;
+        const parsed = gitdate.parse(text, .{ .now = gitdate.timestamp(now.secs), .local_offset_minutes = now.offset_minutes }) orelse return error.InvalidDate;
         when = .{ .secs = parsed.secs, .offset_minutes = parsed.offset_minutes };
     };
     return .{
