@@ -318,6 +318,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Smith fuzz tests are shakedown `check` properties: a plain `zig build test` runs each on many seeded cases and shrinks a failure, and `zig build test --fuzz` fuzzes the same bodies.
+
 - The `http` build option (on by default) brings uplink, cloak and strand, which are now lazy: a program built with `.http = false` fetches none of them, and an `http` or `https` remote is `error.HttpUnavailable`.
 
 - A server's JSON (LFS batch, locks, `git-lfs-authenticate`, a custom transfer agent's answers, a refusal's reason) is read through [strand](https://github.com/pedronaugusto/strand), within its limits on input, depth, items, strings and memory, where it was read without any. It is still read as git-lfs reads it: members a type does not name are ignored, and one given twice is its last.
