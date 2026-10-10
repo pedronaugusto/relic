@@ -24,6 +24,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -486,10 +487,11 @@ test "the XDG file and ~/.gitconfig are both read, the second winning, as git re
 }
 
 test "fuzz: any GIT_CONFIG_PARAMETERS is read into pairs or refused by name" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [256]u8 = undefined;
-            const text = buf[0..smith.slice(&buf)];
+            const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+            case.source.bytes(text);
             var arena: std.heap.ArenaAllocator = .init(testing.allocator);
             defer arena.deinit();
             const pairs = parseParameters(arena.allocator(), text) catch |err| switch (err) {
@@ -498,5 +500,24 @@ test "fuzz: any GIT_CONFIG_PARAMETERS is read into pairs or refused by name" {
             };
             for (pairs) |p| try testing.expect(p.name.len <= text.len);
         }
-    }.one, .{ .corpus = &.{ "'a.b'='c'", "'a.b=c' 'd.e'=", "'x'\\''y'" } });
+    }.one, .{});
+}
+
+test "GIT_CONFIG_PARAMETERS in both forms, a bare name and a quoted quote read as these pairs" {
+    const Pair = config_mod.Sources.Pair;
+    const cases = [_]struct { text: []const u8, pairs: []const Pair }{
+        .{ .text = "'a.b'='c'", .pairs = &.{.{ .name = "a.b", .value = "c" }} },
+        .{ .text = "'a.b=c' 'd.e'=", .pairs = &.{ .{ .name = "a.b", .value = "c" }, .{ .name = "d.e", .value = null } } },
+        .{ .text = "'x'\\''y'", .pairs = &.{.{ .name = "x'y", .value = null }} },
+    };
+    for (cases) |c| {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const pairs = try parseParameters(arena.allocator(), c.text);
+        try testing.expectEqual(c.pairs.len, pairs.len);
+        for (c.pairs, pairs) |want, got| {
+            try testing.expectEqualStrings(want.name, got.name);
+            if (want.value) |v| try testing.expectEqualStrings(v, got.value.?) else try testing.expect(got.value == null);
+        }
+    }
 }

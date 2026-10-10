@@ -9,6 +9,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -293,13 +294,14 @@ test "a multi-pack index that is not one is refused by name" {
 }
 
 test "fuzz: any bytes are an index or a named error" {
-    try std.testing.fuzz({}, fuzzMidx, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzMidx, .{});
 }
 
-fn fuzzMidx(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzMidx(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [2048]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     const bytes = try gpa.dupe(u8, scratch[0..n]);
     var index = Index.parse(gpa, .sha1, bytes) catch return;
     defer index.deinit();

@@ -19,6 +19,7 @@ const Self = @This();
 const ewah = @import("../codec.zig").ewah;
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -2247,13 +2248,14 @@ test "a cache tree nested past any tree, or claiming more subtrees than it holds
 }
 
 test "fuzz: any bytes are an index or a named error" {
-    try std.testing.fuzz({}, fuzzIndex, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzIndex, .{});
 }
 
-fn fuzzIndex(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzIndex(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [4096]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var index = Index.parse(gpa, .sha1, input) catch return;
     defer index.deinit();
     _ = index.find("a");

@@ -15,6 +15,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -436,13 +437,14 @@ test "the policy decides which refs get a log" {
 }
 
 test "fuzz: any bytes are entries or a named error" {
-    try std.testing.fuzz({}, fuzzLog, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzLog, .{});
 }
 
-fn fuzzLog(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzLog(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [1024]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var lines = std.mem.splitScalar(u8, input, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;

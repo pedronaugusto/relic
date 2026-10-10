@@ -34,6 +34,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1060,13 +1061,14 @@ test "a key command splits into words without a shell" {
 }
 
 test "fuzz: any commit bytes split into a payload and a signature or into nothing" {
-    try testing.fuzz({}, fuzzSplit, .{});
+    try shakedown.check(testing.allocator, {}, fuzzSplit, .{});
 }
 
-fn fuzzSplit(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzSplit(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = testing.allocator;
     var scratch: [1024]u8 = undefined;
-    const bytes = scratch[0..smith.slice(&scratch)];
+    const bytes = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(bytes);
     if (try splitCommit(gpa, .sha1, bytes)) |value| {
         var split = value;
         defer split.deinit(gpa);

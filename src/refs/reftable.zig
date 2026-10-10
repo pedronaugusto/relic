@@ -26,6 +26,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1501,7 +1502,7 @@ test "a damaged footer is a named error" {
 }
 
 test "fuzz: any bytes are a table or a named error, and every record reads or is refused" {
-    try std.testing.fuzz({}, fuzzTable, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzTable, .{});
 }
 
 /// A valid table with every section -- several small ref blocks, their
@@ -1543,9 +1544,10 @@ fn fuzzBase() ![]const u8 {
     return fuzz_base.?;
 }
 
-fn fuzzTable(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzTable(_: void, case: *shakedown.Case) anyerror!void {
     var buf: [4096]u8 = undefined;
-    const input = buf[0..smith.slice(&buf)];
+    const input = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(input);
 
     // The input taken as a table, which is mostly refused at the door.
     try readEverything(input);

@@ -28,6 +28,7 @@ const Self = @This();
 const retention = @import("keep.zig");
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -2467,10 +2468,10 @@ test "a receive canceled while it resolves stops every resolving task, even one 
 }
 
 test "fuzz: any stream is a pack or a named error, and a kept pack verifies" {
-    try testing.fuzz({}, fuzzReceive, .{});
+    try shakedown.check(testing.allocator, {}, fuzzReceive, .{});
 }
 
-fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzReceive(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -2485,9 +2486,11 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
 
     var stream: []u8 = &.{};
     defer gpa.free(stream);
-    if (smith.valueRangeAtMost(u8, 0, 3) == 0) {
+    if (shakedown.gen.intRange(case.source, u8, 0, 3) == 0) {
         var scratch: [512]u8 = undefined;
-        stream = try gpa.dupe(u8, scratch[0..smith.slice(&scratch)]);
+        const drawn = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+        case.source.bytes(drawn);
+        stream = try gpa.dupe(u8, drawn);
     } else {
         // A pack that is well formed up to the damage done to it, so the
         // fuzzer spends its time inside the entries and not in the header.
@@ -2495,10 +2498,11 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
         var bodies: [4][64]u8 = undefined;
         var patches: [4][]u8 = .{ &.{}, &.{}, &.{}, &.{} };
         defer for (patches) |p| gpa.free(p);
-        const count = smith.valueRangeAtMost(u8, 1, 4);
+        const count = shakedown.gen.intRange(case.source, u8, 1, 4);
         for (0..count) |i| {
-            const body = bodies[i][0..smith.slice(&bodies[i])];
-            const choice = smith.valueRangeAtMost(u8, 0, 5);
+            const body = bodies[i][0..shakedown.gen.intRange(case.source, usize, 0, bodies[i].len)];
+            case.source.bytes(body);
+            const choice = shakedown.gen.intRange(case.source, u8, 0, 5);
             if (i != 0 and choice >= 4) {
                 patches[i] = try appendDelta(gpa, if (entries[i - 1] == .whole) entries[i - 1].whole.bytes.len else 0, body[0..@min(body.len, 100)]);
                 entries[i] = if (choice == 4)
@@ -2515,10 +2519,10 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
             }
         }
         stream = try buildPack(gpa, .sha1, entries[0..count]);
-        const flips = smith.valueRangeAtMost(u8, 0, 3);
+        const flips = shakedown.gen.intRange(case.source, u8, 0, 3);
         for (0..flips) |_| {
-            const at = smith.valueRangeAtMost(u32, 0, @intCast(stream.len - 1));
-            stream[at] ^= smith.value(u8);
+            const at = shakedown.gen.intRange(case.source, u32, 0, @intCast(stream.len - 1));
+            stream[at] ^= shakedown.gen.int(case.source, u8);
         }
     }
 

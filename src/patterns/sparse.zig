@@ -466,15 +466,17 @@ test "git's trimming keeps an escaped trailing space" {
 }
 
 test "fuzz: any pattern file is a cone or not, and any path is answered" {
-    try std.testing.fuzz({}, fuzzCone, .{});
+    try shakedown_mod.check(std.testing.allocator, {}, fuzzCone, .{});
 }
 
-fn fuzzCone(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzCone(_: void, case: *shakedown_mod.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var text_buf: [512]u8 = undefined;
-    const text = text_buf[0..smith.slice(&text_buf)];
+    const text = text_buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, text_buf.len)];
+    case.source.bytes(text);
     var path_buf: [64]u8 = undefined;
-    const path = path_buf[0..smith.slice(&path_buf)];
+    const path = path_buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, path_buf.len)];
+    case.source.bytes(path);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     for ([_]bool{ false, true }) |fold| {
