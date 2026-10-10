@@ -94,10 +94,11 @@ test "a pattern matches where POSIX extended expressions match" {
 }
 
 test "fuzz: any pattern compiles or is refused, and any search ends" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    try shakedown_mod.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown_mod.Case) anyerror!void {
             var buf: [64]u8 = undefined;
-            const all = buf[0..smith.slice(&buf)];
+            const all = buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, buf.len)];
+            case.source.bytes(all);
             const cut = all.len / 2;
             var p = Pattern.compile(testing.allocator, all[0..cut]) catch |err| switch (err) {
                 error.InvalidPattern => return,
@@ -109,7 +110,7 @@ test "fuzz: any pattern compiles or is refused, and any search ends" {
                 else => return err,
             };
         }
-    }.one, .{ .corpus = &.{ "(ab)+c|d*xababc", "[[:alpha:]]{2,}x9" } });
+    }.one, .{});
 }
 
 //=========================================================================
@@ -1091,10 +1092,11 @@ test "a back-reference takes the way glibc takes: the furthest end any assignmen
 }
 
 test "fuzz: any regex compiles or is refused, and any match is within the line" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
+    try shakedown_mod.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown_mod.Case) anyerror!void {
             var buf: [64]u8 = undefined;
-            const all = buf[0..smith.slice(&buf)];
+            const all = buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, buf.len)];
+            case.source.bytes(all);
             const cut = all.len / 2;
             for ([_]Syntax{ .basic, .extended }) |syntax| {
                 var r = Regex.compile(testing.allocator, all[0..cut], .{ .syntax = syntax }) catch |err| switch (err) {
@@ -1111,7 +1113,7 @@ test "fuzz: any regex compiles or is refused, and any match is within the line" 
                 }
             }
         }
-    }.one, .{ .corpus = &.{ "\\(a\\|b\\)*c", "[[:alpha:]]{2,}x9" } });
+    }.one, .{});
 }
 
 test "boolean ERE uses git extensions and captures" {

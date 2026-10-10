@@ -15,6 +15,7 @@
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Io = std.Io;
 const assert = std.debug.assert;
 
@@ -225,12 +226,13 @@ test "git's own advertisement reads as lines, then a flush" {
 }
 
 test "fuzz: any bytes are lines or a named error" {
-    try testing.fuzz({}, fuzzRead, .{});
+    try shakedown.check(testing.allocator, {}, fuzzRead, .{});
 }
 
-fn fuzzRead(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzRead(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [4096]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     var buffer: [max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(scratch[0..n]);
     var in = fixed.limited(.unlimited, &buffer);

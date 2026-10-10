@@ -35,6 +35,7 @@
 //! detected, and no object any of the fixture repositories holds is.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 
 /// SHA-1, with the collision check run on every block.
 ///
@@ -967,12 +968,13 @@ test "the FIPS 180 vectors, unchanged by the check" {
 }
 
 test "fuzz: the check never changes the name, and never fires by accident" {
-    try std.testing.fuzz({}, fuzzSha1Dc, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzSha1Dc, .{});
 }
 
-fn fuzzSha1Dc(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzSha1Dc(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [4096]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     const input = scratch[0..n];
 
     var mine: [20]u8 = undefined;

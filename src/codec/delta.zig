@@ -7,6 +7,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 /// Errors from reading or applying a delta.
@@ -554,15 +555,17 @@ test "a copy longer than one command is split into several" {
 }
 
 test "fuzz: a delta this writes decodes back to what it was written from" {
-    try std.testing.fuzz({}, fuzzEncode, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzEncode, .{});
 }
 
-fn fuzzEncode(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzEncode(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var base_buf: [512]u8 = undefined;
     var target_buf: [512]u8 = undefined;
-    const base = base_buf[0..smith.slice(&base_buf)];
-    const target = target_buf[0..smith.slice(&target_buf)];
+    const base = base_buf[0..shakedown.gen.intRange(case.source, usize, 0, base_buf.len)];
+    case.source.bytes(base);
+    const target = target_buf[0..shakedown.gen.intRange(case.source, usize, 0, target_buf.len)];
+    case.source.bytes(target);
 
     const written = (try encode(gpa, base, target, .{})) orelse return;
     defer gpa.free(written);
@@ -619,13 +622,14 @@ test "a lying delta is a named error" {
 }
 
 test "fuzz: any bytes are a value or a named error" {
-    try std.testing.fuzz({}, fuzzOne, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{});
 }
 
-fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [512]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var base_buf: [64]u8 = undefined;
     @memset(&base_buf, 'a');
     for (0..64) |n| {
