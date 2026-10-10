@@ -157,12 +157,7 @@ pub fn writeState(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) 
             else => |e| return e,
         };
     }
-    var dir_buf: [512]u8 = undefined;
-    const prefix = if (std.Io.Dir.path.dirnamePosix(sub_path)) |parent|
-        std.mem.print(&dir_buf, "{s}/.relic-", .{parent}) catch ".relic-"
-    else
-        ".relic-";
-    try fs.atomicWrite(io, dir, sub_path, bytes, .{ .prefix = prefix, .sync = .none });
+    try fs.atomicWrite(io, dir, sub_path, bytes, .{ .prefix = ".relic-", .sync = .none });
 }
 
 /// The state file `sub_path` under `dir`, or `null`. The bytes are the
