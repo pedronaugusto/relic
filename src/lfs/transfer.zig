@@ -59,7 +59,7 @@ const object_mod = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
 const repo_mod = @import("../repo/repo.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const objectwalk = @import("../walk/objectwalk.zig");
@@ -68,7 +68,7 @@ const timetext = @import("timetext.zig");
 const lfsssh = @import("ssh.zig");
 const custom = @import("custom.zig");
 const remote_mod = @import("../wire.zig").remote;
-const revwalk = @import("../walk.zig");
+const revwalk = @import("../walk/walk.zig");
 const diff_mod = @import("../diff/diff.zig");
 const config_mod = @import("../config/config.zig");
 

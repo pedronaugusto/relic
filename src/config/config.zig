@@ -20,7 +20,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const glob_mod = @import("../text.zig").glob;
 
 /// Errors from reading a configuration file.

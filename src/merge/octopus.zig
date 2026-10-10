@@ -23,8 +23,8 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
-const revwalk = @import("../walk.zig");
-const worktree = @import("../checkout.zig");
+const revwalk = @import("../walk/walk.zig");
+const worktree = @import("../checkout/checkout.zig");
 const blobmerge = @import("blobmerge.zig");
 const ort = @import("ort.zig");
 

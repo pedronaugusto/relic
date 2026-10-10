@@ -22,7 +22,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const delta = @import("../codec.zig").delta;
 const revindex = @import("revindex.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;

@@ -1,6 +1,6 @@
 //! The ref backend, hash and cache live and change together under Store.
 //! This module is package plumbing, reached by no public name.
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const std = @import("std");
 const hash = @import("../hash/hash.zig");
 const refs = @import("value.zig");

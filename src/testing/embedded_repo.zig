@@ -14,7 +14,7 @@ const Allocator = std.mem.Allocator;
 const testgit = @import("git.zig");
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 
 const Repository = repo_mod.Repository;
 const testing = std.testing;

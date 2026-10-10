@@ -14,7 +14,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const config = @import("config.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 /// One change to a configuration file.
 pub const Edit = union(enum) {

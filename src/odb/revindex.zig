@@ -17,7 +17,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const pack = @import("pack/entry.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;

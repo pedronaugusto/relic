@@ -26,7 +26,7 @@ const Io = std.Io;
 const sets = @import("set.zig");
 const ignore = @import("ignore.zig");
 const glob_mod = @import("../text.zig").glob;
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 /// Errors from loading sparse patterns.
 pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;

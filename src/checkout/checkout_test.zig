@@ -14,10 +14,10 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
-const worktree = @import("../checkout.zig");
+const worktree = @import("checkout.zig");
 const ignore = @import("../patterns.zig").ignore;
 const attributes = @import("../patterns.zig").attributes;
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const sparse = @import("../patterns.zig").sparse;
 const pathspec = @import("../patterns.zig").pathspec;
 

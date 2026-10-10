@@ -29,7 +29,7 @@ const hash = @import("hash/hash.zig");
 const object = @import("object/object.zig");
 const odb_mod = @import("odb/odb.zig");
 const repo_mod = @import("repo/repo.zig");
-const worktree = @import("checkout.zig");
+const worktree = @import("checkout/checkout.zig");
 const attributes = @import("patterns.zig").attributes;
 const convert = @import("checkout/convert.zig");
 const pathspec_mod = @import("patterns.zig").pathspec;
@@ -38,7 +38,7 @@ const message = @import("object/message.zig");
 const abbrev = @import("odb/abbrev.zig");
 const mailfmt = @import("mail/format.zig");
 const program = @import("process.zig").program;
-const fs = @import("fs.zig");
+const fs = @import("fs/fs.zig");
 const mailmap_mod = @import("revwalk/mailmap.zig");
 const signing = @import("object/signing.zig");
 

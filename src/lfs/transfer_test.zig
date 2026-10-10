@@ -8,7 +8,7 @@
 //! the person's — helpers, keychain, agents — is reached. The tests want
 //! git-lfs as well as git, and stand aside without it.
 
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const progress_mod = @import("../report.zig").progress;
 const testgit = @import("../testing/git.zig");
 const std = @import("std");
@@ -28,7 +28,7 @@ const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 const program = @import("../process.zig").program;
 const auth = @import("../wire.zig").auth;
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 const builtin = @import("builtin");
 
 /// A server, a home, and a place for tools and repositories.

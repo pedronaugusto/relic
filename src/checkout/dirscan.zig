@@ -27,7 +27,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 /// Whether this platform has a call that reads a batch of entries with their
 /// stats. A run-time `ENOTSUP` from the volume is still possible, and is a
 /// fallback rather than a failure.

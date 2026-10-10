@@ -74,7 +74,7 @@ const tests = [_][]const u8{ "src/testing/**", "src/**/*_test.zig" };
 pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "process owner", .tokens = &.{ "waitpid", "wait4", "execve", "posix_spawn", "setsid", "CreateProcessW" } },
     // the ssh stand-in is another program, holding its handles as ssh does
-    .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/fs.zig", "src/testing/fake_ssh.zig" } },
+    .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/fs/fs.zig", "src/testing/fake_ssh.zig" } },
     // what a ref may be named is decided once, in `names/ref.zig`
     .{ .name = "one ref-name rule", .tokens = &.{ "checkRefFormat", "checkRefName", "isValidRefName", "isPseudoRef" } },
     // the root and special refs are spelled once, and reached through the

@@ -170,7 +170,7 @@ test "patterns that are not a cone, or an unmerged entry, leave the index full" 
     try std.testing.expect(!sparseindex_mod.hasSparseDirectories(&index));
 }
 
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 const repo_mod = @import("../repo/repo.zig");
 
 /// `git status --porcelain` as text, from a status: changes first, then

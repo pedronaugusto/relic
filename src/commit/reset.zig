@@ -21,9 +21,9 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const index_mod = @import("../index/index.zig");
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 const convert = @import("../checkout/convert.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const threeway = @import("../merge/threeway.zig");
 

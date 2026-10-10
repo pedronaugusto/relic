@@ -14,13 +14,13 @@ const Io = std.Io;
 const testgit = @import("../testing/git.zig");
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout.zig");
+const worktree = @import("checkout.zig");
 const filter = @import("filter.zig");
 const program = @import("../process.zig").program;
 const index_mod = @import("../index/index.zig");
 const lfs = @import("../lfs/lfs.zig");
 const lfs_filter = @import("../lfs/filter.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 const testing = std.testing;

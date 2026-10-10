@@ -457,7 +457,7 @@ test "merged split layers are marked at the write time before an older expiry cu
     defer gpa.free(chain);
     const path = try gpa.print(".git/objects/info/commit-graphs/graph-{s}.graph", .{std.mem.trim(u8, chain, "\n")});
     defer gpa.free(path);
-    const fs = @import("../fs.zig");
+    const fs = @import("../fs/fs.zig");
     try fs.setTimestamps(io, repo.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } } });
     try linearCommit(&repo, 3);
     const dir = try repo.gitDir(io);

@@ -13,7 +13,7 @@
 //! value. `process` is `git interpret-trailers`; `format` is what `%(trailers)`
 //! writes; `iterate` is git's `trailer_iterator`.
 
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

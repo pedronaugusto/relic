@@ -21,11 +21,11 @@ const odb = @import("../odb/odb.zig");
 const index = @import("../index/index.zig");
 const sparseindex = @import("../index/sparseindex.zig");
 const repo = @import("../repo/repo.zig");
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 const diff_mod = @import("../diff/diff.zig");
 const filter = @import("../checkout/filter.zig");
 const program = @import("../process.zig").program;
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const opening = @import("../odb/open.zig");
 
 pub const Error = worktree.Error || repo.Error || repo.Repository.LoadFiltersError ||

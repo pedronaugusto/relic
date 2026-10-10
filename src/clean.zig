@@ -37,7 +37,7 @@ const gitlink = @import("discover.zig").gitlink;
 const dirscan = @import("checkout/dirscan.zig");
 const cquote = @import("text.zig").cquote;
 const config_core = @import("config/config.zig");
-const fs = @import("fs.zig");
+const fs = @import("fs/fs.zig");
 
 const Repository = repo_mod.Repository;
 const Index = index_mod.Index;

@@ -42,13 +42,13 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const safepath = @import("../names.zig").path;
 const index_mod = @import("../index/index.zig");
 const config_mod = @import("../config/config.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 const program = @import("../process.zig").program;
 const pathspec_mod = @import("../patterns.zig").pathspec;
 

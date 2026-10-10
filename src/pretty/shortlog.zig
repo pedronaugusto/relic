@@ -473,7 +473,7 @@ test "a subject folds where git's -w folds it" {
 
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
-const revwalk = @import("../walk.zig");
+const revwalk = @import("../walk/walk.zig");
 
 fn commitAs(io: Io, r: *testgit.Repo, author: []const u8, committer: []const u8, msg: []const u8) !void {
     const lt = std.mem.findScalar(u8, committer, '<').?;

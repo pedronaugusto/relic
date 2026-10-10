@@ -20,7 +20,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 

@@ -22,7 +22,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const safepath = @import("../names.zig").path;
 const ref_names = @import("../names.zig").ref;
 const refs_mod = @import("../refs/refs.zig");

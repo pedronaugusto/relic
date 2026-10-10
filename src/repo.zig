@@ -3,7 +3,7 @@
 pub const warning = @import("report.zig").warning;
 pub const hooks = @import("hooks/hooks.zig");
 pub const program = @import("process.zig").program;
-pub const fs = @import("fs.zig");
+pub const fs = @import("fs.zig").engine;
 pub const safe = @import("repo/safe.zig");
 pub const ident = @import("repo/ident.zig");
 pub const Error = @import("repo/repo.zig").Error;

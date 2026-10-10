@@ -5,7 +5,7 @@
 //! object never meet and a reader never sees half of one.
 
 const ErrorNamespace = @This();
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const opening = @import("open.zig");
 const reachability = @import("bitmap/reachability.zig");
 const midx = @import("midx.zig");

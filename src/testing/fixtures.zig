@@ -10,7 +10,7 @@ const odb_mod = @import("../odb/odb.zig");
 const odb_state = @import("../odb/state.zig");
 const pack = @import("../odb/pack.zig");
 const sha1dc = @import("../hash/sha1dc.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 
@@ -699,12 +699,12 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
 }
 
 const sparse_mod = @import("../patterns.zig").sparse;
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 
 const commitgraph_mod = @import("../odb/commitgraph.zig");
 const midx_mod = @import("../odb/midx.zig");
 const merge_mod = @import("../merge/merge.zig");
-const revwalk = @import("../walk.zig");
+const revwalk = @import("../walk/walk.zig");
 const worktrees_mod = @import("../checkout/worktrees.zig");
 const repo_mod = @import("../repo/repo.zig");
 

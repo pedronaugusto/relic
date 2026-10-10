@@ -27,7 +27,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const attributes = @import("../patterns.zig").attributes;
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const program = @import("../process.zig").program;
 const filter = @import("filter.zig");
 const native = @import("native.zig");

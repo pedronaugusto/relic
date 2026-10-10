@@ -32,7 +32,7 @@ const Io = std.Io;
 
 const repo_mod = @import("../repo/repo.zig");
 const attributes = @import("../patterns.zig").attributes;
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfsssh = @import("ssh.zig");

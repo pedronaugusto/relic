@@ -25,7 +25,7 @@ const Io = std.Io;
 const sets = @import("set.zig");
 const sweep = @import("sweep");
 const encoding = @import("../text.zig").encoding;
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 /// Errors from loading attributes.
 pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;

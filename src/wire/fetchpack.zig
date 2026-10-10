@@ -35,7 +35,7 @@ const protocol = @import("protocol.zig");
 const sideband = @import("sideband.zig");
 const indexpack = @import("../odb/indexpack.zig");
 const progress_mod = @import("../report.zig").progress;
-const revwalk = @import("../walk.zig");
+const revwalk = @import("../walk/walk.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;

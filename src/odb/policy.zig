@@ -3,7 +3,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const object = @import("../object/object.zig");
 const pack = @import("pack.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 /// How the object database behaves. The only caches in this package are
 /// named here.
 pub const Options = struct {

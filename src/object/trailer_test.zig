@@ -16,7 +16,7 @@ const repo_mod = @import("../repo/repo.zig");
 const pretty = @import("../pretty/pretty.zig");
 const refs_filter = @import("../pretty/refs.zig");
 const shortlog = @import("../pretty/shortlog.zig");
-const revwalk = @import("../walk.zig");
+const revwalk = @import("../walk/walk.zig");
 const testgit = @import("../testing/git.zig");
 
 const Repository = repo_mod.Repository;

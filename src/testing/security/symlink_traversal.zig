@@ -19,7 +19,7 @@ const Io = std.Io;
 
 const apply = @import("../../patch/apply.zig");
 const repo_mod = @import("../../repo/repo.zig");
-const worktree = @import("../../checkout.zig");
+const worktree = @import("../../checkout/checkout.zig");
 const index_mod = @import("../../index/index.zig");
 const clone_mod = @import("../../transport/clone.zig");
 const transport = @import("../../transport/transport.zig");

@@ -37,10 +37,10 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 const index_mod = @import("../index/index.zig");
 const hooks = @import("../hooks/hooks.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

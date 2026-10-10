@@ -33,14 +33,14 @@ const object = @import("object/object.zig");
 const odb_mod = @import("odb/odb.zig");
 const refs_mod = @import("refs/refs.zig");
 const repo_mod = @import("repo/repo.zig");
-const revwalk = @import("walk.zig");
+const revwalk = @import("walk/walk.zig");
 const revparse = @import("revwalk/revparse.zig");
 const cquote = @import("text.zig").cquote;
 const gitdate = @import("text.zig").date;
 const signing = @import("object/signing.zig");
 const safepath = @import("names.zig").path;
 const ref_names = @import("names.zig").ref;
-const fs = @import("fs.zig");
+const fs = @import("fs/fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

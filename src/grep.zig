@@ -34,7 +34,7 @@ const odb_mod = @import("odb/odb.zig");
 const attributes = @import("patterns.zig").attributes;
 const ere = @import("text.zig").ere;
 const pathspec_mod = @import("patterns.zig").pathspec;
-const fs = @import("fs.zig");
+const fs = @import("fs/fs.zig");
 const userdiff = @import("diff/userdiff.zig");
 
 const Oid = hash.Oid;

@@ -10,7 +10,7 @@ const Self = @This();
 const hooks = @import("../hooks/hooks.zig");
 const program = @import("../process.zig").program;
 
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const safe = @import("safe.zig");
 
 const std = @import("std");
@@ -30,7 +30,7 @@ const commit_cache = @import("cache.zig");
 const shallow = @import("../walk/shallow.zig");
 const ignore = @import("../patterns.zig").ignore;
 const attributes = @import("../patterns.zig").attributes;
-const worktree = @import("../checkout.zig");
+const worktree = @import("../checkout/checkout.zig");
 const worktrees = @import("../checkout/worktrees.zig");
 const filter = @import("../checkout/filter.zig");
 const reftablestack = @import("../refs/reftablestack.zig");

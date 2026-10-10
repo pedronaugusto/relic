@@ -30,11 +30,11 @@ const assert = std.debug.assert;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const fs = @import("../fs.zig");
+const fs = @import("../fs/fs.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
-const revwalk = @import("../walk.zig");
+const revwalk = @import("../walk/walk.zig");
 const fetchpack = @import("../wire.zig").fetchpack;
 const shallow_mod = @import("../walk/shallow.zig");
 const revindex = @import("../odb/revindex.zig");
