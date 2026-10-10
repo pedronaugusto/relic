@@ -275,11 +275,16 @@ pub const Agent = struct {
 
     const Answer = struct {
         event: []const u8 = "",
-        @"error": ?struct { code: i64 = 0, message: []const u8 = "" } = null,
+        @"error": ?struct {
+            code: i64 = 0,
+            message: []const u8 = "",
+            pub const strand = lfsapi.json_policy;
+        } = null,
         oid: []const u8 = "",
         path: []const u8 = "",
         bytesSoFar: i64 = 0,
         bytesSinceLast: i64 = 0,
+        pub const strand = lfsapi.json_policy;
     };
 
     fn receive(a: *Agent, io: Io) ErrorNamespace.Error!Answer {
@@ -296,12 +301,9 @@ pub const Agent = struct {
             return error.LfsAdapterProtocolError;
         }
         r.toss(1);
-        return std.json.parseFromSliceLeaky(Answer, a.arena_state.allocator(), a.line.written(), .{
-            .ignore_unknown_fields = true,
-            .allocate = .alloc_always,
-        }) catch |err| switch (err) {
+        return lfsapi.parseJson(Answer, a.arena_state.allocator(), a.line.written()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.LfsAdapterProtocolError,
+            error.MalformedResponse => return error.LfsAdapterProtocolError,
         };
     }
 };

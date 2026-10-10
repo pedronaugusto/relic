@@ -242,6 +242,7 @@ pub const BatchResponse = struct {
     transfer: ?[]const u8 = null,
     objects: []const BatchObject = &.{},
     hash_algo: ?[]const u8 = null,
+    pub const strand = lfsapi.json_policy;
 };
 
 /// One object of a batch answer.
@@ -254,6 +255,7 @@ pub const BatchObject = struct {
     /// reads it.
     _links: ?Actions = null,
     @"error": ?ObjectError = null,
+    pub const strand = lfsapi.json_policy;
 
     /// The action named `rel`, from `actions` or else `_links`.
     pub fn action(o: *const BatchObject, rel: Rel) ?Action {
@@ -279,12 +281,13 @@ pub const Actions = struct {
     download: ?Action = null,
     upload: ?Action = null,
     verify: ?Action = null,
+    pub const strand = lfsapi.json_policy;
 };
 
 /// One action: where to go, and what to say when there.
 pub const Action = struct {
     href: []const u8,
-    header: ?std.json.ArrayHashMap([]const u8) = null,
+    header: ?lfsapi.HeaderMap = null,
     /// When the action stops working, as RFC 3339 text, or how many seconds
     /// after the answer. With `lfsapi.Options.now`, an action that expires
     /// within five seconds of it is not used, and the object gets a fresh
@@ -295,6 +298,7 @@ pub const Action = struct {
     /// and the transfer by, handed back with each request for it.
     id: ?[]const u8 = null,
     token: ?[]const u8 = null,
+    pub const strand = lfsapi.json_policy;
 
     /// Whether the action, answered at `now`, expires within five seconds
     /// of it.
@@ -308,15 +312,7 @@ pub const Action = struct {
 
     /// The action's headers, checked.
     pub fn headers(a: Action, arena: Allocator) HeadersError![]const http.Header {
-        var out: std.ArrayList(http.Header) = .empty;
-        if (a.header) |map| {
-            var it = map.map.iterator();
-            while (it.next()) |kv| {
-                try lfsapi.checkHeader(kv.key_ptr.*, kv.value_ptr.*);
-                try out.append(arena, .{ .name = kv.key_ptr.*, .value = kv.value_ptr.* });
-            }
-        }
-        return out.items;
+        return lfsapi.headersOf(arena, a.header);
     }
 };
 
@@ -324,6 +320,7 @@ pub const Action = struct {
 pub const ObjectError = struct {
     code: i64 = 0,
     message: []const u8 = "",
+    pub const strand = lfsapi.json_policy;
 };
 
 /// Errors from `parseBatch`.
@@ -333,14 +330,7 @@ pub const ParseBatchError = Allocator.Error || error{MalformedResponse};
 /// does not parse, whose objects are not named by a SHA-256, or that names
 /// another hash algorithm, is `error.MalformedResponse`.
 pub fn parseBatch(arena: Allocator, bytes: []const u8) ParseBatchError!BatchResponse {
-    const parsed = std.json.parseFromSliceLeaky(BatchResponse, arena, bytes, .{
-        .ignore_unknown_fields = true,
-        .duplicate_field_behavior = .use_last,
-        .allocate = .alloc_always,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.MalformedResponse,
-    };
+    const parsed = try lfsapi.parseJson(BatchResponse, arena, bytes);
     if (parsed.hash_algo) |algo| {
         if (algo.len != 0 and !std.mem.eql(u8, algo, "sha256")) return error.MalformedResponse;
     }
@@ -933,10 +923,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
     var request_action: ?custom.Action = null;
     if (action) |a| {
         var headers: std.ArrayList(custom.Action.Header) = .empty;
-        if (a.header) |map| {
-            var it = map.map.iterator();
-            while (it.next()) |kv| try headers.append(scratch, .{ .name = kv.key_ptr.*, .value = kv.value_ptr.* });
-        }
+        if (a.header) |map| for (map.items) |kv| try headers.append(scratch, .{ .name = kv.key, .value = kv.value });
         request_action = .{ .href = a.href, .header = headers.items, .expires_at = a.expires_at, .expires_in = a.expires_in orelse 0 };
     }
     const Progress = struct {
@@ -1193,10 +1180,9 @@ fn copyAction(state: *Run, a: Action) Error!Action {
         .token = if (a.token) |v| try state.arena.dupe(u8, v) else null,
     };
     if (a.header) |map| {
-        var copy: std.json.ArrayHashMap([]const u8) = .{};
-        var it = map.map.iterator();
-        while (it.next()) |kv| try copy.map.put(state.arena, try state.arena.dupe(u8, kv.key_ptr.*), try state.arena.dupe(u8, kv.value_ptr.*));
-        out.header = copy;
+        const copy = try state.arena.alloc(@TypeOf(map.items[0]), map.items.len);
+        for (map.items, copy) |kv, *to| to.* = .{ .key = try state.arena.dupe(u8, kv.key), .value = try state.arena.dupe(u8, kv.value) };
+        out.header = .{ .items = copy };
     }
     return out;
 }

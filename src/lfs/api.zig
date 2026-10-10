@@ -73,6 +73,26 @@ const Self = @This();
 const std = @import("std");
 const percent = @import("../text.zig").percent;
 const warp = @import("warp");
+test "a server's JSON is read as git-lfs reads it, within limits" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Unknown members ignored, a member given twice its last, a header name
+    // given twice its last value.
+    const auth = try parseAuthenticate(arena, "{\"href\":\"a\",\"extra\":[1,{}],\"href\":\"b\",\"header\":{\"X\":\"1\",\"Y\":\"2\",\"X\":\"3\"}}");
+    try std.testing.expectEqualStrings("b", auth.href.?);
+    try std.testing.expectEqual(@as(usize, 2), auth.headers.len);
+    try std.testing.expectEqualStrings("Y", auth.headers[0].name);
+    try std.testing.expectEqualStrings("3", auth.headers[1].value);
+    // A hostile nesting is refused, not followed.
+    var nested: std.ArrayList(u8) = .empty;
+    try nested.appendSlice(arena, "{\"extra\":");
+    for (0..1000) |_| try nested.append(arena, '[');
+    for (0..1000) |_| try nested.append(arena, ']');
+    try nested.append(arena, '}');
+    try std.testing.expectError(error.MalformedResponse, parseAuthenticate(arena, nested.items));
+}
+
 test "LFS checks certificates with the request Io before dialing" {
     const gpa = testing.allocator;
     const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
@@ -118,6 +138,7 @@ const clientcert = @import("../wire.zig").clientcert;
 const authorities = @import("../wire.zig").authorities;
 const uplink = @import("uplink");
 const cloak = @import("cloak");
+const strand = @import("strand");
 const shakedown = @import("shakedown");
 
 const Config = config_mod.Config;
@@ -994,32 +1015,61 @@ const authenticate_missing = [_][]const u8{
     "command not found: git-lfs-authenticate",
 };
 
+/// How git-lfs reads a server's JSON, for a type to declare as
+/// `pub const strand = json_policy`: a member given twice is its last.
+/// `parseJson` ignores members a type does not name for every type.
+pub const json_policy = .{ .duplicates = .last };
+
+/// A server's JSON as git-lfs reads it, within strand's limits: members the
+/// type does not name are ignored, and one given twice is its last in a type
+/// that declares `json_policy`. The text is copied into `arena`, which the
+/// result's strings point into.
+pub fn parseJson(comptime T: type, arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!T {
+    const owned = try arena.dupe(u8, bytes);
+    return strand.json.parseLeaky(T, arena, owned, .{ .ignore_unknown_fields = true, .reject_duplicates = false }) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.MalformedResponse,
+    };
+}
+
+/// A server's `header` object: names and values, in its order.
+pub const HeaderMap = strand.core.Pairs([]const u8, []const u8);
+
+/// The headers `map` names, checked, in `arena`. A name given twice is its
+/// last value, as git-lfs reads the object.
+pub fn headersOf(arena: Allocator, map: ?HeaderMap) (Allocator.Error || error{InvalidHttpHeader})![]const http.Header {
+    const items = (map orelse return &.{}).items;
+    var out: std.ArrayList(http.Header) = .empty;
+    for (items, 0..) |kv, i| {
+        const later = for (items[i + 1 ..]) |next| {
+            if (std.mem.eql(u8, next.key, kv.key)) break true;
+        } else false;
+        if (later) continue;
+        try checkHeader(kv.key, kv.value);
+        try out.append(arena, .{ .name = kv.key, .value = kv.value });
+    }
+    return out.items;
+}
+
+/// A server's reason for a refusal.
+const Reason = struct {
+    message: ?[]const u8 = null,
+    pub const strand = json_policy;
+};
+
 /// `git-lfs-authenticate`'s answer, read.
 pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Self.Error!SshAuth {
     const Answer = struct {
         href: ?[]const u8 = null,
-        header: ?std.json.ArrayHashMap([]const u8) = null,
+        header: ?HeaderMap = null,
         expires_in: ?i64 = null,
         expires_at: ?[]const u8 = null,
+        pub const strand = json_policy;
     };
-    const parsed = std.json.parseFromSliceLeaky(Answer, arena, bytes, .{
-        .ignore_unknown_fields = true,
-        .duplicate_field_behavior = .use_last,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.MalformedResponse,
-    };
-    var headers: std.ArrayList(http.Header) = .empty;
-    if (parsed.header) |map| {
-        var it = map.map.iterator();
-        while (it.next()) |kv| {
-            try checkHeader(kv.key_ptr.*, kv.value_ptr.*);
-            try headers.append(arena, .{ .name = kv.key_ptr.*, .value = kv.value_ptr.* });
-        }
-    }
+    const parsed = try parseJson(Answer, arena, bytes);
     return .{
         .href = parsed.href,
-        .headers = headers.items,
+        .headers = try headersOf(arena, parsed.header),
         .expires_in = parsed.expires_in orelse 0,
         .expires_at = if (parsed.expires_at) |t| timetext.parseRfc3339(t) else null,
     };
@@ -2223,8 +2273,7 @@ pub const Client = struct {
     fn noteStatusText(c: *Client, io: Io, ex: *Exchange, what: []const u8) []const u8 {
         const status = ex.status();
         const body = ex.readAll(io, 64 * 1024) catch "";
-        const Reason = struct { message: ?[]const u8 = null };
-        const reason = std.json.parseFromSliceLeaky(Reason, ex.arena.allocator(), body, .{ .ignore_unknown_fields = true }) catch Reason{};
+        const reason = parseJson(Reason, ex.arena.allocator(), body) catch Reason{};
         var buf: [512]u8 = undefined;
         c.setMessage(io, std.mem.print(&buf, "{s}: HTTP {d}{s}{s}", .{
             what,
@@ -2327,8 +2376,7 @@ pub const Exchange = struct {
         const body = ex.readAll(io, 4096) catch return "";
         if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body) catch "";
         if (std.ascii.findIgnoreCase(content_type, "json") == null) return "";
-        const Reason = struct { message: ?[]const u8 = null };
-        const reason = std.json.parseFromSliceLeaky(Reason, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return "";
+        const reason = parseJson(Reason, a, body) catch return "";
         return reason.message orelse "";
     }
 
