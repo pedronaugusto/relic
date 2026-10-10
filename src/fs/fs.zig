@@ -1371,7 +1371,10 @@ test "a lock syncs the file as its policy asks, and the directory when it is to 
             // none: nothing. batch: the file ordered, and the batch's end makes it durable.
             // per file: the file and the directory that received its name.
             try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(lock_file_sync));
-            try std.testing.expectEqual(@as(u32, @intFromBool(policy == .per_file)), h.count(.sync_dir));
+            // Linux hands airlock a directory it cannot sync, and airlock syncs a handle it reopens: the
+            // refused call is recorded too.
+            const reopened: u32 = if (builtin.target.os.tag == .linux) h.count(.getfl) else 0;
+            try std.testing.expectEqual(@as(u32, @intFromBool(policy == .per_file)) + reopened, h.count(.sync_dir));
             var read_buf: [16]u8 = undefined;
             try std.testing.expectEqualStrings("new\n", try tmp.dir.readFile(io, target, &read_buf));
             try std.testing.expect(!lockHeld(io, tmp.dir, target));
