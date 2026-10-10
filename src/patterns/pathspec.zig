@@ -326,6 +326,18 @@ test "pathspecs name prefixes, globs and exclusions as git's do" {
     try std.testing.expect(g.matches("a.c"));
 }
 
+test "shared pathspec magic and exclusions" {
+    const gpa = std.testing.allocator;
+    var magic = try parse(gpa, &.{ ":(icase)SRC/**", ":(exclude)src/private/**" });
+    defer magic.deinit();
+    try std.testing.expect(magic.matches("src/public/main.zig"));
+    try std.testing.expect(!magic.matches("src/private/main.zig"));
+    var literal = try parse(gpa, &.{":(literal)a*b"});
+    defer literal.deinit();
+    try std.testing.expect(literal.matches("a*b"));
+    try std.testing.expect(!literal.matches("axb"));
+}
+
 test "fuzz: any pathspec parses or is refused by name, and any path is asked of it" {
     try std.testing.fuzz({}, struct {
         fn one(_: void, smith: *std.testing.Smith) anyerror!void {

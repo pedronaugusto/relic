@@ -428,14 +428,6 @@ fn mapSide(map: *const std.StringHashMapUnmanaged(TreeEntry), path: []const u8) 
 
 const TreeEntry = worktree.TreeEntry;
 
-/// Whether a pathspec matches `path`: the path itself, a directory above
-/// it, or a glob over the whole path in which `*` crosses `/`.
-fn matchesAny(gpa: Allocator, specs: []const []const u8, path: []const u8) pathspec_mod.Error!bool {
-    var parsed = try pathspec_mod.parse(gpa, specs);
-    defer parsed.deinit();
-    return parsed.matches(path);
-}
-
 /// `git stash push`: record the index and the working tree — and the
 /// untracked files, if asked — as a stash, then put the working tree and
 /// the index back to `HEAD`, as git does. `null` when there is nothing to
@@ -1114,13 +1106,4 @@ pub fn clear(io: Io, repo: *Repository, options: DropOptions) Self.Error!void {
         // Deleting the ref deletes its log, which is the list.
         try tx.commit(io, null);
     }
-}
-
-test "shared pathspec magic and exclusions" {
-    const gpa = std.testing.allocator;
-    const specs: []const []const u8 = &.{ ":(icase)SRC/**", ":(exclude)src/private/**" };
-    try std.testing.expect(try matchesAny(gpa, specs, "src/public/main.zig"));
-    try std.testing.expect(!try matchesAny(gpa, specs, "src/private/main.zig"));
-    try std.testing.expect(try matchesAny(gpa, &.{":(literal)a*b"}, "a*b"));
-    try std.testing.expect(!try matchesAny(gpa, &.{":(literal)a*b"}, "axb"));
 }

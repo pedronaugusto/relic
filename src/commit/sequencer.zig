@@ -1144,7 +1144,8 @@ test "sequencer signing policy refuses malformed values, and reads one without t
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = std.math.maxInt(usize) });
+    var no_resize = shakedown.alloc.NoResize.init(gpa);
+    var failing = std.testing.FailingAllocator.init(no_resize.allocator(), .{ .fail_index = std.math.maxInt(usize) });
     var r = try Repository.create(failing.allocator(), io, tmp.dir, .{});
     defer r.deinit(io);
     try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "maybe" }}, null);

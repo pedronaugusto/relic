@@ -303,18 +303,14 @@ pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []c
     if (repo.configuration().find(active_key) != null) return repo.configuration().getBool(active_key, false);
     const specs = try repo.configuration().all("submodule.active");
     defer repo.configuration().gpa.free(specs);
-    if (specs.len > 0) return pathspecMatches(arena, specs, path);
+    if (specs.len > 0) {
+        // git reads `submodule.active` as pathspecs: a path, a directory above it or a glob,
+        // with `:(exclude)`, `:!` and `:^` taking matches away.
+        var parsed = try pathspec_mod.parse(arena, specs);
+        defer parsed.deinit();
+        return parsed.matches(path);
+    }
     return repo.configuration().get(try configKey(arena, name, "url")) != null;
-}
-
-/// git's pathspec match for `submodule.active`: a path, a directory above
-/// it, or a glob; `:(exclude)`, `:!` and `:^` take matches away; `:(top)`,
-/// `:/`, `:(glob)` and `:(literal)` are read, and any other magic is
-/// refused by name.
-fn pathspecMatches(gpa: Allocator, specs: []const []const u8, path: []const u8) pathspec_mod.Error!bool {
-    var parsed = try pathspec_mod.parse(gpa, specs);
-    defer parsed.deinit();
-    return parsed.matches(path);
 }
 
 /// The remote git resolves a relative url against: the current branch's
@@ -1819,13 +1815,4 @@ pub fn walk(gpa: Allocator, io: Io, repo: *Repository, options: WalkOptions) Sel
         return err;
     };
     return w;
-}
-
-test "shared pathspec magic and exclusions" {
-    const gpa = std.testing.allocator;
-    const specs: []const []const u8 = &.{ ":(icase)SRC/**", ":(exclude)src/private/**" };
-    try std.testing.expect(try pathspecMatches(gpa, specs, "src/public/main.zig"));
-    try std.testing.expect(!try pathspecMatches(gpa, specs, "src/private/main.zig"));
-    try std.testing.expect(try pathspecMatches(gpa, &.{":(literal)a*b"}, "a*b"));
-    try std.testing.expect(!try pathspecMatches(gpa, &.{":(literal)a*b"}, "axb"));
 }

@@ -949,15 +949,6 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: u32) Error!Norma
     return normalize(r.arena, merged.bytes, size, r.repo.objectFormat());
 }
 
-/// Whether git's plain pathspec `items` names `path`: the path itself, a
-/// directory above it, or a glob matching it, `*` crossing `/`. No items,
-/// or `.`, name every path.
-fn pathspecMatches(gpa: Allocator, specs: []const []const u8, path: []const u8) pathspec_mod.Error!bool {
-    var parsed = try pathspec_mod.parse(gpa, specs);
-    defer parsed.deinit();
-    return parsed.matches(path);
-}
-
 /// `git rerere gc`: prune the records of conflicts not met or used for
 /// long enough, counted from `now`, in seconds since the epoch. A
 /// resolution is kept `gc.rerereResolved` days from when it was last
@@ -1128,13 +1119,4 @@ fn fuzzNormalize(_: void, smith: *std.testing.Smith) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try normalize(arena.allocator(), text, 7, .sha1);
-}
-
-test "shared pathspec magic and exclusions" {
-    const gpa = std.testing.allocator;
-    const specs: []const []const u8 = &.{ ":(icase)SRC/**", ":(exclude)src/private/**" };
-    try std.testing.expect(try pathspecMatches(gpa, specs, "src/public/main.zig"));
-    try std.testing.expect(!try pathspecMatches(gpa, specs, "src/private/main.zig"));
-    try std.testing.expect(try pathspecMatches(gpa, &.{":(literal)a*b"}, "a*b"));
-    try std.testing.expect(!try pathspecMatches(gpa, &.{":(literal)a*b"}, "axb"));
 }

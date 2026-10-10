@@ -552,7 +552,8 @@ test "a checker marks no folder read when reading it runs out of memory" {
     try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.log\n" });
     var failures: usize = 0;
     for (0..6) |offset| {
-        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
+        var fa = std.testing.FailingAllocator.init(no_resize.allocator(), .{});
         var checker: Checker = .init(try .init(fa.allocator(), .{ .case_fold = false }), tmp.dir, .{});
         defer checker.deinit();
         fa.fail_index = fa.alloc_index + offset;
