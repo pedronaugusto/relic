@@ -449,19 +449,20 @@ which happened. On a miss the object database re-scans the pack directory once
 and tries again, because a `git gc` may have packed the object away between
 the two.
 
-**Durability is a policy with three values, and the default is git's own.**
+**Durability is a policy with three values, and airlock does the syncing.**
 `repo.fs.Sync.none` makes neither a loose object nor the index durable before
-returning, which is what `core.fsync` defaults to. `batch` flushes each file
-and puts one real barrier at the end — a throwaway file in the same directory,
-synced and removed — which is full durability at one sync per batch rather
-than one per object. `per_file` syncs each one. Under the latter two a lock's
-own descriptor is synced before the rename, which is the step that prevents an
-empty ref or a truncated index. Directory entries are not made durable unless
-asked: git does not do it either, and the guarantee it adds is one git does
-not make. On macOS `fsync(2)` reaches the device and not the drive's own
-cache, so `F_FULLFSYNC` is the real barrier. Waiting for the drive's cache
-adds a storage barrier, which is why ordinary object writes can put it at
-the end of a batch.
+returning, which is what `core.fsync` defaults to. `batch` orders each file's
+bytes before its name appears and leaves the end of the batch to make them
+durable: `Odb.syncBatch` flushes the directories that received loose objects,
+once each, and a written pack flushes its directory. `per_file` makes each file
+durable before its name appears, and a lock's directory with it, so a ref or an
+index that returned is the one a power cut leaves. A lock's own descriptor is
+synced before the rename in both, which is the step that prevents an empty ref
+or a truncated index. Every sync, rename and replacement goes through
+[airlock](https://github.com/pedronaugusto/airlock), which says what the
+filesystem reached and refuses a level it cannot keep; on macOS that is a
+barrier on the file and `F_FULLFSYNC` where the drive's own cache is, since
+`fsync(2)` reaches the device and not the cache.
 
 **Every path from a tree is checked before it is written.** A tree entry's
 name is written by whoever wrote the tree and becomes a filesystem path on

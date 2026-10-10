@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Breaking:** airlock owns relic's lock files, replacements and syncs. `LockFile` is an airlock temp named `<path>.lock`, still taken exclusively with git's backoff and the holder's pid in its first bytes; `atomicWrite` is `airlock.writeFile`; `fs.renameWithRetry` is `fs.rename`, which retries on Windows as airlock does; `fs.syncBarrier` and `fs.syncPath` are removed. A `per_file` lock and a `per_file` replacement sync the directory that receives the name as well as the file, so a lock's commit can fail with `PublishedNotDurable`: the new file is in place and its name may not survive a power cut. `LockFile.Options.sync_directory` and `odb.Options.sync_directories` go, since a durable name is what `per_file` now means. `Odb.syncBatch` flushes the fan-out directories that received loose objects since the last call, once each, where it created and removed a file to flush none; a pack written under `batch` flushes its directory. `Odb.makeDurable` and a durable checkout sync their files and directories together, one flush of the volume for all of them. On macOS a lock's file is ordered with a barrier and its directory flushed with `F_FULLFSYNC`; `atomicWrite` takes `permissions` for a replacement that keeps the replaced file's.
+
 - The package ships `build.zig`, `build.zig.zon`, `src`, the license, README and changelog, which is all a consumer's build reads.
 
 - Attribute pattern sets compile once per file and keep one matching cache, so
