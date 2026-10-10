@@ -43,6 +43,7 @@ It times each through shakedown.bench and prints its rows as JSON lines;
 
 - rules: loading and matching a 32-line ignore file, an includeIf condition,
   loading an attributes file and looking one path up, and the CRC kernel over 1 MiB;
+- patch: one git patch of 64 files and 512 hunks read whole, checking the files read;
 - ere: boolean and span compile/search on one bounded interval expression,
   checking the boolean result and the exact longest span on every operation;
 - pack codec: reused compression of 32 KiB text and noise at each pack level;

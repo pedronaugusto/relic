@@ -5,6 +5,7 @@ const Io = std.Io;
 const api = @import("relic").api;
 const scratchgit = @import("scratchgit.zig");
 const benchmark = @import("shakedown").bench;
+const shared = @import("shared.zig");
 
 const Context = struct {
     gpa: std.mem.Allocator,
@@ -34,7 +35,8 @@ const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.run)).@"fn".return_typ
 pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
-    const smoke = args.len > 1 and std.mem.eql(u8, args[1], "--smoke");
+    const run_options = try shared.options(init, args);
+    if (!shared.wants(run_options.prefix, "local_push_three_objects")) return;
     scratchgit.environment = init.minimal.environ;
     var source = try scratchgit.Repo.init(gpa, io);
     defer source.deinit();
@@ -57,9 +59,9 @@ pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     var out_buffer: [4096]u8 = undefined;
     var output = Io.File.stdout().writer(io, &out_buffer);
     const rows = [_]benchmark.Row(Context, WorkloadError){.{ .name = "local_push_three_objects", .unit = "push", .initial = 1, .run = Context.run }};
-    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = shared.commit }, run_options);
     try output.interface.flush();
-    if (context.checksum == 0) return error.NoWork;
+    if (shared.selects(run_options.prefix, rows) and context.checksum == 0) return error.NoWork;
     const received = try remote.repo.refStore().readOid(gpa, io, "refs/heads/arrived");
     if (received == null or !received.?.eql(oid)) return error.WrongRef;
 }

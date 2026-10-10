@@ -2,6 +2,7 @@
 const std = @import("std");
 const pack = @import("relic").api.odb.pack;
 const benchmark = @import("shakedown").bench;
+const shared = @import("shared.zig");
 const Context = struct {
     deflater: *pack.Deflater,
     text: []const u8,
@@ -45,7 +46,7 @@ const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.fastText)).@"fn".retur
 
 pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const gpa = init.gpa;
-    const smoke = args.len > 1 and std.mem.eql(u8, args[1], "--smoke");
+    const run_options = try shared.options(init, args);
     const text = try gpa.alloc(u8, 32 << 10);
     defer gpa.free(text);
     const phrase = "tree commit object refs source history merge file\n";
@@ -69,7 +70,7 @@ pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
         .{ .name = "pack_default_noise", .unit = "32KiB_stream", .initial = 1, .run = Context.defaultNoise },
         .{ .name = "pack_best_noise", .unit = "32KiB_stream", .initial = 1, .run = Context.bestNoise },
     };
-    try benchmark.run(WorkloadError, gpa, init.io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    try benchmark.run(WorkloadError, gpa, init.io, &output.interface, &context, &rows, .{ .commit = shared.commit }, run_options);
     try output.interface.flush();
-    if (context.checksum == 0) return error.NoWork;
+    if (shared.selects(run_options.prefix, rows) and context.checksum == 0) return error.NoWork;
 }

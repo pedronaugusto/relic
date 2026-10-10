@@ -6,6 +6,7 @@ const Io = std.Io;
 const api = @import("relic").api;
 const connection = api.transport.connection;
 const benchmark = @import("shakedown").bench;
+const shared = @import("shared.zig");
 
 const Context = struct {
     conn: *connection.Connection,
@@ -45,7 +46,8 @@ const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.run)).@"fn".return_typ
 pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
-    const smoke = args.len > 1 and std.mem.eql(u8, args[1], "--smoke");
+    const run_options = try shared.options(init, args);
+    if (!shared.wants(run_options.prefix, "native_cached_roundtrip_256")) return;
     var env = try init.minimal.environ.createMap(gpa);
     defer env.deinit();
     const executable = try Io.Dir.cwd().realPathFileAlloc(io, args[0], gpa);
@@ -56,7 +58,7 @@ pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     var out_buffer: [4096]u8 = undefined;
     var output = Io.File.stdout().writer(io, &out_buffer);
     const rows = [_]benchmark.Row(Context, WorkloadError){.{ .name = "native_cached_roundtrip_256", .unit = "roundtrip", .initial = 64, .run = Context.run }};
-    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = shared.commit }, run_options);
     try output.interface.flush();
-    if (context.checksum == 0) return error.NoWork;
+    if (shared.selects(run_options.prefix, rows) and context.checksum == 0) return error.NoWork;
 }

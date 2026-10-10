@@ -6,6 +6,7 @@ const native = @import("native.zig");
 const groups = .{
     @import("rules.zig"),
     @import("ere.zig"),
+    @import("patch.zig"),
     @import("pack_codec.zig"),
     @import("zstd.zig"),
     @import("local_push.zig"),

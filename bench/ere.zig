@@ -3,6 +3,7 @@
 const std = @import("std");
 const ere = @import("relic").regex;
 const benchmark = @import("shakedown").bench;
+const shared = @import("shared.zig");
 const pattern = "(foo|bar){2,3}baz";
 const text = "xfoobarfoobaz";
 const Context = struct {
@@ -35,7 +36,7 @@ const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.boolean)).@"fn".return
 pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
-    const smoke = args.len > 1 and std.mem.eql(u8, args[1], "--smoke");
+    const run_options = try shared.options(init, args);
     var context: Context = .{ .gpa = gpa };
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(io, &buffer);
@@ -43,7 +44,7 @@ pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
         .{ .name = "ere_interval_boolean", .unit = "compile_search", .initial = 64, .run = Context.boolean },
         .{ .name = "ere_interval_span", .unit = "compile_search", .initial = 64, .run = Context.span },
     };
-    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = if (!smoke and args.len > 1) args[1] else "work-in-progress" }, .{ .smoke = smoke, .samples = 11, .minimum = .fromMilliseconds(5) });
+    try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = shared.commit }, run_options);
     try output.interface.flush();
-    if (context.checksum == 0) return error.NoWork;
+    if (shared.selects(run_options.prefix, rows) and context.checksum == 0) return error.NoWork;
 }
