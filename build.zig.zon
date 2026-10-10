@@ -24,13 +24,13 @@
             .hash = "uplink-0.1.0-0eVSJrsiDQDDCVeuumekrp3XLlXTaYXHAyj2b34KUc_7",
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#99418acb02deacefe8cc555c4205dce98f54ef68",
-            .hash = "shakedown-0.1.0-BR8U409YEgCLU7igVgkutLKZ1u5FzuaC6geo-4n84d_G",
+            .url = "git+https://github.com/pedronaugusto/shakedown#d95deb1d8859416f23689440b1af5da3d034860e",
+            .hash = "shakedown-0.1.0-BR8U45NvFQB7Z_VGFcneyHXmB5wYCSM73NQLSpQkx4UB",
             .lazy = true,
         },
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#a19d4f4e6825a49fc61478c14718414fb190a324",
-            .hash = "airlock-0.1.0-rfvu6JWGBQCN3u7evgacrcGxb7KYWMxQ-cxp8jviJKOD",
+            .url = "git+https://github.com/pedronaugusto/airlock#2505fadfad3dcb36137340b3ba731b044c38596c",
+            .hash = "airlock-0.1.0-rfvu6OXqBQDXhoG4omggY-Wdf0mpDIeXBKe4v4FFJA6d",
         },
         .warp = .{
             .url = "git+https://github.com/pedronaugusto/warp#d7f9b6dfe48a3e327f002088b25847787419f490",
