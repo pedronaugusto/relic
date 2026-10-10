@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -443,12 +444,13 @@ test "an ls-refs line carries its symbolic target, its peel, or its unborn state
 }
 
 test "fuzz: any advertisement is refs or a named error" {
-    try testing.fuzz({}, fuzzAdvertisement, .{});
+    try shakedown.check(testing.allocator, {}, fuzzAdvertisement, .{});
 }
 
-fn fuzzAdvertisement(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzAdvertisement(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [2048]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var fake: Fake = .init(input);
     var adv = readAdvertisement(testing.allocator, &fake.connection, null) catch return;
     defer adv.deinit();

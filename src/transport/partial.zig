@@ -22,6 +22,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const shakedown = @import("shakedown");
 const odb_mod = @import("../odb/odb.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -366,12 +367,13 @@ test "filters are read and sent as git reads and sends them, and the ones git do
 }
 
 test "fuzz: a filter is sent as git spells it or refused by name" {
-    try std.testing.fuzz({}, fuzzFilter, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzFilter, .{});
 }
 
-fn fuzzFilter(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzFilter(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [128]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     _ = normalize(arena_state.allocator(), input) catch |err| switch (err) {

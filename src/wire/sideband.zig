@@ -9,6 +9,7 @@
 //! with the server's message kept.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Io = std.Io;
 const assert = std.debug.assert;
 
@@ -180,12 +181,13 @@ test "the server's fatal error ends the stream and is kept" {
 }
 
 test "fuzz: any bytes are data or a named failure" {
-    try testing.fuzz({}, fuzzDemux, .{});
+    try shakedown.check(testing.allocator, {}, fuzzDemux, .{});
 }
 
-fn fuzzDemux(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzDemux(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [2048]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var buffer: [pktline.max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(input);
     var in = fixed.limited(.unlimited, &buffer);

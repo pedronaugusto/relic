@@ -15,6 +15,7 @@
 //! would refuse is `error.InvalidRefspec` here too.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 const hash = @import("../hash/hash.zig");
@@ -304,12 +305,13 @@ test "what git refuses is refused by name" {
 }
 
 test "fuzz: any bytes are a refspec or a named error" {
-    try testing.fuzz({}, fuzzParse, .{});
+    try shakedown.check(testing.allocator, {}, fuzzParse, .{});
 }
 
-fn fuzzParse(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzParse(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [256]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     const gpa = testing.allocator;
     for ([_]Direction{ .fetch, .push }) |direction| {
         const spec = Refspec.parse(input, direction) catch |err| switch (err) {
