@@ -218,15 +218,14 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("airlock", airlock);
     test_module.addImport("warp", warp);
     // Test support is fetched for this package's own build only: a consumer
-    // never fetches shakedown, which airlock's testing module brings.
+    // never fetches shakedown, which airlock's testing module brings. One
+    // shakedown in the test graph: the one airlock's seam is built on, bound to
+    // airlock's aegis. Until it is fetched the build asks again.
     if (b.pkg_hash.len == 0) {
-        if (b.lazyImport(@This(), "airlock")) |airlock_build|
-            test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency) catch return);
-        if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |dep| {
-            test_module.addImport("shakedown", dep.module("shakedown"));
-        } else |err| switch (err) {
-            // The build asks again once the package is fetched.
-            error.LazyDependencyNeeded => {},
+        if (b.lazyImport(@This(), "airlock")) |airlock_build| {
+            const seam = airlock_build.testing(airlock_dependency) catch return;
+            test_module.addImport("airlock.testing", seam);
+            test_module.addImport("shakedown", seam.import_table.get("shakedown").?);
         }
     }
     filter_helper.root_module.addImport("relic", module);
