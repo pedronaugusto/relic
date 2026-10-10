@@ -12,6 +12,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 /// One entry.
@@ -172,12 +173,13 @@ test "a netrc's entries are found by host and login, with the last default after
 }
 
 test "fuzz: any netrc is read or refused by name" {
-    try testing.fuzz({}, fuzzNetrc, .{});
+    try shakedown.check(testing.allocator, {}, fuzzNetrc, .{});
 }
 
-fn fuzzNetrc(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzNetrc(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [512]u8 = undefined;
-    const len = smith.slice(&scratch);
+    const len = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..len]);
     var n = Netrc.parse(testing.allocator, scratch[0..len]) catch |err| switch (err) {
         error.MalformedNetrc => return,
         else => return err,

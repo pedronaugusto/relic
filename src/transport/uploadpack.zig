@@ -19,6 +19,7 @@
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -1189,12 +1190,13 @@ test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
     defer gpa.free(path);
     var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    try std.testing.fuzz(&remote, fuzzServe, .{});
+    try shakedown.check(std.testing.allocator, &remote, fuzzServe, .{});
 }
 
-fn fuzzServe(remote: *local.Remote, smith: *std.testing.Smith) anyerror!void {
+fn fuzzServe(remote: *local.Remote, case: *shakedown.Case) anyerror!void {
     var scratch: [1024]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     for ([_]protocol.Version{ .v2, .v0 }) |version| {
         var server: Server = .init(std.testing.allocator, std.testing.io, remote, version, .{ .stateless = true, .allow_filter = true });
         var fixed: Io.Reader = .fixed(input);

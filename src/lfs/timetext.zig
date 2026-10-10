@@ -4,6 +4,7 @@
 //! what it is compared with is the caller's.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 
 /// `2006-01-02T15:04:05Z07:00`, with or without fractional seconds, which
 /// are dropped: Go's `time.RFC3339` layout, which git-lfs parses with. The
@@ -124,12 +125,13 @@ test "RFC 3339 and HTTP dates are read to the second, as Go reads them" {
 }
 
 test "fuzz: any text is a time or is not, and never a crash" {
-    try testing.fuzz({}, fuzzTimes, .{});
+    try shakedown.check(testing.allocator, {}, fuzzTimes, .{});
 }
 
-fn fuzzTimes(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzTimes(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [64]u8 = undefined;
-    const len = smith.slice(&scratch);
+    const len = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..len]);
     _ = parseRfc3339(scratch[0..len]);
     _ = parseHttpDate(scratch[0..len]);
 }

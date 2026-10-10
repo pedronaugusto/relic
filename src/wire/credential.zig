@@ -28,6 +28,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -915,12 +916,13 @@ test "a refused credential is forgotten even when a helper cannot be told" {
 }
 
 test "fuzz: a helper's answer is read or ignored, never trusted into a crash" {
-    try testing.fuzz({}, fuzzAnswer, .{});
+    try shakedown.check(testing.allocator, {}, fuzzAnswer, .{});
 }
 
-fn fuzzAnswer(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzAnswer(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [2048]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var session: Session = .{ .gpa = testing.allocator, .url = try url_mod.Url.parse("https://git.example.com/r.git") };
     defer session.deinit();
     _ = session.readAnswer(input) catch |err| switch (err) {

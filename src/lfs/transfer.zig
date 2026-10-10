@@ -49,6 +49,7 @@ const ErrorNamespace = @This();
 const transfer = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -2496,12 +2497,13 @@ test "the backoff is git-lfs's: a quarter second, doubling, capped" {
 }
 
 test "fuzz: any batch answer is read or refused by name" {
-    try testing.fuzz({}, fuzzBatch, .{});
+    try shakedown.check(testing.allocator, {}, fuzzBatch, .{});
 }
 
-fn fuzzBatch(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzBatch(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [1024]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -2521,12 +2523,13 @@ fn fuzzBatch(_: void, smith: *testing.Smith) anyerror!void {
 }
 
 test "fuzz: any lines of an ssh batch answer are read or refused by name" {
-    try testing.fuzz({}, fuzzSshBatch, .{});
+    try shakedown.check(testing.allocator, {}, fuzzSshBatch, .{});
 }
 
-fn fuzzSshBatch(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzSshBatch(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [512]u8 = undefined;
-    const len = smith.slice(&scratch);
+    const len = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..len]);
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();

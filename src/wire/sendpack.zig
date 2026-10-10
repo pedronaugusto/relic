@@ -15,6 +15,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -287,12 +288,13 @@ test "a report reads its refs, their reasons and a failed unpack" {
 }
 
 test "fuzz: any report is a report or a named error" {
-    try testing.fuzz({}, fuzzReport, .{});
+    try shakedown.check(testing.allocator, {}, fuzzReport, .{});
 }
 
-fn fuzzReport(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzReport(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [2048]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     var buffer: [pktline.max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(input);
     var in = fixed.limited(.unlimited, &buffer);

@@ -2856,12 +2856,13 @@ test "git-lfs-authenticate's answer is read, and a header with a line break is r
 }
 
 test "fuzz: any answer from git-lfs-authenticate is read or refused by name" {
-    try testing.fuzz({}, fuzzAuthenticate, .{});
+    try shakedown.check(testing.allocator, {}, fuzzAuthenticate, .{});
 }
 
-fn fuzzAuthenticate(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzAuthenticate(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [512]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const auth = parseAuthenticate(arena_state.allocator(), scratch[0..n]) catch |err| switch (err) {
