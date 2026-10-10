@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The `http` build option (on by default) brings uplink, cloak and strand, which are now lazy: a program built with `.http = false` fetches none of them, and an `http` or `https` remote is `error.HttpUnavailable`.
+- `transport.clone` lists its destination through a handle of its own, so the current directory (`Io.Dir.cwd()`) can be cloned into; it used to fail on a handle not opened for listing.
+
 - **Breaking:** time a caller gives is typed: every "now" (`transport`, `credential`, smart-HTTP and LFS options, `date.Context` and `date.Clock`, `revparse.Clock`, `archive.Options.now` and `mtime`, `patch.format` threading, `rerere.gc`, LFS `sweepTmp` and `expiredAt`) is a `std.Io.Timestamp`, `--shallow-since` and the commit-graph's `expire_time` too; a lock's wait is `fs.OnContention.wait`, a `std.Io.Duration`; LFS `retryAfterSeconds` is `parseRetryAfter`, returning a duration. `date.timestamp` makes one from git's seconds. Times git stores (a commit's, a reflog entry's) stay git's seconds.
 
 - A server's JSON (LFS batch, locks, `git-lfs-authenticate`, a custom transfer agent's answers, a refusal's reason) is read through [strand](https://github.com/pedronaugusto/strand), within its limits on input, depth, items, strings and memory, where it was read without any. It is still read as git-lfs reads it: members a type does not name are ignored, and one given twice is its last.

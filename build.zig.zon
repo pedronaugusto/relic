@@ -22,6 +22,7 @@
         .uplink = .{
             .url = "git+https://github.com/pedronaugusto/uplink#559767401542fe25042ff5187a310cafe30b6a00",
             .hash = "uplink-0.1.0-0eVSJgQQCgAbTaUaSktfikMoeVOfL9_mx-ZWeaWG8t81",
+            .lazy = true,
         },
         .shakedown = .{
             .url = "git+https://github.com/pedronaugusto/shakedown#caf380381a49ace7c13beba70dd512c4faf24ce7",
@@ -39,10 +40,12 @@
         .cloak = .{
             .url = "git+https://github.com/pedronaugusto/cloak#d20b2ff425d0ef333a71b0a3a9989cb0641007bd",
             .hash = "cloak-0.1.0-9onwcYyZ8QJBmOJ4OKRAhgK3SDFv8bBKnplJ20-Qfpcg",
+            .lazy = true,
         },
         .strand = .{
             .url = "git+https://github.com/pedronaugusto/strand#dba457548716ac243002f753b8acf6a53904b37d",
             .hash = "strand-0.7.0-8LNWVhMnFwDALhZ_3rVrAlpKY1255BgGx8Nn5VW7uOGi",
+            .lazy = true,
         },
     },
     .minimum_zig_version = "0.17.0",

@@ -32,6 +32,8 @@ const sendpack = @import("../wire.zig").sendpack;
 const local = @import("local.zig");
 const ssh = @import("../wire.zig").ssh;
 const smarthttp = @import("../wire.zig").smarthttp;
+/// Whether relic was built with HTTP: the `http` build option.
+const http_enabled = @import("relic_options").http;
 
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
@@ -82,7 +84,10 @@ pub const Error = error{
     ProgramsNotGranted,
     /// The URL carries a password and `transfer.credentialsInUrl` is `die`.
     CredentialsInUrl,
-} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error || bundle.Error ||
+    /// An `http` or `https` remote, and relic was built without HTTP: its
+    /// `http` build option is off.
+    HttpUnavailable,
+} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || (if (http_enabled) smarthttp.Error else error{}) || sendpack.Error || bundle.Error ||
     remotehelper.Error;
 
 /// How a remote is reached.
@@ -318,6 +323,7 @@ pub const Session = struct {
                 };
             },
             .http, .https => {
+                if (comptime !http_enabled) return error.HttpUnavailable;
                 const conn = try smarthttp.connect(gpa, io, parsed, service, .{
                     .config = options.config,
                     .remote_name = options.remote_name,
