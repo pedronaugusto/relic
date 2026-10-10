@@ -4,10 +4,5 @@
 zig-out/
 zig-pkg/
 
-# Editor and tool directories.
-
 # macOS.
 .DS_Store
-
-# Standalone, unshared baseline clones for retained phase comparisons.
-.phase2/

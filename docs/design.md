@@ -1,8 +1,8 @@
 # Relic design
 
-Relic implements repository formats and operations as a Zig library. Architecture
-phase 2 is in progress. Public namespaces publish concerns; implementation files
-own state and import the implementations beneath them directly.
+Relic implements repository formats and operations as a Zig library. Public
+namespaces publish concerns; implementation files own state and import the
+implementations beneath them directly.
 
 ## Owners and layers
 

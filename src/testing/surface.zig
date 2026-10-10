@@ -71,8 +71,8 @@ test "module tables equal the exported namespace tree" {
     defer std.testing.allocator.free(readme);
     const count = try checkTree(relic, "", 3, readme);
     try std.testing.expectEqual(count, comptime rows(@embedFile("../relic.zig")));
-    const start = std.mem.find(u8, readme, "<!-- BEGIN PHASE2 MODULES -->").?;
-    const end = std.mem.find(u8, readme, "<!-- END PHASE2 MODULES -->").?;
+    const start = std.mem.find(u8, readme, "<!-- BEGIN MODULES -->").?;
+    const end = std.mem.find(u8, readme, "<!-- END MODULES -->").?;
     try std.testing.expectEqual(count, rows(readme[start..end]));
 }
 

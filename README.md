@@ -8,11 +8,7 @@ merge, cherry-pick, revert and rebase; hooks, filters, signing, submodules,
 stash; LFS with locks. What it lays down is what git reads back, so a program
 that needs a repository can have one in process.
 
-Architecture phase 2 is work in progress. Phase 2a covers grouped public inputs,
-Warp codecs and checksums, received-pack retention, shared expression parsing and
-LFS I/O ownership. Phase 2b continues the remaining concern moves and dependency
-seams, durability, hunk grammar, termination types, allocation checks and extraction
-findings. The package is not release complete. Its architecture is described in [docs/design.md](docs/design.md).
+Its architecture is described in [docs/design.md](docs/design.md).
 
 ## Usage
 
@@ -214,8 +210,7 @@ running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's glob
 [parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges and
 [uplink](https://github.com/pedronaugusto/uplink) for HTTP and TLS. Conduit carries its libc linkage on POSIX; Windows needs
 no C runtime. SHA-256 comes from `std.crypto`; SHA-1 is in the
-package. Warp supplies checksums and DEFLATE compression and decoding. Architecture
-phase 2 is still in progress. There is no build option to
+package. Warp supplies checksums and DEFLATE compression and decoding. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — reading
 objects and deflating entries while a pack is written
@@ -239,7 +234,7 @@ The root is one module per concern, and each of those holds the modules
 that belong to it: `relic.refs` is refs, their transactions and the log git
 writes beside them, and `relic.refs.reftable` is the table format.
 
-<!-- BEGIN PHASE2 MODULES -->
+<!-- BEGIN MODULES -->
 | Module | Purpose |
 |---|---|
 | `repo` | `Repository.open`, `create` (templates and `--shared` included), `templateDir`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `configuration`, `writeConfig`, `editConfig`, `refreshConfig`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. The front door. |
@@ -377,7 +372,7 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `fastimport` | `import`, `Marks` — `git fast-import`: every command, its dates, marks files and notes fanout, branches updated as git updates them. |
 | `fastexport` | `write` — `git fast-export` byte for byte: marks, renames, tags, signatures, refspecs. |
 | `maintenance` | `writeCommitGraph`, `writeMidx`, `repackMidx`, `expireMidx`, `writePackBitmap`, `writeMidxBitmap`, `writeConfiguredCommitGraph`, `repackRepository`. The format modules own the bytes; these operations gather through the object database, diff and revision walk. Fetch applies `fetch.writeCommitGraph`; configured maintenance applies `gc.writeCommitGraph` and the bitmap settings. |
-<!-- END PHASE2 MODULES -->
+<!-- END MODULES -->
 
 Native LFS belongs to the operation owner. Use `lfs.filter.load(gpa, io, &repo,
 .{ .fetch = fetcher })` to load native LFS alongside configured program filters,
@@ -391,8 +386,7 @@ snapshot redirects its writes to its private store. Checkout reports unavailable
 native content in `native_fallbacks` and `filter.Report.native_missing`.
 
 
-Public declarations document their contracts. Phase 2 is completing the
-named error sets and call conventions across operations. A refusal is a named error. For a refused
+Public declarations document their contracts. A refusal is a named error. For a refused
 repository format or extension,
 pass a caller-owned `repo.Diagnostic` in `Repository.OpenOptions.diagnostic`:
 its `unsupported_setting` survives a failed open, and `deinit` releases its copy.
