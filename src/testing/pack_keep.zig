@@ -1,6 +1,7 @@
 //! Received-pack retention through reference publication, against Git collection.
 const std = @import("std");
-const shakedown_mod = @import("shakedown");
+const builtin = @import("builtin");
+const seam = @import("airlock.testing");
 const transport_mod = @import("../transport/transport.zig");
 const testing = std.testing;
 const Io = std.Io;
@@ -8,6 +9,7 @@ const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
+const no_space: seam.Code = if (builtin.target.os.tag == .windows) .DISK_FULL else .NOSPC;
 
 test "received pack survives prune before references are published" {
     const gpa = testing.allocator;
@@ -91,8 +93,8 @@ test "received pack retention and rollback survive a ref commit fault" {
         defer gpa.free(args);
         var target = try testgit.Repo.init(gpa, io, args);
         defer target.deinit();
-        const fault = try shakedown_mod.FaultIo.init(gpa, io, .{});
-        defer fault.deinit();
+        const fault = try seam.Seam.create(gpa, io, .{});
+        defer fault.destroy();
         const fault_io = fault.io();
         // Reftable read caches retain their Io until the repository closes.
         var repo = try repo_mod.Repository.open(gpa, fault_io, target.dir, .{});
@@ -110,9 +112,9 @@ test "received pack retention and rollback survive a ref commit fault" {
             try tx.create("refs/heads/faulted", .{ .direct = try Oid.parse(.sha1, head) });
             try tx.prepare(fault_io);
             // A fault Windows' replace-retry does not absorb.
-            try fault.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirRename, .n = 1 } }, .fault = .{ .fail = error.NoSpaceLeft } }});
+            fault.setPlan(&.{seam.fail(.rename, 1, no_space)});
             try testing.expectError(error.NoSpaceLeft, tx.commit(fault_io, null));
-            try testing.expectEqual(@as(usize, 1), fault.fired().len);
+            try testing.expectEqual(@as(usize, 1), fault.plan.firedCount());
             try target.dir.access(io, marker, .{});
         }
         try testing.expect((try repo.refStore().readOid(gpa, io, "refs/heads/faulted")) == null);
