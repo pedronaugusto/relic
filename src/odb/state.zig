@@ -29,7 +29,7 @@ pub const Data = struct {
     bitmap_checked: bool = false,
     bitmap: ?reachability.Store = null,
     deflate_state: ?DeflateState = null,
-    /// Under `Options.sync = .batch`, the fan-out directories that received
+    /// Under `core.fsyncMethod = batch`, the fan-out directories that received
     /// a loose object since the last `syncBatch`, and whether `objects`
     /// itself received one of those directories.
     unsynced_fanouts: std.bit_set.Static(256) = .empty,

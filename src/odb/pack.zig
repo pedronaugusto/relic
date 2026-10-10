@@ -1743,10 +1743,10 @@ pub const Compression = enum {
 pub const WriteOptions = struct {
     /// Retain publication until the returned report is released.
     keep: bool = false,
-    /// How hard the two files are pushed towards the disk before they are
-    /// renamed into place. A pack that a loose object is about to be deleted
-    /// for wants `batch` at least.
-    sync: fs.Sync = .none,
+    /// Which of the pack and its indexes are synced before they are renamed
+    /// into place, and how: the pack as `core.fsync`'s `pack`, the indexes
+    /// as its `pack-metadata`.
+    fsync: fs.Fsync = .off,
     /// How hard the entries are compressed.
     compression: Compression = .default,
     /// Write `pack-<name>.rev` too, as git's pack-objects does while
@@ -2193,10 +2193,7 @@ pub const Writer = struct {
         errdefer if (token) |*t| t.deinit(io);
         const pack_bytes = w.sink.count + w.kind.rawLen();
         try w.file_writer.interface.flush();
-        switch (w.options.sync) {
-            .none => {},
-            .batch, .per_file => try fs.syncFile(io, w.file, .{ .policy = w.options.sync }),
-        }
+        try fs.syncFile(io, w.file, .{ .policy = w.options.fsync.sync(.pack) });
         w.file.close(io);
         w.finished = true;
 
@@ -2221,7 +2218,7 @@ pub const Writer = struct {
         errdefer w.dir.deleteFile(io, idx_temp) catch {};
         var rev_temp_buf: [64]u8 = undefined;
         const rev_temp: ?[]const u8 = if (w.options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
-        if (rev_temp) |t| try revindex.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.sync });
+        if (rev_temp) |t| try revindex.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
         // glint-ignore: Z026 -- the write's error is the one to report; a temporary reverse index left behind is what git gc prunes
         errdefer if (rev_temp) |t| w.dir.deleteFile(io, t) catch {};
 
@@ -2285,7 +2282,7 @@ pub const Writer = struct {
     }
 
     fn writeIndex(w: *Writer, io: Io, pack_checksum: Oid, idx_name: []const u8) WriteError!u64 {
-        return writeIndexFile(w.gpa, io, w.dir, idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.sync });
+        return writeIndexFile(w.gpa, io, w.dir, idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.fsync.sync(.pack_metadata) });
     }
 };
 
@@ -2400,10 +2397,7 @@ pub fn writeIndexFile(
     std.debug.assert(written == 8 + 1024 + entries.len * (raw_len + 8) + large.items.len * 8 + 2 * raw_len);
     try out.writeAll(own.raw()[0..raw_len]);
     try out.flush();
-    switch (sync) {
-        .none => {},
-        .batch, .per_file => try fs.syncFile(io, file, .{ .policy = sync }),
-    }
+    try fs.syncFile(io, file, .{ .policy = sync });
     file.close(io);
     failed = false;
     return written;

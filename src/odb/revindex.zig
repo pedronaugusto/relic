@@ -94,10 +94,7 @@ pub fn write(
     const own = hasher.final();
     try out.writeAll(own.raw()[0..kind.rawLen()]);
     try out.flush();
-    switch (sync) {
-        .none => {},
-        .batch, .per_file => try fs.syncFile(io, file, .{ .policy = sync }),
-    }
+    try fs.syncFile(io, file, .{ .policy = sync });
     file.close(io);
     failed = false;
 }

@@ -262,6 +262,10 @@ const RepositoryData = struct {
     /// repository was opened: the objects, refs, logs, index and
     /// configuration it writes are given them.
     shared: fs.Shared = .umask,
+    /// `core.fsync`, `core.fsyncMethod` and `core.fsyncObjectFiles`, as the
+    /// published configuration says: which of the objects, packs, refs and
+    /// index are synced, and how.
+    fsync: fs.Fsync = .default,
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
     lfsconfig_mutex: Io.Mutex = .init,
@@ -632,8 +636,10 @@ pub const Repository = struct {
         repo.data()._config = try config_owner.create(config);
         errdefer config_owner.destroy(repo.data()._config);
         repo.data().shared = try sharedOf(repo.configuration());
+        repo.data().fsync = try fsyncOf(repo.configuration());
         var odb_options = options.odb;
         odb_options.shared = repo.data().shared;
+        odb_options.fsync = repo.data().fsync;
         repo.data().odb = try odb_mod.Odb.open(gpa, io, repo.data().common_dir, format.kind, odb_options);
         errdefer repo.data().odb.deinit(io);
         repo.data().odb.shallow = try shallow.read(gpa, io, repo.data().common_dir, format.kind);
@@ -645,6 +651,7 @@ pub const Repository = struct {
             .format = format.ref_storage,
             .reftable = stack_options,
             .shared = repo.data().shared,
+            .fsync = repo.data().fsync,
             .packed_lock = try lockTimeout(repo.configuration(), "core.packedrefstimeout", 1000),
         });
         repo.data()._refs = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
@@ -729,6 +736,36 @@ pub const Repository = struct {
 
     /// The `reftable.*` settings, for the stack's writes and compactions.
     /// `core.sharedRepository`, as git reads it.
+    /// `core.fsync`, `core.fsyncMethod` and `core.fsyncObjectFiles`, read as
+    /// git reads them: `core.fsync` over git's default, and when it is
+    /// unset, git's default with the references and the index besides
+    /// (`fs.Fsync.default`). `core.fsyncObjectFiles = true` syncs loose
+    /// objects whatever `core.fsync` says. A value git ignores is ignored.
+    fn fsyncOf(config: *const config_mod.Config) ErrorNamespace.Error!fs.Fsync {
+        var fsync: fs.Fsync = .default;
+        if (config.find("core.fsync")) |entry| {
+            const value = entry.value orelse return error.MalformedValue;
+            fsync.components = fs.Fsync.parseComponents(value);
+        }
+        if (config.find("core.fsyncmethod")) |entry| {
+            const value = entry.value orelse return error.MalformedValue;
+            if (fs.Fsync.parseMethod(value)) |method| fsync.method = method;
+        }
+        if (try config.getBool("core.fsyncobjectfiles", false)) fsync.components.insert(.loose_object);
+        return fsync;
+    }
+
+    /// How the index lock is taken and synced: `core.sharedRepository`'s
+    /// permissions and `core.fsync`'s `index`.
+    pub fn indexLock(repo: *const Repository) fs.LockFile.Options {
+        return .{ .shared = repo.data().shared, .sync = repo.data().fsync.sync(.index) };
+    }
+
+    /// Which writes are synced, and how.
+    pub fn fsyncPolicy(repo: *const Repository) fs.Fsync {
+        return repo.data().fsync;
+    }
+
     fn sharedOf(config: *const config_mod.Config) ErrorNamespace.Error!fs.Shared {
         const entry = config.find("core.sharedrepository") orelse return .umask;
         const value = entry.value orelse return .group;
@@ -1096,6 +1133,7 @@ pub const Repository = struct {
     /// write policy, checked before anything is replaced.
     const ConfigPolicy = struct {
         ref_options: reftablestack.Options,
+        fsync: fs.Fsync,
     };
 
     /// Whether `next` may be published, and the policy it sets: the same
@@ -1110,10 +1148,13 @@ pub const Repository = struct {
             try refuseSetting(diagnostic, "extensions.refStorage");
             return error.RefStorageChanged;
         }
-        return .{ .ref_options = if (format.ref_storage == .reftable)
-            try reftableOptions(next)
-        else
-            repo.refStore().reftableOptions() };
+        return .{
+            .ref_options = if (format.ref_storage == .reftable)
+                try reftableOptions(next)
+            else
+                repo.refStore().reftableOptions(),
+            .fsync = try fsyncOf(next),
+        };
     }
 
     /// Replace the published configuration with `next`, which it takes,
@@ -1122,6 +1163,9 @@ pub const Repository = struct {
         config_owner.get(repo.data()._config).deinit();
         config_owner.get(repo.data()._config).* = next;
         repo.refStore().configureReftable(policy.ref_options);
+        repo.refStore().configureFsync(policy.fsync);
+        repo.data().odb.configureFsync(policy.fsync);
+        repo.data().fsync = policy.fsync;
     }
 
     fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) ErrorNamespace.Error!void {
@@ -1361,13 +1405,13 @@ pub const Repository = struct {
     /// racily clean entry is smudged only where its file changed, read
     /// through the repository's own rules and attributes.
     pub fn writeIndex(repo: *Repository, io: Io, index: *index_mod.Index) WriteIndexError!void {
-        const wt = repo.data().work_dir orelse return index.write(io, repo.data().git_dir, "index", .{ .lock = .{ .shared = repo.data().shared } });
+        const wt = repo.data().work_dir orelse return index.write(io, repo.data().git_dir, "index", .{ .lock = repo.indexLock() });
         var attrs = try repo.loadAttrs(io);
         defer attrs.deinit();
         var rules = try repo.worktreeRules();
         rules.attrs = &attrs;
         var check: worktree.RacyCheck = .{ .gpa = repo.data().gpa, .io = io, .wt = wt, .rules = rules };
-        try index.write(io, repo.data().git_dir, "index", .{ .racy = check.racy(), .lock = .{ .shared = repo.data().shared } });
+        try index.write(io, repo.data().git_dir, "index", .{ .racy = check.racy(), .lock = repo.indexLock() });
     }
 
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {

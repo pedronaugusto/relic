@@ -325,6 +325,7 @@ pub const Pending = struct {
         buffer: []u8,
         written: bool = false,
         shared: fs.Shared = .umask,
+        sync: fs.Sync = .none,
     };
 
     fn release(p: *Pending, gpa: Allocator, io: Io) void {
@@ -347,8 +348,9 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, options: Options) refs.Tran
     errdefer dir.close(io);
     const buffer = try gpa.alloc(u8, 4096);
     errdefer gpa.free(buffer);
-    const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared });
-    return .{ .dir = dir, .lock = lock, .buffer = buffer, .shared = options.shared };
+    const sync = options.fsync.sync(.reference);
+    const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = sync });
+    return .{ .dir = dir, .lock = lock, .buffer = buffer, .shared = options.shared, .sync = sync };
 }
 
 /// `Transaction.prepare` over reftable: take `tables.list.lock` on every
@@ -686,7 +688,7 @@ fn compactAfter(gpa: Allocator, io: Io, parent: Io.Dir, store: anytype) refs.Tra
 fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, update_index: u64) refs.TransactionError!void {
     var name_buf: [64]u8 = undefined;
     const name = tableName(io, &name_buf, update_index, update_index);
-    try writeTable(gpa, io, locked.dir, name, bytes, locked.shared);
+    try writeTable(gpa, io, locked.dir, name, bytes, locked.shared, locked.sync);
     const w = locked.lock.writer();
     w.writeAll(stack.list) catch return error.WriteFailed;
     if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') w.writeByte('\n') catch return error.WriteFailed;
@@ -807,9 +809,9 @@ fn logMessage(arena: Allocator, text: []const u8, block_size: u32) Allocator.Err
 
 /// Write a new table under its final name, through `<name>.lock`, so no
 /// reader sees half of it.
-fn writeTable(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8, shared: fs.Shared) refs.TransactionError!void {
+fn writeTable(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8, shared: fs.Shared, sync: fs.Sync) refs.TransactionError!void {
     var buffer: [16 * 1024]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = shared });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = shared, .sync = sync });
     defer lock.deinit(io);
     lock.writer().writeAll(bytes) catch return error.WriteFailed;
     try lock.commit(io);
@@ -848,7 +850,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     };
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
-    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared });
+    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference) });
     defer if (list_lock) |*lock| lock.deinit(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
@@ -922,7 +924,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
         const bytes = try reftable.write(gpa, kind, .{ .min_update_index = min, .max_update_index = max, .refs = merged_refs, .logs = merged_logs }, options.write);
         defer gpa.free(bytes);
         const name = tableName(io, &name_buf, min, max);
-        try writeTable(gpa, io, dir, name, bytes, options.shared);
+        try writeTable(gpa, io, dir, name, bytes, options.shared, options.fsync.sync(.reference));
         new_name = name;
     }
     var installed = false;
@@ -931,7 +933,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
 
     // The list again, as it is now: writers may have added tables, and the
     // merged ones are wherever it has them, in the order they were merged.
-    list_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared });
+    list_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference) });
     const listed = (try fs.readFileAlloc(gpa, io, dir, "tables.list", 1 << 20)) orelse try gpa.alloc(u8, 0);
     defer gpa.free(listed);
     var current: std.ArrayList([]const u8) = .empty;

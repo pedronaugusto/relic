@@ -1594,7 +1594,7 @@ test "loose objects move into a pack and the pack is the only copy" {
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{ .sync = .batch });
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{ .fsync = .{ .components = .initOne(.loose_object), .method = .batch } });
     defer db.deinit(io);
 
     var before = try db.listObjects(io);
@@ -1642,7 +1642,7 @@ test "loose objects move into a pack and the pack is the only copy" {
     // does replace the pack it was built from.
     const repacked = try db.repack(io, .{
         .remove_packs = true,
-        .pack = .{ .delta = .none, .sync = .batch },
+        .pack = .{ .delta = .none },
     });
     try std.testing.expect(repacked.written != null);
     try std.testing.expectEqual(before.count(), repacked.written.?.objects);
