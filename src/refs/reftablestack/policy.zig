@@ -21,6 +21,8 @@ pub const Options = struct {
     /// What `core.sharedRepository` asks of the permissions of the tables,
     /// the list and the directory.
     shared: fs.Shared = .umask,
+    /// `core.fsync`: the tables and the list are references.
+    fsync: fs.Fsync = .default,
 };
 
 /// Errors from reading a stack.

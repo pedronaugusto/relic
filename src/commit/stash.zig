@@ -540,7 +540,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     }
 
     try resetAfterPush(&ctx, &head_map, head_commit.tree, index_tree, untracked_files.items, options);
-    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = .{ .shared = repo.sharedPermissions() } });
+    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = repo.indexLock() });
     return stash_commit;
 }
 
@@ -884,7 +884,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     }
 
     _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = untracked_writes.items }, checkout_options);
-    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = .{ .shared = repo.sharedPermissions() } });
+    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = repo.indexLock() });
 
     return .{
         .gpa = gpa,

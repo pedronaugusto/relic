@@ -843,7 +843,7 @@ test "a merge reads the trees it changes, not the whole tree" {
     try std.testing.expectEqualStrings("theirs\n", try r.dir.readFile(io, "d005/f", &buf));
     try std.testing.expectEqualStrings("ours\n", try r.dir.readFile(io, "d250/f", &buf));
     // The index is the merged tree, and git says so.
-    try index.write(io, repo.gitDirectory(), "index", .{ .lock = .{ .shared = repo.sharedPermissions() } });
+    try index.write(io, repo.gitDirectory(), "index", .{ .lock = repo.indexLock() });
     var hex: [hash.max_hex_len]u8 = undefined;
     const written = try r.line(io, &.{"write-tree"});
     defer gpa.free(written);

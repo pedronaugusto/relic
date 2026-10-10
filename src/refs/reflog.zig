@@ -29,7 +29,7 @@ pub const AppendError = errors: {
     break :errors Io.File.OpenError || Io.Writer.Error ||
         Io.File.WritePositionalError || Io.File.StatError ||
         Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Allocator.Error ||
-        error{InvalidSignature};
+        fs.SyncError || error{InvalidSignature};
 };
 
 /// Errors from reading a log.
@@ -125,7 +125,7 @@ pub fn exists(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) Allocato
 /// The log is opened for appending rather than replaced: several processes
 /// appending a line each interleave lines, never halves of one, because a
 /// line is written in a single call.
-pub const AppendOptions = struct { ref: []const u8, old: Oid, new: Oid, who: object.Signature, message: []const u8 = "", shared: fs.Shared = .umask };
+pub const AppendOptions = struct { ref: []const u8, old: Oid, new: Oid, who: object.Signature, message: []const u8 = "", shared: fs.Shared = .umask, sync: fs.Sync = .none };
 pub fn append(gpa: Allocator, io: Io, git_dir: Io.Dir, options: AppendOptions) AppendError!void {
     const ref = options.ref;
     const old = options.old;
@@ -181,6 +181,8 @@ pub fn append(gpa: Allocator, io: Io, git_dir: Io.Dir, options: AppendOptions) A
     defer file.close(io);
     const end = try file.length(io);
     try file.writePositionalAll(io, line.written(), end);
+    // A log is a reference to git's `core.fsync`.
+    try fs.syncFile(io, file, .{ .policy = options.sync });
 }
 
 /// Every entry in `logs/<ref>`, oldest first.
@@ -255,7 +257,7 @@ pub const ExpireError = errors: {
 /// Returns the newest kept entry's new value, or `null` when none was kept
 /// or there is no log, which is left as it is. The caller holds the ref's
 /// own lock, as git holds it, so the log and the ref move together.
-pub const ExpireOptions = struct { ref: []const u8, kind: hash.Kind, shared: fs.Shared = .umask, rewrite: bool = false };
+pub const ExpireOptions = struct { ref: []const u8, kind: hash.Kind, shared: fs.Shared = .umask, sync: fs.Sync = .none, rewrite: bool = false };
 
 pub fn expire(
     gpa: Allocator,
@@ -272,7 +274,7 @@ pub fn expire(
     defer gpa.free(path);
     if (!try exists(gpa, io, git_dir, ref)) return null;
     var buffer: [4096]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, git_dir, .{ .sub_path = path, .buffer = &buffer }, .{ .shared = shared });
+    var lock = try fs.LockFile.open(gpa, io, git_dir, .{ .sub_path = path, .buffer = &buffer }, .{ .shared = shared, .sync = options.sync });
     defer lock.deinit(io);
     // Read under the lock: an append that took it first is in the file.
     const bytes = (try fs.readFileAlloc(gpa, io, git_dir, path, 1 << 28)) orelse try gpa.alloc(u8, 0);

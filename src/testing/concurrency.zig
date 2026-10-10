@@ -127,7 +127,7 @@ test "a stale lock is reported and never broken" {
     var buffer: [64]u8 = undefined;
     try std.testing.expectError(
         error.LockHeld,
-        fs.LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{}),
+        fs.LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{ .sync = .none }),
     );
     try tmp.dir.access(io, "thing.lock", .{});
     var read_buf: [16]u8 = undefined;

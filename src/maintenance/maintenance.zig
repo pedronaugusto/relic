@@ -34,7 +34,9 @@ pub const CommitGraphOptions = struct {
     changed_paths: ?graph_mod.bloom.Settings = null,
     /// Existing commits are retained, as in git without --split=replace.
     append: bool = true,
-    sync: fs.Sync = .none,
+    /// How the files are synced; `null` as the database's `core.fsync`
+    /// says for the commit-graph.
+    sync: ?fs.Sync = null,
 };
 
 const GraphNode = struct {
@@ -156,14 +158,14 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable; // unreachable: the slice is the last raw length of bytes the encoder wrote
     try fs.makeDirs(io, dir, "info", db.sharedPermissions());
     if (options.split == .none) {
-        try publish(gpa, io, db, dir, "info/commit-graph", bytes, options.sync, .read_only);
+        try publish(gpa, io, db, dir, "info/commit-graph", bytes, options.sync orelse db.settings().fsync.sync(.commit_graph), .read_only);
         try removeIfPresent(io, dir, "info/commit-graphs/commit-graph-chain");
     } else {
         try fs.makeDirs(io, dir, "info/commit-graphs", db.sharedPermissions());
         // Take the chain lock before writing layers. Its rename is the only
         // point at which a reader begins to see the new chain.
         var buffer: [8192]u8 = undefined;
-        var chain_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "info/commit-graphs/commit-graph-chain", .buffer = &buffer }, .{ .sync = options.sync, .shared = db.sharedPermissions() });
+        var chain_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "info/commit-graphs/commit-graph-chain", .buffer = &buffer }, .{ .sync = options.sync orelse db.settings().fsync.sync(.commit_graph), .shared = db.sharedPermissions() });
         defer chain_lock.deinit(io);
         var hex_buffer: [hash.max_hex_len]u8 = undefined;
         if (retained) |base| {
@@ -171,10 +173,10 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
             var bottom = base;
             while (bottom.base) |lower| bottom = lower;
             const name = try arena.print("info/commit-graphs/graph-{s}.graph", .{bottom.checksum().hex(&hex_buffer)});
-            try publish(gpa, io, db, dir, name, bottom.bytes, options.sync, .read_only);
+            try publish(gpa, io, db, dir, name, bottom.bytes, options.sync orelse db.settings().fsync.sync(.commit_graph), .read_only);
         }
         const name = try arena.print("info/commit-graphs/graph-{s}.graph", .{checksum.hex(&hex_buffer)});
-        try publish(gpa, io, db, dir, name, bytes, options.sync, .read_only);
+        try publish(gpa, io, db, dir, name, bytes, options.sync orelse db.settings().fsync.sync(.commit_graph), .read_only);
         try bases.append(arena, checksum);
         for (bases.items) |base| {
             try chain_lock.writer().writeAll(base.hex(&hex_buffer));
@@ -288,7 +290,9 @@ pub const MidxOptions = struct {
     reverse_index: bool = false,
     /// Keep a previous bitmap until writeMidxBitmap publishes its replacement.
     keep_bitmaps: bool = false,
-    sync: fs.Sync = .none,
+    /// How the files are synced; `null` as the database's `core.fsync`
+    /// says for pack metadata.
+    sync: ?fs.Sync = null,
 };
 
 const PackInputs = struct {
@@ -385,7 +389,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
     defer gpa.free(bytes);
     // unreachable: the slice is the last raw length of bytes the encoder wrote
     const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable;
-    try publish(gpa, io, db, dir, "multi-pack-index", bytes, options.sync, .umask);
+    try publish(gpa, io, db, dir, "multi-pack-index", bytes, options.sync orelse db.settings().fsync.sync(.pack_metadata), .umask);
     if (!options.keep_bitmaps) try clearMidxBitmaps(gpa, io, dir, null);
     try db.refresh(io);
     return checksum;
@@ -393,7 +397,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
 
 /// Remove packs to which the current MIDX assigns no objects, retaining .keep
 /// and cruft (.mtimes) packs. This is git's separate expire step after repack.
-pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: fs.Sync) Self.MidxError!u32 {
+pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: ?fs.Sync) Self.MidxError!u32 {
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     // An index that does not read as one assigns nothing, so it is no
@@ -457,7 +461,9 @@ pub const BitmapOptions = struct {
     /// Commits selected by pack.preferBitmapTips, supplied after ref-name matching.
     preferred_tips: []const Oid = &.{},
     lookup_table: bool = false,
-    sync: fs.Sync = .none,
+    /// How the files are synced; `null` as the database's `core.fsync`
+    /// says for pack metadata.
+    sync: ?fs.Sync = null,
 };
 pub const BitmapError = Error || MidxError || revwalk_mod.Error || objectwalk.Error || bitmap_mod.Error || bitmap_store.Error || error{ InvalidBitmapInput, BitmapNotClosed };
 
@@ -712,7 +718,7 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: BitmapInput
     defer gpa.free(bytes);
     const target = try gpa.print("{s}.bitmap", .{base});
     defer gpa.free(target);
-    try publish(gpa, io, db, dir, target, bytes, options.sync, .read_only);
+    try publish(gpa, io, db, dir, target, bytes, options.sync orelse db.settings().fsync.sync(.pack_metadata), .read_only);
     try db.refresh(io);
 }
 
@@ -746,7 +752,7 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: MidxBitmapI
     var hex: [hash.max_hex_len]u8 = undefined;
     const path = try gpa.print("multi-pack-index-{s}.bitmap", .{checksum.hex(&hex)});
     defer gpa.free(path);
-    try publish(gpa, io, db, dir, path, bytes, options.sync, .read_only);
+    try publish(gpa, io, db, dir, path, bytes, options.sync orelse db.settings().fsync.sync(.pack_metadata), .read_only);
     try clearMidxBitmaps(gpa, io, dir, path);
     try db.refresh(io);
     return checksum;
@@ -758,7 +764,9 @@ pub const MidxRepackOptions = struct {
     batch_size: u64 = 0,
     pack_kept_objects: bool = false,
     pack: odb.PackOptions = .{},
-    sync: fs.Sync = .none,
+    /// How the files are synced; `null` as the database's `core.fsync`
+    /// says for pack metadata.
+    sync: ?fs.Sync = null,
 };
 
 /// Repack objects assigned to at least two eligible MIDX packs. Old packs stay
@@ -878,7 +886,7 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
         if (version != 1 and version != 2) return error.UnsupportedBloomVersion;
         value.version = @intCast(version);
     }
-    return writeCommitGraph(gpa, io, repo.objectDatabase(), tips, .{ .split = if (purpose == .fetch) .merge else .none, .generations = generation_version == 2, .changed_paths = settings, .sync = repo.objectDatabase().settings().sync });
+    return writeCommitGraph(gpa, io, repo.objectDatabase(), tips, .{ .split = if (purpose == .fetch) .merge else .none, .generations = generation_version == 2, .changed_paths = settings });
 }
 
 /// Repack the repository and apply its bitmap and gc.writeCommitGraph policies.
@@ -892,7 +900,7 @@ pub fn repackRepository(gpa: Allocator, io: Io, repo: *repo_mod.Repository, opti
         var hex: [hash.max_hex_len]u8 = undefined;
         const name = try gpa.print("pack-{s}", .{written.name.hex(&hex)});
         defer gpa.free(name);
-        try writePackBitmap(gpa, io, repo.objectDatabase(), .{ .pack_name = name, .tips = tips }, .{ .hash_cache = try config.getBool("pack.writebitmaphashcache", true), .lookup_table = try config.getBool("pack.writebitmaplookuptable", false), .sync = repo.objectDatabase().settings().sync });
+        try writePackBitmap(gpa, io, repo.objectDatabase(), .{ .pack_name = name, .tips = tips }, .{ .hash_cache = try config.getBool("pack.writebitmaphashcache", true), .lookup_table = try config.getBool("pack.writebitmaplookuptable", false) });
     };
     _ = try writeConfiguredCommitGraph(gpa, io, repo, .gc);
     return report;

@@ -131,6 +131,8 @@ pub const Store = struct {
     pub fn init(gpa: Allocator, kind: Kind, git_dir: Io.Dir, common_dir: Io.Dir, options: Options) Allocator.Error!Store {
         const state = try state_mod.create(gpa, kind, options.format, options.reftable, git_dir, common_dir);
         state_mod.get(state).shared = options.shared;
+        state_mod.get(state).fsync = options.fsync;
+        state_mod.get(state).options.fsync = options.fsync;
         state_mod.get(state).packed_lock = options.packed_lock;
         return .{ ._state = state };
     }
@@ -141,6 +143,9 @@ pub const Store = struct {
         /// What `core.sharedRepository` asks of the permissions of the
         /// refs, logs and directories written.
         shared: fs.Shared = .umask,
+        /// `core.fsync`: which writes are synced; refs, `packed-refs`, logs
+        /// and reftable tables are its `reference`.
+        fsync: fs.Fsync = .default,
         /// `core.packedRefsTimeout`: how long a writer waits for
         /// `packed-refs.lock`, with git's backoff. git waits a second.
         packed_lock: fs.OnContention = .{ .wait_ms = 1000 },
@@ -175,8 +180,23 @@ pub const Store = struct {
     }
 
     /// Replace write policy without changing the backend, hash or read cache.
+    /// The `fsync` it carries is the store's, which `configureFsync` sets.
     pub fn configureReftable(store: *Store, options: stack_engine.Options) void {
-        state_mod.get(store._state).options = options;
+        const data = state_mod.get(store._state);
+        data.options = options;
+        data.options.fsync = data.fsync;
+    }
+
+    /// How a reference this store writes is synced.
+    pub fn referenceSync(store: *const Store) fs.Sync {
+        return state_mod.get(store._state).fsync.sync(.reference);
+    }
+
+    /// Change which writes are synced, as a refreshed configuration says.
+    pub fn configureFsync(store: *Store, fsync: fs.Fsync) void {
+        const data = state_mod.get(store._state);
+        data.fsync = fsync;
+        data.options.fsync = fsync;
     }
 
     /// Release the backend and every cached stack together.
@@ -600,6 +620,7 @@ pub const Store = struct {
         const data = state_mod.get(store._state);
         return fs.LockFile.open(data.gpa, io, store.commonDir(), .{ .sub_path = "packed-refs", .buffer = buffer }, .{
             .shared = store.sharedPermissions(),
+            .sync = store.referenceSync(),
             .on_contention = data.packed_lock,
         });
     }
@@ -670,7 +691,7 @@ pub const Store = struct {
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, log.message);
         defer gpa.free(text);
-        return reflog.append(gpa, io, store.dirFor(name), .{ .ref = name, .old = old, .new = new, .who = log.who, .message = text, .shared = store.sharedPermissions() });
+        return reflog.append(gpa, io, store.dirFor(name), .{ .ref = name, .old = old, .new = new, .who = log.who, .message = text, .shared = store.sharedPermissions(), .sync = store.referenceSync() });
     }
 
     /// Errors from `readLog`.
@@ -739,9 +760,9 @@ pub const Store = struct {
         // git's `files_reflog_expire` takes the ref's lock first, which every
         // transaction moving the ref or appending to its log also takes.
         var buffer: [max_loose_ref]u8 = undefined;
-        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions() });
+        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync() });
         defer lock.deinit(io);
-        const newest = try reflog.expire(gpa, io, dir, keeper, .{ .ref = name, .kind = store.objectFormat(), .shared = store.sharedPermissions(), .rewrite = options.rewrite });
+        const newest = try reflog.expire(gpa, io, dir, keeper, .{ .ref = name, .kind = store.objectFormat(), .shared = store.sharedPermissions(), .sync = store.referenceSync(), .rewrite = options.rewrite });
         if (!options.update_ref) return;
         const oid = newest orelse return;
         if (try store.readLoose(gpa, io, name)) |own| switch (own) {
@@ -1324,7 +1345,7 @@ pub const Transaction = struct {
             }
             const buffer = try tx.gpa.alloc(u8, 4096);
             edit.lock_buffer = buffer;
-            edit.lock = fs.LockFile.open(tx.gpa, io, dir, .{ .sub_path = edit.name, .buffer = buffer }, .{ .shared = tx.store.sharedPermissions() }) catch |err| switch (err) {
+            edit.lock = fs.LockFile.open(tx.gpa, io, dir, .{ .sub_path = edit.name, .buffer = buffer }, .{ .shared = tx.store.sharedPermissions(), .sync = tx.store.referenceSync() }) catch |err| switch (err) {
                 error.LockHeld => return error.LockHeld,
                 else => |e| return e,
             };
@@ -1687,7 +1708,7 @@ pub const Transaction = struct {
                 // An edit's own words, or the transaction's.
                 const own = if (source.message) |m| try reflog.normalizeMessage(tx.gpa, m) else null;
                 defer if (own) |t| tx.gpa.free(t);
-                try reflog.append(tx.gpa, io, tx.store.dirFor(edit.name), .{ .ref = edit.name, .old = old, .new = new, .who = message.who, .message = own orelse shared, .shared = tx.store.sharedPermissions() });
+                try reflog.append(tx.gpa, io, tx.store.dirFor(edit.name), .{ .ref = edit.name, .old = old, .new = new, .who = message.who, .message = own orelse shared, .shared = tx.store.sharedPermissions(), .sync = tx.store.referenceSync() });
             }
         }
 

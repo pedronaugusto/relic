@@ -597,7 +597,7 @@ const Importer = struct {
         const dir = imp.marksDir(path);
         if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(imp.io, parent);
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(imp.gpa, imp.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{});
+        var lock = try fs.LockFile.open(imp.gpa, imp.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });
         defer lock.deinit(imp.io);
         try imp.marks.write(imp.gpa, lock.writer());
         try lock.commit(imp.io);
