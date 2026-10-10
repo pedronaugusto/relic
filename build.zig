@@ -203,10 +203,12 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("uplink", uplink);
     test_module.addImport("cloak", cloak);
     test_module.addImport("airlock", airlock);
-    if (b.lazyImport(@This(), "airlock")) |airlock_build|
-        test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency) catch return);
     test_module.addImport("warp", warp);
+    // Test support is fetched for this package's own build only: a consumer
+    // never fetches shakedown, which airlock's testing module brings.
     if (b.pkg_hash.len == 0) {
+        if (b.lazyImport(@This(), "airlock")) |airlock_build|
+            test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency) catch return);
         if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |dep| {
             test_module.addImport("shakedown", dep.module("shakedown"));
         } else |err| switch (err) {

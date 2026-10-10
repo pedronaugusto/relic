@@ -37,6 +37,7 @@ const reftablestack = @import("../refs/reftablestack.zig");
 const signing = @import("../object/signing.zig");
 const diagnostic_mod = @import("../report.zig").diagnostic;
 const repository_format = @import("../discover.zig").format;
+const gitfile = @import("../discover.zig").gitfile;
 const RepositoryFormat = repository_format.Format;
 
 const Oid = hash.Oid;
@@ -475,18 +476,12 @@ pub const Repository = struct {
             git_dir.close(io);
             return null;
         }
-        const text = fs.readFileAlloc(gpa, io, dir, ".git", 4096) catch return error.BrokenGitFile;
-        const bytes = text orelse return error.BrokenGitFile;
-        defer gpa.free(bytes);
-        if (!std.mem.startsWith(u8, bytes, "gitdir: ")) return error.BrokenGitFile;
-        const target = std.mem.trimEnd(u8, bytes["gitdir: ".len..], "\r\n");
-        if (target.len == 0) return error.BrokenGitFile;
-        // A linked worktree's names its directory absolutely; a
-        // submodule's names it relative to the file itself.
-        const git_dir = (if (std.Io.Dir.path.isAbsolute(target))
-            Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
-        else
-            dir.openDir(io, target, .{ .iterate = true })) catch return error.BrokenGitFile;
+        const target = (gitfile.read(gpa, io, dir, ".git") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.BrokenGitFile,
+        }) orelse return error.BrokenGitFile;
+        defer gpa.free(target);
+        const git_dir = gitfile.open(io, dir, target, .{ .iterate = true }) catch return error.BrokenGitFile;
         if (looksLikeGitDir(io, git_dir)) return git_dir;
         git_dir.close(io);
         return error.BrokenGitFile;
