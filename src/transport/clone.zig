@@ -233,7 +233,11 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     const single_branch = options.single_branch orelse (deepen != null);
     if (!refspecNameOk(options.origin)) return error.InvalidRemoteName;
     {
-        var it = dir.iterate();
+        // Opened again to be read, so any handle will do, the current
+        // directory's included.
+        var listed = try dir.openDir(io, ".", .{ .iterate = true });
+        defer listed.close(io);
+        var it = listed.iterate();
         if (try it.next(io) != null) return error.DestinationNotEmpty;
     }
 

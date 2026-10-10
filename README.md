@@ -207,11 +207,24 @@ exe.root_module.addImport("relic", relic_dep.module("relic"));
 
 One module, with [conduit](https://github.com/pedronaugusto/conduit) for
 running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's globs,
-[parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges and
-[uplink](https://github.com/pedronaugusto/uplink) for HTTP and TLS. Conduit carries its libc linkage on POSIX; Windows needs
-no C runtime. SHA-256 comes from `std.crypto`; SHA-1 is in the
-package. Warp supplies checksums and DEFLATE compression and decoding. There is no build option to
-forward. Every function that allocates takes the allocator as its first argument and every function that
+[parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges,
+[warp](https://github.com/pedronaugusto/warp) for checksums and DEFLATE, and
+[airlock](https://github.com/pedronaugusto/airlock) for durable writes. Conduit carries its libc linkage on POSIX; Windows needs
+no C runtime. SHA-256 comes from `std.crypto`; SHA-1 is in the package.
+
+Fetching and pushing over HTTP and HTTPS, and Git LFS, take three more:
+[uplink](https://github.com/pedronaugusto/uplink) for HTTP,
+[cloak](https://github.com/pedronaugusto/cloak) for TLS's certificates, keys and trust, and
+[strand](https://github.com/pedronaugusto/strand) for the JSON servers send. The `http` option
+(on by default) brings them; a program that works on local repositories, or over ssh and the
+file system alone, turns it off and fetches none of them, and an `http` or `https` remote is then
+`error.HttpUnavailable`:
+
+```zig
+const relic_dep = b.dependency("relic", .{ .target = target, .optimize = optimize, .http = false });
+```
+
+There is no other build option to forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — reading
 objects and deflating entries while a pack is written
 (`PackOptions.threads`, one task per processor unless asked otherwise),

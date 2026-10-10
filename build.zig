@@ -7,10 +7,20 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
     // The module. Conduit runs programs and carries its platform linkage;
     // command preparation and the permission to run remain here. sweep
-    // matches git's globs, parallax diffs and merges lines, uplink speaks
-    // HTTP, cloak holds the certificates, keys and trust TLS uses, and
-    // strand reads the JSON servers send, within limits.
+    // matches git's globs, parallax diffs and merges lines, warp compresses
+    // and airlock makes writes durable.
+    //
+    // Fetching and pushing over HTTP and HTTPS, and Git LFS, take three more:
+    // uplink speaks HTTP, cloak holds the certificates, keys and trust TLS
+    // uses, and strand reads the JSON servers send, within limits. They are
+    // lazy, fetched only while `http` is on, which it is by default; a
+    // program that works on local repositories, or over ssh and the file
+    // system alone, turns it off and fetches none of them.
     //=====================================================================
+
+    const http = b.option(bool, "http", "Fetch and push over HTTP(S) and Git LFS, with uplink, cloak and strand (default on)") orelse true;
+    const features = b.addOptions();
+    features.addOption(bool, "http", http);
 
     const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
@@ -18,9 +28,10 @@ pub fn build(b: *std.Build) void {
     const warp = b.dependency("warp", .{ .target = target, .optimize = optimize }).module("warp");
     const airlock_dependency = b.dependency("airlock", .{ .target = target, .optimize = optimize });
     const airlock = airlock_dependency.module("airlock");
-    const uplink = b.dependency("uplink", .{ .target = target, .optimize = optimize }).module("uplink");
-    const cloak = b.dependency("cloak", .{ .target = target, .optimize = optimize }).module("cloak");
-    const strand = b.dependency("strand", .{ .target = target, .optimize = optimize }).module("strand");
+    var http_modules: [http_packages.len]?*std.Build.Module = @splat(null);
+    if (http) for (http_packages, &http_modules) |name, *slot| {
+        if (b.lazyDependency(name, .{ .target = target, .optimize = optimize })) |dep| slot.* = dep.module(name);
+    };
 
     const module = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
@@ -31,9 +42,8 @@ pub fn build(b: *std.Build) void {
     module.addImport("conduit", conduit);
     module.addImport("sweep", sweep);
     module.addImport("parallax", parallax);
-    module.addImport("uplink", uplink);
-    module.addImport("cloak", cloak);
-    module.addImport("strand", strand);
+    module.addOptions("relic_options", features);
+    for (http_packages, http_modules) |name, found| if (found) |m| module.addImport(name, m);
     module.addImport("airlock", airlock);
     module.addImport("warp", warp);
 
@@ -200,9 +210,8 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("conduit", conduit);
     test_module.addImport("sweep", sweep);
     test_module.addImport("parallax", parallax);
-    test_module.addImport("uplink", uplink);
-    test_module.addImport("cloak", cloak);
-    test_module.addImport("strand", strand);
+    test_module.addOptions("relic_options", features);
+    for (http_packages, http_modules) |name, found| if (found) |m| test_module.addImport(name, m);
     test_module.addImport("airlock", airlock);
     test_module.addImport("warp", warp);
     // Test support is fetched for this package's own build only: a consumer
@@ -323,6 +332,10 @@ pub fn build(b: *std.Build) void {
     b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module })).step);
 }
 
+/// What fetching and pushing over HTTP and Git LFS need, fetched only while
+/// the `http` option is on.
+const http_packages = [_][]const u8{ "uplink", "cloak", "strand" };
+
 /// Every example, listed rather than globbed: a build graph that scans a
 /// directory is not reproducible from the manifest alone.
 const example_sources = [_][]const u8{
@@ -331,7 +344,11 @@ const example_sources = [_][]const u8{
 
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const module = b.createModule(.{ .root_source_file = b.path("src/benchmark.zig"), .target = target, .optimize = optimize });
-    for ([_][]const u8{ "conduit", "sweep", "parallax", "uplink", "cloak", "strand", "airlock", "warp" }) |name| module.addImport(name, b.dependency(name, .{ .target = target, .optimize = optimize }).module(name));
+    for ([_][]const u8{ "conduit", "sweep", "parallax", "airlock", "warp" }) |name| module.addImport(name, b.dependency(name, .{ .target = target, .optimize = optimize }).module(name));
+    const features = b.addOptions();
+    features.addOption(bool, "http", true);
+    module.addOptions("relic_options", features);
+    for (http_packages) |name| if (b.lazyDependency(name, .{ .target = target, .optimize = optimize })) |dep| module.addImport(name, dep.module(name));
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
     return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown } }) catch @panic("out of memory");
 }
