@@ -182,6 +182,19 @@ test "program invocation owns its working directory type" {
     try std.testing.expect(@FieldType(relic.commit.trailer.Commands, "cwd") == relic.repo.program.Cwd);
 }
 
+test "how a program ended is conduit's Term, where it is shown" {
+    const program = relic.repo.program;
+    const conduit = @import("conduit");
+    try std.testing.expect(program.Term == conduit.Term);
+    try std.testing.expect(program.Term != std.process.Child.Term);
+    try std.testing.expect(@FieldType(program.Outcome, "term") == conduit.Term);
+    try std.testing.expect(program.Child.Term == conduit.Term);
+    try std.testing.expect(@typeInfo(@typeInfo(@TypeOf(program.Running.wait)).@"fn".return_type.?).error_union.payload == conduit.Term);
+    try std.testing.expect(@typeInfo(@typeInfo(@TypeOf(program.Child.wait)).@"fn".return_type.?).error_union.payload == conduit.Term);
+    try std.testing.expect(@FieldType(relic.repo.hooks.Failure, "term") == ?conduit.Term);
+    try std.testing.expect(@FieldType(relic.transport.connection.Process, "term") == ?conduit.Term);
+}
+
 test "transport and LFS requests stay within five positional inputs" {
     inline for (.{ relic.transport.Session.open, relic.transport.Session.fetch, relic.transport.fetchpack.fetch, relic.transport.sendpack.send, relic.transport.local.Remote.receivePush, relic.transport.bundle.receive, relic.transport.bundle.create, relic.lfs.api.sshInvocation, relic.lfs.push.beforePush }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
