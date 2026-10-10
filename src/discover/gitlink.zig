@@ -21,6 +21,7 @@ const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repository_format = @import("format.zig");
+const gitfile = @import("gitfile.zig");
 
 const Oid = hash.Oid;
 
@@ -72,17 +73,13 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
 
     var via_file = false;
     const git_dir = if (work.openDir(io, ".git", .{ .iterate = true })) |dir| dir else |_| blk: {
-        const text = (fs.readFileAlloc(gpa, io, work, ".git", 4096) catch |err| switch (err) {
+        const target = (gitfile.read(gpa, io, work, ".git") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return null,
         }) orelse return null;
-        defer gpa.free(text);
-        const target = gitFileTarget(text) orelse return null;
+        defer gpa.free(target);
         via_file = true;
-        break :blk (if (std.Io.Dir.path.isAbsolute(target))
-            Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
-        else
-            work.openDir(io, target, .{ .iterate = true })) catch return null;
+        break :blk gitfile.open(io, work, target, .{ .iterate = true }) catch return null;
     };
     if (!isGitDirectory(io, git_dir)) {
         git_dir.close(io);
@@ -174,16 +171,6 @@ pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Oi
     }) orelse return null;
     gpa.free(resolved.name);
     return resolved.oid;
-}
-
-/// The path after `gitdir:` in a `.git` file's text, or `null` when the text
-/// is not one.
-pub fn gitFileTarget(text: []const u8) ?[]const u8 {
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    if (!std.mem.startsWith(u8, trimmed, "gitdir:")) return null;
-    const target = std.mem.trim(u8, trimmed["gitdir:".len..], " \t");
-    if (target.len == 0) return null;
-    return target;
 }
 
 /// Whether `dir` holds what a git directory must: `HEAD`, `objects` and

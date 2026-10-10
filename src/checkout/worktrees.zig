@@ -23,6 +23,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
+const gitfile = @import("../discover.zig").gitfile;
 const safepath = @import("../names.zig").path;
 const ref_names = @import("../names.zig").ref;
 const refs_mod = @import("../refs/refs.zig");
@@ -208,14 +209,14 @@ fn namedTree(arena: Allocator, io: Io, admin: Io.Dir) Self.Error!?Named {
     const text = (try fs.readFileAlloc(arena, io, admin, "gitdir", 4096)) orelse return null;
     const written = std.mem.trim(u8, text, " \t\r\n");
     if (written.len == 0) return null;
-    const gitfile = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
+    const dot_git = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
         var buf: [4096]u8 = undefined;
         break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try absolutePath(io, admin, &buf), written });
     };
     // The `gitdir` file names the destination's `.git` *file*; the
     // working tree is its parent.
-    const work = if (std.mem.endsWith(u8, gitfile, "/.git")) gitfile[0 .. gitfile.len - "/.git".len] else gitfile;
-    return .{ .gitfile = gitfile, .work = work };
+    const work = if (std.mem.endsWith(u8, dot_git, "/.git")) dot_git[0 .. dot_git.len - "/.git".len] else dot_git;
+    return .{ .gitfile = dot_git, .work = work };
 }
 
 /// git's `validate_worktree`: whether the working tree's `.git` file points
@@ -227,15 +228,8 @@ fn pointsBack(arena: Allocator, io: Io, admin: Io.Dir, named: Named) Self.Error!
         else => return false,
     };
     defer work.close(io);
-    const text = (try fs.readFileAlloc(arena, io, work, ".git", 4096)) orelse return false;
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    if (!std.mem.startsWith(u8, trimmed, "gitdir:")) return false;
-    const target = std.mem.trim(u8, trimmed["gitdir:".len..], " \t");
-    if (target.len == 0) return false;
-    var target_dir = (if (std.Io.Dir.path.isAbsolute(target))
-        Io.Dir.openDirAbsolute(io, target, .{})
-    else
-        work.openDir(io, target, .{})) catch return false;
+    const target = (try gitfile.read(arena, io, work, ".git")) orelse return false;
+    var target_dir = gitfile.open(io, work, target, .{}) catch return false;
     defer target_dir.close(io);
     var target_buf: [4096]u8 = undefined;
     var admin_buf: [4096]u8 = undefined;
@@ -363,7 +357,7 @@ pub fn add(
     var admin_abs_buf: [4096]u8 = undefined;
     const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
     var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.mem.print(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
+    const pointer = std.mem.print(&pointer_buf, gitfile.prefix ++ "{s}\n", .{admin_abs}) catch
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 
@@ -535,7 +529,7 @@ pub fn repair(
     var admin_abs_buf: [4096]u8 = undefined;
     const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
     var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.mem.print(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
+    const pointer = std.mem.print(&pointer_buf, gitfile.prefix ++ "{s}\n", .{admin_abs}) catch
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 }
@@ -573,19 +567,4 @@ pub fn move(
     var moved = try new_parent.openDir(io, new_name, .{ .iterate = true });
     defer moved.close(io);
     try repair(io, common_dir, name, moved);
-}
-
-/// Read a `.git` file's `gitdir:` line. The result is the caller's.
-///
-/// This is how a linked worktree's directory is found from the worktree
-/// itself, and the reason a `.git` that is a file is not an error.
-pub fn readGitFile(gpa: Allocator, io: Io, dir: Io.Dir) Self.Error!?[]u8 {
-    const text = (try fs.readFileAlloc(gpa, io, dir, ".git", 4096)) orelse return null;
-    defer gpa.free(text);
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    if (!std.mem.startsWith(u8, trimmed, "gitdir:")) return null;
-    const target = std.mem.trim(u8, trimmed["gitdir:".len..], " \t");
-    if (target.len == 0) return null;
-    const owned = try gpa.dupe(u8, target);
-    return owned;
 }

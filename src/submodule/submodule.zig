@@ -33,6 +33,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.submodule.<name>`.
 const gitmodules = @import("../config/gitmodules.zig");
 const gitlink = @import("../discover.zig").gitlink;
+const gitfile = @import("../discover.zig").gitfile;
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -466,10 +467,9 @@ fn connect(
     git_dir_abs: []const u8,
 ) Error!void {
     const to_git_dir = try relativePath(arena, git_dir_abs, work_abs);
-    // `gitlink.gitFileTarget` refuses a `.git` file with no path in it.
+    // `gitfile.target` refuses a `.git` file with no path in it.
     assert(to_git_dir.len != 0);
-    const line = try arena.print("gitdir: {s}\n", .{to_git_dir});
-    try work.writeFile(io, .{ .sub_path = ".git", .data = line });
+    try gitfile.write(arena, io, work, to_git_dir);
     try setCoreWorktree(io, repo, git_dir, try relativePath(arena, work_abs, git_dir_abs));
 }
 

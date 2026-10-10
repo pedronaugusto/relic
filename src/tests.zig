@@ -63,6 +63,7 @@ test {
         _ = @import("names/ref.zig");
         _ = @import("refs/refs_test.zig");
         _ = @import("discover/format.zig");
+        _ = @import("discover/gitfile.zig");
         _ = @import("codec/ewah.zig");
         _ = @import("text/ere.zig");
         _ = @import("fs/stat.zig");

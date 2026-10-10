@@ -91,6 +91,7 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "reflog files owner", .kind = .string, .tokens = &.{ "logs", "logs/*" }, .owners = &[_][]const u8{ "src/refs/refs.zig", "src/refs/**" } ++ tests },
     .{ .name = "stash ref owner", .kind = .string, .tokens = &.{"refs/stash"}, .owners = &[_][]const u8{"src/names/ref.zig"} ++ tests },
     // the published configuration is the repository's to replace
+    .{ .name = "gitfile owner", .kind = .string, .tokens = &.{ "gitdir: ", "gitdir:" }, .owners = &[_][]const u8{ "src/discover/gitfile.zig", "src/config/config.zig" } ++ tests },
     .{ .name = "configuration owner", .tokens = &.{"_config"}, .owners = &[_][]const u8{"src/repo/repo.zig"} ++ tests },
 };
 
