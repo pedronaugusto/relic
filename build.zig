@@ -197,17 +197,14 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("parallax", parallax);
     test_module.addImport("uplink", uplink);
     test_module.addImport("airlock", airlock);
-    if (b.lazyImport(@This(), "airlock")) |airlock_build|
-        test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency) catch return);
-    test_module.addImport("warp", warp);
-    if (b.pkg_hash.len == 0) {
-        if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |dep| {
-            test_module.addImport("shakedown", dep.module("shakedown"));
-        } else |err| switch (err) {
-            // The build asks again once the package is fetched.
-            error.LazyDependencyNeeded => {},
-        }
+    // One shakedown in the test graph: the one airlock's seam is built on,
+    // bound to airlock's aegis. Until it is fetched the build asks again.
+    if (b.lazyImport(@This(), "airlock")) |airlock_build| {
+        const seam = airlock_build.testing(airlock_dependency) catch return;
+        test_module.addImport("airlock.testing", seam);
+        test_module.addImport("shakedown", seam.import_table.get("shakedown").?);
     }
+    test_module.addImport("warp", warp);
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
     hook_fixture.root_module.addImport("relic", module);
