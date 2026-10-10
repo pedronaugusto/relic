@@ -66,6 +66,7 @@ test {
         _ = @import("discover/gitfile.zig");
         _ = @import("codec/ewah.zig");
         _ = @import("text/ere.zig");
+        _ = @import("text/percent.zig");
         _ = @import("fs/stat.zig");
         _ = @import("lfs/timetext.zig");
         _ = @import("lfs/mimesniff.zig");

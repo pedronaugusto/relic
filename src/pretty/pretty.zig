@@ -17,6 +17,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -386,16 +387,8 @@ fn expandArg(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
         } else if (i < text.len and text[i] == 'n') {
             try out.append(a, '\n');
             i += 1;
-        } else if (i + 2 < text.len and text[i] == 'x') {
-            const hi = std.fmt.charToDigit(text[i + 1], 16) catch {
-                try out.append(a, '%');
-                continue;
-            };
-            const lo = std.fmt.charToDigit(text[i + 2], 16) catch {
-                try out.append(a, '%');
-                continue;
-            };
-            try out.append(a, hi << 4 | lo);
+        } else if (i + 2 < text.len and text[i] == 'x' and percent.hexPair(text[i + 1], text[i + 2]) != null) {
+            try out.append(a, percent.hexPair(text[i + 1], text[i + 2]).?);
             i += 3;
         } else try out.append(a, '%');
     }
@@ -504,13 +497,9 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
             return 1;
         },
         'x' => {
-            if (ph.len >= 3) {
-                const hi = std.fmt.charToDigit(ph[1], 16) catch return 0;
-                const lo = std.fmt.charToDigit(ph[2], 16) catch return 0;
-                try out.append(a, hi << 4 | lo);
-                return 3;
-            }
-            return 0;
+            if (ph.len < 3) return 0;
+            try out.append(a, percent.hexPair(ph[1], ph[2]) orelse return 0);
+            return 3;
         },
         'C', 'w', '<', '>' => return error.UnsupportedPlaceholder,
         else => {},

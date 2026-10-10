@@ -15,6 +15,7 @@
 
 const fs = @import("../fs/fs.zig");
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -960,16 +961,8 @@ fn expandArg(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
         } else if (i < text.len and text[i] == 'n') {
             try out.append(arena, '\n');
             i += 1;
-        } else if (i + 2 < text.len and text[i] == 'x') {
-            const hi = std.fmt.charToDigit(text[i + 1], 16) catch {
-                try out.append(arena, '%');
-                continue;
-            };
-            const lo = std.fmt.charToDigit(text[i + 2], 16) catch {
-                try out.append(arena, '%');
-                continue;
-            };
-            try out.append(arena, hi << 4 | lo);
+        } else if (i + 2 < text.len and text[i] == 'x' and percent.hexPair(text[i + 1], text[i + 2]) != null) {
+            try out.append(arena, percent.hexPair(text[i + 1], text[i + 2]).?);
             i += 3;
         } else try out.append(arena, '%');
     }

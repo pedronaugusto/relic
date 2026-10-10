@@ -17,6 +17,7 @@
 //! characters encoded, as git encodes them.
 
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 
 const config_mod = @import("../config/config.zig");
@@ -165,23 +166,7 @@ fn appendEncoded(arena: Allocator, out: *std.ArrayList(u8), text: []const u8) Al
 /// git's `url_percent_decode`: each `%` and two hex digits a byte, a `%`
 /// that is not one kept as it stands.
 pub fn decode(arena: Allocator, text: []const u8) Allocator.Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '%' and i + 2 < text.len) {
-            const hi = std.fmt.charToDigit(text[i + 1], 16) catch {
-                try out.append(arena, '%');
-                continue;
-            };
-            const lo = std.fmt.charToDigit(text[i + 2], 16) catch {
-                try out.append(arena, '%');
-                continue;
-            };
-            try out.append(arena, hi * 16 + lo);
-            i += 2;
-        } else try out.append(arena, text[i]);
-    }
-    return out.items;
+    return percent.decode(arena, text, .decode);
 }
 
 /// What a server with `config` advertises as `promisor-remote=`, or

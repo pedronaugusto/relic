@@ -28,6 +28,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -794,20 +795,7 @@ fn hostMatches(pattern: []const u8, host: []const u8) bool {
 }
 
 fn percentDecode(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '%' and i + 2 < text.len) {
-            if (std.fmt.parseInt(u8, text[i + 1 .. i + 3], 16)) |byte| {
-                try out.append(gpa, byte);
-                i += 2;
-                continue;
-            } else |_| {}
-        }
-        try out.append(gpa, text[i]);
-    }
-    return out.toOwnedSlice(gpa);
+    return percent.decode(gpa, text, .decode);
 }
 
 const testing = std.testing;
