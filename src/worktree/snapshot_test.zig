@@ -416,6 +416,12 @@ test "a live snapshot store reads its own objects after source packs are damaged
 
 const airlock_testing = @import("airlock.testing");
 
+/// The files a batch synced one by one: Linux's data syncs, and the writeouts
+/// macOS and Windows make before one flush of the volume.
+fn fileSyncs(h: *airlock_testing.Seam) usize {
+    return if (builtin.os.tag == .linux) h.count(.sync_data) else h.count(.sync_writeout);
+}
+
 fn expectSyncOrder(h: *airlock_testing.Seam) !void {
     var trace_calls: [256]airlock_testing.Call = undefined;
     const calls = h.calls(&trace_calls);
@@ -423,7 +429,8 @@ fn expectSyncOrder(h: *airlock_testing.Seam) !void {
     var directories_started = false;
     for (calls) |call| switch (call) {
         .sync_dir => directories_started = true,
-        .sync_full, .sync_barrier, .sync_data, .sync_plain, .sync_writeout => try testing.expect(!directories_started),
+        // the batch's last flush of the volume follows its directories
+        .sync_data, .sync_writeout => try testing.expect(!directories_started),
         else => {},
     };
 }
@@ -459,16 +466,16 @@ test "durable snapshots sync their closure and restored files before directories
     resetSyncs(h);
     const captured = try store.capture(io, .{ .folder = folder.dir }, .{});
     // Three trees and the blob; already present objects must be covered too.
-    try testing.expectEqual(@as(usize, 4), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 4), fileSyncs(h));
     try testing.expect(h.count(.sync_dir) >= 2);
     try expectSyncOrder(h);
     resetSyncs(h);
     _ = try store.capture(io, .{ .folder = folder.dir }, .{});
-    try testing.expectEqual(@as(usize, 4), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 4), fileSyncs(h));
     try expectSyncOrder(h);
     resetSyncs(h);
     _ = try store.adoptTree(io, &store.db, captured.snapshot.tree);
-    try testing.expectEqual(@as(usize, 4), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 4), fileSyncs(h));
     try expectSyncOrder(h);
     resetSyncs(h);
     h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
@@ -477,14 +484,14 @@ test "durable snapshots sync their closure and restored files before directories
     defer dest.cleanup();
     resetSyncs(h);
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
-    try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 1), fileSyncs(h));
     try expectDirectorySyncs(h, 3);
     try expectSyncOrder(h);
     try expectFile(dest.dir, "nested/deep/file", "kept");
     // The same barrier covers a stat-shortcut checkout's existing bytes.
     resetSyncs(h);
     _ = try store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot });
-    try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 1), fileSyncs(h));
     try expectSyncOrder(h);
     resetSyncs(h);
     h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
@@ -517,7 +524,7 @@ test "selected object durability syncs a used pack and index once" {
     const io = h.io();
     resetSyncs(h);
     try store.db.makeDurable(io, &.{ saved.snapshot.tree, saved.snapshot.tree });
-    try testing.expectEqual(@as(usize, 2), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 2), fileSyncs(h));
     try expectDirectorySyncs(h, 2);
     try expectSyncOrder(h);
 }
@@ -546,7 +553,7 @@ test "durable checkout covers unchanged files and surviving parents of deletions
     resetSyncs(h);
     const result = try store.restore(io, after.snapshot, dest.dir, .{ .from = before.snapshot, .checkout = .{ .durability = .durable } });
     try testing.expectEqual(@as(u32, 1), result.removed);
-    try testing.expectEqual(@as(usize, 1), h.syncs() - h.count(.sync_dir));
+    try testing.expectEqual(@as(usize, 1), fileSyncs(h));
     try expectDirectorySyncs(h, 1);
     try expectSyncOrder(h);
     try testing.expectError(error.FileNotFound, dest.dir.access(base, "old", .{}));

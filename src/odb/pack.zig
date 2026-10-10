@@ -2226,7 +2226,7 @@ pub const Writer = struct {
         fs.readOnlyObject(io, w.dir, w.temp[0..w.temp_len], w.options.shared);
         fs.readOnlyObject(io, w.dir, idx_temp, w.options.shared);
         if (rev_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
-        fs.renameWithRetry(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
+        fs.rename(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
             // ziglint-ignore: Z026 the rename's error is the one to report; temporary files left behind are what `git gc` prunes
             w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
             // ziglint-ignore: Z026 the rename's error is the one to report; temporary files left behind are what `git gc` prunes
@@ -2238,9 +2238,9 @@ pub const Writer = struct {
             var rev_name_buf: [hash.max_hex_len + 16]u8 = undefined;
             // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
             const rev_name = std.mem.print(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
-            try fs.renameWithRetry(io, w.dir, t, rev_name);
+            try fs.rename(io, w.dir, t, rev_name);
         }
-        fs.renameWithRetry(io, w.dir, idx_temp, idx_name) catch |err| {
+        fs.rename(io, w.dir, idx_temp, idx_name) catch |err| {
             // ziglint-ignore: Z026 the rename's error is the one to report; a pack without its index is unreachable, and `git gc` prunes it
             w.dir.deleteFile(io, idx_temp) catch {};
             return err;

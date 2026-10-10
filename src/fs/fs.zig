@@ -55,6 +55,33 @@ pub fn syncDirectory(io: Io, dir: Io.Dir, path: []const u8) SyncError!void {
     try syncDir(io, opened);
 }
 
+/// A file or a directory, as `sub_path` below `dir`.
+pub const Named = struct { dir: Io.Dir, sub_path: []const u8 };
+
+/// Errors from `syncAll`.
+pub const SyncAllError = airlock.Pending.CommitError || airlock.SyncPathError || airlock.DirSyncError || Io.File.StatError || Allocator.Error || error{LevelUnavailable};
+
+/// Make `files` and the names changed in `directories` durable together:
+/// each file is synced, the device is flushed once per volume, and each
+/// directory once, where `files.len + directories.len` separate syncs would
+/// flush the device each time. A filesystem that cannot keep that is
+/// `error.LevelUnavailable`. The paths are borrowed until it returns.
+pub fn syncAll(gpa: Allocator, io: Io, files: []const Named, directories: []const Named) SyncAllError!void {
+    if (files.len + directories.len == 0) return;
+    const slots = try gpa.alloc(airlock.Batch.Slot, files.len + directories.len);
+    defer gpa.free(slots);
+    var batch: airlock.Batch = .init(slots);
+    defer batch.reset(io);
+    // unreachable: a slot for each file and each directory
+    for (files) |file| batch.addPath(file.dir, file.sub_path) catch unreachable;
+    // unreachable: a slot for each file and each directory
+    for (directories) |directory| batch.addDirPath(directory.dir, directory.sub_path) catch unreachable;
+    _ = batch.commitOrRefuse(io, .{ .level = .data }) catch |err| switch (err) {
+        error.BatchFull => unreachable, // unreachable: nothing was added past the slots
+        else => |e| return e,
+    };
+}
+
 /// How hard a write is pushed towards the disk.
 ///
 /// git's own default is looser than it looks: `core.fsync` defaults to
@@ -357,47 +384,13 @@ pub fn permissionsFor(executable: bool) Io.File.Permissions {
     return @fromBackingInt(@intCast(@as(std.posix.mode_t, if (executable) 0o777 else 0o666)));
 }
 
-/// Whether directory entries are made durable after a rename.
-///
-/// Off by default, and on by request for a caller who wants the renamed
-/// entry flushed as well as the file's bytes. This uses plain `fsync`, with
-/// the same macOS writeout policy as file syncs; the batch barrier remains
-/// the place for the drive-cache flush. Windows cannot flush directory
-/// handles with `FlushFileBuffers`, so this is a no-op there.
-pub const sync_directories_default = false;
-
 /// `fsync` on a directory, so a name that was created or renamed is durable.
 ///
-/// Windows's `FlushFileBuffers` does not support directory handles, so this
-/// is a no-op there; the guarantee is the operating system's.
-/// On Linux `dir` must have been opened with `iterate = true`: otherwise
-/// Zig uses `O_PATH`, whose handle cannot be synced.
+/// A handle that cannot be synced, Linux's `O_PATH` one, is reopened by
+/// airlock.
 pub fn syncDir(io: Io, dir: Io.Dir) SyncError!void {
     const reached = try airlock.syncDir(io, dir, .{ .level = .data });
     if (!reached.atLeast(.data)) return error.LevelUnavailable;
-}
-
-/// Put one durability barrier at the end of a batch of writes.
-///
-/// git's own method: create a throwaway file in the same directory, sync it,
-/// and remove it. Everything flushed into the same writeback cache before it
-/// is durable once it returns, at the cost of one sync instead of one per
-/// file. On macOS that is the difference between milliseconds and seconds.
-pub const BarrierError = Io.File.OpenError || SyncError;
-
-pub fn syncBarrier(io: Io, dir: Io.Dir) BarrierError!void {
-    var name_buf: [64]u8 = undefined;
-    const name = tempName(io, &name_buf, "relic_fsync_");
-    return syncBarrierNamed(io, dir, name);
-}
-
-fn syncBarrierNamed(io: Io, dir: Io.Dir, name: []const u8) (Io.File.OpenError || SyncError)!void {
-    const file = try dir.createFile(io, name, .{ .exclusive = true });
-    defer {
-        file.close(io);
-        dir.deleteFile(io, name) catch {};
-    }
-    try syncFileLevel(io, file, .data);
 }
 
 /// What to do when the lock is already held.
@@ -417,10 +410,25 @@ pub const LockError = error{
     /// — holds it. It is never removed on your behalf; `staleReport` says
     /// what can be found out about the holder.
     LockHeld,
-} || Io.File.OpenError || Io.Cancelable;
+} || airlock.CreateError || Io.Cancelable;
 
 /// Errors from finishing a lock.
-pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.OpenError || Io.File.SetLengthError;
+pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.File.SetLengthError || airlock.Pending.CommitError || error{
+    /// The new file is in place, and the directory sync that makes its name
+    /// survive a power cut failed.
+    PublishedNotDurable,
+};
+
+/// What a `Sync` asks of airlock for one file it publishes: nothing; the
+/// file ordered before its name, which the end of a batch makes durable; or
+/// the file and its name durable.
+pub fn levelOf(sync: Sync) airlock.Level {
+    return switch (sync) {
+        .none => .none,
+        .batch => .ordered,
+        .per_file => .data,
+    };
+}
 
 /// git's lock file: `<path>.lock`, created with `O_CREAT|O_EXCL`, written,
 /// made durable as the policy asks, and renamed over `<path>`.
@@ -431,20 +439,16 @@ pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io
 pub const LockFile = struct {
     pub const Error = ErrorNamespace.Error;
 
-    dir: Io.Dir,
-    /// The name being replaced, relative to `dir`. Borrowed from the caller
-    /// for the lifetime of the lock.
-    target: []const u8,
+    /// The lock, airlock's exact-named temp of the target.
+    pending: airlock.Pending,
     /// `<target>.lock`, owned by this lock.
     lock_name: []u8,
     /// How many bytes of `pid <n>` the lock holds until its contents are
     /// written, zero when it holds none.
     pid_len: u8 = 0,
     gpa: Allocator,
-    file: Io.File,
     file_writer: Io.File.Writer,
     sync: Sync,
-    sync_directory: bool,
     finished: bool = false,
 
     /// How a lock is taken.
@@ -464,10 +468,6 @@ pub const LockFile = struct {
         /// replaces ever sees them, git reads nothing from a lock, and it
         /// costs one write rather than a file of its own beside each lock.
         write_pid: bool = true,
-        /// Sync the target's parent directory after the commit rename, so
-        /// the new name is flushed too. Independent of the file sync policy.
-        /// A no-op on Windows: `FlushFileBuffers` cannot flush directories.
-        sync_directory: bool = sync_directories_default,
         /// The permissions `core.sharedRepository` asks for, given to the
         /// lock, and so to the file it becomes, as git's tempfiles get them.
         shared: Shared = .umask,
@@ -494,11 +494,8 @@ pub const LockFile = struct {
         const lock_name = try gpa.print("{s}.lock", .{sub_path});
         errdefer gpa.free(lock_name);
 
-        const file = try createExclusive(io, dir, lock_name, options.on_contention);
-        errdefer {
-            file.close(io);
-            dir.deleteFile(io, lock_name) catch {};
-        }
+        var pending = try createLock(io, dir, sub_path, lock_name[baseStart(lock_name)..], options.on_contention);
+        errdefer pending.discard(io);
         adjustShared(io, dir, lock_name, options.shared);
 
         var pid_len: u8 = 0;
@@ -508,21 +505,18 @@ pub const LockFile = struct {
             const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
             // Only a name for a report: a lock that could not say it is
             // still the lock.
-            if (file.writePositionalAll(io, line, 0)) |_| {
-                pid_len = @intCast(line.len);
+            if (pending.file().writePositionalAll(io, line, 0)) |_| {
+                pid_len = @intCast(line.len); // safe: the line is at most eighteen bytes
             } else |_| {}
         }
 
         return .{
-            .dir = dir,
-            .target = sub_path,
+            .pending = pending,
             .lock_name = lock_name,
             .pid_len = pid_len,
             .gpa = gpa,
-            .file = file,
-            .file_writer = file.writer(io, buffer),
+            .file_writer = pending.file().writer(io, buffer),
             .sync = options.sync,
-            .sync_directory = options.sync_directory,
         };
     }
 
@@ -537,56 +531,38 @@ pub const LockFile = struct {
         assert(!lock.finished);
         try lock.file_writer.interface.flush();
         // Contents shorter than the `pid` line under them leave its tail.
-        if (lock.file_writer.pos < lock.pid_len) try lock.file.setLength(io, lock.file_writer.pos);
-        switch (lock.sync) {
-            .none => {},
-            // Both arms sync the lock's own descriptor before the rename,
-            // which is the step that prevents every corruption the field
-            // reports: an empty ref, a truncated index, a zero-length loose
-            // object. A batch differs from a per-file sync in what happens
-            // at the end of the batch, not here.
-            .batch => try syncFileLevel(io, lock.file, .ordered),
-            .per_file => try syncFileLevel(io, lock.file, .data),
-        }
-        lock.file.close(io);
+        if (lock.file_writer.pos < lock.pid_len) try lock.pending.file().setLength(io, lock.file_writer.pos);
+        // A commit that fails before the name is visible leaves the lock to
+        // `deinit`, which gives it up; one that fails after has published.
+        _ = try lock.pending.commit(io, .{ .level = levelOf(lock.sync) });
         lock.finished = true;
-        renameWithRetry(io, lock.dir, lock.lock_name, lock.target) catch |err| {
-            // ziglint-ignore: Z026 the rename's error is the one to report; a lock left behind is what git reports as held, naming the file to remove
-            lock.dir.deleteFile(io, lock.lock_name) catch {};
-            return err;
-        };
-        if (lock.sync_directory) {
-            // `target` may be refs/heads/main relative to the repository:
-            // it is heads, not the repository directory, that was changed.
-            // Linux's non-iterable directory handles use O_PATH, which
-            // fsync cannot use. Open for reading even when this is `dir`.
-            const parent = std.Io.Dir.path.dirname(lock.target) orelse ".";
-            const dir = try lock.dir.openDir(io, parent, .{ .iterate = true });
-            defer dir.close(io);
-            try syncDir(io, dir);
-        }
     }
 
     /// Give the lock up, leaving the target as it was. Safe to call after
     /// `commit`, which is what makes `defer lock.deinit(io)` the right shape.
     pub fn deinit(lock: *LockFile, io: Io) void {
-        if (!lock.finished) {
-            lock.file.close(io);
-            // ziglint-ignore: Z026 giving a lock up cannot fail; a lock left behind is what git reports as held, naming the file to remove
-            lock.dir.deleteFile(io, lock.lock_name) catch {};
-            lock.finished = true;
-        }
+        lock.pending.discard(io);
         lock.gpa.free(lock.lock_name);
         lock.* = undefined;
     }
 };
 
-fn createExclusive(
+/// Where the last path component of `path` starts.
+fn baseStart(path: []const u8) usize {
+    const slash = std.mem.findScalarLast(u8, path, '/');
+    const separator = if (builtin.target.os.tag == .windows) std.mem.findScalarLast(u8, path, '\\') else null;
+    return @max(if (slash) |at| at + 1 else 0, if (separator) |at| at + 1 else 0);
+}
+
+/// Create `lock` (the base name `lock_base` beside `target`) exclusively,
+/// waiting for a holder as `on_contention` says.
+fn createLock(
     io: Io,
     dir: Io.Dir,
-    name: []const u8,
+    target: []const u8,
+    lock_base: []const u8,
     on_contention: OnContention,
-) LockError!Io.File {
+) LockError!airlock.Pending {
     const deadline_ms: u32 = switch (on_contention) {
         .fail => 0,
         .wait_ms => |ms| ms,
@@ -594,10 +570,13 @@ fn createExclusive(
     var waited: u32 = 0;
     var attempt: u32 = 0;
     while (true) {
-        if (dir.createFile(io, name, .{ .exclusive = true, .truncate = false, .read = true })) |file| {
-            return file;
+        if (airlock.create(io, dir, target, .{ .temp = .{ .exact = lock_base }, .mode = .default, .read = true })) |pending| {
+            return pending;
         } else |err| switch (err) {
-            error.PathAlreadyExists => {},
+            // Windows keeps the name of a deleted file while another
+            // process holds it, which airlock says as `Busy`: a lock that
+            // is as good as held.
+            error.PathAlreadyExists, error.Busy => {},
             // Windows hands back a sharing violation as access denied when
             // an indexer or a scanner holds the file between the write and
             // the rename. Two independent implementations settled on the
@@ -635,36 +614,13 @@ test "the backoff grows as git's does, by squares to a second, with spread" {
     try std.testing.expectEqual(@as(i64, 1249), backoffMs(40, 499));
 }
 
-/// Rename, retrying briefly on Windows.
-///
-/// Antivirus and the search indexer hold a handle between the write and the
-/// rename, and ten attempts at five milliseconds apart is what the field has
-/// settled on. Elsewhere the first attempt is the only one.
-pub fn renameWithRetry(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
-    if (builtin.target.os.tag != .windows) {
-        return dir.rename(old_name, dir, new_name, io);
-    }
-    var attempts: u8 = 0;
-    var cleared = false;
-    while (true) {
-        if (dir.rename(old_name, dir, new_name, io)) {
-            return;
-        } else |err| switch (err) {
-            error.AccessDenied, error.PermissionDenied, error.FileBusy => {
-                // A read-only file — a lockable one nobody holds the lock
-                // on — cannot be replaced until the attribute is off, which
-                // git for Windows takes off too.
-                if (!cleared) {
-                    cleared = true;
-                    if (clearReadOnly(io, dir, new_name)) continue;
-                }
-                attempts += 1;
-                if (attempts >= 10) return err;
-                Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }, io) catch return err;
-            },
-            else => return err,
-        }
-    }
+/// Rename over the name `new_name`, as git renames: with no sync, and on
+/// Windows retried while a scanner or indexer holds either name.
+pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
+    _ = airlock.rename(io, dir, old_name, dir, new_name, .{ .sync = .{ .level = .none } }) catch |err| switch (err) {
+        error.PublishedNotDurable => unreachable, // unreachable: a rename asked to sync nothing reports no failed sync
+        else => |e| return e,
+    };
 }
 
 /// Take off `sub_path`'s read-only attribute, when it has one, as git for
@@ -1085,10 +1041,19 @@ pub fn lockHeld(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
 }
 
 /// Errors from replacing a file whole.
-pub const AtomicWriteError = Io.File.OpenError || Io.Writer.Error ||
-    SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError;
+pub const AtomicWriteError = airlock.WriteFileError || error{PublishedNotDurable};
 
-pub const AtomicWriteOptions = struct { prefix: []const u8, sync: Sync = .none };
+pub const AtomicWriteOptions = struct {
+    prefix: []const u8,
+    sync: Sync = .none,
+    /// Whose permissions the new file has.
+    permissions: enum {
+        /// A new file's: the umask decides.
+        default,
+        /// The file it replaces, as git's in-place rewrites keep them.
+        destination,
+    } = .default,
+};
 
 /// Replace `sub_path` with `bytes` through a uniquely-named neighbour.
 ///
@@ -1101,30 +1066,13 @@ pub fn atomicWrite(
     bytes: []const u8,
     options: AtomicWriteOptions,
 ) Self.AtomicWriteError!void {
-    const prefix = options.prefix;
-    const sync = options.sync;
-    var name_buf: [128]u8 = undefined;
-    const temp = tempName(io, &name_buf, prefix);
-    var file = try dir.createFile(io, temp, .{ .exclusive = true });
-    errdefer {
-        file.close(io);
-        dir.deleteFile(io, temp) catch {};
-    }
-    var write_buf: [4096]u8 = undefined;
-    var fw = file.writer(io, &write_buf);
-    try fw.interface.writeAll(bytes);
-    try fw.interface.flush();
-    switch (sync) {
-        .none => {},
-        .batch => try syncFileLevel(io, file, .ordered),
-        .per_file => try syncFileLevel(io, file, .data),
-    }
-    file.close(io);
-    renameWithRetry(io, dir, temp, sub_path) catch |err| {
-        // ziglint-ignore: Z026 the rename's error is the one to report; a temporary left behind is what `git gc` prunes
-        dir.deleteFile(io, temp) catch {};
-        return err;
-    };
+    _ = try airlock.writeFile(io, dir, sub_path, bytes, .{
+        .create = .{ .temp = .{ .random = options.prefix }, .mode = switch (options.permissions) {
+            .default => .default,
+            .destination => .inherit,
+        } },
+        .commit = .{ .level = levelOf(options.sync) },
+    });
 }
 
 /// A name no other process will pick, written into `buf`.
@@ -1401,33 +1349,29 @@ test "a lock names its holder in its own bytes, and no file but the lock is made
     }
 }
 
-test "a lock syncs the target's directory after rename only when asked" {
+test "a lock syncs the file as its policy asks, and the directory when it is to be durable" {
     const seam = airlock_mod;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "nested", .default_dir);
     for ([_][]const u8{ "thing", "nested/thing" }) |target| {
         for ([_]Sync{ .none, .batch, .per_file }) |policy| {
-            for ([_]bool{ false, true }) |sync_directory| {
-                const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{});
-                defer h.destroy();
-                const io = h.io();
-                var buf: [64]u8 = undefined;
-                var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = target, .buffer = &buf }, .{
-                    .sync = policy,
-                    .sync_directory = sync_directory,
-                });
-                defer lock.deinit(io);
-                try lock.writer().writeAll("new\n");
-                try lock.commit(io);
-                try std.testing.expectEqual(@as(u32, @intFromBool(sync_directory)), h.count(.sync_dir));
-                const file_call: seam.Call = if (policy == .batch and builtin.target.os.tag.isDarwin()) .sync_barrier else seam.data_sync;
-                try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(file_call));
-                try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none) + @as(u32, @intFromBool(sync_directory))), h.syncs());
-                var read_buf: [16]u8 = undefined;
-                try std.testing.expectEqualStrings("new\n", try tmp.dir.readFile(io, target, &read_buf));
-                try std.testing.expect(!lockHeld(io, tmp.dir, target));
-            }
+            const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{});
+            defer h.destroy();
+            const io = h.io();
+            var buf: [64]u8 = undefined;
+            var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = target, .buffer = &buf }, .{ .sync = policy });
+            defer lock.deinit(io);
+            try lock.writer().writeAll("new\n");
+            try lock.commit(io);
+            // none: nothing. batch: the file ordered, and the batch's end makes it durable.
+            // per file: the file and the directory that received its name.
+            const file_call: seam.Call = if (policy == .batch and builtin.target.os.tag.isDarwin()) .sync_barrier else seam.data_sync;
+            try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(file_call));
+            try std.testing.expectEqual(@as(u32, @intFromBool(policy == .per_file)), h.count(.sync_dir));
+            var read_buf: [16]u8 = undefined;
+            try std.testing.expectEqualStrings("new\n", try tmp.dir.readFile(io, target, &read_buf));
+            try std.testing.expect(!lockHeld(io, tmp.dir, target));
         }
     }
 }
@@ -1446,13 +1390,15 @@ test "airlock file failure prevents lock publication and directory failure is ex
         const io = h.io();
         {
             var buffer: [64]u8 = undefined;
-            var lock = try LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{ .sync = .per_file, .sync_directory = true });
+            var lock = try LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{ .sync = .per_file });
             defer lock.deinit(io);
             try lock.writer().writeAll("new\n");
-            try std.testing.expectError(error.InputOutput, lock.commit(io));
+            // A file that did not reach the disk is never renamed; a name that
+            // may not survive is published, and says so.
+            try std.testing.expectError(if (directory_failure) error.PublishedNotDurable else error.InputOutput, lock.commit(io));
             var read_buf: [16]u8 = undefined;
             try std.testing.expectEqualStrings(if (directory_failure) "new\n" else "old\n", try tmp.dir.readFile(io, "thing", &read_buf));
-            try std.testing.expectEqual(!directory_failure, lockHeld(io, tmp.dir, "thing"));
+            try std.testing.expect(!lockHeld(io, tmp.dir, "thing"));
         }
         try std.testing.expect(!lockHeld(io, tmp.dir, "thing"));
         try std.testing.expectEqual(@as(u32, 1), h.count(if (directory_failure) .sync_dir else seam.data_sync));
@@ -1547,26 +1493,6 @@ test "waiting for a lock gives up with the same named error" {
     );
 }
 
-test "the batch barrier costs one sync and leaves nothing behind" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try syncBarrier(io, tmp.dir);
-    var it = tmp.dir.iterate();
-    try std.testing.expect((try it.next(io)) == null);
-}
-
-test "a batch barrier reports that its file could not be created" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "occupied", .data = "keep\n" });
-
-    try std.testing.expectError(error.PathAlreadyExists, syncBarrierNamed(io, tmp.dir, "occupied"));
-    var buf: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("keep\n", try tmp.dir.readFile(io, "occupied", &buf));
-}
-
 test "a read-only file is replaced and removed, as a lockable one nobody holds must be" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1575,7 +1501,7 @@ test "a read-only file is replaced and removed, as a lockable one nobody holds m
     const st = try tmp.dir.statFile(io, "locked.bin", .{});
     try setFilePermissions(io, tmp.dir, "locked.bin", withReadOnly(st.permissions, true));
     try tmp.dir.writeFile(io, .{ .sub_path = "new.tmp", .data = "new" });
-    try renameWithRetry(io, tmp.dir, "new.tmp", "locked.bin");
+    try rename(io, tmp.dir, "new.tmp", "locked.bin");
     var buf: [8]u8 = undefined;
     try std.testing.expectEqualStrings("new", try tmp.dir.readFile(io, "locked.bin", &buf));
     const again = try tmp.dir.statFile(io, "locked.bin", .{});
@@ -1585,7 +1511,7 @@ test "a read-only file is replaced and removed, as a lockable one nobody holds m
 }
 
 /// All errors reported by this namespace.
-pub const Error = SyncError || StatError || BarrierError || LockError || CommitError || LockFile.OpenError || Shared.ParseError || SetTimestampsError || HardLinkError || AtomicWriteError || ReadSizedError || Self.StatError || Self.CommitError || Io.Dir.RenameError || Io.Dir.CreateDirPathError || Io.Dir.SetFilePermissionsError || Io.Dir.DeleteFileError || Self.AtomicWriteError || Self.ReadSizedError || Allocator.Error;
+pub const Error = SyncError || StatError || LockError || CommitError || LockFile.OpenError || Shared.ParseError || SetTimestampsError || HardLinkError || AtomicWriteError || ReadSizedError || Self.StatError || Self.CommitError || Io.Dir.RenameError || Io.Dir.CreateDirPathError || Io.Dir.SetFilePermissionsError || Io.Dir.DeleteFileError || Self.AtomicWriteError || Self.ReadSizedError || Allocator.Error;
 
 test "sized read releases its hint allocation when a grown file exceeds the limit" {
     var tmp = std.testing.tmpDir(.{});

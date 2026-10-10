@@ -415,7 +415,7 @@ pub const Store = struct {
         const object_path = try store.objectPath(&object_buf, &pointer.oid);
         if (try store.contains(io, &pointer)) return pointer;
         try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
-        try fs.renameWithRetry(io, store.base, tmp_path, object_path);
+        try fs.rename(io, store.base, tmp_path, object_path);
         installed = true;
         return pointer;
     }

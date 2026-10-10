@@ -857,25 +857,7 @@ pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_o
     var parent = if (slash) |at| try dir.openDir(io, path[0..at], .{}) else dir;
     defer if (slash != null) parent.close(io);
     const base = if (slash) |at| path[at + 1 ..] else path;
-    const stat = try parent.statFile(io, base, .{});
-    var name_buf: [128]u8 = undefined;
-    const temp = fs.tempName(io, &name_buf, "git-interpret-trailers-");
-    var file = try parent.createFile(io, temp, .{ .exclusive = true });
-    var file_open = true;
-    errdefer {
-        if (file_open) file.close(io);
-        parent.deleteFile(io, temp) catch |cleanup_error| {
-            std.log.warn("cannot remove trailer temporary file: {s}", .{@errorName(cleanup_error)});
-        };
-    }
-    var write_buf: [4096]u8 = undefined;
-    var fw = file.writer(io, &write_buf);
-    try fw.interface.writeAll(result.items);
-    try fw.interface.flush();
-    file.close(io);
-    file_open = false;
-    try fs.setFilePermissions(io, parent, temp, stat.permissions);
-    try fs.renameWithRetry(io, parent, temp, base);
+    try fs.atomicWrite(io, parent, base, result.items, .{ .prefix = "git-interpret-trailers-", .permissions = .destination });
 }
 
 /// git's `strbuf_complete_line`.

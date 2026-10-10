@@ -438,7 +438,7 @@ pub fn receive(
     if (rev_temp) |t| fs.readOnlyObject(io, pack_dir, t, shared);
     // Pack first, then the reverse index, index last, as git renames them:
     // a reader finds a pack by its index.
-    try fs.renameWithRetry(io, pack_dir, temp, pack_name);
+    try fs.rename(io, pack_dir, temp, pack_name);
     kept = true;
     if (rev_temp) |t| {
         var rev_name_buf: [96]u8 = undefined;
@@ -447,7 +447,7 @@ pub fn receive(
         try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
     try renameBesidePack(io, pack_dir, idx_temp, idx_name, pack_name);
-    if (options.sync == .batch) try fs.syncBarrier(io, pack_dir);
+    if (options.sync == .batch) try fs.syncDir(io, pack_dir);
     try db.refresh(io);
     return result;
 }
@@ -504,7 +504,7 @@ fn indexEntries(gpa: Allocator, indexer: *const Indexer, options: Options) Error
 /// Rename `from` to `to` beside the pack already at `pack_name`. When the
 /// rename fails the pack goes too: a pack with no index is never read.
 fn renameBesidePack(io: Io, pack_dir: Io.Dir, from: []const u8, to: []const u8, pack_name: []const u8) Io.Dir.RenameError!void {
-    fs.renameWithRetry(io, pack_dir, from, to) catch |err| {
+    fs.rename(io, pack_dir, from, to) catch |err| {
         // ziglint-ignore: Z026 the rename's error is the one to report; a pack with no index is unreachable, and `git gc` prunes it
         pack_dir.deleteFile(io, pack_name) catch {};
         return err;

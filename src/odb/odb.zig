@@ -1055,9 +1055,11 @@ pub const Odb = struct {
         const final = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
 
         const shared = odb.backendData().options.shared;
+        var fan_out_made = false;
         var file = source.dir.createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions }) catch |err| switch (err) {
             error.FileNotFound => blk: {
                 if (source.dir.createDir(io, text[0..2], .default_dir)) |_| {
+                    fan_out_made = true;
                     fs.adjustShared(io, source.dir, text[0..2], shared);
                 } else |e| switch (e) {
                     error.PathAlreadyExists => {},
@@ -1103,16 +1105,12 @@ pub const Odb = struct {
 
         // An object's name is the hash of its content, so a rename over an
         // object that is already there replaces it with the same bytes.
-        fs.renameWithRetry(io, source.dir, temp, final) catch |err| {
+        fs.rename(io, source.dir, temp, final) catch |err| {
             // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
             source.dir.deleteFile(io, temp) catch {};
             return err;
         };
-        if (odb.backendData().options.sync_directories) {
-            const sub = try source.dir.openDir(io, text[0..2], .{});
-            defer sub.close(io);
-            try fs.syncDir(io, sub);
-        }
+        odb.noteLooseObject(oid, fan_out_made);
         odb.stats.loose_written += 1;
     }
 
@@ -1528,6 +1526,11 @@ pub const Odb = struct {
             }
         }
         const source = odb.writableSource();
+        var arena_instance: std.heap.ArenaAllocator = .init(odb.backendData().gpa);
+        defer arena_instance.deinit();
+        const arena = arena_instance.allocator();
+        var files: std.ArrayList(fs.Named) = .empty;
+        var directories: std.ArrayList(fs.Named) = .empty;
         var fanouts: [256]bool = @splat(false);
         var packs: std.AutoHashMapUnmanaged(usize, void) = .empty;
         defer packs.deinit(odb.backendData().gpa);
@@ -1537,42 +1540,57 @@ pub const Odb = struct {
                 const slot = try packs.getOrPut(odb.backendData().gpa, hit.at);
                 if (slot.found_existing) continue;
                 const named = &source.packs.items[hit.at];
-                // As wide as `Pack.open`'s, which refused a name whose
-                // `.pack` does not fit.
-                var path_buf: [512]u8 = undefined;
-                // unreachable: the pack opened, so its `.pack` name fits 512 bytes
-                const pack_path = std.mem.print(&path_buf, "{s}.pack", .{named.name}) catch unreachable;
-                try fs.syncPath(io, source.pack_dir.?, pack_path);
-                // unreachable: `.idx` is shorter than `.pack`, which fits
-                const idx_path = std.mem.print(&path_buf, "{s}.idx", .{named.name}) catch unreachable;
-                try fs.syncPath(io, source.pack_dir.?, idx_path);
+                try files.append(arena, .{ .dir = source.pack_dir.?, .sub_path = try arena.print("{s}.pack", .{named.name}) });
+                try files.append(arena, .{ .dir = source.pack_dir.?, .sub_path = try arena.print("{s}.idx", .{named.name}) });
             } else {
                 var path_buf: [hash.max_hex_len + 2]u8 = undefined;
-                const path = odb.loosePath(oid.*, &path_buf);
-                try fs.syncPath(io, source.dir, path);
+                try files.append(arena, .{ .dir = source.dir, .sub_path = try arena.dupe(u8, odb.loosePath(oid.*, &path_buf)) });
                 fanouts[oid.raw()[0]] = true;
             }
         }
         for (fanouts, 0..) |used, byte| if (used) {
-            var path: [2]u8 = undefined;
-            // unreachable: a byte is two hex digits
-            _ = std.mem.print(&path, "{x:0>2}", .{byte}) catch unreachable;
-            try fs.syncDirectory(io, source.dir, &path);
+            try directories.append(arena, .{ .dir = source.dir, .sub_path = try arena.print("{x:0>2}", .{byte}) });
         };
-        if (packs.count() != 0) try fs.syncDirectory(io, source.dir, "pack");
-        try fs.syncDirectory(io, source.dir, ".");
+        if (packs.count() != 0) try directories.append(arena, .{ .dir = source.dir, .sub_path = "pack" });
+        try directories.append(arena, .{ .dir = source.dir, .sub_path = "." });
+        try fs.syncAll(odb.backendData().gpa, io, files.items, directories.items);
     }
 
-    /// Put one durability barrier at the end of a batch of object writes.
+    /// Make the loose objects written since the last call durable, with the
+    /// directories that received them.
     ///
-    /// Under `Options.sync = .batch` this is what makes every object written
-    /// since the last barrier durable, for the cost of one sync rather than
-    /// one per object. Under the other two policies it is a no-op that costs
-    /// a file creation, so a caller may always call it.
+    /// Under `Options.sync = .batch` each object's bytes were ordered before
+    /// its name appeared; this is what then makes the names survive a power
+    /// cut, for one flush per fan-out directory rather than one per object.
+    /// Under the other two policies it does nothing, so a caller may always
+    /// call it.
     pub fn syncBatch(odb: *Odb, io: Io) ErrorNamespace.Error!void {
-        if (odb.backendData().options.sync != .batch) return;
+        const data = odb.backendData();
+        if (data.options.sync != .batch) return;
         const source = odb.writableSource();
-        try fs.syncBarrier(io, source.dir);
+        var fanouts = data.unsynced_fanouts.iterator(.{});
+        while (fanouts.next()) |byte| {
+            var name: [2]u8 = undefined;
+            // unreachable: a byte is two hex digits
+            _ = std.mem.print(&name, "{x:0>2}", .{byte}) catch unreachable;
+            const sub = try source.dir.openDir(io, &name, .{ .iterate = true });
+            defer sub.close(io);
+            try fs.syncDir(io, sub);
+            data.unsynced_fanouts.unset(byte);
+        }
+        if (data.unsynced_objects_dir) {
+            try fs.syncDir(io, source.dir);
+            data.unsynced_objects_dir = false;
+        }
+    }
+
+    /// Note that a loose object was renamed into its fan-out directory, for
+    /// `syncBatch`.
+    fn noteLooseObject(odb: *Odb, oid: Oid, fan_out_made: bool) void {
+        const data = odb.backendData();
+        if (data.options.sync != .batch) return;
+        data.unsynced_fanouts.set(oid.raw()[0]);
+        if (fan_out_made) data.unsynced_objects_dir = true;
     }
 
     /// Write a pack holding exactly these objects, into `pack_dir`.
@@ -2329,7 +2347,7 @@ pub const Odb = struct {
         }
 
         const written = try odb.writePack(io, pack_dir, collected.entries, options.pack);
-        if (options.pack.sync == .batch) try fs.syncBarrier(io, pack_dir);
+        if (options.pack.sync == .batch) try fs.syncDir(io, pack_dir);
 
         // The new pack has to be readable here before anything is taken
         // away, because it is this database that will be asked for those
@@ -2493,7 +2511,7 @@ pub const Odb = struct {
             return null;
         }
         const report = try filling.writer.finish(io);
-        if (filling.writer.options.sync == .batch) try fs.syncBarrier(io, filling.dir);
+        if (filling.writer.options.sync == .batch) try fs.syncDir(io, filling.dir);
         try odb.refresh(io);
         return report;
     }
@@ -2595,7 +2613,9 @@ pub const ObjectStream = struct {
         if (s.hasher.collisionAttack()) return error.CollisionAttack;
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
+        var fan_out_made = false;
         if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
+            fan_out_made = true;
             fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
@@ -2604,13 +2624,13 @@ pub const ObjectStream = struct {
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
         // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
         const final_path = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
-        fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
+        fs.rename(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
             // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
             s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
             return err;
         };
         s.finished = true;
-        if (s.odb.backendData().options.sync_directories) try fs.syncDir(io, s.dir);
+        s.odb.noteLooseObject(oid, fan_out_made);
         return oid;
     }
 

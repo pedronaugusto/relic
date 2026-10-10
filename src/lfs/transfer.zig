@@ -1251,7 +1251,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     var name_buf: [64]u8 = undefined;
     const temp_path = try scratch.print("{s}/{s}", .{ incomplete, fs.tempName(io, &name_buf, "dl-") });
     var resumed = true;
-    fs.renameWithRetry(io, store.base, part_path, temp_path) catch |err| switch (err) {
+    fs.rename(io, store.base, part_path, temp_path) catch |err| switch (err) {
         error.FileNotFound => resumed = false,
         else => |e| return e,
     };
@@ -1264,7 +1264,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         partial.file.close(io);
         if (!installed) {
             if (partial.keep) {
-                fs.renameWithRetry(io, store.base, temp_path, part_path) catch {};
+                fs.rename(io, store.base, temp_path, part_path) catch {};
             } else store.base.deleteFile(io, temp_path) catch {};
         }
     }
@@ -1302,7 +1302,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     const object_path = try store.objectPath(&object_buf, &pointer.oid);
     if (try store.contains(io, &pointer)) return .ok;
     try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
-    try fs.renameWithRetry(io, store.base, temp_path, object_path);
+    try fs.rename(io, store.base, temp_path, object_path);
     installed = true;
     return .ok;
 }
@@ -2425,7 +2425,7 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
         };
         fw.interface.flush() catch return fw.err.?;
     }
-    try fs.renameWithRetry(io, wt, temp_path, path);
+    try fs.rename(io, wt, temp_path, path);
     done = true;
 }
 

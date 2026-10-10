@@ -2205,12 +2205,13 @@ fn writeLink(io: Io, wt: Io.Dir, path: []const u8, target: []const u8, symlinks:
 fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringHashMapUnmanaged(TreeEntry), removed: *const std.StringHashMapUnmanaged(void)) Error!void {
     var dirs: std.StringHashMap(bool) = .init(arena);
     try dirs.put(".", true);
+    var files: std.ArrayList(fs.Named) = .empty;
     var paths = wanted.iterator();
     while (paths.next()) |entry| {
         const path = entry.key_ptr.*;
         if (entry.value_ptr.mode != .gitlink) {
             const st = (try fs.statAt(io, wt, path)) orelse return error.FileNotFound;
-            if (st.kind == .file) try fs.syncPath(io, wt, path);
+            if (st.kind == .file) try files.append(arena, .{ .dir = wt, .sub_path = path });
         }
         try addSyncParents(&dirs, path, true);
     }
@@ -2222,22 +2223,18 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
         if (!slot.found_existing) slot.value_ptr.* = false;
         try addSyncParents(&dirs, path.*, false);
     }
-    var ordered: std.ArrayList([]const u8) = .empty;
-    var names = dirs.keyIterator();
-    while (names.next()) |name| try ordered.append(arena, name.*);
-    std.mem.sort([]const u8, ordered.items, {}, struct {
-        fn less(_: void, a: []const u8, b: []const u8) bool {
-            if (std.mem.eql(u8, a, ".")) return false;
-            if (std.mem.eql(u8, b, ".")) return true;
-            return a.len > b.len;
-        }
-    }.less);
-    for (ordered.items) |path| {
-        fs.syncDirectory(io, wt, path) catch |err| switch (err) {
-            error.FileNotFound => if (dirs.get(path).?) return err,
-            else => return err,
+    var directories: std.ArrayList(fs.Named) = .empty;
+    var names = dirs.iterator();
+    while (names.next()) |entry| {
+        // A directory the checkout removed is not there to sync; one it
+        // wanted is, and its absence is the error.
+        if (!entry.value_ptr.*) wt.access(io, entry.key_ptr.*, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => |e| return e,
         };
+        try directories.append(arena, .{ .dir = wt, .sub_path = entry.key_ptr.* });
     }
+    try fs.syncAll(arena, io, files.items, directories.items);
 }
 
 fn addSyncParents(dirs: *std.StringHashMap(bool), path: []const u8, required: bool) Allocator.Error!void {
@@ -3024,7 +3021,7 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
         }
         try fw.interface.flush();
     }
-    try fs.renameWithRetry(io, wt, temp_path, path);
+    try fs.rename(io, wt, temp_path, path);
     failed = false;
 }
 
