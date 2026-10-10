@@ -19,17 +19,15 @@ const Allocator = std.mem.Allocator;
 const config_mod = @import("../config/config.zig");
 
 /// Which server the refs are hidden from.
-pub const Service = enum {
-    upload_pack,
-    receive_pack,
+pub const Service = @import("connection.zig").Service;
 
-    fn section(service: Service) []const u8 {
-        return switch (service) {
-            .upload_pack => "uploadpack",
-            .receive_pack => "receive",
-        };
-    }
-};
+/// The section of the server's own `hideRefs`, besides `transfer`.
+fn section(service: Service) []const u8 {
+    return switch (service) {
+        .upload_pack => "uploadpack",
+        .receive_pack => "receive",
+    };
+}
 
 /// The patterns, in the order the configuration sets them.
 pub const Refs = struct {
@@ -58,7 +56,7 @@ pub const Refs = struct {
         }
         for (config.entries.items) |entry| {
             if (entry.has_subsection or !std.ascii.eqlIgnoreCase(entry.name, "hiderefs")) continue;
-            if (!std.mem.eql(u8, entry.section, "transfer") and !std.mem.eql(u8, entry.section, service.section())) continue;
+            if (!std.mem.eql(u8, entry.section, "transfer") and !std.mem.eql(u8, entry.section, section(service))) continue;
             const raw = entry.value orelse return error.MalformedValue;
             const value = raw;
             var len = value.len;

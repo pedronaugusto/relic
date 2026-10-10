@@ -311,8 +311,8 @@ const Http = struct {
                 h.client_auth = try h.clientCertificate(.{
                     .cert = try expandHome(arena, cert, environ),
                     .key = if (settings.ssl_key) |k| try expandHome(arena, k, environ) else null,
-                    .cert_type = settings.ssl_cert_type,
-                    .key_type = settings.ssl_key_type,
+                    .cert_format = clientcert.Format.parse(settings.ssl_cert_type) catch return h.fail(error.SslCertTypeUnsupported, "http.sslCertType"),
+                    .key_format = clientcert.Format.parse(settings.ssl_key_type) catch return h.fail(error.SslCertTypeUnsupported, "http.sslKeyType"),
                 }, settings.ssl_cert_password_protected, &h.cert_credentials);
                 tls_options.client_auth = h.client_auth;
             }
