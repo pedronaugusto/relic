@@ -9,6 +9,8 @@ const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
+/// Windows renames through the handle of the file.
+const rename_call: seam.Call = if (builtin.target.os.tag == .windows) .win_rename_ex else .rename;
 const no_space: seam.Code = if (builtin.target.os.tag == .windows) .DISK_FULL else .NOSPC;
 
 test "received pack survives prune before references are published" {
@@ -112,7 +114,7 @@ test "received pack retention and rollback survive a ref commit fault" {
             try tx.create("refs/heads/faulted", .{ .direct = try Oid.parse(.sha1, head) });
             try tx.prepare(fault_io);
             // A fault Windows' replace-retry does not absorb.
-            fault.setPlan(&.{seam.fail(.rename, 1, no_space)});
+            fault.setPlan(&.{seam.fail(rename_call, 1, no_space)});
             try testing.expectError(error.NoSpaceLeft, tx.commit(fault_io, null));
             try testing.expectEqual(@as(usize, 1), fault.plan.firedCount());
             try target.dir.access(io, marker, .{});

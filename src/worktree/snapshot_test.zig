@@ -416,6 +416,10 @@ test "a live snapshot store reads its own objects after source packs are damaged
 
 const airlock_testing = @import("airlock.testing");
 
+/// The call a batch ends with whatever it wrote out: Linux's data sync of each
+/// file, and the flush of the volume elsewhere.
+const batch_sync: airlock_testing.Call = if (builtin.os.tag == .linux) .sync_data else .sync_full;
+
 /// A batch syncs `files` one by one. Linux does it with a data sync each;
 /// macOS and Windows write each file and directory out and flush the volume
 /// once, so they show at least as many writeouts as files.
@@ -486,7 +490,7 @@ test "durable snapshots sync their closure and restored files before directories
     try expectFileSyncs(h, 4);
     try expectSyncOrder(h);
     resetSyncs(h);
-    h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
+    h.setPlan(&.{airlock_testing.fail(batch_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.adoptTree(io, &store.db, captured.snapshot.tree));
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
@@ -502,7 +506,7 @@ test "durable snapshots sync their closure and restored files before directories
     try expectFileSyncs(h, 1);
     try expectSyncOrder(h);
     resetSyncs(h);
-    h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
+    h.setPlan(&.{airlock_testing.fail(batch_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
     resetSyncs(h);
     if (builtin.os.tag == .linux) {
@@ -510,7 +514,7 @@ test "durable snapshots sync their closure and restored files before directories
         try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
     }
     resetSyncs(h);
-    h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
+    h.setPlan(&.{airlock_testing.fail(batch_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.capture(io, .{ .folder = folder.dir }, .{}));
     resetSyncs(h);
 }
