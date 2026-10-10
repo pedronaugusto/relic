@@ -57,6 +57,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "facade imports", .target = "src/index.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/lfs.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/merge.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/maintenance.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/object.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/odb.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/patch.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
