@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Percent escapes are read in one place, `text.percent`, with git's `hex2chr`: credential URLs, LFS paths, promisor and filter specs, `.gitmodules` URLs, and the `%xHH` of pretty, trailer and ref formats. Three readers took a sign as a digit, so `%+1` decoded to a byte where git keeps it.
+
 - **Breaking:** a `.git` file is read in one place, `discover.gitfile`, as git reads it: `gitdir: ` with its space, the path up to the line ending, spaces kept, up to 1 MiB. Submodules and linked worktrees used to accept `gitdir:` without the space and trim spaces around the path. `checkout.worktrees.readGitFile` is removed; `discover.gitfile.read` takes its place.
 
 - **Breaking:** certificates, keys and trust are [cloak](https://github.com/pedronaugusto/cloak)'s, which relic depends on directly; uplink makes the connections. `wire.clientcert.load` returns a `cloak.ClientAuth` (released with `deinit`), and the new `wire.authorities` reads `http.sslCAInfo`, `http.sslCAPath` and `http.proxySSLCAInfo` into a `cloak.Trust.Snapshot`, used by the smart-HTTP and LFS transports alike. On macOS and Windows the system's authorities are the system's own verifier, with `http.sslCAPath`'s besides it. A certificate file may also hold its key, and text before a block, as OpenSSL writes it, is read past. Until cloak speaks TLS 1.2 and signs with RSA keys, a server that speaks only TLS 1.2 fails with `error.TlsFailed`, and an RSA client key with `error.ClientCertificateSchemeUnsupported`.

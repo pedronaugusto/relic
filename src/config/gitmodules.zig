@@ -24,6 +24,7 @@ const testgit = @import("../testing/git.zig");
 const Self = @This();
 
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
@@ -353,11 +354,7 @@ fn decodesToNewline(url: []const u8) bool {
     var i: usize = 0;
     while (i < url.len) : (i += 1) {
         if (url[i] == '\n') return true;
-        if (url[i] == '%' and i + 2 < url.len) {
-            const high = std.fmt.charToDigit(url[i + 1], 16) catch continue;
-            const low = std.fmt.charToDigit(url[i + 2], 16) catch continue;
-            if (high * 16 + low == '\n') return true;
-        }
+        if (percent.escapeAt(url, i) == '\n') return true;
     }
     return false;
 }
@@ -370,8 +367,7 @@ fn curlUrlIsSafe(url: []const u8) bool {
     var i: usize = 0;
     while (i < url.len) : (i += 1) {
         if (url[i] != '%') continue;
-        if (i + 2 >= url.len) return false;
-        const byte = std.fmt.parseInt(u8, url[i + 1 .. i + 3], 16) catch return false;
+        const byte = percent.escapeAt(url, i) orelse return false;
         if (byte == '\n') return false;
         i += 2;
     }

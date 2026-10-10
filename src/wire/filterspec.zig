@@ -14,6 +14,7 @@
 const Self = @This();
 
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 
 const object = @import("../object/object.zig");
@@ -137,20 +138,7 @@ fn isCSpace(c: u8) bool {
 /// two hexadecimal digits is itself.
 fn percentDecode(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
     if (std.mem.findScalar(u8, text, '%') == null) return text;
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '%' and i + 2 < text.len and std.ascii.isHex(text[i + 1]) and std.ascii.isHex(text[i + 2])) {
-            // unreachable: both digits passed isHex above
-            const high = std.fmt.charToDigit(text[i + 1], 16) catch unreachable;
-            const low = std.fmt.charToDigit(text[i + 2], 16) catch unreachable; // unreachable: as above
-            try out.append(arena, high * 16 + low);
-            i += 2;
-            continue;
-        }
-        try out.append(arena, text[i]);
-    }
-    return out.items;
+    return percent.decode(arena, text, .decode);
 }
 
 const testing = std.testing;

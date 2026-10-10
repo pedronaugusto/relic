@@ -71,6 +71,7 @@ const config_mod = @import("../config/config.zig");
 const Self = @This();
 
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const warp = @import("warp");
 test "LFS checks certificates with the request Io before dialing" {
     const gpa = testing.allocator;
@@ -810,19 +811,7 @@ fn localFileUrl(arena: Allocator, path: []const u8) Allocator.Error![]const u8 {
 
 fn percentDecode(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     if (std.mem.findScalar(u8, text, '%') == null) return text;
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '%' and i + 2 < text.len) {
-            if (std.fmt.parseInt(u8, text[i + 1 .. i + 3], 16)) |byte| {
-                try out.append(a, byte);
-                i += 2;
-                continue;
-            } else |_| {}
-        }
-        try out.append(a, text[i]);
-    }
-    return out.items;
+    return percent.decode(a, text, .decode);
 }
 
 //=====================================================================

@@ -22,6 +22,7 @@ const ErrorNamespace = @This();
 const unicodewidth = @import("../text.zig").unicodewidth;
 const builtin = @import("builtin");
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const revparse_mod = @import("../revwalk/revparse.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -2474,14 +2475,10 @@ fn appendLiteral(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8) Allo
         if (text[cp] == '%') {
             if (cp + 1 < text.len and text[cp + 1] == '%') {
                 cp += 1;
-            } else if (cp + 2 < text.len) {
-                const hi = std.fmt.charToDigit(text[cp + 1], 16) catch null;
-                const lo = std.fmt.charToDigit(text[cp + 2], 16) catch null;
-                if (hi != null and lo != null) {
-                    try out.append(gpa, hi.? << 4 | lo.?);
-                    cp += 3;
-                    continue;
-                }
+            } else if (percent.escapeAt(text, cp)) |byte| {
+                try out.append(gpa, byte);
+                cp += 3;
+                continue;
             }
         }
         try out.append(gpa, text[cp]);

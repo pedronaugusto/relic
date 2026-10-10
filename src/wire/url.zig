@@ -11,6 +11,7 @@
 
 const Self = @This();
 const std = @import("std");
+const percent = @import("../text.zig").percent;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -168,28 +169,9 @@ pub const Identity = struct {
         if (decode) {
             decoded = try gpa.dupe(u8, raw);
             const buffer = decoded.?;
-            var read: usize = sep.?;
-            var write: usize = read;
-            while (read < buffer.len) {
-                if (buffer[read] == '%' and buffer.len - read >= 3) {
-                    const hi = std.fmt.charToDigit(buffer[read + 1], 16) catch null;
-                    const lo = std.fmt.charToDigit(buffer[read + 2], 16) catch null;
-                    if (hi != null and lo != null) {
-                        const byte = hi.? * 16 + lo.?;
-                        // Git leaves zero and malformed escapes literal.
-                        if (byte != 0) {
-                            buffer[write] = byte;
-                            write += 1;
-                            read += 3;
-                            continue;
-                        }
-                    }
-                }
-                buffer[write] = buffer[read];
-                write += 1;
-                read += 1;
-            }
-            parsed = try Url.parse(buffer[0..write]);
+            // Git leaves zero and malformed escapes literal.
+            const end = sep.? + percent.decodeInto(buffer[sep.?..], buffer[sep.?..], .literal);
+            parsed = try Url.parse(buffer[0..end]);
             parsed.raw = raw;
         } else parsed = try Url.parse(raw);
         return .{ .gpa = gpa, .url = parsed, .raw = raw, .decoded = decoded };
