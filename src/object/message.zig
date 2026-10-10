@@ -11,6 +11,7 @@
 //! takes arbitrary bytes.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 const object = @import("object.zig");
@@ -313,13 +314,14 @@ test "a sign-off goes after a blank line, joins a trailer block, and is not repe
 }
 
 test "fuzz: trailer detection and cleanup take any bytes" {
-    try std.testing.fuzz({}, fuzzMessage, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzMessage, .{});
 }
 
-fn fuzzMessage(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzMessage(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var buf: [256]u8 = undefined;
-    const text = buf[0..smith.slice(&buf)];
+    const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(text);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const block = try trailer.block(arena_state.allocator(), .{}, text, .{ .no_divider = true });

@@ -12,6 +12,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 const glob_mod = @import("../text.zig").glob;
@@ -339,12 +340,14 @@ test "shared pathspec magic and exclusions" {
 }
 
 test "fuzz: any pathspec parses or is refused by name, and any path is asked of it" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var spec_buf: [128]u8 = undefined;
             var path_buf: [128]u8 = undefined;
-            const spec_text = spec_buf[0..smith.slice(&spec_buf)];
-            const path = path_buf[0..smith.slice(&path_buf)];
+            const spec_text = spec_buf[0..shakedown.gen.intRange(case.source, usize, 0, spec_buf.len)];
+            case.source.bytes(spec_text);
+            const path = path_buf[0..shakedown.gen.intRange(case.source, usize, 0, path_buf.len)];
+            case.source.bytes(path);
             var p = parse(std.testing.allocator, &.{spec_text}) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return,

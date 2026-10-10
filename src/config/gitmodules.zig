@@ -24,6 +24,7 @@ const testgit = @import("../testing/git.zig");
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
@@ -742,13 +743,14 @@ test "relative urls resolve exactly as git's own table says" {
 }
 
 test "fuzz: any bytes are a .gitmodules or a named error" {
-    try std.testing.fuzz({}, fuzzGitmodules, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzGitmodules, .{});
 }
 
-fn fuzzGitmodules(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzGitmodules(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = testing.allocator;
     var scratch: [2048]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     _ = checkUrl(input);
     _ = checkName(input);
     if (isRelativeUrl(input)) {

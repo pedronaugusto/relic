@@ -10,6 +10,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.object.<name>`.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const hash = @import("../hash/hash.zig");
@@ -1033,13 +1034,14 @@ test "a loose object header parses and refuses a padded size" {
 }
 
 test "fuzz: any bytes are an object or a named error" {
-    try std.testing.fuzz({}, fuzzObject, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzObject, .{});
 }
 
-fn fuzzObject(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzObject(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [2048]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
 
     if (parseHeader(input)) |parsed| {
         std.debug.assert(parsed.len <= input.len);

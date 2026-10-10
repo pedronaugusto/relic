@@ -583,15 +583,17 @@ test "a checker hands back its rules with every level it read" {
 }
 
 test "fuzz: any ignore file answers without a crash" {
-    try std.testing.fuzz({}, fuzzIgnore, .{});
+    try shakedown_mod.check(std.testing.allocator, {}, fuzzIgnore, .{});
 }
 
-fn fuzzIgnore(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzIgnore(_: void, case: *shakedown_mod.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var text_buf: [1024]u8 = undefined;
     var path_buf: [128]u8 = undefined;
-    const text = text_buf[0..smith.slice(&text_buf)];
-    const path = path_buf[0..smith.slice(&path_buf)];
+    const text = text_buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, text_buf.len)];
+    case.source.bytes(text);
+    const path = path_buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, path_buf.len)];
+    case.source.bytes(path);
     var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     rules.addText(text, "", "fuzz", 2) catch return;

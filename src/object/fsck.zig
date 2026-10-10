@@ -25,6 +25,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -1377,12 +1378,13 @@ test "git refuses the same objects and names the same problem" {
 }
 
 test "fuzz: any bytes are a verdict, never a crash" {
-    try testing.fuzz({}, fuzzCheck, .{});
+    try shakedown.check(testing.allocator, {}, fuzzCheck, .{});
 }
 
-fn fuzzCheck(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzCheck(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [1024]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     const strict: Rules = .{ .strict = true };
     for ([_]object.Type{ .blob, .tree, .commit, .tag }) |t| {
         for ([_]Kind{ .sha1, .sha256 }) |kind| {
