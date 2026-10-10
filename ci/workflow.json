@@ -19,8 +19,8 @@
   "source_job_timeout": 10,
   "fast_shards": 2,
   "shards": {
-    "macos": 2,
-    "windows": 5
+    "macos": 3,
+    "windows": 8
   },
   "windows_git_latest": true
 }
