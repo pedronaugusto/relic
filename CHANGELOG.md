@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `wire.clientcert.Files` takes `cert_format` and `key_format`, a `clientcert.Format` (`pem` or `der`) that `Format.parse` reads from `http.sslCertType` and `http.sslKeyType`, where it took the setting's text. `wire.hidden.Service` is `wire.connection.Service`, the one enum of the two services.
+
 ## [0.4.2] - 2026-10-13
 
 ### Changed

@@ -45,9 +45,9 @@ pub const Files = struct {
     cert: []const u8,
     /// The key's file; the certificate's when `null`.
     key: ?[]const u8 = null,
-    /// `PEM` or `DER`, in any case; `PEM` when `null`.
-    cert_type: ?[]const u8 = null,
-    key_type: ?[]const u8 = null,
+    /// `http.sslCertType` and `http.sslKeyType`, read with `Format.parse`.
+    cert_format: Format = .pem,
+    key_format: Format = .pem,
 };
 
 /// The file the key is read from.
@@ -70,8 +70,8 @@ pub const LoadOptions = struct { arena: Allocator, passphrase: ?[]const u8 = nul
 /// with `deinit`; the files' bytes are the arena's.
 pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Error!cloak.ClientAuth {
     const arena = options.arena;
-    const cert_der = try isDer(files.cert_type);
-    const key_der = try isDer(files.key_type);
+    const cert_der = files.cert_format == .der;
+    const key_der = files.key_format == .der;
     const cert_bytes = readAll(arena, io, files.cert) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
@@ -104,12 +104,21 @@ pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Err
     };
 }
 
-fn isDer(kind: ?[]const u8) Error!bool {
-    const k = kind orelse return false;
-    if (std.ascii.eqlIgnoreCase(k, "PEM")) return false;
-    if (std.ascii.eqlIgnoreCase(k, "DER")) return true;
-    return error.SslCertTypeUnsupported;
-}
+/// What kind of file a certificate or a key is.
+pub const Format = enum {
+    pem,
+    der,
+
+    /// `PEM` or `DER`, in any case, as curl reads `http.sslCertType` and
+    /// `http.sslKeyType`; `null` is `PEM`. Anything else (`P12`, `ENG`) is
+    /// `error.SslCertTypeUnsupported`.
+    pub fn parse(text: ?[]const u8) error{SslCertTypeUnsupported}!Format {
+        const k = text orelse return .pem;
+        if (std.ascii.eqlIgnoreCase(k, "PEM")) return .pem;
+        if (std.ascii.eqlIgnoreCase(k, "DER")) return .der;
+        return error.SslCertTypeUnsupported;
+    }
+};
 
 fn readAll(arena: Allocator, io: Io, path: []const u8) ![]u8 {
     return Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
@@ -151,6 +160,7 @@ test "a certificate and key are read from one file or two, and each refusal has 
     try testing.expectError(error.SslClientKeyMismatch, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "other.pem") }, .{ .arena = arena, .passphrase = null }));
     try testing.expectError(error.SslClientKeyUnreadable, load(gpa, io, .{ .cert = at(arena, base, "cert.pem") }, .{ .arena = arena, .passphrase = null }));
     try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "nothere.pem") }, .{ .arena = arena, .passphrase = null }));
-    try testing.expectError(error.SslCertTypeUnsupported, load(gpa, io, .{ .cert = at(arena, base, "both.pem"), .cert_type = "P12" }, .{ .arena = arena, .passphrase = null }));
-    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "both.pem"), .cert_type = "der" }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslCertTypeUnsupported, Format.parse("P12"));
+    try testing.expectEqual(Format.der, try Format.parse("der"));
+    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "both.pem"), .cert_format = .der }, .{ .arena = arena, .passphrase = null }));
 }
