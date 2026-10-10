@@ -859,3 +859,4 @@ test "a tar header's checksum and octal fields are git's" {
     try std.testing.expectEqualStrings("0000664\x00", &h.mode);
     try std.testing.expectEqualStrings("00000000005\x00", &h.size);
 }
+// ci-time: a comment, so that the run after the first is warm and the sources have changed
