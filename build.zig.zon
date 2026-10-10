@@ -3,8 +3,8 @@
     .version = "0.3.0",
     .dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#3a44d222737d9d8d5423cbaf04fff1d29bfcc62d",
-            .hash = "preflight-0.1.0-LX1ZwtjUCQDYxTvrtd-4X5k9PNLWEqBTxENOFAi02CsA",
+            .url = "git+https://github.com/pedronaugusto/preflight#9b813323207ea78e607a5fc8ad49dd30ae62978a",
+            .hash = "preflight-0.1.0-LX1ZwgYNCgC2RK0HPKzicPsTUkMexXhkspEH31GSxCrQ",
             .lazy = true,
         },
         .conduit = .{
