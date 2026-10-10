@@ -24,11 +24,11 @@ permissions:
   actions: read
 jobs:
   gate:
-    uses: pedronaugusto/preflight/.github/workflows/zig.yml@eade5faba539aaf9f6c48f63adc2545ba63d43d8
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@2e35e64fa7da6a10f2843c1fbb558287042ba736
     with:
       tier: ${{ github.event_name == 'workflow_dispatch' && inputs.tier || 'merge' }}
       working-directory: "."
-      preflight-ref: eade5faba539aaf9f6c48f63adc2545ba63d43d8
+      preflight-ref: 2e35e64fa7da6a10f2843c1fbb558287042ba736
       attest: ${{ github.event_name == 'push' || inputs.status-only }}
       fast-matrix: >-
         {"include":[{"os":"ubuntu-latest","name":"source checks and documented snippets","step":"lint","args":"","shard":"","setup":false,"job_timeout":10,"cache_key":"lint","artifact":"","operation":"execute","targets":""},{"os":"ubuntu-latest","name":"Linux Debug shard 1/2","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"1/2","setup":true,"job_timeout":45,"cache_key":"fast-linux-debug-0","artifact":"","operation":"execute","targets":""},{"os":"ubuntu-latest","name":"Linux Debug shard 2/2","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"2/2","setup":true,"job_timeout":45,"cache_key":"fast-linux-debug-1","artifact":"","operation":"execute","targets":""},{"os":"ubuntu-latest","name":"Cross compile 1/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-0","artifact":"","operation":"objects","targets":"aarch64-linux-gnu"},{"os":"ubuntu-latest","name":"Cross compile 2/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-1","artifact":"","operation":"objects","targets":"aarch64-macos"},{"os":"ubuntu-latest","name":"Cross compile 3/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-2","artifact":"","operation":"objects","targets":"x86_64-windows-gnu"},{"os":"ubuntu-latest","name":"Cross compile 4/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-3","artifact":"","operation":"objects","targets":"x86_64-linux-gnu x86_64-macos"},{"os":"ubuntu-latest","name":"Cross compile 5/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-4","artifact":"","operation":"objects","targets":"x86_64-linux-musl aarch64-windows-gnu"}]}
