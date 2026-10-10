@@ -180,10 +180,12 @@ pub const Store = struct {
     }
 
     /// Replace write policy without changing the backend, hash or read cache.
-    /// The `fsync` it carries is the store's, which `configureFsync` sets.
+    /// The permissions and syncs it carries are the store's, which
+    /// `configureWrites` sets.
     pub fn configureReftable(store: *Store, options: stack_engine.Options) void {
         const data = state_mod.get(store._state);
         data.options = options;
+        data.options.shared = data.shared;
         data.options.fsync = data.fsync;
     }
 
@@ -192,10 +194,13 @@ pub const Store = struct {
         return state_mod.get(store._state).fsync.sync(.reference);
     }
 
-    /// Change which writes are synced, as a refreshed configuration says.
-    pub fn configureFsync(store: *Store, fsync: fs.Fsync) void {
+    /// Change the permissions and syncs of what this store writes, as a
+    /// refreshed configuration's `core.sharedRepository` and `core.fsync` say.
+    pub fn configureWrites(store: *Store, shared: fs.Shared, fsync: fs.Fsync) void {
         const data = state_mod.get(store._state);
+        data.shared = shared;
         data.fsync = fsync;
+        data.options.shared = shared;
         data.options.fsync = fsync;
     }
 

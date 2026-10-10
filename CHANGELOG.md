@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A refreshed configuration's `core.sharedRepository` reaches every writer at once (objects, packs, refs, logs, reftable tables, the index): it used to stay what the repository was opened with. `Odb.configureWrites` and `refs.Store.configureWrites` take the permissions and the syncs together.
+
 - The `http` build option (on by default) brings uplink, cloak and strand, which are now lazy: a program built with `.http = false` fetches none of them, and an `http` or `https` remote is `error.HttpUnavailable`.
 - `transport.clone` lists its destination through a handle of its own, so the current directory (`Io.Dir.cwd()`) can be cloned into; it used to fail on a handle not opened for listing.
 

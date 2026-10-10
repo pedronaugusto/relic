@@ -193,9 +193,11 @@ pub const Odb = struct {
         return db.backendData().options.fsync.sync(.loose_object);
     }
 
-    /// Change which writes are synced, as a refreshed configuration says.
-    /// Objects a `batch` wrote before it are still synced by `syncBatch`.
-    pub fn configureFsync(db: *Odb, fsync: fs.Fsync) void {
+    /// Change the permissions and syncs of what this database writes, as a
+    /// refreshed configuration's `core.sharedRepository` and `core.fsync`
+    /// say. Objects a `batch` wrote before it are still synced by `syncBatch`.
+    pub fn configureWrites(db: *Odb, shared: fs.Shared, fsync: fs.Fsync) void {
+        db.backendData().options.shared = shared;
         db.backendData().options.fsync = fsync;
     }
 
