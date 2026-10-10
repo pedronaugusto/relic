@@ -17,6 +17,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 /// Errors from reading mail.
@@ -1067,10 +1068,11 @@ test "a message ending in a bare --- breaks to the patch there, as git's mailinf
 }
 
 test "fuzz: any bytes split and come apart, or are refused by name" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
             var buf: [2048]u8 = undefined;
-            const len = smith.slice(&buf);
+            const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+            case.source.bytes(buf[0..len]);
             const input = buf[0..len];
             var box = split(std.testing.allocator, input, .{}) catch |err| switch (err) {
                 error.OutOfMemory => return err,

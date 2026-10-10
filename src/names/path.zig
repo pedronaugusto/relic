@@ -17,6 +17,7 @@
 //! kernel's tree holds `aux.c`.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 
 /// Why a path was refused. Each is reported by name so a caller can say which
@@ -477,12 +478,13 @@ test "a symbolic link may not be .gitmodules in any spelling, and a file may" {
 }
 
 test "fuzz: any bytes answer without a crash" {
-    try std.testing.fuzz({}, fuzzOne, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{});
 }
 
-fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [256]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     _ = check(input, .worktree);
     _ = check(input, .stored);
 }

@@ -11,6 +11,7 @@
 
 const testgit = @import("../testing/git.zig");
 const std = @import("std");
+const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 
 /// What `checkFormat` takes beyond a full ref name: git's
@@ -361,12 +362,13 @@ test "a worktree-qualified name reaches the worktree git's parse_worktree_ref na
 }
 
 test "fuzz: any bytes answer without a crash, and a valid name is safe" {
-    try testing.fuzz({}, fuzzOne, .{});
+    try shakedown.check(testing.allocator, {}, fuzzOne, .{});
 }
 
-fn fuzzOne(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [256]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
+    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(input);
     const valid = checkFormat(input, .{});
     _ = checkFormat(input, .{ .allow_onelevel = true, .pattern = true });
     // A name a ref may be given under `refs/` is one a deletion may name.
