@@ -455,14 +455,15 @@ returning, which is what `core.fsync` defaults to. `batch` orders each file's
 bytes before its name appears and leaves the end of the batch to make them
 durable: `Odb.syncBatch` flushes the directories that received loose objects,
 once each, and a written pack flushes its directory. `per_file` makes each file
-durable before its name appears, and a lock's directory with it, so a ref or an
-index that returned is the one a power cut leaves. A lock's own descriptor is
-synced before the rename in both, which is the step that prevents an empty ref
-or a truncated index. Every sync, rename and replacement goes through
+durable before its name appears, as git does with `core.fsync`; a lock's
+directory is flushed too when it is asked to (`LockFile.Options.sync_directory`).
+A lock's own descriptor is synced before the rename in both, which is the step
+that prevents an empty ref or a truncated index. Every sync, rename and
+replacement goes through
 [airlock](https://github.com/pedronaugusto/airlock), which says what the
-filesystem reached and refuses a level it cannot keep; on macOS that is a
-barrier on the file and `F_FULLFSYNC` where the drive's own cache is, since
-`fsync(2)` reaches the device and not the cache.
+filesystem reached and refuses a level it cannot keep; on macOS `F_FULLFSYNC` is
+the real barrier, since `fsync(2)` reaches the device and not the drive's own
+cache.
 
 **Every path from a tree is checked before it is written.** A tree entry's
 name is written by whoever wrote the tree and becomes a filesystem path on

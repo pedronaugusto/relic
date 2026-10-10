@@ -101,9 +101,9 @@ pub const Sync = enum {
     /// `core.fsyncMethod = batch`, and where git leaves the barrier to a
     /// throwaway file, airlock flushes the volume.
     batch,
-    /// Make each file durable before its name appears, and with a lock or a
-    /// replacement the directory that receives the name. The strictest and
-    /// the slowest.
+    /// Make each file durable before its name appears, as git's `core.fsync`
+    /// does; the name itself is the directory's to make durable, which a lock
+    /// asks for with `sync_directory`. The strictest and the slowest.
     per_file,
 
     /// git's own default for the objects and the index: neither is synced.
@@ -417,22 +417,7 @@ pub const LockError = error{
 } || airlock.CreateError || Io.Cancelable;
 
 /// Errors from finishing a lock.
-pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.File.SetLengthError || airlock.Pending.CommitOrRefuseError || error{
-    /// The new file is in place, and the directory sync that makes its name
-    /// survive a power cut failed.
-    PublishedNotDurable,
-};
-
-/// What a `Sync` asks of airlock for one file it publishes: nothing; the
-/// file ordered before its name, which the end of a batch makes durable; or
-/// the file and its name durable.
-pub fn levelOf(sync: Sync) airlock.Level {
-    return switch (sync) {
-        .none => .none,
-        .batch => .ordered,
-        .per_file => .data,
-    };
-}
+pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.Dir.OpenError || Io.File.SetLengthError || airlock.Pending.CommitError;
 
 /// git's lock file: `<path>.lock`, created with `O_CREAT|O_EXCL`, written,
 /// made durable as the policy asks, and renamed over `<path>`.
@@ -445,6 +430,10 @@ pub const LockFile = struct {
 
     /// The lock, airlock's exact-named temp of the target.
     pending: airlock.Pending,
+    dir: Io.Dir,
+    /// The name being replaced, relative to `dir`. Borrowed from the caller
+    /// for the lifetime of the lock.
+    target: []const u8,
     /// `<target>.lock`, owned by this lock.
     lock_name: []u8,
     /// How many bytes of `pid <n>` the lock holds until its contents are
@@ -453,6 +442,7 @@ pub const LockFile = struct {
     gpa: Allocator,
     file_writer: Io.File.Writer,
     sync: Sync,
+    sync_directory: bool,
     finished: bool = false,
 
     /// How a lock is taken.
@@ -472,6 +462,9 @@ pub const LockFile = struct {
         /// replaces ever sees them, git reads nothing from a lock, and it
         /// costs one write rather than a file of its own beside each lock.
         write_pid: bool = true,
+        /// Sync the target's parent directory after the commit rename, so
+        /// the new name is flushed too. Independent of the file sync policy.
+        sync_directory: bool = false,
         /// The permissions `core.sharedRepository` asks for, given to the
         /// lock, and so to the file it becomes, as git's tempfiles get them.
         shared: Shared = .umask,
@@ -516,11 +509,14 @@ pub const LockFile = struct {
 
         return .{
             .pending = pending,
+            .dir = dir,
+            .target = sub_path,
             .lock_name = lock_name,
             .pid_len = pid_len,
             .gpa = gpa,
             .file_writer = pending.file().writer(io, buffer),
             .sync = options.sync,
+            .sync_directory = options.sync_directory,
         };
     }
 
@@ -536,10 +532,23 @@ pub const LockFile = struct {
         try lock.file_writer.interface.flush();
         // Contents shorter than the `pid` line under them leave its tail.
         if (lock.file_writer.pos < lock.pid_len) try lock.pending.file().setLength(io, lock.file_writer.pos);
-        // A commit that fails before the name is visible leaves the lock to
-        // `deinit`, which gives it up; one that fails after has published.
-        _ = try lock.pending.commitOrRefuse(io, .{ .level = levelOf(lock.sync) });
+        // The lock's own descriptor is synced before the rename, which is the
+        // step that prevents every corruption the field reports: an empty
+        // ref, a truncated index, a zero-length loose object. A batch differs
+        // from a per-file sync in what happens at the end of the batch, not
+        // here. A commit that fails before the name is visible leaves the
+        // lock to `deinit`, which gives it up.
+        try syncFile(io, lock.pending.file(), .{ .policy = lock.sync });
+        _ = try lock.pending.commit(io, .{ .level = .none });
         lock.finished = true;
+        if (lock.sync_directory) {
+            // `target` may be refs/heads/main relative to the repository: it
+            // is heads, not the repository directory, that was changed.
+            const parent = std.Io.Dir.path.dirname(lock.target) orelse ".";
+            const dir = try lock.dir.openDir(io, parent, .{ .iterate = true });
+            defer dir.close(io);
+            try syncDir(io, dir);
+        }
     }
 
     /// Give the lock up, leaving the target as it was. Safe to call after
@@ -1045,7 +1054,7 @@ pub fn lockHeld(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
 }
 
 /// Errors from replacing a file whole.
-pub const AtomicWriteError = airlock.WriteFileOrRefuseError || error{PublishedNotDurable};
+pub const AtomicWriteError = airlock.CreateError || Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || airlock.Pending.CommitError;
 
 pub const AtomicWriteOptions = struct {
     prefix: []const u8,
@@ -1070,13 +1079,17 @@ pub fn atomicWrite(
     bytes: []const u8,
     options: AtomicWriteOptions,
 ) Self.AtomicWriteError!void {
-    _ = try airlock.writeFileOrRefuse(io, dir, sub_path, bytes, .{
-        .create = .{ .temp = .{ .random = options.prefix }, .mode = switch (options.permissions) {
-            .default => .default,
-            .destination => .inherit,
-        } },
-        .commit = .{ .level = levelOf(options.sync) },
-    });
+    var pending = try airlock.create(io, dir, sub_path, .{ .temp = .{ .random = options.prefix }, .mode = switch (options.permissions) {
+        .default => .default,
+        .destination => .inherit,
+    } });
+    defer pending.discard(io);
+    var write_buf: [4096]u8 = undefined;
+    var fw = pending.file().writer(io, &write_buf);
+    try fw.interface.writeAll(bytes);
+    try fw.interface.flush();
+    try syncFile(io, pending.file(), .{ .policy = options.sync });
+    _ = try pending.commit(io, .{ .level = .none });
 }
 
 /// A name no other process will pick, written into `buf`.
@@ -1353,35 +1366,33 @@ test "a lock names its holder in its own bytes, and no file but the lock is made
     }
 }
 
-/// How a lock's file is synced before its name: macOS orders it with a
-/// barrier and leaves the flush of the device to the directory's sync.
-const lock_file_sync: airlock_mod.Call = if (builtin.target.os.tag.isDarwin()) .sync_barrier else airlock_mod.data_sync;
-
-test "a lock syncs the file as its policy asks, and the directory when it is to be durable" {
+test "a lock syncs the target's directory after rename only when asked" {
     const seam = airlock_mod;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "nested", .default_dir);
     for ([_][]const u8{ "thing", "nested/thing" }) |target| {
         for ([_]Sync{ .none, .batch, .per_file }) |policy| {
-            const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{});
-            defer h.destroy();
-            const io = h.io();
-            var buf: [64]u8 = undefined;
-            var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = target, .buffer = &buf }, .{ .sync = policy });
-            defer lock.deinit(io);
-            try lock.writer().writeAll("new\n");
-            try lock.commit(io);
-            // none: nothing. batch: the file ordered, and the batch's end makes it durable.
-            // per file: the file and the directory that received its name.
-            try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(lock_file_sync));
-            // Linux hands airlock a directory it cannot sync, and airlock syncs a handle it reopens: the
-            // refused call is recorded too.
-            const reopened: u32 = if (builtin.target.os.tag == .linux) h.count(.getfl) else 0;
-            try std.testing.expectEqual(@as(u32, @intFromBool(policy == .per_file)) + reopened, h.count(.sync_dir));
-            var read_buf: [16]u8 = undefined;
-            try std.testing.expectEqualStrings("new\n", try tmp.dir.readFile(io, target, &read_buf));
-            try std.testing.expect(!lockHeld(io, tmp.dir, target));
+            for ([_]bool{ false, true }) |sync_directory| {
+                const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{});
+                defer h.destroy();
+                const io = h.io();
+                var buf: [64]u8 = undefined;
+                var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = target, .buffer = &buf }, .{
+                    .sync = policy,
+                    .sync_directory = sync_directory,
+                });
+                defer lock.deinit(io);
+                try lock.writer().writeAll("new\n");
+                try lock.commit(io);
+                try std.testing.expectEqual(@as(u32, @intFromBool(sync_directory)), h.count(.sync_dir));
+                const file_call: seam.Call = if (policy == .batch and builtin.target.os.tag.isDarwin()) .sync_barrier else seam.data_sync;
+                try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none)), h.count(file_call));
+                try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none) + @as(u32, @intFromBool(sync_directory))), h.syncs());
+                var read_buf: [16]u8 = undefined;
+                try std.testing.expectEqualStrings("new\n", try tmp.dir.readFile(io, target, &read_buf));
+                try std.testing.expect(!lockHeld(io, tmp.dir, target));
+            }
         }
     }
 }
@@ -1394,24 +1405,22 @@ test "airlock file failure prevents lock publication and directory failure is ex
         defer tmp.cleanup();
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "thing", .data = "old\n" });
         const h = try seam.Seam.create(gpa, std.testing.io, .{
-            .plan = &.{seam.fail(if (directory_failure) .sync_dir else lock_file_sync, 1, seam.io_error)},
+            .plan = &.{seam.fail(if (directory_failure) .sync_dir else seam.data_sync, 1, seam.io_error)},
         });
         defer h.destroy();
         const io = h.io();
         {
             var buffer: [64]u8 = undefined;
-            var lock = try LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{ .sync = .per_file });
+            var lock = try LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buffer }, .{ .sync = .per_file, .sync_directory = true });
             defer lock.deinit(io);
             try lock.writer().writeAll("new\n");
-            // A file that did not reach the disk is never renamed; a name that
-            // may not survive is published, and says so.
-            try std.testing.expectError(if (directory_failure) error.PublishedNotDurable else error.InputOutput, lock.commit(io));
+            try std.testing.expectError(error.InputOutput, lock.commit(io));
             var read_buf: [16]u8 = undefined;
             try std.testing.expectEqualStrings(if (directory_failure) "new\n" else "old\n", try tmp.dir.readFile(io, "thing", &read_buf));
-            try std.testing.expect(!lockHeld(io, tmp.dir, "thing"));
+            try std.testing.expectEqual(!directory_failure, lockHeld(io, tmp.dir, "thing"));
         }
         try std.testing.expect(!lockHeld(io, tmp.dir, "thing"));
-        try std.testing.expectEqual(@as(u32, 1), h.count(if (directory_failure) .sync_dir else lock_file_sync));
+        try std.testing.expectEqual(@as(u32, 1), h.count(if (directory_failure) .sync_dir else seam.data_sync));
     }
 }
 
@@ -1421,7 +1430,7 @@ test "airlock refused durability never publishes weaker file data" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "thing", .data = "old\n" });
     const h = try seam.Seam.create(std.testing.allocator, std.testing.io, .{
-        .plan = &.{ seam.always(seam.data_sync, seam.refused), seam.always(.sync_full, seam.refused), seam.always(.sync_barrier, seam.refused), seam.always(.sync_plain, seam.refused) },
+        .plan = &.{ seam.always(seam.data_sync, seam.refused), seam.always(.sync_full, seam.refused), seam.always(.sync_plain, seam.refused) },
     });
     defer h.destroy();
     const io = h.io();

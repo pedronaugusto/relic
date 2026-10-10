@@ -49,11 +49,12 @@ Airlock owns replacing a file and making it durable. A lock is an airlock temp
 named `<path>.lock`, created exclusively; relic adds git's protocol over it, the
 backoff while another process holds it and the holder's pid in its first bytes,
 and never breaks one. A replacement that has no lock, a state file or the
-alternates, is `airlock.writeFile`. Relic chooses each file's `Sync`: none; the
-bytes ordered before the name, with the end of the batch making them durable
-(`Odb.syncBatch` flushes the fan-out directories that received loose objects,
-once each, and a written pack flushes its directory); or the bytes and the name
-durable before the call returns. A filesystem that cannot keep the level is a
+alternates, is an airlock temp renamed over its name. Relic chooses each file's
+`Sync`: none; the bytes ordered before the name, with the end of the batch making
+them durable (`Odb.syncBatch` flushes the fan-out directories that received loose
+objects, once each, and a written pack flushes its directory); or the bytes
+durable before the name appears, as git's `core.fsync` makes them, with the
+directory too when a lock is asked to. A filesystem that cannot keep the level is a
 named error, never a weaker promise. `Odb.makeDurable` and a durable checkout sync
 the files they cover and the directories that received them as one airlock batch,
 one flush of each volume. Object publication is ordered before refs, and a
