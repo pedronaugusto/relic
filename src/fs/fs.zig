@@ -1,9 +1,13 @@
 //! The file protocol git uses, and nothing else.
 //!
-//! Every replacement goes through `LockFile` or `atomicWrite`:
-//! `O_CREAT|O_EXCL` on a neighbouring name, write, make durable as the policy
-//! asks, rename. No advisory lock is taken anywhere, because git takes none
-//! and a lock that is not the lock git holds is a lock that does not stop it.
+//! Every replacement goes through `LockFile` or `atomicWrite`: a temp beside
+//! the target, written, made durable as the policy asks and renamed over it,
+//! which is [airlock](https://github.com/pedronaugusto/airlock)'s publish. What
+//! is relic's is git's protocol on top of it: the lock is `<path>.lock`, taken
+//! exclusively with git's backoff and the holder's pid in its first bytes, and
+//! the policy is git's `core.sharedRepository` and a `Sync` per file. No
+//! advisory lock is taken anywhere, because git takes none and a lock that is
+//! not the lock git holds is a lock that does not stop it.
 //!
 //! A lock another process holds is reported, never broken — with the holder's
 //! process id where it can be found, which is what git itself now writes.
