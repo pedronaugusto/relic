@@ -5,7 +5,7 @@ const std = @import("std");
 const repo_mod = @import("../repo/repo.zig");
 const path_mod = @import("../names.zig").path;
 const shakedown = @import("shakedown");
-const testbytes = @import("../testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 const builtin = @import("builtin");
 const Io = std.Io;
 
@@ -1050,7 +1050,7 @@ test "a filesystem walk that reaches its depth limit refuses a partial result" {
     const gpa = std.testing.allocator;
     var folder = std.testing.tmpDir(.{ .iterate = true });
     defer folder.cleanup();
-    const path = testbytes.repeat("d/", 66) ++ "file";
+    const path = repeat("d/", 66) ++ "file";
     try folder.dir.createDirPath(io, std.Io.Dir.path.dirnamePosix(path).?);
     try folder.dir.writeFile(io, .{ .sub_path = path, .data = "deep\n" });
     var private = std.testing.tmpDir(.{ .iterate = true });
@@ -1446,7 +1446,7 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
 /// at its edges, the probes the glob design names, and a pattern far longer
 /// than one match takes on the stack.
 const glob_lines = "tabbed\t\nspaced   \nkept\\ \n\\#hash\n\\!bang\n*.log\n!keep.log\nbuild/\n/root-only\n" ++
-    "doc/*.txt\nsr**/wild.zig\na/**/z\n[[:upper:]]*.c\nx[abc\n" ++ "long/" ++ testbytes.repeat("*", 1100) ++ "z\n";
+    "doc/*.txt\nsr**/wild.zig\na/**/z\n[[:upper:]]*.c\nx[abc\n" ++ "long/" ++ repeat("*", 1100) ++ "z\n";
 
 /// The paths the `sr**/wild.zig` probe is decided on where git before 2.52
 /// matched it: its `match_pathname` cut the literal `sr` off and read what
@@ -1542,13 +1542,13 @@ test "attributes match globs as git check-attr matches them" {
     const folded: attributes.Attrs = try .init(gpa, .{ .case_fold = std.mem.eql(u8, fold, "true") });
     h.attrs.deinit();
     h.attrs = folded;
-    const many = testbytes.repeat("[ab]", 65);
+    const many = repeat("[ab]", 65);
     try h.repo.writeFile(io, ".gitattributes", "*.txt t1\nsr**/wild.zig probe\n[[:upper:]]*.c upper\n" ++
         many ++ " many\nx[abc broken\na/**/z deep\n*.C\tfolded\n");
     const probe = try probeAgrees(gpa, io);
     for ([_][]const u8{
-        "f.txt",   "src/worktree/wild.zig",   "srwild.zig",                     "src/wild.zig", "Upper.c",
-        "lower.c", testbytes.repeat("a", 65), testbytes.repeat("a", 64) ++ "c", "x[abc",        "a/b/c/z",
+        "f.txt",   "src/worktree/wild.zig", "srwild.zig",           "src/wild.zig", "Upper.c",
+        "lower.c", repeat("a", 65),         repeat("a", 64) ++ "c", "x[abc",        "a/b/c/z",
         "a/z",     "UPPER.C",
     }) |path| {
         if (!probe and isProbePath(path)) continue;
@@ -1564,7 +1564,7 @@ test "pathspecs choose the files git ls-files lists" {
     const files = [_][]const u8{ "src/worktree/wild.zig", "src/a.zig", "srcx/b.zig", "docs/README.md", "Upper.c", "top.zig" };
     for (files) |path| try h.repo.writeFile(io, path, "x\n");
     try h.repo.exec(io, &.{ "add", "-A" });
-    const long = "src/" ++ testbytes.repeat("*", 1100) ++ ".zig";
+    const long = "src/" ++ repeat("*", 1100) ++ ".zig";
     for ([_][]const u8{
         // git_fnmatch matches what follows the literal prefix as a pattern
         // of its own: `**` after `sr` spans components.

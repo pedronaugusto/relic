@@ -3,7 +3,7 @@
 //! refusal with nothing changed.
 
 const std = @import("std");
-const testbytes = @import("../testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -171,7 +171,7 @@ fn setupBase(p: *Pair, io: Io) !void {
     try p.write(io, "b.txt", "one\ntwo\nthree\n");
     try p.write(io, "dir/c.txt", "c1\nc2\nc3\nc4\nc5\nc6\n");
     try p.write(io, "run.sh", "#!/bin/sh\necho hi\n");
-    try p.write(io, "bin.dat", testbytes.repeat("\x00\x01\x02binary\x00", 30));
+    try p.write(io, "bin.dat", repeat("\x00\x01\x02binary\x00", 30));
     try p.both(io, &.{ "add", "-A" });
     try p.both(io, &.{ "commit", "-q", "-m", "base" });
     try p.both(io, &.{ "tag", "base" });
@@ -200,7 +200,7 @@ fn changeMany(p: *Pair, io: Io) !void {
     try r.exec(io, &.{ "mv", "dir/c.txt", "dir/moved.txt" });
     try r.writeFile(io, "dir/moved.txt", "c1\nc2\nc3\nC4\nc5\nc6\n");
     try r.exec(io, &.{ "update-index", "--chmod=+x", "run.sh" });
-    try r.writeFile(io, "bin.dat", testbytes.repeat("\x00\x01\x02binary\x00", 29) ++ "\x00changed!");
+    try r.writeFile(io, "bin.dat", repeat("\x00\x01\x02binary\x00", 29) ++ "\x00changed!");
 }
 
 test "a patch with every kind of change applies as git applies it, to the working tree, the index or the index alone" {

@@ -2,7 +2,7 @@
 //! the same bytes.
 
 const std = @import("std");
-const testbytes = @import("../testing/bytes.zig");
+const repeat = @import("shakedown").corpus.repeat;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -197,7 +197,7 @@ test "the files format-patch -o writes are named as git names them" {
 }
 
 fn binaryBase(io: Io, git: *testgit.Repo) !void {
-    try git.writeFile(io, "blob.bin", testbytes.repeat("\x00\x01\x02 binary data ", 64));
+    try git.writeFile(io, "blob.bin", repeat("\x00\x01\x02 binary data ", 64));
     try git.exec(io, &.{ "add", "-A" });
     try git.exec(io, &.{ "commit", "-q", "-m", "base" });
 }
@@ -208,7 +208,7 @@ test "a binary change goes out as a GIT binary patch git applies to the same fil
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
     try binaryBase(io, &git);
-    try git.writeFile(io, "blob.bin", testbytes.repeat("\x00\x01\x02 binary data ", 60) ++ "\x00 changed tail");
+    try git.writeFile(io, "blob.bin", repeat("\x00\x01\x02 binary data ", 60) ++ "\x00 changed tail");
     try git.writeFile(io, "fresh.bin", "\x00new");
     try git.exec(io, &.{ "add", "-A" });
     try git.exec(io, &.{ "commit", "-q", "-m", "binary" });
@@ -259,7 +259,7 @@ test "odd paths, binary files, type changes, wide diffstats and odd authors come
     defer git.deinit();
     try git.writeFile(io, "plain.txt", "1\n2\n3\n");
     try git.writeFile(io, "kind", "a file that becomes a link\n");
-    try git.writeFile(io, "pic.bin", testbytes.repeat("\x00\x01image", 10));
+    try git.writeFile(io, "pic.bin", repeat("\x00\x01image", 10));
     try git.exec(io, &.{ "add", "-A" });
     try git.exec(io, &.{ "commit", "-q", "-m", "base" });
     try git.exec(io, &.{ "tag", "base" });
@@ -273,10 +273,10 @@ test "odd paths, binary files, type changes, wide diffstats and odd authors come
     const odd_name = if (builtin.target.os.tag == .windows) "odd name caf\xc3\xa9.txt" else "odd\tname caf\xc3\xa9.txt";
     try git.writeFile(io, odd_name, "odd\n");
     try git.writeFile(io, "中文e\u{0301}.txt", "wide and combining\n");
-    try git.writeFile(io, "wide/" ++ testbytes.repeat("目录", 40) ++ "e\u{0301}.txt", "a shortened wide name\n");
+    try git.writeFile(io, "wide/" ++ repeat("目录", 40) ++ "e\u{0301}.txt", "a shortened wide name\n");
     try git.writeFile(io, "a/very/long/directory/path/that/needs/to/be/shortened/in/the/diffstat/file.txt", "deep\n");
     try git.writeFile(io, "plain.txt", big.items);
-    try git.writeFile(io, "pic.bin", testbytes.repeat("\x00\x01image", 9) ++ "\x00changed");
+    try git.writeFile(io, "pic.bin", repeat("\x00\x01image", 9) ++ "\x00changed");
     try git.exec(io, &.{ "add", "-A" });
     try git.exec(io, &.{ "-c", "user.name=Doe, John (the \"tester\")", "-c", "user.email=doe@example.com", "commit", "-q", "-m", "Odd things =?with?= an encoded-word lookalike\n\nFrom here on, a line mboxrd quotes\n>From one already quoted\n" });
     if (builtin.target.os.tag != .windows) {
