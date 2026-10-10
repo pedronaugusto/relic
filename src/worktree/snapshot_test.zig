@@ -416,10 +416,15 @@ test "a live snapshot store reads its own objects after source packs are damaged
 
 const airlock_testing = @import("airlock.testing");
 
-/// The files a batch synced one by one: Linux's data syncs, and the writeouts
-/// macOS and Windows make before one flush of the volume.
-fn fileSyncs(h: *airlock_testing.Seam) usize {
-    return if (builtin.os.tag == .linux) h.count(.sync_data) else h.count(.sync_writeout);
+/// A batch syncs `files` one by one. Linux does it with a data sync each;
+/// macOS and Windows write each file and directory out and flush the volume
+/// once, so they show at least as many writeouts as files.
+fn expectFileSyncs(h: *airlock_testing.Seam, files: usize) !void {
+    if (builtin.os.tag == .linux) {
+        try testing.expectEqual(files, h.count(.sync_data));
+    } else {
+        try testing.expect(h.count(.sync_writeout) >= files);
+    }
 }
 
 fn expectSyncOrder(h: *airlock_testing.Seam) !void {
@@ -436,6 +441,9 @@ fn expectSyncOrder(h: *airlock_testing.Seam) !void {
 }
 
 fn expectDirectorySyncs(h: *airlock_testing.Seam, expected: usize) !void {
+    // Only Linux syncs a directory with a call of its own; elsewhere the batch
+    // writes it out with its files.
+    if (builtin.os.tag != .linux) return;
     // Airlock retries Linux O_PATH descriptors after EBADF: the failed fsync
     // is recorded too, and each getfl identifies that recovery attempt.
     const recovered = if (builtin.os.tag == .linux) h.count(.getfl) else 0;
@@ -466,16 +474,16 @@ test "durable snapshots sync their closure and restored files before directories
     resetSyncs(h);
     const captured = try store.capture(io, .{ .folder = folder.dir }, .{});
     // Three trees and the blob; already present objects must be covered too.
-    try testing.expectEqual(@as(usize, 4), fileSyncs(h));
-    try testing.expect(h.count(.sync_dir) >= 2);
+    try expectFileSyncs(h, 4);
+    if (builtin.os.tag == .linux) try testing.expect(h.count(.sync_dir) >= 2);
     try expectSyncOrder(h);
     resetSyncs(h);
     _ = try store.capture(io, .{ .folder = folder.dir }, .{});
-    try testing.expectEqual(@as(usize, 4), fileSyncs(h));
+    try expectFileSyncs(h, 4);
     try expectSyncOrder(h);
     resetSyncs(h);
     _ = try store.adoptTree(io, &store.db, captured.snapshot.tree);
-    try testing.expectEqual(@as(usize, 4), fileSyncs(h));
+    try expectFileSyncs(h, 4);
     try expectSyncOrder(h);
     resetSyncs(h);
     h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
@@ -484,21 +492,23 @@ test "durable snapshots sync their closure and restored files before directories
     defer dest.cleanup();
     resetSyncs(h);
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
-    try testing.expectEqual(@as(usize, 1), fileSyncs(h));
+    try expectFileSyncs(h, 1);
     try expectDirectorySyncs(h, 3);
     try expectSyncOrder(h);
     try expectFile(dest.dir, "nested/deep/file", "kept");
     // The same barrier covers a stat-shortcut checkout's existing bytes.
     resetSyncs(h);
     _ = try store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot });
-    try testing.expectEqual(@as(usize, 1), fileSyncs(h));
+    try expectFileSyncs(h, 1);
     try expectSyncOrder(h);
     resetSyncs(h);
     h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
     resetSyncs(h);
-    h.setPlan(&.{airlock_testing.fail(.sync_dir, 1, airlock_testing.io_error)});
-    try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
+    if (builtin.os.tag == .linux) {
+        h.setPlan(&.{airlock_testing.fail(.sync_dir, 1, airlock_testing.io_error)});
+        try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
+    }
     resetSyncs(h);
     h.setPlan(&.{airlock_testing.fail(airlock_testing.data_sync, 1, airlock_testing.io_error)});
     try testing.expectError(error.InputOutput, store.capture(io, .{ .folder = folder.dir }, .{}));
@@ -524,7 +534,7 @@ test "selected object durability syncs a used pack and index once" {
     const io = h.io();
     resetSyncs(h);
     try store.db.makeDurable(io, &.{ saved.snapshot.tree, saved.snapshot.tree });
-    try testing.expectEqual(@as(usize, 2), fileSyncs(h));
+    try expectFileSyncs(h, 2);
     try expectDirectorySyncs(h, 2);
     try expectSyncOrder(h);
 }
@@ -553,7 +563,7 @@ test "durable checkout covers unchanged files and surviving parents of deletions
     resetSyncs(h);
     const result = try store.restore(io, after.snapshot, dest.dir, .{ .from = before.snapshot, .checkout = .{ .durability = .durable } });
     try testing.expectEqual(@as(u32, 1), result.removed);
-    try testing.expectEqual(@as(usize, 1), fileSyncs(h));
+    try expectFileSyncs(h, 1);
     try expectDirectorySyncs(h, 1);
     try expectSyncOrder(h);
     try testing.expectError(error.FileNotFound, dest.dir.access(base, "old", .{}));
