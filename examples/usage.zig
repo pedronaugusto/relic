@@ -28,6 +28,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
         };
         break;
     }
+    // glint-ignore: Z026 -- the example's scratch directory is removed best effort; a leftover is the temporary directory's to clear
     defer cwd.deleteTree(io, &scratch_name) catch {};
     var dir = try cwd.openDir(io, &scratch_name, .{ .iterate = true });
     defer dir.close(io);
@@ -182,8 +183,10 @@ test "overlapping usage examples own different scratch directories" {
     vtable.dirOpenDir = Controlled.open;
     const guarded: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     var first = try io.concurrent(Controlled.example, .{ &control, guarded });
+    // glint-ignore: Z026 -- the task is canceled to stop it; how it ended is not this example's subject
     defer first.cancel(io) catch {};
     var second = try io.concurrent(Controlled.example, .{ &control, guarded });
+    // glint-ignore: Z026 -- the task is canceled to stop it; how it ended is not this example's subject
     defer second.cancel(io) catch {};
     defer control.proceed.set(io);
     const example_watchdog: Io.Duration = .fromSeconds(5);

@@ -495,7 +495,7 @@ fn fuzzGraph(_: void, smith: *std.testing.Smith) anyerror!void {
     defer graph.deinit();
     var i: u32 = 0;
     while (i < @min(graph.count, 64)) : (i += 1) {
-        // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
+        // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
         _ = graph.commitAt(i) catch {};
         const parents = graph.parentsOf(gpa, i) catch continue;
         gpa.free(parents);

@@ -909,13 +909,14 @@ const TempFile = struct {
         const path = try std.Io.Dir.path.join(arena, &.{ dir_abs, name });
         const file = try Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
         defer file.close(io);
+        // glint-ignore: Z026 -- the write's error is the one to report; a scratch file left behind is in relic's own temporary directory
         errdefer Io.Dir.deleteFileAbsolute(io, path) catch {};
         try file.writePositionalAll(io, bytes, 0);
         return .{ .path = path };
     }
 
     fn remove(f: *TempFile, io: Io) void {
-        // ziglint-ignore: Z026 as git's delete_tempfile: the signature is already read, and a temporary file left behind holds only what was signed or verified
+        // glint-ignore: Z026 -- as git's delete_tempfile: the signature is already read, and a temporary file left behind holds only what was signed or verified
         Io.Dir.deleteFileAbsolute(io, f.path) catch {};
     }
 };

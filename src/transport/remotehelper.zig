@@ -253,11 +253,11 @@ pub const Helper = struct {
     /// and the helper waited for.
     pub fn deinit(h: *Helper, io: Io) void {
         if (h.conn) |conn| {
-            // ziglint-ignore: Z026 the blank line is a courtesy; the helper is waited for whether or not it heard it
+            // glint-ignore: Z026 -- the blank line is a courtesy; the helper is waited for whether or not it heard it
             sayGoodbye(conn) catch {};
             conn.deinit(io);
         }
-        // ziglint-ignore: Z026 a lock file that cannot be removed is stale, and the next run that needs it says so
+        // glint-ignore: Z026 -- a lock file that cannot be removed is stale, and the next run that needs it says so
         for (h.locks.items) |path| Io.Dir.cwd().deleteFile(io, path) catch {};
         h.locks.deinit(h.gpa);
         h.unchanged.deinit(h.gpa);
@@ -479,16 +479,16 @@ pub const Helper = struct {
                 if (ref.symref_target) |target| name = target;
                 break;
             };
-            if (name.ptr != w.name.ptr) try aliases.append(h.gpa, .{ w.name, name });
+            if (name.ptr != w.name.ptr) try aliases.append(h.gpa, .{ try h.arena_state.allocator().dupe(u8, w.name), name });
             const seen = for (wants.items) |o| {
                 if (std.mem.eql(u8, o.name, name)) break true;
             } else false;
             if (!seen) try wants.append(h.gpa, .{ .name = name, .oid = w.oid });
         }
-        defer for (aliases.items) |pair| if (h.fetched.get(pair[1])) |oid| {
-            const key = h.arena_state.allocator().dupe(u8, pair[0]) catch continue;
-            h.fetched.put(h.gpa, key, oid) catch {};
-        };
+        // Room for every want the fetch records and every alias first, so
+        // recording the aliases after the fetch, however it ends, cannot fail.
+        try h.fetched.ensureUnusedCapacity(h.gpa, @intCast(aliases.items.len + wants.items.len));
+        defer for (aliases.items) |pair| if (h.fetched.get(pair[1])) |oid| h.fetched.putAssumeCapacity(pair[0], oid);
         if (wants.items.len == 0) return;
         if (!h.caps.fetch and !h.caps.import) return error.HelperCannotFetch;
         if (options.cloning) _ = try h.option("cloning", "true", .raw);
@@ -655,7 +655,7 @@ pub const Helper = struct {
         w.flush() catch return conn.failure();
         var report = try h.readStatus(gpa);
         errdefer report.deinit();
-        // ziglint-ignore: Z026 the marks are an optimisation for the next push, as git's are: kept when they can be, and the push stands either way
+        // glint-ignore: Z026 -- the marks are an optimisation for the next push, as git's are: kept when they can be, and the push stands either way
         if (export_tmp) |tmp| Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), h.export_marks.?, h.io) catch {};
         return report;
     }

@@ -913,6 +913,7 @@ const CannedServer = struct {
             const stream = s.listener.accept(s.io) catch return;
             defer stream.close(s.io);
             if (s.stopping.load(.acquire)) return;
+            // glint-ignore: Z026 -- a request the bench server cannot answer fails the client that sent it, which the row reports
             s.handle(stream) catch {};
         }
     }

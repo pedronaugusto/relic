@@ -29,6 +29,7 @@ const TmpDir = struct {
 
     fn cleanup(t: *TmpDir) void {
         t.dir.close(t.io);
+        // glint-ignore: Z026 -- a scratch tree left behind is the temporary directory's to clear; the timings are already taken
         t.parent.deleteTree(t.io, &t.path) catch {};
         t.parent.close(t.io);
     }

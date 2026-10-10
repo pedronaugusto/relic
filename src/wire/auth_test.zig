@@ -749,6 +749,7 @@ test "ssh's refusal is named once ssh has ended, while something it started stil
     // Released however the test ends, and waited for, since the
     // grandchild runs from the folder the test removes.
     defer {
+        // glint-ignore: Z026 -- releasing the grandchild is best effort; the wait after it bounds the test either way
         Io.Dir.cwd().writeFile(io, .{ .sub_path = release, .data = "" }) catch {};
         for (0..6000) |_| {
             if (Io.Dir.cwd().access(io, ended, .{})) |_| break else |_| {}

@@ -2004,6 +2004,7 @@ const CheckoutWrite = struct {
         defer batch.deinit();
         // A path that fails here leaves every path before it written, as a
         // checkout one file at a time leaves them.
+        // glint-ignore: Z026 -- the path's own error is the one returned; flushing only keeps the paths before it written
         errdefer batch.flush(c.io, c.wt, c.index, c.outcome) catch {};
         var leading: LeadingDirs = .{};
         for (paths) |path| {
@@ -2191,7 +2192,7 @@ fn makeLeadingDirs(io: Io, wt: Io.Dir, path: []const u8) Error!void {
 /// where `symlinks` is off or the platform refuses one, an ordinary file
 /// holding the target. `true` when it was written as a file.
 fn writeLink(io: Io, wt: Io.Dir, path: []const u8, target: []const u8, symlinks: bool) Error!bool {
-    // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
+    // glint-ignore: Z026 -- whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
     fs.deleteFile(io, wt, path) catch {};
     if (symlinks) {
         if (wt.symLink(io, target, path, .{})) |_| return false else |_| {}
@@ -2708,7 +2709,7 @@ pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
     if (!try realLeadingPath(io, wt, path)) return;
     wt.deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
-        // ziglint-ignore: Z026 as git's remove_path: a directory with something in it stays, and only an empty one goes
+        // glint-ignore: Z026 -- as git's remove_path: a directory with something in it stays, and only an empty one goes
         error.IsDir => wt.deleteDir(io, path) catch {},
         else => |e| return e,
     };
@@ -3002,6 +3003,7 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
     });
     var failed = true;
     defer if (failed) {
+        // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind is what git's own checkout leaves too
         wt.deleteFile(io, temp_path) catch {};
     };
     {

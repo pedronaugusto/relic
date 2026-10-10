@@ -231,7 +231,7 @@ pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        // ziglint-ignore: Z026 a line git cannot parse is one it skips, and the log's other entries stand
+        // A line git cannot parse is one it skips, and the log's other entries stand.
         const entry = parseLine(line, kind) catch continue;
         try entries.append(gpa, entry);
     }
@@ -282,7 +282,7 @@ pub fn expire(
     var counting = std.mem.splitScalar(u8, bytes, '\n');
     while (counting.next()) |line| {
         if (line.len == 0) continue;
-        // ziglint-ignore: Z026 a line git cannot parse is no entry and is not counted
+        // A line git cannot parse is one it skips, and the log's other entries stand.
         _ = parseLine(line, kind) catch continue;
         count += 1;
     }
@@ -294,7 +294,7 @@ pub fn expire(
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        // ziglint-ignore: Z026 a line git cannot parse is one its rewrite drops
+        // A line git cannot parse is one it skips, and the log's other entries stand.
         const entry = parseLine(line, kind) catch continue;
         seen += 1;
         if (!keeper.keep(entry, count - seen)) continue;

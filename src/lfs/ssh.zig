@@ -244,7 +244,7 @@ pub const Connection = struct {
             c.ended = true;
             var scratch: std.heap.ArenaAllocator = .init(c.gpa);
             defer scratch.deinit();
-            // ziglint-ignore: Z026 quit is a courtesy; the connection is closed next whether or not the server answered
+            // glint-ignore: Z026 -- quit is a courtesy; the connection is closed next whether or not the server answered
             c.sayQuit(scratch.allocator(), io) catch {};
         }
         c.conn.deinit(io);
@@ -340,7 +340,7 @@ pub const Transfer = struct {
 
     fn removeControlDir(t: *Transfer, io: Io) void {
         const dir = t.control_dir orelse return;
-        // ziglint-ignore: Z026 a control directory left behind holds only a dead socket, in the system's temporary space
+        // glint-ignore: Z026 -- a control directory left behind holds only a dead socket, in the system's temporary space
         Io.Dir.cwd().deleteTree(io, dir) catch {};
         t.control_dir = null;
     }

@@ -1051,7 +1051,7 @@ fn fuzzObject(_: void, smith: *std.testing.Smith) anyerror!void {
         while (it.next() catch null) |entry| {
             std.debug.assert(entry.name.len != 0);
         }
-        // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
+        // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
         _ = tree.find("a") catch {};
 
         if (Commit.parse(gpa, kind, input)) |parsed| {
@@ -1067,9 +1067,9 @@ fn fuzzObject(_: void, smith: *std.testing.Smith) anyerror!void {
         } else |_| {}
     }
 
-    // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
+    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = Signature.parse(input) catch {};
-    // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
+    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = Mode.parse(input[0..@min(input.len, 6)]) catch {};
 }
 

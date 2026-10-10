@@ -2665,9 +2665,9 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     var config = Config.parseText(gpa, input, .local) catch return;
     defer config.deinit();
     _ = config.get("core.autocrlf");
-    // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
+    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = config.getBool("core.bare", false) catch {};
-    // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
+    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = config.getInt("core.bigfilethreshold", 0) catch {};
     const values = config.all("core.autocrlf") catch return;
     gpa.free(values);

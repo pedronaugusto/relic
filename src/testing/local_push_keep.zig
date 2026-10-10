@@ -77,6 +77,7 @@ test "local push retains its pack through collection failure and cancellation" {
                     defer fault.destroy();
                     var push: Push = .{};
                     var publication = try io.concurrent(Push.run, .{ &push, fault.io(), path, from.objectDatabase(), &commands, objects.entries, atomic });
+                    // glint-ignore: Z026 -- the task is canceled to stop it; its outcome is checked through its state
                     defer _ = publication.cancel(io) catch {};
                     try ready.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(20) } });
                     var pack_dir = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
@@ -91,6 +92,7 @@ test "local push retains its pack through collection failure and cancellation" {
                         }
                     };
                     var collector = try io.concurrent(Collector.run, .{ io, &target });
+                    // glint-ignore: Z026 -- the task is canceled to stop it; its outcome is checked through its state
                     defer _ = collector.cancel(io) catch {};
                     try collector.await(io);
                     try target.exec(io, &.{ "cat-file", "-e", head });

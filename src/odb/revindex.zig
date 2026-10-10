@@ -66,6 +66,7 @@ pub fn write(
     var failed = true;
     defer if (failed) {
         file.close(io);
+        // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind is what git gc prunes
         dir.deleteFile(io, sub_path) catch {};
     };
     var fw = file.writer(io, &buffer);

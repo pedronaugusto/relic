@@ -417,6 +417,6 @@ fn writeLog(io: Io, dir_path: []const u8, text: []const u8) void {
     const name = std.mem.print(&name_buf, "{x}.log", .{&raw}) catch return;
     var dir = Io.Dir.cwd().openDir(io, dir_path, .{}) catch return;
     defer dir.close(io);
-    // ziglint-ignore: Z026 a helper exits with its own status; a test that reads this log fails on its absence
+    // glint-ignore: Z026 -- a helper exits with its own status; a test that reads this log fails on its absence
     dir.writeFile(io, .{ .sub_path = name, .data = text }) catch {};
 }

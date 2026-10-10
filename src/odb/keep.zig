@@ -62,7 +62,7 @@ pub const Token = struct {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         defer t.dir.close(io);
-        // ziglint-ignore: Z026 failed cleanup retains the marker, keeping unreferenced objects protected
+        // glint-ignore: Z026 -- failed cleanup retains the marker, keeping unreferenced objects protected
         if (t.managed) t.release(io) catch {};
     }
 
@@ -145,6 +145,7 @@ test "keep cleanup survives cancellation of its owner" {
     var ready: Io.Event = .unset;
     var parked: Io.Event = .unset;
     var worker = try io.concurrent(Worker.run, .{ std.testing.allocator, io, tmp.dir, oid, &ready, &parked });
+    // glint-ignore: Z026 -- the worker is canceled to stop it; its outcome is checked through the events
     defer _ = worker.cancel(io) catch {};
     try ready.wait(io);
     try tmp.dir.access(io, "pack-1111111111111111111111111111111111111111.keep", .{});

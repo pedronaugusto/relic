@@ -491,7 +491,7 @@ const Run = struct {
     /// or straight to the caller's `Progress` when this is the calling task.
     fn say(r: *Run, event: Event) void {
         if (r.events) |q| {
-            // ziglint-ignore: Z026 a closed queue means the calling task has stopped listening; there is no one left to tell
+            // glint-ignore: Z026 -- a closed queue means the calling task has stopped listening; there is no one left to tell
             q.putOneUncancelable(r.io(), event) catch {};
             return;
         }
@@ -968,6 +968,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
             const file = Io.Dir.cwd().openFile(io, full, .{}) catch return .{ .fail = "the custom transfer's file cannot be read" };
             defer {
                 file.close(io);
+                // glint-ignore: Z026 -- the custom transfer's file was read; removing it is best effort, as git-lfs leaves it otherwise
                 Io.Dir.cwd().deleteFile(io, full) catch {};
             }
             var buf: [64 * 1024]u8 = undefined;
@@ -1264,8 +1265,12 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         partial.file.close(io);
         if (!installed) {
             if (partial.keep) {
+                // glint-ignore: Z026 -- keeping the partial for a resume is best effort; the download's own error is the one to report
                 fs.rename(io, store.base, temp_path, part_path) catch {};
-            } else store.base.deleteFile(io, temp_path) catch {};
+            } else {
+                // glint-ignore: Z026 -- the download's error is the one to report; a temporary left in the store is what git-lfs prune removes
+                store.base.deleteFile(io, temp_path) catch {};
+            }
         }
     }
     if (resumed) try partial.hashResumed(io, r.size);
@@ -2412,6 +2417,7 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
         temp_name;
     const out = try wt.createFile(io, temp_path, .{ .exclusive = true, .permissions = fs.permissionsFor(executable) });
     var done = false;
+    // glint-ignore: Z026 -- the smudge's error is the one to report; a temporary left in the tree is what git-lfs leaves too
     defer if (!done) wt.deleteFile(io, temp_path) catch {};
     {
         defer out.close(io);

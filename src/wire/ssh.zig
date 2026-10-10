@@ -219,7 +219,7 @@ pub fn explain(gpa: Allocator, io: Io, conn: *Connection, err: anyerror, options
     if (refusal) |r| {
         if (failure) |f| describe: {
             f.begin(gpa, r.reason, url.scheme, url.raw) catch break :describe;
-            // ziglint-ignore: Z026 the description is a courtesy to the caller; the refusal, returned below, is the outcome
+            // glint-ignore: Z026 -- the description is a courtesy to the caller; the refusal, returned below, is the outcome
             f.setServerMessage(said) catch {};
             if (url.user) |user| f.username = f.allocator().dupe(u8, user) catch null;
         }

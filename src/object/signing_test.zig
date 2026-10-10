@@ -90,7 +90,7 @@ const Keyed = struct {
         if (k.format != .ssh) {
             // The daemons gpg started for this home go with it: the agent,
             // and keyboxd or dirmngr on a GnuPG that starts them.
-            // ziglint-ignore: Z026 the home is deleted next either way; a daemon that did not hear dies with its socket
+            // glint-ignore: Z026 -- the home is deleted next either way; a daemon that did not hear dies with its socket
             _ = k.run(io, &.{ "gpgconf", "--kill", "all" }) catch {};
         }
         k.gnupg.deinit(io);

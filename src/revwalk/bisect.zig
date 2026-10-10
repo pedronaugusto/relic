@@ -1143,7 +1143,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     try c.appendState("BISECT_LOG", log_line.items);
     // A bisection that cannot go on is not left half started.
     return autoNext(c, t.*) catch |err| {
-        // ziglint-ignore: Z026 the step's error is the one to report; a state left behind is what `git bisect reset` removes
+        // glint-ignore: Z026 -- the step's error is the one to report; a state left behind is what `git bisect reset` removes
         cleanState(c) catch {};
         return err;
     };
