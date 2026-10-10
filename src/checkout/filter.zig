@@ -27,6 +27,7 @@
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -834,12 +835,13 @@ test "a malformed or truncated reply is a named error" {
 }
 
 test "fuzz: any reply is an answer or a named error" {
-    try testing.fuzz({}, fuzzProtocol, .{});
+    try shakedown.check(testing.allocator, {}, fuzzProtocol, .{});
 }
 
-fn fuzzProtocol(_: void, smith: *testing.Smith) anyerror!void {
+fn fuzzProtocol(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [4096]u8 = undefined;
-    const n = smith.slice(&scratch);
+    const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
+    case.source.bytes(scratch[0..n]);
     var s: Scripted = undefined;
     s.init(scratch[0..n]);
     defer s.deinit();

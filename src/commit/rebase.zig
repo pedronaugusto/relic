@@ -28,6 +28,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -2677,12 +2678,13 @@ test "an author script reads back what git writes, quotes and all" {
 }
 
 test "fuzz: any bytes are an author script or a named error" {
-    try std.testing.fuzz({}, fuzzAuthorScript, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzAuthorScript, .{});
 }
 
-fn fuzzAuthorScript(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzAuthorScript(_: void, case: *shakedown.Case) anyerror!void {
     var input: [256]u8 = undefined;
-    const text = input[0..smith.slice(&input)];
+    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
+    case.source.bytes(text);
     var buf: [512]u8 = undefined;
     _ = parseAuthorScript(text, &buf) catch |err| switch (err) {
         error.MalformedState => return,
@@ -2690,12 +2692,13 @@ fn fuzzAuthorScript(_: void, smith: *std.testing.Smith) anyerror!void {
 }
 
 test "fuzz: any bytes are an update-refs file or a named error" {
-    try std.testing.fuzz({}, fuzzUpdateRefs, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzUpdateRefs, .{});
 }
 
-fn fuzzUpdateRefs(_: void, smith: *std.testing.Smith) anyerror!void {
+fn fuzzUpdateRefs(_: void, case: *shakedown.Case) anyerror!void {
     var input: [256]u8 = undefined;
-    const text = input[0..smith.slice(&input)];
+    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
+    case.source.bytes(text);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = parseUpdateRefsText(arena.allocator(), .sha1, text) catch |err| switch (err) {
