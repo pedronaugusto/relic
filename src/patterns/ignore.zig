@@ -246,7 +246,7 @@ pub const Rules = struct {
                 const m = levelMatcher(level);
                 if (m.walking) |*walking| {
                     const step = walking.next() orelse continue;
-                    if (step.last) |i| by = level.patterns[i];
+                    if (step.last) |i| by = level.patterns[i.raw()];
                 }
             }
             const decision: Match = if (by) |pattern| .{ .excluded = !pattern.negated, .by = pattern } else .{ .excluded = false, .by = null };

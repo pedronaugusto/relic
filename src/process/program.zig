@@ -149,7 +149,7 @@ pub fn run(
     // A program that ends without reading all of its input is no error, as
     // git has it: conduit does not report the closed pipe.
     var output = try started.child.exchange(gpa, io, options.input, .{
-        .max_bytes = options.output.toInt() orelse std.math.maxInt(usize),
+        .max_bytes = .fromRaw(options.output.toInt() orelse std.math.maxInt(usize)),
         .timeout = options.timeout,
     });
     defer output.deinit();

@@ -52,10 +52,13 @@ pub const Matcher = struct {
 
     pub fn build(builder: *Builder) Allocator.Error!*Matcher {
         const m = builder.owner;
-        var compiled = try builder.inner.build();
+        // Past the set's own size arithmetic is the exhaustion an allocation reports.
+        var compiled = builder.inner.build() catch |err| switch (err) {
+            error.OutOfMemory, error.PatternTooLong => return error.OutOfMemory,
+        };
         errdefer compiled.deinit();
         m.set = compiled;
-        m.cache = try .init(m.gpa, &m.set, .{ .capacity = 1 << 16 });
+        m.cache = try .init(m.gpa, &m.set, .{ .capacity = sweep.Set.Bytes.fromRaw(1 << 16) });
         builder.inner.deinit();
         builder.transferred = true;
         return m;
@@ -80,10 +83,11 @@ pub const Matcher = struct {
     pub fn last(m: *Matcher, path: []const u8, is_dir: bool) ?u32 {
         m.lock();
         defer m.unlock();
-        return m.set.last(&m.cache, path, if (is_dir) .dir else .file);
+        const hit = m.set.last(&m.cache, path, if (is_dir) .dir else .file) orelse return null;
+        return hit.raw();
     }
 
-    pub fn all(m: *Matcher, a: Allocator, path: []const u8, is_dir: bool, out: *std.ArrayList(u32)) Allocator.Error!void {
+    pub fn all(m: *Matcher, a: Allocator, path: []const u8, is_dir: bool, out: *std.ArrayList(sweep.Set.Index)) Allocator.Error!void {
         m.lock();
         defer m.unlock();
         try m.set.all(a, &m.cache, path, if (is_dir) .dir else .file, out);

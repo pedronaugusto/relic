@@ -99,9 +99,13 @@ pub const Glob = struct {
         };
         const long = try gpa.create(Long);
         errdefer gpa.destroy(long);
-        long.* = .{ .gpa = gpa, .set = try builder.build(), .cache = undefined, .turn = .unlocked };
+        // A set holds as much as memory and its own size arithmetic allow; a
+        // pattern past that is the same exhaustion an allocation reports.
+        long.* = .{ .gpa = gpa, .set = builder.build() catch |err| switch (err) {
+            error.OutOfMemory, error.PatternTooLong => return error.OutOfMemory,
+        }, .cache = undefined, .turn = .unlocked };
         errdefer long.set.deinit();
-        long.cache = try .init(gpa, &long.set, .{ .capacity = 1 << 16 });
+        long.cache = try .init(gpa, &long.set, .{ .capacity = sweep.Set.Bytes.fromRaw(1 << 16) });
         return .{ .compiled = .{ .long = long } };
     }
 

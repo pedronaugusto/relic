@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const sets = @import("set.zig");
+const sweep = @import("sweep");
 const encoding = @import("../text.zig").encoding;
 const fs = @import("../fs.zig");
 
@@ -447,16 +448,16 @@ pub const Attrs = struct {
 
         for (order) |level| {
             const relative = relativeTo(level.base, path) orelse continue;
-            var hit_buffer: [16]u32 = undefined;
+            var hit_buffer: [16]sweep.Set.Index = undefined;
             var hit_scratch: std.heap.BufferFirstAllocator = .init(std.mem.asBytes(&hit_buffer), a);
             const hit_allocator = hit_scratch.allocator();
-            var hits: std.ArrayList(u32) = .empty;
+            var hits: std.ArrayList(sweep.Set.Index) = .empty;
             defer hits.deinit(hit_allocator);
             try levelMatcher(level.*).all(hit_allocator, relative, is_dir, &hits);
             var i = hits.items.len;
             while (i > 0) {
                 i -= 1;
-                try attrs.fill(a, &out, level.rules[hits.items[i]].assignments);
+                try attrs.fill(a, &out, level.rules[hits.items[i].raw()].assignments);
             }
         }
         return .{ .items = out.items };

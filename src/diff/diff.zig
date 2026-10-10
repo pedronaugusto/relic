@@ -510,7 +510,7 @@ fn lineOptions(options: Options) parallax.Options {
             .change = options.ignore_whitespace_change,
             .at_eol = options.ignore_trailing_whitespace,
         } },
-        .max_work = options.max_work,
+        .max_work = .fromRaw(options.max_work),
         .anchors = options.anchors,
     };
 }

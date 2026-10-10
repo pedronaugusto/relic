@@ -143,7 +143,7 @@ pub const Patterns = struct {
         m.begin(path, is_dir);
         var included = false;
         while (m.walking.?.next()) |step| {
-            if (step.last) |i| included = !p.items.items[i].negated;
+            if (step.last) |i| included = !p.items.items[i.raw()].negated;
         }
         return included;
     }
