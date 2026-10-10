@@ -79,6 +79,8 @@ pub const ApplyToError = Error || Allocator.Error;
 /// delta that lies about its own output is a named error rather than a short
 /// object. A result over `max_result_bytes` or the address space is
 /// `DeltaSizeLimitExceeded`, checked before reserving any output.
+/// What is reserved up front is the stated size, or what the commands could
+/// produce when that is less, so a header alone cannot claim gigabytes.
 pub fn applyTo(
     gpa: Allocator,
     out: *std.ArrayList(u8),
@@ -90,7 +92,7 @@ pub fn applyTo(
     if (sizes.target > max_result_bytes) return error.DeltaSizeLimitExceeded;
     const target = std.math.cast(usize, sizes.target) orelse return error.DeltaSizeLimitExceeded;
     const start = out.items.len;
-    try out.ensureUnusedCapacity(gpa, target);
+    try out.ensureUnusedCapacity(gpa, @min(target, producible(base.len, delta.len - sizes.len)));
 
     var i: usize = sizes.len;
     while (i < delta.len) {
@@ -133,6 +135,13 @@ pub fn applyTo(
         }
     }
     if (out.items.len - start != sizes.target) return error.DeltaResultSizeMismatch;
+}
+
+/// The most `commands` bytes of delta can produce from a base of `base_len`:
+/// every command takes at least one byte, a copy yields at most 0xffffff
+/// bytes and no more than the base, and an insert yields less than it takes.
+fn producible(base_len: usize, commands: usize) usize {
+    return commands *| @max(1, @min(base_len, 0xff_ffff));
 }
 
 /// The largest object a delta is allowed to produce, so a crafted delta
