@@ -25,6 +25,7 @@ const assert = std.debug.assert;
 
 const cquote = @import("../text.zig").cquote;
 const binarypatch = @import("binary.zig");
+const hunks = @import("parallax").patch;
 
 /// Errors from reading a patch.
 pub const Error = error{
@@ -807,149 +808,53 @@ fn parseNum(line: []const u8, out: *usize) usize {
     return i;
 }
 
-fn parseRange(line: []const u8, offset_in: ?usize, expect: []const u8, p1: *usize, p2: *usize) ?usize {
-    var offset = offset_in orelse return null;
-    if (offset >= line.len) return null;
-    var digits = parseNum(line[offset..], p1);
-    if (digits == 0) return null;
-    offset += digits;
-    p2.* = 1;
-    if (offset < line.len and line[offset] == ',') {
-        digits = parseNum(line[offset + 1 ..], p2);
-        if (digits == 0) return null;
-        offset += digits + 1;
-    }
-    if (line.len - offset < expect.len) return null;
-    if (!std.mem.eql(u8, line[offset .. offset + expect.len], expect)) return null;
-    return offset + expect.len;
-}
-
-fn parseFragmentHeader(line: []const u8, frag: *Fragment) ?usize {
-    if (line.len == 0 or line[line.len - 1] != '\n') return null;
-    const offset = parseRange(line, 4, " +", &frag.old_pos, &frag.old_lines);
-    return parseRange(line, offset, " @@", &frag.new_pos, &frag.new_lines);
-}
-
-/// `--recount`: the counts the lines give, or the header's when a line is
-/// one no hunk carries.
-fn recount(body: []const u8, frag: *Fragment) void {
-    var old_lines: usize = 0;
-    var new_lines: usize = 0;
-    var rest = body;
-    if (rest.len < 1) return;
-    while (true) {
-        const len = linelen(rest);
-        rest = rest[len..];
-        if (rest.len < 1) break;
-        switch (rest[0]) {
-            ' ', '\n' => {
-                new_lines += 1;
-                old_lines += 1;
-                continue;
-            },
-            '-' => {
-                old_lines += 1;
-                continue;
-            },
-            '+' => {
-                new_lines += 1;
-                continue;
-            },
-            '\\' => continue,
-            '@' => if (rest.len < 3 or !startsWith(rest, "@@ ")) return,
-            'd' => if (rest.len < 5 or !startsWith(rest, "diff ")) return,
-            else => return,
-        }
-        break;
-    }
-    frag.old_lines = old_lines;
-    frag.new_lines = new_lines;
-}
-
-/// The `\ No newline` line after a hunk line, or zero.
-fn adjustIncomplete(rest: []const u8, len: usize) usize {
-    const c = rest[0];
-    if (c != '\n' and c != ' ' and c != '+' and c != '-') return 0;
-    if (rest.len - len < 12 or !startsWith(rest[len..], "\\ ")) return 0;
-    const nextlen = linelen(rest[len..]);
-    if (nextlen < 12) return 0;
-    return nextlen;
-}
-
+/// One `@@` hunk, read by parallax's git grammar: its counts bound the
+/// lines, `\ No newline` is the one line after a line, and a hunk that
+/// changes nothing is no hunk. Returns how many bytes it took, or `null`
+/// when it is none, with the line it is refused at in `p.linenr`.
 fn parseFragment(p: *Parser, at: usize, file: *FilePatch, frag: *Fragment) Error!?usize {
     const text = p.text[at..];
-    var len = linelen(text);
-    var offset = parseFragmentHeader(text[0..len], frag) orelse return null;
-    if (p.options.recount) recount(text[offset..], frag);
-    var old_lines = frag.old_lines;
-    var new_lines = frag.new_lines;
-    var leading: usize = 0;
-    var trailing: usize = 0;
-    var added: usize = 0;
-    var deleted: usize = 0;
-    offset = len;
-    p.linenr += 1;
-    while (offset < text.len) {
-        if (old_lines == 0 and new_lines == 0) break;
-        const rest = text[offset..];
-        len = linelen(rest);
-        if (len == 0 or rest[len - 1] != '\n') return null;
-        var skip_len = adjustIncomplete(rest, len);
-        var use_len = len;
-        if (skip_len != 0) {
-            use_len -= 1;
-            skip_len += 1;
-        }
-        switch (rest[0]) {
-            '\n', ' ' => {
-                if (old_lines == 0 or new_lines == 0) return null;
-                old_lines -= 1;
-                new_lines -= 1;
-                if (deleted == 0 and added == 0) leading += 1;
-                trailing += 1;
-                checkOldForCrlf(file, rest[0..use_len]);
-            },
-            '-' => {
-                if (old_lines == 0) return null;
-                if (!p.options.reverse) checkOldForCrlf(file, rest[0..use_len]);
-                deleted += 1;
-                old_lines -= 1;
-                trailing = 0;
-            },
-            '+' => {
-                if (new_lines == 0) return null;
-                if (p.options.reverse) checkOldForCrlf(file, rest[0..use_len]);
-                added += 1;
-                new_lines -= 1;
-                trailing = 0;
-            },
-            else => return null,
-        }
-        offset += use_len;
-        if (skip_len != 0) {
-            offset += skip_len;
-            p.linenr += 1;
-        }
-        p.linenr += 1;
-    }
-    if (old_lines != 0 or new_lines != 0) return null;
-    if (!p.options.recount and deleted == 0 and added == 0) return null;
+    var diagnostics: hunks.Diagnostics = .{};
+    const scanned = hunks.scanHunk(text, .{ .dialect = .git, .recount = p.options.recount, .diagnostics = &diagnostics }) catch |err| switch (err) {
+        error.InvalidHunkHeader, error.HunkLengthMismatch, error.UnexpectedLine, error.HunkWithoutChange => {
+            p.linenr = frag.line + diagnostics.line - 1;
+            return null;
+        },
+    };
+    // A number git keeps in an `unsigned long`: past what this machine's
+    // holds, a header is corrupt there too.
+    frag.old_pos = std.math.cast(usize, scanned.header.old_start) orelse return null;
+    frag.old_lines = std.math.cast(usize, scanned.header.old_len) orelse return null;
+    frag.new_pos = std.math.cast(usize, scanned.header.new_start) orelse return null;
+    frag.new_lines = std.math.cast(usize, scanned.header.new_len) orelse return null;
+    frag.leading = std.math.cast(usize, scanned.leading) orelse return null;
+    frag.trailing = std.math.cast(usize, scanned.trailing) orelse return null;
+    const added = std.math.cast(usize, scanned.added) orelse return null;
+    const deleted = std.math.cast(usize, scanned.removed) orelse return null;
+    p.linenr = frag.line + (std.math.cast(usize, scanned.lines) orelse return null);
     // Every line the header counts was read, so the context on either side
     // is old lines the hunk keeps: `apply` reduces the context by these.
     assert(deleted <= frag.old_lines);
-    assert(leading <= frag.old_lines - deleted);
-    assert(trailing <= frag.old_lines - deleted);
-    frag.leading = leading;
-    frag.trailing = trailing;
+    assert(frag.leading <= frag.old_lines - deleted);
+    assert(frag.trailing <= frag.old_lines - deleted);
+    noteCrlf(file, text[linelen(text)..scanned.consumed], p.options.reverse);
     file.lines_added += added;
     file.lines_deleted += deleted;
-    if (file.is_new == .yes and old_lines != 0) return p.fail(error.NewFileDependsOnOldContents, p.linenr);
-    if (file.is_delete == .yes and new_lines != 0) return p.fail(error.DeletedFileStillHasContents, p.linenr);
-    return offset;
+    return scanned.consumed;
 }
 
-fn checkOldForCrlf(file: *FilePatch, line: []const u8) void {
-    if (line.len >= 2 and line[line.len - 1] == '\n' and line[line.len - 2] == '\r') file.crlf_in_old = true;
+/// A context line, or a line the old file has, ends in CR LF: the old
+/// file's line endings are compared as they are.
+fn noteCrlf(file: *FilePatch, body: []const u8, reverse: bool) void {
+    var lines: hunks.HunkLines = .init(body, .git);
+    while (lines.next()) |line| {
+        const old = switch (line.kind) {
+            .context => true,
+            .removed => !reverse,
+            .added => reverse,
+        };
+        if (old and std.mem.endsWith(u8, line.text, "\r\n")) file.crlf_in_old = true;
+    }
 }
 
 fn parseSinglePatch(p: *Parser, at_in: usize, file: *FilePatch) Error!usize {
@@ -1002,8 +907,7 @@ fn findHeader(p: *Parser, start: usize, file: *FilePatch) Error!?struct { offset
         if (len == 0) break;
         if (len < 6) continue;
         if (startsWith(rest, "@@ -")) {
-            var dummy: Fragment = undefined;
-            if (parseFragmentHeader(rest[0..len], &dummy) == null) continue;
+            if (rest[len - 1] != '\n' or hunks.parseHunkHeader(rest[0..len], .git) == null) continue;
             return p.fail(error.FragmentWithoutHeader, p.linenr);
         }
         if (size < len + 6) break;

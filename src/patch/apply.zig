@@ -30,6 +30,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 
 const patchparse = @import("patch.zig");
+const hunks = @import("parallax").patch;
 const whitespace = @import("whitespace.zig");
 const binarypatch = @import("binary.zig");
 const hash = @import("../hash/hash.zig");
@@ -844,35 +845,22 @@ fn checkPatchWhitespace(st: *State, entry: *Entry) Error!void {
     }
     entry.ws_rule = rule;
     for (entry.p.fragments) |frag| {
-        var rest = frag.text[linelen(frag.text)..];
-        var linenr = frag.line + 1;
-        while (rest.len > 0) {
-            var len = linelen(rest);
-            const full = len;
-            var incomplete = false;
-            if (len < rest.len and rest[len] == '\\' and (rest[0] == ' ' or rest[0] == '+' or rest[0] == '-' or rest[0] == '\n')) {
-                incomplete = true;
-                len -= 1;
-            }
-            const first = rest[0];
-            switch (first) {
-                ' ', '\n' => if (!st.options.reverse and st.ws_action == .correct) {
-                    const line: []const u8 = if (first == '\n') " \n" else rest[0..len];
-                    try recordWs(st, whitespace.check(line[1..], rule), line[1..], linenr);
+        var lines: hunks.HunkLines = .init(frag.text[linelen(frag.text)..], .git);
+        while (true) {
+            const linenr = frag.line + 1 + lines.read;
+            const line = lines.next() orelse break;
+            switch (line.kind) {
+                .context => if (!st.options.reverse and st.ws_action == .correct) {
+                    // an empty context line has lost its space, and is checked as the line it stands for
+                    const text = if (lines.bare) "\n" else line.text;
+                    try recordWs(st, whitespace.check(text, rule), text, linenr);
                 },
-                '-' => if (st.options.reverse and st.ws_action != .nowarn) {
-                    try recordWs(st, whitespace.check(rest[1..len], rule), rest[1..len], linenr);
+                .removed => if (st.options.reverse and st.ws_action != .nowarn) {
+                    try recordWs(st, whitespace.check(line.text, rule), line.text, linenr);
                 },
-                '+' => if (!st.options.reverse and st.ws_action != .nowarn) {
-                    try recordWs(st, whitespace.check(rest[1..len], rule), rest[1..len], linenr);
+                .added => if (!st.options.reverse and st.ws_action != .nowarn) {
+                    try recordWs(st, whitespace.check(line.text, rule), line.text, linenr);
                 },
-                else => {},
-            }
-            rest = rest[full..];
-            linenr += 1;
-            if (incomplete) {
-                rest = rest[linelen(rest)..];
-                linenr += 1;
             }
         }
     }
@@ -1139,61 +1127,57 @@ fn updateImage(st: *State, img: *Image, applied_pos: usize, preimage: *const Ima
 const Blanks = struct { count: usize, first_line: usize };
 
 /// Read a hunk into the lines it expects, `pre`, and the lines it leaves,
-/// `post`. `null` when a line is not a patch line.
-fn hunkImages(st: *State, frag: patchparse.Fragment, inaccurate_eof: bool, ws_rule: whitespace.Rule, pre: *Image, post: *Image) Error!?Blanks {
+/// `post`.
+fn hunkImages(st: *State, frag: patchparse.Fragment, inaccurate_eof: bool, ws_rule: whitespace.Rule, pre: *Image, post: *Image) Error!Blanks {
     const gpa = st.gpa;
     var new_blank_lines_at_end: usize = 0;
     var found_new_blank_lines_at_end: usize = 0;
-    var hunk_linenr = frag.line;
-
-    var text = frag.text;
-    while (text.len > 0) {
-        const len = linelen(text);
-        if (len == 0) break;
-        // the patch data: without the leading character, and without the
-        // newline when a "\ No newline" line follows
-        var plen: isize = @as(isize, @intCast(len)) - 1;
-        if (len < text.len and text[len] == '\\') plen -= 1;
-        var first = text[0];
-        if (st.options.reverse) {
-            if (first == '-') first = '+' else if (first == '+') first = '-';
-        }
+    var lines: hunks.HunkLines = .init(frag.text[linelen(frag.text)..], .git);
+    while (true) {
+        // the patch line this one is on, the header's being the hunk's first
+        const hunk_linenr = frag.line + 1 + lines.read;
+        const line = lines.next() orelse break;
+        const kind: hunks.Line.Kind = if (!st.options.reverse) line.kind else switch (line.kind) {
+            .context => .context,
+            .removed => .added,
+            .added => .removed,
+        };
+        const data = line.text;
         var added_blank_line = false;
         var is_blank_context = false;
-        const data: []const u8 = if (plen > 0) text[1..][0..@intCast(plen)] else "";
-        switch (first) {
-            '\n' => {
-                if (plen >= 0) {
-                    try pre.buf.append(gpa, '\n');
-                    try post.buf.append(gpa, '\n');
-                    try pre.addLine(gpa, "\n", line_common);
-                    try post.addLine(gpa, "\n", line_common);
-                    is_blank_context = true;
-                }
-            },
-            ' ', '-' => {
-                if (first == ' ' and plen > 0 and ws_rule & whitespace.blank_at_eof != 0 and whitespace.blankLine(data)) is_blank_context = true;
-                try pre.buf.appendSlice(gpa, data);
-                try pre.addLine(gpa, data, if (first == ' ') line_common else 0);
-                if (first == ' ') {
+        switch (kind) {
+            .context => {
+                if (lines.bare) {
+                    // an empty context line: git leaves out one with no newline at all
+                    if (!line.no_newline) {
+                        try pre.buf.append(gpa, '\n');
+                        try post.buf.append(gpa, '\n');
+                        try pre.addLine(gpa, "\n", line_common);
+                        try post.addLine(gpa, "\n", line_common);
+                        is_blank_context = true;
+                    }
+                } else {
+                    if (data.len > 0 and ws_rule & whitespace.blank_at_eof != 0 and whitespace.blankLine(data)) is_blank_context = true;
+                    try pre.buf.appendSlice(gpa, data);
+                    try pre.addLine(gpa, data, line_common);
                     try post.buf.appendSlice(gpa, data);
                     try post.addLine(gpa, data, line_common);
                 }
             },
-            '+' => {
-                if (!st.options.no_add) {
-                    const start = post.buf.items.len;
-                    if (st.whitespace_error == 0 or st.ws_action != .correct) {
-                        try post.buf.appendSlice(gpa, data);
-                    } else {
-                        if (try whitespace.fixCopy(gpa, &post.buf, data, ws_rule)) st.applied_after_fixing_ws += 1;
-                    }
-                    try post.addLine(gpa, post.buf.items[start..], 0);
-                    if (ws_rule & whitespace.blank_at_eof != 0 and whitespace.blankLine(data)) added_blank_line = true;
-                }
+            .removed => {
+                try pre.buf.appendSlice(gpa, data);
+                try pre.addLine(gpa, data, 0);
             },
-            '@', '\\' => {},
-            else => return null,
+            .added => if (!st.options.no_add) {
+                const start = post.buf.items.len;
+                if (st.whitespace_error == 0 or st.ws_action != .correct) {
+                    try post.buf.appendSlice(gpa, data);
+                } else {
+                    if (try whitespace.fixCopy(gpa, &post.buf, data, ws_rule)) st.applied_after_fixing_ws += 1;
+                }
+                try post.addLine(gpa, post.buf.items[start..], 0);
+                if (ws_rule & whitespace.blank_at_eof != 0 and whitespace.blankLine(data)) added_blank_line = true;
+            },
         }
         if (added_blank_line) {
             if (new_blank_lines_at_end == 0) found_new_blank_lines_at_end = hunk_linenr;
@@ -1201,8 +1185,6 @@ fn hunkImages(st: *State, frag: patchparse.Fragment, inaccurate_eof: bool, ws_ru
         } else if (!is_blank_context) {
             new_blank_lines_at_end = 0;
         }
-        text = text[len..];
-        hunk_linenr += 1;
     }
     if (inaccurate_eof and pre.buf.items.len > 0 and pre.buf.items[pre.buf.items.len - 1] == '\n' and
         post.buf.items.len > 0 and post.buf.items[post.buf.items.len - 1] == '\n')
@@ -1226,7 +1208,7 @@ fn applyOneFragment(st: *State, img: *Image, frag: patchparse.Fragment, inaccura
     defer preimage.deinit(gpa);
     var postimage: Image = .{};
     defer postimage.deinit(gpa);
-    const blanks = try hunkImages(st, frag, inaccurate_eof, ws_rule, &preimage, &postimage) orelse return false;
+    const blanks = try hunkImages(st, frag, inaccurate_eof, ws_rule, &preimage, &postimage);
     var new_blank_lines_at_end = blanks.count;
     const found_new_blank_lines_at_end = blanks.first_line;
 
