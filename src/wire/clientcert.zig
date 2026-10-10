@@ -9,14 +9,15 @@
 //! The same for an `https` proxy with `http.proxySSLCert`, `http.proxySSLKey`
 //! and `http.proxySSLCertPasswordProtected`.
 //!
-//! The files are read here; the handshake that presents them is uplink's.
+//! The files are read here and parsed by cloak; the handshake that presents
+//! them is uplink's.
 
 const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const tls = @import("uplink").tls;
+const cloak = @import("cloak");
 
 /// Errors from reading a certificate and its key.
 pub const Error = error{
@@ -27,7 +28,7 @@ pub const Error = error{
     SslClientCertificateUnreadable,
     /// The key file could not be read, or holds no key relic reads: an
     /// algorithm other than RSA, ECDSA on P-256 or P-384, and Ed25519, or
-    /// an encryption other than AES-128 and AES-256 in CBC mode.
+    /// an encryption other than AES or triple DES in CBC mode.
     SslClientKeyUnreadable,
     /// The key is encrypted and no passphrase was asked for: git would
     /// leave OpenSSL to ask on the terminal, which relic never does. Set
@@ -58,17 +59,17 @@ pub fn keyPath(files: Files) []const u8 {
 /// be read, which `load` names.
 pub fn keyIsEncrypted(arena: Allocator, io: Io, files: Files) bool {
     const bytes = readAll(arena, io, keyPath(files)) catch return false;
-    return tls.key.PrivateKey.isEncrypted(bytes);
+    return cloak.PrivateKey.isEncrypted(bytes);
 }
 
-/// Read the certificate chain and the key, opening the key with
-/// `passphrase` when it is encrypted. The key's numbers are `arena`'s; the
-/// result's encoded chain is `gpa`'s, freed with `deinit`.
+/// How `load` reads the files: `arena` holds their bytes, and `passphrase`
+/// opens the key when it is encrypted.
 pub const LoadOptions = struct { arena: Allocator, passphrase: ?[]const u8 = null };
 
-pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Error!tls.ClientAuth {
+/// Read the certificate chain and the key. The result is `gpa`'s, released
+/// with `deinit`; the files' bytes are the arena's.
+pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Error!cloak.ClientAuth {
     const arena = options.arena;
-    const passphrase = options.passphrase;
     const cert_der = try isDer(files.cert_type);
     const key_der = try isDer(files.key_type);
     const cert_bytes = readAll(arena, io, files.cert) catch |err| switch (err) {
@@ -77,26 +78,29 @@ pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Err
         else => return error.SslClientCertificateUnreadable,
     };
     if (cert_der and std.mem.find(u8, cert_bytes, "-----BEGIN ") != null) return error.SslClientCertificateUnreadable;
-    const chain = tls.key.certificates(arena, cert_bytes) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.SslClientCertificateUnreadable,
-    };
     const key_bytes = if (files.key) |path| readAll(arena, io, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return error.SslClientKeyUnreadable,
     } else cert_bytes;
     if (key_der and std.mem.find(u8, key_bytes, "-----BEGIN ") != null) return error.SslClientKeyUnreadable;
-    const key = tls.key.PrivateKey.parse(arena, key_bytes, passphrase) catch |err| return switch (err) {
+    // An RSA key's primes are checked with witnesses drawn from `io`.
+    const key = cloak.PrivateKey.parse(gpa, key_bytes, .{ .passphrase = options.passphrase, .entropy = .fromIo(&io) }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.KeyPassphraseRequired => error.SslClientKeyPassphraseRequired,
-        error.KeyPassphraseWrong => error.SslClientKeyPassphraseWrong,
-        error.MalformedKey, error.KeyAlgorithmUnsupported, error.KeyEncryptionUnsupported, error.CertificateMissing => error.SslClientKeyUnreadable,
+        error.PasswordRequired => error.SslClientKeyPassphraseRequired,
+        error.BadPassword => error.SslClientKeyPassphraseWrong,
+        else => error.SslClientKeyUnreadable,
     };
-    return tls.ClientAuth.init(gpa, chain, key) catch |err| switch (err) {
+    defer key.deinit();
+    // A PEM certificate file may hold the key too, as curl reads it.
+    const made = if (cert_der)
+        cloak.ClientAuth.init(gpa, &.{cert_bytes}, key, .{})
+    else
+        cloak.ClientAuth.initPem(gpa, cert_bytes, key, .{ .other_blocks = .skip });
+    return made catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.KeyCertificateMismatch => error.SslClientKeyMismatch,
-        error.CertificateMissing, error.CertificateChainTooLong => error.SslClientCertificateUnreadable,
+        error.KeyMismatch => error.SslClientKeyMismatch,
+        else => error.SslClientCertificateUnreadable,
     };
 }
 
@@ -134,11 +138,11 @@ test "a certificate and key are read from one file or two, and each refusal has 
         }
     }.f;
 
-    var two = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "key.pem") }, .{ .arena = arena });
+    const two = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "key.pem") }, .{ .arena = arena });
     two.deinit();
-    var one = try load(gpa, io, .{ .cert = at(arena, base, "both.pem") }, .{ .arena = arena, .passphrase = null });
+    const one = try load(gpa, io, .{ .cert = at(arena, base, "both.pem") }, .{ .arena = arena, .passphrase = null });
     one.deinit();
-    var opened = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = "correct-horse" });
+    const opened = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = "correct-horse" });
     opened.deinit();
     try testing.expect(keyIsEncrypted(arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }));
 

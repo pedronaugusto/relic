@@ -12,20 +12,20 @@
             .hash = "conduit-0.5.1-4rIA77qIEwC8_ZsMmOguwVBU_ETrevh4OUMXPqKTB-QV",
         },
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep#0d50ab1ba413cbc52edadc62ffc1da20da477ac7",
-            .hash = "sweep-0.1.0-6ErwaT7WOwBL11GvSql0AyZtFYCjJwHNyLeCiLFSGxtR",
+            .url = "git+https://github.com/pedronaugusto/sweep#b1211f3b3b04465bbf0572435aacf73464c39b8d",
+            .hash = "sweep-0.1.0-6ErwaXvZOwCYVwscGZUXmCi99N4ucHK1cMVbCW7hZ63-",
         },
         .parallax = .{
             .url = "git+https://github.com/pedronaugusto/parallax#cad4442831956f4465df7f86faf664768ea4bbb1",
             .hash = "parallax-0.1.0-lz9Br_RUBgA0p1GJ-4gtOO_zofSYRFkwrTHYvP0pC0BS",
         },
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink#c39e8df5f854b7d6fa28d346f449f1b8e6b3726b",
-            .hash = "uplink-0.1.0-0eVSJrsiDQDDCVeuumekrp3XLlXTaYXHAyj2b34KUc_7",
+            .url = "git+https://github.com/pedronaugusto/uplink#559767401542fe25042ff5187a310cafe30b6a00",
+            .hash = "uplink-0.1.0-0eVSJgQQCgAbTaUaSktfikMoeVOfL9_mx-ZWeaWG8t81",
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#99418acb02deacefe8cc555c4205dce98f54ef68",
-            .hash = "shakedown-0.1.0-BR8U409YEgCLU7igVgkutLKZ1u5FzuaC6geo-4n84d_G",
+            .url = "git+https://github.com/pedronaugusto/shakedown#caf380381a49ace7c13beba70dd512c4faf24ce7",
+            .hash = "shakedown-0.1.0-BR8U4yVfEgCS2Vw6zWMqw0wRjxct8g3tePy1UKNZ8Q89",
             .lazy = true,
         },
         .airlock = .{
@@ -33,8 +33,12 @@
             .hash = "airlock-0.1.0-rfvu6JWGBQCN3u7evgacrcGxb7KYWMxQ-cxp8jviJKOD",
         },
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp#d7f9b6dfe48a3e327f002088b25847787419f490",
-            .hash = "warp-0.1.0-JASxFQgYEQBvE0hKlmx9qYtSYl2o32CTxsymZQrFUAlP",
+            .url = "git+https://github.com/pedronaugusto/warp#f446a8b7bf86aef188075a32cc5d42e43eb102e0",
+            .hash = "warp-0.1.0-JASxFaMZEQBWhVdtwJ_gojtCU1nxRcpLj9OX-nlaaSqa",
+        },
+        .cloak = .{
+            .url = "git+https://github.com/pedronaugusto/cloak#d20b2ff425d0ef333a71b0a3a9989cb0641007bd",
+            .hash = "cloak-0.1.0-9onwcYyZ8QJBmOJ4OKRAhgK3SDFv8bBKnplJ20-Qfpcg",
         },
     },
     .minimum_zig_version = "0.17.0",

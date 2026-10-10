@@ -54,8 +54,9 @@ const auth = @import("auth.zig");
 const httpsettings = @import("httpsettings.zig");
 const policy = @import("policy.zig");
 const clientcert = @import("clientcert.zig");
+const authorities = @import("authorities.zig");
 const uplink = @import("uplink");
-const tls = uplink.tls;
+const cloak = @import("cloak");
 const warning = @import("../report.zig").warning;
 const builtin = @import("builtin");
 
@@ -261,14 +262,14 @@ const Http = struct {
     proxy_credentials: ?credential.Session = null,
     /// `http.sslCAInfo` and `http.sslCAPath`, when they name authorities;
     /// `http.proxySSLCAInfo`, when it does.
-    trust: ?tls.Trust = null,
-    proxy_trust: ?tls.Trust = null,
+    trust: ?cloak.Trust.Snapshot = null,
+    proxy_trust: ?cloak.Trust.Snapshot = null,
     /// `http.sslCert` and its key, and the passphrase's credential when
     /// `http.sslCertPasswordProtected` asks for one.
-    client_auth: ?tls.ClientAuth = null,
+    client_auth: ?cloak.ClientAuth = null,
     cert_credentials: ?credential.Session = null,
     /// The same for an `https` proxy.
-    proxy_client_auth: ?tls.ClientAuth = null,
+    proxy_client_auth: ?cloak.ClientAuth = null,
     proxy_cert_credentials: ?credential.Session = null,
     /// A failure met inside a writer, which can only say that it failed.
     write_error: ?Error = null,
@@ -304,7 +305,7 @@ const Http = struct {
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
         var settings = try httpsettings.resolveForRemote(arena, h.options.config, environ, url, h.options.remote_name);
         httpsettings.chooseProxy(&settings, h.options.proxy);
-        var tls_options: tls.ClientOptions = .{};
+        var tls_options: uplink.tls.ClientOptions = .{};
         if (url.scheme == .https) {
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{
@@ -313,14 +314,14 @@ const Http = struct {
                     .cert_type = settings.ssl_cert_type,
                     .key_type = settings.ssl_key_type,
                 }, settings.ssl_cert_password_protected, &h.cert_credentials);
-                tls_options.client_auth = &h.client_auth.?;
+                tls_options.client_auth = h.client_auth;
             }
             if (!settings.ssl_verify) {
                 tls_options.verify = .none;
                 try warning.note(h.options.warnings, .{ .ssl_verify_disabled = settings.ssl_verify_from orelse "http.sslVerify" });
             } else if (settings.ca_info != null or settings.ca_path != null) {
                 try h.trustAuthorities(settings, environ);
-                tls_options.trust = &h.trust.?;
+                tls_options.trust = h.trust;
             }
         }
 
@@ -348,20 +349,19 @@ const Http = struct {
             // curl checks an https proxy on its own terms: always, against
             // `http.proxySSLCAInfo` or the system's authorities.
             if (settings.proxy_ssl_ca_info) |file| {
-                h.proxy_trust = .init(h.gpa);
-                h.proxy_trust.?.addFile(h.io, Io.Dir.cwd(), file) catch |err| return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.Canceled => error.Canceled,
-                    else => h.fail(error.SslCertificateUnreadable, "http.proxySSLCAInfo"),
+                var failed: authorities.Failed = undefined;
+                h.proxy_trust = authorities.load(h.gpa, h.io, .{ .ca_info = file }, &failed) catch |err| return switch (err) {
+                    error.SslCertificateUnreadable => h.fail(error.SslCertificateUnreadable, "http.proxySSLCAInfo"),
+                    else => |e| e,
                 };
-                p.tls.trust = .{ .own = &h.proxy_trust.? };
+                p.tls.trust = .{ .own = h.proxy_trust };
             } else p.tls.trust = .{ .own = null };
             if (settings.proxy_ssl_cert) |cert| {
                 h.proxy_client_auth = try h.clientCertificate(.{
                     .cert = cert,
                     .key = settings.proxy_ssl_key,
                 }, settings.proxy_ssl_cert_password_protected, &h.proxy_cert_credentials);
-                p.tls.client_auth = &h.proxy_client_auth.?;
+                p.tls.client_auth = h.proxy_client_auth;
             }
         };
         h.proxied = proxy != null;
@@ -385,7 +385,7 @@ const Http = struct {
     /// the key is encrypted or not; a certificate that cannot be used then
     /// has its passphrase rejected, as git rejects it on
     /// `CURLE_SSL_CERTPROBLEM`.
-    fn clientCertificate(h: *Http, files: clientcert.Files, ask: bool, session_slot: *?credential.Session) Error!tls.ClientAuth {
+    fn clientCertificate(h: *Http, files: clientcert.Files, ask: bool, session_slot: *?credential.Session) Error!cloak.ClientAuth {
         var passphrase: ?[]const u8 = null;
         if (ask) {
             session_slot.* = .forCertificate(h.gpa, files.cert);
@@ -421,10 +421,10 @@ const Http = struct {
     /// Free the authorities and certificates, which the client must no
     /// longer use.
     fn freeTls(h: *Http) void {
-        if (h.trust) |*t| t.deinit();
-        if (h.proxy_trust) |*t| t.deinit();
-        if (h.client_auth) |*a| a.deinit();
-        if (h.proxy_client_auth) |*a| a.deinit();
+        if (h.trust) |t| t.deinit();
+        if (h.proxy_trust) |t| t.deinit();
+        if (h.client_auth) |a| a.deinit();
+        if (h.proxy_client_auth) |a| a.deinit();
         if (h.cert_credentials) |*s| s.deinit();
         if (h.proxy_cert_credentials) |*s| s.deinit();
         h.trust = null;
@@ -439,28 +439,19 @@ const Http = struct {
     /// `http.sslCAPath` besides them, as curl does for git.
     fn trustAuthorities(h: *Http, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
         const arena = h.arena.allocator();
-        h.trust = .init(h.gpa);
-        const t = &h.trust.?;
-        if (settings.ca_info) |raw| {
-            t.addFile(h.io, Io.Dir.cwd(), try expandHome(arena, raw, environ)) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.Canceled => error.Canceled,
-                else => h.fail(error.SslCertificateUnreadable, settings.ca_info_from orelse "http.sslCAInfo"),
-            };
-        } else {
-            t.addSystem(h.io) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.Canceled => error.Canceled,
-                else => h.fail(error.SslCertificateUnreadable, "the system's certificates"),
-            };
-        }
-        if (settings.ca_path) |raw| {
-            t.addDir(h.io, Io.Dir.cwd(), try expandHome(arena, raw, environ)) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.Canceled => error.Canceled,
-                else => h.fail(error.SslCertificateUnreadable, "http.sslCAPath"),
-            };
-        }
+        const sources: authorities.Sources = .{
+            .ca_info = if (settings.ca_info) |raw| try expandHome(arena, raw, environ) else null,
+            .ca_path = if (settings.ca_path) |raw| try expandHome(arena, raw, environ) else null,
+        };
+        var failed: authorities.Failed = undefined;
+        h.trust = authorities.load(h.gpa, h.io, sources, &failed) catch |err| return switch (err) {
+            error.SslCertificateUnreadable => h.fail(error.SslCertificateUnreadable, switch (failed) {
+                .ca_info => settings.ca_info_from orelse "http.sslCAInfo",
+                .system => "the system's certificates",
+                .ca_path => "http.sslCAPath",
+            }),
+            else => |e| e,
+        };
     }
 
     fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) Allocator.Error![]const u8 {
@@ -564,7 +555,7 @@ const Http = struct {
     /// so its connection can carry the next one.
     fn endRequest(h: *Http) void {
         if (h.in_flight) |*res| {
-            // ziglint-ignore: Z026 a body left unread costs only the connection: deinit keeps it only when the response is complete
+            // glint-ignore: Z026 -- a body left unread costs only the connection: deinit keeps it only when the response is complete
             _ = res.reader(h.io).discardRemaining() catch {};
             res.deinit(h.io);
             h.in_flight = null;
@@ -772,7 +763,7 @@ const Http = struct {
             error.EndOfStream => {},
             else => return out.written(),
         };
-        // ziglint-ignore: Z026 what was read is the text; the rest is read only so the connection can carry the next request
+        // glint-ignore: Z026 -- what was read is the text; the rest is read only so the connection can carry the next request
         _ = reader.streamRemaining(&out.writer) catch {};
         const text = out.written();
         return text[0..@min(text.len, 4096)];
@@ -786,9 +777,9 @@ const Http = struct {
         if (h.options.auth_failure) |described| describe: {
             described.begin(h.gpa, reason, h.credentials.url.scheme, h.credentials.url.raw) catch break :describe;
             described.status = status;
-            // ziglint-ignore: Z026 the description is a courtesy to the caller; the error, returned below, is the outcome
+            // glint-ignore: Z026 -- the description is a courtesy to the caller; the error, returned below, is the outcome
             described.setServerMessage(said) catch {};
-            // ziglint-ignore: Z026 as above
+            // glint-ignore: Z026 -- as above
             h.credentials.describeFailure(described, h.options.prompt != null) catch {};
         }
         return switch (err) {
@@ -1055,9 +1046,9 @@ test "an https proxy is checked against http.proxySSLCAInfo, or the system's, wh
         const proxy = configured.client.proxy.fixed;
         try testing.expectEqual(uplink.Proxy.Kind.https, proxy.kind);
         // `http.sslVerify` is the server's alone.
-        try testing.expectEqual(tls.ClientOptions.Verify.none, configured.client.tls.verify);
+        try testing.expectEqual(uplink.tls.ClientOptions.Verify.none, configured.client.tls.verify);
         switch (proxy.tls.trust) {
-            .own => |authorities| try testing.expectEqual(with_files, authorities != null),
+            .own => |own| try testing.expectEqual(with_files, own != null),
             .as_target => return error.TestUnexpectedResult,
         }
         try testing.expectEqual(with_files, proxy.tls.client_auth != null);
