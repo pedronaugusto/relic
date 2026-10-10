@@ -45,10 +45,20 @@ it owns. Cancellation cleanup releases it without cancellation interrupting the
 release. Repacking preserves packs protected by another operation. A failed ref
 transaction cannot expose refs to objects that collection has already removed.
 
-Airlock owns atomic replacement and durability. Relic chooses the durability
-policy and orders object publication before refs, and file synchronization before
-parent-directory synchronization. Tests inject faults through the owning
-package's published seams, including native filesystem synchronization.
+Airlock owns replacing a file and making it durable. A lock is an airlock temp
+named `<path>.lock`, created exclusively; relic adds git's protocol over it, the
+backoff while another process holds it and the holder's pid in its first bytes,
+and never breaks one. A replacement that has no lock, a state file or the
+alternates, is `airlock.writeFile`. Relic chooses each file's `Sync`: none; the
+bytes ordered before the name, with the end of the batch making them durable
+(`Odb.syncBatch` flushes the fan-out directories that received loose objects,
+once each, and a written pack flushes its directory); or the bytes and the name
+durable before the call returns. A filesystem that cannot keep the level is a
+named error, never a weaker promise. `Odb.makeDurable` and a durable checkout sync
+the files they cover and the directories that received them as one airlock batch,
+one flush of each volume. Object publication is ordered before refs, and a
+file's bytes before its name. Tests inject faults through airlock's seam, which
+sees every raw call a publish makes, and hold a task at one of them with its gate.
 
 LFS pagination treats an absent or empty cursor as termination. Each traversal
 remembers every nonempty cursor and refuses a repeated or cyclic cursor. A failed
@@ -74,10 +84,14 @@ line-diff parsing use one grammar each.
 Warp owns checksums and DEFLATE compression and decoding, including loose
 objects, packs, binary patches, archives, HTTP gzip and reftable log blocks. Whole-entry
 reads reuse its decoding tables; large received entries use its bounded reader. LFS zstd decoding also uses Warp, with a frame-declared window bounded at
-512 MiB. Remaining hunk-grammar adoption must use published dependency APIs; Relic does not copy dependency
-implementations or publish compatibility wrappers. Conduit owns child termination
-states. Allocation contracts exercise lifecycle failures using Shakedown's
-NoResize allocator.
+512 MiB. Parallax owns the grammar of a hunk: relic reads a patch's file headers,
+extended lines and binary patches, and gives the text after them to
+`parallax.patch.scanHunk` in git's dialect, which ends a hunk where its counts do and
+measures the context around its changes without allocating; applying walks a hunk's
+lines with `HunkLines`. Relic copies no dependency's implementation and publishes no
+compatibility wrapper. Conduit owns child termination states, and relic shows its
+`Term`. Allocation contracts exercise lifecycle failures using Shakedown's
+NoResize allocator, which keeps the count of allocations the same from run to run.
 
 ## Cost and validation
 
