@@ -2780,10 +2780,15 @@ test "listing loose refs preserves allocation resource failures" {
         var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
         try std.testing.checkAllAllocationFailures(no_resize.allocator(), listLooseRefsForAllocation, .{ io, tmp.dir });
     }
-    var counting = std.testing.FailingAllocator.init(gpa, .{});
+    // A resize or remap that succeeds in one run and not in the next changes how
+    // many allocations the listing makes, and an index counted in one run may
+    // not be reached in another: every allocator below refuses them.
+    var counted_base = shakedown.alloc.NoResize.init(gpa);
+    var counting = std.testing.FailingAllocator.init(counted_base.allocator(), .{});
     try listLooseRefsForAllocation(counting.allocator(), io, tmp.dir);
     for (0..counting.alloc_index) |fail_index| {
-        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        var failing_base = shakedown.alloc.NoResize.init(gpa);
+        var failing = std.testing.FailingAllocator.init(failing_base.allocator(), .{ .fail_index = fail_index });
         var vtable = failing.allocator().vtable.*;
         vtable.alloc = struct {
             fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
