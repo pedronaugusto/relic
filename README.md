@@ -44,7 +44,7 @@ helpers and LFS filters work with relic.
 ## Usage
 
 The block below is a region of [`examples/usage.zig`](examples/usage.zig),
-which `zig build examples` builds and runs. CI compares the two.
+which `bay examples` builds and runs. CI compares the two.
 
 <!-- BEGIN GENERATED zig build docs -- usage -->
 ```zig
@@ -785,7 +785,7 @@ tree carrying two entries that differ only in case, or one whose name folds to
 another's directory, is refused on a filesystem that folds case rather than
 having one written over or through the other.
 
-`zig build check -Dtarget=…` compiles everything, tests included, without
+`bay check -Dtarget=…` compiles everything, tests included, without
 running it, and CI does that for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 `x86_64-linux-musl`, `x86_64-windows-gnu`, `aarch64-windows-gnu`,
 `x86_64-macos` and `aarch64-macos`.
@@ -805,21 +805,22 @@ Fetching and pushing over HTTP and HTTPS, and Git LFS, take three more:
 [strand](https://github.com/pedronaugusto/strand) for the JSON servers send. The `http` option (on by default) brings them.
 
 [preflight](https://github.com/pedronaugusto/preflight) supplies the build and CI gate, and
-[shakedown](https://github.com/pedronaugusto/shakedown) is a lazy test-only dependency; neither is
-fetched by a consumer.
+[shakedown](https://github.com/pedronaugusto/shakedown) supplies the tests' clocks and fault plans. Both are dev dependencies, which [bay](https://github.com/pedronaugusto/bay) gives relic's own development and a project that depends on relic never sees.
 
 ## Testing
 
-Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap through preflight; run `zig build cache` before direct Zig builds (only a rebuild is lost).
+Development runs through bay.
+
+Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap through preflight; run `bay cache` before direct Zig builds (only a rebuild is lost).
 
 ```sh
-zig build test --test-timeout 60s   # the suite, and the examples, which are run
-zig build test -Dtest-filter=hooks --test-timeout 60s   # run matching tests while developing
-zig build examples      # the examples on their own
-zig build check         # compile everything, including the tests, run nothing
-zig build check-imports # named source layers and dependency owners
-zig build test --fuzz   # the fuzz tests, until stopped
-zig build docs -- usage --check   # the Usage block against the example
+bay test --test-timeout 60s   # the suite, and the examples, which are run
+bay test -Dtest-filter=hooks --test-timeout 60s   # run matching tests while developing
+bay examples      # the examples on their own
+bay check         # compile everything, including the tests, run nothing
+bay check-imports # named source layers and dependency owners
+bay test --fuzz   # the fuzz tests, until stopped
+bay docs -- usage --check   # the Usage block against the example
 ```
 
 Every test runs under `std.testing.allocator` and `std.testing.io`, against
@@ -830,7 +831,7 @@ ReleaseSafe on all three platforms, ReleaseFast on Linux, ReleaseSmall as a
 compile check, and ThreadSanitizer on Linux. Each parity corpus seed has its
 own named test, and the hosted jobs split the suite test by test, balanced by
 the durations the last run recorded. A test that stalls is reported by name.
-The package's own benchmarks are in `bench/`: `zig build bench` builds them,
+The package's own benchmarks are in `bench/`: `bay bench` builds them,
 and [bench/README.md](bench/README.md) says how to run them. CI only compiles
 them.
 
@@ -910,7 +911,7 @@ encodes and compares it with what it was encoded from. And the pack fuzzer
 writes a pack of random objects, some of them deltas, then reads it back and
 rehashes every one against the name its index gives it. The merge fuzzer
 merges three random blobs and proves that an unchanged theirs preserves ours
-byte for byte. `zig build test
+byte for byte. `bay test
 --fuzz` builds the suite a second time with the instrumentation on and runs
 them until stopped, keeping a corpus per property under `.zig-cache/f` and
 printing a web address where the coverage is.

@@ -1,5 +1,4 @@
 {
-  "glint": {"rules": [{"id": "P001", "level": "gate"}, {"id": "P003", "level": "gate"}]},
   "sources": [
     "src"
   ],
@@ -48,6 +47,14 @@
   ],
   "glint": {
     "rules": [
+      {
+        "id": "P001",
+        "level": "gate"
+      },
+      {
+        "id": "P003",
+        "level": "gate"
+      },
       {
         "id": "Z026",
         "level": "gate"

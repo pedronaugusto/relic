@@ -4,7 +4,7 @@ relic's own measurements of its own work, against nothing else. They are timed o
 a quiet machine. CI compiles them and runs untimed smoke checks.
 
 ```sh
-zig build bench -Doptimize=ReleaseFast
+bay bench -Doptimize=ReleaseFast
 ./zig-out/bench/relic-regressions
 ```
 
@@ -56,6 +56,6 @@ It times each through shakedown.bench and prints its rows as JSON lines;
 - native: cached 256-byte native pipe round trips, with process startup outside
   the clock and exact answer checking.
 
-Compare ReleaseFast executables in paired, interleaved order (`zig build bench-ab`);
+Compare ReleaseFast executables in paired, interleaved order (`bay bench-ab`);
 fixture filesystem work remains visible in the timing spread. Fixture and buffer
 allocation stay outside the clock.

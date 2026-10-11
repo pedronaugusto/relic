@@ -1,9 +1,11 @@
 const std = @import("std");
+/// airlock's build, for its test seam.
+const airlock_build = @import("airlock");
 
+/// What a project that depends on relic builds: the `relic` module, on conduit,
+/// sweep, parallax, airlock and warp, and with `http` (the default) uplink,
+/// cloak and strand. The tests, examples, benchmarks and gate are `dev`'s.
 pub fn build(b: *std.Build) void {
-    // lazyImport compares every package of the dependency tree at comptime;
-    // a large tree runs past the default quota of 1000 branches.
-    @setEvalBranchQuota(100_000);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -29,8 +31,7 @@ pub fn build(b: *std.Build) void {
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
     const parallax = b.dependency("parallax", .{ .target = target, .optimize = optimize }).module("parallax");
     const warp = b.dependency("warp", .{ .target = target, .optimize = optimize }).module("warp");
-    const airlock_dependency = b.dependency("airlock", .{ .target = target, .optimize = optimize });
-    const airlock = airlock_dependency.module("airlock");
+    const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock");
     var http_modules: [http_packages.len]?*std.Build.Module = @splat(null);
     if (http) for (http_packages, &http_modules) |name, *slot| {
         slot.* = lazyModule(b, name, target, optimize);
@@ -49,6 +50,22 @@ pub fn build(b: *std.Build) void {
     for (http_packages, http_modules) |name, found| if (found) |m| module.addImport(name, m);
     module.addImport("airlock", airlock);
     module.addImport("warp", warp);
+}
+
+/// relic's development: its tests, helpers, examples and benchmarks, under
+/// preflight's gate, with shakedown bound to relic's aegis. Run through bay.
+pub fn dev(b: *std.Build, tools: type) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const preflight = tools.preflight;
+    use_aegis = tools.shakedown.useAegis;
+    // The option of `build`, passed on to relic.
+    http_option = b.option(bool, "http", "Fetch and push over HTTP(S) and Git LFS, with uplink, cloak and strand (default on)") orelse true;
+    const package = relicPackage(b, target, optimize);
+    const p = package.builder;
+    const module = package.module("relic");
+    const airlock_dependency = p.dependency("airlock", .{ .target = target, .optimize = optimize });
+    const conduit = module.import_table.get("conduit").?;
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -64,7 +81,7 @@ pub fn build(b: *std.Build) void {
     const lock_helper = b.addExecutable(.{
         .name = "relic-lock-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/lock.zig"),
+            .root_source_file = p.path("src/testing/lock.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -76,7 +93,7 @@ pub fn build(b: *std.Build) void {
     const filter_helper = b.addExecutable(.{
         .name = "relic-filter-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/filter.zig"),
+            .root_source_file = p.path("src/testing/filter.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -88,7 +105,7 @@ pub fn build(b: *std.Build) void {
     const lfs_transfer_helper = b.addExecutable(.{
         .name = "relic-lfs-transfer-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/lfs/transfer.zig"),
+            .root_source_file = p.path("src/testing/lfs/transfer.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -100,7 +117,7 @@ pub fn build(b: *std.Build) void {
     const upload_pack_helper = b.addExecutable(.{
         .name = "relic-upload-pack",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/uploadpack.zig"),
+            .root_source_file = p.path("src/testing/uploadpack.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -111,7 +128,7 @@ pub fn build(b: *std.Build) void {
     const hook_fixture = b.addExecutable(.{
         .name = "relic-hook-fixture",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/hook.zig"),
+            .root_source_file = p.path("src/testing/hook.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -120,7 +137,7 @@ pub fn build(b: *std.Build) void {
     const fake_ssh = b.addExecutable(.{
         .name = "relic-fake-ssh",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/fake_ssh.zig"),
+            .root_source_file = p.path("src/testing/fake_ssh.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -129,7 +146,7 @@ pub fn build(b: *std.Build) void {
     const lfs_tool = b.addExecutable(.{
         .name = "relic-lfs-test-tool",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/lfs/tool.zig"),
+            .root_source_file = p.path("src/testing/lfs/tool.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -140,7 +157,7 @@ pub fn build(b: *std.Build) void {
     const remote_helper = b.addExecutable(.{
         .name = "relic-remote-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/remotehelper.zig"),
+            .root_source_file = p.path("src/testing/remotehelper.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -150,7 +167,7 @@ pub fn build(b: *std.Build) void {
     const lfs_agent = b.addExecutable(.{
         .name = "relic-lfs-agent",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/lfs/agent.zig"),
+            .root_source_file = p.path("src/testing/lfs/agent.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -159,7 +176,7 @@ pub fn build(b: *std.Build) void {
     const process_fixture = b.addExecutable(.{
         .name = "relic-process-fixture",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/process.zig"),
+            .root_source_file = p.path("src/testing/process.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -174,7 +191,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOptionPathUntracked("gnupg_fixture_root", if (std.Io.Dir.path.isAbsolute(gnupg_fixture_root))
         b.graph.cwdRelativePath(gnupg_fixture_root)
     else
-        b.path(gnupg_fixture_root));
+        p.path(gnupg_fixture_root));
     build_options.addOptionPath("lock_helper_path", lock_helper.getEmittedBin());
     build_options.addOptionPath("filter_helper_path", filter_helper.getEmittedBin());
     build_options.addOptionPath("lfs_transfer_helper_path", lfs_transfer_helper.getEmittedBin());
@@ -197,7 +214,7 @@ pub fn build(b: *std.Build) void {
     // `PackOptions.threads` asks for more than one, and the suite writes
     // the same repository from two processes and two tasks at once. Whether
     // that is free of races is a claim a race detector can check and a
-    // reader cannot: `zig build test -Dthread-sanitizer`.
+    // reader cannot: `bay test -Dthread-sanitizer`.
     const thread_sanitizer = b.option(
         bool,
         "thread-sanitizer",
@@ -205,29 +222,20 @@ pub fn build(b: *std.Build) void {
     ) orelse false;
 
     const test_module = b.createModule(.{
-        .root_source_file = b.path("src/tests.zig"),
+        .root_source_file = p.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = if (thread_sanitizer) true else null,
     });
-    test_module.addImport("conduit", conduit);
-    test_module.addImport("sweep", sweep);
-    test_module.addImport("parallax", parallax);
-    test_module.addOptions("relic_options", features);
-    for (http_packages, http_modules) |name, found| if (found) |m| test_module.addImport(name, m);
-    test_module.addImport("airlock", airlock);
-    test_module.addImport("warp", warp);
-    // Test support is fetched for this package's own build only: a consumer
-    // never fetches shakedown, which airlock's testing module brings. One
-    // shakedown in the test graph: the one airlock's seam is built on, bound to
-    // airlock's aegis. Until it is fetched the build asks again.
-    if (b.pkg_hash.len == 0) {
-        if (b.lazyImport(@This(), "airlock")) |airlock_build| {
-            const seam = airlock_build.testing(airlock_dependency) catch return;
-            test_module.addImport("airlock.testing", seam);
-            test_module.addImport("shakedown", seam.import_table.get("shakedown").?);
-        }
-    }
+    // The imports of the module a consumer gets, the options among them.
+    var imports = module.import_table.iterator();
+    while (imports.next()) |entry| test_module.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    // One shakedown in the test graph: the one airlock's seam is built on,
+    // bound to airlock's aegis, which is relic's. The seam is lazy: until
+    // shakedown is fetched this configure pass ends.
+    const seam = airlock_build.testing(airlock_dependency) catch return;
+    test_module.addImport("airlock.testing", seam);
+    test_module.addImport("shakedown", seam.import_table.get("shakedown").?);
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
     hook_fixture.root_module.addImport("relic", module);
@@ -269,7 +277,7 @@ pub fn build(b: *std.Build) void {
     // Built AND run, against the module a consumer gets. An example that is
     // only compiled proves the names still resolve; running it is what
     // proves the bytes are still the bytes. examples/usage.zig is also where
-    // README.md's Usage block comes from -- see zig build docs -- usage -- so the
+    // README.md's Usage block comes from -- see bay docs -- usage -- so the
     // snippet a reader copies cannot drift from code CI executes.
     //=====================================================================
 
@@ -278,7 +286,7 @@ pub fn build(b: *std.Build) void {
         const example = b.addExecutable(.{
             .name = std.Io.Dir.path.stem(source),
             .root_module = b.createModule(.{
-                .root_source_file = b.path(source),
+                .root_source_file = p.path(source),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "relic", .module = module }},
@@ -288,7 +296,7 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&example.step);
         const run = b.addRunArtifact(example);
         run.step.dependOn(b.getInstallStep());
-        run.setCwd(b.path("zig-out"));
+        run.setCwd(p.path("zig-out"));
         examples_step.dependOn(&run.step);
 
         const example_tests = b.addTest(.{ .root_module = example.root_module });
@@ -307,25 +315,22 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
     // Benchmarks
     //
-    // relic's own measurements of its own work, in bench/: `zig build bench
-    // -Doptimize=ReleaseFast` installs them under zig-out/bench, and `zig
-    // build bench` compiles them, so they keep up with the API. They run on a
-    // quiet machine, never in CI; bench/README.md says how. Only in relic's
-    // own tree: a package fetched by a consumer has no bench/.
+    // relic's own measurements of its own work, in bench/: `bay bench
+    // -Doptimize=ReleaseFast` installs them under zig-out/bench, and `bay
+    // bench` compiles them, so they keep up with the API. They run on a
+    // quiet machine, never in CI; bench/README.md says how.
     //=====================================================================
 
-    if (b.pkg_hash.len == 0) {
-        if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{
-            .tests = test_step,
-            .bench = .{
-                .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-rows", .source = "bench/rows.zig" } },
-                .imports = benchImports,
-                .target = target,
-                .optimize = optimize,
-            },
-        });
-    }
-    const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = b.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
+    preflight.addCi(b, p, .{
+        .tests = test_step,
+        .bench = .{
+            .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-rows", .source = "bench/rows.zig" } },
+            .imports = benchImports,
+            .target = target,
+            .optimize = optimize,
+        },
+    });
+    const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = p.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
     const prepare = b.addRunArtifact(setup);
     prepare.addPassthruArgs();
     b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
@@ -353,13 +358,27 @@ const example_sources = [_][]const u8{
     "examples/usage.zig",
 };
 
+/// `-Dhttp`, as `dev` read it, passed on to relic.
+var http_option: bool = true;
+
+/// `tools.shakedown.useAegis`, set by `dev` for the benchmark imports, which are built without `tools`.
+var use_aegis: *const fn (*std.Build.Dependency, *std.Build.Module) void = undefined;
+
+/// relic as the development build has it: the package, with the option passed on.
+fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
+    return b.dependency("relic", .{ .target = target, .optimize = optimize, .http = http_option });
+}
+
+/// The benchmarks' relic: the library's imports over src/benchmark.zig, in the
+/// mode the benchmark builds in, and shakedown bound to relic's aegis.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const module = b.createModule(.{ .root_source_file = b.path("src/benchmark.zig"), .target = target, .optimize = optimize });
-    for ([_][]const u8{ "conduit", "sweep", "parallax", "airlock", "warp" }) |name| module.addImport(name, b.dependency(name, .{ .target = target, .optimize = optimize }).module(name));
-    const features = b.addOptions();
-    features.addOption(bool, "http", true);
-    module.addOptions("relic_options", features);
-    for (http_packages) |name| if (lazyModule(b, name, target, optimize)) |m| module.addImport(name, m);
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown");
-    return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown } }) catch @panic("out of memory");
+    const package = relicPackage(b, target, optimize);
+    const p = package.builder;
+    const published = package.module("relic");
+    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize });
+    var imports = published.import_table.iterator();
+    while (imports.next()) |entry| module.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+    use_aegis(shakedown, published.import_table.get("airlock").?.import_table.get("aegis").?);
+    return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } }) catch @panic("out of memory");
 }
