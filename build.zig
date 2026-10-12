@@ -1,5 +1,5 @@
 const std = @import("std");
-/// airlock's build, for its test seam.
+/// airlock's build, for its test seam and the aegis it is built on.
 const airlock_build = @import("airlock");
 
 /// What a project that depends on relic builds: the `relic` module, on conduit,
@@ -24,32 +24,31 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
 
     const http = b.option(bool, "http", "Fetch and push over HTTP(S) and Git LFS, with uplink, cloak and strand (default on)") orelse true;
-    const features = b.addOptions();
-    features.addOption(bool, "http", http);
-
-    const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
-    const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
-    const parallax = b.dependency("parallax", .{ .target = target, .optimize = optimize }).module("parallax");
-    const warp = b.dependency("warp", .{ .target = target, .optimize = optimize }).module("warp");
-    const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock");
-    var http_modules: [http_packages.len]?*std.Build.Module = @splat(null);
-    if (http) for (http_packages, &http_modules) |name, *slot| {
-        slot.* = lazyModule(b, name, target, optimize);
-    };
-
-    const module = b.addModule("relic", .{
+    _ = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = moduleImports(b, target, optimize, http),
     });
+}
 
-    module.addImport("conduit", conduit);
-    module.addImport("sweep", sweep);
-    module.addImport("parallax", parallax);
-    module.addOptions("relic_options", features);
-    for (http_packages, http_modules) |name, found| if (found) |m| module.addImport(name, m);
-    module.addImport("airlock", airlock);
-    module.addImport("warp", warp);
+/// What the `relic` module imports, from `p`, relic's own build, for `target`
+/// and `optimize`: conduit, sweep, parallax, airlock and warp, the
+/// `relic_options` that say whether `http` is on, and with it uplink, cloak
+/// and strand, each once the build has fetched it. The tests and the
+/// benchmarks build their roots on the same.
+fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, http: bool) []const std.Build.Module.Import {
+    const features = p.addOptions();
+    features.addOption(bool, "http", http);
+    var imports: std.ArrayList(std.Build.Module.Import) = .empty;
+    for ([_][]const u8{ "conduit", "sweep", "parallax", "airlock", "warp" }) |name| {
+        imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
+    }
+    imports.append(p.allocator, .{ .name = "relic_options", .module = features.createModule() }) catch @panic("out of memory");
+    if (http) for (http_packages) |name| if (lazyModule(p, name, target, optimize)) |m| {
+        imports.append(p.allocator, .{ .name = name, .module = m }) catch @panic("out of memory");
+    };
+    return imports.items;
 }
 
 /// relic's development: its tests, helpers, examples and benchmarks, under
@@ -65,7 +64,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const p = package.builder;
     const module = package.module("relic");
     const airlock_dependency = p.dependency("airlock", .{ .target = target, .optimize = optimize });
-    const conduit = module.import_table.get("conduit").?;
+    const conduit = p.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -226,16 +225,15 @@ pub fn dev(b: *std.Build, tools: type) void {
         .target = target,
         .optimize = optimize,
         .sanitize_thread = if (thread_sanitizer) true else null,
+        // The imports of the module a consumer gets, the options among them.
+        .imports = moduleImports(p, target, optimize, http_option),
     });
-    // The imports of the module a consumer gets, the options among them.
-    var imports = module.import_table.iterator();
-    while (imports.next()) |entry| test_module.addImport(entry.key_ptr.*, entry.value_ptr.*);
-    // One shakedown in the test graph: the one airlock's seam is built on,
-    // bound to airlock's aegis, which is relic's. The seam is lazy: until
-    // shakedown is fetched this configure pass ends.
-    const seam = airlock_build.testing(airlock_dependency) catch return;
-    test_module.addImport("airlock.testing", seam);
-    test_module.addImport("shakedown", seam.import_table.get("shakedown").?);
+    // One shakedown in the test graph, relic's own, bound to the aegis
+    // airlock is built on, and airlock's seam on it.
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+    use_aegis(shakedown, airlock_build.aegis(airlock_dependency));
+    test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
+    test_module.addImport("shakedown", shakedown.module("shakedown"));
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
     hook_fixture.root_module.addImport("relic", module);
@@ -391,15 +389,12 @@ fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
 }
 
 /// The benchmarks' relic: the library's imports over src/benchmark.zig, in the
-/// mode the benchmark builds in, and shakedown bound to relic's aegis.
+/// mode the benchmark builds in, and shakedown bound to the aegis airlock is
+/// built on.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const package = relicPackage(b, target, optimize);
-    const p = package.builder;
-    const published = package.module("relic");
-    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize });
-    var imports = published.import_table.iterator();
-    while (imports.next()) |entry| module.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    const p = relicPackage(b, target, optimize).builder;
+    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, http_option) });
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, published.import_table.get("airlock").?.import_table.get("aegis").?);
+    use_aegis(shakedown, airlock_build.aegis(p.dependency("airlock", .{ .target = target, .optimize = optimize })));
     return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } }) catch @panic("out of memory");
 }
