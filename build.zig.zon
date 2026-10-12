@@ -8,40 +8,40 @@
         },
 
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep?ref=v0.2.0#0286ebf4329869bbdc72e8da3ac5bf4baf633230",
-            .hash = "sweep-0.2.0-6ErwaQ7cOwABspmB5eoOV_RsNaMBVsqWpfVHerdOMQXY",
+            .url = "git+https://github.com/pedronaugusto/sweep?ref=v0.2.1#ac5c345d88b4088b931f815d90ddc40349917069",
+            .hash = "sweep-0.2.1-6ErwaXfcOwAJ0ASU9H7d1vXKdUzIWCmr_Zqx-OJ10ELh",
         },
 
         .parallax = .{
-            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.0#844d23368983501df227e2d0cc0ee8ee26e17de5",
-            .hash = "parallax-0.2.0-lz9Br4heBgBYLK-SkBtYxMZ3QAPfH62r8TuTeTuFTl0h",
+            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.1#76e1edd345788fe761dbcb28f6efd8b4c432edee",
+            .hash = "parallax-0.2.1-lz9Br_FeBgDsd_HNCMgtXozXToK8reduepyLMvOuxPdf",
         },
 
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.2.0#d67052d8874fcbbe37380d9cb502d701eafbd676",
-            .hash = "uplink-0.2.0-0eVSJrchCgBcNllcWpS5ydY_Auo8TzSER3Lw9KeIlNyL",
+            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.2.3#8bb9087eafb09360db8096223f577ed447600872",
+            .hash = "uplink-0.2.3-0eVSJvcpCgCNu9vN78cZ_3p3-WiHKB09u2n4Kui-AhLW",
             .lazy = true,
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.2.0#bac388a2581bf358114841b7a9dcf77d6473307f",
-            .hash = "airlock-0.2.0-rfvu6GOOBQB5avz0PTXorDKw6v4h2k8tQc_Exo-JWuTq",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.2.1#f9929e0e44537b00068d4513c3c0a2da074fe8f3",
+            .hash = "airlock-0.2.1-rfvu6NmOBQBVaP82aqCDE13vlQj6wwp0XaHfYo7DtYtF",
         },
 
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.2.0#3ff0a6ba86c824c3a7b0855ae448b3bb414448c6",
-            .hash = "warp-0.2.0-JASxFV1ZEQA-R6vYMwAnigBe8OOdo5OG18PK_SpTzAa3",
+            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.2.1#4db0ba5a1c97b86e4b815ff46acdd7e02aad8321",
+            .hash = "warp-0.2.1-JASxFepZEQDYfDwnAAY_2Vo90dqeQpL4BmViUV3Uqt87",
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.2.0#b49da10f0fb4b05a544757c95b1103e1876b8d48",
-            .hash = "cloak-0.2.0-9onwcRPt8QK13PYULA1ckb9sfZ0T98BJr-GKaJedF931",
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.2.1#4586c54f8b2e4b14f1e2934733f4a83e73decae9",
+            .hash = "cloak-0.2.1-9onwcYnt8QJI1SbUJzqxlaMt2OEVwhhLJC0W_n4MMZqC",
             .lazy = true,
         },
 
         .strand = .{
-            .url = "git+https://github.com/pedronaugusto/strand?ref=v0.8.0#eb6be2d1353a4c03cc967b067e2476f6e27b33ce",
-            .hash = "strand-0.8.0-8LNWVsQuFwAuvo0ge8Wy-6kE2RdFjWliHcqXVHSt-Em8",
+            .url = "git+https://github.com/pedronaugusto/strand?ref=v0.8.1#8bdc29a3e4fc78c7e379dc239fb7fae640f4d4ce",
+            .hash = "strand-0.8.1-8LNWVoMvFwARssM52gfg9wmI-63REL5aGy8_HNuZLEW0",
             .lazy = true,
         },
     },
@@ -57,13 +57,13 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.2.2#02d1f43bb66fa14f3ab5c59447a5bc6f2015f6d0",
-            .hash = "preflight-0.2.2-LX1ZwqvoDQD3UmfgI4wVWyO_N477NByPJcmMBHlokAeU",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.3.4#a0efa97ac6fb5656d5e2b1a19657926b66a55d11",
+            .hash = "preflight-0.3.4-LX1ZwoE8DgCcci81Z_m2wf0UmKlkxeLCGV74OcKQC8nV",
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.2.0#a5c268211e8643b61e218194e81e204cc7dc6648",
-            .hash = "shakedown-0.2.0-BR8U45DLFQApbteZnJuS2mYJWOPJczptulfESpBLDhNf",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.2.6#5becaa0dafaf80d18662bc0df64e92f7676a110d",
+            .hash = "shakedown-0.2.6-BR8U43kqFgA0tls4urweSOXdQXn95gnWgHWfxaao9MZw",
         },
     },
 }
