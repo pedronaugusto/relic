@@ -864,8 +864,6 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
         last = segment.end - 1;
     }
 
-    // Lock from the newest back, and stop at the first one held.
-    var locked: usize = 0;
     var held: std.ArrayList([]u8) = .empty;
     defer {
         for (held.items) |lock_name| {
@@ -875,32 +873,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
         }
         held.deinit(gpa);
     }
-    var i = last + 1;
-    while (i > first) : (i -= 1) {
-        const lock_name = try gpa.print("{s}.lock", .{stack.names[i - 1]});
-        if (dir.createFile(io, lock_name, .{ .exclusive = true })) |file| {
-            file.close(io);
-            held.append(gpa, lock_name) catch |err| {
-                // glint-ignore: Z026 -- the allocation's error is the one to report; a lock left behind is one git reports by name
-                dir.deleteFile(io, lock_name) catch {};
-                gpa.free(lock_name);
-                return err;
-            };
-            locked += 1;
-        } else |err| {
-            gpa.free(lock_name);
-            switch (err) {
-                error.PathAlreadyExists => {
-                    if (locked >= 2) {
-                        first = i;
-                        break;
-                    }
-                    return error.LockHeld;
-                },
-                else => |e| return e,
-            }
-        }
-    }
+    first += try lockTables(gpa, io, dir, stack.names[first .. last + 1], &held);
     // One table merged with nothing is the same table.
     if (last == first) return;
     // The tables are locked; the list need not be while they are merged.
@@ -959,6 +932,38 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     cache.internal.closeUnclaimed(&stack, &.{});
     // glint-ignore: Z026 -- the list no longer names these tables; one a platform will not remove is left for the next compaction
     for (stack.names[first .. last + 1]) |name| dir.deleteFile(io, name) catch {};
+}
+
+/// Lock `names`, tables to be merged, from the newest back, each by
+/// `<table>.lock` as git's `stack_compact_range` locks them, into `held`,
+/// which the caller releases. A table another process has locked stops the
+/// run there: the tables newer than it are merged when there are two of
+/// them, and otherwise the compaction is `error.LockHeld`. Returns where in
+/// `names` the locked run begins.
+fn lockTables(gpa: Allocator, io: Io, dir: Io.Dir, names: []const []const u8, held: *std.ArrayList([]u8)) refs.TransactionError!usize {
+    var i = names.len;
+    while (i > 0) : (i -= 1) {
+        const lock_name = try gpa.print("{s}.lock", .{names[i - 1]});
+        if (dir.createFile(io, lock_name, .{ .exclusive = true })) |file| {
+            file.close(io);
+            held.append(gpa, lock_name) catch |err| {
+                // glint-ignore: Z026 -- the allocation's error is the one to report; a lock left behind is one git reports by name
+                dir.deleteFile(io, lock_name) catch {};
+                gpa.free(lock_name);
+                return err;
+            };
+        } else |err| {
+            gpa.free(lock_name);
+            switch (err) {
+                error.PathAlreadyExists => {
+                    if (held.items.len >= 2) return i;
+                    return error.LockHeld;
+                },
+                else => |e| return e,
+            }
+        }
+    }
+    return 0;
 }
 
 /// Where `run` stands in `names`, whole and in order, or `null`.

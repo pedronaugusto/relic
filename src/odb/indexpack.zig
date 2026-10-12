@@ -345,8 +345,6 @@ pub fn receive(
     options: Options,
 ) Self.Error!Result {
     const pack_dir = inputs.pack_dir;
-    const in = inputs.in;
-    const kind = db.objectFormat();
 
     var temp_buf: [64]u8 = undefined;
     const temp = fs.tempName(io, &temp_buf, "tmp_pack_");
@@ -359,32 +357,9 @@ pub fn receive(
         if (!kept) pack_dir.deleteFile(io, temp) catch {};
     }
 
-    // The stream is read once: each entry as it arrives, its bytes kept in
-    // the file on the way, as git's index-pack reads its input, so that
-    // naming the objects goes on while the rest is still coming.
-    const tee_buffer = try gpa.alloc(u8, 64 * 1024);
-    defer gpa.free(tee_buffer);
-    var tee: Tee = .init(io, file, in, kind, tee_buffer, options);
-    const count = try readPackHeader(&tee);
-
     var indexer: Indexer = try .init(gpa, io, Database.from(db), file, options);
     defer indexer.deinit();
-    const read = try readEntries(&tee, &indexer, count, kind);
-    const trailer = read.trailer;
-    const body_end = read.body_end;
-
-    if (count == 0) return .{ .name = null, .objects = 0, .deltas = 0, .appended = 0 };
-    try indexer.findBases();
-    try indexer.resolve();
-    try indexer.checkCollisions();
-
-    var name = trailer;
-    var appended: u32 = 0;
-    if (indexer.thin_bases.items.len != 0) {
-        name = try indexer.appendBases(body_end, count);
-        appended = @intCast(indexer.thin_bases.items.len);
-    }
-    try indexer.checkFound();
+    const streamed = try indexStream(&indexer, inputs.in) orelse return .{ .name = null, .objects = 0, .deltas = 0, .appended = 0 };
 
     const index_entries = try indexEntries(gpa, &indexer, options);
     defer gpa.free(index_entries);
@@ -396,8 +371,81 @@ pub fn receive(
     file.close(io);
     file_open = false;
 
+    var token: ?retention.Token = if (options.keep) try retention.Token.open(gpa, io, pack_dir, streamed.name) else null;
+    errdefer if (token) |*t| t.deinit(io);
+    const result: Result = .{
+        .keep = token,
+        .name = streamed.name,
+        .objects = @intCast(index_entries.len), // safe: one entry per object of the stream, which counts them in a u32
+        .deltas = indexer.deltas,
+        .appended = streamed.appended,
+    };
+    const published = try publish(gpa, io, db, .{
+        .pack_dir = pack_dir,
+        .temp = temp,
+        .name = streamed.name,
+        .entries = index_entries,
+        .fsync = fsync,
+        .kept = &kept,
+    }, options);
+    if (published) try db.refresh(io);
+    return result;
+}
+
+/// What reading a pack stream found: the name the pack takes, and how many
+/// bases a thin pack's deltas needed appended.
+const Streamed = struct { name: Oid, appended: u32 = 0 };
+
+/// Read the stream `in` once into `indexer`'s file, each entry as it
+/// arrives, its bytes kept in the file on the way, as git's index-pack reads
+/// its input, so that naming the objects goes on while the rest is still
+/// coming. Then resolve the deltas, check the names against the database,
+/// and append the bases a thin pack left out, which renames the pack.
+/// `null` for a pack of no objects.
+fn indexStream(indexer: *Indexer, in: *Io.Reader) Self.Error!?Streamed {
+    const tee_buffer = try indexer.gpa.alloc(u8, 64 * 1024);
+    defer indexer.gpa.free(tee_buffer);
+    var tee: Tee = .init(indexer.io, indexer.file, in, indexer.kind, tee_buffer, indexer.options);
+    const count = try readPackHeader(&tee);
+    const read = try readEntries(&tee, indexer, count, indexer.kind);
+    if (count == 0) return null;
+    try indexer.findBases();
+    try indexer.resolve();
+    try indexer.checkCollisions();
+
+    var streamed: Streamed = .{ .name = read.trailer };
+    if (indexer.thin_bases.items.len != 0) {
+        streamed.name = try indexer.appendBases(read.body_end, count);
+        streamed.appended = @intCast(indexer.thin_bases.items.len); // safe: one base for each of at most `count` deltas, a u32
+    }
+    try indexer.checkFound();
+    return streamed;
+}
+
+/// A received pack, closed at `temp` in `pack_dir`, and what `publish`
+/// writes beside it.
+const Publication = struct {
+    pack_dir: Io.Dir,
+    temp: []const u8,
+    name: Oid,
+    entries: []pack.IndexEntry,
+    fsync: fs.Fsync,
+    /// Set once the pack has its name, when `temp` is no longer there to
+    /// remove.
+    kept: *bool,
+};
+
+/// Write the pack's index, and its reverse index when `options` asks, and
+/// rename the three into place: the pack first, then the reverse index,
+/// the index last, as git renames them, since a reader finds a pack by its
+/// index. The names are then synced as the pack is. The same pack received
+/// twice has the same name, and the one already there, which a reader may
+/// have open, is kept: `false`, nothing put in place.
+fn publish(gpa: Allocator, io: Io, db: anytype, p: Publication, options: Options) Self.Error!bool {
+    const pack_dir = p.pack_dir;
+    const kind = db.objectFormat();
     var hex: [hash.max_hex_len]u8 = undefined;
-    const text = name.hex(&hex);
+    const text = p.name.hex(&hex);
     var pack_name_buf: [96]u8 = undefined;
     // unreachable: a hex name is at most max_hex_len digits, the rest ten bytes
     const pack_name = std.mem.print(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
@@ -405,42 +453,28 @@ pub fn receive(
     // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
     const idx_name = std.mem.print(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
-    var token: ?retention.Token = if (options.keep) try retention.Token.open(gpa, io, pack_dir, name) else null;
-    errdefer if (token) |*t| t.deinit(io);
-    const result: Result = .{
-        .keep = token,
-        .name = name,
-        .objects = @intCast(index_entries.len),
-        .deltas = indexer.deltas,
-        .appended = appended,
-    };
-
-    // The same pack received twice has the same name, and the one already
-    // there is the one a reader may have open.
     if (pack_dir.access(io, idx_name, .{})) |_| {
-        return result;
+        return false;
     } else |_| {}
 
     var idx_temp_buf: [64]u8 = undefined;
     const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
-    _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = fsync.sync(.pack_metadata) });
+    _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, .{ .kind = kind, .entries = p.entries, .pack_checksum = p.name, .sync = p.fsync.sync(.pack_metadata) });
     // glint-ignore: Z026 -- the receive's error is the one to report; a temporary index left behind is what git gc prunes
     errdefer pack_dir.deleteFile(io, idx_temp) catch {};
     var rev_temp_buf: [64]u8 = undefined;
     const rev_temp: ?[]const u8 = if (options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
-    if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, .{ .kind = kind, .entries = index_entries, .pack_checksum = name, .sync = fsync.sync(.pack_metadata) });
+    if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, .{ .kind = kind, .entries = p.entries, .pack_checksum = p.name, .sync = p.fsync.sync(.pack_metadata) });
     // glint-ignore: Z026 -- the receive's error is the one to report; a temporary reverse index left behind is what git gc prunes
     errdefer if (rev_temp) |t| pack_dir.deleteFile(io, t) catch {};
 
     // read-only, as git leaves a pack and its indexes
     const shared = db.sharedPermissions();
-    fs.readOnlyObject(io, pack_dir, temp, shared);
+    fs.readOnlyObject(io, pack_dir, p.temp, shared);
     fs.readOnlyObject(io, pack_dir, idx_temp, shared);
     if (rev_temp) |t| fs.readOnlyObject(io, pack_dir, t, shared);
-    // Pack first, then the reverse index, index last, as git renames them:
-    // a reader finds a pack by its index.
-    try fs.rename(io, pack_dir, temp, pack_name);
-    kept = true;
+    try fs.rename(io, pack_dir, p.temp, pack_name);
+    p.kept.* = true;
     if (rev_temp) |t| {
         var rev_name_buf: [96]u8 = undefined;
         // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
@@ -448,9 +482,8 @@ pub fn receive(
         try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
     try renameBesidePack(io, pack_dir, idx_temp, idx_name, pack_name);
-    try pack.syncNames(io, pack_dir, fsync);
-    try db.refresh(io);
-    return result;
+    try pack.syncNames(io, pack_dir, p.fsync);
+    return true;
 }
 
 /// Read every entry of the stream through `tee` into `indexer`, then the

@@ -1664,13 +1664,67 @@ pub const Odb = struct {
         // No more tasks than objects: a task with nothing to take still
         // costs the Io one, and its deflate state.
         const workers = @min(taskCount(options.threads), @max(entries.len, 1));
-
-        // Every object's type and length, which is what the order is by. A
-        // header is all this needs, and for a packed object that is no
-        // inflation at all.
-        var ordered = try gpa.alloc(Ordered, entries.len);
-        var ordered_filled: usize = 0;
+        const ordered = try odb.orderForPack(io, entries, options, workers);
         defer {
+            for (ordered) |item| if (item.cached) |bytes| gpa.free(bytes);
+            gpa.free(ordered);
+        }
+
+        const write_options: pack.WriteOptions = .{
+            .keep = options.keep,
+            // A pack written into the database is synced as `core.fsync`
+            // says; one streamed to a caller is the caller's.
+            .fsync = switch (target) {
+                .dir => odb.backendData().options.fsync,
+                .stream => .off,
+            },
+            .compression = options.compression,
+            .reverse_index = options.reverse_index,
+            .shared = odb.backendData().options.shared,
+        };
+        var writer = switch (target) {
+            .dir => |pack_dir| try pack.Writer.open(gpa, io, pack_dir, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
+            .stream => |out| try pack.Writer.openStream(gpa, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, out, write_options),
+        };
+        defer writer.deinit(io);
+
+        var build: Build = blk: {
+            const group_starts = try groupStarts(gpa, ordered);
+            errdefer gpa.free(group_starts);
+            var reuse = try odb.planReuse(io, ordered, options);
+            errdefer reuse.deinit(gpa);
+            break :blk .{
+                .odb = odb,
+                .gpa = gpa,
+                .options = options,
+                .ordered = ordered,
+                .offsets = try gpa.alloc(u64, ordered.len),
+                .writer = writer,
+                .group_starts = group_starts,
+                .reuse = reuse,
+            };
+        };
+        defer build.deinit();
+        if (workers > 1) {
+            try build.writeConcurrently(io, workers);
+        } else {
+            try build.writeSerially(io);
+        }
+        return writer.finish(io);
+    }
+
+    /// `entries` in the order a pack holds them, as git's packer orders
+    /// them: type, then the tail of the path hint, then size descending.
+    /// Every object's type and length is what the order is by, and a header
+    /// is all that needs, which for a packed object is no inflation at all.
+    /// With one task, a loose object's body is kept as well while
+    /// `PackOptions.loose_cache_bytes` has room. The caller frees each
+    /// `cached` and the slice.
+    fn orderForPack(odb: *Odb, io: Io, entries: []const PackEntry, options: PackOptions, workers: usize) ErrorNamespace.Error![]Ordered {
+        const gpa = odb.backendData().gpa;
+        const ordered = try gpa.alloc(Ordered, entries.len);
+        var ordered_filled: usize = 0;
+        errdefer {
             for (ordered[0..ordered_filled]) |item| if (item.cached) |bytes| gpa.free(bytes);
             gpa.free(ordered);
         }
@@ -1718,48 +1772,7 @@ pub const Odb = struct {
             }
         }
         std.mem.sort(Ordered, ordered, {}, beforeInPackOrder);
-
-        const write_options: pack.WriteOptions = .{
-            .keep = options.keep,
-            // A pack written into the database is synced as `core.fsync`
-            // says; one streamed to a caller is the caller's.
-            .fsync = switch (target) {
-                .dir => odb.backendData().options.fsync,
-                .stream => .off,
-            },
-            .compression = options.compression,
-            .reverse_index = options.reverse_index,
-            .shared = odb.backendData().options.shared,
-        };
-        var writer = switch (target) {
-            .dir => |pack_dir| try pack.Writer.open(gpa, io, pack_dir, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
-            .stream => |out| try pack.Writer.openStream(gpa, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, out, write_options),
-        };
-        defer writer.deinit(io);
-
-        var build: Build = blk: {
-            const group_starts = try groupStarts(gpa, ordered);
-            errdefer gpa.free(group_starts);
-            var reuse = try odb.planReuse(io, ordered, options);
-            errdefer reuse.deinit(gpa);
-            break :blk .{
-                .odb = odb,
-                .gpa = gpa,
-                .options = options,
-                .ordered = ordered,
-                .offsets = try gpa.alloc(u64, ordered.len),
-                .writer = writer,
-                .group_starts = group_starts,
-                .reuse = reuse,
-            };
-        };
-        defer build.deinit();
-        if (workers > 1) {
-            try build.writeConcurrently(io, workers);
-        } else {
-            try build.writeSerially(io);
-        }
-        return writer.finish(io);
+        return ordered;
     }
 
     /// What of `ordered`'s objects is written as their packs store it, as
