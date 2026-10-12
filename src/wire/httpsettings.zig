@@ -30,6 +30,8 @@ const config_mod = @import("../config/config.zig");
 const url_mod = @import("url.zig");
 const uplink = @import("uplink");
 const shakedown = @import("shakedown");
+/// Whether relic was built with HTTP: the `http` build option.
+const http_enabled = @import("relic_options").http;
 
 /// What an HTTP conversation with one URL is configured to do.
 pub const Settings = struct {
@@ -185,6 +187,8 @@ pub const Error = error{
     /// A value that does not parse: a `http.sslVerify` that is not a
     /// boolean, a `http.postBuffer` that is not a size.
     InvalidHttpSetting,
+    /// relic was built without HTTP: its `http` build option is off.
+    HttpUnavailable,
 } || Allocator.Error;
 
 /// Which proxy an HTTP remote is reached through, chosen by the caller.
@@ -218,6 +222,7 @@ pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*c
 /// A named remote's proxy overrides `http.proxy`, including an empty value.
 /// The environment's `no_proxy` still applies to that proxy.
 pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url, remote_name: ?[]const u8) Self.Error!Settings {
+    if (comptime !http_enabled) return error.HttpUnavailable;
     var s: Settings = .{};
     var headers: std.ArrayList([]const u8) = .empty;
     var proxy_set = false;

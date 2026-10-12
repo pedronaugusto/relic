@@ -57,6 +57,8 @@ const clientcert = @import("clientcert.zig");
 const authorities = @import("authorities.zig");
 const uplink = @import("uplink");
 const cloak = @import("cloak");
+/// Whether relic was built with HTTP: the `http` build option.
+const http_enabled = @import("relic_options").http;
 const warning = @import("../report.zig").warning;
 const builtin = @import("builtin");
 
@@ -120,6 +122,8 @@ pub const Error = error{
     /// A URL no request can carry: a space or a control character in its
     /// path, which curl refuses too.
     MalformedUrl,
+    /// relic was built without HTTP: its `http` build option is off.
+    HttpUnavailable,
 } || connection.Error || credential.Error || clientcert.Error;
 
 /// How the conversation is made.
@@ -157,6 +161,7 @@ pub const user_agent = "git/2.0 (relic 0.3)";
 
 /// Open a smart HTTP conversation with the service at `url`.
 pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Self.Error!*Connection {
+    if (comptime !http_enabled) return error.HttpUnavailable;
     const h = try gpa.create(Http);
     errdefer gpa.destroy(h);
     h.* = .{

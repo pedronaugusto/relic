@@ -40,6 +40,9 @@ pub const Error = error{
     /// The process answered `init` with an error: git-lfs's "error
     /// initializing custom adapter". `Agent.message` holds it.
     LfsAdapterInitFailed,
+    /// relic was built without HTTP, and with it Git LFS: its `http` build
+    /// option is off.
+    HttpUnavailable,
 } || connection.Error || program.Error;
 
 /// Which way an adapter moves objects.
@@ -179,6 +182,7 @@ pub const Agent = struct {
     /// Start `adapter` in `cwd` and tell it `init`.
     pub const OpenOptions = struct { cwd: ?[]const u8 = null, adapter: Adapter, init: Init };
     pub fn open(gpa: Allocator, io: Io, programs: program.Programs, options: OpenOptions) Self.Error!*Agent {
+        if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
         const cwd = options.cwd;
         const adapter = options.adapter;
         const init = options.init;
@@ -234,6 +238,7 @@ pub const Agent = struct {
     /// Hand the agent one transfer and wait for it to end. `progress` hears
     /// each `bytesSinceLast`.
     pub fn transfer(a: *Agent, io: Io, request: Request, progress: anytype) Self.Error!Completion {
+        if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
         var msg: Io.Writer.Allocating = .init(a.gpa);
         defer msg.deinit();
         writeRequest(&msg.writer, request) catch return error.OutOfMemory;

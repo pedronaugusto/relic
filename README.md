@@ -23,7 +23,8 @@ exe.root_module.addImport("relic", relic_dep.module("relic"));
 
 A program that works on local repositories, or over ssh and the file system alone, turns the `http`
 option off and fetches none of HTTP's packages; an `http` or `https` remote is then
-`error.HttpUnavailable`:
+`error.HttpUnavailable`, and so is Git LFS: opening an LFS server, its transfers and locks, a custom
+transfer agent and the lock cache:
 
 ```zig
 const relic_dep = b.dependency("relic", .{ .target = target, .optimize = optimize, .http = false });

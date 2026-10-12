@@ -590,6 +590,7 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
 }
 
 fn run(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     var outcome = try runTransfers(io, server, operation, objects, given);
     // git-lfs sweeps its temporary files when a command ends.
     if (server.client.options.now) |now| {
@@ -2119,6 +2120,7 @@ pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
 /// `lfs.fetchinclude` leaves out, or `lfs.fetchexclude` names, is not
 /// fetched unless `all_paths` says so.
 pub fn fetch(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!Outcome {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const gpa = server.gpa;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -2431,6 +2433,7 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
 /// have, as git-lfs's pre-push hook uploads them. A blob that is not a
 /// pointer is not looked at twice.
 pub fn pushObjects(io: Io, server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb_mod.PackEntry, options: Options) transfer.FetchError!Outcome {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const gpa = server.gpa;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();

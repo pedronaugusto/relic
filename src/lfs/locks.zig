@@ -285,6 +285,7 @@ fn writeRef(s: *std.json.Stringify, ref: ?[]const u8) Io.Writer.Error!void {
 /// the person's.
 pub const LockOptions = struct { path: []const u8, request: Options = .{} };
 pub fn lock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository, with: LockOptions) Self.Error!Acquired {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const path = with.path;
     const options = with.request;
     try checkPath(path);
@@ -343,6 +344,7 @@ fn tookLock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
 /// lockable, and the caches forget the lock.
 pub const UnlockOptions = struct { id: []const u8, request: Options = .{} };
 pub fn unlock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository, with: UnlockOptions) Self.Error!Lock {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const id = with.id;
     const options = with.request;
     return unlockAsked(arena, io, server, repo, id, null, options.force, options);
@@ -420,6 +422,7 @@ fn gaveBack(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
 /// unlock <path>` asks.
 pub const UnlockPathOptions = struct { path: []const u8, request: Options = .{} };
 pub fn unlockPath(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository, with: UnlockPathOptions) Self.Error!Lock {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const path = with.path;
     const options = with.request;
     const force = options.force;
@@ -462,6 +465,7 @@ pub const Filter = struct {
 /// does. A full listing — no filter, no limit — is kept as the `remote`
 /// cache.
 pub fn list(io: Io, server: *lfsapi.Server, repo: *Repository, filter: Filter, options: Options) Self.Error!Listing {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     var out: Listing = .{ .arena = .init(server.gpa), .locks = &.{} };
     errdefer out.arena.deinit();
     const arena = out.arena.allocator();
@@ -531,6 +535,7 @@ pub fn list(io: Io, server: *lfsapi.Server, repo: *Repository, filter: Filter, o
 /// its pages, as `git lfs locks --verify` and the pre-push check ask. The
 /// answer is kept as the `verifiable` cache.
 pub fn verify(io: Io, server: *lfsapi.Server, repo: *Repository, options: Options) Self.Error!Verified {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     var out: Verified = .{ .arena = .init(server.gpa), .ours = &.{}, .theirs = &.{} };
     errdefer out.arena.deinit();
     const arena = out.arena.allocator();
@@ -783,8 +788,10 @@ pub const Cache = struct {
     }
 
     /// Read what is cached for `ref`, which is nothing when there is no
-    /// cache or it does not parse.
+    /// cache or it does not parse. The cache is JSON, which relic reads
+    /// only with HTTP.
     pub fn read(a: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Self.Error!Cache {
+        if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
         var c: Cache = .{};
         const dir = try dirPath(a, store, ref);
         const remote_path = try a.print("{s}/remote", .{dir});

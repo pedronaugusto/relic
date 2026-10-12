@@ -330,6 +330,27 @@ pub fn dev(b: *std.Build, tools: type) void {
             .optimize = optimize,
         },
     });
+    // A project that depends on relic by path with `.http = false`: the
+    // build a consumer gets, with conduit, sweep, parallax, airlock and warp
+    // to fetch, and aegis and reactor beneath them, and none of uplink,
+    // cloak and strand. Its program names the entry points that may speak
+    // HTTP, so each must compile without them.
+    const conduit_dependency = p.dependency("conduit", .{ .target = target, .optimize = optimize });
+    preflight.addConsumerCheck(b, p, .{
+        .package = "relic",
+        .program = p.path("ci/consumer.zig"),
+        .packages = &.{
+            conduit_dependency,
+            // The aegis and reactor conduit was built with are its own to pin.
+            conduit_dependency.builder.dependency("aegis", .{}),
+            conduit_dependency.builder.dependency("reactor", .{}),
+            p.dependency("sweep", .{}),
+            p.dependency("parallax", .{}),
+            airlock_dependency,
+            p.dependency("warp", .{}),
+        },
+        .options = &.{.{ .name = "http", .value = .{ .flag = false } }},
+    });
     const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = p.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
     const prepare = b.addRunArtifact(setup);
     prepare.addPassthruArgs();

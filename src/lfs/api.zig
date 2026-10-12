@@ -141,6 +141,9 @@ const uplink = @import("uplink");
 const cloak = @import("cloak");
 const strand = @import("strand");
 const shakedown = @import("shakedown");
+/// Whether relic was built with HTTP, which Git LFS needs: the `http` build
+/// option.
+pub const http_enabled = @import("relic_options").http;
 
 const Config = config_mod.Config;
 const assert = std.debug.assert;
@@ -240,6 +243,9 @@ pub const Error = error{
     ProxyAddressUnsupported,
     /// A proxy's answer that is neither SOCKS nor HTTP.
     ProxyProtocolError,
+    /// relic was built without HTTP, and with it Git LFS: its `http` build
+    /// option is off.
+    HttpUnavailable,
 } || credential.Error || lfsssh.Error || clientcert.Error || Allocator.Error || Io.Cancelable;
 
 //=====================================================================
@@ -1182,6 +1188,7 @@ pub const Client = struct {
     /// Open a client for `remote`. `settings` is borrowed.
     pub const OpenOptions = struct { remote: []const u8, where: Where, reach: Options = .{} };
     pub fn open(gpa: Allocator, io: Io, settings: *const Settings, with: OpenOptions) Self.Error!Client {
+        if (comptime !http_enabled) return error.HttpUnavailable;
         const remote = with.remote;
         const where = with.where;
         const options = with.reach;
@@ -1247,17 +1254,22 @@ pub const Client = struct {
             else => {},
         };
         c.ssh_failure.deinit(c.gpa);
-        if (c.transports) |handle| {
-            const pool: *TransportPool = @ptrCast(@alignCast(handle)); // safe: transportFor installs a TransportPool
-            for (pool.items.items) |t| {
-                t.client.deinit(io);
-                t.free(c.gpa);
-            }
-            pool.items.deinit(c.gpa);
-            c.gpa.destroy(pool);
-        }
+        // Only HTTP makes transports.
+        if (comptime http_enabled) c.freeTransports(io);
         c.arena.deinit();
         c.* = undefined;
+    }
+
+    /// Close the HTTP clients `transportFor` made.
+    fn freeTransports(c: *Client, io: Io) void {
+        const handle = c.transports orelse return;
+        const pool: *TransportPool = @ptrCast(@alignCast(handle)); // safe: transportFor installs a TransportPool
+        for (pool.items.items) |t| {
+            t.client.deinit(io);
+            t.free(c.gpa);
+        }
+        pool.items.deinit(c.gpa);
+        c.gpa.destroy(pool);
     }
 
     /// What the server or the program last said about a failure.
@@ -2001,6 +2013,7 @@ pub const Client = struct {
         const settings = httpsettings.resolve(scratch, c.settings.config, environ, url) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidHttpSetting => return c.fail("an http.* setting for {s} does not parse", io, .{stripQuery(request_url)}, error.InvalidHttpSetting),
+            error.HttpUnavailable => return error.HttpUnavailable,
         };
         var ca_info: ?[]const u8 = null;
         var ca_path: ?[]const u8 = null;
@@ -2502,6 +2515,7 @@ pub const Server = struct {
     /// is sent until an operation asks. `repo` is borrowed for as long as
     /// the server is open.
     pub fn open(gpa: Allocator, io: Io, repo: *repo_mod.Repository, remote: ?[]const u8, options: Options) OpenError!*Server {
+        if (comptime !http_enabled) return error.HttpUnavailable;
         const s = try gpa.create(Server);
         errdefer gpa.destroy(s);
         s.* = .{
