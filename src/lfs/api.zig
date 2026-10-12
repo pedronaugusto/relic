@@ -2614,9 +2614,12 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
 
 /// How long a `Retry-After` value asks to wait, as git-lfs reads it: whole
 /// seconds, or with `now` an HTTP date, a date gone by being no wait at all.
+/// Any count of seconds a `u64` holds is a wait, however long, for the
+/// caller to hold against `lfs.transfer.maxRetryTime`.
 pub fn parseRetryAfter(value: []const u8, now: ?Io.Timestamp) ?Io.Duration {
     const text = std.mem.trim(u8, value, " \t");
-    if (std.fmt.parseInt(u32, text, 10)) |n| return .fromSeconds(n) else |_| {}
+    // A u64 of seconds is under 2^94 nanoseconds, well inside a Duration's i96.
+    if (std.fmt.parseInt(u64, text, 10)) |n| return .fromNanoseconds(@as(i96, n) * std.time.ns_per_s) else |_| {}
     const at = timetext.parseHttpDate(text) orelse return null;
     const from = (now orelse return null).toSeconds();
     return .fromSeconds(@max(0, at - from));
@@ -2937,6 +2940,8 @@ test "git-lfs's timeouts are read as git-lfs reads them: 30 seconds unless set, 
 test "Retry-After is a number of seconds, or a date counted from the time the caller gives" {
     const at = gitdate.timestamp;
     try testing.expectEqual(@as(i64, 120), parseRetryAfter(" 120 ", null).?.toSeconds());
+    try testing.expectEqual(@as(i64, 1 << 32), parseRetryAfter("4294967296", null).?.toSeconds());
+    try testing.expectEqual(@as(i96, std.math.maxInt(u64)) * std.time.ns_per_s, parseRetryAfter("18446744073709551615", null).?.toNanoseconds());
     try testing.expectEqual(@as(?Io.Duration, null), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", null));
     try testing.expectEqual(@as(i64, 23), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", at(784111777 - 23)).?.toSeconds());
     try testing.expectEqual(@as(i64, 0), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", at(784111777 + 60)).?.toSeconds());

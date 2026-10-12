@@ -223,6 +223,16 @@ const Limits = struct {
         };
     }
 
+    /// How long to wait before retry `attempt`: the server's `Retry-After`
+    /// when it gave one, else the backoff. `null` when the server asks for
+    /// longer than `lfs.transfer.maxRetryTime`, and the transfer fails, as
+    /// git-lfs fails it.
+    fn retryDelay(l: Limits, attempt: u32, after: ?Io.Duration) ?Io.Duration {
+        const wait = after orelse return .fromNanoseconds(@as(i96, l.backoffMs(attempt)) * std.time.ns_per_ms);
+        if (wait.nanoseconds > Io.Duration.fromSeconds(l.max_retry_time_s).nanoseconds) return null;
+        return wait;
+    }
+
     /// git-lfs's backoff: a quarter of a second, doubled each retry, up to
     /// the most it may wait.
     fn backoffMs(l: Limits, attempt: u32) u64 {
@@ -1076,7 +1086,7 @@ fn work(state: *Run, worker: usize) void {
 const Attempt = union(enum) {
     ok,
     /// Try again, after the backoff or the server's `Retry-After`.
-    retry: struct { message: []const u8, after_s: ?u64 = null },
+    retry: struct { message: []const u8, after: ?Io.Duration = null },
     /// Give up.
     fail: []const u8,
 };
@@ -1125,16 +1135,12 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
                     return;
                 }
                 retries += 1;
-                var delay_ms = state.limits.backoffMs(retries);
-                if (why.after_s) |seconds| {
-                    if (seconds > state.limits.max_retry_time_s) {
-                        r.status = .failed;
-                        r.message = why.message;
-                        return;
-                    }
-                    delay_ms = seconds * 1000;
-                }
-                if (delay_ms != 0) try state.io().sleep(.fromMilliseconds(@intCast(delay_ms)), .awake);
+                const delay = state.limits.retryDelay(retries, why.after) orelse {
+                    r.status = .failed;
+                    r.message = why.message;
+                    return;
+                };
+                if (delay.nanoseconds != 0) try state.io().sleep(delay, .awake);
                 // A fresh batch for the object, as git-lfs retries it: the
                 // action may have expired, or pointed somewhere that failed.
                 const again = batchRequest(state.io(), state.server, state.operation, &.{.{ .oid = r.oid, .size = r.size, .name = r.name }}, state.options.ref, state.limits, null) catch |err| switch (err) {
@@ -1353,7 +1359,7 @@ const Partial = struct {
         if (status.class() != .success) {
             p.keep = p.from > 0;
             const why = try scratch.print("HTTP {d} from {s}", .{ @backingInt(status), lfsapi.stripQuery(href) });
-            if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after_s = if (ex.retryAfter()) |wait| @intCast(wait.toSeconds()) else null } };
+            if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after = ex.retryAfter() } };
             return .{ .retry = .{ .message = try state.dupe(why) } };
         }
         if (p.from > 0) state.say(.{ .bytes = p.from });
@@ -1519,7 +1525,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
         const why = try state.dupe(try scratch.print("HTTP {d} from {s}", .{ @backingInt(status), lfsapi.stripQuery(action.href) }));
         return switch (status) {
             .unprocessable_entity => .{ .fail = why },
-            .too_many_requests => .{ .retry = .{ .message = why, .after_s = null } },
+            .too_many_requests => .{ .retry = .{ .message = why } },
             else => .{ .retry = .{ .message = why } },
         };
     }
@@ -1648,16 +1654,11 @@ fn batchRequest(
         const status = ex.status();
         if (status == .too_many_requests and retries < limits.max_retries) {
             retries += 1;
-            var delay_ms = limits.backoffMs(retries);
-            if (ex.retryAfter()) |wait| {
-                const seconds: u64 = @intCast(wait.toSeconds());
-                if (seconds > limits.max_retry_time_s) {
-                    server.client.noteStatus(io, ex, "batch");
-                    return error.LfsBatchFailed;
-                }
-                delay_ms = seconds * 1000;
-            }
-            if (delay_ms != 0) try io.sleep(.fromMilliseconds(@intCast(delay_ms)), .awake);
+            const delay = limits.retryDelay(retries, ex.retryAfter()) orelse {
+                server.client.noteStatus(io, ex, "batch");
+                return error.LfsBatchFailed;
+            };
+            if (delay.nanoseconds != 0) try io.sleep(delay, .awake);
             continue;
         }
         if (status != .ok) {
@@ -2480,6 +2481,17 @@ test "a batch request is written as git-lfs writes one" {
     const oid = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
     try writeBatchRequest(&out.writer, .download, &.{.{ .oid = oid.*, .size = 6 }}, "refs/heads/main");
     try testing.expectEqualStrings("{\"operation\":\"download\",\"objects\":[{\"oid\":\"" ++ oid ++ "\",\"size\":6}],\"ref\":{\"name\":\"refs/heads/main\"},\"hash_algo\":\"sha256\"}", out.written());
+}
+
+test "a Retry-After longer than lfs.transfer.maxRetryTime fails the retry, however long it is" {
+    const l: Limits = .{ .batch_size = 100, .max_retries = 8, .max_retry_delay_s = 10, .max_retry_time_s = 300, .max_verifies = 3, .concurrency = 8, .allow_incomplete_push = false };
+    try testing.expectEqual(@as(i64, 250), l.retryDelay(1, null).?.toMilliseconds());
+    try testing.expectEqual(@as(i64, 300), l.retryDelay(1, lfsapi.parseRetryAfter("300", null)).?.toSeconds());
+    try testing.expectEqual(@as(?Io.Duration, null), l.retryDelay(1, lfsapi.parseRetryAfter("301", null)));
+    // Past a u32 of seconds is still a wait, and fails rather than retrying
+    // on the backoff.
+    try testing.expectEqual(@as(?Io.Duration, null), l.retryDelay(1, lfsapi.parseRetryAfter("4294967296", null)));
+    try testing.expectEqual(@as(?Io.Duration, null), l.retryDelay(1, lfsapi.parseRetryAfter("18446744073709551615", null)));
 }
 
 test "the backoff is git-lfs's: a quarter second, doubling, capped" {
