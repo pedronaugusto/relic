@@ -9,105 +9,66 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - relic is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, helpers, examples, checks and benchmarks are the development build's (`bay test`, `bay check`, `bay bench`). relic ships with conduit, sweep, parallax, airlock and warp, and with `-Dhttp` (the default) uplink, cloak and strand; what a project that depends on it builds is unchanged. The family's packages are pinned to the revisions developed with bay, on one aegis.
-- time a caller gives is typed: every "now" (`transport`, `credential`, smart-HTTP and LFS options, `date.Context` and `date.Clock`, `revparse.Clock`, `archive.Options.now` and `mtime`, `patch.format` threading, `rerere.gc`, LFS `sweepTmp` and `expiredAt`) is a `std.Io.Timestamp`, `--shallow-since` and the commit-graph's `expire_time` too; a lock's wait is `fs.OnContention.wait`, a `std.Io.Duration`; LFS `retryAfterSeconds` is `parseRetryAfter`, returning a duration. `date.timestamp` makes one from git's seconds. Times git stores (a commit's, a reflog entry's) stay git's seconds.
+
+- Time a caller gives is typed: every "now" (`transport`, `credential`, smart-HTTP and LFS options, `date.Context` and `date.Clock`, `revparse.Clock`, `archive.Options.now` and `mtime`, `patch.format` threading, `rerere.gc`, LFS `sweepTmp` and `expiredAt`) is a `std.Io.Timestamp`, `--shallow-since` and the commit-graph's `expire_time` too; a lock's wait is `fs.OnContention.wait`, a `std.Io.Duration`; LFS `retryAfterSeconds` is `parseRetryAfter`, returning a duration. `date.timestamp` makes one from git's seconds. Times git stores (a commit's, a reflog entry's) stay git's seconds.
 
 - relic reads `core.fsync`, `core.fsyncMethod` and `core.fsyncObjectFiles`, as git reads them, and every writer they name keeps them: loose objects, packs (received ones included), their indexes and bitmaps, the commit-graph, the index, and refs, logs and reftable tables. Unset, packs, their metadata, the commit-graph, the index and references are synced, git's default with the last two besides; set, the value is read over git's default alone, so `core.fsync = pack` leaves references unsynced as git does. `core.fsyncObjectFiles` syncs loose objects whatever `core.fsync` says (`fs.Fsync.object_files`), batched only where `core.fsync` names them, as git's `close_loose_object` syncs them. Config and state files are not synced, as git does not. A received pack was not synced at all before, so a crash after a fetch could leave refs naming a pack that never reached the disk. `fs.Fsync` holds the policy and `fs.Sync` gains `ordered` (`writeout-only`); `odb.Options.sync` is `odb.Options.fsync`, `pack.WriteOptions.sync` is `fsync`, `PackOptions.sync` and `indexpack.Options.sync` are gone (the database's policy applies), the maintenance writers' `sync` is optional and defaults to the database's, `LockFile.Options.sync` has no default, and `Repository.indexLock` gives an index writer its lock options.
 
-- a `.git` file is read in one place, `discover.gitfile`, as git reads it: `gitdir: ` with its space, the path up to the line ending, spaces kept, up to 1 MiB. Submodules and linked worktrees used to accept `gitdir:` without the space and trim spaces around the path. `checkout.worktrees.readGitFile` is removed; `discover.gitfile.read` takes its place.
+- A `.git` file is read in one place, `discover.gitfile`, as git reads it: `gitdir: ` with its space, the path up to the line ending, spaces kept, up to 1 MiB. Submodules and linked worktrees used to accept `gitdir:` without the space and trim spaces around the path. `checkout.worktrees.readGitFile` is removed; `discover.gitfile.read` takes its place.
 
-- certificates, keys and trust are [cloak](https://github.com/pedronaugusto/cloak)'s, which relic depends on directly; uplink makes the connections. `wire.clientcert.load` returns a `cloak.ClientAuth` (released with `deinit`), and the new `wire.authorities` reads `http.sslCAInfo`, `http.sslCAPath` and `http.proxySSLCAInfo` into a `cloak.Trust.Snapshot`, used by the smart-HTTP and LFS transports alike. On macOS and Windows the system's authorities are the system's own verifier, with `http.sslCAPath`'s besides it. A certificate file may also hold its key, and text before a block, as OpenSSL writes it, is read past. Until cloak speaks TLS 1.2 and signs with RSA keys, a server that speaks only TLS 1.2 fails with `error.TlsFailed`, and an RSA client key with `error.ClientCertificateSchemeUnsupported`.
+- Certificates, keys and trust are [cloak](https://github.com/pedronaugusto/cloak)'s, which relic depends on directly; uplink makes the connections. `wire.clientcert.load` returns a `cloak.ClientAuth` (released with `deinit`), and the new `wire.authorities` reads `http.sslCAInfo`, `http.sslCAPath` and `http.proxySSLCAInfo` into a `cloak.Trust.Snapshot`, used by the smart-HTTP and LFS transports alike. On macOS and Windows the system's authorities are the system's own verifier, with `http.sslCAPath`'s besides it. A certificate file may also hold its key, and text before a block, as OpenSSL writes it, is read past. Until cloak speaks TLS 1.2 and signs with RSA keys, a server that speaks only TLS 1.2 fails with `error.TlsFailed`, and an RSA client key with `error.ClientCertificateSchemeUnsupported`.
 
 - airlock owns relic's lock files, replacements and syncs. `LockFile` is an airlock temp named `<path>.lock`, still taken exclusively with git's backoff and the holder's pid in its first bytes, and `LockFile.Options.sync_directory` still makes its target's directory durable; `atomicWrite` is an airlock temp too, and takes `permissions` for a replacement that keeps the replaced file's; `fs.renameWithRetry` is `fs.rename`, which retries on Windows as airlock does; `fs.syncBarrier` and `fs.syncPath` are removed, and `odb.Options.sync_directories` with them. `Odb.syncBatch` flushes the fan-out directories that received loose objects since the last call, once each, where it created and removed a file to flush none; a pack written or received while `core.fsync` syncs packs flushes its directory once its names are in place, before a ref moves to it or a loose object it holds is removed. `Odb.makeDurable` and a durable checkout sync their files and directories together, one flush of the volume for all of them.
 
-- `Attrs.Macro.assignments` is read-only; the built-in binary macro
-  borrows static assignments.
+- `Attrs.Macro.assignments` is read-only; the built-in binary macro borrows static assignments.
 
-- native filter, clone-filter and before-send callbacks receive allocator and Io before their opaque context; LFS SSH status readers receive allocator before Io.
+- Native filter, clone-filter and before-send callbacks receive allocator and Io before their opaque context; LFS SSH status readers receive allocator before Io.
 
-- conversion sessions use `open(gpa, io, Options)` and `deinit(io)`. Filter processes and native providers receive the teardown call’s I/O.
+- Conversion sessions use `open(gpa, io, Options)` and `deinit(io)`. Filter processes and native providers receive the teardown call’s I/O.
 
-- hook, trailer, mailmap, remote URL, LFS pattern and helper operations take defaulted policy options. Ref listing writes take the output writer before `WriteOptions`; transport policy takes a name and `Options`.
+- Hook, trailer, mailmap, remote URL, LFS pattern and helper operations take defaulted policy options. Ref listing writes take the output writer before `WriteOptions`; transport policy takes a name and `Options`.
 
-- ignore, attribute and sparse pattern constructors take defaulted `InitOptions`. Sparse file loading has one `load` operation with `LoadOptions`; `loadMode` is removed.
+- Ignore, attribute and sparse pattern constructors take defaulted `InitOptions`. Sparse file loading has one `load` operation with `LoadOptions`; `loadMode` is removed.
 
-- object and binary-patch decoding use Warp directly; the internal `odb.inflate` namespace and copied decoder are removed. Pack resource failures retain their I/O causes.
+- Object and binary-patch decoding use warp directly; the internal `odb.inflate` namespace and copied decoder are removed. Pack resource failures retain their I/O causes.
 
-- object validation, conversion, hook preparation, identity, branch movement and pretty formatting group related inputs and defaulted options. Every exported function and method takes at most five positional inputs.
+- Object validation, conversion, hook preparation, identity, branch movement and pretty formatting group related inputs and defaulted options. Every exported function and method takes at most five positional inputs.
 
-- archive, range-diff, linked-worktree, bisect marking, subtree
-  shifting and bitmap writes take named input groups. Archive and range-diff
-  output writers precede their options. Published bytes, selection policies,
-  local edits and bitmap object ordering keep their behavior.
+- Archive, range-diff, linked-worktree, bisect marking, subtree shifting and bitmap writes take named input groups. Archive and range-diff output writers precede their options. Published bytes, selection policies, local edits and bitmap object ordering keep their behavior.
 
-- ref-log append takes AppendInputs before LogMessage; expiration
-  takes its generic keeper before named options containing the ref name.
-  Reftable writes take WriteInputs before WriteOptions, and compaction takes
-  CompactInputs. Keeper order, rewrite/update-ref policy and record bytes
-  are preserved across files and reftable.
+- Ref-log append takes AppendInputs before LogMessage; expiration takes its generic keeper before named options containing the ref name. Reftable writes take WriteInputs before WriteOptions, and compaction takes CompactInputs. Keeper order, rewrite/update-ref policy and record bytes are preserved across files and reftable.
 
-- working-tree staging/status, checkout, path writes, verification,
-  comparisons and sparse application take named input groups after the working
-  directory. The index and object database stay borrowed; path selection,
-  refusal diagnostics, local edits and durability keep their behavior.
+- Working-tree staging/status, checkout, path writes, verification, comparisons and sparse application take named input groups after the working directory. The index and object database stay borrowed; path selection, refusal diagnostics, local edits and durability keep their behavior.
 
-- transport session, fetch/send pack, local receive and bundle APIs
-  group their named inputs; bundle creation takes Target. LFS pre-push and SSH
-  invocation take input groups and options. Object retention, protocol bytes,
-  lock pagination and failure/cancellation outcomes keep their contracts.
+- Transport session, fetch/send pack, local receive and bundle APIs group their named inputs; bundle creation takes Target. LFS pre-push and SSH invocation take input groups and options. Object retention, protocol bytes, lock pagination and failure/cancellation outcomes keep their contracts.
 
-- LockFile.open takes Inputs for the path and borrowed buffer;
-  atomicWrite and readFileSized take named options. Program invocation and
-  trailer commands use Relic's own Cwd type. Sized-read fallback failures free
-  their original allocation exactly once, including a grown file over its limit.
+- LockFile.open takes Inputs for the path and borrowed buffer; atomicWrite and readFileSized take named options. Program invocation and trailer commands use relic's own Cwd type. Sized-read fallback failures free their original allocation exactly once, including a grown file over its limit.
 
-- pack/index opening and pack decode requests take named inputs and
-  options. Pack Writer.open replaces init and initCounting, with a nullable count
-  in OpenInputs; openStream takes StreamInputs before its output writer. Index
-  and reverse-index writes take write options; indexpack and bitmap encoding take
-  input groups. Pack publication, retention and format bytes keep their contracts.
+- Pack/index opening and pack decode requests take named inputs and options. Pack Writer.open replaces init and initCounting, with a nullable count in OpenInputs; openStream takes StreamInputs before its output writer. Index and reverse-index writes take write options; indexpack and bitmap encoding take input groups. Pack publication, retention and format bytes keep their contracts.
 
-- unified diff takes UnifiedInputs before its output writer; blame
-  groups commit/path in Inputs; patch ids take the shared diff.TreeInputs.
-  Output formatting, attribution and patch-id semantics are unchanged.
+- Unified diff takes UnifiedInputs before its output writer; blame groups commit/path in Inputs; patch ids take the shared diff.TreeInputs. Output formatting, attribution and patch-id semantics are unchanged.
 
-- working-tree merges take TreeInputs, CommitInputs or OctopusInputs,
-  including their mutable index. Reset takes Options for its index, target tree
-  and overwrite policy; sequencer.resetMerge takes ResetOptions for ref identity
-  and refusal diagnostics. Unrelated edits and abort restoration keep their
-  existing behavior.
+- Working-tree merges take TreeInputs, CommitInputs or OctopusInputs, including their mutable index. Reset takes Options for its index, target tree and overwrite policy; sequencer.resetMerge takes ResetOptions for ref identity and refusal diagnostics. Unrelated edits and abort restoration keep their existing behavior.
 
-- merge trees/commits and diff tree pairs take named input groups;
-  ancestry and merge-base walks take Pair, Many or Ancestry plus BaseOptions.
-  Options and all semantic outcomes are preserved in their canonical operations.
+- Merge trees/commits and diff tree pairs take named input groups; ancestry and merge-base walks take Pair, Many or Ancestry plus BaseOptions. Options and all semantic outcomes are preserved in their canonical operations.
 
-- index reads take ReadOptions, including optional measured timestamp
-  resolution. Object walks use MissingOptions, ConnectedOptions and ReceivedOptions
-  in their canonical operations; the With variants are removed. Top-level note copy
-  takes CopyRefOptions; trailer processing and amendment take named request options.
+- Index reads take ReadOptions, including optional measured timestamp resolution. Object walks use MissingOptions, ConnectedOptions and ReceivedOptions in their canonical operations; the With variants are removed. Top-level note copy takes CopyRefOptions; trailer processing and amendment take named request options.
 
-- `Repository.create` replaces `Repository.init`; repository
-  mutable state is reached through directory, allocator, object database and
-  configuration accessors. Public concerns move to `maintenance`, `pretty.refs`
-  and `pretty.shortlog`; object walks are under `revwalk`. LFS submodules drop the
-  repeated `lfs` prefix; configuration, sparse index, hooks and linked worktree
-  namespaces use their concern names.
+- `Repository.create` replaces `Repository.init`; repository mutable state is reached through directory, allocator, object database and configuration accessors. Public concerns move to `maintenance`, `pretty.refs` and `pretty.shortlog`; object walks are under `revwalk`. LFS submodules drop the repeated `lfs` prefix; configuration, sparse index, hooks and linked worktree namespaces use their concern names.
 
-- owned connections use `deinit` as their release word.
-  Program calls take allocator and I/O before the program policy; `run` takes
-  `RunOptions` for input and bounds. Signing takes I/O before its signer. Arena
-  choices belong to operation options. Inline public error unions have names.
+- Owned connections use `deinit` as their release word. Program calls take allocator and I/O before the program policy; `run` takes `RunOptions` for input and bounds. Signing takes I/O before its signer. Arena choices belong to operation options. Inline public error unions have names.
 
 - HTTP and TLS are [uplink](https://github.com/pedronaugusto/uplink)'s; relic's own HTTP/1.1 client, its proxy authentication, its SOCKS client and its copy of std's TLS client are gone, and relic's API names no uplink type. `transport.httpclient`, `transport.httpauth`, `transport.tls`, `transport.clientcert` and `lfs.lfsapi.timeoutsFor` are removed; LFS transport and exchange network state are opaque, and `Exchange.response` and `Exchange.diagnostics` are removed; smart HTTP and LFS are configured by git's and git-lfs's settings as before, which relic maps onto uplink's options. The errors a proxy fails with are uplink's: `ProxyNetworkUnreachable` and `ProxyTtlExpired` are `ProxyHostUnreachable`, `ProxyCommandUnsupported` is `ProxyRefused`, and `SocksProtocolError` is `ProxyProtocolError`, the SOCKS reply code in the message. A remote URL whose path holds a space or a control character is `MalformedUrl`, as curl refuses it, where the bytes went onto the request line; an `http.extraHeader` that is no field (a name that is not a token, a control character in its value) or names `Host`, `Content-Length` or `Transfer-Encoding`, and an `http.userAgent` with a control character, are `InvalidHttpHeader`, where they were sent as given. Responses are read as curl reads them: a bare LF ends a line and a folded field is unfolded, where both were refused, and a `Content-Length` with an underscore, which std's number parser took, is refused. `no_proxy` names an address range in CIDR notation, as curl 7.86 and later read it. Every socket has `TCP_NODELAY`, as curl sets it.
 
-- a repository's ref format is decided once, from its own `config`, and handed to whatever opens its refs. A submodule's gitlink reads its repository's own format rather than probing for `reftable/tables.list` (`submodule.gitlink.head` and `GitDir.refStore` take no `kind`), and `worktree.worktrees.add`, `list` and `prune` take the repository's `refs.Store` in place of its `common_dir` and hash, reading each worktree's `HEAD` through it as `worktrees/<id>/HEAD`. `refs.create` lays down a new ref store's directories as git's `ref_store_create_on_disk` does, and `Repository.init` and `worktrees.add` then write `HEAD` through a transaction; `refs.reftablestack.initialize`, `headIn` and `isReftableRepository` are removed, and `refs.Format.name` and `parse` spell the formats as `extensions.refStorage` does. `refs.Store.writeInitial` is git's initial ref transaction: a clone writes the fetched refs through it, packed in the files format and as one table in a reftable, where it wrote `packed-refs` in either, and `clone.Options.ref_format` (git's `--ref-format`) clones into a reftable repository. `refs.Store.list` keeps what is no ref apart in `Listing.broken` -- a name no ref may have, a file that holds no ref, an object name of zeros -- as git marks them broken, where a bad name in `packed-refs` failed the whole listing and a bad loose ref was dropped unseen; in a linked worktree it no longer lists the main worktree's `refs/bisect`, `refs/worktree` and `refs/rewritten`, and `%(worktreepath)` finds the main worktree's branch in a reftable repository. A transaction that cannot take a symbolic value no longer leaks it.
+- A repository's ref format is decided once, from its own `config`, and handed to whatever opens its refs. A submodule's gitlink reads its repository's own format rather than probing for `reftable/tables.list` (`submodule.gitlink.head` and `GitDir.refStore` take no `kind`), and `worktree.worktrees.add`, `list` and `prune` take the repository's `refs.Store` in place of its `common_dir` and hash, reading each worktree's `HEAD` through it as `worktrees/<id>/HEAD`. `refs.create` lays down a new ref store's directories as git's `ref_store_create_on_disk` does, and `Repository.init` and `worktrees.add` then write `HEAD` through a transaction; `refs.reftablestack.initialize`, `headIn` and `isReftableRepository` are removed, and `refs.Format.name` and `parse` spell the formats as `extensions.refStorage` does. `refs.Store.writeInitial` is git's initial ref transaction: a clone writes the fetched refs through it, packed in the files format and as one table in a reftable, where it wrote `packed-refs` in either, and `clone.Options.ref_format` (git's `--ref-format`) clones into a reftable repository. `refs.Store.list` keeps what is no ref apart in `Listing.broken` -- a name no ref may have, a file that holds no ref, an object name of zeros -- as git marks them broken, where a bad name in `packed-refs` failed the whole listing and a bad loose ref was dropped unseen; in a linked worktree it no longer lists the main worktree's `refs/bisect`, `refs/worktree` and `refs/rewritten`, and `%(worktreepath)` finds the main worktree's branch in a reftable repository. A transaction that cannot take a symbolic value no longer leaks it.
 
-- the ref store owns the root refs and the special refs. `refs.Store.root()` writes, reads, lists and removes `ORIG_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, `AUTO_MERGE`, `BISECT_HEAD`, `BISECT_EXPECTED_REV` and the notes merge refs (`refs.names.Root`) as themselves, never through a ref they name (git's `REF_NO_DEREF`), in either ref format; `refs.Store.special()` reads, replaces and appends to `FETCH_HEAD` and `MERGE_HEAD`, which stay files in either format, through their locks (`git fetch --append` reads and writes under one). `commit.head.writeRef`, `readRef`, `deleteRef` and `refExists` are removed, and `refs.reftablestack.initialize` takes no `orig_head`. `refs.Store.deleteRefs` is git's `refs_delete_refs`, and a transaction deletes a ref by any name git's `refname_is_safe` takes, so a ref with a bad name is removed by its name; `refs.Store.readOid` is git's `read_ref`. `main-worktree/<ref>` and `worktrees/<id>/<ref>` read another worktree's `HEAD`, root refs, per-worktree refs and their logs in either format, as git's do, and a transaction or a log write (`appendLog`, `createLog`, `expireLog`, `deleteLog`) refuses them (`error.OtherWorktreeRef`). Fixed with it: in a reftable repository `commit` refuses while a cherry-pick or a revert is stopped, and a rebase with `--update-refs` leaves alone a branch another worktree has checked out; writing `ORIG_HEAD` while it named a branch no longer moves the branch; `--include-root-refs` lists a reftable repository's root refs from its tables alone; a bisection tells `reference-transaction` of `BISECT_HEAD` and `BISECT_EXPECTED_REV`; `worktree.worktrees.add` writes no `ORIG_HEAD`, as `git worktree add --no-checkout` writes none.
+- The ref store owns the root refs and the special refs. `refs.Store.root()` writes, reads, lists and removes `ORIG_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, `AUTO_MERGE`, `BISECT_HEAD`, `BISECT_EXPECTED_REV` and the notes merge refs (`refs.names.Root`) as themselves, never through a ref they name (git's `REF_NO_DEREF`), in either ref format; `refs.Store.special()` reads, replaces and appends to `FETCH_HEAD` and `MERGE_HEAD`, which stay files in either format, through their locks (`git fetch --append` reads and writes under one). `commit.head.writeRef`, `readRef`, `deleteRef` and `refExists` are removed, and `refs.reftablestack.initialize` takes no `orig_head`. `refs.Store.deleteRefs` is git's `refs_delete_refs`, and a transaction deletes a ref by any name git's `refname_is_safe` takes, so a ref with a bad name is removed by its name; `refs.Store.readOid` is git's `read_ref`. `main-worktree/<ref>` and `worktrees/<id>/<ref>` read another worktree's `HEAD`, root refs, per-worktree refs and their logs in either format, as git's do, and a transaction or a log write (`appendLog`, `createLog`, `expireLog`, `deleteLog`) refuses them (`error.OtherWorktreeRef`). Fixed with it: in a reftable repository `commit` refuses while a cherry-pick or a revert is stopped, and a rebase with `--update-refs` leaves alone a branch another worktree has checked out; writing `ORIG_HEAD` while it named a branch no longer moves the branch; `--include-root-refs` lists a reftable repository's root refs from its tables alone; a bisection tells `reference-transaction` of `BISECT_HEAD` and `BISECT_EXPECTED_REV`; `worktree.worktrees.add` writes no `ORIG_HEAD`, as `git worktree add --no-checkout` writes none.
 
-- what a ref may be named is decided in one place, `refs.names`. `checkFormat` is git's `check_refname_format` with its `allow_onelevel` and `pattern` flags, held to `git check-ref-format` under every combination; `isSafe` is git's `refname_is_safe`; `isRootRef`, `isSpecial`, `isPerWorktree` and `parseWorktreeRef` classify names as git does. `worktree.safepath.checkRefName`, `safepath.isValidRefName` and `safepath.Reason.invalid_ref_name`, `transport.refspec.checkRefFormat` and `refspec.Format`, `refs.filter.isRootRef` and `refs.reftablestack.isSpecial` are removed: use `refs.names.checkFormat(name, .{ .allow_onelevel = true })`, `refs.names.isRootRef` and `refs.names.isSpecial`. A push to a repository on this machine refuses a ref of one level under `refs/` (`refs/funny`) with receive-pack's "funny refname", where it took it; a revision of one level spelled with a dash (`FOO-BAR`) resolves as git resolves it.
+- What a ref may be named is decided in one place, `refs.names`. `checkFormat` is git's `check_refname_format` with its `allow_onelevel` and `pattern` flags, held to `git check-ref-format` under every combination; `isSafe` is git's `refname_is_safe`; `isRootRef`, `isSpecial`, `isPerWorktree` and `parseWorktreeRef` classify names as git does. `worktree.safepath.checkRefName`, `safepath.isValidRefName` and `safepath.Reason.invalid_ref_name`, `transport.refspec.checkRefFormat` and `refspec.Format`, `refs.filter.isRootRef` and `refs.reftablestack.isSpecial` are removed: use `refs.names.checkFormat(name, .{ .allow_onelevel = true })`, `refs.names.isRootRef` and `refs.names.isSpecial`. A push to a repository on this machine refuses a ref of one level under `refs/` (`refs/funny`) with receive-pack's "funny refname", where it took it; a revision of one level spelled with a dash (`FOO-BAR`) resolves as git resolves it.
 
-- one way to write a repository's configuration. `Repository.writeConfig(io, file, edits, diagnostic)` writes `.git/config` or the worktree's `config.worktree` (the shared file while `extensions.worktreeConfig` is off, as git falls back) as git's `repo_config_set_multivar_in_file_gently` does: the file read again under its lock and only `edits` applied, so another process's `git config` since open survives; the configuration it would leave checked whole before it lands (`ObjectFormatChanged`, `RefStorageChanged`, any setting `open` refuses), then published. It returns a `WriteOutcome` (`sections_removed`). `writeConfigFile` writes a file that is not the repository's own, a submodule's or the main worktree's `config.worktree`, with its permissions. `Config.write` is removed, and `Config.SetError` no longer carries lock or commit errors. `editConfig` takes the `Io` and `config.Sources.Pair` values, set in memory only over every file as later `-c` values are, kept through `refreshConfig` and every write and never written; a value for the repository's format is refused (`FormatEditInMemory`, which replaces `WorktreeConfigChanged`). Clone, a lazy fetch's filter, the promisor fields a server asks to store, what an LFS server teaches, submodule `init`, `sync`, `deinit` and `absorb`, sparse-checkout and `init` itself write through it: none renders a configuration read earlier over the file, none writes a memory-only value, and sparse-checkout leaves `configuration()` what the files say. `config.Sources.Path.contents` reads given bytes in place of a file, and `Config.withCommandValues` is a configuration with other `-c` values and nothing read again.
+- One way to write a repository's configuration. `Repository.writeConfig(io, file, edits, diagnostic)` writes `.git/config` or the worktree's `config.worktree` (the shared file while `extensions.worktreeConfig` is off, as git falls back) as git's `repo_config_set_multivar_in_file_gently` does: the file read again under its lock and only `edits` applied, so another process's `git config` since open survives; the configuration it would leave checked whole before it lands (`ObjectFormatChanged`, `RefStorageChanged`, any setting `open` refuses), then published. It returns a `WriteOutcome` (`sections_removed`). `writeConfigFile` writes a file that is not the repository's own, a submodule's or the main worktree's `config.worktree`, with its permissions. `Config.write` is removed, and `Config.SetError` no longer carries lock or commit errors. `editConfig` takes the `Io` and `config.Sources.Pair` values, set in memory only over every file as later `-c` values are, kept through `refreshConfig` and every write and never written; a value for the repository's format is refused (`FormatEditInMemory`, which replaces `WorktreeConfigChanged`). Clone, a lazy fetch's filter, the promisor fields a server asks to store, what an LFS server teaches, submodule `init`, `sync`, `deinit` and `absorb`, sparse-checkout and `init` itself write through it: none renders a configuration read earlier over the file, none writes a memory-only value, and sparse-checkout leaves `configuration()` what the files say. `config.Sources.Path.contents` reads given bytes in place of a file, and `Config.withCommandValues` is a configuration with other `-c` values and nothing read again.
 
-- a ref's log is the ref store's, in either format. `refs.reflog` is no longer public, and `Store.dirFor` is private: `Store.readLog`, `logExists` and `appendLog` read and write a log where the format keeps it, and the new `Store.createLog`, `expireLog` (git's `reflog expire` and `reflog delete`, with `--rewrite` and `--updateref`) and `deleteLog` start, prune and remove one. `refs.Log`, `LogEntry`, `LogPolicy` and `LogReadError` name what they return. `Store.appendLog` takes a `LogMessage` and logs only where its policy says, so `HEAD` moved under `core.logAllRefUpdates = false` gains its line in a reftable repository as in a files one. `Resolved.from_packed` says whether a resolved ref came from `packed-refs`. In a reftable repository the stash works: two pushes keep both, `stash list` reads git's list and git reads relic's, and `drop` rewrites the log as git's does, with no `reference-transaction` hook until the last stash takes `refs/stash` with it. A deleted ref's log goes with it whether or not the transaction logs anything, so fetch's prune and push's tracking deletes leave no log behind in a reftable stack.
+- A ref's log is the ref store's, in either format. `refs.reflog` is no longer public, and `Store.dirFor` is private: `Store.readLog`, `logExists` and `appendLog` read and write a log where the format keeps it, and the new `Store.createLog`, `expireLog` (git's `reflog expire` and `reflog delete`, with `--rewrite` and `--updateref`) and `deleteLog` start, prune and remove one. `refs.Log`, `LogEntry`, `LogPolicy` and `LogReadError` name what they return. `Store.appendLog` takes a `LogMessage` and logs only where its policy says, so `HEAD` moved under `core.logAllRefUpdates = false` gains its line in a reftable repository as in a files one. `Resolved.from_packed` says whether a resolved ref came from `packed-refs`. In a reftable repository the stash works: two pushes keep both, `stash list` reads git's list and git reads relic's, and `drop` rewrites the log as git's does, with no `reference-transaction` hook until the last stash takes `refs/stash` with it. A deleted ref's log goes with it whether or not the transaction logs anything, so fetch's prune and push's tracking deletes leave no log behind in a reftable stack.
 
 - `relic.diff.textdiff` and `relic.merge.blobmerge` are gone; parallax is the line diff for anyone who wants one. `diff.Algorithm` and `merge.ConflictStyle`, `merge.Labels`, `merge.Resolve` and `merge.Level` are parallax's types; `merge.ConflictStyle.parse` is `merge.parseConflictStyle`. `merge.Favor` is `merge.Resolve` (`none` is `markers`, `union_` is `both`), and every `favor` option is `resolve`: `merge.BlobOptions`, `merge.strategy.Settings`, `merge.ort.Options`, `patch.apply.Options`, whose refusal is `ResolveWithoutThreeWay`. `BlobOptions.join_without_alnum` is `level` (`.zealous_alnum` for `git merge-file`'s). `diff.Options.context` and `max_work` are `u32`, and `diff.function_context_max` is gone. `diff.unifiedBody`, `unified`, `blobNumStat` and `numstat` return `error.InputTooLarge` (`diff.TextError`) for a side of 4 GiB or more, where they returned `error.OutOfMemory`.
 
@@ -117,13 +78,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `worktree.ignore.parseLine` takes an allocator and `LineOptions` and compiles the glob; `ignore.Pattern` and `attributes.Rule` carry it as `matcher`. An ignore line is read by git's grammar: a trailing tab stays part of the pattern, where it was trimmed, and a line ending in an escaped backslash and spaces loses every space, where one stayed.
 
-- pin conduit at confirmed per-child scope completion; callers releasing an unfinished contained `program.Child` use its fallible `release`.
+- Pin conduit at confirmed per-child scope completion; callers releasing an unfinished contained `program.Child` use its fallible `release`.
 
 - HTTP Streaming.finish consumes its connection on success and failure; callers abort only before finish, and smart HTTP and LFS transfer cleanup with the stream.
 
 - HTTP connect, send and stream take a caller-owned Diagnostic as their last argument (or null), replacing Client.tls_error, proxy_status and proxy_offered; LFS and smart HTTP keep diagnostics with each exchange.
 
-- `program.SpawnHook.start` receives an allocator and `conduit.Child.SpawnOptions`, returns `conduit.Child`, and reports its spawn errors; `terminate` receives that child too. `Running.child` uses conduit's stream accessors and ownership transfers. Conduit links libc on POSIX through its module.
+- `program.SpawnHook.start` receives an allocator and `conduit.Child.SpawnOptions`, returns `conduit.Child`, and reports its spawn errors; `terminate` receives that child too. `Running.child` uses conduit's stream accessors and ownership transfers. conduit links libc on POSIX through its module.
 
 - Odb allocator, format, source, policy and storage fields are opaque state read through `allocator`, `objectFormat` and `settings`; repository configuration is borrowed through `configuration` and changed atomically through `editConfig`, with format/backend checks and ref policy publication shared with refresh; memory-only source changes return `WorktreeConfigChanged` and require a standalone write followed by refresh.
 
@@ -139,29 +100,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `CheckoutOptions`, snapshot `OpenOptions` and snapshot `Store` carry durability policy; callers depending on their layouts or constructing stores directly must migrate.
 
-- repository hash/ref fields and ref-store allocator/directory/backend/cache fields are opaque owner state accessed through `objectFormat`, `refStore`, `refFormat` and `reftableOptions`; ref-store construction is fallible and requires `deinit`, including `GitDir.refStore`, with backend selection at construction and write-policy changes through `configureReftable`.
+- Repository hash/ref fields and ref-store allocator/directory/backend/cache fields are opaque owner state accessed through `objectFormat`, `refStore`, `refFormat` and `reftableOptions`; ref-store construction is fallible and requires `deinit`, including `GitDir.refStore`, with backend selection at construction and write-policy changes through `configureReftable`.
 
-- caller-owned `repo.Diagnostic` includes `signing_stderr`, preserved after a failed commit or tag signing program; layout-dependent callers must review the new field.
+- Caller-owned `repo.Diagnostic` includes `signing_stderr`, preserved after a failed commit or tag signing program; layout-dependent callers must review the new field.
 
-- commit, merge, sequencer and rebase options carry optional caller-owned write diagnostics; callers depending on their layouts must review the new field.
+- Commit, merge, sequencer and rebase options carry optional caller-owned write diagnostics; callers depending on their layouts must review the new field.
 
 - `Repository.coreSettings` and `worktreeRules` return malformed-setting and resource failures; callers must handle their error unions.
 
-- repository commit and tag writes preserve `InvalidSignature` and `MixedHashKinds` in `WriteError` instead of reporting `UnexpectedObjectType`.
+- Repository commit and tag writes preserve `InvalidSignature` and `MixedHashKinds` in `WriteError` instead of reporting `UnexpectedObjectType`.
 
-- delta results over the size limit return `DeltaSizeLimitExceeded`; `DeltaSizeOverflow` means a size encoding wider than 64 bits.
+- Delta results over the size limit return `DeltaSizeLimitExceeded`; `DeltaSizeOverflow` means a size encoding wider than 64 bits.
 
-- a refresh that changes the ref backend returns `RefStorageChanged`, requires reopening and keeps the old configuration and ref store.
+- A refresh that changes the ref backend returns `RefStorageChanged`, requires reopening and keeps the old configuration and ref store.
 
 - `refreshConfig`, `writeCommit`, `writeTag` and `writeTagWith` take caller-owned `repo.Diagnostic` output; the repository's `unsupported`, `unsupported_len` and `unsupportedSetting` are removed.
 
 - Client.proxy_retry is removed; HTTP proxy retry decisions belong only to the connection attempt that accepted the challenge.
 
-- the root is one module per concern, each holding the modules
-  that belong to it, in place of 106 flat modules. The sixteen at the top are
-  `repo`, `hash`, `object`, `odb`, `refs`, `config`, `index`, `worktree`,
-  `wildmatch`, `diff`, `revwalk`, `merge`, `commit`, `transport`, `submodule` and `lfs`;
-  the rest moved under them:
+- The root is one module per concern, each holding the modules that belong to it, in place of 106 flat modules. The sixteen at the top are `repo`, `hash`, `object`, `odb`, `refs`, `config`, `index`, `worktree`, `wildmatch`, `diff`, `revwalk`, `merge`, `commit`, `transport`, `submodule` and `lfs`; the rest moved under them:
 
   | Under | Modules |
   |---|---|
@@ -181,11 +138,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `submodule` | `gitmodules`, `gitlink`, `submoduletransport` |
   | `lfs` | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `netrc` |
 
-  So `relic.reflog` is `relic.refs.reflog`, `relic.fetch` is
-  `relic.transport.fetch` and `relic.program` is `relic.repo.program`. The
-  declarations inside each module are unchanged. `blobmerge`, `objectfilter`
-  and `clientcert`, which the README listed and the root did not export, are
-  now reachable.
+  So `relic.reflog` is `relic.refs.reflog`, `relic.fetch` is `relic.transport.fetch` and `relic.program` is `relic.repo.program`. The declarations inside each module are unchanged. `blobmerge`, `objectfilter` and `clientcert`, which the README listed and the root did not export, are now reachable.
 
 ### Added
 
@@ -319,7 +272,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The Smith fuzz tests are shakedown `check` properties: a plain `zig build test` runs each on many seeded cases and shrinks a failure, and `zig build test --fuzz` fuzzes the same bodies.
+- The Smith fuzz tests are shakedown `check` properties: a plain `bay test` runs each on many seeded cases and shrinks a failure, and `bay test --fuzz` fuzzes the same bodies.
 
 - The `http` build option (on by default) brings uplink, cloak and strand, which are now lazy: a program built with `.http = false` fetches none of them, and an `http` or `https` remote is `error.HttpUnavailable`, as is every Git LFS operation that needs them (opening an LFS server, its transfers and locks, a custom transfer agent, the lock cache); `smarthttp.connect` and `httpsettings.resolve` say so themselves. `bay check-consumer` builds a project with `.http = false` that names each of them.
 
