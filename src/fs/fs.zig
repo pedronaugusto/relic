@@ -49,7 +49,10 @@ pub fn syncFile(io: Io, file: Io.File, options: FileSyncOptions) SyncError!void 
 }
 
 pub fn syncDirectory(io: Io, dir: Io.Dir, path: []const u8) SyncError!void {
-    const opened = try dir.openDir(io, path, .{});
+    // A directory opened to be synced is opened for reading: Linux opens a plain
+    // directory handle `O_PATH`, which fsync refuses, so the sync would be one
+    // refused call and a reopen.
+    const opened = try dir.openDir(io, path, .{ .iterate = true });
     defer opened.close(io);
     try syncDir(io, opened);
 }

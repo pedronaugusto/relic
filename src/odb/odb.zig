@@ -1147,7 +1147,9 @@ pub const Odb = struct {
     /// or rollback. Concurrent collectors honour that token's keep marker.
     pub fn receivePack(db: *Odb, io: Io, input: *Io.Reader, options: ReceiveOptions) ReceiveError!ReceivedPack {
         try fs.makeDirs(io, db.objectsDirectory(), "pack", db.sharedPermissions());
-        const dir = try db.objectsDirectory().openDir(io, "pack", .{});
+        // Opened for reading, as a directory to be synced is (`fs.syncDirectory`):
+        // the pack's names are synced in it once it is published.
+        const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
         defer dir.close(io);
         var receiving = options;
         receiving.keep = true;
