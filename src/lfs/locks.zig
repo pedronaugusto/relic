@@ -133,7 +133,11 @@ pub const ParseLockAnswerError = Allocator.Error || error{MalformedResponse};
 
 /// Read an answer to `POST /locks` or `POST /locks/<id>/unlock`.
 pub fn parseLockAnswer(arena: Allocator, bytes: []const u8) ParseLockAnswerError!LockAnswer {
-    const Raw = struct { lock: ?LockJson = null, message: ?[]const u8 = null };
+    const Raw = struct {
+        lock: ?LockJson = null,
+        message: ?[]const u8 = null,
+        pub const strand = lfsapi.json_policy;
+    };
     const raw = try parseJson(Raw, arena, bytes);
     if (raw.lock) |l| {
         if (l.id.len == 0) return error.MalformedResponse;
@@ -1037,6 +1041,10 @@ test "the locking API's answers and git-lfs's cache files are read" {
     try testing.expectEqualStrings("Ada", created.lock.?.owner.?);
     const refused = try parseLockAnswer(a, "{\"message\":\"no\"}");
     try testing.expect(refused.lock == null);
+    // A member given twice is its last, as git-lfs reads it.
+    const twice = try parseLockAnswer(a, "{\"message\":\"first\",\"lock\":{\"id\":\"1\",\"path\":\"x\"},\"message\":\"last\",\"lock\":{\"id\":\"2\",\"path\":\"y\"}}");
+    try testing.expectEqualStrings("last", twice.message.?);
+    try testing.expectEqualStrings("2", twice.lock.?.id);
     const page = try parseListPage(a, "{\"locks\":[{\"id\":\"1\",\"path\":\"x\"}],\"next_cursor\":\"2\"}");
     try testing.expectEqualStrings("2", page.next_cursor.?);
     const cached = try parseListPage(a, "[{\"id\":\"1\",\"path\":\"x\",\"owner\":{\"name\":\"b\"},\"locked_at\":\"2026-09-24T10:01:00Z\"}]\n");
