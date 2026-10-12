@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-12
+
 ### Breaking
 
 - relic is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, helpers, examples, checks and benchmarks are the development build's (`bay test`, `bay check`, `bay bench`). relic ships with conduit, sweep, parallax, airlock and warp, and with `-Dhttp` (the default) uplink, cloak and strand; what a project that depends on it builds is unchanged. The family's packages are pinned to the revisions developed with bay, on one aegis. The tests link relic's own shakedown, bound to the aegis airlock is built on, with airlock's seam built on it through airlock's `testing` and `aegis`.
@@ -975,7 +977,8 @@ Decisions worth knowing before reading the source:
 - **`working-tree-encoding` and a required filter are refusals, with the
   value.** Passing the bytes through would write a blob git would not write.
 
-[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/pedronaugusto/relic/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pedronaugusto/relic/releases/tag/v0.3.0
 [0.2.0]: https://github.com/pedronaugusto/relic/releases/tag/v0.2.0
 [0.1.0]: https://github.com/pedronaugusto/relic/releases/tag/v0.1.0
