@@ -1747,7 +1747,9 @@ pub const WriteOptions = struct {
     keep: bool = false,
     /// Which of the pack and its indexes are synced before they are renamed
     /// into place, and how: the pack as `core.fsync`'s `pack`, the indexes
-    /// as its `pack-metadata`.
+    /// as its `pack-metadata`. A synced pack has its directory synced too
+    /// once the names are in place, so a loose object deleted for it, or a
+    /// ref moved to it, cannot outlive it across a power cut.
     fsync: fs.Fsync = .off,
     /// How hard the entries are compressed.
     compression: Compression = .default,
@@ -2247,6 +2249,7 @@ pub const Writer = struct {
             w.dir.deleteFile(io, idx_temp) catch {};
             return err;
         };
+        try syncNames(io, w.dir, w.options.fsync);
 
         return .{
             .keep = token,
@@ -2287,6 +2290,15 @@ pub const Writer = struct {
         return writeIndexFile(w.gpa, io, w.dir, idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.fsync.sync(.pack_metadata) });
     }
 };
+
+/// Make the names a pack and its indexes were just renamed to in `dir`
+/// durable, when `fsync` syncs packs at all. A rename is the directory's
+/// write: until the directory is synced, a power cut can keep a loose
+/// object's removal, or a ref moved to the pack, and lose the pack's name.
+pub fn syncNames(io: Io, dir: Io.Dir, fsync: fs.Fsync) fs.SyncError!void {
+    if (fsync.sync(.pack) == .none) return;
+    try fs.syncDir(io, dir);
+}
 
 /// Write the `.idx`, version 2, for a pack whose entries are `entries`, in
 /// `dir` as `sub_path`: the magic, the fanout over the first byte of each

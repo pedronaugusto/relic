@@ -96,10 +96,9 @@ pub const Sync = enum {
     ordered,
     /// Order each file's bytes before its name appears, and leave the end of
     /// the batch to make them durable, once for the directories that
-    /// received them rather than once per file (`Odb.syncBatch`, and the
-    /// directory a written pack lands in). This is git's
-    /// `core.fsyncMethod = batch`, and where git leaves the barrier to a
-    /// throwaway file, airlock flushes the volume.
+    /// received them rather than once per file (`Odb.syncBatch`). This is
+    /// git's `core.fsyncMethod = batch`, and where git leaves the barrier to
+    /// a throwaway file, airlock flushes the volume.
     batch,
     /// Make each file durable before its name appears, as git's
     /// `core.fsyncMethod = fsync` does; the name itself is the directory's

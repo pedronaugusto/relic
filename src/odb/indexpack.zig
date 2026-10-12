@@ -448,6 +448,7 @@ pub fn receive(
         try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
     try renameBesidePack(io, pack_dir, idx_temp, idx_name, pack_name);
+    try pack.syncNames(io, pack_dir, fsync);
     try db.refresh(io);
     return result;
 }
