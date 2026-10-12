@@ -647,6 +647,18 @@ fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     }
 }
 
+test "a delta reserves what its commands can produce, not what its header claims" {
+    // A header claiming a gigabyte, over a base of three bytes, with one
+    // inserted byte to follow: two bytes of commands produce six at most.
+    const delta = [_]u8{ 3, 0x80, 0x80, 0x80, 0x80, 0x04, 1, 'x' };
+    try std.testing.expectEqual(@as(u64, 1 << 30), (try header(&delta)).target);
+    var counting = shakedown.alloc.Counting.init(std.testing.allocator);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(counting.allocator());
+    try std.testing.expectError(error.DeltaResultSizeMismatch, applyTo(counting.allocator(), &out, "abc", &delta));
+    try std.testing.expect(counting.peak_bytes < 4096);
+}
+
 test "a valid delta over the result limit is not a size overflow" {
     const gpa = std.testing.allocator;
     const base: [0x10000]u8 = @splat('a');
