@@ -249,9 +249,6 @@ pub fn dev(b: *std.Build, tools: type) void {
     });
 
     const run_tests = b.addRunArtifact(tests);
-    // The tests read the package's own files (the README's namespace table) by
-    // their path in the package: they run in its directory, not the build's root.
-    run_tests.setCwd(p.path("."));
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
