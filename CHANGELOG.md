@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-12
+
+### Changed
+
+- Pins sweep 0.2.1, parallax 0.2.1, uplink 0.2.3, airlock 0.2.1, warp 0.2.1, cloak 0.2.1, strand 0.8.1, preflight 0.3.4 and shakedown 0.2.6.
+
 ## [0.4.0] - 2026-10-12
 
 ### Breaking
@@ -978,7 +984,8 @@ Decisions worth knowing before reading the source:
 - **`working-tree-encoding` and a required filter are refusals, with the
   value.** Passing the bytes through would write a blob git would not write.
 
-[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/pedronaugusto/relic/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/pedronaugusto/relic/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pedronaugusto/relic/releases/tag/v0.3.0
 [0.2.0]: https://github.com/pedronaugusto/relic/releases/tag/v0.2.0
