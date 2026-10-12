@@ -30,11 +30,11 @@ permissions:
   actions: read
 jobs:
   gate:
-    uses: pedronaugusto/preflight/.github/workflows/zig.yml@3fbe75f7345fafef3318818a421e3a08ec3bb9f5
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@02d1f43bb66fa14f3ab5c59447a5bc6f2015f6d0
     with:
       tier: ${{ github.event_name == 'workflow_dispatch' && inputs.tier || github.event_name == 'schedule' && 'release' || 'merge' }}
       working-directory: "."
-      preflight-ref: 3fbe75f7345fafef3318818a421e3a08ec3bb9f5
+      preflight-ref: 02d1f43bb66fa14f3ab5c59447a5bc6f2015f6d0
       attest: ${{ github.event_name == 'push' || inputs.status-only == true }}
       fast-matrix: >-
         {"include":[{"os":"ubuntu-latest","name":"source checks and documented snippets","step":"lint","args":"","shard":"","setup":false,"job_timeout":10,"cache_key":"lint","artifact":"","operation":"execute","targets":"","directory":"","prepare":"","declared":false},{"os":"ubuntu-latest","name":"Linux Debug shard 1/2","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"1/2","setup":true,"job_timeout":45,"cache_key":"fast-linux-debug-0","artifact":"","operation":"execute","targets":"","directory":"","prepare":"","declared":false},{"os":"ubuntu-latest","name":"Linux Debug shard 2/2","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"2/2","setup":true,"job_timeout":45,"cache_key":"fast-linux-debug-1","artifact":"","operation":"execute","targets":"","directory":"","prepare":"","declared":false},{"os":"ubuntu-latest","name":"Cross compile 1/4","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-0","artifact":"","operation":"objects","targets":"x86_64-linux-gnu aarch64-windows-gnu","directory":"","prepare":"","declared":false},{"os":"ubuntu-latest","name":"Cross compile 2/4","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-1","artifact":"","operation":"objects","targets":"aarch64-linux-gnu x86_64-macos","directory":"","prepare":"","declared":false},{"os":"ubuntu-latest","name":"Cross compile 3/4","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-2","artifact":"","operation":"objects","targets":"x86_64-linux-musl aarch64-macos","directory":"","prepare":"","declared":false},{"os":"ubuntu-latest","name":"Cross compile 4/4","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-3","artifact":"","operation":"objects","targets":"x86_64-windows-gnu","directory":"","prepare":"","declared":false}]}
@@ -60,6 +60,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: pedronaugusto/preflight/.github/actions/land@3fbe75f7345fafef3318818a421e3a08ec3bb9f5
+      - uses: pedronaugusto/preflight/.github/actions/land@02d1f43bb66fa14f3ab5c59447a5bc6f2015f6d0
         with:
           version: ${{ needs.gate.outputs.version }}

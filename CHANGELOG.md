@@ -298,7 +298,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   helper the concurrency tests start is given that environment too, and the
   gpg tests stop every daemon gpg started for their home rather than only the
   agent.
-- Pins conduit 0.6.0, sweep 0.2.0, parallax 0.2.0, uplink 0.2.0, airlock 0.2.0, warp 0.2.0, cloak 0.2.0 and strand 0.8.0; developed with preflight 0.2.1 and shakedown 0.2.0.
+- Pins conduit 0.6.0, sweep 0.2.0, parallax 0.2.0, uplink 0.2.0, airlock 0.2.0, warp 0.2.0, cloak 0.2.0 and strand 0.8.0; developed with preflight 0.2.2 and shakedown 0.2.0.
 
 ### Removed
 
