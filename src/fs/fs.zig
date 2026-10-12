@@ -111,6 +111,9 @@ pub const Sync = enum {
 pub const Fsync = struct {
     components: std.EnumSet(Component),
     method: Method = .fsync,
+    /// `core.fsyncObjectFiles`: loose objects are synced whatever
+    /// `components` says, one by one unless `components` names them.
+    object_files: bool = false,
 
     /// What git names the files it may sync.
     pub const Component = enum { loose_object, pack, pack_metadata, commit_graph, index, reference };
@@ -189,8 +192,21 @@ pub const Fsync = struct {
     /// How a file of `component` is synced. `batch` is git's for loose
     /// objects alone; the rest are synced one by one under it, as git
     /// syncs them.
+    ///
+    /// A loose object `components` leaves out is still synced under
+    /// `object_files`, as git's `close_loose_object` does: it batches only
+    /// when `core.fsync` names `loose-object` (`batch_fsync_enabled`), and
+    /// otherwise calls `fsync_or_die`, whose `maybe_fsync` writes out alone
+    /// under `writeout-only` and flushes the hardware under `fsync` and
+    /// `batch` alike.
     pub fn sync(f: Fsync, component: Component) Sync {
-        if (!f.components.contains(component)) return .none;
+        if (!f.components.contains(component)) {
+            if (component != .loose_object or !f.object_files) return .none;
+            return switch (f.method) {
+                .writeout_only => .ordered,
+                .fsync, .batch => .per_file,
+            };
+        }
         return switch (f.method) {
             .fsync => .per_file,
             .writeout_only => .ordered,
@@ -228,6 +244,14 @@ test "core.fsync is read as git reads it" {
     try testing.expectEqual(Sync.per_file, batch.sync(.reference));
     try testing.expectEqual(Sync.none, batch.sync(.index));
     try testing.expectEqual(Sync.ordered, (Fsync{ .components = set(&.{.pack}), .method = .writeout_only }).sync(.pack));
+    // core.fsyncObjectFiles syncs loose objects by the method, batched only
+    // when core.fsync names them, as git's close_loose_object does.
+    const objects: Fsync = .{ .components = Fsync.git_default.components, .object_files = true };
+    try testing.expectEqual(Sync.per_file, objects.sync(.loose_object));
+    try testing.expectEqual(Sync.ordered, (Fsync{ .components = objects.components, .method = .writeout_only, .object_files = true }).sync(.loose_object));
+    try testing.expectEqual(Sync.per_file, (Fsync{ .components = objects.components, .method = .batch, .object_files = true }).sync(.loose_object));
+    try testing.expectEqual(Sync.batch, (Fsync{ .components = set(&.{.loose_object}), .method = .batch, .object_files = true }).sync(.loose_object));
+    try testing.expectEqual(Sync.none, (Fsync{ .components = .empty, .method = .batch, .object_files = true }).sync(.index));
 }
 
 /// How fine a modification time a filesystem records.

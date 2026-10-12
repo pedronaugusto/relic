@@ -740,7 +740,11 @@ pub const Repository = struct {
     /// git reads them: `core.fsync` over git's default, and when it is
     /// unset, git's default with the references and the index besides
     /// (`fs.Fsync.default`). `core.fsyncObjectFiles = true` syncs loose
-    /// objects whatever `core.fsync` says. A value git ignores is ignored.
+    /// objects whatever `core.fsync` says (`fs.Fsync.object_files`): one by
+    /// one, flushed to the hardware under `fsync` and `batch` and written out
+    /// under `writeout-only`, and batched only where `core.fsync` names them,
+    /// as git's `close_loose_object` syncs them. A value git ignores is
+    /// ignored.
     fn fsyncOf(config: *const config_mod.Config) ErrorNamespace.Error!fs.Fsync {
         var fsync: fs.Fsync = .default;
         if (config.find("core.fsync")) |entry| {
@@ -751,7 +755,7 @@ pub const Repository = struct {
             const value = entry.value orelse return error.MalformedValue;
             if (fs.Fsync.parseMethod(value)) |method| fsync.method = method;
         }
-        if (try config.getBool("core.fsyncobjectfiles", false)) fsync.components.insert(.loose_object);
+        fsync.object_files = try config.getBool("core.fsyncobjectfiles", false);
         return fsync;
     }
 

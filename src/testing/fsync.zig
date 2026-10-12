@@ -127,6 +127,29 @@ test "a refreshed configuration changes what is synced" {
     try testing.expectEqual(fs.Sync.per_file, repo.objectDatabase().settings().fsync.sync(.pack));
 }
 
+test "core.fsyncObjectFiles syncs loose objects by the method, batched only where core.fsync names them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var target = try testgit.Repo.init(gpa, io, &.{});
+    defer target.deinit();
+    try target.exec(io, &.{ "config", "core.fsyncObjectFiles", "true" });
+    var repo = try repo_mod.Repository.open(gpa, io, target.dir, .{});
+    defer repo.deinit(io);
+    for ([_]struct { []const u8, ?[]const u8, fs.Sync }{
+        .{ "fsync", null, .per_file },
+        .{ "writeout-only", null, .ordered },
+        // git's fsync_or_die flushes the hardware under batch.
+        .{ "batch", null, .per_file },
+        .{ "batch", "loose-object", .batch },
+    }) |case| {
+        const method, const components, const want = case;
+        try target.exec(io, &.{ "config", "core.fsyncMethod", method });
+        if (components) |value| try target.exec(io, &.{ "config", "core.fsync", value });
+        _ = try repo.refreshConfig(io, null);
+        try testing.expectEqual(want, repo.objectDatabase().settings().fsync.sync(.loose_object));
+    }
+}
+
 test "a refreshed core.sharedRepository reaches every writer" {
     const gpa = testing.allocator;
     const io = testing.io;
