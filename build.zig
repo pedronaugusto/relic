@@ -387,6 +387,5 @@ fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const p = relicPackage(b, target, optimize).builder;
     const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, http_option) });
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
-    return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } }) catch @panic("out of memory");
+    return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "relic", .module = module }}) catch @panic("out of memory");
 }
