@@ -306,6 +306,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On Linux a received pack's directory, and every directory `fs.syncDirectory` syncs, is synced with one call: each was opened `O_PATH`, which fsync refuses, so a sync was a refused call and a reopen.
 - Applying a delta reserves the size its header states only up to what its commands could produce, each copy at most 16 MiB and no more than the base, so a delta of a few bytes whose header claims gigabytes is refused as `DeltaResultSizeMismatch` without reserving them first.
 - A refreshed configuration's `core.sharedRepository` reaches every writer at once (objects, packs, refs, logs, reftable tables, the index): it used to stay what the repository was opened with. `Odb.configureWrites` and `refs.Store.configureWrites` take the permissions and the syncs together.
 - `transport.clone` lists its destination through a handle of its own, so the current directory (`Io.Dir.cwd()`) can be cloned into; it used to fail on a handle not opened for listing.
