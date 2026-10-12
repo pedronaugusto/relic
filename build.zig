@@ -52,12 +52,11 @@ fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// relic's development: its tests, helpers, examples and benchmarks, under
-/// preflight's gate, with shakedown bound to relic's aegis. Run through bay.
+/// preflight's gate. Run through bay.
 pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const preflight = tools.preflight;
-    use_aegis = tools.shakedown.useAegis;
     // The option of `build`, passed on to relic.
     http_option = b.option(bool, "http", "Fetch and push over HTTP(S) and Git LFS, with uplink, cloak and strand (default on)") orelse true;
     const package = relicPackage(b, target, optimize);
@@ -228,10 +227,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         // The imports of the module a consumer gets, the options among them.
         .imports = moduleImports(p, target, optimize, http_option),
     });
-    // One shakedown in the test graph, relic's own, bound to the aegis
-    // airlock is built on, and airlock's seam on it.
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, airlock_build.aegis(airlock_dependency));
+    // shakedown, and airlock's seam built on it.
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
     test_module.addImport("shakedown", shakedown.module("shakedown"));
     filter_helper.root_module.addImport("relic", module);
@@ -380,21 +377,16 @@ const example_sources = [_][]const u8{
 /// `-Dhttp`, as `dev` read it, passed on to relic.
 var http_option: bool = true;
 
-/// `tools.shakedown.useAegis`, set by `dev` for the benchmark imports, which are built without `tools`.
-var use_aegis: *const fn (*std.Build.Dependency, *std.Build.Module) void = undefined;
-
 /// relic as the development build has it: the package, with the option passed on.
 fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
     return b.dependency("relic", .{ .target = target, .optimize = optimize, .http = http_option });
 }
 
 /// The benchmarks' relic: the library's imports over src/benchmark.zig, in the
-/// mode the benchmark builds in, and shakedown bound to the aegis airlock is
-/// built on.
+/// mode the benchmark builds in, and shakedown.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const p = relicPackage(b, target, optimize).builder;
     const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, http_option) });
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, airlock_build.aegis(p.dependency("airlock", .{ .target = target, .optimize = optimize })));
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "relic", .module = module }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } }) catch @panic("out of memory");
 }
