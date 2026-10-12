@@ -94,23 +94,34 @@ test "a pattern matches where POSIX extended expressions match" {
 }
 
 test "fuzz: any pattern compiles or is refused, and any search ends" {
+    for (pattern_examples) |bytes| try checkPattern(bytes);
     try shakedown_mod.check(testing.allocator, {}, struct {
         fn one(_: void, case: *shakedown_mod.Case) anyerror!void {
             var buf: [64]u8 = undefined;
             const all = buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, buf.len)];
             case.source.bytes(all);
-            const cut = all.len / 2;
-            var p = Pattern.compile(testing.allocator, all[0..cut]) catch |err| switch (err) {
-                error.InvalidPattern => return,
-                else => return err,
-            };
-            defer p.deinit();
-            _ = p.search(testing.allocator, all[cut..]) catch |err| switch (err) {
-                error.PatternTooComplex => return,
-                else => return err,
-            };
+            try checkPattern(all);
         }
     }.one, .{});
+}
+
+/// Inputs the property starts from: the pattern is the first half of each,
+/// the subject the rest.
+const pattern_examples = [_][]const u8{ "(ab)+c|d*xababc", "[[:alpha:]]{2,}x9" };
+
+/// The first half of `all` compiles or is refused, and a search of the rest
+/// ends.
+fn checkPattern(all: []const u8) anyerror!void {
+    const cut = all.len / 2;
+    var p = Pattern.compile(testing.allocator, all[0..cut]) catch |err| switch (err) {
+        error.InvalidPattern => return,
+        else => return err,
+    };
+    defer p.deinit();
+    _ = p.search(testing.allocator, all[cut..]) catch |err| switch (err) {
+        error.PatternTooComplex => return,
+        else => return err,
+    };
 }
 
 //=========================================================================
@@ -1092,28 +1103,39 @@ test "a back-reference takes the way glibc takes: the furthest end any assignmen
 }
 
 test "fuzz: any regex compiles or is refused, and any match is within the line" {
+    for (regex_examples) |bytes| try checkRegex(bytes);
     try shakedown_mod.check(testing.allocator, {}, struct {
         fn one(_: void, case: *shakedown_mod.Case) anyerror!void {
             var buf: [64]u8 = undefined;
             const all = buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, buf.len)];
             case.source.bytes(all);
-            const cut = all.len / 2;
-            for ([_]Syntax{ .basic, .extended }) |syntax| {
-                var r = Regex.compile(testing.allocator, all[0..cut], .{ .syntax = syntax }) catch |err| switch (err) {
-                    error.InvalidPattern, error.PatternTooComplex => continue,
-                    else => return err,
-                };
-                defer r.deinit();
-                const found = r.find(testing.allocator, all[cut..], false) catch |err| switch (err) {
-                    error.PatternTooComplex => continue,
-                    else => return err,
-                };
-                if (found) |m| {
-                    try testing.expect(m.start <= m.end and m.end <= all.len - cut);
-                }
-            }
+            try checkRegex(all);
         }
     }.one, .{});
+}
+
+/// Inputs the property starts from: the expression is the first half of
+/// each, the line the rest.
+const regex_examples = [_][]const u8{ "\\(a\\|b\\)*c", "[[:alpha:]]{2,}x9" };
+
+/// The first half of `all` compiles or is refused in both syntaxes, and a
+/// match in the rest lies within it.
+fn checkRegex(all: []const u8) anyerror!void {
+    const cut = all.len / 2;
+    for ([_]Syntax{ .basic, .extended }) |syntax| {
+        var r = Regex.compile(testing.allocator, all[0..cut], .{ .syntax = syntax }) catch |err| switch (err) {
+            error.InvalidPattern, error.PatternTooComplex => continue,
+            else => return err,
+        };
+        defer r.deinit();
+        const found = r.find(testing.allocator, all[cut..], false) catch |err| switch (err) {
+            error.PatternTooComplex => continue,
+            else => return err,
+        };
+        if (found) |m| {
+            try testing.expect(m.start <= m.end and m.end <= all.len - cut);
+        }
+    }
 }
 
 test "boolean ERE uses git extensions and captures" {
