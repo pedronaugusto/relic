@@ -642,7 +642,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     }
 
     const cleanup: message.Cleanup = r.options.cleanup orelse
-        if (r.options.signoff or r.options.record_origin) .whitespace else configuredCleanup(repo);
+        if (r.options.signoff or r.options.record_origin) .whitespace else message.sequencerCleanup(repo.configuration());
     // `try_to_commit`: `prepare-commit-msg` sees the message before it is
     // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
@@ -679,10 +679,6 @@ fn firstLine(text: []const u8) []const u8 {
 }
 
 /// `commit.cleanup`, or the message as it is.
-fn configuredCleanup(repo: *Repository) message.Cleanup {
-    const text = repo.configuration().get("commit.cleanup") orelse return .verbatim;
-    return message.Cleanup.parse(text) orelse .verbatim;
-}
 
 fn emptyTree(io: Io, repo: *Repository) Error!Oid {
     return repo.objectDatabase().write(io, .tree, "");

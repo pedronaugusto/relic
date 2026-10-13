@@ -42,6 +42,23 @@ pub const Cleanup = enum {
     }
 };
 
+/// `commit.cleanup` as `git commit` reads it with no editor: `default` and
+/// `scissors` are `whitespace`, which is also what an unset one means, and
+/// any other value is refused, as git dies on it.
+pub fn commitCleanup(config: *const config_mod.Config) error{InvalidCleanupMode}!Cleanup {
+    const text = config.get("commit.cleanup") orelse return .whitespace;
+    if (std.mem.eql(u8, text, "default")) return .whitespace;
+    return Cleanup.parse(text) orelse error.InvalidCleanupMode;
+}
+
+/// `commit.cleanup` as git's sequencer reads it for a pick, a revert or a
+/// rebase: unset, or a value it only warns about, leaves the message as
+/// it is.
+pub fn sequencerCleanup(config: *const config_mod.Config) Cleanup {
+    const text = config.get("commit.cleanup") orelse return .verbatim;
+    return Cleanup.parse(text) orelse .verbatim;
+}
+
 /// The line `git commit -v` puts above the diff, after the comment string
 /// and a space.
 pub const cut_line = "------------------------ >8 ------------------------";

@@ -34,6 +34,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const message = @import("message.zig");
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -512,8 +513,8 @@ pub const Signer = struct {
             }
         }
 
-        const text = try stripspace(arena, output.items);
-        const errors = try stripspace(arena, err_output.items);
+        const text = try message.stripSpace(arena, output.items, null);
+        const errors = try message.stripSpace(arena, err_output.items, null);
         verdict.output = try std.mem.concat(arena, u8, &.{ text, principals.stderr, errors });
         verdict.status = verdict.output;
         parseSshOutput(verdict);
@@ -873,24 +874,6 @@ fn splitCommandLine(arena: Allocator, line: []const u8) Allocator.Error![]const 
     return words.items;
 }
 
-/// git's `stripspace` without comments, for the verifier's output.
-fn stripspace(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var empties: usize = 0;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, " \t\r\n");
-        if (line.len == 0) {
-            empties += 1;
-            continue;
-        }
-        if (empties > 0 and out.items.len > 0) try out.append(arena, '\n');
-        empties = 0;
-        try out.appendSlice(arena, line);
-        try out.append(arena, '\n');
-    }
-    return out.items;
-}
 
 /// A file in the caller's temporary directory holding bytes a program
 /// reads by name.

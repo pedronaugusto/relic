@@ -72,18 +72,6 @@ pub const Error = error{
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
     error{NameTooLong};
 
-/// How a message is cleaned, from `commit.cleanup` or the caller.
-pub const Cleanup = enum {
-    /// Exactly as given.
-    verbatim,
-    /// Trailing whitespace off every line, runs of blank lines made one,
-    /// blank lines off both ends, and a final newline. What git does to a
-    /// message given with `-m`.
-    whitespace,
-    /// `whitespace`, and every line beginning with the comment character
-    /// removed.
-    strip,
-};
 
 /// How a commit is made.
 pub const Options = struct {
@@ -100,7 +88,7 @@ pub const Options = struct {
     allow_empty_message: bool = false,
     /// How the message is cleaned. `null` asks `commit.cleanup`, whose
     /// default, with no editor, is `whitespace`.
-    cleanup: ?Cleanup = null,
+    cleanup: ?message.Cleanup = null,
     /// `false` skips `post-rewrite` after an amend.
     post_rewrite: bool = true,
     /// Whether and how to sign it. By default `commit.gpgSign` decides,
@@ -151,7 +139,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     if (repo.refStore().special().exists(io, .merge_head) or
         repo.refStore().root().exists(gpa, io, .cherry_pick_head) or
         repo.refStore().root().exists(gpa, io, .revert_head)) return error.OperationInProgress;
-    const cleanup = options.cleanup orelse try configuredCleanup(repo);
+    const cleanup = options.cleanup orelse try message.commitCleanup(repo.configuration());
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -262,7 +250,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     return outcome;
 }
 
-fn validateMessage(arena: Allocator, cleaned: []const u8, cleanup: Cleanup, comment: []const u8, options: Options) Error!void {
+fn validateMessage(arena: Allocator, cleaned: []const u8, cleanup: message.Cleanup, comment: []const u8, options: Options) Error!void {
     if (!options.allow_empty_message and isEmpty(cleaned, cleanup, comment)) return error.EmptyMessage;
     if (!options.allow_empty_message) {
         if (options.template) |text| {
@@ -271,7 +259,7 @@ fn validateMessage(arena: Allocator, cleaned: []const u8, cleanup: Cleanup, comm
     }
 }
 
-fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8, cleanup: Cleanup, comment: []const u8, options: Options) Error![]const u8 {
+fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8, cleanup: message.Cleanup, comment: []const u8, options: Options) Error![]const u8 {
     var first_message = try clean(arena, input, cleanup, comment);
     if (options.trailers.len != 0) {
         // git's `validate_trailer_args`, then `amend_file_with_trailers`
@@ -306,9 +294,9 @@ pub fn template(gpa: Allocator, io: Io, repo: *Repository) Allocator.Error!?[]u8
 /// git's `template_untouched`: whether `text`, a cleaned message, is the template
 /// cleaned the same way and nothing more than blank lines and
 /// `Signed-off-by:` lines.
-pub fn templateUntouched(arena: Allocator, text: []const u8, template_text: []const u8, cleanup: Cleanup, comment: []const u8) Allocator.Error!bool {
+pub fn templateUntouched(arena: Allocator, text: []const u8, template_text: []const u8, cleanup: message.Cleanup, comment: []const u8) Allocator.Error!bool {
     if (cleanup == .verbatim and text.len != 0) return false;
-    const cleaned = try stripspace(arena, template_text, if (cleanup == .strip) comment else null);
+    const cleaned = try message.stripSpace(arena, template_text, if (cleanup == .strip) comment else null);
     const start = if (std.mem.startsWith(u8, text, cleaned)) cleaned.len else 0;
     return restIsEmpty(text, start);
 }
@@ -332,15 +320,6 @@ fn restIsEmpty(text: []const u8, start: usize) bool {
     return true;
 }
 
-fn configuredCleanup(repo: *Repository) error{InvalidCleanupMode}!Cleanup {
-    const text = repo.configuration().get("commit.cleanup") orelse return .whitespace;
-    // With no editor, `default` and `scissors` are both `whitespace`.
-    if (std.mem.eql(u8, text, "default") or std.mem.eql(u8, text, "whitespace") or
-        std.mem.eql(u8, text, "scissors")) return .whitespace;
-    if (std.mem.eql(u8, text, "verbatim")) return .verbatim;
-    if (std.mem.eql(u8, text, "strip")) return .strip;
-    return error.InvalidCleanupMode;
-}
 
 fn commentPrefix(repo: *Repository) []const u8 {
     const text = repo.configuration().get("core.commentstring") orelse repo.configuration().get("core.commentchar") orelse return "#";
@@ -350,16 +329,16 @@ fn commentPrefix(repo: *Repository) []const u8 {
     return text;
 }
 
-fn clean(arena: Allocator, text: []const u8, cleanup: Cleanup, comment: []const u8) Allocator.Error![]const u8 {
+fn clean(arena: Allocator, text: []const u8, cleanup: message.Cleanup, comment: []const u8) Allocator.Error![]const u8 {
     return switch (cleanup) {
         .verbatim => text,
-        .whitespace => stripspace(arena, text, null),
-        .strip => stripspace(arena, text, comment),
+        .whitespace => message.stripSpace(arena, text, null),
+        .strip => message.stripSpace(arena, text, comment),
     };
 }
 
 /// Whether a cleaned message says nothing: every line blank or a comment.
-fn isEmpty(text: []const u8, cleanup: Cleanup, comment: []const u8) bool {
+fn isEmpty(text: []const u8, cleanup: message.Cleanup, comment: []const u8) bool {
     if (cleanup == .verbatim and text.len != 0) return false;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -371,36 +350,6 @@ fn isEmpty(text: []const u8, cleanup: Cleanup, comment: []const u8) bool {
     return true;
 }
 
-/// git's `stripspace`: trailing whitespace off every line, runs of blank
-/// lines made one, blank lines off both ends, and a newline after the last
-/// line. With `comment`, every line beginning with it goes too. The result
-/// is the caller's.
-pub fn stripspace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Allocator.Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    var empties: usize = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const eol = std.mem.findScalarPos(u8, text, i, '\n');
-        const len = if (eol) |e| e - i + 1 else text.len - i;
-        const line = text[i .. i + len];
-        i += len;
-        if (comment) |prefix| {
-            if (std.mem.startsWith(u8, line, prefix)) continue;
-        }
-        var kept = line.len;
-        while (kept > 0 and ctype.isSpace(line[kept - 1])) kept -= 1;
-        if (kept != 0) {
-            if (empties > 0 and out.items.len > 0) try out.append(gpa, '\n');
-            empties = 0;
-            try out.appendSlice(gpa, line[0..kept]);
-            try out.append(gpa, '\n');
-        } else {
-            empties += 1;
-        }
-    }
-    return out.toOwnedSlice(gpa);
-}
 
 //=========================================================================
 // Tests
@@ -420,7 +369,7 @@ test "a message is cleaned the way git's stripspace cleans it" {
         .{ .in = "a\r\nb\r\n", .comment = null, .out = "a\nb\n" },
     };
     for (cases) |case| {
-        const got = try stripspace(gpa, case.in, case.comment);
+        const got = try message.stripSpace(gpa, case.in, case.comment);
         defer gpa.free(got);
         try testing.expectEqualStrings(case.out, got);
     }

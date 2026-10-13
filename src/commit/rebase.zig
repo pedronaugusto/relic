@@ -1527,7 +1527,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
     // `try_to_commit` cleans nothing but whitespace, and that only with a
     // sign-off, unless `commit.cleanup` says otherwise; an edited message
     // is cleaned of comments as an editor's is.
-    const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else configuredCleanup(repo);
+    const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else message.sequencerCleanup(repo.configuration());
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     // An edited message is `git commit -n -e`'s: its hooks see the author
     // and the editor the person has.
@@ -1652,10 +1652,6 @@ fn firstLine(text: []const u8) []const u8 {
     return text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
 }
 
-fn configuredCleanup(repo: *Repository) message.Cleanup {
-    const text = repo.configuration().get("commit.cleanup") orelse return .verbatim;
-    return message.Cleanup.parse(text) orelse .verbatim;
-}
 
 /// A message a person would have edited: what the caller's `Messages` make
 /// of it, or the proposal as an editor left untouched leaves it, cleaned of
@@ -2278,7 +2274,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         return finishOutcome(r, .stopped, .conflict, item.commit);
     }
 
-    var text: []const u8 = try message.cleanup(r.arena, r.msg.items, if (r.options.signoff) .whitespace else configuredCleanup(repo), r.comment);
+    var text: []const u8 = try message.cleanup(r.arena, r.msg.items, if (r.options.signoff) .whitespace else message.sequencerCleanup(repo.configuration()), r.comment);
     if (item.edit_message) text = try edited(r, .merge, text);
     const made = try repo.writeCommit(io, .{
         .tree = outcome.tree.?,
