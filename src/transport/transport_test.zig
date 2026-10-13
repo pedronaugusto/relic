@@ -1185,8 +1185,6 @@ fn withoutAgent(gpa: Allocator, bytes: []const u8) ![]u8 {
 }
 
 test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
-    // the stand-in is a shell script; Windows has no /bin/sh to run it
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const Child = @import("../process.zig").program.Child;
     const Controlled = struct {
@@ -1256,16 +1254,17 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "ssh", .data = "#!/bin/sh\n[ \"$1\" = \"-G\" ] && exit 1\nexec sleep 30\n" });
-    try tmp.dir.setFilePermissions(io, "ssh", .fromMode(0o755), .{});
-    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+    const ssh = try testremote.fakeSsh(gpa, io, tmp.dir);
+    defer gpa.free(ssh);
+    const sidecar = try gpa.print("{s}.fixture", .{ssh});
+    defer gpa.free(sidecar);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = "hang\n" });
     try tmp.dir.createDirPath(io, "repo");
     var repo_dir = try tmp.dir.openDir(io, "repo", .{});
     defer repo_dir.close(io);
     var made = try repo_mod.Repository.create(gpa, io, repo_dir, .{});
     made.deinit(io);
-    const config = try gpa.print("[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tsshCommand = {s}/ssh\n[remote \"origin\"]\n\turl = ssh://example.invalid/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", .{root});
+    const config = try gpa.print("[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tsshCommand = {s}\n[remote \"origin\"]\n\turl = ssh://example.invalid/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", .{ssh});
     defer gpa.free(config);
     try repo_dir.writeFile(io, .{ .sub_path = ".git/config", .data = config });
     var repo = try repo_mod.Repository.open(gpa, io, repo_dir, .{ .discover = false });

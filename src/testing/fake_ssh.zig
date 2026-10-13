@@ -22,6 +22,13 @@ pub fn main(init: std.process.Init) !void {
     const fixture = try Fixture.read(arena, io, executable);
     try logInvocation(arena, io, init.environ_map, executable, args, fixture);
     try act(io, executable, fixture);
+    // `hang`: an ssh that refuses OpenSSH's `-G` probe and then never
+    // answers, for half a minute, as a host that accepts and says nothing.
+    if (fixture.is("hang")) {
+        for (args[1..]) |arg| if (std.mem.eql(u8, arg, "-G")) std.process.exit(1);
+        try io.sleep(.fromSeconds(30), .awake);
+        return;
+    }
 
     const at = commandStart(args) orelse return;
     var line: std.ArrayList(u8) = .empty;

@@ -502,6 +502,8 @@ fn changeModesAndLinks(p: *Pair, io: Io) !void {
 }
 
 test "mode changes, symlinks and copies apply as git applies them" {
+    // Windows has no executable bit, and Git for Windows keeps a link as a
+    // file (core.symlinks is false there): neither side has what this applies.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -555,6 +557,8 @@ fn expectBothRefuse(p: *Pair, io: Io, patch: []const u8) !void {
 }
 
 test "a patch that reads, removes or writes past a symbolic link, or names an invalid path, is refused as git refuses it" {
+    // Git for Windows keeps a link as a file (core.symlinks is false there),
+    // so there is no link to write past.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;

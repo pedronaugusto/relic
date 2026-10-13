@@ -1262,8 +1262,6 @@ test "a link and a directory whose names a folding filesystem makes one are refu
 }
 
 test "nothing is written or removed past a symbolic link in the working tree, and a forced checkout replaces the link as git's does" {
-    // A link needs a privilege on Windows.
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var h = try Harness.init(gpa, io, &.{});
@@ -1279,7 +1277,11 @@ test "nothing is written or removed past a symbolic link in the working tree, an
     try h.repo.exec(io, &.{ "rm", "-q", "--cached", "d/f" });
     try h.repo.dir.deleteTree(io, "d");
     try h.repo.writeFile(io, "elsewhere/keep", "mine\n");
-    try h.repo.dir.symLink(io, "elsewhere", "d", .{ .is_directory = true });
+    h.repo.dir.symLink(io, "elsewhere", "d", .{ .is_directory = true }) catch |err| switch (err) {
+        // A link needs a privilege Windows may not grant.
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => |e| return e,
+    };
     try h.reload(gpa, io);
 
     var refusal: worktree.Refusal = .{};

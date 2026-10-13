@@ -40,6 +40,7 @@ test "CVE-2025-48384, t1300-config 'writing value with trailing CR not stripped 
 }
 
 test "CVE-2025-48384, t7450-bad-git-dotfiles 'submodule must not checkout into different directory': a submodule at sub<CR> is checked out there, not through a link at sub" {
+    // Windows refuses a carriage return in a file name, so there is no sub<CR>.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;

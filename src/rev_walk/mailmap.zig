@@ -462,6 +462,8 @@ test "mailmap.blob and mailmap.file override the working tree's .mailmap in git'
 }
 
 test "a .mailmap that is a symbolic link is not read, as git does not read one" {
+    // Git for Windows keeps a link as a file (core.symlinks is false there),
+    // and making one needs a privilege Windows may not grant.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;

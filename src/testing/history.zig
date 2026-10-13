@@ -3610,7 +3610,8 @@ test "merges, picks, reverts and rebases are signed with an ssh key as git signs
 }
 
 test "merges, picks, reverts and rebases are signed with an OpenPGP key as git signs them" {
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // GnuPG agent is unavailable on the Windows runner.
+    // The Windows runner has no GnuPG agent to sign with.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     try signedHistory(.openpgp);
 }
 

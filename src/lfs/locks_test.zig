@@ -74,9 +74,22 @@ const Pair = struct {
     }
 };
 
+/// What git-lfs changes on a lockable file: its permission bits, or on
+/// Windows its read-only attribute.
 fn mode(io: Io, d: Io.Dir, path: []const u8) !u32 {
     const st = try d.statFile(io, path, .{});
+    if (builtin.target.os.tag == .windows) return @as(u32, @intCast(@backingInt(st.permissions))) & file_attribute_readonly;
     return @intCast(st.permissions.toMode() & 0o777);
+}
+
+/// `FILE_ATTRIBUTE_READONLY`.
+const file_attribute_readonly: u32 = 1;
+
+/// Whether git-lfs left the file writable.
+fn writable(io: Io, d: Io.Dir, path: []const u8) !bool {
+    const m = try mode(io, d, path);
+    if (builtin.target.os.tag == .windows) return m & file_attribute_readonly == 0;
+    return m & 0o200 != 0;
 }
 
 test "locks relic takes git lfs locks lists, and the other way round, with the owner the server names" {
@@ -184,8 +197,6 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
 }
 
 test "lockable files are read-only unless the person holds the lock, with git-lfs's bits" {
-    // Windows has no POSIX write bits for git-lfs's lockable-file mode check.
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var pair = try Pair.init(gpa, io);
@@ -207,7 +218,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     for ([_][]const u8{ "x.bin", "y.bin", "plain.txt", ".gitattributes" }) |p| {
         try testing.expectEqual(try mode(io, pair.theirs, p), try mode(io, pair.ours, p));
     }
-    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "x.bin") & 0o222);
+    try testing.expect(!try writable(io, pair.ours, "x.bin"));
 
     // Each takes a lock on a different file: the holder's file writable,
     // the other's still read-only.
@@ -215,7 +226,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     try fx.gitIn(pair.theirs, &.{ "lfs", "lock", "y.bin" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
     try testing.expectEqual(try mode(io, pair.theirs, "x.bin"), try mode(io, pair.ours, "y.bin"));
-    try testing.expect(try mode(io, pair.ours, "x.bin") & 0o200 != 0);
+    try testing.expect(try writable(io, pair.ours, "x.bin"));
 
     // A checkout keeps it so, from the cache alone.
     var split = try lfslocks.verify(io, server, &repo, .{});
@@ -229,12 +240,10 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     _ = try lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "x.bin", .request = .{ .force = false } });
     try fx.gitIn(pair.theirs, &.{ "lfs", "unlock", "y.bin" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
-    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "x.bin") & 0o222);
+    try testing.expect(!try writable(io, pair.ours, "x.bin"));
 }
 
 test "a lock's file is the one asked about, and a path the server answers with outside the tree is never touched" {
-    // Windows has no POSIX write bits for git-lfs's lockable-file mode check.
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var pair = try Pair.init(gpa, io);
@@ -249,20 +258,20 @@ test "a lock's file is the one asked about, and a path the server answers with o
     const server = try pair.open(&repo);
     defer server.deinit(io);
     _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
-    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
+    try testing.expect(!try writable(io, pair.ours, "y.bin"));
 
     // The server says the lock is on y.bin: x.bin, asked for, is the one
     // made writable, as git-lfs makes the path it asked about writable.
     fx.server.answerLocksWith("y.bin");
     const taken = try lfslocks.lock(arena, io, server, &repo, .{ .path = "x.bin", .request = .{} });
-    try testing.expect(try mode(io, pair.ours, "x.bin") & 0o200 != 0);
-    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
+    try testing.expect(try writable(io, pair.ours, "x.bin"));
+    try testing.expect(!try writable(io, pair.ours, "y.bin"));
 
     // Given back by id, the server naming a file in the other clone: that
     // file keeps its bits.
     try pair.theirs.writeFile(io, .{ .sub_path = "outside.bin", .data = "not ours\n" });
     const outside_before = try mode(io, pair.theirs, "outside.bin");
-    try testing.expect(outside_before & 0o200 != 0);
+    try testing.expect(try writable(io, pair.theirs, "outside.bin"));
     fx.server.answerLocksWith("../theirs/outside.bin");
     _ = try lfslocks.unlock(arena, io, server, &repo, .{ .id = taken.locked.id, .request = .{ .force = false } });
     try testing.expectEqual(outside_before, try mode(io, pair.theirs, "outside.bin"));
@@ -290,8 +299,6 @@ test "a server with no locking API is named" {
 }
 
 test "a repository with git-lfs's hooks works on a machine without git-lfs" {
-    // The final assertions compare POSIX write bits that Windows does not preserve.
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const hooks = @import("../hooks/hooks.zig");
@@ -314,7 +321,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
         try pair.ours.writeFile(io, .{ .sub_path = path, .data = text });
         const file = try pair.ours.openFile(io, path, .{});
         defer file.close(io);
-        try file.setPermissions(io, .fromMode(0o755));
+        if (Io.File.Permissions.has_executable_bit) try file.setPermissions(io, .fromMode(0o755));
     }
 
     // No git-lfs anywhere on the path the hooks are run with.
@@ -352,19 +359,19 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
         try testing.expect(ran.succeeded());
         try testing.expect(ran.lfs_native);
     }
-    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "x.bin") & 0o222);
-    try testing.expect(try mode(io, pair.ours, "plain.txt") & 0o200 != 0);
+    try testing.expect(!try writable(io, pair.ours, "x.bin"));
+    try testing.expect(try writable(io, pair.ours, "plain.txt"));
 
     // After a commit, the files it changed are set as git-lfs sets them.
     try pair.ours.deleteFile(io, "y.bin");
     try pair.ours.writeFile(io, .{ .sub_path = "y.bin", .data = "changed\n" });
     try fx.gitIn(pair.ours, &.{ "-c", "core.hooksPath=/nonexistent", "commit", "-q", "-am", "change y" });
-    try testing.expect(try mode(io, pair.ours, "y.bin") & 0o200 != 0);
+    try testing.expect(try writable(io, pair.ours, "y.bin"));
     const index_path = try fx.path("ours/.git/index");
     defer gpa.free(index_path);
     const ran = try runner.postCommit(io, .{ .index_path = index_path });
     try testing.expect(ran.lfs_native and ran.succeeded());
-    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
+    try testing.expect(!try writable(io, pair.ours, "y.bin"));
     try testing.expectEqualStrings("", runner.captured.items);
 }
 
