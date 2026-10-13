@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- An index is written under the lock it was read under: `Repository.lockIndex` takes `index.lock`, reads the index, and its `LockedIndex.commit` writes it as git does (`Index.commitTo` writes into a held lock); `Repository.writeIndex` is gone. `merge.rerere.afterStop` takes the lock itself and no index.
+- The state files an operation keeps are `repo.state` (`write`, `read`, `remove`, `exists`), where they were `commit.head`'s `writeState`, `readState`, `removeState` and `stateExists`; `commit.in_progress.read` says which operations a worktree is in the middle of, as `git status` says.
+- `.git/shallow` is written by `Repository.writeShallow`; `rev_walk.shallow.write` takes `WriteOptions` (the file as it was read, and the shared mode) and returns what the file is after.
+- `repo.Settings` holds the engines' `core` settings, read once per published configuration (`Repository.settings`): a malformed `core.ignoreCase`, `core.fileMode`, `core.symlinks`, `core.checkStat`, `core.trustCtime`, `core.maxTreeDepth`, `core.protectNTFS` or `core.protectHFS` refuses the configuration, as git dies on it. `fs.Stat.matches` takes a `Stat.Compare`; `worktree.Rules` gains `trust_ctime` and `protect`.
+- `names.path`'s checks take a `Protect` (`core.protectNTFS`, on everywhere, and `core.protectHFS`, on on macOS), and `worktree.removeEntry` takes one.
+- `lfs.Lfs.Options`, `checkout.filter.Drivers.Directories` and the native filter's `LoadOptions` take the repository's `shared` mode.
+- The object database owns its pack directory and `.promisor` files: `Odb.openPackDirectory`, `Odb.writePromisor`, `Odb.commitGraph`; `transport.partial.writePromisor` takes the database; `transport.bundle.ReceiveInputs` has no `pack_dir`.
+- `discover.directory` is the one check of a git directory (`isGitDirectory`, `validHead`, `openCommon`); `discover.gitlink.isGitDirectory` is gone.
+- `config.parseInt` is `config.parseInteger`; `config.interpolatePath` expands every path setting.
+- `commit.Cleanup` and `commit.stripspace` are gone: `commit.message.Cleanup`, `stripSpace`, `commitCleanup` and `sequencerCleanup` are the one cleanup. `fast.importer.signedOffset` is `commit.signing.signedOffset`; `object.findHeader` is the one header search.
+
+### Fixed
+
+- Two index writers no longer lose an update: the lock is held from the read to the write, and `git add` waits its turn while relic holds it.
+- A linked worktree's split index is read with the shared index in its own git directory.
+- A changed status-change time says a file may have changed under `core.trustCtime`, as in git.
+- `repack` with `remove_packs` leaves a kept pack and its objects alone, keeps promisor objects in a promisor pack, and removes every companion of a pack it replaces.
+- A shallow file another writer changed since it was read is not replaced; `MERGE_RR.lock` is held across a rerere run; LFS storage and a submodule's git directory are made with `core.sharedRepository`'s modes.
+- Numbers in git's data are read by git's grammars: a `+` or `_` no longer passes where git takes only digits, and C's `strtol` is followed where git calls it.
+- A vertical tab and a form feed are not spaces, as git's `isspace` has it, in mail, patches, trailers, diffs and dates.
+- An author script with `'\!'` in it reads back.
+- A directory is a git directory only with a `HEAD` that names a ref or an object and with `objects` and `refs` in its common directory, as git's `is_git_directory` asks.
+- A worktree id is one name in every worktree entry point.
+- An index git wrote with names Windows refuses opens: paths are checked by the checkout that would write them.
+
+### Changed
+
+- The LFS lockable-file tests and the cancelled-ssh fetch run on Windows; every test still skipped there says why at the test.
+
 ## [0.6.0] - 2026-10-13
 
 ### Breaking
