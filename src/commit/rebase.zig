@@ -1652,7 +1652,6 @@ fn firstLine(text: []const u8) []const u8 {
     return text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
 }
 
-
 /// A message a person would have edited: what the caller's `Messages` make
 /// of it, or the proposal as an editor left untouched leaves it, cleaned of
 /// comments either way.

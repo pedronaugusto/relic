@@ -72,7 +72,6 @@ pub const Error = error{
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
     error{NameTooLong};
 
-
 /// How a commit is made.
 pub const Options = struct {
     /// The hooks to run, or `null` to run none.
@@ -320,7 +319,6 @@ fn restIsEmpty(text: []const u8, start: usize) bool {
     return true;
 }
 
-
 fn commentPrefix(repo: *Repository) []const u8 {
     const text = repo.configuration().get("core.commentstring") orelse repo.configuration().get("core.commentchar") orelse return "#";
     // `auto` picks a character the message does not use, which only matters
@@ -349,7 +347,6 @@ fn isEmpty(text: []const u8, cleanup: message.Cleanup, comment: []const u8) bool
     }
     return true;
 }
-
 
 //=========================================================================
 // Tests

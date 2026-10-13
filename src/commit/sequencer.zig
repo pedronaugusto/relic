@@ -679,7 +679,6 @@ fn firstLine(text: []const u8) []const u8 {
 }
 
 /// `commit.cleanup`, or the message as it is.
-
 fn emptyTree(io: Io, repo: *Repository) Error!Oid {
     return repo.objectDatabase().write(io, .tree, "");
 }

@@ -834,7 +834,6 @@ fn unquote(arena: Allocator, value: []const u8) (Allocator.Error || error{Malfor
     return arena.dupe(u8, value);
 }
 
-
 /// A command line split into words the way git splits
 /// `gpg.ssh.defaultKeyCommand`: at whitespace, with single and double quotes
 /// and backslashes keeping a word together, and no shell.
@@ -880,7 +879,6 @@ fn splitCommandLine(arena: Allocator, line: []const u8) Allocator.Error![]const 
     if (in_word) try words.append(arena, try word.toOwnedSlice(arena));
     return words.items;
 }
-
 
 /// A file in the caller's temporary directory holding bytes a program
 /// reads by name.

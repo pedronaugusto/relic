@@ -642,7 +642,6 @@ fn treeOf(kind: hash.Kind, buf: []const u8) Error!Oid {
     return Oid.parse(kind, buf[5..][0..hex_len]) catch error.MalformedCommit;
 }
 
-
 /// git's `depth_first`: a directory's contents before the directory, and a
 /// rename after what shares its path.
 fn depthFirst(_: void, a: diff.Change, b: diff.Change) bool {

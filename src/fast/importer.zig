@@ -1800,7 +1800,6 @@ fn validSignatureFormat(text: []const u8) bool {
     return false;
 }
 
-
 /// A signature as a commit header: its lines joined by a newline and a
 /// space, as git's `add_gpgsig_to_commit` writes them.
 fn writeSignatureHeader(w: *Io.Writer, header: []const u8, signature: []const u8) Io.Writer.Error!void {
