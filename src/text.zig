@@ -1,6 +1,7 @@
 //! git's text rules, each in one place: C-style quoting, dates, working-tree encodings, regular expressions, globs and column widths.
 
 pub const c_quote = @import("text/c_quote.zig");
+pub const ctype = @import("text/ctype.zig");
 pub const date = @import("text/date.zig");
 pub const decimal = @import("text/decimal.zig");
 pub const encoding = @import("text/encoding.zig");

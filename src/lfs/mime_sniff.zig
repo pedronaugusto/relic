@@ -15,7 +15,7 @@ pub const sniff_len = 512;
 pub fn contentType(data: []const u8) []const u8 {
     const bytes = data[0..@min(data.len, sniff_len)];
     var first: usize = 0;
-    while (first < bytes.len and isWhitespace(bytes[first])) first += 1;
+    while (first < bytes.len and isSniffSpace(bytes[first])) first += 1;
     for (signatures) |sig| {
         if (sig.match(bytes, first)) return sig.type;
     }
@@ -23,7 +23,7 @@ pub fn contentType(data: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-fn isWhitespace(b: u8) bool {
+fn isSniffSpace(b: u8) bool {
     return switch (b) {
         '\t', '\n', 0x0c, '\r', ' ' => true,
         else => false,

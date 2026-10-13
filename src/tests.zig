@@ -67,6 +67,7 @@ test {
         _ = @import("text/ere.zig");
         _ = @import("text/percent.zig");
         _ = @import("text/decimal.zig");
+        _ = @import("text/ctype.zig");
         _ = @import("fs/stat.zig");
         _ = @import("lfs/time_text.zig");
         _ = @import("lfs/mime_sniff.zig");

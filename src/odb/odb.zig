@@ -14,6 +14,7 @@ const pack = @import("pack.zig");
 const delta = @import("../codec.zig").delta;
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const policy_mod = @import("policy.zig");
 const indexpack_mod = @import("index_pack.zig");
 const shakedown = @import("shakedown");
@@ -4009,7 +4010,7 @@ const Ordered = struct {
 fn nameHash(name: []const u8) u32 {
     var value: u32 = 0;
     for (name) |c| {
-        if (std.ascii.isWhitespace(c)) continue;
+        if (ctype.isSpace(c)) continue;
         value = (value >> 2) +% (@as(u32, c) << 24);
     }
     return value;

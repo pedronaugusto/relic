@@ -19,6 +19,7 @@ const names = @import("../names.zig").ref;
 const stack_engine = @import("reftable/stack/transaction.zig");
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -308,7 +309,7 @@ pub const Store = struct {
         }
         const hex_len = kind.hexLen();
         if (bytes.len < hex_len) return error.MalformedRef;
-        if (bytes.len > hex_len and !std.ascii.isWhitespace(bytes[hex_len])) return error.MalformedRef;
+        if (bytes.len > hex_len and !ctype.isSpace(bytes[hex_len])) return error.MalformedRef;
         const oid = Oid.parse(kind, bytes[0..hex_len]) catch return error.MalformedRef;
         return .{ .direct = oid };
     }

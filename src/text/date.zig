@@ -12,6 +12,7 @@
 //! git asks the C library's local time for.
 
 const std = @import("std");
+const ctype = @import("ctype.zig");
 const shakedown = @import("shakedown");
 
 /// What a date came to.
@@ -202,7 +203,7 @@ fn isDateKnown(tm: *const Tm) bool {
 /// where it stopped.
 fn strtol(s: []const u8, start: usize) struct { value: i64, end: usize } {
     var i = start;
-    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
+    while (i < s.len and ctype.isSpace(s[i])) i += 1;
     var neg = false;
     if (i < s.len and (s[i] == '+' or s[i] == '-')) {
         neg = s[i] == '-';
@@ -977,7 +978,7 @@ fn showNormal(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tm: Tm
         try out.print(gpa, "{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) });
         if (!hide_seconds) try out.print(gpa, ":{d:0>2}", .{@as(u64, @intCast(tm.sec))});
     } else {
-        while (out.items.len > 0 and std.ascii.isWhitespace(out.items[out.items.len - 1])) _ = out.pop();
+        while (out.items.len > 0 and ctype.isSpace(out.items[out.items.len - 1])) _ = out.pop();
     }
     if (!hide_year) try out.print(gpa, " {d}", .{tm.year + 1900});
     if (!hide_tz) {

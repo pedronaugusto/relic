@@ -14,6 +14,7 @@
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const percent = @import("../text.zig").percent;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -66,7 +67,7 @@ pub fn parse(arena: Allocator, text: []const u8) Self.Error!Spec {
             if (encoded.len == 0) continue;
             // A character git reserves is written as `%XX`.
             for (encoded) |c| {
-                if (std.mem.findScalar(u8, reserved, c) != null or std.ascii.isWhitespace(c)) return error.InvalidFilter;
+                if (std.mem.findScalar(u8, reserved, c) != null or ctype.isSpace(c)) return error.InvalidFilter;
             }
             try parts.append(arena, try parse(arena, try percentDecode(arena, encoded)));
         }

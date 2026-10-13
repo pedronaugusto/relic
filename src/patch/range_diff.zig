@@ -13,6 +13,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -230,7 +231,7 @@ const Reader = struct {
                 if (std.mem.startsWith(u8, line, "Notes") and std.mem.endsWith(u8, line, ":")) {
                     try text.print(a, "\n\n ## {s} ##\n", .{line[0 .. line.len - 1]});
                 } else if (std.mem.startsWith(u8, line, "    ")) {
-                    try text.appendSlice(a, std.mem.trimEnd(u8, line, &std.ascii.whitespace));
+                    try text.appendSlice(a, std.mem.trimEnd(u8, line, ctype.space));
                     try text.append(a, '\n');
                 }
             }
@@ -354,7 +355,7 @@ fn appendMessage(a: Allocator, text: *std.ArrayList(u8), message: []const u8) Al
     var it = std.mem.splitScalar(u8, message, '\n');
     while (it.next()) |raw| {
         if (it.index == null and raw.len == 0) break;
-        const line = std.mem.trimEnd(u8, raw, &std.ascii.whitespace);
+        const line = std.mem.trimEnd(u8, raw, ctype.space);
         if (line.len == 0 and lines.items.len == 0) continue;
         try lines.append(a, line);
     }

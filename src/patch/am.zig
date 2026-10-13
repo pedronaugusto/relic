@@ -21,6 +21,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const Allocator = std.mem.Allocator;
@@ -360,9 +361,9 @@ fn sqDequoteWords(a: Allocator, text: []const u8) Allocator.Error!?[]const []con
         }
         try words.append(a, word.items);
         const n = after orelse break;
-        if (!std.ascii.isWhitespace(text[n])) return null;
+        if (!ctype.isSpace(text[n])) return null;
         at = n;
-        while (at < text.len and std.ascii.isWhitespace(text[at])) at += 1;
+        while (at < text.len and ctype.isSpace(text[at])) at += 1;
         if (at >= text.len) return null;
     }
     return words.items;

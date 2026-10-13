@@ -12,6 +12,7 @@
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
@@ -180,10 +181,10 @@ pub fn split(arena: Allocator, line_in: []const u8) Self.SplitError![]const []co
     var at: usize = 0;
     while (at < line.len) {
         const c = line[at];
-        if (quoted == 0 and std.ascii.isWhitespace(c)) {
+        if (quoted == 0 and ctype.isSpace(c)) {
             try words.append(arena, try word.toOwnedSlice(arena));
             at += 1;
-            while (at < line.len and std.ascii.isWhitespace(line[at])) at += 1;
+            while (at < line.len and ctype.isSpace(line[at])) at += 1;
         } else if (quoted == 0 and (c == '\'' or c == '"')) {
             quoted = c;
             at += 1;

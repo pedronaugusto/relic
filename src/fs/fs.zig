@@ -885,7 +885,7 @@ pub const Shared = union(enum) {
     /// C's `strtol(text, &end, 8)` with nothing left after the number.
     fn parseOctalPrefix(text: []const u8) ?u32 {
         var i: usize = 0;
-        while (i < text.len and std.ascii.isWhitespace(text[i])) i += 1;
+        while (i < text.len and decimal.isSpace(text[i])) i += 1;
         var neg = false;
         if (i < text.len and (text[i] == '+' or text[i] == '-')) {
             neg = text[i] == '-';

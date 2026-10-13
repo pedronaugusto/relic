@@ -26,7 +26,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "merge", .patterns = &.{"src/merge/**"} },
     .{ .name = "maintenance", .patterns = &.{"src/maintenance/**"} },
     .{ .name = "worktree", .patterns = &.{"src/worktree/**"} },
-    .{ .name = "revwalk", .patterns = &.{"src/rev_walk/**"} },
+    .{ .name = "rev_walk", .patterns = &.{"src/rev_walk/**"} },
     .{ .name = "pretty", .patterns = &.{"src/pretty/**"} },
     .{ .name = "commit", .patterns = &.{"src/commit/**"} },
     .{ .name = "patch", .patterns = &.{"src/patch/**"} },
@@ -94,6 +94,9 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "configuration owner", .tokens = &.{"config_state"}, .owners = &[_][]const u8{"src/repo/repo.zig"} ++ tests },
     // a number in git's data is read by one of git's grammars, never by
     // Zig's, which takes `+` and `_`
+    // a space is git's (`text.ctype`): C's and Zig's take a vertical tab
+    // and a form feed too; git-lfs's netrc reads Go's
+    .{ .name = "space class", .tokens = &.{"isWhitespace"}, .owners = &[_][]const u8{ "src/text/**", "src/lfs/netrc.zig" } ++ tests },
     .{ .name = "number grammars", .tokens = &.{ "parseInt", "parseUnsigned" }, .owners = &[_][]const u8{ "src/text/**", "src/config/config.zig" } ++ tests },
 };
 

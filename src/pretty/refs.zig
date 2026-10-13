@@ -22,6 +22,7 @@ const ErrorNamespace = @This();
 const unicode_width = @import("../text.zig").unicode_width;
 const builtin = @import("builtin");
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const revparse_mod = @import("../rev_walk/rev_parse.zig");
@@ -2553,7 +2554,7 @@ fn quoteInto(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8, sized: b
 }
 
 fn isEmpty(text: []const u8) bool {
-    for (text) |c| if (!std.ascii.isWhitespace(c)) return false;
+    for (text) |c| if (!ctype.isSpace(c)) return false;
     return true;
 }
 

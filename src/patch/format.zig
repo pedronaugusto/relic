@@ -20,6 +20,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -503,11 +504,11 @@ fn genMessageId(a: Allocator, base: []const u8, t: Thread) Allocator.Error![]con
 
 fn cleanMessageId(a: Allocator, id: []const u8) Allocator.Error![]const u8 {
     var m: usize = 0;
-    while (m < id.len and (std.ascii.isWhitespace(id[m]) or id[m] == '<')) m += 1;
+    while (m < id.len and (ctype.isSpace(id[m]) or id[m] == '<')) m += 1;
     const start = m;
     var end: ?usize = null;
     while (m < id.len) : (m += 1) {
-        if (!std.ascii.isWhitespace(id[m]) and id[m] != '>') end = m;
+        if (!ctype.isSpace(id[m]) and id[m] != '>') end = m;
     }
     const e = end orelse return a.dupe(u8, id[start..start]);
     return a.dupe(u8, id[start .. e + 1]);
