@@ -123,22 +123,16 @@ pub const PromisorRef = struct {
 };
 
 /// Errors from `writePromisor`.
-pub const WritePromisorError = Io.File.OpenError || Io.Writer.Error;
+pub const WritePromisorError = odb_mod.Odb.WritePromisorError || Allocator.Error;
 
-/// Write `pack-<name>.promisor` beside the pack in `pack_dir`: the refs it
-/// was fetched for, `<oid> <name>` to a line, as git writes them; empty for
-/// a lazy fetch, which fetches objects rather than refs.
-pub fn writePromisor(io: Io, pack_dir: Io.Dir, name: Oid, refs: []const PromisorRef) WritePromisorError!void {
-    var hex: [hash.max_hex_len]u8 = undefined;
-    var name_buf: [96]u8 = undefined;
-    // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
-    const file_name = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
-    const file = try pack_dir.createFile(io, file_name, .{});
-    defer file.close(io);
-    var buffer: [4096]u8 = undefined;
-    var w = file.writer(io, &buffer);
-    for (refs) |ref| try w.interface.print("{f} {s}\n", .{ ref.oid, ref.name });
-    try w.interface.flush();
+/// Mark the pack `name` in `db` as a promisor's: the refs it was fetched
+/// for, `<oid> <name>` to a line, as git writes them; empty for a lazy
+/// fetch, which fetches objects rather than refs.
+pub fn writePromisor(gpa: Allocator, io: Io, db: *const odb_mod.Odb, name: Oid, refs: []const PromisorRef) WritePromisorError!void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    for (refs) |ref| try text.print(gpa, "{f} {s}\n", .{ ref.oid, ref.name });
+    try db.writePromisor(io, name, text.items, .replace);
 }
 
 /// A partial clone's lazy fetch: what a read of a promised object asks
@@ -292,7 +286,7 @@ pub const Lazy = struct {
             .repository = repo,
         });
         defer session.deinit(io);
-        var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{});
+        var pack_dir = try repo.objectDatabase().openPackDirectory(io);
         defer pack_dir.close(io);
         var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch }, .{ .explicit = l.options.check_objects, .sink = null });
         defer if (rules) |*r| r.deinit(l.gpa);
@@ -303,7 +297,7 @@ pub const Lazy = struct {
             .filter = "blob:none",
         } }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = rev_index.wanted(repo.configuration()) } });
         defer fetched.deinit(io);
-        if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
+        if (fetched.pack) |pack_name| try writePromisor(l.gpa, io, repo.objectDatabase(), pack_name, &.{});
     }
 
     /// Fetch, in one request, every blob below `tree` that the repository

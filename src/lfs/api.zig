@@ -128,6 +128,7 @@ const http_settings = @import("../wire.zig").http_settings;
 const url_mod = @import("../wire.zig").url;
 const remote_mod = @import("../wire.zig").remote;
 const repo_mod = @import("../repo/repo.zig");
+const odb_mod = @import("../odb/odb.zig");
 const lfs = @import("lfs.zig");
 const mime_sniff = @import("mime_sniff.zig");
 const fs = @import("../fs/fs.zig");
@@ -2506,6 +2507,10 @@ pub const Server = struct {
     /// The ref a download's batch names, as git-lfs names it whatever is
     /// fetched: `downloadRef`.
     download_ref: []u8 = &.{},
+    /// The object directories the repository's alternates name, read once
+    /// through its object database: where git-lfs looks for reference
+    /// copies of an object before it asks a server.
+    alternates: odb_mod.Alternates = undefined,
 
     /// Errors from opening a server.
     pub const OpenError = ErrorNamespace.Error || Settings.LoadError || LfsconfigError || lfs.Lfs.LoadError || Io.Dir.RealPathFileAllocError;
@@ -2553,6 +2558,8 @@ pub const Server = struct {
         errdefer gpa.free(s.download_ref);
         s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions(), .work_dir = null, .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
+        s.alternates = try repo.objectDatabase().listAlternates(gpa, io);
+        errdefer s.alternates.deinit();
         s.client = try Client.open(gpa, io, &s.settings, .{ .remote = s.remote, .where = .{ .base = s.base_path, .fetch_head = s.fetch_head }, .reach = options });
         return s;
     }
@@ -2561,6 +2568,7 @@ pub const Server = struct {
     pub fn deinit(s: *Server, io: Io) void {
         const gpa = s.gpa;
         s.client.deinit(io);
+        s.alternates.deinit();
         s.lfs.deinit();
         s.settings.deinit();
         gpa.free(s.base_path);

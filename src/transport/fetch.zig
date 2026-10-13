@@ -441,7 +441,7 @@ fn bringObjects(
     const wants = try wantsInOrder(arena, io, repo, b.remote_refs, b.map, b.deepen != null);
     const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, b.remote_refs);
 
-    var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
+    var pack_dir = try repo.objectDatabase().openPackDirectory(io);
     defer pack_dir.close(io);
     const boundary = try shallowList(arena, &repo.objectDatabase().shallow);
     var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa };
@@ -469,7 +469,7 @@ fn bringObjects(
     // A remote helper's import learns the values as it goes.
     takeFetchedValues(session, b.map);
     // A fetch's promisor pack names no refs; git's names none either.
-    if (b.promisor) if (fetched.pack) |name| try partial.writePromisor(io, pack_dir, name, &.{});
+    if (b.promisor) if (fetched.pack) |name| try partial.writePromisor(gpa, io, repo.objectDatabase(), name, &.{});
 
     try boundary_change.take(arena, gpa, repo, &shallow_info, session.advertisedShallow(), b.deepen != null);
 

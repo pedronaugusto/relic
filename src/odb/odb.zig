@@ -1146,14 +1146,52 @@ pub const Odb = struct {
     /// token must outlive the ref transaction: deinit it only after commit
     /// or rollback. Concurrent collectors honour that token's keep marker.
     pub fn receivePack(db: *Odb, io: Io, input: *Io.Reader, options: ReceiveOptions) ReceiveError!ReceivedPack {
-        try fs.makeDirs(io, db.objectsDirectory(), "pack", db.sharedPermissions());
         // Opened for reading, as a directory to be synced is (`fs.syncDirectory`):
         // the pack's names are synced in it once it is published.
-        const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+        const dir = try db.openPackDirectory(io);
         defer dir.close(io);
         var receiving = options;
         receiving.keep = true;
         return indexpack_mod.receive(db.allocator(), io, db, .{ .pack_dir = dir, .in = input }, receiving);
+    }
+
+    /// The writable pack directory, made with the shared mode when it is
+    /// missing and opened for iteration; the caller closes it. Every pack
+    /// and companion this database writes is in it.
+    pub fn openPackDirectory(db: *const Odb, io: Io) (Io.Dir.CreateDirPathError || Io.Dir.OpenError)!Io.Dir {
+        try fs.makeDirs(io, db.objectsDirectory(), "pack", db.sharedPermissions());
+        return db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    }
+
+    /// Errors from `writePromisor`.
+    pub const WritePromisorError = Io.Dir.CreateDirPathError || Io.Dir.OpenError || Io.File.OpenError || Io.File.WritePositionalError;
+
+    /// How `writePromisor` treats a `.promisor` already there.
+    pub const PromisorExisting = enum {
+        /// Write over it, as a fetch records its refs again.
+        replace,
+        /// Keep it, as unbundling a pack already marked keeps the mark.
+        keep,
+    };
+
+    /// Mark the pack `name` as one a promisor remote sent: `pack-<name>.promisor`
+    /// beside it, holding `contents` (the refs a fetch asked for, one
+    /// `<oid> <name>` a line, nothing for a lazy fetch), with the shared mode.
+    /// The one writer of `.promisor` files.
+    pub fn writePromisor(db: *const Odb, io: Io, name: Oid, contents: []const u8, existing: PromisorExisting) WritePromisorError!void {
+        var hex: [hash.max_hex_len]u8 = undefined;
+        var name_buf: [96]u8 = undefined;
+        // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
+        const file_name = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
+        const dir = try db.openPackDirectory(io);
+        defer dir.close(io);
+        const file = dir.createFile(io, file_name, .{ .exclusive = existing == .keep }) catch |err| switch (err) {
+            error.PathAlreadyExists => return,
+            else => |e| return e,
+        };
+        defer file.close(io);
+        try file.writePositionalAll(io, contents, 0);
+        fs.adjustShared(io, dir, file_name, db.sharedPermissions());
     }
 
     pub fn sharedPermissions(odb: *const Odb) fs.Shared {

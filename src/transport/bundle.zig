@@ -389,12 +389,12 @@ pub const UnbundleOptions = struct {
 /// repository, completing a thin pack from it; a filtered bundle's pack is
 /// kept as a promisor pack, as git keeps it. Returns what was received.
 pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Self.Error!index_pack.Result {
-    var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
+    var pack_dir = try repo.objectDatabase().openPackDirectory(io);
     defer pack_dir.close(io);
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
     const strict: fsck.Rules = .{ .strict = true };
-    return receive(gpa, io, repo.objectDatabase(), .{ .pack_dir = pack_dir, .bundle = bundle, .refs = tips }, .{
+    return receive(gpa, io, repo.objectDatabase(), .{ .bundle = bundle, .refs = tips }, .{
         .fix_thin = true,
         .fsck = if (options.check_objects) &strict else null,
         .progress = options.progress,
@@ -406,10 +406,9 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
 /// `unbundle` into `db`, whose `objects/pack` is `pack_dir` and whose refs
 /// point at `refs`, with the pack received as `options` says: what a fetch
 /// from a bundle does.
-pub const ReceiveInputs = struct { pack_dir: Io.Dir, bundle: *File, refs: []const Oid };
+pub const ReceiveInputs = struct { bundle: *File, refs: []const Oid };
 
 pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: ReceiveInputs, options: index_pack.Options) Self.Error!index_pack.Result {
-    const pack_dir = inputs.pack_dir;
     const bundle = inputs.bundle;
     const refs = inputs.refs;
     var v = try verify(gpa, io, db, &bundle.header, refs);
@@ -420,19 +419,7 @@ pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: ReceiveInputs, 
     receive_options.fix_thin = true;
     var result = try db.receivePack(io, bundle.pack(), receive_options);
     errdefer result.deinit(io);
-    if (bundle.header.filter != null) if (result.name) |name| {
-        var hex: [hash.max_hex_len]u8 = undefined;
-        var name_buf: [96]u8 = undefined;
-        // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
-        const promisor = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
-        if (pack_dir.createFile(io, promisor, .{ .exclusive = true })) |file| {
-            defer file.close(io);
-            try file.writeStreamingAll(io, "from-bundle\n");
-        } else |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        }
-    };
+    if (bundle.header.filter != null) if (result.name) |name| try db.writePromisor(io, name, "from-bundle\n", .keep);
     return result;
 }
 

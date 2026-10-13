@@ -519,34 +519,13 @@ const Run = struct {
 };
 
 /// git-lfs's reference directories: the `lfs/objects` beside each object
-/// directory `objects/info/alternates` names — what `git clone --reference`
-/// and `--shared` leave — where one is there. A relative line is taken from
-/// `objects`, as git takes it; a line in double quotes has its backslash
-/// escapes undone, as git-lfs undoes them.
-fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store) Allocator.Error![]const []const u8 {
-    const text = fs.readFileAlloc(arena, io, store.base, "objects/info/alternates", 1 << 20) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        // An alternates file that cannot be read names no reference, as
-        // git-lfs, which only notes it in its trace, takes it.
-        else => return &.{},
-    } orelse return &.{};
+/// directory the repository's alternates name — what `git clone
+/// --reference` and `--shared` leave — where one is there. A relative path
+/// is taken from `objects`, as git takes it.
+fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store, alternates: []const []const u8) Allocator.Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        var line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        if (line[0] == '"') {
-            const close = std.mem.findScalarLast(u8, line, '"').?;
-            if (close == 0) continue;
-            var unquoted: std.ArrayList(u8) = .empty;
-            var i: usize = 1;
-            while (i < close) : (i += 1) {
-                if (line[i] == '\\' and i + 1 < close) i += 1;
-                try unquoted.append(arena, line[i]);
-            }
-            line = unquoted.items;
-        }
-        line = std.mem.trimEnd(u8, line, "/");
+    for (alternates) |path| {
+        const line = std.mem.trimEnd(u8, path, "/");
         const parent = std.Io.Dir.path.dirname(line) orelse continue;
         const dir = if (std.Io.Dir.path.isAbsolute(parent))
             try arena.print("{s}/lfs/objects", .{parent})
@@ -676,7 +655,7 @@ fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, obj
     var pending: std.ArrayList(usize) = .empty;
     var missing_here: std.ArrayList(bool) = .empty;
     try missing_here.resize(arena, outcome.results.len);
-    const references: []const []const u8 = if (operation == .download) try referenceDirs(arena, io, store) else &.{};
+    const references: []const []const u8 = if (operation == .download) try referenceDirs(arena, io, store, server.alternates.paths) else &.{};
     for (outcome.results, 0..) |*r, i| {
         const pointer = Object.asPointer(.{ .oid = r.oid, .size = r.size });
         var here = try store.contains(io, &pointer);

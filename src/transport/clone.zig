@@ -398,7 +398,7 @@ fn receiveObjects(
     options: Options,
 ) Error!struct { detached: ?Oid, fetched: transport.Session.Fetched } {
     var detached = ask.detached;
-    var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
+    var pack_dir = try repo.objectDatabase().openPackDirectory(io);
     defer pack_dir.close(io);
     var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
@@ -431,7 +431,7 @@ fn receiveObjects(
     // A partial clone's pack is a promisor pack, and says for which refs —
     // also when the server did not filter it, as git marks it.
     if (ask.filter != null) if (fetched.pack) |name| {
-        try partial.writePromisor(io, pack_dir, name, try promisorRefs(arena, session, ask.remote_refs, chosen.wants.items));
+        try partial.writePromisor(gpa, io, repo.objectDatabase(), name, try promisorRefs(arena, session, ask.remote_refs, chosen.wants.items));
     };
     if (ask.deepen == null) try shallow_info.shallow.appendSlice(gpa, session.advertisedShallow());
     if (shallow_info.shallow.items.len != 0) {

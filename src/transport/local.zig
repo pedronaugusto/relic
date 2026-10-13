@@ -295,7 +295,7 @@ pub const Remote = struct {
             if (written.keep) |*token| token.deinit(io);
         };
         if (needs_pack and objects.len != 0) {
-            var pack_dir = try r.repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
+            var pack_dir = try r.repo.objectDatabase().openPackDirectory(io);
             defer pack_dir.close(io);
             retained = try from.writePack(io, pack_dir, objects, .{ .keep = true, .reverse_index = rev_index.wanted(r.repo.configuration()) });
             try r.repo.objectDatabase().refresh(io);
