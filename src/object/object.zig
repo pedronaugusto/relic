@@ -11,6 +11,7 @@ const Self = @This();
 
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -403,53 +404,70 @@ pub const Signature = struct {
         });
     }
 
-    /// Read `Name <email> secs ±hhmm`. Borrows `line`.
+    /// The ident a commit has where its line is missing or unreadable.
+    pub const unknown: Signature = .{ .name = "", .email = "", .when_secs = 0, .offset_minutes = 0 };
+
+    /// Read `Name <email> secs ±hhmm` as git's `split_ident_line` reads it,
+    /// and its date as `show_ident_date` takes it. Borrows `line`.
     ///
-    /// A line with no time — which older tools wrote — parses with a time of
-    /// zero and an offset of zero rather than failing, because git reads one.
+    /// The name ends at the last non-space before the first `<`, the email
+    /// at the first `>` after it, and the date starts after the last `>`. A
+    /// line whose date or zone is missing or malformed is a person with no
+    /// date, as git reads it: a time of zero and an offset of zero. A time
+    /// that does not fit is zero, as git's `date_overflows` makes it. A
+    /// minus before the digits is the time before 1970 git's commit reader
+    /// takes as its unsigned wrap.
     pub fn parse(line: []const u8) Signature.ParseError!Signature {
         const lt = std.mem.findScalar(u8, line, '<') orelse return error.MalformedSignature;
         const gt = std.mem.findScalarPos(u8, line, lt, '>') orelse return error.MalformedSignature;
         var name = line[0..lt];
-        while (name.len > 0 and name[name.len - 1] == ' ') name = name[0 .. name.len - 1];
+        while (name.len > 0 and ctype.isSpace(name[name.len - 1])) name = name[0 .. name.len - 1];
         const email = line[lt + 1 .. gt];
-        var rest = line[gt + 1 ..];
-        while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
-        if (rest.len == 0) return .{ .name = name, .email = email, .when_secs = 0, .offset_minutes = 0 };
-        const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
-        // Digits, or a minus and digits: a time before 1970 that git's
-        // commit reader takes as its unsigned wrap.
-        const field = rest[0..space];
-        const negative = field.len > 1 and field[0] == '-';
-        const magnitude = decimal.digits(i64, if (negative) field[1..] else field) orelse return error.InvalidSignatureTime;
-        const secs = if (negative) -magnitude else magnitude;
-        var offset: i16 = 0;
-        if (space < rest.len) {
-            var zone = rest[space + 1 ..];
-            while (zone.len > 0 and zone[zone.len - 1] == ' ') zone = zone[0 .. zone.len - 1];
-            offset = try parseOffset(zone);
-        }
-        return .{ .name = name, .email = email, .when_secs = secs, .offset_minutes = offset };
-    }
-
-    fn parseOffset(zone: []const u8) !i16 {
-        if (zone.len != 5) return error.InvalidSignatureTime;
-        const sign: i16 = switch (zone[0]) {
-            '+' => 1,
-            '-' => -1,
-            else => return error.InvalidSignatureTime,
+        const person: Signature = .{ .name = name, .email = email, .when_secs = 0, .offset_minutes = 0 };
+        // The trailing `>` of a broken ident with another one in its email.
+        var at = (std.mem.findScalarLast(u8, line, '>') orelse gt) + 1;
+        while (at < line.len and ctype.isSpace(line[at])) at += 1;
+        const negative = at < line.len and line[at] == '-';
+        const date_begin = if (negative) at + 1 else at;
+        var date_end = date_begin;
+        while (date_end < line.len and std.ascii.isDigit(line[date_end])) date_end += 1;
+        if (date_end == date_begin) return person;
+        var tz = date_end;
+        while (tz < line.len and ctype.isSpace(line[tz])) tz += 1;
+        if (tz >= line.len or (line[tz] != '+' and line[tz] != '-')) return person;
+        var tz_end = tz + 1;
+        while (tz_end < line.len and std.ascii.isDigit(line[tz_end])) tz_end += 1;
+        if (tz_end == tz + 1) return person;
+        const magnitude = decimal.digits(i64, line[date_begin..date_end]) orelse 0;
+        // `strtol` of the zone as git shows it: `±hhmm` as one number.
+        const hhmm = decimal.strtol(line[tz..tz_end], 10, 64).value;
+        const minutes = @divTrunc(hhmm, 100) * 60 + @rem(hhmm, 100);
+        return .{
+            .name = name,
+            .email = email,
+            .when_secs = if (negative) -magnitude else magnitude,
+            .offset_minutes = std.math.cast(i16, minutes) orelse 0,
         };
-        const hours = decimal.digits(i16, zone[1..3]) orelse return error.InvalidSignatureTime;
-        const minutes = decimal.digits(i16, zone[3..5]) orelse return error.InvalidSignatureTime;
-        return sign * (hours * 60 + minutes);
     }
 };
 
-test "a malformed timezone is not silently UTC" {
-    try std.testing.expectError(
-        error.InvalidSignatureTime,
-        Signature.parse("Ada <a@b> 1 +0x00"),
-    );
+test "an ident reads as git's split_ident_line reads it: the date after the last >, a malformed tail a person with no date" {
+    const plain = try Signature.parse("Ada  <a@b> 100 +0130");
+    try std.testing.expectEqualStrings("Ada", plain.name);
+    try std.testing.expectEqual(@as(i64, 100), plain.when_secs);
+    try std.testing.expectEqual(@as(i16, 90), plain.offset_minutes);
+    try std.testing.expectEqual(@as(i16, -300), (try Signature.parse("A <a@b> 1 -0500")).offset_minutes);
+    // The zone's digits as far as they go, `+0x00` being `+0`.
+    try std.testing.expectEqual(@as(i16, 0), (try Signature.parse("A <a@b> 1 +0x00")).offset_minutes);
+    for ([_][]const u8{ "A <a@b>", "A <a@b> x +0000", "A <a@b> 1", "A <a@b> 1 0000", "A <a@b> 1 +" }) |line| {
+        const sig = try Signature.parse(line);
+        try std.testing.expectEqual(@as(i64, 0), sig.when_secs);
+        try std.testing.expectEqual(@as(i16, 0), sig.offset_minutes);
+    }
+    const broken = try Signature.parse("A <a@b>c> 7 +0000");
+    try std.testing.expectEqualStrings("a@b", broken.email);
+    try std.testing.expectEqual(@as(i64, 7), broken.when_secs);
+    try std.testing.expectError(error.MalformedSignature, Signature.parse("A a@b 1 +0000"));
 }
 
 test "a tree builder refuses an object name from another hash format" {
@@ -522,6 +540,11 @@ pub const Commit = struct {
     parents: []const Oid,
     author: Signature,
     committer: Signature,
+    /// The author or committer line was missing or did not read as an
+    /// ident: git reads such a commit, and shows the ident it could not
+    /// read as empty; `author` and `committer` are `Signature.unknown` then.
+    /// fsck refuses one.
+    malformed_idents: bool = false,
     /// `encoding`, if the object carries one.
     encoding: ?[]const u8,
     /// Every header that is not one of the above, in order, unfolded.
@@ -553,6 +576,7 @@ pub const Commit = struct {
         var extra: std.ArrayList(ExtraHeader) = .empty;
         var author: ?Signature = null;
         var committer: ?Signature = null;
+        var malformed_idents = false;
         var encoding: ?[]const u8 = null;
 
         // git reads a commit's tree from the first line and its parents
@@ -575,15 +599,23 @@ pub const Commit = struct {
                 break;
             }
             const line = takeLine(&rest);
-            const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedObject;
+            // A line with no space is a header named by all of it, with no
+            // value, as git's `read_commit_extra_header_lines` keeps one.
+            const space = std.mem.findScalar(u8, line, ' ') orelse line.len;
             const key = line[0..space];
-            const value = try unfold(arena, line[space + 1 ..], &rest);
+            const value = try unfold(arena, if (space < line.len) line[space + 1 ..] else "", &rest);
 
             // The first of each is the one git reads.
             if (author == null and std.mem.eql(u8, key, "author")) {
-                author = try Signature.parse(value);
+                author = Signature.parse(value) catch blk: {
+                    malformed_idents = true;
+                    break :blk Signature.unknown;
+                };
             } else if (committer == null and std.mem.eql(u8, key, "committer")) {
-                committer = try Signature.parse(value);
+                committer = Signature.parse(value) catch blk: {
+                    malformed_idents = true;
+                    break :blk Signature.unknown;
+                };
             } else if (encoding == null and std.mem.eql(u8, key, "encoding")) {
                 encoding = value;
             } else {
@@ -595,8 +627,9 @@ pub const Commit = struct {
             .kind = kind,
             .tree = tree,
             .parents = parents.items,
-            .author = author orelse return error.MissingHeader,
-            .committer = committer orelse return error.MissingHeader,
+            .author = author orelse Signature.unknown,
+            .committer = committer orelse Signature.unknown,
+            .malformed_idents = malformed_idents or author == null or committer == null,
             .encoding = encoding,
             .extra = extra.items,
             .message = rest,
@@ -779,12 +812,16 @@ pub const Tag = struct {
                 break;
             }
             const line = takeLine(&rest);
-            const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedObject;
+            // A line with no space is a header named by all of it, with no
+            // value, as git's `read_commit_extra_header_lines` keeps one.
+            const space = std.mem.findScalar(u8, line, ' ') orelse line.len;
             const key = line[0..space];
-            const value = try unfold(arena, line[space + 1 ..], &rest);
+            const value = try unfold(arena, if (space < line.len) line[space + 1 ..] else "", &rest);
 
             if (first and std.mem.eql(u8, key, "tagger")) {
-                tagger = try Signature.parse(value);
+                // An ident git cannot read is a tag with no tagger, as git
+                // reads it; fsck refuses one.
+                tagger = Signature.parse(value) catch null;
             } else {
                 try extra.append(arena, .{ .name = key, .value = value });
             }
