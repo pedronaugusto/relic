@@ -22,7 +22,6 @@ const Self = @This();
 
 const std = @import("std");
 const quote = @import("../text.zig").quote;
-const ctype = @import("../text.zig").ctype;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const Allocator = std.mem.Allocator;
