@@ -29,7 +29,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 const conduit = @import("conduit");
-pub const Child = @import("child.zig").Child;
+pub const Child = conduit.Child;
 /// What a program's pipe holds now, read without waiting for more: once the
 /// program has ended, the rest of what it wrote, even while something it
 /// started still holds the pipe open.

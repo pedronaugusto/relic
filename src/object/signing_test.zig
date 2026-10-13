@@ -184,7 +184,7 @@ fn relicCommit(k: *Keyed, io: Io, tree_from: []const u8) !Oid {
         .committer = who,
         .message = "signed here\n",
         .signing = .{ .programs = k.programs() },
-    }, null);
+    }, .{});
 }
 
 fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
@@ -384,7 +384,7 @@ test "signing configured with no programs is refused by name, never written unsi
         .author = who,
         .committer = who,
         .message = "m\n",
-    }, &diagnostic));
+    }, .{ .diagnostic = &diagnostic }));
     try testing.expectEqualStrings("commit.gpgSign", diagnostic.unsupported_setting);
     try testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, .{
         .target = empty,
@@ -400,7 +400,7 @@ test "signing configured with no programs is refused by name, never written unsi
         .committer = who,
         .message = "m\n",
         .signing = .{ .sign = .never },
-    }, &diagnostic);
+    }, .{ .diagnostic = &diagnostic });
 }
 
 test "the commit porcelain signs as commit.gpgSign says" {
@@ -504,7 +504,7 @@ test "history writes leave signing refusals in caller-owned diagnostics" {
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
-        try repo.editConfig(io, &.{.{ .name = "commit.gpgSign", .value = "true" }}, null);
+        try repo.editConfig(io, &.{.{ .name = "commit.gpgSign", .value = "true" }}, .{});
         if (comptime std.mem.eql(u8, operation, "commit")) {
             var options: commit_mod.Options = .{ .allow_empty = true };
             options.diagnostic = &diagnostic;
@@ -558,7 +558,7 @@ test "a failed signing program leaves its stderr after the repository closes" {
         {
             var repo = try Repository.create(gpa, io, tmp.dir, .{});
             defer repo.deinit(io);
-            try repo.editConfig(io, &.{.{ .name = "gpg.program", .value = executable }}, null);
+            try repo.editConfig(io, &.{.{ .name = "gpg.program", .value = executable }}, .{});
             const tree = hash.Hasher.object(.sha1, "tree", "");
             if (comptime std.mem.eql(u8, target, "commit")) {
                 try testing.expectError(error.SigningFailed, repo.writeCommit(io, .{
@@ -567,7 +567,7 @@ test "a failed signing program leaves its stderr after the repository closes" {
                     .committer = who,
                     .message = "m",
                     .signing = .{ .sign = .always, .programs = programs },
-                }, &diagnostic));
+                }, .{ .diagnostic = &diagnostic }));
             } else {
                 try testing.expectError(error.SigningFailed, repo.writeTag(io, .{
                     .target = tree,
@@ -599,7 +599,7 @@ test "a history refusal before writing clears an earlier diagnostic" {
         defer tmp.cleanup();
         var repo = try Repository.create(gpa, io, tmp.dir, .{});
         defer repo.deinit(io);
-        try repo.editConfig(io, &.{.{ .name = "commit.gpgSign", .value = "true" }}, null);
+        try repo.editConfig(io, &.{.{ .name = "commit.gpgSign", .value = "true" }}, .{});
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
         try testing.expectError(error.SigningRequiresPrograms, repo.writeCommit(io, .{
@@ -607,7 +607,7 @@ test "a history refusal before writing clears an earlier diagnostic" {
             .author = who,
             .committer = who,
             .message = "m",
-        }, &diagnostic));
+        }, .{ .diagnostic = &diagnostic }));
         diagnostic.signing_stderr = try gpa.dupe(u8, "earlier signer failure");
         if (comptime std.mem.eql(u8, operation, "commit")) {
             try testing.expectError(error.NothingToCommit, commit_mod.commit(io, &repo, .{

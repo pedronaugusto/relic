@@ -554,7 +554,7 @@ fn configureRemote(
         try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.promisor", .{origin}), .value = "true" } });
         try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.partialclonefilter", .{origin}), .value = spec } });
     }
-    _ = try repo.writeConfig(io, .local, edits.items, null);
+    _ = try repo.writeConfig(io, .local, edits.items, .{});
 }
 
 /// What a clone asks for and the refs it writes, all in the arena.
@@ -686,7 +686,7 @@ fn pointHead(
             _ = try repo.writeConfig(io, .local, &.{
                 .{ .set = .{ .name = try arena.print("branch.{s}.remote", .{short}), .value = options.origin } },
                 .{ .set = .{ .name = try arena.print("branch.{s}.merge", .{short}), .value = branch } },
-            }, null);
+            }, .{});
         }
         return value;
     }
@@ -804,7 +804,7 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
         _ = try repo.writeConfig(io, .local, &.{
             .{ .set = .{ .name = "core.bare", .value = "false" } },
             .{ .set = .{ .name = "core.logallrefupdates", .value = "true" } },
-        }, null);
+        }, .{});
     }
     return repo;
 }

@@ -38,7 +38,7 @@ const View = struct {
     stacks: *const Stacks,
 
     fn acquire(gpa: Allocator, io: Io, store: anytype, owned: *?Stacks) Error!View {
-        if (state_mod.get(store._state).cache) |c| {
+        if (state_mod.get(store.state).cache) |c| {
             c.mutex.lock(io) catch return error.Canceled;
             errdefer c.mutex.unlock(io);
             const st = try cache.internal.refresh(c, io, store);

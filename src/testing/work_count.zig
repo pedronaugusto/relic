@@ -164,7 +164,7 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
     }
     scan.cold_reads = ReadWork.calls;
     scan.cold_read_bytes = ReadWork.bytes;
-    scan.cold_bases = odb_state.get(db._state).cache.entries.count();
+    scan.cold_bases = odb_state.get(db.state).cache.entries.count();
 
     // A second pass over the same objects, with the delta base cache warm.
     ReadWork.reset();
@@ -177,7 +177,7 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
     }
     scan.warm_reads = ReadWork.calls;
     scan.warm_read_bytes = ReadWork.bytes;
-    scan.warm_bases = odb_state.get(db._state).cache.entries.count();
+    scan.warm_bases = odb_state.get(db.state).cache.entries.count();
     return scan;
 }
 

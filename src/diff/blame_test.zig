@@ -95,7 +95,7 @@ const History = struct {
         defer h.gpa.free(tree_bytes);
         const tree = try h.repo.objectDatabase().write(h.io, .tree, tree_bytes);
         const who: object.Signature = .{ .name = "T", .email = "t@example.invalid", .when_secs = when, .offset_minutes = 0 };
-        return h.repo.writeCommit(h.io, .{ .tree = tree, .parents = parents, .author = who, .committer = who, .message = "c\n" }, null);
+        return h.repo.writeCommit(h.io, .{ .tree = tree, .parents = parents, .author = who, .committer = who, .message = "c\n" }, .{});
     }
 };
 

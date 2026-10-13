@@ -64,8 +64,8 @@ pub const Level = struct {
     /// The directory this level's patterns are relative to.
     base: []const u8,
     patterns: []Pattern,
-    /// Private compiled set; the rules own its lifetime.
-    _matcher: *anyopaque,
+    /// Private: the compiled set; the rules own its lifetime.
+    compiled: *anyopaque,
     /// How this level compares to the others: a higher number wins.
     depth: u32,
 };
@@ -188,7 +188,7 @@ pub const Rules = struct {
         try rules.levels.append(rules.gpa, .{
             .base = base,
             .patterns = patterns.items,
-            ._matcher = compiled,
+            .compiled = compiled,
             .depth = depth,
         });
     }
@@ -348,7 +348,7 @@ pub const Checker = struct {
 };
 
 fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level._matcher)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
+    return @ptrCast(@alignCast(level.compiled)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
 }
 
 fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {

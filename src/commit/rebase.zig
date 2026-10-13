@@ -1598,7 +1598,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         .message = final_text,
         .extra = extra,
         .signing = r.options.signing,
-    }, r.options.diagnostic);
+    }, .{ .diagnostic = r.options.diagnostic });
     const log = try arena.print("{s}: {s}", .{ reflog_action, firstLine(final_text) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     if (msg_source == .squash_edit) {
@@ -1722,7 +1722,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
         .committer = r.options.who,
         .message = text,
         .signing = r.options.signing,
-    }, r.options.diagnostic);
+    }, .{ .diagnostic = r.options.diagnostic });
     const log = try r.arena.print("{s}: {s}", .{ reflog_action, firstLine(text) });
     try head_mod.advance(r.io, r.repo, head, made, .{ .who = r.options.who, .message = log });
     // The amend is `git commit --amend`, which takes `AUTO_MERGE` away.
@@ -2305,7 +2305,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         .committer = r.options.who,
         .message = text,
         .signing = r.options.signing,
-    }, r.options.diagnostic);
+    }, .{ .diagnostic = r.options.diagnostic });
     const log = try r.arena.print("rebase (merge): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     // git makes this commit with `git commit`, whose clean-up takes
@@ -2592,7 +2592,7 @@ fn commitStagedChanges(r: *Run) Error!void {
         .message = text,
         .extra = if (amend) try extraHeadersOf(r, head_oid) else &.{},
         .signing = r.options.signing,
-    }, r.options.diagnostic);
+    }, .{ .diagnostic = r.options.diagnostic });
     const log = try r.arena.print("rebase (continue): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);

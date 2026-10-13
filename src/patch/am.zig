@@ -815,7 +815,7 @@ fn doCommit(s: *Session) Error!void {
         .committer = commit_who,
         .message = s.msg.?,
         .signing = s.options.signing,
-    }, null);
+    }, .{});
     const log_message = try s.a.print("am: {s}", .{subjectOf(s.msg.?)});
     try head_mod.advance(io, repo, head, commit, .{ .who = committer, .message = log_message });
     try s.commits.append(s.a, commit);

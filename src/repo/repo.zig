@@ -203,7 +203,7 @@ const RepositoryData = struct {
     /// Whether `common_dir` is a separate handle that must be closed.
     common_is_separate: bool,
     /// Owned ref state. Its format and cache are opaque to callers.
-    _refs: *RefState,
+    refs_state: *RefState,
     /// Opaque ownership of the published configuration: what the files
     /// held at `open`, or when `refreshConfig` last found one changed, or
     /// when `writeConfig` last wrote one, with `editConfig`'s values over
@@ -213,7 +213,7 @@ const RepositoryData = struct {
     /// what another process wrote there stays. An `includeIf` is decided
     /// against this repository's `.git` directory and the branch `HEAD`
     /// was on when the files were read.
-    _config: *config_owner.State,
+    config_state: *config_owner.State,
     odb: odb_mod.Odb,
     /// What `core.sharedRepository` asked of permissions when the
     /// repository was opened: the objects, refs, logs, index and
@@ -227,10 +227,34 @@ const RepositoryData = struct {
     lfsconfig_cache: ?LfsconfigCache = null,
     lfsconfig_mutex: Io.Mutex = .init,
     /// Commits read through `commitInfo` and `commitTree`, kept.
-    _commits: commit_cache.Cache = .{},
+    commits: commit_cache.Cache = .{},
 };
 
 pub const Repository = struct {
+    /// How `refreshConfig` reports.
+    pub const RefreshConfigOptions = struct {
+        /// Names a refusal; cleared on every call.
+        diagnostic: ?*Diagnostic = null,
+    };
+
+    /// How `writeConfig` reports.
+    pub const WriteConfigOptions = struct {
+        /// Names a refusal; cleared on every call.
+        diagnostic: ?*Diagnostic = null,
+    };
+
+    /// How `editConfig` reports.
+    pub const EditConfigOptions = struct {
+        /// Names a refusal; cleared on every call.
+        diagnostic: ?*Diagnostic = null,
+    };
+
+    /// How `writeCommit` reports.
+    pub const WriteCommitOptions = struct {
+        /// Keeps the refused setting or signing stderr; cleared on every call.
+        diagnostic: ?*Diagnostic = null,
+    };
+
     /// How a repository is created.
     pub const CreateOptions = struct {
         /// The hash every object name is written with.
@@ -276,11 +300,11 @@ pub const Repository = struct {
 
     pub const Error = ErrorNamespace.Error;
 
-    /// Private ownership; handles, caches and live configuration stay together.
-    _state: *anyopaque,
+    /// Private: handles, caches and live configuration, together.
+    state: *anyopaque,
 
     fn data(repo: *const Repository) *RepositoryData {
-        return @ptrCast(@alignCast(repo._state)); // safe: a Repository's state is the RepositoryData its open allocated
+        return @ptrCast(@alignCast(repo.state)); // safe: a Repository's state is the RepositoryData its open allocated
     }
 
     pub fn allocator(repo: *const Repository) Allocator {
@@ -605,12 +629,12 @@ pub const Repository = struct {
             .common_dir = discovered.common_dir,
             .work_dir = discovered.work_dir,
             .common_is_separate = discovered.common_is_separate,
-            ._config = undefined,
+            .config_state = undefined,
             .odb = undefined,
-            ._refs = undefined,
+            .refs_state = undefined,
         };
 
-        var repo: Repository = .{ ._state = owned };
+        var repo: Repository = .{ .state = owned };
 
         // The configuration is read before anything else, because it says
         // which hash the object names are written with.
@@ -633,8 +657,8 @@ pub const Repository = struct {
             .command = options.config_overrides,
             .pairs = options.config_pairs,
         }, .{ .git_dir = git_dir_path, .branch = branch, .home = options.home }, format, null);
-        repo.data()._config = try config_owner.create(config);
-        errdefer config_owner.destroy(repo.data()._config);
+        repo.data().config_state = try config_owner.create(config);
+        errdefer config_owner.destroy(repo.data().config_state);
         repo.data().shared = try sharedOf(repo.configuration());
         repo.data().fsync = try fsyncOf(repo.configuration());
         var odb_options = options.odb;
@@ -654,7 +678,7 @@ pub const Repository = struct {
             .fsync = repo.data().fsync,
             .packed_lock = try lockTimeout(repo.configuration(), "core.packedrefstimeout", 1000),
         });
-        repo.data()._refs = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
+        repo.data().refs_state = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
         return repo;
     }
 
@@ -684,9 +708,10 @@ pub const Repository = struct {
     /// as `-c` values are. A configuration that no longer passes `open`'s
     /// checks is that check's error, and the one held before is kept. A
     /// changed hash or ref backend requires reopening
-    /// (`ObjectFormatChanged`, `RefStorageChanged`). `diagnostic`, when
-    /// given, names the refusal and is cleared on every call.
-    pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Self.Error!bool {
+    /// (`ObjectFormatChanged`, `RefStorageChanged`). `options.diagnostic`,
+    /// when given, names the refusal and is cleared on every call.
+    pub fn refreshConfig(repo: *Repository, io: Io, options: RefreshConfigOptions) Self.Error!bool {
+        const diagnostic = options.diagnostic;
         diagnostic_mod.reset(diagnostic);
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
         const short = try branchOf(repo.data().gpa, io, repo.refStore());
@@ -972,11 +997,11 @@ pub const Repository = struct {
     /// Close everything the repository holds.
     pub fn deinit(repo: *Repository, io: Io) void {
         if (repo.data().lfsconfig_cache) |c| if (c.text) |t| repo.data().gpa.free(t);
-        repo.data()._commits.deinit(repo.data().gpa);
+        repo.data().commits.deinit(repo.data().gpa);
         repo.refStore().deinit();
         repo.data().gpa.destroy(repo.refStore());
         repo.data().odb.deinit(io);
-        config_owner.destroy(repo.data()._config);
+        config_owner.destroy(repo.data().config_state);
         // One handle, closed once, when the common directory is not separate.
         if (!repo.data().common_is_separate) assert(repo.data().common_dir.handle == repo.data().git_dir.handle);
         if (repo.data().common_is_separate) repo.data().common_dir.close(io);
@@ -995,7 +1020,7 @@ pub const Repository = struct {
     /// The repository owns this store; callers borrow it for ref operations.
     /// Its backend and cache cannot be assigned separately.
     pub fn refStore(repo: *const Repository) *refs_mod.Store {
-        return @ptrCast(@alignCast(repo.data()._refs)); // safe: finish allocates _refs as an aligned Store.
+        return @ptrCast(@alignCast(repo.data().refs_state)); // safe: finish allocates refs_state as an aligned Store.
     }
 
     /// The last published configuration, borrowed until an edit, a write,
@@ -1003,7 +1028,7 @@ pub const Repository = struct {
     /// repository (`writeConfig`, `editConfig`) to keep its stores and
     /// configuration policy in agreement.
     pub fn configuration(repo: *const Repository) *const config_mod.Config {
-        return config_owner.get(repo.data()._config);
+        return config_owner.get(repo.data().config_state);
     }
 
     /// One change `writeConfig` makes to a configuration file.
@@ -1037,9 +1062,10 @@ pub const Repository = struct {
     /// hash or ref backend (`ObjectFormatChanged`, `RefStorageChanged`), or
     /// a setting `open` would refuse, writes nothing. Then the file keeps
     /// its mode, is put in place, and that configuration is published,
-    /// memory-only edits replayed over it. `diagnostic`, when given, names
-    /// a refusal and is cleared on every call.
-    pub fn writeConfig(repo: *Repository, io: Io, file: ConfigFile, edits: []const ConfigEdit, diagnostic: ?*Diagnostic) WriteConfigError!WriteOutcome {
+    /// memory-only edits replayed over it. `options.diagnostic`, when given,
+    /// names a refusal and is cleared on every call.
+    pub fn writeConfig(repo: *Repository, io: Io, file: ConfigFile, edits: []const ConfigEdit, options: WriteConfigOptions) WriteConfigError!WriteOutcome {
+        const diagnostic = options.diagnostic;
         diagnostic_mod.reset(diagnostic);
         const current = repo.configuration();
         const worktree_file = file == .worktree and current.sources.worktree != null;
@@ -1095,7 +1121,8 @@ pub const Repository = struct {
     /// published. The repository's format is its own file's to say, so a
     /// value for `core.repositoryFormatVersion` or an `extensions.*` is
     /// refused (`FormatEditInMemory`); `writeConfig` writes one.
-    pub fn editConfig(repo: *Repository, io: Io, values: []const config_mod.Sources.Pair, diagnostic: ?*Diagnostic) EditConfigError!void {
+    pub fn editConfig(repo: *Repository, io: Io, values: []const config_mod.Sources.Pair, options: EditConfigOptions) EditConfigError!void {
+        const diagnostic = options.diagnostic;
         diagnostic_mod.reset(diagnostic);
         for (values) |value| {
             const key = try config_mod.checkKey(value.name);
@@ -1166,8 +1193,8 @@ pub const Repository = struct {
     /// Replace the published configuration with `next`, which it takes,
     /// and the policy `checkConfig` gave for it.
     fn installConfig(repo: *Repository, next: config_mod.Config, policy: ConfigPolicy) void {
-        config_owner.get(repo.data()._config).deinit();
-        config_owner.get(repo.data()._config).* = next;
+        config_owner.get(repo.data().config_state).deinit();
+        config_owner.get(repo.data().config_state).* = next;
         repo.refStore().configureReftable(policy.ref_options);
         // Every writer takes the new policy at once: a changed
         // `core.sharedRepository` used to reach none of them.
@@ -1464,7 +1491,7 @@ pub const Repository = struct {
     /// parents copied with `out` (none without it). Each commit is read
     /// once per repository handle and kept, a bounded number of them.
     pub fn commitInfo(repo: *Repository, io: Io, commit_oid: Oid, out: ?Allocator) Self.Error!commit_cache.Info {
-        return repo.data()._commits.get(repo.data().gpa, io, &repo.data().odb, commit_oid, .{ .out = out });
+        return repo.data().commits.get(repo.data().gpa, io, &repo.data().odb, commit_oid, .{ .out = out });
     }
 
     /// Follow a tag object until it names something that is not a tag, and
@@ -1507,9 +1534,10 @@ pub const Repository = struct {
     ///
     /// A commit that is to be signed and comes with no `Programs` to sign it
     /// is `error.SigningRequiresPrograms`, never an unsigned commit.
-    /// `diagnostic`, when given, keeps the refused setting or signing stderr
-    /// and is cleared on every call.
-    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, diagnostic: ?*Diagnostic) Self.WriteError!Oid {
+    /// `options.diagnostic`, when given, keeps the refused setting or signing
+    /// stderr and is cleared on every call.
+    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, options: WriteCommitOptions) Self.WriteError!Oid {
+        const diagnostic = options.diagnostic;
         diagnostic_mod.reset(diagnostic);
         const fields: object.Commit.Fields = .{
             .tree = request.tree,
@@ -1672,9 +1700,9 @@ test "reading a signing policy allocates nothing of the configuration's" {
     defer tmp.cleanup();
     var repo = try Self.Repository.create(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
-    try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, .{});
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    const config_gpa = &config_owner.get(repo.data()._config).gpa;
+    const config_gpa = &config_owner.get(repo.data().config_state).gpa;
     config_gpa.* = failing.allocator();
     defer config_gpa.* = gpa;
     var diagnostic = Self.Diagnostic.init(gpa);
@@ -1706,21 +1734,21 @@ test "worktree configuration adapters refuse malformed settings, and read a quot
     var repo = try Self.Repository.create(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
     inline for (.{ "core.autocrlf", "core.safecrlf", "core.ignorecase", "core.filemode", "core.symlinks" }) |setting| {
-        try repo.editConfig(io, &.{.{ .name = setting, .value = "maybe" }}, null);
+        try repo.editConfig(io, &.{.{ .name = setting, .value = "maybe" }}, .{});
         try std.testing.expectError(error.NotABoolean, Adapter.rules(&repo));
-        try repo.editConfig(io, &.{.{ .name = setting, .value = "false" }}, null);
+        try repo.editConfig(io, &.{.{ .name = setting, .value = "false" }}, .{});
     }
     inline for (.{ "core.eol", "core.checkstat" }) |setting| {
-        try repo.editConfig(io, &.{.{ .name = setting, .value = "unknown" }}, null);
+        try repo.editConfig(io, &.{.{ .name = setting, .value = "unknown" }}, .{});
         try std.testing.expectError(error.MalformedValue, Adapter.rules(&repo));
-        try repo.editConfig(io, &.{.{ .name = setting, .value = if (comptime std.mem.eql(u8, setting, "core.eol")) "native" else "default" }}, null);
+        try repo.editConfig(io, &.{.{ .name = setting, .value = if (comptime std.mem.eql(u8, setting, "core.eol")) "native" else "default" }}, .{});
     }
     try tmp.dir.writeFile(io, .{ .sub_path = ".git/config", .data = "[core]\n autocrlf = \"input\"\n" });
     var reread = try Self.Repository.open(gpa, io, tmp.dir, .{});
     defer reread.deinit(io);
     try std.testing.expectEqual(attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&reread)).autocrlf);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    const config_gpa = &config_owner.get(reread.data()._config).gpa;
+    const config_gpa = &config_owner.get(reread.data().config_state).gpa;
     config_gpa.* = failing.allocator();
     defer config_gpa.* = gpa;
     // The value was read once, quotes and all, when the file was.
@@ -1744,12 +1772,12 @@ test "rule loaders refuse a malformed case policy, and read one without the conf
     defer tmp.cleanup();
     var r = try Self.Repository.create(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
-    try r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "maybe" }}, null);
+    try r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "maybe" }}, .{});
     try std.testing.expectError(error.NotABoolean, Load.ignoreRules(io, &r));
     try std.testing.expectError(error.NotABoolean, Load.attributesRules(io, &r));
-    try r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "true" }}, null);
+    try r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "true" }}, .{});
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    const config_gpa = &config_owner.get(r.data()._config).gpa;
+    const config_gpa = &config_owner.get(r.data().config_state).gpa;
     config_gpa.* = failing.allocator();
     defer config_gpa.* = gpa;
     try Load.ignoreRules(io, &r);
@@ -1771,7 +1799,7 @@ test "required filter discovery keeps full names, and reads the policy without t
     var r = try Self.Repository.create(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
     const long_name = &@as([300]u8, @splat('x'));
-    try r.editConfig(io, &.{.{ .name = "filter." ++ long_name ++ ".required", .value = "true" }}, null);
+    try r.editConfig(io, &.{.{ .name = "filter." ++ long_name ++ ".required", .value = "true" }}, .{});
     const names = try r.requiredFilters(gpa);
     defer gpa.free(names);
     try std.testing.expectEqual(@as(usize, 1), names.len);
@@ -1779,7 +1807,7 @@ test "required filter discovery keeps full names, and reads the policy without t
     // The values were read when the file was: asking for them allocates
     // nothing of the configuration's.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    const config_gpa = &config_owner.get(r.data()._config).gpa;
+    const config_gpa = &config_owner.get(r.data().config_state).gpa;
     config_gpa.* = failing.allocator();
     defer config_gpa.* = gpa;
     try std.testing.expectEqual(@as(usize, 1), try Read.count(&r));

@@ -41,8 +41,8 @@ pub const Patterns = struct {
     arena: *std.heap.ArenaAllocator,
     items: std.ArrayList(ignore.Pattern),
     case_fold: bool,
-    /// Private compiled non-cone patterns.
-    _matcher: ?*anyopaque = null,
+    /// Private: the compiled non-cone patterns.
+    compiled: ?*anyopaque = null,
     /// The cone the patterns describe, when they were read in cone mode and
     /// have its shape. `null` means every pattern is consulted in turn.
     cone: ?Cone = null,
@@ -59,7 +59,7 @@ pub const Patterns = struct {
     /// Release everything.
     pub fn deinit(p: *Patterns) void {
         if (p.cone) |*c| c.deinit(p.gpa);
-        if (p._matcher) |m| matcher(m).deinit();
+        if (p.compiled) |m| matcher(m).deinit();
         p.arena.deinit();
         p.gpa.destroy(p.arena);
         p.items.deinit(p.gpa);
@@ -125,8 +125,8 @@ pub const Patterns = struct {
         const compiled = try sets.Matcher.build(&builder);
         errdefer compiled.deinit();
         try p.items.appendSlice(p.gpa, added.items);
-        if (p._matcher) |m| matcher(m).deinit();
-        p._matcher = compiled;
+        if (p.compiled) |m| matcher(m).deinit();
+        p.compiled = compiled;
     }
 
     /// Whether `path` belongs in the working tree.
@@ -139,7 +139,7 @@ pub const Patterns = struct {
     /// says otherwise.
     pub fn includes(p: *const Patterns, path: []const u8, kind: Kind) bool {
         if (p.cone) |*c| return c.match(path, kind) != .outside;
-        const m = matcher(p._matcher orelse return false);
+        const m = matcher(p.compiled orelse return false);
         m.begin(path, kind);
         var included = false;
         while (m.walking.?.next()) |step| {

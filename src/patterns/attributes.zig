@@ -82,8 +82,8 @@ pub const Rule = struct {
 pub const Level = struct {
     base: []const u8,
     rules: []Rule,
-    /// Private compiled set, owned by the attributes.
-    _matcher: *anyopaque,
+    /// Private: the compiled set, owned by the attributes.
+    compiled: *anyopaque,
     /// Higher wins. `info/attributes` is highest, then the deepest
     /// `.gitattributes`, down to the global file.
     precedence: u32,
@@ -402,7 +402,7 @@ pub const Attrs = struct {
         try attrs.levels.append(a, .{
             .base = base,
             .rules = rules.items,
-            ._matcher = compiled,
+            .compiled = compiled,
             .precedence = precedence,
         });
     }
@@ -515,7 +515,7 @@ pub const Attrs = struct {
 };
 
 fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level._matcher)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
+    return @ptrCast(@alignCast(level.compiled)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
 }
 
 fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {

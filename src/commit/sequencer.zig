@@ -658,7 +658,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    }, r.options.diagnostic);
+    }, .{ .diagnostic = r.options.diagnostic });
     const log = try arena.print("{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
@@ -905,7 +905,7 @@ fn commitStaged(r: *Replay) Error!Oid {
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    }, r.options.diagnostic);
+    }, .{ .diagnostic = r.options.diagnostic });
     const log = if (picked != null)
         try arena.print("commit (cherry-pick): {s}", .{firstLine(cleaned)})
     else
@@ -1149,11 +1149,11 @@ test "sequencer signing policy refuses malformed values, and reads one without t
     var failing = std.testing.FailingAllocator.init(no_resize.allocator(), .{ .fail_index = std.math.maxInt(usize) });
     var r = try Repository.create(failing.allocator(), io, tmp.dir, .{});
     defer r.deinit(io);
-    try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "maybe" }}, null);
+    try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "maybe" }}, .{});
     try std.testing.expectError(error.NotABoolean, Read.run(&r, .{}));
     try std.testing.expect(try Read.run(&r, .{ .sign = .always }));
     try std.testing.expect(!try Read.run(&r, .{ .sign = .never }));
-    try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "true" }}, null);
+    try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "true" }}, .{});
     failing.fail_index = failing.alloc_index;
     defer failing.fail_index = std.math.maxInt(usize);
     try std.testing.expect(try Read.run(&r, .{}));

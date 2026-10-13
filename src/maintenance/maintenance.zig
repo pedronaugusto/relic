@@ -435,7 +435,7 @@ pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: ?fs.Sync) Self.Mid
 
 /// Whether the database's own directory has the pack `name` open.
 fn ownsPack(db: *const odb.Odb, name: []const u8) bool {
-    const sources = storage.get(db._state).sources.items;
+    const sources = storage.get(db.state).sources.items;
     if (sources.len == 0) return false;
     for (sources[0].packs.items) |named| {
         if (std.mem.eql(u8, named.name, name)) return true;

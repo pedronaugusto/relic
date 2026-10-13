@@ -1308,7 +1308,7 @@ pub const Client = struct {
             }
             try edits.append(c.gpa, .{ .set = .{ .name = l.key, .value = l.value } });
         }
-        if (edits.items.len != 0) _ = try repo.writeConfig(io, .local, edits.items, null);
+        if (edits.items.len != 0) _ = try repo.writeConfig(io, .local, edits.items, .{});
     }
 
     /// Describe a request that failed for want of a credential, or that the
@@ -3020,6 +3020,6 @@ test "learned LFS policy writes the shared source without replacing worktree con
     const after = try repo.commonDirectory().readFileAlloc(io, "config.worktree", gpa, .limited(4096));
     defer gpa.free(after);
     try testing.expectEqualStrings(worktree, after);
-    _ = try repo.refreshConfig(io, null);
+    _ = try repo.refreshConfig(io, .{});
     try testing.expectEqualStrings("untouched", repo.configuration().get("fixture.worktree").?);
 }

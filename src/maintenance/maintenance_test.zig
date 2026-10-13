@@ -340,7 +340,7 @@ test "configured maintenance writes full and split commit graphs and repack bitm
     _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
     try repo.exec(io, &.{ "commit-graph", "verify" });
     try repo.exec(io, &.{ "config", "fetch.writeCommitGraph", "true" });
-    _ = try native.refreshConfig(io, null);
+    _ = try native.refreshConfig(io, .{});
     try linearCommit(&repo, 6);
     _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .fetch);
     try repo.exec(io, &.{ "commit-graph", "verify" });

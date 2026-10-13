@@ -158,12 +158,12 @@ that original handle in the caller. Odb owns its format, sources and storage
 policy together. Use `objectFormat()`, `settings()` and `allocator()` to
 read them; changing format or storage policy requires a new database.
 Repository configuration is borrowed through `configuration()`, and
-changed through the repository. `writeConfig(io, .local, edits, diagnostic)`
+changed through the repository. `writeConfig(io, .local, edits, .{ .diagnostic = d })`
 writes `.git/config` (`.worktree` the worktree's `config.worktree`, or the
 shared file while `extensions.worktreeConfig` is off): the file is read again
 under its lock and only those edits applied, so another process's `git
 config` since open stays; the configuration it would leave is checked whole
-before it lands, and then published. `editConfig(io, values, diagnostic)`
+before it lands, and then published. `editConfig(io, values, .{ .diagnostic = d })`
 sets values in memory only, over every file as later `-c` values are, kept
 through `refreshConfig` and every write and never written; the repository's
 format (`core.repositoryFormatVersion`, `extensions.*`) is refused there.

@@ -561,7 +561,7 @@ fn commitOrStop(
             .committer = options.who,
             .message = cleaned,
             .signing = options.signing,
-        }, options.diagnostic);
+        }, .{ .diagnostic = options.diagnostic });
         const log_message = try arena.print("{s}: Merge made by the '{s}' strategy.", .{ made.reflog_action, made.strategy });
         try head_mod.advance(io, repo, made.head, commit, .{ .who = options.who, .message = log_message });
         // `post-merge` runs before the merge's files go, as in git.
@@ -668,7 +668,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
         .committer = options.who,
         .message = cleaned,
         .signing = options.signing,
-    }, options.diagnostic);
+    }, .{ .diagnostic = options.diagnostic });
     const log_message = try arena.print("commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
     try rerere.afterCommit(gpa, io, repo);

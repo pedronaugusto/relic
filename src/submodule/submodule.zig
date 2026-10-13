@@ -398,7 +398,7 @@ const LocalEdits = struct {
     }
 
     fn commit(e: *LocalEdits, io: Io, repo: *Repository) Error!void {
-        if (e.edits.items.len != 0) _ = try repo.writeConfig(io, .local, e.edits.items, null);
+        if (e.edits.items.len != 0) _ = try repo.writeConfig(io, .local, e.edits.items, .{});
         e.edits.clearRetainingCapacity();
     }
 };
@@ -1001,7 +1001,7 @@ fn syncIn(
         var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
         defer sub.deinit(io);
         const remote = try defaultRemote(arena, io, &sub);
-        _ = try sub.writeConfig(io, .local, &.{.{ .set = .{ .name = try arena.print("remote.{s}.url", .{remote}), .value = for_sub } }}, null);
+        _ = try sub.writeConfig(io, .local, &.{.{ .set = .{ .name = try arena.print("remote.{s}.url", .{remote}), .value = for_sub } }}, .{});
         outcome.remotes += 1;
         if (options.recursive) {
             try syncIn(gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, outcome);
@@ -1087,7 +1087,7 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
             error.PathAlreadyExists => {},
             else => |e| return e,
         };
-        const written = try repo.writeConfig(io, .local, &.{.{ .remove_section = .{ .section = "submodule", .subsection = module.name } }}, null);
+        const written = try repo.writeConfig(io, .local, &.{.{ .remove_section = .{ .section = "submodule", .subsection = module.name } }}, .{});
         if (written.sections_removed != 0) outcome.unregistered += 1;
     }
     return outcome;

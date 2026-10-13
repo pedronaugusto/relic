@@ -12,18 +12,18 @@ const storage = @import("state.zig");
 
 pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, options: odb.Options) odb.Error!Odb {
     _ = io;
-    return .{ ._state = try storage.create(gpa, kind, options) };
+    return .{ .state = try storage.create(gpa, kind, options) };
 }
 
 /// The caller owns `dir` until append succeeds; the database owns it after.
 /// The pack directory is acquired here and follows the same transfer.
 pub fn register(io: Io, db: anytype, dir: Io.Dir, writable: bool) odb.Error!void {
-    const gpa = storage.get(db._state).gpa;
+    const gpa = storage.get(db.state).gpa;
     const real_path = try realPath(gpa, io, dir);
     errdefer gpa.free(real_path);
     const pack_dir = try openDirectory(io, dir, "pack");
     errdefer if (pack_dir) |d| d.close(io);
-    try storage.get(db._state).sources.append(gpa, .{
+    try storage.get(db.state).sources.append(gpa, .{
         .dir = dir,
         .real_path = real_path,
         .pack_dir = pack_dir,
@@ -46,7 +46,7 @@ pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind
     var db = try empty(Odb, gpa, io, kind, options);
     errdefer db.deinit(io);
     const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
-    errdefer if (storage.get(db._state).sources.items.len == 0) objects.close(io);
+    errdefer if (storage.get(db.state).sources.items.len == 0) objects.close(io);
     try register(io, &db, objects, true);
     try db.refresh(io);
     if (options.probe_timestamp_resolution) db.timestamp_resolution = fs.probeTimestampResolution(io, objects);

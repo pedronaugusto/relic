@@ -90,7 +90,7 @@ pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Stor
     const arena = arena_state.allocator();
     const edits = try arena.alloc(Repository.ConfigEdit, stores.len);
     for (stores, edits) |store, *edit| edit.* = .{ .set = .{ .name = try store.key(arena), .value = store.new } };
-    _ = try repo.writeConfig(io, .local, edits, null);
+    _ = try repo.writeConfig(io, .local, edits, .{});
     for (stores) |store| {
         try warning.note(warnings, .{ .promisor_stored = .{
             .field = switch (store.field) {
@@ -276,7 +276,7 @@ pub const Lazy = struct {
             var buf: [256]u8 = undefined;
             const key = try std.mem.print(&buf, "remote.{s}.partialclonefilter", .{name});
             if (repo.configuration().get(key) == null) {
-                _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = key, .value = "blob:none" } }}, null);
+                _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = key, .value = "blob:none" } }}, .{});
             }
         }
         var remote = try remote_mod.Remote.get(l.gpa, repo.configuration(), name);

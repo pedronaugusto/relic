@@ -154,8 +154,8 @@ const testgit = @import("../testing/git.zig");
 pub const Odb = struct {
     pub const Error = ErrorNamespace.Error;
 
-    /// Owned format and storage state; never reassigned piecemeal.
-    _state: *storage.State,
+    /// Private: the format and storage state; never reassigned piecemeal.
+    state: *storage.State,
     /// How lookups resolved. Read it; nothing in the package does.
     stats: Stats = .{},
     /// How fine a modification time this repository's filesystem records,
@@ -175,7 +175,7 @@ pub const Odb = struct {
     lazy: ?Lazy = null,
 
     fn backendData(db: *const Odb) *storage.Data {
-        return storage.get(db._state);
+        return storage.get(db.state);
     }
 
     /// The hash format selected at construction.
@@ -4407,7 +4407,7 @@ test "loose inflate preserves allocation resource failures" {
             var data_copy = original.backendData().*;
             data_copy.gpa = allocator;
             var copy = original.*;
-            copy._state = @ptrCast(&data_copy);
+            copy.state = @ptrCast(&data_copy);
             const bytes = try copy.inflateWhole(std.testing.io, input);
             defer allocator.free(bytes);
             try std.testing.expectEqualStrings("blob 6\x00hello\n", bytes);

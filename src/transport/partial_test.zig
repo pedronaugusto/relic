@@ -424,7 +424,7 @@ test "a promised object is fetched from the next promisor remote when one fails,
     // With no promisor remote that has them, the read fails by name.
     const set = try git(gpa, io, twins.by_relic, &.{ "config", "remote.mirror.url", "file:///nowhere/mirror.git" });
     gpa.free(set);
-    try repo.editConfig(io, &.{.{ .name = "remote.mirror.url", .value = "file:///nowhere/mirror.git" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "remote.mirror.url", .value = "file:///nowhere/mirror.git" }}, .{});
     const missing = try Oid.parse(repo.objectFormat(), "1111111111111111111111111111111111111111");
     try testing.expectError(error.PromisorFetchFailed, repo.objectDatabase().read(io, missing));
 }
@@ -450,7 +450,7 @@ test "a lazy fetch writes the filter it registers, and leaves another process's 
 
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, .{});
     gpa.free(try git(gpa, io, dir, &.{ "config", "fixture.external", "yes" }));
     var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
     defer lazy.deinit();

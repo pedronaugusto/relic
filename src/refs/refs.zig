@@ -125,7 +125,8 @@ pub const WatchScopes = struct {
 pub const Store = struct {
     pub const Error = ErrorNamespace.Error;
 
-    _state: *state_mod.State,
+    /// Private: the store's format, directories and caches.
+    state: *state_mod.State,
     /// Open over an already-opened pair of directories, which the store borrows.
     /// The returned owner must be released with `deinit`.
     pub fn init(gpa: Allocator, kind: Kind, git_dir: Io.Dir, common_dir: Io.Dir, options: Options) Allocator.Error!Store {
@@ -134,7 +135,7 @@ pub const Store = struct {
         state_mod.get(state).fsync = options.fsync;
         state_mod.get(state).options.fsync = options.fsync;
         state_mod.get(state).packed_lock = options.packed_lock;
-        return .{ ._state = state };
+        return .{ .state = state };
     }
 
     pub const Options = struct {
@@ -155,35 +156,35 @@ pub const Store = struct {
     /// Changing the backend or object format requires opening another store.
     /// What `core.sharedRepository` asks of what this store writes.
     pub fn sharedPermissions(store: *const Store) fs.Shared {
-        return state_mod.get(store._state).shared;
+        return state_mod.get(store.state).shared;
     }
 
     /// Borrowed directories; their handles stay owned by the caller of init.
     pub fn gitDir(store: *const Store) Io.Dir {
-        return state_mod.get(store._state).git_dir;
+        return state_mod.get(store.state).git_dir;
     }
     pub fn commonDir(store: *const Store) Io.Dir {
-        return state_mod.get(store._state).common_dir;
+        return state_mod.get(store.state).common_dir;
     }
 
     pub fn objectFormat(store: *const Store) Kind {
-        return state_mod.get(store._state).kind;
+        return state_mod.get(store.state).kind;
     }
 
     pub fn refFormat(store: *const Store) Format {
-        return state_mod.get(store._state).format;
+        return state_mod.get(store.state).format;
     }
 
     /// The current write policy, returned by value.
     pub fn reftableOptions(store: *const Store) stack_engine.Options {
-        return state_mod.get(store._state).options;
+        return state_mod.get(store.state).options;
     }
 
     /// Replace write policy without changing the backend, hash or read cache.
     /// The permissions and syncs it carries are the store's, which
     /// `configureWrites` sets.
     pub fn configureReftable(store: *Store, options: stack_engine.Options) void {
-        const data = state_mod.get(store._state);
+        const data = state_mod.get(store.state);
         data.options = options;
         data.options.shared = data.shared;
         data.options.fsync = data.fsync;
@@ -191,13 +192,13 @@ pub const Store = struct {
 
     /// How a reference this store writes is synced.
     pub fn referenceSync(store: *const Store) fs.Sync {
-        return state_mod.get(store._state).fsync.sync(.reference);
+        return state_mod.get(store.state).fsync.sync(.reference);
     }
 
     /// Change the permissions and syncs of what this store writes, as a
     /// refreshed configuration's `core.sharedRepository` and `core.fsync` say.
     pub fn configureWrites(store: *Store, shared: fs.Shared, fsync: fs.Fsync) void {
-        const data = state_mod.get(store._state);
+        const data = state_mod.get(store.state);
         data.shared = shared;
         data.fsync = fsync;
         data.options.shared = shared;
@@ -206,7 +207,7 @@ pub const Store = struct {
 
     /// Release the backend and every cached stack together.
     pub fn deinit(store: *Store) void {
-        state_mod.destroy(state_mod.get(store._state).gpa, store._state);
+        state_mod.destroy(state_mod.get(store.state).gpa, store.state);
         store.* = undefined;
     }
 
@@ -590,14 +591,14 @@ pub const Store = struct {
     /// The store's snapshot of `packed-refs`, brought up to date, with its
     /// mutex held: give it back with `releasePacked`.
     fn acquirePacked(store: *const Store, io: Io) ReadError!*const PackedListing {
-        const c = state_mod.get(store._state).packed_refs.?;
+        const c = state_mod.get(store.state).packed_refs.?;
         c.mutex.lock(io) catch return error.Canceled;
         errdefer c.mutex.unlock(io);
         return c.refresh(io, store.commonDir(), store.objectFormat());
     }
 
     fn releasePacked(store: *const Store, io: Io) void {
-        state_mod.get(store._state).packed_refs.?.mutex.unlock(io);
+        state_mod.get(store.state).packed_refs.?.mutex.unlock(io);
     }
 
     /// The object `packed-refs` names for `name`, or `null`.
@@ -622,7 +623,7 @@ pub const Store = struct {
 
     /// Take `packed-refs.lock`, waiting as `core.packedRefsTimeout` says.
     fn lockPacked(store: *const Store, io: Io, buffer: []u8) TransactionError!fs.LockFile {
-        const data = state_mod.get(store._state);
+        const data = state_mod.get(store.state);
         return fs.LockFile.open(data.gpa, io, store.commonDir(), .{ .sub_path = "packed-refs", .buffer = buffer }, .{
             .shared = store.sharedPermissions(),
             .sync = store.referenceSync(),
@@ -644,7 +645,7 @@ pub const Store = struct {
         }
         try lock.commit(io);
         // The stat would tell the next lookup as much; this is cheaper.
-        if (state_mod.get(store._state).packed_refs) |c| c.forget(io);
+        if (state_mod.get(store.state).packed_refs) |c| c.forget(io);
     }
 
     /// Begin a transaction over this store.
@@ -2020,7 +2021,7 @@ test "a store parses packed-refs once, and again when the file is replaced" {
     // Another writer: a store of its own over the same directory.
     var other: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
     defer other.deinit();
-    const loads = &state_mod.get(store._state).packed_refs.?.loads;
+    const loads = &state_mod.get(store.state).packed_refs.?.loads;
 
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));

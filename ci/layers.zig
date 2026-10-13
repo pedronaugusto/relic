@@ -91,7 +91,7 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "stash ref owner", .kind = .string, .tokens = &.{"refs/stash"}, .owners = &[_][]const u8{"src/names/ref.zig"} ++ tests },
     // the published configuration is the repository's to replace
     .{ .name = "gitfile owner", .kind = .string, .tokens = &.{ "gitdir: ", "gitdir:" }, .owners = &[_][]const u8{ "src/discover/gitfile.zig", "src/config/config.zig" } ++ tests },
-    .{ .name = "configuration owner", .tokens = &.{"_config"}, .owners = &[_][]const u8{"src/repo/repo.zig"} ++ tests },
+    .{ .name = "configuration owner", .tokens = &.{"config_state"}, .owners = &[_][]const u8{"src/repo/repo.zig"} ++ tests },
 };
 
 // The owner requires every production edge to count. No re-export exemptions.

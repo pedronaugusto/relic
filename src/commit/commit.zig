@@ -226,7 +226,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
         .message = cleaned,
         .extra = carried,
         .signing = options.signing,
-    }, options.diagnostic);
+    }, .{ .diagnostic = options.diagnostic });
 
     const action = if (current == null)
         "commit (initial)"
@@ -664,7 +664,7 @@ test "a message that is commit.template unedited is refused, as git commit refus
             try testing.expect(std.mem.find(u8, theirs.stderr, "you did not edit the message") != null);
             const edited_message = if (signoff) template_text ++ "\nSigned-off-by: Fixture <fixture@example.com>\n" else template_text;
             try twin.relic.exec(io, &.{ "config", "commit.cleanup", cleanup });
-            _ = try repo.refreshConfig(io, null);
+            _ = try repo.refreshConfig(io, .{});
             try testing.expectError(error.TemplateUntouched, commit(io, &repo, .{ .author = Twin.who, .committer = Twin.who, .message = edited_message }, .{ .template = text }));
         }
     }

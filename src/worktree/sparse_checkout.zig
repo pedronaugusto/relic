@@ -98,7 +98,7 @@ pub const Outcome = struct {
 /// The settings as the repository's files hold them now: the
 /// configuration read again when a file changed, and asked.
 pub fn settings(io: Io, repo: *Repository) Self.Error!Settings {
-    _ = try repo.refreshConfig(io, null);
+    _ = try repo.refreshConfig(io, .{});
     return settingsOf(repo.configuration());
 }
 
@@ -304,7 +304,7 @@ const Op = struct {
 
     fn init(io: Io, repo: *Repository) Error!Op {
         if (repo.workDirectory() == null) return error.NoWorkingTree;
-        _ = try repo.refreshConfig(io, null);
+        _ = try repo.refreshConfig(io, .{});
         return .{
             .repo = repo,
             .io = io,
@@ -361,7 +361,7 @@ const Op = struct {
         const core_worktree = if (sharedValue(repo.configuration(), "core.worktree")) |v| try repo.allocator().dupe(u8, v) else null;
         defer if (core_worktree) |v| repo.allocator().free(v);
 
-        _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.worktreeConfig", .value = "true" } }}, null);
+        _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.worktreeConfig", .value = "true" } }}, .{});
         if (!bare and core_worktree == null) return;
         var moved: [2]Repository.ConfigEdit = undefined;
         var unset: [2]Repository.ConfigEdit = undefined;
@@ -381,15 +381,15 @@ const Op = struct {
         if (repo.isLinkedWorktree())
             _ = try repo.writeConfigFile(io, repo.commonDirectory(), "config.worktree", moved[0..n])
         else
-            _ = try repo.writeConfig(io, .worktree, moved[0..n], null);
-        _ = try repo.writeConfig(io, .local, unset[0..n], null);
+            _ = try repo.writeConfig(io, .worktree, moved[0..n], .{});
+        _ = try repo.writeConfig(io, .local, unset[0..n], .{});
     }
 
     /// Set values in this worktree's `config.worktree`, writing them at
     /// once as git's `repo_config_set_worktree_gently` does.
     fn setWorktreeValues(op: *Op, values: []const Repository.ConfigEdit) Error!void {
         try op.initWorktreeConfig();
-        _ = try op.repo.writeConfig(op.io, .worktree, values, null);
+        _ = try op.repo.writeConfig(op.io, .worktree, values, .{});
     }
 
     /// Refuse, in cone mode, what cannot be a directory: git's

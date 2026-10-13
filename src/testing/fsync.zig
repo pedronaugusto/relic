@@ -120,7 +120,7 @@ test "a refreshed configuration changes what is synced" {
     try testing.expectEqual(fs.Sync.per_file, repo.refStore().referenceSync());
     try target.exec(io, &.{ "config", "core.fsync", "loose-object" });
     try target.exec(io, &.{ "config", "core.fsyncMethod", "batch" });
-    _ = try repo.refreshConfig(io, null);
+    _ = try repo.refreshConfig(io, .{});
     try testing.expectEqual(fs.Sync.none, repo.indexLock().sync);
     try testing.expectEqual(fs.Sync.none, repo.refStore().referenceSync());
     try testing.expectEqual(fs.Sync.batch, repo.objectDatabase().settings().fsync.sync(.loose_object));
@@ -145,7 +145,7 @@ test "core.fsyncObjectFiles syncs loose objects by the method, batched only wher
         const method, const components, const want = case;
         try target.exec(io, &.{ "config", "core.fsyncMethod", method });
         if (components) |value| try target.exec(io, &.{ "config", "core.fsync", value });
-        _ = try repo.refreshConfig(io, null);
+        _ = try repo.refreshConfig(io, .{});
         try testing.expectEqual(want, repo.objectDatabase().settings().fsync.sync(.loose_object));
     }
 }
@@ -159,7 +159,7 @@ test "a refreshed core.sharedRepository reaches every writer" {
     defer repo.deinit(io);
     try testing.expectEqual(fs.Shared.umask, repo.sharedPermissions());
     try target.exec(io, &.{ "config", "core.sharedRepository", "group" });
-    _ = try repo.refreshConfig(io, null);
+    _ = try repo.refreshConfig(io, .{});
     try testing.expectEqual(fs.Shared.group, repo.sharedPermissions());
     try testing.expectEqual(fs.Shared.group, repo.refStore().sharedPermissions());
     try testing.expectEqual(fs.Shared.group, repo.objectDatabase().sharedPermissions());

@@ -38,7 +38,7 @@ test "another process's git config is seen after refreshConfig, and not before" 
     var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
     defer repo.deinit(io);
     try expectValue(&repo, "core.autocrlf", "input");
-    try testing.expect(!try repo.refreshConfig(io, null));
+    try testing.expect(!try repo.refreshConfig(io, .{}));
 
     // `input` and `false` are the same length, and the write lands inside
     // the second the file was read in: a stat on a file system that records
@@ -48,13 +48,13 @@ test "another process's git config is seen after refreshConfig, and not before" 
     try expectValue(&repo, "core.autocrlf", "input");
     try testing.expect(try repo.configuration().isStale(io));
 
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "core.autocrlf", "false");
     try expectValue(&repo, "user.name", "Ada");
-    try testing.expect(!try repo.refreshConfig(io, null));
+    try testing.expect(!try repo.refreshConfig(io, .{}));
 
     try git.exec(io, &.{ "config", "--unset", "user.name" });
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "user.name", null);
 }
 
@@ -70,7 +70,7 @@ test "an include that appears later and a worktree file the extension turns on a
     try expectValue(&repo, "fixture.value", null);
 
     try git.writeFile(io, ".git/extra.config", "[fixture]\n\tvalue = included\n");
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "fixture.value", "included");
     const read = try git.line(io, &.{ "config", "fixture.value" });
     defer gpa.free(read);
@@ -78,13 +78,13 @@ test "an include that appears later and a worktree file the extension turns on a
 
     try git.exec(io, &.{ "config", "extensions.worktreeConfig", "true" });
     try git.exec(io, &.{ "config", "--worktree", "fixture.scoped", "here" });
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "fixture.scoped", "here");
     try testing.expectEqual(.worktree, repo.configuration().origin("fixture.scoped").?.level);
 
     // A file the extension brought in is watched like the others.
     try git.exec(io, &.{ "config", "--worktree", "fixture.scoped", "there" });
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "fixture.scoped", "there");
 }
 
@@ -104,11 +104,11 @@ test "a global file the caller named is read again, whether or not it was there 
     try expectValue(&repo, "user.email", null);
 
     try home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[user]\n\temail = ada@example.com\n" });
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "user.email", "ada@example.com");
 
     try home.dir.deleteFile(io, ".gitconfig");
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "user.email", null);
 }
 
@@ -129,17 +129,17 @@ test "a configuration the repository can no longer be opened with is refused, an
     try git.exec(io, &.{ "config", "-f", ".git/config", "core.repositoryformatversion", "1" });
     try git.exec(io, &.{ "config", "-f", ".git/config", "extensions.somethingNew", "true" });
     try git.exec(io, &.{ "config", "-f", ".git/config", "user.name", "Grace" });
-    try testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, &diagnostic));
+    try testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try testing.expectEqualStrings("somethingnew", diagnostic.unsupported_setting);
     try expectValue(&repo, "user.name", "Ada");
 
     try git.exec(io, &.{ "config", "-f", ".git/config", "--unset", "extensions.somethingNew" });
     try git.exec(io, &.{ "config", "-f", ".git/config", "extensions.objectFormat", "sha256" });
-    try testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io, &diagnostic));
+    try testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try expectValue(&repo, "user.name", "Ada");
 
     try git.exec(io, &.{ "config", "-f", ".git/config", "--unset", "extensions.objectFormat" });
-    try testing.expect(try repo.refreshConfig(io, &diagnostic));
+    try testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try expectValue(&repo, "user.name", "Grace");
 }
 
@@ -190,7 +190,7 @@ test "includeIf hasconfig:remote.*.url: holds for the URLs of every file, as it 
     // Another URL, and the conditions follow it at the refresh.
     const changed = try gitWithHome(gpa, io, proj, home, &.{ "config", "remote.origin.url", "https://example.com/top" });
     gpa.free(changed.?);
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "test.feature", "yes");
     try expectIncludesAgree(gpa, io, proj, home, &repo);
 
@@ -198,7 +198,7 @@ test "includeIf hasconfig:remote.*.url: holds for the URLs of every file, as it 
     // the whole read, and so does this.
     try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig-main", .data = "[remote \"sneaky\"]\n\turl = https://elsewhere.org/x\n" });
     try testing.expect(try gitWithHome(gpa, io, proj, home, &.{ "config", "--get", "test.work" }) == null);
-    try testing.expectError(error.RemoteUrlInConditionalInclude, repo.refreshConfig(io, null));
+    try testing.expectError(error.RemoteUrlInConditionalInclude, repo.refreshConfig(io, .{}));
 }
 
 /// `git` run in `cwd` with `home` as its `HOME` and no system file, so the
@@ -288,16 +288,16 @@ test "includeIf gitdir:, gitdir/i: and onbranch: in ~/.gitconfig hold for a repo
     gpa.free(committed.?);
     const switched = try gitWithHome(gpa, io, proj, home, &.{ "checkout", "-q", "-b", "feature/x" });
     gpa.free(switched.?);
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "test.main", null);
     try expectValue(&repo, "test.feature", "yes");
     try expectIncludesAgree(gpa, io, proj, home, &repo);
-    try testing.expect(!try repo.refreshConfig(io, null));
+    try testing.expect(!try repo.refreshConfig(io, .{}));
 
     // A detached `HEAD` is on no branch.
     const detached = try gitWithHome(gpa, io, proj, home, &.{ "checkout", "-q", "--detach" });
     gpa.free(detached.?);
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "test.feature", null);
     try expectIncludesAgree(gpa, io, proj, home, &repo);
 }
@@ -309,24 +309,24 @@ test "a value set in memory stays through a refresh and a write, and never reach
     defer git.deinit();
     var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
     defer repo.deinit(io);
-    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, .{});
     try git.exec(io, &.{ "config", "fixture.external", "yes" });
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "fixture.memory", "only");
     try expectValue(&repo, "fixture.external", "yes");
     // memory's value beats the files', as a later `-c` would
     try git.exec(io, &.{ "config", "fixture.memory", "file" });
-    try testing.expect(try repo.refreshConfig(io, null));
+    try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "fixture.memory", "only");
     // set again, it replaces what memory held
-    try repo.editConfig(io, &.{.{ .name = "Fixture.Memory", .value = "again" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "Fixture.Memory", .value = "again" }}, .{});
     try expectValue(&repo, "fixture.memory", "again");
     const values = try repo.configuration().all("fixture.memory");
     defer gpa.free(values);
     try testing.expectEqual(@as(usize, 2), values.len);
     try testing.expectEqualStrings("file", values[0]);
     try testing.expectEqualStrings("again", values[1]);
-    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.written", .value = "yes" } }}, null);
+    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.written", .value = "yes" } }}, .{});
     try expectValue(&repo, "fixture.memory", "again");
     const file = try git.run(io, &.{ "config", "--file", ".git/config", "--get-regexp", "^fixture\\." });
     defer gpa.free(file);
@@ -345,14 +345,14 @@ test "a write keeps what another process wrote since open, and the repository re
     _ = try repo.writeConfig(io, .local, &.{
         .{ .set = .{ .name = "fixture.written", .value = "yes" } },
         .{ .unset = .{ .name = "core.logallrefupdates" } },
-    }, null);
+    }, .{});
     const file = try git.run(io, &.{ "config", "--file", ".git/config", "--get-regexp", "^(fixture|core\\.logallrefupdates)" });
     defer gpa.free(file);
     try testing.expectEqualStrings("fixture.external yes\nfixture.many one\nfixture.written yes\n", file);
     try expectValue(&repo, "fixture.external", "yes");
     try expectValue(&repo, "fixture.written", "yes");
     try expectValue(&repo, "core.logallrefupdates", null);
-    try testing.expect(!try repo.refreshConfig(io, null));
+    try testing.expect(!try repo.refreshConfig(io, .{}));
 }
 
 test "a worktree write falls back to the shared file while extensions.worktreeConfig is off, as git's does" {
@@ -362,15 +362,15 @@ test "a worktree write falls back to the shared file while extensions.worktreeCo
     defer git.deinit();
     var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
     defer repo.deinit(io);
-    _ = try repo.writeConfig(io, .worktree, &.{.{ .set = .{ .name = "fixture.where", .value = "shared" } }}, null);
+    _ = try repo.writeConfig(io, .worktree, &.{.{ .set = .{ .name = "fixture.where", .value = "shared" } }}, .{});
     try testing.expectError(error.FileNotFound, git.dir.access(io, ".git/config.worktree", .{}));
     const shared = try git.run(io, &.{ "config", "--file", ".git/config", "fixture.where" });
     defer gpa.free(shared);
     try testing.expectEqualStrings("shared\n", shared);
 
     // With it on, the worktree's own file, which git reads over the shared one.
-    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.worktreeConfig", .value = "true" } }}, null);
-    _ = try repo.writeConfig(io, .worktree, &.{.{ .set = .{ .name = "fixture.where", .value = "worktree" } }}, null);
+    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.worktreeConfig", .value = "true" } }}, .{});
+    _ = try repo.writeConfig(io, .worktree, &.{.{ .set = .{ .name = "fixture.where", .value = "worktree" } }}, .{});
     const own = try git.run(io, &.{ "config", "--file", ".git/config.worktree", "fixture.where" });
     defer gpa.free(own);
     try testing.expectEqualStrings("worktree\n", own);
@@ -397,10 +397,10 @@ test "sparse-checkout leaves the repository's configuration what the files say" 
     try expectValue(&repo, "core.sparsecheckout", "true");
     try expectValue(&repo, "core.sparsecheckoutcone", "true");
     try testing.expect(repo.configuration().sources.worktree != null);
-    try testing.expect(!try repo.refreshConfig(io, null));
+    try testing.expect(!try repo.refreshConfig(io, .{}));
     _ = try sparse_checkout.disable(io, &repo);
     try expectValue(&repo, "core.sparsecheckout", "false");
-    try testing.expect(!try repo.refreshConfig(io, null));
+    try testing.expect(!try repo.refreshConfig(io, .{}));
 }
 
 test "what an LFS server teaches is written without another process's settings lost or memory's written" {
@@ -410,7 +410,7 @@ test "what an LFS server teaches is written without another process's settings l
     defer git.deinit();
     var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
     defer repo.deinit(io);
-    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, .{});
     try git.exec(io, &.{ "config", "fixture.external", "yes" });
     const settings: lfsapi.Settings = .{ .gpa = gpa, .config = repo.configuration() };
     var client = try lfsapi.Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{} });

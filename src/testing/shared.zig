@@ -99,7 +99,7 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     _ = try relic.worktree.addAll(gpa, io, git.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
     const tree = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try repo.writeIndex(io, &index);
-    const commit = try repo.writeCommit(io, .{ .tree = tree, .author = who, .committer = who, .message = "first\n" }, null);
+    const commit = try repo.writeCommit(io, .{ .tree = tree, .author = who, .committer = who, .message = "first\n" }, .{});
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
@@ -127,7 +127,7 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     }
     _ = try repo.objectDatabase().repack(io, .{ .remove_packs = true });
     _ = try repo.objectDatabase().write(io, .blob, "");
-    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.value", .value = "set" } }}, null);
+    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.value", .value = "set" } }}, .{});
     _ = try relic.maintenance.writeCommitGraph(gpa, io, repo.objectDatabase(), &.{commit}, .{});
 }
 

@@ -112,7 +112,7 @@ test "a whole commit cycle, and git agrees with every part of it" {
         .author = fixture_who,
         .committer = fixture_who,
         .message = "first commit\n",
-    }, null);
+    }, .{});
 
     var tx = repo.beginRefs();
     defer tx.deinit(io);
@@ -191,7 +191,7 @@ test "a sha256 repository this creates is one git uses" {
         .author = fixture_who,
         .committer = fixture_who,
         .message = "sha256\n",
-    }, null);
+    }, .{});
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.update("refs/heads/main", .{ .direct = commit }, .any);
@@ -724,15 +724,15 @@ test "a config refresh keeps only its own refused setting" {
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nsomethingNew = true\n" });
-    try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("somethingnew", diagnostic.unsupported_setting);
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 0\n" });
-    try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
+    try std.testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
-    try std.testing.expect(!try repo.refreshConfig(io, &diagnostic));
+    try std.testing.expect(!try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha256\n" });
-    try std.testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("extensions.objectFormat", diagnostic.unsupported_setting);
 }
 
@@ -756,13 +756,13 @@ test "opening uses the format validated before worktree settings are read" {
     var opened = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
     defer opened.deinit(io);
     try std.testing.expectEqual(refs_mod.Format.reftable, opened.refStore().refFormat());
-    try opened.editConfig(io, &.{.{ .name = "fixture.edited", .value = "shared" }}, null);
+    try opened.editConfig(io, &.{.{ .name = "fixture.edited", .value = "shared" }}, .{});
     try std.testing.expectEqualStrings("shared", opened.configuration().get("fixture.edited").?);
     try std.testing.expectEqual(refs_mod.Format.reftable, opened.refStore().refFormat());
-    try std.testing.expectError(error.FormatEditInMemory, opened.editConfig(io, &.{.{ .name = "extensions.refstorage", .value = "files" }}, null));
+    try std.testing.expectError(error.FormatEditInMemory, opened.editConfig(io, &.{.{ .name = "extensions.refstorage", .value = "files" }}, .{}));
     const before = try tmp.dir.readFileAlloc(io, ".git/config", gpa, .limited(4096));
     defer gpa.free(before);
-    try std.testing.expectError(error.RefStorageChanged, opened.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.refstorage", .value = "files" } }}, null));
+    try std.testing.expectError(error.RefStorageChanged, opened.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.refstorage", .value = "files" } }}, .{}));
     const after = try tmp.dir.readFileAlloc(io, ".git/config", gpa, .limited(4096));
     defer gpa.free(after);
     try std.testing.expectEqualStrings(before, after);
@@ -800,7 +800,7 @@ test "a refresh preserves a refused extension beyond sixty-four bytes" {
         var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
         defer repo.deinit(io);
         try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\n" ++ name ++ " = true\n" });
-        try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, &diagnostic));
+        try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     }
     try std.testing.expectEqualStrings(name, diagnostic.unsupported_setting);
 }
@@ -814,7 +814,7 @@ test "a signing write keeps only its own refused setting" {
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
-    try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, .{});
     const fields: object.Tag.Fields = .{
         .target = hash.Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
@@ -846,11 +846,11 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
     var diagnostic = repo_mod.Diagnostic.init(failing.allocator());
     defer diagnostic.deinit();
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 9\n" });
-    try std.testing.expectError(error.OutOfMemory, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectError(error.OutOfMemory, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
     try std.testing.expectEqual(@as(i64, 0), try repo.configuration().getInt("core.repositoryformatversion", -1));
-    try std.testing.expectError(error.UnsupportedRepositoryVersion, repo.refreshConfig(io, null));
-    try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, null);
+    try std.testing.expectError(error.UnsupportedRepositoryVersion, repo.refreshConfig(io, .{}));
+    try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, .{});
     const fields: object.Tag.Fields = .{
         .target = hash.Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
@@ -872,28 +872,28 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
-        const cache = refs_state.get(repo.refStore()._state).cache;
+        const cache = refs_state.get(repo.refStore().state).cache;
         const replacement = if (format == .files)
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = changed\n"
         else
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = files\n[user]\nname = changed\n";
         try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = replacement });
-        try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, &diagnostic));
+        try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqualStrings("extensions.refStorage", diagnostic.unsupported_setting);
         try std.testing.expectEqual(format, repo.refStore().refFormat());
-        try std.testing.expectEqual(cache, refs_state.get(repo.refStore()._state).cache);
+        try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
         try std.testing.expect(repo.configuration().get("user.name") == null);
         // A refused refresh did not acknowledge the new file.
-        try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, null));
+        try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, .{}));
         const restored = if (format == .files)
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = files\n[user]\nname = accepted\n"
         else
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = accepted\n";
         try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = restored });
-        try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
+        try std.testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
         try std.testing.expectEqualStrings("accepted", repo.configuration().get("user.name").?);
-        try std.testing.expectEqual(cache, refs_state.get(repo.refStore()._state).cache);
+        try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
     }
 }
 
@@ -906,7 +906,7 @@ test "a signing refusal names the tag setting that required it" {
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
-    try repo.editConfig(io, &.{.{ .name = "tag.forceSignAnnotated", .value = "true" }}, null);
+    try repo.editConfig(io, &.{.{ .name = "tag.forceSignAnnotated", .value = "true" }}, .{});
     try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, .{
         .target = hash.Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
@@ -923,26 +923,26 @@ test "a refresh updates reftable write settings together with the configuration"
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
     defer repo.deinit(io);
-    const cache = refs_state.get(repo.refStore()._state).cache;
+    const cache = refs_state.get(repo.refStore().state).cache;
     const prefix = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[reftable]\n";
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++
         "blockSize = 8192\nrestartInterval = 32\nindexObjects = false\ngeometricFactor = 4\nlockTimeout = 0\n" });
-    try std.testing.expect(try repo.refreshConfig(io, null));
+    try std.testing.expect(try repo.refreshConfig(io, .{}));
     const options = repo.refStore().reftableOptions();
     try std.testing.expectEqual(@as(u32, 8192), options.write.block_size);
     try std.testing.expectEqual(@as(u16, 32), options.write.restart_interval);
     try std.testing.expect(!options.write.index_objects);
     try std.testing.expectEqual(@as(u8, 4), options.geometric_factor);
     try std.testing.expectEqual(fs_mod.OnContention.fail, options.lock);
-    try std.testing.expectEqual(cache, refs_state.get(repo.refStore()._state).cache);
+    try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
-    try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, null));
+    try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, .{}));
     try std.testing.expectEqualDeep(options, repo.refStore().reftableOptions());
     try std.testing.expectEqualStrings("8192", repo.configuration().get("reftable.blocksize").?);
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
-    try std.testing.expect(try repo.refreshConfig(io, null));
+    try std.testing.expect(try repo.refreshConfig(io, .{}));
     try std.testing.expectEqualDeep(reftable_stack.Options{ .lock = .{ .wait = .fromMilliseconds(200) } }, repo.refStore().reftableOptions());
-    try std.testing.expectEqual(cache, refs_state.get(repo.refStore()._state).cache);
+    try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
 }
 
 test "a reftable HEAD read failure does not become a detached branch" {
@@ -962,7 +962,7 @@ test "a reftable HEAD read failure does not become a detached branch" {
         };
         inline for (cases) |case| {
             try repo.gitDirectory().writeFile(io, .{ .sub_path = "reftable/tables.list", .data = case[0] });
-            try std.testing.expectError(case[1], repo.refreshConfig(io, null));
+            try std.testing.expectError(case[1], repo.refreshConfig(io, .{}));
             try std.testing.expectEqualStrings("main", repo.configuration().context.branch.?);
             if (repo_mod.Repository.open(gpa, io, tmp.dir, .{})) |opened| {
                 var unexpected = opened;
@@ -973,7 +973,7 @@ test "a reftable HEAD read failure does not become a detached branch" {
             }
         }
         try repo.gitDirectory().writeFile(io, .{ .sub_path = "reftable/tables.list", .data = before });
-        try std.testing.expect(!try repo.refreshConfig(io, null));
+        try std.testing.expect(!try repo.refreshConfig(io, .{}));
         try std.testing.expectEqualStrings("main", repo.configuration().context.branch.?);
     }
 }
@@ -988,7 +988,7 @@ test "a malformed signing policy is refused before an unsigned object is written
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
-        try repo.editConfig(io, &.{.{ .name = setting, .value = "maybe" }}, null);
+        try repo.editConfig(io, &.{.{ .name = setting, .value = "maybe" }}, .{});
         const tree = hash.Hasher.object(.sha1, "tree", "");
         if (comptime std.mem.startsWith(u8, setting, "commit.")) {
             try std.testing.expectError(error.NotABoolean, repo.writeCommit(io, .{
@@ -996,7 +996,7 @@ test "a malformed signing policy is refused before an unsigned object is written
                 .author = fixture_who,
                 .committer = fixture_who,
                 .message = "m",
-            }, &diagnostic));
+            }, .{ .diagnostic = &diagnostic }));
         } else {
             try std.testing.expectError(error.NotABoolean, repo.writeTag(io, .{
                 .target = tree,
@@ -1119,7 +1119,7 @@ test "a signer configuration refusal names its setting in caller-owned output" {
         .{ "gpg.format", "new-format", error.UnknownSignatureFormat, "openpgp" },
         .{ "gpg.minTrustLevel", "new-level", error.UnknownTrustLevel, "undefined" },
     }) |case| {
-        try repo.editConfig(io, &.{.{ .name = case[0], .value = case[1] }}, null);
+        try repo.editConfig(io, &.{.{ .name = case[0], .value = case[1] }}, .{});
         try std.testing.expectError(case[2], repo.writeTag(io, .{
             .target = hash.Hasher.object(.sha1, "tree", ""),
             .target_type = .tree,
@@ -1127,7 +1127,7 @@ test "a signer configuration refusal names its setting in caller-owned output" {
             .message = "m",
         }, .{ .signing = request, .diagnostic = &diagnostic }));
         try std.testing.expectEqualStrings(case[0], diagnostic.unsupported_setting);
-        try repo.editConfig(io, &.{.{ .name = case[0], .value = case[3] }}, null);
+        try repo.editConfig(io, &.{.{ .name = case[0], .value = case[3] }}, .{});
     }
 }
 
@@ -1143,7 +1143,7 @@ test "a malformed worktree configuration policy is refused instead of disabling 
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config.worktree", .data = "[user]\nname = worktree\n" });
     const shared = "[core]\nrepositoryformatversion = 1\n[extensions]\nworktreeConfig = ";
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = shared ++ "maybe\n" });
-    try std.testing.expectError(error.NotABoolean, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectError(error.NotABoolean, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
     try std.testing.expect(repo.configuration().get("user.name") == null);
     if (repo_mod.Repository.open(gpa, io, tmp.dir, .{ .diagnostic = &diagnostic })) |opened| {
@@ -1155,7 +1155,7 @@ test "a malformed worktree configuration policy is refused instead of disabling 
         try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
     }
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = shared ++ "true\n" });
-    try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
+    try std.testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("worktree", repo.configuration().get("user.name").?);
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
 }
@@ -1175,13 +1175,13 @@ test "repository writes preserve signature and hash refusals" {
         .author = invalid,
         .committer = fixture_who,
         .message = "m",
-    }, null));
+    }, .{}));
     try std.testing.expectError(error.MixedHashKinds, repo.writeCommit(io, .{
         .tree = hash.Hasher.object(.sha256, "tree", ""),
         .author = fixture_who,
         .committer = fixture_who,
         .message = "m",
-    }, null));
+    }, .{}));
     try std.testing.expectError(error.InvalidSignature, repo.writeTag(io, .{
         .target = tree,
         .target_type = .tree,
@@ -1219,7 +1219,7 @@ test "required filter discovery refuses malformed required policy" {
     defer tmp.cleanup();
     var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
-    try r.editConfig(io, &.{.{ .name = "filter.needed.required", .value = "maybe" }}, null);
+    try r.editConfig(io, &.{.{ .name = "filter.needed.required", .value = "maybe" }}, .{});
     try std.testing.expectError(error.NotABoolean, Read.run(&r));
 }
 
@@ -1243,29 +1243,29 @@ test "repository configuration edits publish policy only after validating the wh
     try std.testing.expectError(error.FormatEditInMemory, r.editConfig(io, &.{
         .{ .name = "fixture.value", .value = "discard" },
         .{ .name = "extensions.objectformat", .value = "sha256" },
-    }, &diagnostic));
+    }, .{ .diagnostic = &diagnostic }));
     try std.testing.expect(r.configuration().get("fixture.value") == null);
     try std.testing.expectEqualStrings("extensions.objectformat", diagnostic.unsupported_setting);
-    try std.testing.expectError(error.FormatEditInMemory, r.editConfig(io, &.{.{ .name = "core.repositoryFormatVersion", .value = "1" }}, &diagnostic));
-    try std.testing.expectError(error.FormatEditInMemory, r.editConfig(io, &.{.{ .name = "extensions.worktreeconfig", .value = "true" }}, &diagnostic));
+    try std.testing.expectError(error.FormatEditInMemory, r.editConfig(io, &.{.{ .name = "core.repositoryFormatVersion", .value = "1" }}, .{ .diagnostic = &diagnostic }));
+    try std.testing.expectError(error.FormatEditInMemory, r.editConfig(io, &.{.{ .name = "extensions.worktreeconfig", .value = "true" }}, .{ .diagnostic = &diagnostic }));
     try std.testing.expect(r.configuration().sources.worktree == null);
     // A write of the format is checked before it lands, and refused.
     try std.testing.expectError(error.ObjectFormatChanged, r.writeConfig(io, .local, &.{
         .{ .set = .{ .name = "fixture.value", .value = "discard" } },
         .{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } },
         .{ .set = .{ .name = "extensions.objectformat", .value = "sha256" } },
-    }, &diagnostic));
+    }, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("extensions.objectFormat", diagnostic.unsupported_setting);
     try std.testing.expectError(error.RefStorageChanged, r.writeConfig(io, .local, &.{
         .{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } },
         .{ .set = .{ .name = "extensions.refstorage", .value = "reftable" } },
-    }, &diagnostic));
+    }, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqual(hash.Kind.sha1, r.objectDatabase().objectFormat());
     try std.testing.expectEqual(refs_mod.Format.files, r.refStore().refFormat());
     var reopened = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
     defer reopened.deinit(io);
     try std.testing.expect(reopened.configuration().get("fixture.value") == null);
-    try r.editConfig(io, &.{.{ .name = "fixture.value", .value = "published" }}, &diagnostic);
+    try r.editConfig(io, &.{.{ .name = "fixture.value", .value = "published" }}, .{ .diagnostic = &diagnostic });
     try std.testing.expectEqualStrings("published", r.configuration().get("fixture.value").?);
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
 }
@@ -1278,22 +1278,22 @@ test "repository configuration edits keep their owners when allocation stops" {
             defer tmp.cleanup();
             var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable, .odb = .{ .probe_timestamp_resolution = false } });
             defer r.deinit(io);
-            try r.editConfig(io, &.{.{ .name = "fixture.kept", .value = "before" }}, null);
+            try r.editConfig(io, &.{.{ .name = "fixture.kept", .value = "before" }}, .{});
             r.editConfig(io, &.{
                 .{ .name = "fixture.kept", .value = "yes" },
                 .{ .name = "reftable.blocksize", .value = "8192" },
-            }, null) catch |err| {
+            }, .{}) catch |err| {
                 try std.testing.expectEqualStrings("before", r.configuration().get("fixture.kept").?);
                 try std.testing.expectEqual(@as(u32, 4096), r.refStore().reftableOptions().write.block_size);
                 return err;
             };
             try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
             try std.testing.expectEqual(@as(usize, 8192), r.refStore().reftableOptions().write.block_size);
-            _ = r.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.written", .value = "on disk" } }}, null) catch |err| {
+            _ = r.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.written", .value = "on disk" } }}, .{}) catch |err| {
                 try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
                 return err;
             };
-            _ = try r.refreshConfig(io, null);
+            _ = try r.refreshConfig(io, .{});
             try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
             try std.testing.expectEqualStrings("on disk", r.configuration().get("fixture.written").?);
         }
@@ -1550,5 +1550,5 @@ test "a repository whose HEAD holds no ref still opens, with no branch for onbra
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     try std.testing.expect(repo.configuration().context.branch == null);
-    try std.testing.expect(!try repo.refreshConfig(io, null));
+    try std.testing.expect(!try repo.refreshConfig(io, .{}));
 }

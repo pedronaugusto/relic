@@ -645,7 +645,7 @@ pub const Notes = struct {
             .committer = who,
             .message = msg,
             .signing = .{ .sign = .never },
-        }, null);
+        }, .{});
     }
 
     /// `prune_notes`: drop every note on an object the repository does not

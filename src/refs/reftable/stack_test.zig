@@ -137,7 +137,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
             .author = fixtureWho(1_700_000_000 + @as(i64, @intCast(i))),
             .committer = fixtureWho(1_700_000_000 + @as(i64, @intCast(i))),
             .message = "a commit\n",
-        }, null);
+        }, .{});
         parent = c.*;
     }
     const tag = try repo.writeTag(io, .{
@@ -476,7 +476,7 @@ test "a repository's stack is kept between reads and read again only when it cha
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    const cache = state_mod.get(repo.refStore()._state).cache.?;
+    const cache = state_mod.get(repo.refStore().state).cache.?;
     for (0..50) |_| {
         const head = (try repo.head(io)).?;
         gpa.free(head.name);
