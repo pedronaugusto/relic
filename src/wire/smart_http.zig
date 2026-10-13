@@ -290,7 +290,7 @@ const Http = struct {
         .request = request,
         .response = response,
         .failure = failure,
-        .close = close,
+        .deinit = deinit,
     };
 
     fn self(context: *anyopaque) *Http {
@@ -973,7 +973,7 @@ const Http = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(io: Io, context: *anyopaque) void {
+    fn deinit(io: Io, context: *anyopaque) void {
         const h = self(context);
         h.endRequest();
         h.client.deinit(io);

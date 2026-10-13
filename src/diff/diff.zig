@@ -541,7 +541,7 @@ pub const BinaryRule = struct {
     pub fn isBinary(rule: BinaryRule, a: Allocator, io: Io, path: []const u8, bytes: []const u8) attributes.Error!bool {
         if (rule.attrs) |attrs| {
             if (rule.work_dir) |wt| try attrs.enter(io, wt, path);
-            const applied = try attrs.lookup(a, path, false);
+            const applied = try attrs.lookup(a, path, .file);
             if (applied.get("diff")) |state| switch (state) {
                 .unset => return true,
                 .set => return false,

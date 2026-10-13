@@ -24,6 +24,7 @@ const Io = std.Io;
 
 const sets = @import("set.zig");
 const sweep = @import("sweep");
+const Kind = sweep.Kind;
 const encoding = @import("../text.zig").encoding;
 const fs = @import("../fs/fs.zig");
 
@@ -131,7 +132,8 @@ pub const Attributes = struct {
     }
 };
 
-/// The loaded attributes for a working tree.
+/// The loaded attributes for a working tree. Each level holds the cache its
+/// lookups run on, so one thread at a time looks up.
 pub const Attrs = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -430,7 +432,7 @@ pub const Attrs = struct {
     ///
     /// The result borrows the allocator passed in, which is usually an arena
     /// the caller resets per path.
-    pub fn lookup(attrs: *const Attrs, a: Allocator, path: []const u8, is_dir: bool) Allocator.Error!Attributes {
+    pub fn lookup(attrs: *const Attrs, a: Allocator, path: []const u8, kind: Kind) Allocator.Error!Attributes {
         var out: std.ArrayList(Assignment) = .empty;
         errdefer out.deinit(a);
 
@@ -453,7 +455,7 @@ pub const Attrs = struct {
             const hit_allocator = hit_scratch.allocator();
             var hits: std.ArrayList(sweep.Set.Index) = .empty;
             defer hits.deinit(hit_allocator);
-            try levelMatcher(level.*).all(hit_allocator, relative, is_dir, &hits);
+            try levelMatcher(level.*).all(hit_allocator, relative, kind, &hits);
             var i = hits.items.len;
             while (i > 0) {
                 i -= 1;
@@ -933,7 +935,7 @@ test "text=auto normalises a text file and leaves a binary one" {
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const a = try attrs.lookup(arena.allocator(), "a.txt", false);
+    const a = try attrs.lookup(arena.allocator(), "a.txt", .file);
 
     const text = try toGit(gpa, "one\r\ntwo\r\n", a, .{});
     defer text.deinit(gpa);
@@ -971,7 +973,7 @@ test "core.autocrlf without an attribute" {
     defer attrs.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const a = try attrs.lookup(arena.allocator(), "a.txt", false);
+    const a = try attrs.lookup(arena.allocator(), "a.txt", .file);
 
     const off = try toGit(gpa, "one\r\n", a, .{ .autocrlf = .false });
     defer off.deinit(gpa);
@@ -997,7 +999,7 @@ test "-text turns conversion off whatever the configuration says" {
     try attrs.addText("*.bin -text\n", "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const a = try attrs.lookup(arena.allocator(), "x.bin", false);
+    const a = try attrs.lookup(arena.allocator(), "x.bin", .file);
     const kept = try toGit(gpa, "one\r\n", a, .{ .autocrlf = .true });
     defer kept.deinit(gpa);
     try std.testing.expectEqualStrings("one\r\n", kept.bytes);
@@ -1011,12 +1013,12 @@ test "the eol attribute beats core.eol" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
-    const txt = try attrs.lookup(arena.allocator(), "a.txt", false);
+    const txt = try attrs.lookup(arena.allocator(), "a.txt", .file);
     const crlf = try toWorktree(gpa, "one\n", txt, .{ .eol = .lf });
     defer crlf.deinit(gpa);
     try std.testing.expectEqualStrings("one\r\n", crlf.bytes);
 
-    const sh = try attrs.lookup(arena.allocator(), "a.sh", false);
+    const sh = try attrs.lookup(arena.allocator(), "a.sh", .file);
     const lf = try toWorktree(gpa, "one\n", sh, .{ .eol = .crlf });
     defer lf.deinit(gpa);
     try std.testing.expectEqualStrings("one\n", lf.bytes);
@@ -1030,11 +1032,11 @@ test "a macro expands, and the built-in binary macro is there" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
-    const zz = try attrs.lookup(arena.allocator(), "a.zz", false);
+    const zz = try attrs.lookup(arena.allocator(), "a.zz", .file);
     try std.testing.expectEqual(State.unset, zz.get("text").?);
     try std.testing.expectEqualStrings("zig", zz.value("diff").?);
 
-    const png = try attrs.lookup(arena.allocator(), "a.png", false);
+    const png = try attrs.lookup(arena.allocator(), "a.png", .file);
     try std.testing.expectEqual(State.unset, png.get("text").?);
     try std.testing.expectEqual(State.unset, png.get("diff").?);
 }
@@ -1056,7 +1058,7 @@ test "macros naming each other many times over expand once each, where each expa
     try attrs.addText(text.items, "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const found = try attrs.lookup(arena.allocator(), "f", false);
+    const found = try attrs.lookup(arena.allocator(), "f", .file);
     try std.testing.expect(found.isSet("leaf"));
     try std.testing.expectEqual(@as(usize, 10), found.items.len);
 }
@@ -1069,11 +1071,11 @@ test "a deeper file wins, and info/attributes wins over both" {
     try attrs.addText("* -text\n", "sub", "sub/.gitattributes", 2);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const deep = try attrs.lookup(arena.allocator(), "sub/a.txt", false);
+    const deep = try attrs.lookup(arena.allocator(), "sub/a.txt", .file);
     try std.testing.expectEqual(State.unset, deep.get("text").?);
 
     try attrs.addText("* text=auto\n", "", "info/attributes", info_precedence);
-    const highest = try attrs.lookup(arena.allocator(), "sub/a.txt", false);
+    const highest = try attrs.lookup(arena.allocator(), "sub/a.txt", .file);
     try std.testing.expectEqualStrings("auto", highest.value("text").?);
 }
 
@@ -1085,13 +1087,13 @@ test "an unimplemented setting is named" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
-    const po = try attrs.lookup(arena.allocator(), "a.po", false);
+    const po = try attrs.lookup(arena.allocator(), "a.po", .file);
     const refused = unsupported(po, &.{}).?;
     try std.testing.expectEqualStrings("working-tree-encoding", refused.settingName());
     try std.testing.expectEqualStrings("SHIFT-JIS", refused.settingValue());
-    try std.testing.expect(unsupported(try attrs.lookup(arena.allocator(), "a.txt", false), &.{}) == null);
+    try std.testing.expect(unsupported(try attrs.lookup(arena.allocator(), "a.txt", .file), &.{}) == null);
 
-    const lfs = try attrs.lookup(arena.allocator(), "a.lfs", false);
+    const lfs = try attrs.lookup(arena.allocator(), "a.lfs", .file);
     try std.testing.expect(unsupported(lfs, &.{}) == null);
     const required = unsupported(lfs, &.{"lfs"}).?;
     try std.testing.expectEqualStrings("filter", required.settingName());
@@ -1115,7 +1117,7 @@ fn fuzzAttrs(_: void, case: *shakedown_mod.Case) anyerror!void {
     attrs.addText(text, "", "fuzz", 1) catch return;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const a = attrs.lookup(arena.allocator(), path, false) catch return;
+    const a = attrs.lookup(arena.allocator(), path, .file) catch return;
     _ = unsupported(a, &.{"lfs"});
     const converted = toGit(gpa, text, a, .{ .autocrlf = .true }) catch return;
     converted.deinit(gpa);
@@ -1130,7 +1132,7 @@ test "quoted attributes decode C escapes once" {
     defer arena.deinit();
     const cases = .{ .{ "tab\tname", "tab" }, .{ "quote\"name", "quote" }, .{ "octal name", "octal" } };
     inline for (cases) |case| {
-        const found = try attrs.lookup(arena.allocator(), case[0], false);
+        const found = try attrs.lookup(arena.allocator(), case[0], .file);
         try std.testing.expectEqualStrings(case[1], found.value("diff") orelse "missing");
     }
 }
@@ -1145,10 +1147,10 @@ test "attribute sets survive every allocation failure and keep precedence" {
             try attrs.addText("*.ZIG diff=deep\n", "src", "src/.gitattributes", 2);
             var arena = std.heap.ArenaAllocator.init(gpa);
             defer arena.deinit();
-            const found = try attrs.lookup(arena.allocator(), "src/main.Zig", false);
+            const found = try attrs.lookup(arena.allocator(), "src/main.Zig", .file);
             try std.testing.expectEqualStrings("deep", found.value("diff").?);
             try std.testing.expect(found.isSet("text"));
-            const binary = try attrs.lookup(arena.allocator(), "src/data.BIN", false);
+            const binary = try attrs.lookup(arena.allocator(), "src/data.BIN", .file);
             try std.testing.expectEqual(State.unset, binary.get("diff").?);
         }
     }.exercise, .{});
@@ -1165,7 +1167,7 @@ test "attribute queries release their scratch on every allocation failure" {
         fn query(a: Allocator, loaded: *const Attrs) !void {
             var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();
-            const result = try loaded.lookup(arena.allocator(), &@as([1800]u8, @splat('a')), false);
+            const result = try loaded.lookup(arena.allocator(), &@as([1800]u8, @splat('a')), .file);
             try std.testing.expect(result.isSet("text"));
             try std.testing.expectEqualStrings("long", result.value("diff").?);
         }

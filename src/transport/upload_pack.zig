@@ -118,7 +118,10 @@ pub const Server = struct {
         (switch (s.version) {
             .v2 => s.advertiseV2(w),
             .v0, .v1 => s.advertiseV0(w),
-        }) catch |err| return writeError(err);
+        }) catch |err| switch (err) {
+            error.PacketTooLong => return error.WriteFailed,
+            else => |e| return e,
+        };
     }
 
     fn advertiseV2(s: *Server, w: *Io.Writer) (pkt_line.WriteError || Allocator.Error)!void {
@@ -1060,11 +1063,10 @@ const Sideband = struct {
     }
 };
 
-fn writeError(err: anyerror) Error {
+/// A packet that could not be written, to the client: `WriteFailed`.
+fn writeError(err: pkt_line.WriteError) Error {
     return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.Canceled => error.Canceled,
-        else => error.WriteFailed,
+        error.PacketTooLong, error.WriteFailed => error.WriteFailed,
     };
 }
 
@@ -1106,7 +1108,7 @@ const InProcess = struct {
         .request = request,
         .response = response,
         .failure = failure,
-        .close = close,
+        .deinit = deinit,
     };
 
     fn self(context: *anyopaque) *InProcess {
@@ -1167,7 +1169,7 @@ const InProcess = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(io: Io, context: *anyopaque) void {
+    fn deinit(io: Io, context: *anyopaque) void {
         const c = self(context);
         if (c.started) {
             c.request_bytes.deinit();

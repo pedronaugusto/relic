@@ -44,6 +44,13 @@ pub const Error = error{
     LfsSshVersionRefused,
 } || connection.Error || program.Error;
 
+/// The head of an answer whose data follows: its status and arguments,
+/// with the data read by `Connection.nextData`.
+pub const Head = struct {
+    code: u16,
+    args: []const []const u8,
+};
+
 /// One answer: its status, its arguments, and its lines.
 pub const Status = struct {
     code: u16,
@@ -116,7 +123,7 @@ pub const Connection = struct {
         }
         if (!version) return error.LfsSshVersionRefused;
         try c.send(io, "version 1", &.{});
-        const status = try c.readStatus(scratch.allocator(), io);
+        const status = try c.readAnswer(scratch.allocator(), io);
         if (status.code != 200) return error.LfsSshVersionRefused;
     }
 
@@ -168,7 +175,7 @@ pub const Connection = struct {
 
     /// Read an answer made of a status, arguments, and lines after a
     /// delimiter, to its flush. Everything is copied into `arena`.
-    pub fn readStatus(c: *Connection, arena: Allocator, io: Io) Self.Error!Status {
+    pub fn readAnswer(c: *Connection, arena: Allocator, io: Io) Self.Error!Status {
         try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var lines: std.ArrayList([]const u8) = .empty;
@@ -194,9 +201,9 @@ pub const Connection = struct {
         }
     }
 
-    /// Read the status and arguments of an answer that carries data after
-    /// its delimiter; the data is then read with `nextData`.
-    pub fn readStatusWithData(c: *Connection, arena: Allocator, io: Io) Self.Error!struct { code: u16, args: []const []const u8 } {
+    /// Read the head of an answer that carries data after its delimiter;
+    /// the data is then read with `nextData`.
+    pub fn readHead(c: *Connection, arena: Allocator, io: Io) Self.Error!Head {
         try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var code: ?u16 = null;
@@ -234,7 +241,7 @@ pub const Connection = struct {
 
     fn sayQuit(c: *Connection, arena: Allocator, io: Io) ErrorNamespace.Error!void {
         try c.send(io, "quit", &.{});
-        _ = try c.readStatus(arena, io);
+        _ = try c.readAnswer(arena, io);
     }
 
     /// Say `quit`, read its answer, and close the connection. A connection

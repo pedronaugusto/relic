@@ -943,7 +943,7 @@ const Merge = struct {
                 at = slash;
             }
         }
-        const applied = try attrs.lookup(m.arena, path, false);
+        const applied = try attrs.lookup(m.arena, path, .file);
         return applied;
     }
 

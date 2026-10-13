@@ -301,7 +301,7 @@ const Traversal = struct {
     /// the directory's when none does.
     fn match(rules: *const ignore.Rules, path: []const u8, is_dir: bool, inherited: bool) bool {
         if (path.len == 0) return inherited;
-        const m = rules.match(path, is_dir);
+        const m = rules.match(path, if (is_dir) .dir else .file);
         return if (m.by != null) m.excluded else inherited;
     }
 };

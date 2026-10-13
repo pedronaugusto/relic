@@ -1,4 +1,6 @@
-//! Private storage for one compiled pattern set per precedence level.
+//! Private storage for one compiled pattern set per precedence level: the
+//! set, and the cache and cursor its queries run on, so one thread at a
+//! time asks a level.
 const std = @import("std");
 const sweep = @import("sweep");
 const Allocator = std.mem.Allocator;
@@ -47,7 +49,6 @@ pub const Matcher = struct {
     arena: std.heap.ArenaAllocator,
     set: sweep.Set,
     cache: sweep.Set.Cache,
-    turn: std.atomic.Mutex = .unlocked,
     walking: ?sweep.Set.Ancestors = null,
 
     pub fn build(builder: *Builder) Allocator.Error!*Matcher {
@@ -72,28 +73,16 @@ pub const Matcher = struct {
         gpa.destroy(m);
     }
 
-    pub fn lock(m: *Matcher) void {
-        while (!m.turn.tryLock()) std.atomic.spinLoopHint();
-    }
-
-    pub fn unlock(m: *Matcher) void {
-        m.turn.unlock();
-    }
-
-    pub fn last(m: *Matcher, path: []const u8, is_dir: bool) ?u32 {
-        m.lock();
-        defer m.unlock();
-        const hit = m.set.last(&m.cache, path, if (is_dir) .dir else .file) orelse return null;
+    pub fn last(m: *Matcher, path: []const u8, kind: sweep.Kind) ?u32 {
+        const hit = m.set.last(&m.cache, path, kind) orelse return null;
         return hit.raw();
     }
 
-    pub fn all(m: *Matcher, a: Allocator, path: []const u8, is_dir: bool, out: *std.ArrayList(sweep.Set.Index)) Allocator.Error!void {
-        m.lock();
-        defer m.unlock();
-        try m.set.all(a, &m.cache, path, if (is_dir) .dir else .file, out);
+    pub fn all(m: *Matcher, a: Allocator, path: []const u8, kind: sweep.Kind, out: *std.ArrayList(sweep.Set.Index)) Allocator.Error!void {
+        try m.set.all(a, &m.cache, path, kind, out);
     }
 
-    pub fn begin(m: *Matcher, path: []const u8, is_dir: bool) void {
-        m.walking = m.set.ancestors(&m.cache, path, if (is_dir) .dir else .file);
+    pub fn begin(m: *Matcher, path: []const u8, kind: sweep.Kind) void {
+        m.walking = m.set.ancestors(&m.cache, path, kind);
     }
 };

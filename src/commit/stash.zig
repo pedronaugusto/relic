@@ -395,7 +395,7 @@ const Ctx = struct {
         var content: []const u8 = raw;
         if (mode != .symlink) {
             try ctx.attrs.enter(ctx.io, ctx.wt, path);
-            const applied = try ctx.attrs.lookup(a, path, false);
+            const applied = try ctx.attrs.lookup(a, path, .file);
             content = (try ctx.conv.toGit(a, .{ .path = path, .bytes = raw, .applied = applied }, .{ .storing = if (write) .store else .hash_only })).bytes;
         }
         const oid = if (write)

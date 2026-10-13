@@ -24,6 +24,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const sets = @import("set.zig");
+const Kind = @import("sweep").Kind;
 const ignore = @import("ignore.zig");
 const glob_mod = @import("../text.zig").glob;
 const fs = @import("../fs/fs.zig");
@@ -31,7 +32,8 @@ const fs = @import("../fs/fs.zig");
 /// Errors from loading sparse patterns.
 pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
 
-/// The patterns that decide what is in the working tree.
+/// The patterns that decide what is in the working tree. They hold the cache
+/// their queries run on, so one thread at a time asks them.
 pub const Patterns = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -135,12 +137,10 @@ pub const Patterns = struct {
     /// the same file: `/*` includes every top-level entry, and everything
     /// under an included directory comes with it unless a deeper pattern
     /// says otherwise.
-    pub fn includes(p: *const Patterns, path: []const u8, is_dir: bool) bool {
-        if (p.cone) |*c| return c.match(path, is_dir) != .outside;
+    pub fn includes(p: *const Patterns, path: []const u8, kind: Kind) bool {
+        if (p.cone) |*c| return c.match(path, kind) != .outside;
         const m = matcher(p._matcher orelse return false);
-        m.lock();
-        defer m.unlock();
-        m.begin(path, is_dir);
+        m.begin(path, kind);
         var included = false;
         while (m.walking.?.next()) |step| {
             if (step.last) |i| included = !p.items.items[i.raw()].negated;
@@ -295,7 +295,8 @@ pub const Cone = struct {
     /// Where `path` stands. A directory is answered for the files directly
     /// inside it, which is how git asks: a parent of the cone is `inside`
     /// even though most of what is under it is not.
-    pub fn match(c: *const Cone, path: []const u8, is_dir: bool) ConeMatch {
+    pub fn match(c: *const Cone, path: []const u8, kind: Kind) ConeMatch {
+        const is_dir = kind == .dir;
         if (c.full) return .inside;
         // A file named like an included directory, which only a pattern
         // written by hand can produce.
@@ -384,9 +385,9 @@ test "the last matching pattern decides, and nothing is in by default" {
     defer patterns.deinit();
     try patterns.addText("/*\n!/secret/\n");
 
-    try std.testing.expect(patterns.includes("README.md", false));
-    try std.testing.expect(patterns.includes("src/main.zig", false));
-    try std.testing.expect(!patterns.includes("secret", true));
+    try std.testing.expect(patterns.includes("README.md", .file));
+    try std.testing.expect(patterns.includes("src/main.zig", .file));
+    try std.testing.expect(!patterns.includes("secret", .dir));
 }
 
 test "a cone-shaped file includes a directory and everything under it" {
@@ -395,17 +396,17 @@ test "a cone-shaped file includes a directory and everything under it" {
     defer patterns.deinit();
     try patterns.addText("/*\n!/*/\n/src/\n");
 
-    try std.testing.expect(patterns.includes("top.txt", false));
-    try std.testing.expect(patterns.includes("src/main.zig", false));
-    try std.testing.expect(patterns.includes("src/deep/inner.zig", false));
-    try std.testing.expect(!patterns.includes("docs/page.md", false));
+    try std.testing.expect(patterns.includes("top.txt", .file));
+    try std.testing.expect(patterns.includes("src/main.zig", .file));
+    try std.testing.expect(patterns.includes("src/deep/inner.zig", .file));
+    try std.testing.expect(!patterns.includes("docs/page.md", .file));
 }
 
 test "empty patterns include nothing" {
     const gpa = std.testing.allocator;
     var patterns = try Patterns.init(gpa, .{ .case_fold = false });
     defer patterns.deinit();
-    try std.testing.expect(!patterns.includes("anything", false));
+    try std.testing.expect(!patterns.includes("anything", .file));
 }
 
 test "a cone file reads as its directories, and a path is answered by lookups" {
@@ -418,15 +419,15 @@ test "a cone file reads as its directories, and a path is answered by lookups" {
     try std.testing.expect(cone.isParent("A"));
     try std.testing.expect(cone.isRecursive("A/B"));
     try std.testing.expect(cone.isRecursive("g[1]"));
-    try std.testing.expectEqual(ConeMatch.inside, cone.match("top.txt", false));
-    try std.testing.expectEqual(ConeMatch.inside, cone.match("A/a.txt", false));
-    try std.testing.expectEqual(ConeMatch.recursive, cone.match("A/B/C/c.txt", false));
-    try std.testing.expectEqual(ConeMatch.outside, cone.match("A/X/x.txt", false));
-    try std.testing.expectEqual(ConeMatch.outside, cone.match("D/d.txt", false));
+    try std.testing.expectEqual(ConeMatch.inside, cone.match("top.txt", .file));
+    try std.testing.expectEqual(ConeMatch.inside, cone.match("A/a.txt", .file));
+    try std.testing.expectEqual(ConeMatch.recursive, cone.match("A/B/C/c.txt", .file));
+    try std.testing.expectEqual(ConeMatch.outside, cone.match("A/X/x.txt", .file));
+    try std.testing.expectEqual(ConeMatch.outside, cone.match("D/d.txt", .file));
     // A directory is answered for the files directly in it.
-    try std.testing.expectEqual(ConeMatch.inside, cone.match("A", true));
-    try std.testing.expectEqual(ConeMatch.recursive, cone.match("A/B", true));
-    try std.testing.expectEqual(ConeMatch.outside, cone.match("D", true));
+    try std.testing.expectEqual(ConeMatch.inside, cone.match("A", .dir));
+    try std.testing.expectEqual(ConeMatch.recursive, cone.match("A/B", .dir));
+    try std.testing.expectEqual(ConeMatch.outside, cone.match("D", .dir));
 }
 
 test "a file without the cone's shape is not a cone" {
@@ -445,8 +446,8 @@ test "a file without the cone's shape is not a cone" {
     var empty = (try Cone.parse(gpa, "", .{ .arena = arena.allocator(), .case_fold = false })).?;
     defer empty.deinit(gpa);
     // Files at the root are in whatever the cone says.
-    try std.testing.expectEqual(ConeMatch.inside, empty.match("README", false));
-    try std.testing.expectEqual(ConeMatch.outside, empty.match("src/main.zig", false));
+    try std.testing.expectEqual(ConeMatch.inside, empty.match("README", .file));
+    try std.testing.expectEqual(ConeMatch.outside, empty.match("src/main.zig", .file));
 }
 
 test "a cone compares without case when the filesystem folds it" {
@@ -454,8 +455,8 @@ test "a cone compares without case when the filesystem folds it" {
     var patterns = try Patterns.fromText(gpa, "/*\n!/*/\n/Docs/\n", .{ .cone = true, .case_fold = true });
     defer patterns.deinit();
     try std.testing.expect(patterns.cone != null);
-    try std.testing.expect(patterns.includes("docs/page.md", false));
-    try std.testing.expect(!patterns.includes("src/main.zig", false));
+    try std.testing.expect(patterns.includes("docs/page.md", .file));
+    try std.testing.expect(!patterns.includes("src/main.zig", .file));
 }
 
 test "git's trimming keeps an escaped trailing space" {
@@ -482,12 +483,12 @@ fn fuzzCone(_: void, case: *shakedown_mod.Case) anyerror!void {
     for ([_]bool{ false, true }) |fold| {
         var cone = (try Cone.parse(gpa, text, .{ .arena = arena.allocator(), .case_fold = fold })) orelse continue;
         defer cone.deinit(gpa);
-        _ = cone.match(path, false);
-        _ = cone.match(path, true);
+        _ = cone.match(path, .file);
+        _ = cone.match(path, .dir);
     }
     var patterns = try Patterns.fromText(gpa, text, .{ .cone = true });
     defer patterns.deinit();
-    _ = patterns.includes(path, false);
+    _ = patterns.includes(path, .file);
 }
 
 test "sparse set rebuilding survives every allocation failure" {
@@ -498,10 +499,10 @@ test "sparse set rebuilding survives every allocation failure" {
             defer patterns.deinit();
             try patterns.addText("/src/\n");
             try patterns.addText("!/src/generated/\n/src/generated/keep.zig\n");
-            try std.testing.expect(patterns.includes("SRC/main.zig", false));
-            try std.testing.expect(!patterns.includes("src/generated/drop.zig", false));
-            try std.testing.expect(patterns.includes("src/generated/keep.zig", false));
-            try std.testing.expect(!patterns.includes("docs/a", false));
+            try std.testing.expect(patterns.includes("SRC/main.zig", .file));
+            try std.testing.expect(!patterns.includes("src/generated/drop.zig", .file));
+            try std.testing.expect(patterns.includes("src/generated/keep.zig", .file));
+            try std.testing.expect(!patterns.includes("docs/a", .file));
         }
     }.exercise, .{});
 }

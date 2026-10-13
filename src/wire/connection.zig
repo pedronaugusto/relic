@@ -83,7 +83,7 @@ pub const Connection = struct {
         failure: *const fn (context: *anyopaque, connection: *Connection) ErrorNamespace.Error,
         /// End the conversation and release everything. After a failure it
         /// is still called, and still releases everything.
-        close: *const fn (io: Io, context: *anyopaque) void,
+        deinit: *const fn (io: Io, context: *anyopaque) void,
     };
 
     /// What the far side last said about a failure.
@@ -125,7 +125,7 @@ pub const Connection = struct {
         const context = c.context;
         const vtable = c.vtable;
         // Closing may free this connection's embedded storage.
-        defer vtable.close(io, context);
+        defer vtable.deinit(io, context);
         c.* = undefined;
     }
 
@@ -241,15 +241,15 @@ pub const Process = struct {
         .request = request,
         .response = response,
         .failure = failure,
-        .close = close,
+        .deinit = deinit,
     };
 
     /// Errors from `start`.
     pub const StartError = Error || program.Error;
 
     /// Start `invocation` with its standard input and output as the
-    /// conversation. The result is the caller's, released by closing its
-    /// connection.
+    /// conversation. The result is the caller's, released by its
+    /// connection's `deinit`.
     pub fn start(
         gpa: Allocator,
         io: Io,
@@ -348,7 +348,7 @@ pub const Process = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(io: Io, context: *anyopaque) void {
+    fn deinit(io: Io, context: *anyopaque) void {
         const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         p.writer.io = io;
         if (!p.exited) {
@@ -413,7 +413,7 @@ pub const Process = struct {
     }
 
     /// Close the program's input and wait for it: whether it succeeded.
-    /// The connection stays open for `close`.
+    /// The connection stays open for `deinit`.
     pub fn finish(c: *Connection, io: Io) Self.Error!void {
         const p = of(c) orelse return;
         if (p.exited) return;
@@ -446,7 +446,7 @@ pub const Process = struct {
         if (!p.exited) {
             p.exited = true;
             if (canceled(p)) {
-                // as `close`: a cancelled conversation's program is stopped
+                // as `deinit`: a cancelled conversation's program is stopped
                 p.running.kill(io);
                 return error.Canceled;
             }
@@ -495,7 +495,7 @@ test "a conversation that is not a program's is not read as one" {
         .request = undefined,
         .response = undefined,
         .failure = undefined,
-        .close = undefined,
+        .deinit = undefined,
     };
     var c: Connection = .{ .context = &other, .vtable = &vtable, .stateless = false };
     try std.testing.expectError(error.ConnectionFailed, Process.streams(&c, std.testing.io));

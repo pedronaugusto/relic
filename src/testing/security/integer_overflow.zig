@@ -110,10 +110,10 @@ test "CVE-2022-23521, t0003-attributes 'large attributes line ignored in tree' a
     try attrs.addText(text.items, "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    try std.testing.expectEqual(@as(usize, 0), (try attrs.lookup(arena.allocator(), "path", false)).items.len);
-    try std.testing.expectEqual(@as(usize, 0), (try attrs.lookup(arena.allocator(), "trailing", false)).items.len);
-    try std.testing.expectEqual(@as(usize, 0), (try attrs.lookup(arena.allocator(), "a", false)).items.len);
-    try std.testing.expectEqual(@as(usize, 1), (try attrs.lookup(arena.allocator(), "kept", false)).items.len);
+    try std.testing.expectEqual(@as(usize, 0), (try attrs.lookup(arena.allocator(), "path", .file)).items.len);
+    try std.testing.expectEqual(@as(usize, 0), (try attrs.lookup(arena.allocator(), "trailing", .file)).items.len);
+    try std.testing.expectEqual(@as(usize, 0), (try attrs.lookup(arena.allocator(), "a", .file)).items.len);
+    try std.testing.expectEqual(@as(usize, 1), (try attrs.lookup(arena.allocator(), "kept", .file)).items.len);
 }
 
 test "git 2.39.0 apply input cap, t4141-apply-too-large 'git apply rejects patches that are too large': a patch of 1023 MiB or more is refused before it is read" {

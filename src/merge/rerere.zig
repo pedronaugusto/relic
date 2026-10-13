@@ -167,7 +167,7 @@ const Run = struct {
 
     fn markerSize(r: *Run, path: []const u8) Error!u32 {
         const attrs = r.rules.attrs orelse return 7;
-        const applied = try attrs.lookup(r.arena, path, false);
+        const applied = try attrs.lookup(r.arena, path, .file);
         if (applied.value("conflict-marker-size")) |text| {
             if (std.fmt.parseInt(i32, text, 10)) |size| {
                 if (size > 0) return @intCast(size);
@@ -578,7 +578,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
     // of that name, and nothing said `merge.default`.
     var name: ?[]const u8 = r.repo.configuration().get("merge.default");
     if (r.rules.attrs) |attrs| {
-        const applied = try attrs.lookup(r.arena, path, false);
+        const applied = try attrs.lookup(r.arena, path, .file);
         if (applied.get("merge")) |state| switch (state) {
             .unset => return .{ .bytes = ours, .clean = false },
             .set => name = null,
@@ -616,7 +616,7 @@ fn stagePath(r: *Run, index: *Index, path: []const u8) Error!void {
     if (index.findStage(path, 2)) |ours| mode = ours.mode;
     var content: []const u8 = bytes;
     if (r.rules.attrs) |attrs| {
-        const applied = try attrs.lookup(r.arena, path, false);
+        const applied = try attrs.lookup(r.arena, path, .file);
         content = (try attributes.toGit(r.arena, bytes, applied, r.rules.core)).bytes;
     }
     const oid = try r.repo.objectDatabase().write(r.io, .blob, content);

@@ -20,6 +20,7 @@ const Io = std.Io;
 
 const sets = @import("set.zig");
 const sweep = @import("sweep");
+const Kind = sweep.Kind;
 const fs = @import("../fs/fs.zig");
 
 /// Errors from loading ignore rules.
@@ -74,7 +75,8 @@ pub const Level = struct {
 /// Levels are held in precedence order, lowest first. A directory walk pushes
 /// a level as it enters a directory holding a `.gitignore` and pops it on the
 /// way out, which is how a deeper file comes to override a shallower one
-/// without re-reading anything.
+/// without re-reading anything. Each level holds the cache its queries run
+/// on, so one thread at a time asks the rules.
 pub const Rules = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -207,11 +209,11 @@ pub const Rules = struct {
     /// Only the path itself is considered: a caller walking a tree does not
     /// descend into an excluded directory, so the parents have already been
     /// decided. `matchPath` is the call that considers them.
-    pub fn match(rules: *const Rules, path: []const u8, is_dir: bool) Match {
+    pub fn match(rules: *const Rules, path: []const u8, kind: Kind) Match {
         var by: ?*const Pattern = null;
         for (rules.levels.items) |level| {
             const relative = relativeTo(level.base, path) orelse continue;
-            if (levelMatcher(level).last(relative, is_dir)) |i| by = &level.patterns[i];
+            if (levelMatcher(level).last(relative, kind)) |i| by = &level.patterns[i];
         }
         const decided = by orelse return .{ .excluded = false, .by = null };
         return .{ .excluded = !decided.negated, .by = decided.* };
@@ -226,15 +228,12 @@ pub const Rules = struct {
     /// directory excluded by a pattern that only names its *contents*, such
     /// as `dir/*`: the directory itself is not excluded, so the walk enters
     /// it and a later negation applies.
-    pub fn matchPath(rules: *const Rules, path: []const u8, is_dir: bool) Match {
-        // Every level advances once over the subject. Lock in precedence
-        // order so concurrent queries keep their caches and cursors separate.
-        for (rules.levels.items) |level| levelMatcher(level).lock();
-        defer for (rules.levels.items) |level| levelMatcher(level).unlock();
+    pub fn matchPath(rules: *const Rules, path: []const u8, kind: Kind) Match {
+        // Every level advances once over the subject.
         for (rules.levels.items) |level| {
             const m = levelMatcher(level);
             m.walking = null;
-            if (relativeTo(level.base, path)) |relative| m.begin(relative, is_dir);
+            if (relativeTo(level.base, path)) |relative| m.begin(relative, kind);
         }
         var at: usize = 0;
         while (true) {
@@ -306,7 +305,7 @@ pub const Checker = struct {
 
     /// The rules with every level read so far, handed back; the checker is
     /// finished, and needs no `deinit`.
-    pub fn release(checker: *Checker) Rules {
+    pub fn toRules(checker: *Checker) Rules {
         checker.read.deinit(checker.rules.gpa);
         const rules = checker.rules;
         checker.* = undefined;
@@ -317,14 +316,14 @@ pub const Checker = struct {
     /// (`Rules.matchPath`). `path` is `/`-separated and relative to the
     /// working tree's root. A tracked path is the caller's to keep: git
     /// reports it whatever the rules say.
-    pub fn excluded(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Self.Error!bool {
-        return (try checker.match(io, path, is_dir)).excluded;
+    pub fn excluded(checker: *Checker, io: Io, path: []const u8, kind: Kind) Self.Error!bool {
+        return (try checker.match(io, path, kind)).excluded;
     }
 
     /// What decided `path`, and how, as `excluded` decides it.
-    pub fn match(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Self.Error!Match {
+    pub fn match(checker: *Checker, io: Io, path: []const u8, kind: Kind) Self.Error!Match {
         try checker.readAbove(io, path);
-        return checker.rules.matchPath(path, is_dir);
+        return checker.rules.matchPath(path, kind);
     }
 
     fn readAbove(checker: *Checker, io: Io, path: []const u8) ErrorNamespace.Error!void {
@@ -397,11 +396,11 @@ test "the last matching line in a file wins" {
     defer rules.deinit();
     try rules.addText("*.log\n!keep.log\n", "", ".gitignore", 2);
 
-    try std.testing.expect(rules.match("a.log", false).excluded);
-    try std.testing.expect(!rules.match("keep.log", false).excluded);
-    try std.testing.expect(rules.match("keep.log", false).by != null);
-    try std.testing.expect(!rules.match("a.txt", false).excluded);
-    try std.testing.expect(rules.match("a.txt", false).by == null);
+    try std.testing.expect(rules.match("a.log", .file).excluded);
+    try std.testing.expect(!rules.match("keep.log", .file).excluded);
+    try std.testing.expect(rules.match("keep.log", .file).by != null);
+    try std.testing.expect(!rules.match("a.txt", .file).excluded);
+    try std.testing.expect(rules.match("a.txt", .file).by == null);
 }
 
 test "a deeper file overrides a shallower one" {
@@ -411,11 +410,11 @@ test "a deeper file overrides a shallower one" {
     try rules.addText("*.log\n", "", ".gitignore", 2);
     try rules.addText("!important.log\n", "sub", "sub/.gitignore", 3);
 
-    try std.testing.expect(rules.match("a.log", false).excluded);
-    try std.testing.expect(rules.match("sub/a.log", false).excluded);
-    try std.testing.expect(!rules.match("sub/important.log", false).excluded);
+    try std.testing.expect(rules.match("a.log", .file).excluded);
+    try std.testing.expect(rules.match("sub/a.log", .file).excluded);
+    try std.testing.expect(!rules.match("sub/important.log", .file).excluded);
     // The deeper file only applies below its own directory.
-    try std.testing.expect(rules.match("important.log", false).excluded);
+    try std.testing.expect(rules.match("important.log", .file).excluded);
 }
 
 test "a directory excluded by its contents is still entered" {
@@ -427,11 +426,11 @@ test "a directory excluded by its contents is still entered" {
     // back.
     try rules.addText("dir/*\n!dir/keep\nother/\n!other/keep\n", "", ".gitignore", 2);
 
-    try std.testing.expect(!rules.match("dir", true).excluded);
-    try std.testing.expect(rules.matchPath("dir/drop", false).excluded);
-    try std.testing.expect(!rules.matchPath("dir/keep", false).excluded);
-    try std.testing.expect(rules.match("other", true).excluded);
-    try std.testing.expect(rules.matchPath("other/keep", false).excluded);
+    try std.testing.expect(!rules.match("dir", .dir).excluded);
+    try std.testing.expect(rules.matchPath("dir/drop", .file).excluded);
+    try std.testing.expect(!rules.matchPath("dir/keep", .file).excluded);
+    try std.testing.expect(rules.match("other", .dir).excluded);
+    try std.testing.expect(rules.matchPath("other/keep", .file).excluded);
 }
 
 test "a bare negation line is not a pattern" {
@@ -449,12 +448,12 @@ test "trailing spaces go and trailing tabs stay, as git trims a line" {
     var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText("tabbed\t\nspaced  \nkept\\ \nesc\\\\  \n", "", ".gitignore", 2);
-    try std.testing.expect(rules.match("tabbed\t", false).excluded);
-    try std.testing.expect(!rules.match("tabbed", false).excluded);
-    try std.testing.expect(rules.match("spaced", false).excluded);
-    try std.testing.expect(rules.match("kept ", false).excluded);
-    try std.testing.expect(rules.match("esc\\", false).excluded);
-    try std.testing.expect(!rules.match("esc\\ ", false).excluded);
+    try std.testing.expect(rules.match("tabbed\t", .file).excluded);
+    try std.testing.expect(!rules.match("tabbed", .file).excluded);
+    try std.testing.expect(rules.match("spaced", .file).excluded);
+    try std.testing.expect(rules.match("kept ", .file).excluded);
+    try std.testing.expect(rules.match("esc\\", .file).excluded);
+    try std.testing.expect(!rules.match("esc\\ ", .file).excluded);
 }
 
 test "anchoring, directory-only and name matching" {
@@ -463,14 +462,14 @@ test "anchoring, directory-only and name matching" {
     defer rules.deinit();
     try rules.addText("/root-only\nbuild/\ndoc/*.txt\nanywhere\n", "", ".gitignore", 2);
 
-    try std.testing.expect(rules.match("root-only", false).excluded);
-    try std.testing.expect(!rules.match("sub/root-only", false).excluded);
-    try std.testing.expect(rules.match("build", true).excluded);
-    try std.testing.expect(!rules.match("build", false).excluded);
-    try std.testing.expect(rules.match("doc/a.txt", false).excluded);
-    try std.testing.expect(!rules.match("other/doc/a.txt", false).excluded);
-    try std.testing.expect(rules.match("anywhere", false).excluded);
-    try std.testing.expect(rules.match("deep/nest/anywhere", false).excluded);
+    try std.testing.expect(rules.match("root-only", .file).excluded);
+    try std.testing.expect(!rules.match("sub/root-only", .file).excluded);
+    try std.testing.expect(rules.match("build", .dir).excluded);
+    try std.testing.expect(!rules.match("build", .file).excluded);
+    try std.testing.expect(rules.match("doc/a.txt", .file).excluded);
+    try std.testing.expect(!rules.match("other/doc/a.txt", .file).excluded);
+    try std.testing.expect(rules.match("anywhere", .file).excluded);
+    try std.testing.expect(rules.match("deep/nest/anywhere", .file).excluded);
 }
 
 test "the deciding pattern is reported" {
@@ -478,7 +477,7 @@ test "the deciding pattern is reported" {
     var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     try rules.addText("*.o\n*.tmp\n", "", ".gitignore", 2);
-    const decided = rules.match("a.tmp", false);
+    const decided = rules.match("a.tmp", .file);
     try std.testing.expect(decided.excluded);
     try std.testing.expectEqualStrings("*.tmp", decided.by.?.glob);
     try std.testing.expectEqual(@as(u32, 2), decided.by.?.line);
@@ -499,19 +498,19 @@ test "a checker reads each folder's rules the first time a path below it is aske
     var checker: Checker = .init(rules, tmp.dir, .{});
     defer checker.deinit();
 
-    try std.testing.expect(try checker.excluded(io, "a.log", false));
-    try std.testing.expect(try checker.excluded(io, "x.secret", false));
-    try std.testing.expect(!try checker.excluded(io, "a.txt", false));
+    try std.testing.expect(try checker.excluded(io, "a.log", .file));
+    try std.testing.expect(try checker.excluded(io, "x.secret", .file));
+    try std.testing.expect(!try checker.excluded(io, "a.txt", .file));
     // a deeper file beats a shallower one, and applies only below itself
-    try std.testing.expect(!try checker.excluded(io, "sub/keep.log", false));
-    try std.testing.expect(try checker.excluded(io, "sub/other.log", false));
-    try std.testing.expect(try checker.excluded(io, "sub/deep/x.tmp", false));
-    try std.testing.expect(!try checker.excluded(io, "x.tmp", false));
+    try std.testing.expect(!try checker.excluded(io, "sub/keep.log", .file));
+    try std.testing.expect(try checker.excluded(io, "sub/other.log", .file));
+    try std.testing.expect(try checker.excluded(io, "sub/deep/x.tmp", .file));
+    try std.testing.expect(!try checker.excluded(io, "x.tmp", .file));
     // a folder-only rule decides by what the path is, and covers below it
-    try std.testing.expect(try checker.excluded(io, "build", true));
-    try std.testing.expect(!try checker.excluded(io, "build", false));
-    try std.testing.expect(try checker.excluded(io, "build/out.o", false));
-    try std.testing.expectEqualStrings("*.tmp", (try checker.match(io, "sub/deep/y.tmp", false)).by.?.glob);
+    try std.testing.expect(try checker.excluded(io, "build", .dir));
+    try std.testing.expect(!try checker.excluded(io, "build", .file));
+    try std.testing.expect(try checker.excluded(io, "build/out.o", .file));
+    try std.testing.expectEqualStrings("*.tmp", (try checker.match(io, "sub/deep/y.tmp", .file)).by.?.glob);
     // each folder read once: four levels of files and one of text
     try std.testing.expectEqual(@as(usize, 4), checker.rules.levels.items.len);
 }
@@ -530,19 +529,19 @@ test "a checker asks an unreadable folder's rules again, or skips them when told
 
     var failing: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{});
     defer failing.deinit();
-    try std.testing.expect(std.meta.isError(failing.excluded(io, "sub/a.log", false)));
+    try std.testing.expect(std.meta.isError(failing.excluded(io, "sub/a.log", .file)));
     try std.testing.expect(!failing.read.contains(""));
     try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "!sub/a.log\n*.txt\n" });
-    try std.testing.expect(try failing.excluded(io, "b.txt", false));
-    try std.testing.expect(try failing.excluded(io, "sub/a.log", false));
+    try std.testing.expect(try failing.excluded(io, "b.txt", .file));
+    try std.testing.expect(try failing.excluded(io, "sub/a.log", .file));
 
     var big_again = try tmp.dir.createFile(io, ".gitignore", .{});
     try big_again.setLength(io, (1 << 24) + 1);
     big_again.close(io);
     var skipping: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{ .unreadable = .skip });
     defer skipping.deinit();
-    try std.testing.expect(try skipping.excluded(io, "sub/a.log", false));
-    try std.testing.expect(!try skipping.excluded(io, "b.txt", false));
+    try std.testing.expect(try skipping.excluded(io, "sub/a.log", .file));
+    try std.testing.expect(!try skipping.excluded(io, "b.txt", .file));
 }
 
 test "a checker marks no folder read when reading it runs out of memory" {
@@ -557,12 +556,12 @@ test "a checker marks no folder read when reading it runs out of memory" {
         var checker: Checker = .init(try .init(fa.allocator(), .{ .case_fold = false }), tmp.dir, .{});
         defer checker.deinit();
         fa.fail_index = fa.alloc_index + offset;
-        _ = checker.excluded(io, "keep.log", false) catch |err| {
+        _ = checker.excluded(io, "keep.log", .file) catch |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             failures += 1;
             try std.testing.expect(!checker.read.contains(""));
             fa.fail_index = std.math.maxInt(usize);
-            try std.testing.expect(try checker.excluded(io, "keep.log", false));
+            try std.testing.expect(try checker.excluded(io, "keep.log", .file));
             continue;
         };
     }
@@ -576,10 +575,10 @@ test "a checker hands back its rules with every level it read" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.o\n" });
     var checker: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{});
-    try std.testing.expect(try checker.excluded(io, "a.o", false));
-    var rules = checker.release();
+    try std.testing.expect(try checker.excluded(io, "a.o", .file));
+    var rules = checker.toRules();
     defer rules.deinit();
-    try std.testing.expect(rules.match("b.o", false).excluded);
+    try std.testing.expect(rules.match("b.o", .file).excluded);
 }
 
 test "fuzz: any ignore file answers without a crash" {
@@ -597,8 +596,8 @@ fn fuzzIgnore(_: void, case: *shakedown_mod.Case) anyerror!void {
     var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     rules.addText(text, "", "fuzz", 2) catch return;
-    _ = rules.match(path, false);
-    _ = rules.matchPath(path, true);
+    _ = rules.match(path, .file);
+    _ = rules.matchPath(path, .dir);
 }
 
 test "level sets retain negation, precedence and ancestor decisions under allocation failure" {
@@ -609,12 +608,12 @@ test "level sets retain negation, precedence and ancestor decisions under alloca
             defer rules.deinit();
             try rules.addText("*.LOG\n!keep.log\n/blocked/\n!blocked/keep.log\n", "", ".gitignore", 2);
             try rules.addText("!special.log\n", "sub", "sub/.gitignore", 3);
-            try std.testing.expect(rules.matchPath("sub/a.log", false).excluded);
-            try std.testing.expect(!rules.matchPath("sub/special.log", false).excluded);
-            try std.testing.expect(!rules.matchPath("sub/keep.log", false).excluded);
-            try std.testing.expect(rules.matchPath("blocked/keep.log", false).excluded);
+            try std.testing.expect(rules.matchPath("sub/a.log", .file).excluded);
+            try std.testing.expect(!rules.matchPath("sub/special.log", .file).excluded);
+            try std.testing.expect(!rules.matchPath("sub/keep.log", .file).excluded);
+            try std.testing.expect(rules.matchPath("blocked/keep.log", .file).excluded);
             rules.popTo(3);
-            try std.testing.expect(rules.matchPath("sub/special.log", false).excluded);
+            try std.testing.expect(rules.matchPath("sub/special.log", .file).excluded);
         }
     }.exercise, .{});
 }

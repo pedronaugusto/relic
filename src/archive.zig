@@ -581,7 +581,7 @@ const Walk = struct {
         if (wk.options.worktree_attributes) {
             if (wk.repo.workDirectory()) |wt| try wk.attrs.enter(wk.io, wt, path);
         }
-        return wk.attrs.lookup(wk.a, path, is_dir);
+        return wk.attrs.lookup(wk.a, path, if (is_dir) .dir else .file);
     }
 
     fn emit(wk: *Walk, oid: Oid, path: []const u8, mode: u32, content: []const u8, is_binary: bool) Error!void {

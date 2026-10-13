@@ -480,7 +480,7 @@ const Walker = struct {
             if (w.options.rules.ignore) |rules| {
                 // An excluded directory is not entered at all, so a negation
                 // inside it cannot bring anything back — which is git's rule.
-                if (rules.match(path, true).excluded) return;
+                if (rules.match(path, .dir).excluded) return;
             }
             if (try gitlink.isRepository(w.gpa, w.io, w.wt, path)) return w.stageRepository(path, found);
         }
@@ -528,7 +528,7 @@ const Walker = struct {
             w.index.findStage(path, 2) != null or w.index.findStage(path, 3) != null);
         if (tracked == null) {
             if (!conflicted) if (w.options.rules.ignore) |rules| {
-                if (rules.match(path, false).excluded) return;
+                if (rules.match(path, .file).excluded) return;
             };
         } else if (tracked.?.skip_worktree) {
             try w.markSeen(path);
@@ -618,7 +618,7 @@ const Walker = struct {
         }
 
         if (w.options.rules.attrs) |attrs| {
-            const applied = try attrs.lookup(a, path, false);
+            const applied = try attrs.lookup(a, path, .file);
             const converted = try w.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .store });
             if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
                 .false => {},
@@ -1313,7 +1313,7 @@ const StatusScan = struct {
 
     fn excluded(s: *const StatusScan, path: []const u8, is_dir: bool) bool {
         const rules = s.options.rules.ignore orelse return false;
-        return rules.match(path, is_dir).excluded;
+        return rules.match(path, if (is_dir) .dir else .file).excluded;
     }
 
     /// An ignored directory the index has nothing under. Under `normal` it
@@ -1460,7 +1460,7 @@ const StatusScan = struct {
             const len = try s.wt.readLink(s.io, path, &buf);
             break :blk try a.dupe(u8, buf[0..len]);
         } else if (s.options.rules.attrs) |attrs| blk: {
-            const applied = try attrs.lookup(a, path, false);
+            const applied = try attrs.lookup(a, path, .file);
             break :blk (try s.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
         } else try s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
         const oid = hash.Hasher.object(s.db.objectFormat(), "blob", content);
@@ -2055,7 +2055,7 @@ const CheckoutWrite = struct {
                 const found = try c.db.read(c.io, want.oid);
                 defer c.gpa.free(found.bytes);
                 const executable = want.mode == .exec and c.options.rules.file_mode;
-                const smudged: native.Content = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = try attrs.lookup(a, path, false) }, .{
+                const smudged: native.Content = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = try attrs.lookup(a, path, .file) }, .{
                     .blob = want.oid,
                     .treeish = c.tree_oid,
                     .can_delay = true,
@@ -2592,7 +2592,7 @@ fn writePathFile(
         return true;
     };
     try attrs.enter(io, wt, path);
-    const applied = try attrs.lookup(a, path, false);
+    const applied = try attrs.lookup(a, path, .file);
     const smudged = try conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = applied }, .{
         .blob = want.oid,
         .can_delay = true,
@@ -2646,7 +2646,7 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
             const a = scratch.allocator();
             const found = try db.read(io, oid);
             defer db.allocator().free(found.bytes);
-            const applied: attributes.Attributes = if (rules.attrs) |attrs| try attrs.lookup(a, path, false) else .{ .items = &.{} };
+            const applied: attributes.Attributes = if (rules.attrs) |attrs| try attrs.lookup(a, path, .file) else .{ .items = &.{} };
             const smudged = try conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = applied }, .{ .blob = oid });
             try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
         },
@@ -2688,7 +2688,7 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
             const a = scratch.allocator();
             const applied: attributes.Attributes = if (rules.attrs) |attrs| blk: {
                 try attrs.enter(io, wt, path);
-                break :blk try attrs.lookup(a, path, false);
+                break :blk try attrs.lookup(a, path, .file);
             } else .{ .items = &.{} };
             const smudged = try conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = applied }, .{});
             try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
@@ -2791,7 +2791,7 @@ pub fn verifyUpdates(
     // back to the caller; one that cannot be read counts as absent
     var ignores: ?ignore.Checker = if (options.ignore) |rules| .init(rules.*, wt, .{ .unreadable = .skip }) else null;
     defer if (ignores) |*checker| {
-        options.ignore.?.* = checker.release();
+        options.ignore.?.* = checker.toRules();
     };
 
     const paths = try arena.dupe([]const u8, updates.keys());
@@ -2815,7 +2815,7 @@ pub fn verifyUpdates(
                 else if (index.find(prefix) != null)
                     false
                 else
-                    !(if (ignores) |*checker| try checker.excluded(io, prefix, false) else false);
+                    !(if (ignores) |*checker| try checker.excluded(io, prefix, .file) else false);
                 if (blocks) {
                     try untracked.append(arena, prefix);
                     break;
@@ -2932,7 +2932,7 @@ pub fn differsFromIndex(
             const entered = attrs.entered_any;
             try attrs.enter(io, wt, entry.path);
             defer if (!entered) attrs.leave();
-            const applied = try attrs.lookup(a, entry.path, false);
+            const applied = try attrs.lookup(a, entry.path, .file);
             content = (try conv.toGit(a, .{ .path = entry.path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only })).bytes;
         }
     }
@@ -3100,7 +3100,7 @@ pub fn applySparse(
 
     for (index.entries.items) |*entry| {
         if (entry.stage != 0 or entry.isSparseDirectory()) continue;
-        const included = patterns.includes(entry.path, false);
+        const included = patterns.includes(entry.path, .file);
         if (!included and !entry.skip_worktree) {
             if (try fs.statAt(io, wt, entry.path)) |found| {
                 // git's `verify_uptodate`: a stat that does not match is a
@@ -3122,7 +3122,7 @@ pub fn applySparse(
                     if (options.rules.attrs) |attrs| {
                         if (found.kind != .sym_link) {
                             try attrs.enter(io, wt, entry.path);
-                            const applied = try attrs.lookup(a, entry.path, false);
+                            const applied = try attrs.lookup(a, entry.path, .file);
                             content = (try conv.toGit(a, .{ .path = entry.path, .bytes = raw, .applied = applied }, .{ .storing = .hash_only })).bytes;
                         }
                     }
@@ -3193,7 +3193,7 @@ fn restoreSparse(
             const executable = entry.mode == .exec and options.rules.file_mode;
             if (options.rules.attrs) |attrs| {
                 try attrs.enter(io, wt, entry.path);
-                const applied = try attrs.lookup(a, entry.path, false);
+                const applied = try attrs.lookup(a, entry.path, .file);
                 const smudged = try conv.toWorktree(a, .{ .path = entry.path, .blob = found.bytes, .applied = applied }, .{ .blob = entry.oid });
                 try writeSmudged(io, wt, entry.path, smudged, executable);
             } else {
@@ -3314,7 +3314,7 @@ const ListScan = struct {
                 }
                 if (!s.index.hasDirectory(path)) {
                     if (s.rules.ignore) |rules| {
-                        if (rules.match(path, true).excluded) continue;
+                        if (rules.match(path, .dir).excluded) continue;
                     }
                     // A repository inside the working tree is its own to
                     // list: git names it once, as `sub/`.
@@ -3334,7 +3334,7 @@ const ListScan = struct {
             }
             if (s.index.find(path) != null) continue;
             if (s.rules.ignore) |rules| {
-                if (rules.match(path, false).excluded) continue;
+                if (rules.match(path, .file).excluded) continue;
             }
             try s.out.append(s.arena, path);
         }

@@ -107,49 +107,6 @@ pub const max_discovery_depth: u8 = 64;
 /// Caller-owned output for repository and history operations.
 pub const Diagnostic = diagnostic_mod.Diagnostic;
 
-/// The caller-owned diagnostic used by earlier open callers.
-/// How a repository is created.
-pub const CreateOptions = struct {
-    /// The hash every object name is written with.
-    object_format: hash.Kind = .sha1,
-    /// The branch `HEAD` points at before the first commit. git's own
-    /// default comes from `init.defaultBranch`, which this package does not
-    /// read because it reads no environment; the caller passes it.
-    default_branch: []const u8 = "main",
-    /// A repository with no working tree.
-    bare: bool = false,
-    /// Whether `core.filemode` is recorded as true. The caller decides,
-    /// because probing means writing a file.
-    file_mode: bool = Io.File.Permissions.has_executable_bit,
-    /// What the object database is opened with, including whether every
-    /// SHA-1 name it takes is checked for a collision attack.
-    odb: odb_mod.Options = .{},
-    /// Where the refs are kept: loose files and `packed-refs`, or a
-    /// reftable stack, which is `git init --ref-format=reftable` and which
-    /// git 3.0 makes the default.
-    ref_format: refs_mod.Format = .files,
-    /// The template directory git copies into a new repository: what
-    /// `--template`, `GIT_TEMPLATE_DIR`, `init.templateDir`
-    /// (`templateDir` reads it) or git's own installed one names, opened by
-    /// the caller. Everything in it but dotfiles is copied, nothing already
-    /// there replaced, a `config` in it the start of the repository's own.
-    template: ?Io.Dir = null,
-    /// `--shared`: written as `core.sharedRepository`, with
-    /// `receive.denyNonFastforwards`, and given to everything made. `null`
-    /// takes the template configuration's.
-    shared: ?fs.Shared = null,
-    /// Whether `core.ignorecase` is recorded as true: git probes for a file
-    /// system that folds case, and the caller decides here, as with
-    /// `file_mode`.
-    ignore_case: bool = false,
-    /// Whether the file system holds symbolic links; git records
-    /// `core.symlinks = false` where it does not.
-    symlinks: bool = true,
-    /// `core.precomposeunicode`, which git records on macOS from its probe
-    /// of how the file system stores decomposed names; `null` records
-    /// nothing.
-    precompose_unicode: ?bool = null,
-};
 
 /// Errors from `templateDir`.
 pub const TemplateDirError = Allocator.Error || error{MalformedValue};
@@ -274,6 +231,49 @@ const RepositoryData = struct {
 };
 
 pub const Repository = struct {
+    /// How a repository is created.
+    pub const CreateOptions = struct {
+        /// The hash every object name is written with.
+        object_format: hash.Kind = .sha1,
+        /// The branch `HEAD` points at before the first commit. git's own
+        /// default comes from `init.defaultBranch`, which this package does not
+        /// read because it reads no environment; the caller passes it.
+        default_branch: []const u8 = "main",
+        /// A repository with no working tree.
+        bare: bool = false,
+        /// Whether `core.filemode` is recorded as true. The caller decides,
+        /// because probing means writing a file.
+        file_mode: bool = Io.File.Permissions.has_executable_bit,
+        /// What the object database is opened with, including whether every
+        /// SHA-1 name it takes is checked for a collision attack.
+        odb: odb_mod.Options = .{},
+        /// Where the refs are kept: loose files and `packed-refs`, or a
+        /// reftable stack, which is `git init --ref-format=reftable` and which
+        /// git 3.0 makes the default.
+        ref_format: refs_mod.Format = .files,
+        /// The template directory git copies into a new repository: what
+        /// `--template`, `GIT_TEMPLATE_DIR`, `init.templateDir`
+        /// (`templateDir` reads it) or git's own installed one names, opened by
+        /// the caller. Everything in it but dotfiles is copied, nothing already
+        /// there replaced, a `config` in it the start of the repository's own.
+        template: ?Io.Dir = null,
+        /// `--shared`: written as `core.sharedRepository`, with
+        /// `receive.denyNonFastforwards`, and given to everything made. `null`
+        /// takes the template configuration's.
+        shared: ?fs.Shared = null,
+        /// Whether `core.ignorecase` is recorded as true: git probes for a file
+        /// system that folds case, and the caller decides here, as with
+        /// `file_mode`.
+        ignore_case: bool = false,
+        /// Whether the file system holds symbolic links; git records
+        /// `core.symlinks = false` where it does not.
+        symlinks: bool = true,
+        /// `core.precomposeunicode`, which git records on macOS from its probe
+        /// of how the file system stores decomposed names; `null` records
+        /// nothing.
+        precompose_unicode: ?bool = null,
+    };
+
     pub const Error = ErrorNamespace.Error;
 
     /// Private ownership; handles, caches and live configuration stay together.

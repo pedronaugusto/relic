@@ -477,7 +477,7 @@ pub const Fake = struct {
         .request = request,
         .response = response,
         .failure = failure,
-        .close = close,
+        .deinit = deinit,
     };
 
     /// A connection whose server says `bytes`.
@@ -512,5 +512,5 @@ pub const Fake = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(_: Io, _: *anyopaque) void {}
+    fn deinit(_: Io, _: *anyopaque) void {}
 };

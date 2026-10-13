@@ -1387,10 +1387,10 @@ test "the git directory of a working tree is found without opening the repositor
 
 /// What `git init` decided about the file system, read from what it wrote,
 /// for an `init` to record the same.
-fn probedOptions(gpa: std.mem.Allocator, io: Io, config_text: []const u8) repo_mod.CreateOptions {
+fn probedOptions(gpa: std.mem.Allocator, io: Io, config_text: []const u8) repo_mod.Repository.CreateOptions {
     _ = gpa;
     _ = io;
-    var options: repo_mod.CreateOptions = .{};
+    var options: repo_mod.Repository.CreateOptions = .{};
     options.file_mode = std.mem.find(u8, config_text, "filemode = true") != null;
     options.ignore_case = std.mem.find(u8, config_text, "ignorecase = true") != null;
     options.symlinks = std.mem.find(u8, config_text, "symlinks = false") == null;

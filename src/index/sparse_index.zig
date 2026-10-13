@@ -181,7 +181,7 @@ fn expandSelected(
 
     for (index.entries.items) |entry| {
         const keep = !entry.isSparseDirectory() or
-            (cone != null and cone.?.match(entry.path[0 .. entry.path.len - 1], true) == .outside) or
+            (cone != null and cone.?.match(entry.path[0 .. entry.path.len - 1], .dir) == .outside) or
             (only != null and !only.?.contains(entry.path));
         if (keep) {
             var copy = entry;
@@ -233,7 +233,7 @@ fn expandTree(
         if (item.mode == .tree) {
             // A directory the cone still leaves out stays collapsed.
             if (cone) |c| {
-                if (c.match(base.items, true) == .outside) {
+                if (c.match(base.items, .dir) == .outside) {
                     try base.append(gpa, '/');
                     try appendEntry(gpa, out, base.items, .tree, item.oid);
                     continue;
@@ -314,7 +314,7 @@ fn collapseNode(
     prefix: *std.ArrayList(u8),
     out: *std.ArrayList(Entry),
 ) Error!bool {
-    if (prefix.items.len != 0 and cone.match(prefix.items[0 .. prefix.items.len - 1], true) == .outside) {
+    if (prefix.items.len != 0 and cone.match(prefix.items[0 .. prefix.items.len - 1], .dir) == .outside) {
         var convertible = node.oid != null;
         for (entries) |entry| {
             if (entry.stage != 0 or entry.mode == .gitlink or !entry.skip_worktree) {

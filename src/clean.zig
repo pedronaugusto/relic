@@ -386,9 +386,9 @@ const Walk = struct {
 
     fn isExcluded(w: *Walk, path: []const u8, is_dir: bool) bool {
         // the command line's patterns decide first, whichever way they go
-        const by_command = w.command_line.match(path, is_dir);
+        const by_command = w.command_line.match(path, if (is_dir) .dir else .file);
         if (by_command.by != null) return by_command.excluded;
-        if (w.standard) |rules| return rules.match(path, is_dir).excluded;
+        if (w.standard) |rules| return rules.match(path, if (is_dir) .dir else .file).excluded;
         return false;
     }
 

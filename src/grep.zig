@@ -909,7 +909,7 @@ fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attr
         var driver: ?[]const u8 = null;
         if (attrs) |at| {
             if (repo.workDirectory()) |w| try at.enter(io, w, item.path);
-            const applied = try at.lookup(a, item.path, false);
+            const applied = try at.lookup(a, item.path, .file);
             if (applied.get("diff")) |state| switch (state) {
                 .unset => item.binary = true,
                 .set => item.binary = false,

@@ -819,7 +819,7 @@ fn usePatch(gpa: Allocator, limits: []const Limit, p: *const FilePatch) Allocato
 fn wsRuleFor(st: *State, path: []const u8, configured: whitespace.Rule) Error!whitespace.Rule {
     const attrs = st.rules.attrs orelse return configured;
     if (st.wt) |wt| try attrs.enter(st.io, wt, path);
-    const applied = try attrs.lookup(st.a, path, false);
+    const applied = try attrs.lookup(st.a, path, .file);
     const attribute: whitespace.Attribute = if (applied.get("whitespace")) |state| switch (state) {
         .set => .set,
         .unset => .unset,
@@ -1373,7 +1373,7 @@ fn readOldData(st: *State, path: []const u8, found: fs.Entry, crlf_in_old: bool,
             defer scratch.deinit();
             const attrs = st.rules.attrs.?;
             try attrs.enter(st.io, wt, path);
-            const applied = try attrs.lookup(scratch.allocator(), path, false);
+            const applied = try attrs.lookup(scratch.allocator(), path, .file);
             const converted = try st.conv.toGit(scratch.allocator(), .{ .path = path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only });
             try out.appendSlice(st.gpa, converted.bytes);
         },

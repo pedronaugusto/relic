@@ -1387,7 +1387,7 @@ fn expectCheckAttr(gpa: std.mem.Allocator, io: Io, h: *Harness, path: []const u8
     defer arena.deinit();
     const a = arena.allocator();
     try h.attrs.enter(io, h.repo.dir, path);
-    const found = try h.attrs.lookup(a, path, false);
+    const found = try h.attrs.lookup(a, path, .file);
     var ours: std.ArrayList([]const u8) = .empty;
     for (found.items) |item| {
         const value = switch (item.state) {
@@ -1521,7 +1521,7 @@ test "ignore rules decide every path as git check-ignore decides it" {
         const decided: ?u32 = if (line_text.len == 0) null else try std.fmt.parseUnsigned(u32, line_text, 10);
         // A `!` pattern re-included the path.
         const theirs = decided != null and pattern[0] != '!';
-        const ours = rules.matchPath(p[0], p[1]);
+        const ours = rules.matchPath(p[0], if (p[1]) .dir else .file);
         std.testing.expectEqual(theirs, ours.excluded) catch |err| {
             std.debug.print("{s}: git line {s}, {s}\n", .{ p[0], line_text, pattern });
             return err;
