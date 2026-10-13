@@ -417,7 +417,12 @@ pub const Signature = struct {
         while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
         if (rest.len == 0) return .{ .name = name, .email = email, .when_secs = 0, .offset_minutes = 0 };
         const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
-        const secs = decimal.digits(i64, rest[0..space]) orelse return error.InvalidSignatureTime;
+        // Digits, or a minus and digits: a time before 1970 that git's
+        // commit reader takes as its unsigned wrap.
+        const field = rest[0..space];
+        const negative = field.len > 1 and field[0] == '-';
+        const magnitude = decimal.digits(i64, if (negative) field[1..] else field) orelse return error.InvalidSignatureTime;
+        const secs = if (negative) -magnitude else magnitude;
         var offset: i16 = 0;
         if (space < rest.len) {
             var zone = rest[space + 1 ..];

@@ -14,4 +14,5 @@ pub const Diagnostic = @import("repo/repo.zig").Diagnostic;
 pub const templateDir = @import("repo/repo.zig").templateDir;
 pub const IgnoreSources = @import("repo/repo.zig").IgnoreSources;
 pub const Repository = @import("repo/repo.zig").Repository;
+pub const Settings = @import("repo/repo.zig").Settings;
 pub const TemplateDirError = @import("repo/repo.zig").TemplateDirError;

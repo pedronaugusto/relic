@@ -1050,6 +1050,22 @@ test "discovery closes its git directory when the worktree handle cannot be open
         fn access(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
             return dir.access(std.testing.io, path, options);
         }
+        // And what reads `HEAD` to see that it names a ref or an object.
+        fn readLink(_: ?*anyopaque, dir: Io.Dir, path: []const u8, buffer: []u8) Io.Dir.ReadLinkError!usize {
+            return dir.readLink(std.testing.io, path, buffer);
+        }
+        fn openFile(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+            return dir.openFile(std.testing.io, path, options);
+        }
+        fn readPositional(_: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+            return std.testing.io.vtable.fileReadPositional(std.testing.io.userdata, file, data, offset);
+        }
+        fn fileStat(_: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
+            return file.stat(std.testing.io);
+        }
+        fn closeFiles(_: ?*anyopaque, files: []const Io.File) void {
+            for (files) |file| file.close(std.testing.io);
+        }
     };
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1065,6 +1081,11 @@ test "discovery closes its git directory when the worktree handle cannot be open
     vtable.dirClose = Recorder.close;
     vtable.dirStatFile = Recorder.statFile;
     vtable.dirAccess = Recorder.access;
+    vtable.dirReadLink = Recorder.readLink;
+    vtable.dirOpenFile = Recorder.openFile;
+    vtable.fileReadPositional = Recorder.readPositional;
+    vtable.fileStat = Recorder.fileStat;
+    vtable.fileClose = Recorder.closeFiles;
     const tracked: Io = .{ .userdata = &recorder, .vtable = &vtable };
     try std.testing.expectError(error.ProcessFdQuotaExceeded, repo_mod.Repository.open(std.testing.allocator, tracked, tmp.dir, .{ .discover = false }));
     try std.testing.expectEqual(@as(usize, 1), recorder.closed);
@@ -1086,9 +1107,12 @@ test "a commondir that cannot be opened is not replaced by the worktree director
     var linked = try tmp.dir.openDir(io, "linked", .{});
     defer linked.close(io);
     try linked.writeFile(io, .{ .sub_path = ".git", .data = "gitdir: ../.git\n" });
+    // git's `is_git_directory` looks for `objects` and `refs` where
+    // `commondir` points, so a directory whose `commondir` names nothing
+    // is no git directory at all.
     const cases = .{
-        .{ "missing-common-dir\n", error.FileNotFound },
-        .{ "not-a-directory\n", error.NotDir },
+        .{ "missing-common-dir\n", error.NotARepository },
+        .{ "not-a-directory\n", error.NotARepository },
     };
     inline for (cases) |case| {
         try git_dir.writeFile(io, .{ .sub_path = "commondir", .data = case[0] });
@@ -1098,7 +1122,9 @@ test "a commondir that cannot be opened is not replaced by the worktree director
                 unexpected.deinit(io);
                 return error.TestExpectedError;
             } else |err| {
-                try std.testing.expectEqual(case[1], err);
+                // Through the `.git` file the git directory it names is
+                // what is broken.
+                try std.testing.expectEqual(if (dir.handle == linked.handle) error.BrokenGitFile else case[1], err);
             }
         }
     }
@@ -1540,18 +1566,35 @@ test "init.templateDir names the template git init copies" {
     try std.testing.expectEqualStrings("/home/someone/templates", path);
 }
 
-test "a repository whose HEAD holds no ref still opens, with no branch for onbranch:, as git's does" {
+test "a detached HEAD opens with no branch for onbranch:, and a HEAD that names neither a ref nor an object is no repository, as in git" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
     try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
     try git.exec(io, &.{ "config", "includeIf.onbranch:main.path", "never" });
+    const tip = try git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(tip);
+    const detached = try gpa.print("{s}\n", .{tip});
+    defer gpa.free(detached);
+    try git.writeFile(io, ".git/HEAD", detached);
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        try std.testing.expect(repo.configuration().context.branch == null);
+        try std.testing.expect(!try repo.refreshConfig(io, .{}));
+    }
     try git.writeFile(io, ".git/HEAD", "not a ref\n");
-    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
-    defer repo.deinit(io);
-    try std.testing.expect(repo.configuration().context.branch == null);
-    try std.testing.expect(!try repo.refreshConfig(io, .{}));
+    // git looks no higher than this directory, which sits inside the
+    // package's own checkout.
+    const root = try git.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const parent = std.Io.Dir.path.dirname(root).?;
+    try git.isolated.?.put("GIT_CEILING_DIRECTORIES", parent);
+    var said = try git.capture(io, &.{ "rev-parse", "--git-dir" });
+    defer said.deinit(gpa);
+    try std.testing.expect(said.code != 0);
+    try std.testing.expectError(error.NotARepository, repo_mod.Repository.open(gpa, io, git.dir, .{ .discover = false }));
 }
 
 test "an index writer holds index.lock from its read to its write: git and relic wait their turn and no change is lost" {

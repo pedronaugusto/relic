@@ -1803,7 +1803,7 @@ test "reading a signing policy allocates nothing of the configuration's" {
     try std.testing.expectEqualStrings("tag.gpgSign", diagnostic.unsupported_setting);
 }
 
-test "worktree configuration adapters refuse malformed settings, and read a quoted one without allocating" {
+test "a malformed core setting is refused when it is published, as git dies reading it, and a quoted one is read without allocating" {
     const Adapter = struct {
         fn core(r: *const Self.Repository) !attributes.CoreSettings {
             return r.coreSettings();
@@ -1818,16 +1818,20 @@ test "worktree configuration adapters refuse malformed settings, and read a quot
     defer tmp.cleanup();
     var repo = try Self.Repository.create(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
-    inline for (.{ "core.autocrlf", "core.safecrlf", "core.ignorecase", "core.filemode", "core.symlinks" }) |setting| {
+    // The engines' settings are read once, as a configuration is published.
+    inline for (.{ "core.ignorecase", "core.filemode", "core.symlinks", "core.trustctime" }) |setting| {
+        try std.testing.expectError(error.NotABoolean, repo.editConfig(io, &.{.{ .name = setting, .value = "maybe" }}, .{}));
+    }
+    try std.testing.expectError(error.MalformedValue, repo.editConfig(io, &.{.{ .name = "core.checkstat", .value = "unknown" }}, .{}));
+    // The line-ending settings are asked for by the conversions that use them.
+    inline for (.{ "core.autocrlf", "core.safecrlf" }) |setting| {
         try repo.editConfig(io, &.{.{ .name = setting, .value = "maybe" }}, .{});
         try std.testing.expectError(error.NotABoolean, Adapter.rules(&repo));
         try repo.editConfig(io, &.{.{ .name = setting, .value = "false" }}, .{});
     }
-    inline for (.{ "core.eol", "core.checkstat" }) |setting| {
-        try repo.editConfig(io, &.{.{ .name = setting, .value = "unknown" }}, .{});
-        try std.testing.expectError(error.MalformedValue, Adapter.rules(&repo));
-        try repo.editConfig(io, &.{.{ .name = setting, .value = if (comptime std.mem.eql(u8, setting, "core.eol")) "native" else "default" }}, .{});
-    }
+    try repo.editConfig(io, &.{.{ .name = "core.eol", .value = "unknown" }}, .{});
+    try std.testing.expectError(error.MalformedValue, Adapter.rules(&repo));
+    try repo.editConfig(io, &.{.{ .name = "core.eol", .value = "native" }}, .{});
     try tmp.dir.writeFile(io, .{ .sub_path = ".git/config", .data = "[core]\n autocrlf = \"input\"\n" });
     var reread = try Self.Repository.open(gpa, io, tmp.dir, .{});
     defer reread.deinit(io);
@@ -1840,7 +1844,7 @@ test "worktree configuration adapters refuse malformed settings, and read a quot
     try std.testing.expectEqual(attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&reread)).autocrlf);
 }
 
-test "rule loaders refuse a malformed case policy, and read one without the configuration allocating" {
+test "a malformed case policy is refused when it is published, and the rule loaders read the published one without the configuration allocating" {
     const Load = struct {
         fn ignoreRules(io: Io, r: *Self.Repository) !void {
             var rules = try r.loadIgnore(io);
@@ -1857,9 +1861,7 @@ test "rule loaders refuse a malformed case policy, and read one without the conf
     defer tmp.cleanup();
     var r = try Self.Repository.create(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
-    try r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "maybe" }}, .{});
-    try std.testing.expectError(error.NotABoolean, Load.ignoreRules(io, &r));
-    try std.testing.expectError(error.NotABoolean, Load.attributesRules(io, &r));
+    try std.testing.expectError(error.NotABoolean, r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "maybe" }}, .{}));
     try r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "true" }}, .{});
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     const config_gpa = &config_owner.get(r.data().config_state).gpa;
