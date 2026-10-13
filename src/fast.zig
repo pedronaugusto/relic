@@ -4,3 +4,6 @@
 
 pub const importer = @import("fast/importer.zig");
 pub const exporter = @import("fast/exporter.zig");
+
+/// All errors reported by this namespace.
+pub const Error = importer.Error || exporter.Error;

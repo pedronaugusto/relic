@@ -3,3 +3,6 @@
 
 pub const table = @import("reftable/table.zig");
 pub const stack = @import("reftable/stack.zig");
+
+/// All errors reported by this namespace.
+pub const Error = table.Error || stack.Error;

@@ -105,10 +105,19 @@ test "publishing facades cover every implementation declaration" {
     try covers(relic.maintenance, maintenance_mod);
 }
 
+/// Types relic publishes as the family package's own, whose conventions
+/// are that package's.
+const foreign = .{@import("conduit").Child};
+
+fn isForeign(comptime T: type) bool {
+    inline for (foreign) |F| if (T == F) return true;
+    return false;
+}
+
 fn checkErrors(comptime ns: type, comptime depth: usize) !void {
     inline for (@typeInfo(ns).@"struct".decl_names) |name| {
         const value = @field(ns, name);
-        if (@TypeOf(value) == type) switch (@typeInfo(value)) {
+        if (@TypeOf(value) == type and !comptime isForeign(value)) switch (@typeInfo(value)) {
             .@"struct" => {
                 if (comptime isNamespace(ns, name) or @hasDecl(value, "deinit")) {
                     if (comptime @hasDecl(value, "Error")) {

@@ -3,3 +3,6 @@
 
 pub const walk = @import("object/walk.zig");
 pub const filter = @import("object/filter.zig");
+
+/// All errors reported by this namespace.
+pub const Error = walk.Error;
