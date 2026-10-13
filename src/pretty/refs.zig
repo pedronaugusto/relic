@@ -19,11 +19,11 @@
 //! repository's `trailer.*` settings say.
 
 const ErrorNamespace = @This();
-const unicodewidth = @import("../text.zig").unicodewidth;
+const unicode_width = @import("../text.zig").unicode_width;
 const builtin = @import("builtin");
 const std = @import("std");
 const percent = @import("../text.zig").percent;
-const revparse_mod = @import("../revwalk/revparse.zig");
+const revparse_mod = @import("../rev_walk/rev_parse.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -34,9 +34,9 @@ const refs_mod = @import("../refs/refs.zig");
 const ref_names = @import("../names.zig").ref;
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
-const revwalk = @import("../walk/walk.zig");
-const describe_mod = @import("../revwalk/describe.zig");
-const mailmap_mod = @import("../revwalk/mailmap.zig");
+const rev_walk = @import("../walk/walk.zig");
+const describe_mod = @import("../rev_walk/describe.zig");
+const mailmap_mod = @import("../rev_walk/mailmap.zig");
 const abbrev_mod = @import("../odb/abbrev.zig");
 const signing = @import("../object/signing.zig");
 const gitdate = @import("../text.zig").date;
@@ -82,7 +82,7 @@ pub const Error = errors: {
         /// A signature atom for a signed commit, with no `signer`.
         SignatureNeedsSigner,
     } || Allocator.Error || refs_mod.ReadError || odb_mod.Error || object.ParseError ||
-        revwalk.Error || signing.Error || remote_mod.Error || worktrees.Error || mailmap_mod.LoadError || describe_mod.Error;
+        rev_walk.Error || signing.Error || remote_mod.Error || worktrees.Error || mailmap_mod.LoadError || describe_mod.Error;
 };
 
 /// The kinds of ref a listing takes: git's `FILTER_REFS_*`.
@@ -861,7 +861,7 @@ pub const Listing = struct {
 
     fn containsAny(l: *Listing, commit: Oid, wanted: []const Oid) ErrorNamespace.Error!bool {
         for (wanted) |w| {
-            if (try revwalk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), .{ .ancestor = w, .descendant = commit }, .{})) return true;
+            if (try rev_walk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), .{ .ancestor = w, .descendant = commit }, .{})) return true;
         }
         return false;
     }
@@ -874,7 +874,7 @@ pub const Listing = struct {
         for (l.items.items) |item| {
             var reached = false;
             for (bases) |base| {
-                if (try revwalk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), .{ .ancestor = item.commit.?, .descendant = base }, .{})) {
+                if (try rev_walk.isAncestor(l.gpa, l.io, l.repo.objectDatabase(), .{ .ancestor = item.commit.?, .descendant = base }, .{})) {
                     reached = true;
                     break;
                 }
@@ -1262,7 +1262,7 @@ pub const Listing = struct {
 
     /// How many commits `tip` reaches that `base` does not.
     fn countOnly(l: *Listing, tip: Oid, base: Oid) ErrorNamespace.Error!usize {
-        var walk = revwalk.Walk.init(l.gpa, l.repo.objectDatabase());
+        var walk = rev_walk.Walk.init(l.gpa, l.repo.objectDatabase());
         defer walk.deinit();
         try walk.push(tip);
         try walk.hide(base);
@@ -2561,7 +2561,7 @@ fn isEmpty(text: []const u8) bool {
 fn alignText(gpa: Allocator, a: Align, text: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     const s = if (std.mem.findScalar(u8, text, 0)) |z| text[0..z] else text;
-    const display = unicodewidth.strWidth(s);
+    const display = unicode_width.strWidth(s);
     if (display >= a.width) {
         try out.appendSlice(gpa, s);
         return out.toOwnedSlice(gpa);
@@ -2718,7 +2718,7 @@ pub fn branchFormat(gpa: Allocator, l: *Listing, options: BranchOptions) Error![
             var desc = item.name;
             if (std.mem.startsWith(u8, desc, "refs/heads/")) desc = desc["refs/heads/".len..];
             if (std.mem.startsWith(u8, desc, "refs/remotes/")) desc = desc["refs/remotes/".len..];
-            var w = if (item.kind == .detached_head) unicodewidth.strWidth(try l.headDescription()) else unicodewidth.strWidth(desc);
+            var w = if (item.kind == .detached_head) unicode_width.strWidth(try l.headDescription()) else unicode_width.strWidth(desc);
             if (item.kind == .remote) w += remote_prefix.len;
             maxwidth = @max(maxwidth, w);
         }

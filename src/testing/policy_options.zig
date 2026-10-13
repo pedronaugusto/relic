@@ -11,7 +11,7 @@ test "pattern constructors take defaulted policy options" {
 }
 
 test "public operations keep policy in option fields" {
-    inline for (.{ relic.repo.hooks.Runner.postMerge, relic.commit.hooks.Hooks.init, relic.commit.trailer.block, relic.revwalk.mailmap.Mailmap.addFileAt, relic.lfs.api.gitRemoteUrl, relic.lfs.FetchPattern.compile, relic.transport.remotehelper.Helper.list, relic.pretty.refs.Listing.write, relic.transport.policy.allowed }) |operation| {
+    inline for (.{ relic.repo.hooks.Runner.postMerge, relic.commit.hooks.Hooks.init, relic.commit.trailer.block, relic.rev_walk.mailmap.Mailmap.addFileAt, relic.lfs.api.gitRemoteUrl, relic.lfs.FetchPattern.compile, relic.transport.remote_helper.Helper.list, relic.pretty.refs.Listing.write, relic.transport.policy.allowed }) |operation| {
         inline for (@typeInfo(@TypeOf(operation)).@"fn".param_types) |parameter| {
             if (parameter) |T| try std.testing.expect(T != bool and T != ?bool);
         }

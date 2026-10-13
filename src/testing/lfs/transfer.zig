@@ -18,7 +18,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const pktline = @import("relic").transport.pktline;
+const pkt_line = @import("relic").transport.pkt_line;
 
 const locked_at = "2026-09-24T10:00:00Z";
 
@@ -41,9 +41,9 @@ pub fn main(init: std.process.Init) !void {
     var repo = try Io.Dir.cwd().createDirPathOpen(io, repo_path, .{});
     defer repo.close(io);
 
-    const in_buffer = try gpa.alloc(u8, pktline.max_line);
+    const in_buffer = try gpa.alloc(u8, pkt_line.max_line);
     var in = Io.File.stdin().readerStreaming(io, in_buffer);
-    const out_buffer = try gpa.alloc(u8, pktline.max_line);
+    const out_buffer = try gpa.alloc(u8, pkt_line.max_line);
     var out = Io.File.stdout().writerStreaming(io, out_buffer);
     const r = &in.interface;
     const w = &out.interface;
@@ -52,9 +52,9 @@ pub fn main(init: std.process.Init) !void {
     defer if (options.log_dir) |dir| writeLog(io, dir, log.items);
     try log.print(gpa, "== {s} {s}\n", .{ options.path, options.operation });
 
-    if (options.offer_version) try pktline.write(w, "version=1\n");
-    try pktline.write(w, "locking\n");
-    try pktline.flush(w);
+    if (options.offer_version) try pkt_line.write(w, "version=1\n");
+    try pkt_line.write(w, "locking\n");
+    try pkt_line.flush(w);
     try w.flush();
 
     var session: Session = .{ .gpa = gpa, .io = io, .repo = repo, .operation = options.operation, .user = options.user, .w = w, .lock_cursors = options.lock_cursors };
@@ -169,16 +169,16 @@ const Session = struct {
     fn getObject(s: *const Session, req: Request, oid: []const u8) !void {
         if (!try authorised(req, oid)) return status(s.w, 403, &.{}, &.{"missing id or token"});
         const bytes = readObject(s.gpa, s.io, s.repo, oid) orelse return status(s.w, 404, &.{}, &.{"not found"});
-        try pktline.write(s.w, "status 200\n");
-        try pktline.print("size={d}\n", .{bytes.len}, s.w);
-        try pktline.delim(s.w);
+        try pkt_line.write(s.w, "status 200\n");
+        try pkt_line.print("size={d}\n", .{bytes.len}, s.w);
+        try pkt_line.delim(s.w);
         var left = bytes;
         while (left.len != 0) {
-            const n = @min(left.len, pktline.max_data);
-            try pktline.write(s.w, left[0..n]);
+            const n = @min(left.len, pkt_line.max_data);
+            try pkt_line.write(s.w, left[0..n]);
             left = left[n..];
         }
-        try pktline.flush(s.w);
+        try pkt_line.flush(s.w);
         try s.w.flush();
     }
 
@@ -270,7 +270,7 @@ const Session = struct {
 /// delimiter; `null` at the end of the input.
 fn readRequest(gpa: Allocator, r: *Io.Reader, operation: []const u8) !?Request {
     _ = operation;
-    const first = pktline.read(r) catch |err| switch (err) {
+    const first = pkt_line.read(r) catch |err| switch (err) {
         error.EndOfStream => return null,
         else => |e| return e,
     };
@@ -280,7 +280,7 @@ fn readRequest(gpa: Allocator, r: *Io.Reader, operation: []const u8) !?Request {
     };
     var args: std.ArrayList([]const u8) = .empty;
     while (true) {
-        switch (try pktline.read(r)) {
+        switch (try pkt_line.read(r)) {
             .flush => return .{ .command = command, .args = args.items },
             .delim => break,
             .data => |d| try args.append(gpa, try gpa.dupe(u8, trimNewline(d))),
@@ -291,7 +291,7 @@ fn readRequest(gpa: Allocator, r: *Io.Reader, operation: []const u8) !?Request {
     var lines: std.ArrayList([]const u8) = .empty;
     const binary = std.mem.startsWith(u8, command, "put-object ");
     while (true) {
-        switch (try pktline.read(r)) {
+        switch (try pkt_line.read(r)) {
             .flush => break,
             .data => |d| if (binary) try body.appendSlice(gpa, d) else try lines.append(gpa, try gpa.dupe(u8, trimNewline(d))),
             else => return error.UnexpectedPacket,
@@ -324,13 +324,13 @@ fn sortStrings(items: [][]const u8) void {
 }
 
 fn status(w: *Io.Writer, code: u16, args: []const []const u8, lines: ?[]const []const u8) !void {
-    try pktline.print("status {d}\n", .{code}, w);
-    for (args) |a| try pktline.print("{s}\n", .{a}, w);
+    try pkt_line.print("status {d}\n", .{code}, w);
+    for (args) |a| try pkt_line.print("{s}\n", .{a}, w);
     if (lines) |ls| {
-        try pktline.delim(w);
-        for (ls) |l| try pktline.print("{s}\n", .{l}, w);
+        try pkt_line.delim(w);
+        for (ls) |l| try pkt_line.print("{s}\n", .{l}, w);
     }
-    try pktline.flush(w);
+    try pkt_line.flush(w);
     try w.flush();
 }
 

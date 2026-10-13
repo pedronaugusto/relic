@@ -19,7 +19,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const pktline = @import("../codec.zig").pktline;
+const pkt_line = @import("../codec.zig").pkt_line;
 const connection = @import("connection.zig");
 
 const Oid = hash.Oid;
@@ -290,11 +290,11 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
     const unborn = adv.commandHas("ls-refs", "unborn");
     (struct {
         fn args(out: *Io.Writer, prefixes: []const []const u8, want_unborn: bool) !void {
-            try pktline.write(out, "peel\n");
-            try pktline.write(out, "symrefs\n");
-            if (want_unborn) try pktline.write(out, "unborn\n");
-            for (prefixes) |prefix| try pktline.print("ref-prefix {s}\n", .{prefix}, out);
-            try pktline.flush(out);
+            try pkt_line.write(out, "peel\n");
+            try pkt_line.write(out, "symrefs\n");
+            if (want_unborn) try pkt_line.write(out, "unborn\n");
+            for (prefixes) |prefix| try pkt_line.print("ref-prefix {s}\n", .{prefix}, out);
+            try pkt_line.flush(out);
         }
     }).args(w, options.prefixes, unborn) catch |err| return conn.writeFailed(err);
 
@@ -353,17 +353,17 @@ fn matchesPrefix(name: []const u8, prefixes: []const []const u8) bool {
 
 /// The head of a v2 command: `command=<name>`, the capabilities this side
 /// sends back, and the delimiter before the arguments.
-pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8) pktline.WriteError!void {
+pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8) pkt_line.WriteError!void {
     // As git writes them: `ls-refs` with a newline, `fetch` without (they
     // are two functions in git), the capabilities without, the arguments
     // with.
     if (std.mem.eql(u8, command, "ls-refs")) {
-        try pktline.print("command={s}\n", .{command}, w);
-    } else try pktline.print("command={s}", .{command}, w);
-    if (adv.has("agent")) try pktline.print("agent={s}", .{agent}, w);
-    if (adv.has("object-format")) try pktline.print("object-format={s}", .{adv.kind.name()}, w);
-    if (adv.promisor_reply) |names| try pktline.print("promisor-remote={s}", .{names}, w);
-    try pktline.delim(w);
+        try pkt_line.print("command={s}\n", .{command}, w);
+    } else try pkt_line.print("command={s}", .{command}, w);
+    if (adv.has("agent")) try pkt_line.print("agent={s}", .{agent}, w);
+    if (adv.has("object-format")) try pkt_line.print("object-format={s}", .{adv.kind.name()}, w);
+    if (adv.promisor_reply) |names| try pkt_line.print("promisor-remote={s}", .{names}, w);
+    try pkt_line.delim(w);
 }
 
 const testing = std.testing;
@@ -374,11 +374,11 @@ test "a v0 advertisement reads its refs, peels and symbolic refs" {
     defer wire.deinit();
     const a = "1111111111111111111111111111111111111111";
     const b = "2222222222222222222222222222222222222222";
-    try pktline.print("{s} HEAD\x00multi_ack thin-pack side-band-64k symref=HEAD:refs/heads/main agent=git/2\n", .{a}, &wire.writer);
-    try pktline.print("{s} refs/heads/main\n", .{a}, &wire.writer);
-    try pktline.print("{s} refs/tags/v1\n", .{b}, &wire.writer);
-    try pktline.print("{s} refs/tags/v1^{{}}\n", .{a}, &wire.writer);
-    try pktline.flush(&wire.writer);
+    try pkt_line.print("{s} HEAD\x00multi_ack thin-pack side-band-64k symref=HEAD:refs/heads/main agent=git/2\n", .{a}, &wire.writer);
+    try pkt_line.print("{s} refs/heads/main\n", .{a}, &wire.writer);
+    try pkt_line.print("{s} refs/tags/v1\n", .{b}, &wire.writer);
+    try pkt_line.print("{s} refs/tags/v1^{{}}\n", .{a}, &wire.writer);
+    try pkt_line.flush(&wire.writer);
 
     var fake: Fake = .init(wire.written());
     var adv = try readAdvertisement(gpa, &fake.connection, .sha1);
@@ -399,8 +399,8 @@ test "an empty v0 repository advertises capabilities and no refs" {
     const gpa = testing.allocator;
     var wire: Io.Writer.Allocating = .init(gpa);
     defer wire.deinit();
-    try pktline.print("{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{&@as([40]u8, @splat('0'))}, &wire.writer);
-    try pktline.flush(&wire.writer);
+    try pkt_line.print("{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{&@as([40]u8, @splat('0'))}, &wire.writer);
+    try pkt_line.flush(&wire.writer);
     var fake: Fake = .init(wire.written());
     var adv = try readAdvertisement(gpa, &fake.connection, .sha1);
     defer adv.deinit();
@@ -413,7 +413,7 @@ test "a server's error and a mismatched hash are refused by name" {
     {
         var wire: Io.Writer.Allocating = .init(gpa);
         defer wire.deinit();
-        try pktline.write(&wire.writer, "ERR access denied\n");
+        try pkt_line.write(&wire.writer, "ERR access denied\n");
         var fake: Fake = .init(wire.written());
         try testing.expectError(error.RemoteError, readAdvertisement(gpa, &fake.connection, .sha1));
         try testing.expectEqualStrings("access denied", fake.connection.message());
@@ -421,9 +421,9 @@ test "a server's error and a mismatched hash are refused by name" {
     {
         var wire: Io.Writer.Allocating = .init(gpa);
         defer wire.deinit();
-        try pktline.write(&wire.writer, "version 2\n");
-        try pktline.write(&wire.writer, "object-format=sha256\n");
-        try pktline.flush(&wire.writer);
+        try pkt_line.write(&wire.writer, "version 2\n");
+        try pkt_line.write(&wire.writer, "object-format=sha256\n");
+        try pkt_line.flush(&wire.writer);
         var fake: Fake = .init(wire.written());
         try testing.expectError(error.ObjectFormatMismatch, readAdvertisement(gpa, &fake.connection, .sha1));
     }
@@ -466,7 +466,7 @@ fn fuzzAdvertisement(_: void, case: *shakedown.Case) anyerror!void {
 /// A connection whose server said `bytes` and hears nothing, for the tests
 /// of what is read.
 pub const Fake = struct {
-    buffer: [pktline.max_line]u8 = undefined,
+    buffer: [pkt_line.max_line]u8 = undefined,
     fixed: Io.Reader,
     limited: Io.Reader.Limited = undefined,
     sink: Io.Writer.Discarding,

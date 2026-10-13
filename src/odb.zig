@@ -2,9 +2,9 @@
 
 pub const abbrev = @import("odb/abbrev.zig");
 pub const bitmap = @import("odb/bitmap.zig");
-pub const commitgraph = @import("odb/commitgraph.zig");
-pub const revindex = @import("odb/revindex.zig");
-pub const indexpack = @import("odb/indexpack.zig");
+pub const commit_graph = @import("odb/commit_graph.zig");
+pub const rev_index = @import("odb/rev_index.zig");
+pub const index_pack = @import("odb/index_pack.zig");
 pub const pack = @import("odb/pack.zig");
 pub const delta = @import("codec.zig").delta;
 pub const midx = @import("odb/midx.zig");

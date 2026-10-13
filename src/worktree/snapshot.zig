@@ -19,7 +19,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb = @import("../odb/odb.zig");
 const index = @import("../index/index.zig");
-const sparseindex = @import("../index/sparseindex.zig");
+const sparse_index = @import("../index/sparse_index.zig");
 const repo = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const diff_mod = @import("../diff/diff.zig");
@@ -153,7 +153,7 @@ pub const Store = struct {
         // The source index is a membership list, not a cache for this store.
         // Sparse directories keep their indexed contents from the source.
         const source_db: ?*odb.Odb = if (source_repo) |r| r.objectDatabase() else null;
-        try sparseindex.expand(store.gpa, io, &staged, source_db orelse &store.db, null);
+        try sparse_index.expand(store.gpa, io, &staged, source_db orelse &store.db, null);
         for (staged.entries.items) |*entry| {
             entry.stat = .none;
             entry.assume_valid = false;

@@ -1,7 +1,7 @@
 //! Public diff namespace. Implementation is in `diff/diff.zig`.
 
 pub const blame = @import("diff/blame.zig");
-pub const patchid = @import("diff/patchid.zig");
+pub const patch_id = @import("diff/patch_id.zig");
 pub const rename = @import("diff/rename.zig");
 pub const similarity = @import("diff/similarity.zig");
 pub const Algorithm = @import("diff/diff.zig").Algorithm;

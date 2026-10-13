@@ -13,7 +13,7 @@ const Context = struct {
     remote: *api.transport.local.Remote,
     from: *api.odb.Odb,
     entries: []const api.odb.PackEntry,
-    command: api.transport.sendpack.Command,
+    command: api.transport.send_pack.Command,
     checksum: u64 = 0,
 
     fn run(c: *Context, units: u64) !void {

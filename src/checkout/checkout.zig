@@ -18,8 +18,8 @@ const attributes = @import("../patterns.zig").attributes;
 const convert = @import("convert.zig");
 const fsmonitor = @import("fsmonitor.zig");
 const filter = @import("filter.zig");
-const dirscan = @import("dirscan.zig");
-const safepath = @import("../names.zig").path;
+const dir_scan = @import("dir_scan.zig");
+const safe_path = @import("../names.zig").path;
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -32,7 +32,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
 const fs = @import("../fs/fs.zig");
-const sparseindex = @import("../index/sparseindex.zig");
+const sparse_index = @import("../index/sparse_index.zig");
 const pack_mod = @import("../odb/pack.zig");
 const gitlink = @import("../discover.zig").gitlink;
 const native = @import("native.zig");
@@ -82,7 +82,7 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.SymLinkError ||
     Io.Dir.ReadLinkError || Io.Writer.Error || fs.SyncError ||
     Io.File.SetPermissionsError || object.Tree.Builder.AddError ||
-    object.TreeParseError || convert.Error || sparseindex.Error || gitlink.Error;
+    object.TreeParseError || convert.Error || sparse_index.Error || gitlink.Error;
 
 /// What the caller supplies so that a blob is hashed the way git would hash
 /// it, and so that ignore rules are the ones git would apply.
@@ -291,7 +291,7 @@ pub fn addAll(
 
     // A sparse directory the working tree has after all is expanded first,
     // so that what is in it is compared and staged against its own entries.
-    if (index.sparse) try sparseindex.expandPresent(gpa, io, wt, index, db);
+    if (index.sparse) try sparse_index.expandPresent(gpa, io, wt, index, db);
 
     // One pack for the whole call, where the caller asked for one. It is
     // opened before the walk so that an object written early in it is in
@@ -422,7 +422,7 @@ const Walker = struct {
             for (entries.items) |e| w.gpa.free(e.name);
             entries.deinit(w.gpa);
         }
-        var scan = try dirscan.Scan.init(w.gpa, w.io, dir);
+        var scan = try dir_scan.Scan.init(w.gpa, w.io, dir);
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
@@ -491,7 +491,7 @@ const Walker = struct {
     /// is staged as git's `add -A` stages it: a gitlink to the commit it has
     /// checked out, its directory never walked.
     fn stageRepository(w: *Walker, path: []const u8, found: fs.Entry) Error!void {
-        if (!safepath.isSafeStoredPath(path)) {
+        if (!safe_path.isSafeStoredPath(path)) {
             w.outcome.unsafe_paths += 1;
             return;
         }
@@ -534,7 +534,7 @@ const Walker = struct {
             try w.markSeen(path);
             return;
         }
-        if (!safepath.isSafeStoredPath(path)) {
+        if (!safe_path.isSafeStoredPath(path)) {
             w.outcome.unsafe_paths += 1;
             return;
         }
@@ -1177,7 +1177,7 @@ const StatusScan = struct {
     /// Whether `path`, which no index entry names, is a file of a sparse
     /// directory, and so tracked and out of the working tree.
     fn inSparseDirectory(s: *StatusScan, path: []const u8) Error!bool {
-        const dir_entry = sparseindex.containing(s.index, path) orelse return false;
+        const dir_entry = sparse_index.containing(s.index, path) orelse return false;
         if (!s.sparse_loaded.contains(dir_entry.path)) {
             try s.sparse_loaded.put(s.arena, dir_entry.path, {});
             try flattenTree(s.arena, s.io, s.db, dir_entry.oid, dir_entry.path[0 .. dir_entry.path.len - 1], &s.sparse_files, 1, null);
@@ -1195,7 +1195,7 @@ const StatusScan = struct {
         if (s.options.rules.attrs) |attrs| try attrs.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
-        var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
+        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir);
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
@@ -1429,7 +1429,7 @@ const StatusScan = struct {
         errdefer out.deinit(s.gpa);
         const dir = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
         defer if (path.len != 0) dir.close(s.io);
-        var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
+        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir);
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
@@ -1578,7 +1578,7 @@ pub fn resetIndex(
 
     // The tree is compared path by path, so a sparse index is made full
     // first; a caller that wants it sparse again collapses it.
-    try sparseindex.expand(gpa, io, index, db, null);
+    try sparse_index.expand(gpa, io, index, db, null);
     var wanted = try flatten(arena, io, db, tree_oid);
 
     var gone: std.ArrayList([]const u8) = .empty;
@@ -1650,7 +1650,7 @@ pub const CheckoutOutcome = struct {
 /// Where a refusal is written, so `error.UnsafePath` can say which path and
 /// which rule without allocating.
 pub const Refusal = struct {
-    reason: ?safepath.Reason = null,
+    reason: ?safe_path.Reason = null,
     buffer: [512]u8 = undefined,
     len: usize = 0,
 
@@ -1659,7 +1659,7 @@ pub const Refusal = struct {
         return r.buffer[0..r.len];
     }
 
-    fn set(r: *Refusal, reason: ?safepath.Reason, text: []const u8) void {
+    fn set(r: *Refusal, reason: ?safe_path.Reason, text: []const u8) void {
         r.reason = reason;
         r.len = @min(text.len, r.buffer.len);
         @memcpy(r.buffer[0..r.len], text[0..r.len]);
@@ -1732,7 +1732,7 @@ pub fn checkout(
 
     // Every path of the tree is written, so a sparse index is made full
     // first, which is what this leaves behind anyway.
-    try sparseindex.expand(gpa, io, index, db, null);
+    try sparse_index.expand(gpa, io, index, db, null);
     var wanted = try flatten(arena, io, db, tree_oid);
 
     const attrs_before = if (options.rules.attrs) |attrs| attrs.checkpoint() else null;
@@ -1813,7 +1813,7 @@ fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEn
     var check_it = wanted.iterator();
     while (check_it.next()) |entry| {
         const path = entry.key_ptr.*;
-        if (safepath.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink)) |refused| {
+        if (safe_path.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink)) |refused| {
             if (options.refusal) |out| out.set(refused.reason, path);
             return error.UnsafePath;
         }
@@ -2470,7 +2470,7 @@ pub fn writePaths(
     defer if (options.rules.attrs) |attrs| attrs.leave();
     for (writes) |w| {
         const symlink = if (w.blob) |b| b.mode == .symlink else false;
-        if (safepath.checkEntry(w.path, .worktree, symlink)) |refused| {
+        if (safe_path.checkEntry(w.path, .worktree, symlink)) |refused| {
             if (options.refusal) |out| out.set(refused.reason, w.path);
             return error.UnsafePath;
         }
@@ -2627,7 +2627,7 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
     const mode = options.mode;
     const oid = options.oid;
     const rules = options.rules;
-    if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
+    if (safe_path.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path);
     var written: Written = .{ .stat = .none };
     switch (mode) {
@@ -2668,7 +2668,7 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
     const mode = options.mode;
     const bytes = options.bytes;
     const rules = options.rules;
-    if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
+    if (safe_path.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path);
     if (try fs.statAt(io, wt, path)) |found| {
         if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
@@ -2703,7 +2703,7 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
 pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
-    if (safepath.check(path, .worktree) != null) return error.UnsafePath;
+    if (safe_path.check(path, .worktree) != null) return error.UnsafePath;
     // A file past a symbolic link is not the working tree's: git's
     // `unlink_entry` leaves it.
     if (!try realLeadingPath(io, wt, path)) return;
@@ -3096,7 +3096,7 @@ pub fn applySparse(
     // A sparse index is expanded as far as the new patterns reach into it,
     // which for a cone is the directories it now includes and for anything
     // else is everything. What stays collapsed stays out.
-    if (index.sparse) try sparseindex.expand(gpa, io, index, db, patterns);
+    if (index.sparse) try sparse_index.expand(gpa, io, index, db, patterns);
 
     for (index.entries.items) |*entry| {
         if (entry.stage != 0 or entry.isSparseDirectory()) continue;
@@ -3146,7 +3146,7 @@ pub fn applySparse(
             continue;
         }
         if (included and entry.skip_worktree) {
-            if (safepath.checkEntry(entry.path, .worktree, entry.mode == .symlink)) |refused| {
+            if (safe_path.checkEntry(entry.path, .worktree, entry.mode == .symlink)) |refused| {
                 if (options.refusal) |out| out.set(refused.reason, entry.path);
                 return error.UnsafePath;
             }
@@ -3298,7 +3298,7 @@ const ListScan = struct {
         if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.rules.ignore) |rules| rules.popTo(depth + 2);
 
-        var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
+        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir);
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;

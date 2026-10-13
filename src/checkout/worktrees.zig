@@ -24,7 +24,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
 const gitfile = @import("../discover.zig").gitfile;
-const safepath = @import("../names.zig").path;
+const safe_path = @import("../names.zig").path;
 const ref_names = @import("../names.zig").ref;
 const refs_mod = @import("../refs/refs.zig");
 
@@ -282,7 +282,7 @@ pub fn add(
     const common_dir = refs.commonDir();
     // The name becomes a directory under `worktrees/`, so it is held to
     // the rules of a name written to the disk.
-    if (safepath.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
+    if (safe_path.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
     if (options.detach_at == null) {
         if (options.branch) |branch| {
             var ref_buf: [512]u8 = undefined;

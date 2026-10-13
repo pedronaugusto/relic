@@ -8,7 +8,7 @@
 
 const lfspush = @import("push.zig");
 const testremote = @import("../testing/remote.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const std = @import("std");
 const build_options_mod = @import("build_options");
 const lfs_mod = @import("lfs.zig");
@@ -150,7 +150,7 @@ fn relicPrePush(fx: *Fixture, d: Io.Dir) !void {
     defer repo.deinit(io);
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);
-    var collected = try objectwalk.missing(gpa, io, repo.objectDatabase(), &.{head.oid}, .{ .exclude = &.{} });
+    var collected = try object_walk.missing(gpa, io, repo.objectDatabase(), &.{head.oid}, .{ .exclude = &.{} });
     defer collected.deinit();
     var report: lfspush.Report = .init(gpa);
     defer report.deinit();

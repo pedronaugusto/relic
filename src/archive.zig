@@ -39,7 +39,7 @@ const abbrev = @import("odb/abbrev.zig");
 const mailfmt = @import("mail/format.zig");
 const program = @import("process.zig").program;
 const fs = @import("fs/fs.zig");
-const mailmap_mod = @import("revwalk/mailmap.zig");
+const mailmap_mod = @import("rev_walk/mailmap.zig");
 const signing = @import("object/signing.zig");
 
 const Oid = hash.Oid;

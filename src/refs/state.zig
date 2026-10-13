@@ -4,9 +4,9 @@ const fs = @import("../fs/fs.zig");
 const std = @import("std");
 const hash = @import("../hash/hash.zig");
 const refs = @import("value.zig");
-const stack = @import("reftablestack/cache.zig");
+const stack = @import("reftable/stack/cache.zig");
 const packed_cache = @import("packed.zig");
-const policy = @import("reftablestack/policy.zig");
+const policy = @import("reftable/stack/policy.zig");
 
 pub const State = opaque {};
 

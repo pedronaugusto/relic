@@ -3,7 +3,7 @@
 //! a program of the repository's choosing. relic fetches a promised object
 //! only through a `partial.Lazy` the caller installs on its own repository
 //! (`transport/partial.zig`); the source of a local clone and a repository
-//! being served (`transport/local.zig`, `transport/uploadpack.zig`) are
+//! being served (`transport/local.zig`, `transport/upload_pack.zig`) are
 //! opened with none.
 
 const suite = @import("../helpers.zig");

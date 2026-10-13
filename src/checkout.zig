@@ -3,7 +3,7 @@
 
 pub const engine = @import("checkout/checkout.zig");
 pub const convert = @import("checkout/convert.zig");
-pub const dirscan = @import("checkout/dirscan.zig");
+pub const dir_scan = @import("checkout/dir_scan.zig");
 pub const filter = @import("checkout/filter.zig");
 pub const fsmonitor = @import("checkout/fsmonitor.zig");
 pub const native = @import("checkout/native.zig");

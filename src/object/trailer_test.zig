@@ -16,7 +16,7 @@ const repo_mod = @import("../repo/repo.zig");
 const pretty = @import("../pretty/pretty.zig");
 const refs_filter = @import("../pretty/refs.zig");
 const shortlog = @import("../pretty/shortlog.zig");
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 const testgit = @import("../testing/git.zig");
 
 const Repository = repo_mod.Repository;
@@ -340,7 +340,7 @@ test "a shortlog by trailer reads them as the repository's trailer rules say" {
         defer arena_state.deinit();
         var s = try shortlog.Shortlog.init(gpa, try shortlog.configured(arena_state.allocator(), repo.configuration(), .{ .groups = &.{.{ .trailer = key }} }));
         defer s.deinit();
-        var walk: revwalk.Walk = .init(gpa, repo.objectDatabase());
+        var walk: rev_walk.Walk = .init(gpa, repo.objectDatabase());
         defer walk.deinit();
         const head = (try repo.head(io)).?;
         defer gpa.free(head.name);

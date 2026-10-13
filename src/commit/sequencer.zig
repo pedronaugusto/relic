@@ -24,10 +24,10 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const merge = @import("../merge/merge.zig");
-const threeway = @import("../merge/threeway.zig");
+const three_way = @import("../merge/three_way.zig");
 const signing_mod = @import("../object/signing.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
-const commithooks = @import("commithooks.zig");
+const commit_hooks_mod = @import("commit_hooks.zig");
 const program = @import("../process.zig").program;
 const filter = @import("../checkout/filter.zig");
 const reset = @import("reset.zig");
@@ -87,8 +87,8 @@ pub const Error = error{
     NothingToSkip,
     /// A name given names no commit.
     NotACommit,
-} || threeway.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
-    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commithooks.Error;
+} || three_way.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
+    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commit_hooks_mod.Error;
 
 /// Which replay.
 pub const Action = enum {
@@ -155,7 +155,7 @@ pub const Options = struct {
     /// `strategy.Settings.apply` reads them. Kept in `opts` between steps.
     strategy_options: []const []const u8 = &.{},
     /// The filter drivers and relic's own LFS the merged files go through,
-    /// as `Repository.loadFilters` gives them: `threeway.Options.filters`.
+    /// as `Repository.loadFilters` gives them: `three_way.Options.filters`.
     filters: ?*const filter.Drivers = null,
     /// The permission to run the filters' programs.
     programs: ?program.Programs = null,
@@ -182,7 +182,7 @@ pub const Options = struct {
     /// state, as `git cherry-pick <commit>` does.
     sequence: bool = false,
     /// Where a refusal writes the path that caused it.
-    blocked: ?*threeway.Blocked = null,
+    blocked: ?*three_way.Blocked = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
     /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
     rerere_autoupdate: ?bool = null,
@@ -208,7 +208,7 @@ pub const Outcome = struct {
     /// The commit the replay stopped at.
     stopped_at: ?Oid = null,
     /// The paths left conflicted, sorted.
-    conflicts: []const threeway.Conflict = &.{},
+    conflicts: []const three_way.Conflict = &.{},
     /// The commits made, in order.
     made: []const Oid = &.{},
 
@@ -437,7 +437,7 @@ const Replay = struct {
     trailers: trailer.Settings,
     abbrev_len: usize,
     made: std.ArrayList(Oid) = .empty,
-    conflicts: []const threeway.Conflict = &.{},
+    conflicts: []const three_way.Conflict = &.{},
 
     fn short(r: *Replay, oid: Oid) Error![]const u8 {
         var buf: [hash.max_hex_len]u8 = undefined;
@@ -496,7 +496,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         const ff = if (parent) |p| (head.oid != null and p.eql(head.oid.?)) else head.oid == null;
         if (ff) {
             const their_tree = commit.tree;
-            var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = their_tree }, .{ .blocked = r.options.blocked });
+            var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = their_tree }, .{ .blocked = r.options.blocked });
             defer outcome.deinit();
             try repo.writeIndex(io, &index);
             const log = try arena.print("{s}: fast-forward", .{r.action.name()});
@@ -538,7 +538,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.trailers);
 
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse try emptyTree(io, repo) }, .{
+    var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse try emptyTree(io, repo) }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = base_label, .theirs = next_label },
@@ -586,7 +586,7 @@ fn mainlineParent(parents: []const Oid, mainline: ?u32) Error!?Oid {
 
 /// Leave a stopped pick's conflicts at the foot of its message, commented,
 /// and in the run.
-fn noteConflicts(r: *Replay, msg: *std.ArrayList(u8), conflicts: []const threeway.Conflict) Error!void {
+fn noteConflicts(r: *Replay, msg: *std.ArrayList(u8), conflicts: []const three_way.Conflict) Error!void {
     const arena = r.arena;
     try msg.append(arena, '\n');
     try msg.appendSlice(arena, r.comment);
@@ -597,7 +597,7 @@ fn noteConflicts(r: *Replay, msg: *std.ArrayList(u8), conflicts: []const threewa
         try msg.appendSlice(arena, conflict.path);
         try msg.append(arena, '\n');
     }
-    const copied = try arena.dupe(threeway.Conflict, conflicts);
+    const copied = try arena.dupe(three_way.Conflict, conflicts);
     for (copied) |*c| c.path = try arena.dupe(u8, c.path);
     r.conflicts = copied;
 }
@@ -642,7 +642,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         if (r.options.signoff or r.options.record_origin) .whitespace else configuredCleanup(repo);
     // `try_to_commit`: `prepare-commit-msg` sees the message before it is
     // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
-    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
+    const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     var text: []const u8 = msg;
     if (commit_hooks.exists(io, "prepare-commit-msg")) {
         try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", text);
@@ -893,7 +893,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
-    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
+    const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     const given = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
     const raw = try commit_hooks.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
     const cleaned = try message.cleanup(arena, raw, .strip, r.comment);
@@ -994,7 +994,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// working tree back to where it began -- unless something else has moved
 /// `HEAD` since the sequence last did, in which case `HEAD` is left where it
 /// is, as git leaves it. The state goes either way.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Self.Error!void {
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*three_way.Blocked) Self.Error!void {
     const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), head_path)) orelse {
         if (!repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) and
             !repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.NoSequencerInProgress;
@@ -1038,7 +1038,7 @@ fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
 /// Ref identity and diagnostics for a merge reset.
 pub const ResetOptions = struct {
     who: object.Signature,
-    blocked: ?*threeway.Blocked = null,
+    blocked: ?*three_way.Blocked = null,
 };
 
 /// `git reset --merge <commit>`, `HEAD` when `target` is `null`: the index

@@ -2,7 +2,7 @@
 const std = @import("std");
 const testgit = @import("../testing/git.zig");
 const ops = @import("maintenance.zig");
-const graph = @import("../odb/commitgraph.zig");
+const graph = @import("../odb/commit_graph.zig");
 const odb = @import("../odb/odb.zig");
 const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
@@ -158,7 +158,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
 const midx = @import("../odb/midx.zig");
 const bitmaps = @import("../odb/bitmap.zig");
 const bitmap_store = @import("../odb/bitmap/reachability.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const pack_mod = @import("../odb/pack.zig");
 const repo_mod = @import("../repo/repo.zig");
 
@@ -217,7 +217,7 @@ test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with 
         try sameFile(&repo, path, expected_bitmap);
         try repo.exec(io, &.{ "multi-pack-index", "verify" });
         try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
-        const count = try objectwalk.countObjects(gpa, io, &db, &.{head}, &.{});
+        const count = try object_walk.countObjects(gpa, io, &db, &.{head}, &.{});
         try std.testing.expectEqual(@as(u64, 18), count.commits);
         try std.testing.expectEqual(@as(u64, 54), count.total());
         try std.testing.expect(db.stats.bitmap_hits > 0);
@@ -256,10 +256,10 @@ test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree
         const old_text = try repo.line(io, &.{ "rev-parse", "HEAD~7" });
         defer gpa.free(old_text);
         const old = try Oid.parse(.sha1, old_text);
-        try std.testing.expectEqual(@as(u64, 7), try objectwalk.countCommits(gpa, io, &db, &.{head}, &.{old}));
-        const counts = try objectwalk.countObjects(gpa, io, &db, &.{head}, &.{old});
+        try std.testing.expectEqual(@as(u64, 7), try object_walk.countCommits(gpa, io, &db, &.{head}, &.{old}));
+        const counts = try object_walk.countObjects(gpa, io, &db, &.{head}, &.{old});
         try std.testing.expectEqual(@as(u64, 21), counts.total());
-        var missing = try objectwalk.missing(gpa, io, &db, &.{head}, .{ .exclude = &.{old} });
+        var missing = try object_walk.missing(gpa, io, &db, &.{head}, .{ .exclude = &.{old} });
         defer missing.deinit();
         try std.testing.expectEqual(@as(usize, 21), missing.entries.len);
         const expected_objects = try repo.run(io, &.{ "rev-list", "--objects", "HEAD", "^HEAD~7" });
@@ -274,7 +274,7 @@ test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree
         try linearCommit(&repo, 24);
         const next = try tip(&repo, .sha1);
         const hits = db.stats.bitmap_hits;
-        try std.testing.expectEqual(@as(u64, 25), try objectwalk.countCommits(gpa, io, &db, &.{next}, &.{}));
+        try std.testing.expectEqual(@as(u64, 25), try object_walk.countCommits(gpa, io, &db, &.{next}, &.{}));
         try std.testing.expectEqual(hits, db.stats.bitmap_hits);
     }
 }
@@ -540,7 +540,7 @@ test "MIDX bitmap discovery preserves filesystem refusals for its packs" {
     }
 }
 
-const describe_mod = @import("../revwalk/describe.zig");
+const describe_mod = @import("../rev_walk/describe.zig");
 
 /// A multi-pack index's bytes with its trailing checksum taken again.
 fn resealMidx(bytes: []u8) void {

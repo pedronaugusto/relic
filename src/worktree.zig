@@ -1,6 +1,6 @@
 //! Public worktree namespace. Implementation is in `checkout/checkout.zig`.
 
-pub const sparsecheckout = @import("worktree/sparsecheckout.zig");
+pub const sparse_checkout = @import("worktree/sparse_checkout.zig");
 pub const linked = @import("checkout.zig").worktrees;
 pub const snapshot = @import("worktree/snapshot.zig");
 pub const sparse = @import("patterns.zig").sparse;
@@ -10,8 +10,8 @@ pub const convert = @import("checkout.zig").convert;
 pub const encoding = @import("text.zig").encoding;
 pub const fsmonitor = @import("checkout.zig").fsmonitor;
 pub const filter = @import("checkout.zig").filter;
-pub const dirscan = @import("checkout.zig").dirscan;
-pub const safepath = @import("names.zig").path;
+pub const dir_scan = @import("checkout.zig").dir_scan;
+pub const safe_path = @import("names.zig").path;
 pub const Error = @import("checkout/checkout.zig").Error;
 pub const Rules = @import("checkout/checkout.zig").Rules;
 pub const AddOutcome = @import("checkout/checkout.zig").AddOutcome;

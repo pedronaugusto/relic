@@ -15,7 +15,7 @@ const std = @import("std");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
-const blobmerge = @import("blobmerge.zig");
+const blob_merge = @import("blob_merge.zig");
 const parallax = @import("parallax");
 const similarity = @import("../diff/similarity.zig");
 
@@ -33,7 +33,7 @@ const LineDiff = @import("../diff/diff.zig").LineDiff;
 /// and the strategy options have had their say.
 pub const Settings = struct {
     /// `-X ours`, `-X theirs`.
-    resolve: blobmerge.Resolve = .markers,
+    resolve: blob_merge.Resolve = .markers,
     /// The line diff the content merges take: histogram unless
     /// `diff.algorithm` or a strategy option says otherwise.
     algorithm: parallax.Algorithm = .histogram,
@@ -213,7 +213,7 @@ test "strategy options set what git's parse_merge_opt sets, the later word winni
     var s: Settings = .{};
     try s.apply("theirs");
     try s.apply("diff-algorithm=minimal");
-    try std.testing.expectEqual(blobmerge.Resolve.theirs, s.resolve);
+    try std.testing.expectEqual(blob_merge.Resolve.theirs, s.resolve);
     try std.testing.expectEqual(parallax.Algorithm.myers, s.algorithm);
     try std.testing.expect(s.minimal);
     // `patience` keeps `minimal`; `diff-algorithm=` clears it.

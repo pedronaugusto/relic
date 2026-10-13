@@ -115,7 +115,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const upload_pack_helper = b.addExecutable(.{
         .name = "relic-upload-pack",
         .root_module = b.createModule(.{
-            .root_source_file = p.path("src/testing/uploadpack.zig"),
+            .root_source_file = p.path("src/testing/upload_pack.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -155,7 +155,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const remote_helper = b.addExecutable(.{
         .name = "relic-remote-helper",
         .root_module = b.createModule(.{
-            .root_source_file = p.path("src/testing/remotehelper.zig"),
+            .root_source_file = p.path("src/testing/remote_helper.zig"),
             .target = target,
             .optimize = optimize,
         }),

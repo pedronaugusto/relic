@@ -1,9 +1,9 @@
 //! git's text rules, each in one place: C-style quoting, dates, working-tree encodings, regular expressions, globs and column widths.
 
-pub const cquote = @import("text/cquote.zig");
+pub const c_quote = @import("text/c_quote.zig");
 pub const date = @import("text/date.zig");
 pub const encoding = @import("text/encoding.zig");
 pub const ere = @import("text/ere.zig");
 pub const glob = @import("text/glob.zig");
 pub const percent = @import("text/percent.zig");
-pub const unicodewidth = @import("text/unicodewidth.zig");
+pub const unicode_width = @import("text/unicode_width.zig");

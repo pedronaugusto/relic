@@ -21,7 +21,7 @@ const repo_mod = @import("../repo/repo.zig");
 const merging = @import("../commit/merging.zig");
 const rerere = @import("../merge/rerere.zig");
 const worktree = @import("../checkout/checkout.zig");
-const threeway = @import("../merge/threeway.zig");
+const three_way = @import("../merge/three_way.zig");
 const ort = @import("../merge/ort.zig");
 const signing = @import("../object/signing.zig");
 const program = @import("../process.zig").program;
@@ -406,7 +406,7 @@ test "a merge that would overwrite a local change is refused, and one it does no
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
                 const target = try merging.resolve(gpa, io, &repo, "clean");
-                var blocked: threeway.Blocked = .{};
+                var blocked: three_way.Blocked = .{};
                 try std.testing.expectError(error.LocalChangesWouldBeOverwritten, merging.start(gpa, io, &repo, target, .{ .who = who, .blocked = &blocked }));
                 try std.testing.expectEqualStrings("shared", blocked.path());
             }
@@ -1868,7 +1868,7 @@ test "a pick refused for an untracked file goes back on the sheet, and continues
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                var blocked: threeway.Blocked = .{};
+                var blocked: three_way.Blocked = .{};
                 try std.testing.expectError(error.UntrackedWouldBeOverwritten, rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .blocked = &blocked }));
                 try std.testing.expectEqualStrings("tmp", blocked.path());
             }

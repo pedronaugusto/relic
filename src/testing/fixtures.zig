@@ -701,10 +701,10 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
 const sparse_mod = @import("../patterns.zig").sparse;
 const worktree = @import("../checkout/checkout.zig");
 
-const commitgraph_mod = @import("../odb/commitgraph.zig");
+const commitgraph_mod = @import("../odb/commit_graph.zig");
 const midx_mod = @import("../odb/midx.zig");
 const merge_mod = @import("../merge/merge.zig");
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 const worktrees_mod = @import("../checkout/worktrees.zig");
 const repo_mod = @import("../repo/repo.zig");
 
@@ -827,7 +827,7 @@ test "a three-way tree merge agrees with git merge-tree" {
     const theirs = try Oid.parse(.sha1, theirs_text);
 
     // The merge base this computes is the one git computes.
-    const base = (try revwalk.mergeBase(gpa, io, &db, ours, theirs)).?;
+    const base = (try rev_walk.mergeBase(gpa, io, &db, ours, theirs)).?;
     var hex: [hash.max_hex_len]u8 = undefined;
     const merge_base_text = try repo.line(io, &.{ "merge-base", ours_text, theirs_text });
     defer gpa.free(merge_base_text);
@@ -1057,10 +1057,10 @@ test "a walk with the commit-graph answers what a walk without it answers" {
     defer gpa.free(head_text);
     const head = try Oid.parse(.sha1, head_text);
 
-    var plain: revwalk.Walk = .init(gpa, &db);
+    var plain: rev_walk.Walk = .init(gpa, &db);
     defer plain.deinit();
     try plain.push(head);
-    var accelerated: revwalk.Walk = .init(gpa, &db);
+    var accelerated: rev_walk.Walk = .init(gpa, &db);
     defer accelerated.deinit();
     accelerated.graph = &graph;
     try accelerated.push(head);

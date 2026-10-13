@@ -24,7 +24,7 @@ const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const cquote = @import("../text.zig").cquote;
+const c_quote = @import("../text.zig").c_quote;
 const binarypatch = @import("binary.zig");
 const hunks = @import("parallax").patch;
 
@@ -314,7 +314,7 @@ fn withRoot(p: *Parser, name: []const u8) Allocator.Error![]const u8 {
 
 /// A name quoted as git quotes one, with `p_value` components removed.
 fn findNameGnu(p: *Parser, line: []const u8, p_value: usize) Allocator.Error!?[]const u8 {
-    const got = (try cquote.unquote(p.a, line)) orelse return null;
+    const got = (try c_quote.unquote(p.a, line)) orelse return null;
     var cp: []const u8 = got.name;
     var n = p_value;
     while (n > 0) : (n -= 1) {
@@ -579,13 +579,13 @@ fn gitHeaderName(p: *Parser, full_line: []const u8) Allocator.Error!?[]const u8 
     // the line without "diff --git ", its newline kept as git's C string has it
     const line = full_line["diff --git ".len..];
     if (line.len > 0 and line[0] == '"') {
-        const first = (try cquote.unquote(p.a, line)) orelse return null;
+        const first = (try c_quote.unquote(p.a, line)) orelse return null;
         const first_name = skipTreePrefix(p.p_value, first.name) orelse return null;
         var second = first.consumed;
         while (second < line.len and isSpace(line[second])) second += 1;
         if (second >= line.len) return null;
         if (line[second] == '"') {
-            const sp = (try cquote.unquote(p.a, line[second..])) orelse return null;
+            const sp = (try c_quote.unquote(p.a, line[second..])) orelse return null;
             const cp = skipTreePrefix(p.p_value, sp.name) orelse return null;
             if (!std.mem.eql(u8, cp, first_name)) return null;
             return first_name;
@@ -599,7 +599,7 @@ fn gitHeaderName(p: *Parser, full_line: []const u8) Allocator.Error!?[]const u8 
     const name = skipTreePrefix(p.p_value, line) orelse return null;
     // a quote in an unquoted first name begins the second name
     if (std.mem.findScalar(u8, name, '"')) |q| {
-        const sp = (try cquote.unquote(p.a, name[q..])) orelse return null;
+        const sp = (try c_quote.unquote(p.a, name[q..])) orelse return null;
         const np = skipTreePrefix(p.p_value, sp.name) orelse return null;
         if (np.len < q and std.mem.startsWith(u8, name, np) and isSpace(name[np.len])) return np;
         return null;

@@ -4,13 +4,13 @@
 //! repository on this machine, opened in process by `local.zig`; `ssh://`
 //! and the scp-like form start the person's `ssh` through `ssh.zig`; and
 //! `http://` and `https://` are git's smart HTTP protocol through
-//! `smarthttp.zig`. The last two are conversations with the remote's own
+//! `smart_http.zig`. The last two are conversations with the remote's own
 //! `git-upload-pack` or `git-receive-pack`, and the protocol above them —
 //! the refs, the negotiation, the pack — is the same for both. A path to a
 //! bundle file is fetched from as git's bundle transport fetches: its refs
 //! listed, its pack indexed whole. A URL that names a remote helper —
 //! `<helper>::<address>`, a scheme relic does not speak, `remote.<name>.vcs`
-//! — runs `git-remote-<helper>` (`remotehelper.zig`): one that can
+//! — runs `git-remote-<helper>` (`remote_helper.zig`): one that can
 //! `connect` becomes a conversation like the others, and one that fetches,
 //! imports, pushes or exports is spoken to in its own commands. A `Session`
 //! hides which it is from the operations above.
@@ -18,32 +18,32 @@
 const ErrorNamespace = @This();
 const Self = @This();
 
-const httpsettings = @import("../wire.zig").httpsettings;
+const http_settings = @import("../wire.zig").http_settings;
 const promisors = @import("../wire.zig").promisors;
 /// Which proxy an HTTP remote is reached through.
-const Proxy = httpsettings.Proxy;
+const Proxy = http_settings.Proxy;
 // The modules relic's API puts under this one, as `relic.transport.<name>`.
 
 const url = @import("../wire.zig").url;
 
-const fetchpack = @import("../wire.zig").fetchpack;
+const fetch_pack = @import("../wire.zig").fetch_pack;
 
-const sendpack = @import("../wire.zig").sendpack;
+const send_pack = @import("../wire.zig").send_pack;
 const local = @import("local.zig");
 const ssh = @import("../wire.zig").ssh;
-const smarthttp = @import("../wire.zig").smarthttp;
+const smart_http = @import("../wire.zig").smart_http;
 
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
 const protocol = @import("../wire.zig").protocol;
 const connection = @import("../wire.zig").connection;
-const pktline = @import("../codec.zig").pktline;
+const pkt_line = @import("../codec.zig").pkt_line;
 
-const uploadpack = @import("uploadpack.zig");
+const upload_pack = @import("upload_pack.zig");
 const bundle = @import("bundle.zig");
 
 const progress = @import("../report.zig").progress;
-const remotehelper = @import("remotehelper.zig");
+const remote_helper = @import("remote_helper.zig");
 const policy = @import("../wire.zig").policy;
 
 const std = @import("std");
@@ -82,8 +82,8 @@ pub const Error = error{
     ProgramsNotGranted,
     /// The URL carries a password and `transfer.credentialsInUrl` is `die`.
     CredentialsInUrl,
-} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error || bundle.Error ||
-    remotehelper.Error;
+} || local.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || send_pack.Error || bundle.Error ||
+    remote_helper.Error;
 
 /// How a remote is reached.
 pub const Options = struct {
@@ -185,7 +185,7 @@ pub const Session = struct {
         },
         /// A remote helper spoken to in its own commands.
         helper: struct {
-            h: *remotehelper.Helper,
+            h: *remote_helper.Helper,
             repository: ?*repo_mod.Repository,
             who: ?object.Signature,
             cloning: bool,
@@ -288,7 +288,7 @@ pub const Session = struct {
                 errdefer if (owned) here.deinit(io);
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 const v2 = options.protocol_v2 orelse wantsV2(options.config);
-                const conn = try uploadpack.connect(gpa, io, here, if (v2) .v2 else .v0, .{});
+                const conn = try upload_pack.connect(gpa, io, here, if (v2) .v2 else .v0, .{});
                 owned = false;
                 errdefer conn.deinit(io);
                 return fromConnection(gpa, conn, service, kind);
@@ -319,7 +319,7 @@ pub const Session = struct {
             },
             .http, .https => {
                 // `error.HttpUnavailable` where relic was built without HTTP.
-                const conn = try smarthttp.connect(gpa, io, parsed, service, .{
+                const conn = try smart_http.connect(gpa, io, parsed, service, .{
                     .config = options.config,
                     .remote_name = options.remote_name,
                     .proxy = options.proxy,
@@ -358,12 +358,12 @@ pub const Session = struct {
             const key = std.mem.print(&key_buf, "remote.{s}.vcs", .{name}) catch break :blk null;
             break :blk c.get(key);
         } else null else null;
-        const spec = remotehelper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
+        const spec = remote_helper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
         try checkAllowed(options, spec.name);
         const programs = options.programs orelse return error.ProgramsNotGranted;
         const git_dir: ?[:0]u8 = if (options.repository) |r| try r.gitDirectory().realPathFileAlloc(io, ".", gpa) else null;
         defer if (git_dir) |d| gpa.free(d);
-        const h = try remotehelper.Helper.open(gpa, io, spec, .{
+        const h = try remote_helper.Helper.open(gpa, io, spec, .{
             .programs = programs,
             .git_dir = git_dir,
             .progress = options.progress != null,
@@ -422,7 +422,7 @@ pub const Session = struct {
 
     fn sayGoodbye(conn: *Connection) !void {
         const w = try conn.request();
-        try pktline.flush(w);
+        try pkt_line.flush(w);
         try w.flush();
     }
 
@@ -486,7 +486,7 @@ pub const Session = struct {
 
     /// What a push sends.
     pub const PushRequest = struct {
-        commands: []const sendpack.Command,
+        commands: []const send_pack.Command,
         /// Everything the new values reach that the remote lacks.
         objects: []const odb_mod.PackEntry,
         atomic: bool = false,
@@ -503,7 +503,7 @@ pub const Session = struct {
 
     /// Send a push, reading the objects from `db`, and return the remote's
     /// report of each command.
-    pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Self.Error!sendpack.Report {
+    pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Self.Error!send_pack.Report {
         assert(s.service == .receive_pack);
         // A helper's sources and `+`s go with the commands by position.
         assert(request.sources.len == 0 or request.sources.len == request.commands.len);
@@ -521,7 +521,7 @@ pub const Session = struct {
             // A bundle is only ever fetched from.
             .bundle => return error.UnsupportedTransport,
             .helper => |helper| {
-                const commands = try gpa.alloc(remotehelper.PushCommand, request.commands.len);
+                const commands = try gpa.alloc(remote_helper.PushCommand, request.commands.len);
                 defer gpa.free(commands);
                 for (request.commands, commands, 0..) |c, *out, i| out.* = .{
                     .src = if (i < request.sources.len) request.sources[i] else null,
@@ -550,7 +550,7 @@ pub const Session = struct {
                         return a.order(b) == .lt;
                     }
                 }.lessThan);
-                return sendpack.send(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db }, .{
+                return send_pack.send(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db }, .{
                     .shallow = shallow,
                     .commands = request.commands,
                     .objects = request.objects,
@@ -563,7 +563,7 @@ pub const Session = struct {
     }
 
     /// What a fetch asks for.
-    pub const FetchRequest = fetchpack.Request;
+    pub const FetchRequest = fetch_pack.Request;
 
     /// What a fetch brought.
     pub const Fetched = struct {
@@ -589,7 +589,7 @@ pub const Session = struct {
         gpa: Allocator,
         io: Io,
         inputs: FetchInputs,
-        options: fetchpack.Options,
+        options: fetch_pack.Options,
     ) Self.Error!Fetched {
         const db = inputs.db;
         const pack_dir = inputs.pack_dir;
@@ -613,7 +613,7 @@ pub const Session = struct {
             .helper => |helper| {
                 // A helper is asked by name: the names the caller gives, or
                 // those the list gave each object.
-                var wants: std.ArrayList(remotehelper.Want) = .empty;
+                var wants: std.ArrayList(remote_helper.Want) = .empty;
                 defer wants.deinit(gpa);
                 for (request.wants, 0..) |oid, i| {
                     if (i < request.want_names.len) {
@@ -648,7 +648,7 @@ pub const Session = struct {
                 // Done with either way: git ends a v2 conversation after
                 // its fetch by closing it, with no flush.
                 smart.done = true;
-                const result = try fetchpack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = request }, options);
+                const result = try fetch_pack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = request }, options);
                 return .{ .pack = result.name, .objects = result.objects, .keep = result.keep };
             },
         }

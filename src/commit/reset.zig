@@ -25,14 +25,14 @@ const worktree = @import("../checkout/checkout.zig");
 const convert = @import("../checkout/convert.zig");
 const fs = @import("../fs/fs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const threeway = @import("../merge/threeway.zig");
+const three_way = @import("../merge/three_way.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
 const Repository = repo_mod.Repository;
 
 /// Errors from a reset.
-pub const Error = threeway.Error;
+pub const Error = three_way.Error;
 
 /// How much of the working tree a reset may overwrite.
 pub const Mode = enum {
@@ -47,7 +47,7 @@ pub const Options = struct {
     index: *Index,
     tree: Oid,
     mode: Mode = .merge,
-    blocked: ?*threeway.Blocked = null,
+    blocked: ?*three_way.Blocked = null,
 };
 
 /// Make `index` and the working tree hold `tree`, as `mode` allows.

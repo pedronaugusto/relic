@@ -1,8 +1,8 @@
 //! Public merge namespace. Implementation is in `merge/merge.zig`.
 
 pub const rerere = @import("merge/rerere.zig");
-pub const threeway = @import("merge/threeway.zig");
-pub const subtreeshift = @import("merge/subtreeshift.zig");
+pub const three_way = @import("merge/three_way.zig");
+pub const subtree_shift = @import("merge/subtree_shift.zig");
 pub const strategy = @import("merge/strategy.zig");
 pub const ort = @import("merge/ort.zig");
 pub const octopus = @import("merge/octopus.zig");

@@ -5,14 +5,14 @@
 //! is what the side-band and every remote message go through; a credential
 //! prompt is percent-encoded by `transport/credential.zig`.
 
-const pktline = @import("../../codec.zig").pktline;
+const pkt_line = @import("../../codec.zig").pkt_line;
 const std = @import("std");
 const Io = std.Io;
 
 const credential = @import("../../wire.zig").credential;
 const url_mod = @import("../../wire.zig").url;
 const config_mod = @import("../../config/config.zig");
-const sideband = @import("../../wire.zig").sideband;
+const side_band = @import("../../wire.zig").side_band;
 const progress = @import("../../report.zig").progress;
 
 /// The prompts a fill showed, one after another.
@@ -60,12 +60,12 @@ fn heard(gpa: std.mem.Allocator, control: progress.Control, messages: []const []
         var line: [256]u8 = undefined;
         line[0] = 2;
         @memcpy(line[1..][0..text.len], text);
-        try pktline.write(&wire.writer, line[0 .. text.len + 1]);
+        try pkt_line.write(&wire.writer, line[0 .. text.len + 1]);
     }
     var line: [256]u8 = undefined;
     line[0] = 3;
     @memcpy(line[1..][0..fatal.len], fatal);
-    try pktline.write(&wire.writer, line[0 .. fatal.len + 1]);
+    try pkt_line.write(&wire.writer, line[0 .. fatal.len + 1]);
 
     const Sink = struct {
         fn report(context: ?*anyopaque, event: progress.Event) void {
@@ -75,10 +75,10 @@ fn heard(gpa: std.mem.Allocator, control: progress.Control, messages: []const []
     };
     var shown: std.ArrayList(u8) = .empty;
     errdefer shown.deinit(gpa);
-    var buffer: [pktline.max_line]u8 = undefined;
+    var buffer: [pkt_line.max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(wire.written());
     var in = fixed.limited(.unlimited, &buffer);
-    var demux: sideband.Demux = .init(&in.interface, &.{}, .{ .context = &shown, .report = Sink.report, .remote_control = control });
+    var demux: side_band.Demux = .init(&in.interface, &.{}, .{ .context = &shown, .report = Sink.report, .remote_control = control });
     var out: [16]u8 = undefined;
     try std.testing.expectError(error.ReadFailed, demux.interface.readSliceShort(&out));
     return .{ .progress = try shown.toOwnedSlice(gpa), .message = try gpa.dupe(u8, demux.message()) };

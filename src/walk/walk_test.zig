@@ -10,8 +10,8 @@ const testing = std.testing;
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
 const object = @import("../object/object.zig");
-const revwalk = @import("walk.zig");
-const commitgraph = @import("../odb/commitgraph.zig");
+const rev_walk = @import("walk.zig");
+const commit_graph = @import("../odb/commit_graph.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 
@@ -82,7 +82,7 @@ test "ancestry answers what git merge-base --is-ancestor answers, for every pair
     defer db.deinit(io);
     const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
     defer objects.close(io);
-    var graph = (try commitgraph.Graph.open(gpa, io, objects, .sha1)) orelse return error.SkipZigTest;
+    var graph = (try commit_graph.Graph.open(gpa, io, objects, .sha1)) orelse return error.SkipZigTest;
     defer graph.deinit();
 
     repo.report_failures = false;
@@ -93,8 +93,8 @@ test "ancestry answers what git merge-base --is-ancestor answers, for every pair
             gpa.free(out);
             break :blk true;
         } else |_| false;
-        try testing.expectEqual(theirs, try revwalk.isAncestor(gpa, io, &db, .{ .ancestor = a, .descendant = d }, .{}));
-        try testing.expectEqual(theirs, try revwalk.isAncestor(gpa, io, &db, .{ .ancestor = a, .descendant = d }, .{ .graph = &graph }));
+        try testing.expectEqual(theirs, try rev_walk.isAncestor(gpa, io, &db, .{ .ancestor = a, .descendant = d }, .{}));
+        try testing.expectEqual(theirs, try rev_walk.isAncestor(gpa, io, &db, .{ .ancestor = a, .descendant = d }, .{ .graph = &graph }));
     };
 }
 
@@ -115,7 +115,7 @@ test "a walk with hidden commits lists what git rev-list lists, for every pair" 
     for (oids) |tip| for (oids) |hidden| {
         const theirs = try repo.run(io, &.{ "rev-list", tip.hex(&tip_hex), "--not", hidden.hex(&hidden_hex) });
         defer gpa.free(theirs);
-        var walk: revwalk.Walk = .init(gpa, &db);
+        var walk: rev_walk.Walk = .init(gpa, &db);
         defer walk.deinit();
         try walk.push(tip);
         try walk.hide(hidden);
@@ -183,7 +183,7 @@ test "a commit's tree and parents are read where git reads them, whatever header
     const theirs_list = try repo.run(io, &.{ "rev-list", odd });
     defer gpa.free(theirs_list);
 
-    var walk: revwalk.Walk = .init(gpa, &db);
+    var walk: rev_walk.Walk = .init(gpa, &db);
     defer walk.deinit();
     try walk.push(try Oid.parse(.sha1, odd));
     var listed: std.ArrayList(u8) = .empty;

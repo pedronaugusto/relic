@@ -24,7 +24,7 @@ const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const http = std.http;
 const lfstransfer = @import("transfer.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 const program = @import("../process.zig").program;
@@ -179,7 +179,7 @@ pub fn relicUploadHead(fx: *Fixture, d: Io.Dir, options: lfstransfer.Options) !l
     defer repo.deinit(fx.io);
     const head = (try repo.head(fx.io)).?;
     defer fx.gpa.free(head.name);
-    var collected = try objectwalk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, .{ .exclude = &.{} });
+    var collected = try object_walk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, .{ .exclude = &.{} });
     defer collected.deinit();
     const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = fx.programs() });
     defer server.deinit(fx.io);

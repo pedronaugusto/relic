@@ -31,7 +31,7 @@ pub fn main() void {
     _ = &relic.lfs.locks.Table.cached;
     _ = &relic.lfs.custom.Agent.open;
     _ = &relic.lfs.hooks.Native.lfsHooks;
-    _ = &relic.transport.smarthttp.connect;
-    _ = &relic.transport.httpsettings.resolve;
-    _ = &relic.transport.httpsettings.resolveForRemote;
+    _ = &relic.transport.smart_http.connect;
+    _ = &relic.transport.http_settings.resolve;
+    _ = &relic.transport.http_settings.resolveForRemote;
 }

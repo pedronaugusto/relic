@@ -31,7 +31,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const program = @import("../process.zig").program;
-const pktline = @import("../codec.zig").pktline;
+const pkt_line = @import("../codec.zig").pkt_line;
 const connection = @import("../wire.zig").connection;
 
 /// Errors from the protocol.
@@ -123,42 +123,42 @@ pub const Connection = struct {
     /// Send `command` and its arguments.
     pub fn send(c: *Connection, io: Io, command: []const u8, args: []const []const u8) Self.Error!void {
         try c.writeHead(io, command, args);
-        pktline.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pkt_line.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// Send `command`, its arguments, a delimiter, and `lines`.
     pub fn sendLines(c: *Connection, io: Io, command: []const u8, args: []const []const u8, lines: []const []const u8) Self.Error!void {
         try c.writeHead(io, command, args);
-        pktline.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
-        for (lines) |line| pktline.print("{s}\n", .{line}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
-        pktline.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pkt_line.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        for (lines) |line| pkt_line.print("{s}\n", .{line}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pkt_line.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// Start `command` with its arguments and a delimiter; the data follows
     /// through `writeData` and ends with `endData`.
     pub fn beginData(c: *Connection, io: Io, command: []const u8, args: []const []const u8) Self.Error!void {
         try c.writeHead(io, command, args);
-        pktline.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pkt_line.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// A piece of data, in lines of at most `pktline.max_data` bytes.
     pub fn writeData(c: *Connection, io: Io, bytes: []const u8) Self.Error!void {
         var rest = bytes;
         while (rest.len != 0) {
-            const n = @min(rest.len, pktline.max_data);
-            pktline.write((try connection.Process.streams(c.conn, io)).writer, rest[0..n]) catch |err| return c.conn.writeFailed(err);
+            const n = @min(rest.len, pkt_line.max_data);
+            pkt_line.write((try connection.Process.streams(c.conn, io)).writer, rest[0..n]) catch |err| return c.conn.writeFailed(err);
             rest = rest[n..];
         }
     }
 
     /// The end of the data.
     pub fn endData(c: *Connection, io: Io) Self.Error!void {
-        pktline.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pkt_line.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     fn writeHead(c: *Connection, io: Io, command: []const u8, args: []const []const u8) ErrorNamespace.Error!void {
-        pktline.print("{s}\n", .{command}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
-        for (args) |a| pktline.print("{s}\n", .{a}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pkt_line.print("{s}\n", .{command}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        for (args) |a| pkt_line.print("{s}\n", .{a}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     fn flushOut(c: *Connection, io: Io) ErrorNamespace.Error!void {

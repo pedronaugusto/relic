@@ -7,10 +7,10 @@ const Oid = hash.Oid;
 const Kind = hash.Kind;
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
-const reftable = @import("reftable.zig");
+const reftable = @import("reftable/table.zig");
 const reflog = @import("reflog.zig");
 const hooks = @import("../hooks/hooks.zig");
-const policy = @import("reftablestack/policy.zig");
+const policy = @import("reftable/stack/policy.zig");
 /// The header `packed-refs` carries, with the space before the newline that
 /// is in git's source and in no document.
 pub const packed_header = "# pack-refs with: peeled fully-peeled sorted \n";

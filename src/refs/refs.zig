@@ -8,15 +8,15 @@
 //!
 //! A repository whose refs are a reftable stack is read and written through
 //! the same `Store` and `Transaction`; `format` says which, and
-//! `reftablestack` is the other side. There a transaction is one table added
+//! `reftable_stack` is the other side. There a transaction is one table added
 //! under one lock, so its commit is all or nothing.
 
 const ErrorNamespace = @This();
 // The modules relic's API puts under this one, as `relic.refs.<name>`.
-const reftable = @import("reftable.zig");
+const reftable = @import("reftable/table.zig");
 /// What a ref may be named, and the names git treats apart.
 const names = @import("../names.zig").ref;
-const stack_engine = @import("reftablestack/transaction.zig");
+const stack_engine = @import("reftable/stack/transaction.zig");
 
 const std = @import("std");
 const shakedown = @import("shakedown");

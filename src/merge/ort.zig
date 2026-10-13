@@ -37,11 +37,11 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
-const merge = @import("blobmerge.zig");
-const subtreeshift = @import("subtreeshift.zig");
+const merge = @import("blob_merge.zig");
+const subtree_shift = @import("subtree_shift.zig");
 const rename = @import("../diff/rename.zig");
 const attributes = @import("../patterns.zig").attributes;
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const convert = @import("../checkout/convert.zig");
 const parallax = @import("parallax");
@@ -74,7 +74,7 @@ pub const Error = error{
     /// two checks.
     DirectoryRenameLostStage,
 } || Allocator.Error || odb_mod.Error || object.TreeParseError || object.ParseError ||
-    attributes.Error || revwalk.Error || convert.Error || subtreeshift.Error;
+    attributes.Error || rev_walk.Error || convert.Error || subtree_shift.Error;
 
 /// When a file one side added lands in a directory the other side renamed:
 /// `merge.directoryRenames`.
@@ -144,7 +144,7 @@ pub const Options = struct {
     whitespace: parallax.Whitespace = .{},
     /// `-X subtree` and `-X subtree=<path>`: before each merge the base and
     /// the second side are shifted to line up with the first side's tree,
-    /// `subtreeshift.shift` with this as its path. `null` shifts nothing.
+    /// `subtree_shift.shift` with this as its path. `null` shifts nothing.
     subtree_shift: ?[]const u8 = null,
     /// Whether renames are followed: `merge.renames`, `-X no-renames`.
     renames: bool = true,
@@ -1182,17 +1182,17 @@ const Merge = struct {
             }
         }
         const gpa = m.db.allocator();
-        if (!try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = o, .descendant = a }, .{}) or !try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = o, .descendant = b }, .{})) {
+        if (!try rev_walk.isAncestor(gpa, m.io, sdb, .{ .ancestor = o, .descendant = a }, .{}) or !try rev_walk.isAncestor(gpa, m.io, sdb, .{ .ancestor = o, .descendant = b }, .{})) {
             try m.pathMsg("Failed to merge submodule {s} (commits don't follow merge-base)", .submodule_may_have_rewinds, path, null, null, &.{}, .{path});
             return false;
         }
         var hex: [hash.max_hex_len]u8 = undefined;
-        if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = a, .descendant = b }, .{})) {
+        if (try rev_walk.isAncestor(gpa, m.io, sdb, .{ .ancestor = a, .descendant = b }, .{})) {
             result.* = b;
             try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, b.hex(&hex) });
             return true;
         }
-        if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = b, .descendant = a }, .{})) {
+        if (try rev_walk.isAncestor(gpa, m.io, sdb, .{ .ancestor = b, .descendant = a }, .{})) {
             result.* = a;
             try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, a.hex(&hex) });
             return true;
@@ -1227,7 +1227,7 @@ const Merge = struct {
     /// contain `b`, less those that contain another of them.
     fn findFirstMerges(m: *Merge, sdb: *odb_mod.Odb, tips: []const Oid, a: Oid, b: Oid) Error![]const Oid {
         const gpa = m.db.allocator();
-        var walk = revwalk.Walk.init(gpa, sdb);
+        var walk = rev_walk.Walk.init(gpa, sdb);
         defer walk.deinit();
         for (tips) |tip| try walk.push(tip);
         try walk.hide(a);
@@ -1236,15 +1236,15 @@ const Merge = struct {
         while (try walk.next(m.io)) |commit| {
             if (commit.parents.len < 2) continue;
             // `--ancestry-path`: descendants of `a` only.
-            if (!try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = a, .descendant = commit.oid }, .{})) continue;
-            if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = b, .descendant = commit.oid }, .{})) try candidates.append(m.arena, commit.oid);
+            if (!try rev_walk.isAncestor(gpa, m.io, sdb, .{ .ancestor = a, .descendant = commit.oid }, .{})) continue;
+            if (try rev_walk.isAncestor(gpa, m.io, sdb, .{ .ancestor = b, .descendant = commit.oid }, .{})) try candidates.append(m.arena, commit.oid);
         }
         var out: std.ArrayList(Oid) = .empty;
         for (candidates.items, 0..) |m1, i| {
             var contains_another = false;
             for (candidates.items, 0..) |m2, j| {
                 if (i == j) continue;
-                if (try revwalk.isAncestor(gpa, m.io, sdb, .{ .ancestor = m2, .descendant = m1 }, .{})) {
+                if (try rev_walk.isAncestor(gpa, m.io, sdb, .{ .ancestor = m2, .descendant = m1 }, .{})) {
                     contains_another = true;
                     break;
                 }
@@ -2055,8 +2055,8 @@ const Merge = struct {
         // `-X subtree`: the other side and the base lined up with ours
         // first, as `merge_ort_nonrecursive_internal` does.
         if (m.options.subtree_shift) |prefix| {
-            side2 = try subtreeshift.shift(m.db.allocator(), m.io, m.db, .{ .one = side1, .two = side2 }, .{ .prefix = prefix });
-            base = try subtreeshift.shift(m.db.allocator(), m.io, m.db, .{ .one = side1, .two = base }, .{ .prefix = prefix });
+            side2 = try subtree_shift.shift(m.db.allocator(), m.io, m.db, .{ .one = side1, .two = side2 }, .{ .prefix = prefix });
+            base = try subtree_shift.shift(m.db.allocator(), m.io, m.db, .{ .one = side1, .two = base }, .{ .prefix = prefix });
         }
         m.reset();
         var passes: u32 = 0;
@@ -2107,14 +2107,14 @@ const Merge = struct {
     }
 
     fn mergeBasesOf(m: *Merge, a: CommitRef, b: CommitRef) Error![]const Oid {
-        var virtuals: std.ArrayList(revwalk.Virtual) = .empty;
+        var virtuals: std.ArrayList(rev_walk.Virtual) = .empty;
         for (m.virtuals.items) |v| {
             const parents = try m.arena.alloc(Oid, v.parents.len);
             for (v.parents, parents) |ref, *out| out.* = m.oidOf(ref);
             try virtuals.append(m.arena, .{ .oid = v.fake, .parents = parents });
         }
         const gpa = m.db.allocator();
-        const found = try revwalk.mergeBases(gpa, m.io, m.db, .{ .a = m.oidOf(a), .b = m.oidOf(b) }, .{ .virtuals = virtuals.items });
+        const found = try rev_walk.mergeBases(gpa, m.io, m.db, .{ .a = m.oidOf(a), .b = m.oidOf(b) }, .{ .virtuals = virtuals.items });
         defer gpa.free(found);
         return m.arena.dupe(Oid, found);
     }

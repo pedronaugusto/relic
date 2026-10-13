@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Every public namespace whose name ran two words together is snake_case, the family's one naming convention, and the names that shared a prefix are one namespace each: `fast` (was `fastimport` and `fastexport`) with `fast.importer` and `fast.exporter`; `rev_walk` (was `revwalk`) with `rev_walk.rev_parse` and `rev_walk.object` (was `objectwalk` and `objectfilter`) with `object.walk` and `object.filter`; `odb.commit_graph`, `odb.rev_index`, `odb.index_pack`; `refs.reftable` with `reftable.table` (the format, was `refs.reftable`) and `reftable.stack` (was `refs.reftablestack`); `worktree.sparse_checkout`, `worktree.dir_scan`, `worktree.safe_path`; `diff.patch_id`; `merge.three_way`, `merge.subtree_shift`; `transport.filter_spec`, `transport.side_band`, `transport.http_settings`, `transport.fetch_pack`, `transport.send_pack`, `transport.smart_http`, `transport.pkt_line`, `transport.upload_pack`, `transport.remote_helper`; `patch.range_diff`. Names git spells as one word stay one: `reftable`, `refspec`, `gitlink`, `gitmodules`, `mailmap`, `fsmonitor`, `shortlog`, `rerere`, `netrc`, `midx`, `sha1dc`.
+
 ## [0.5.0] - 2026-10-13
 
 ### Breaking

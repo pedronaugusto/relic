@@ -1,14 +1,14 @@
 //! Path aliases: a stored name that some filesystem opens as `.git`,
 //! `.gitmodules`, a device or a path outside the working tree. git's fixes
 //! for them, each mirrored from its own test. The rule's owner is
-//! `worktree/safepath.zig` (the architecture's `names/path`); checkout,
+//! `worktree/safe_path.zig` (the architecture's `names/path`); checkout,
 //! the index and fsck all ask it.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 const hostile = @import("hostile.zig");
-const safepath = @import("../../names.zig").path;
+const safe_path = @import("../../names.zig").path;
 const fsck = @import("../../object/fsck.zig");
 const hash = @import("../../hash/hash.zig");
 
@@ -85,7 +85,7 @@ test "CVE-2018-11233, t0060-path-utils 'match .gitmodules': the NTFS and HFS+ ma
     };
     const matches = struct {
         fn f(name: []const u8) bool {
-            return safepath.isHfsDot(name, "gitmodules") or safepath.isNtfsDotGitmodules(name);
+            return safe_path.isHfsDot(name, "gitmodules") or safe_path.isNtfsDotGitmodules(name);
         }
     }.f;
     for (yes) |name| try std.testing.expect(matches(name));
@@ -97,31 +97,31 @@ test "CVE-2018-11233, t0060-path-utils 'match .gitmodules': the NTFS and HFS+ ma
         .{ .needle = "mailmap", .prefix = "maba30", .names = &.{ ".mailmap", ".mail\u{200c}map", ".Mailmap", ".mailmaP", "MAILMA~1", "MABA30~1" } },
     };
     for (others) |other| for (other.names) |name| {
-        try std.testing.expect(safepath.isHfsDot(name, other.needle) or safepath.isNtfsDot(name, other.needle, other.prefix));
+        try std.testing.expect(safe_path.isHfsDot(name, other.needle) or safe_path.isNtfsDot(name, other.needle, other.prefix));
     };
     // The out-of-bounds read was on names cut short: every prefix of every
     // vector is asked, and a safe build traps any read past its end.
     for (yes ++ no) |name| {
         for (0..name.len + 1) |len| {
             _ = matches(name[0..len]);
-            _ = safepath.isNtfsDotGit(name[0..len]);
-            _ = safepath.checkEntry(name[0..len], .worktree, true);
+            _ = safe_path.isNtfsDotGit(name[0..len]);
+            _ = safe_path.checkEntry(name[0..len], .worktree, true);
         }
     }
 }
 
 test "CVE-2019-1351, t0060-path-utils (MINGW): a drive named by any character subst allows is absolute where Windows opens it" {
-    try std.testing.expectEqual(@as(usize, 2), safepath.dosDrivePrefixLen("C:\\git"));
-    try std.testing.expectEqual(@as(usize, 2), safepath.dosDrivePrefixLen("1:/escape"));
-    try std.testing.expectEqual(@as(usize, 3), safepath.dosDrivePrefixLen("\u{e4}:x"));
-    try std.testing.expectEqual(@as(usize, 3), safepath.dosDrivePrefixLen("\u{58d}:x"));
-    try std.testing.expectEqual(@as(usize, 0), safepath.dosDrivePrefixLen("ab:c"));
-    try std.testing.expectEqual(@as(usize, 0), safepath.dosDrivePrefixLen("1"));
+    try std.testing.expectEqual(@as(usize, 2), safe_path.dosDrivePrefixLen("C:\\git"));
+    try std.testing.expectEqual(@as(usize, 2), safe_path.dosDrivePrefixLen("1:/escape"));
+    try std.testing.expectEqual(@as(usize, 3), safe_path.dosDrivePrefixLen("\u{e4}:x"));
+    try std.testing.expectEqual(@as(usize, 3), safe_path.dosDrivePrefixLen("\u{58d}:x"));
+    try std.testing.expectEqual(@as(usize, 0), safe_path.dosDrivePrefixLen("ab:c"));
+    try std.testing.expectEqual(@as(usize, 0), safe_path.dosDrivePrefixLen("1"));
     for ([_][]const u8{ "1:/escape", "\u{e4}:x", "C:x" }) |path| {
-        for ([_]safepath.Use{ .stored, .worktree }) |use| {
+        for ([_]safe_path.Use{ .stored, .worktree }) |use| {
             if (windows) {
-                try std.testing.expectEqual(safepath.Reason.absolute, safepath.check(path, use).?.reason);
-            } else if (use == .stored) try std.testing.expectEqual(null, safepath.check(path, use));
+                try std.testing.expectEqual(safe_path.Reason.absolute, safe_path.check(path, use).?.reason);
+            } else if (use == .stored) try std.testing.expectEqual(null, safe_path.check(path, use));
         }
     }
 }
@@ -135,7 +135,7 @@ test "CVE-2019-1352, t1014-read-tree-confusing (protectNTFS): .git with an alter
     const config = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = "config", .oid = blob }});
     for ([_][]const u8{ ".git::$INDEX_ALLOCATION", ".git:$DATA", "git~1::$INDEX_ALLOCATION", ".GIT...:x" }) |name| {
         const tree = try h.writeTree(gpa, io, &.{.{ .mode = "40000", .name = name, .oid = config }});
-        try std.testing.expectEqual(safepath.Reason.git_directory, (try h.checkout(gpa, io, tree)).?);
+        try std.testing.expectEqual(safe_path.Reason.git_directory, (try h.checkout(gpa, io, tree)).?);
         try std.testing.expectEqual(fsck.Problem.has_dotgit, (try fsckProblem(gpa, "40000", name)).?);
     }
     var buf: [64]u8 = undefined;
@@ -167,13 +167,13 @@ test "CVE-2019-1353, t1014-read-tree-confusing and t0060-path-utils (MINGW): the
     // git's `is_valid_win32_path` vectors, asked of the rule on every
     // platform so that it is proved where it is not applied too.
     for ([_][]const u8{ "win32", "win32 x", "../hello.txt", "C:\\git", "comm", "conout.c", "com0.c", "lptN" }) |path| {
-        try std.testing.expectEqual(null, safepath.win32PathReason(path));
+        try std.testing.expectEqual(null, safe_path.win32PathReason(path));
     }
     for ([_][]const u8{
         "win32 ",                 "win32 /x ", "win32.", "win32 . .", ".../hello.txt", "colon:test", "AUX.c",
         "abc/conOut$  .xyz/test", "lpt8",      "com9.c", "lpt*",      "Nul",           "PRN./abc",
     }) |path| {
-        try std.testing.expect(safepath.win32PathReason(path) != null);
+        try std.testing.expect(safe_path.win32PathReason(path) != null);
     }
 }
 
@@ -185,7 +185,7 @@ test "CVE-2019-1354, verify_path under protectNTFS: a name holding a backslash i
     const blob = try h.blob(io, "x\n");
     const tree = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = "a\\b", .oid = blob }});
     if (windows) {
-        try std.testing.expectEqual(safepath.Reason.separator_inside_component, (try h.checkout(gpa, io, tree)).?);
+        try std.testing.expectEqual(safe_path.Reason.separator_inside_component, (try h.checkout(gpa, io, tree)).?);
         try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "a/b", .{}));
     } else {
         try std.testing.expectEqual(null, try h.checkout(gpa, io, tree));

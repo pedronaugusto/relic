@@ -8,7 +8,7 @@ const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const local = @import("../transport/local.zig");
 const odb_mod = @import("../odb/odb.zig");
-const sendpack = @import("../wire.zig").sendpack;
+const send_pack = @import("../wire.zig").send_pack;
 const hash = @import("../hash/hash.zig");
 
 const no_space: seam.Code = if (builtin.target.os.tag == .windows) .DISK_FULL else .NOSPC;
@@ -18,7 +18,7 @@ const no_space: seam.Code = if (builtin.target.os.tag == .windows) .DISK_FULL el
 const Push = struct {
     accepted: bool = false,
 
-    fn run(push: *Push, io: Io, path: []const u8, from: *odb_mod.Odb, commands: []const sendpack.Command, entries: []const odb_mod.PackEntry, atomic: bool) !void {
+    fn run(push: *Push, io: Io, path: []const u8, from: *odb_mod.Odb, commands: []const send_pack.Command, entries: []const odb_mod.PackEntry, atomic: bool) !void {
         var remote = try local.Remote.open(testing.allocator, io, path, .{});
         defer remote.deinit(io);
         var report = try remote.receivePush(testing.allocator, io, .{ .from = from, .commands = commands, .objects = entries }, .{
@@ -61,7 +61,7 @@ test "local push retains its pack through collection failure and cancellation" {
             const oid = try hash.Oid.parse(from.objectFormat(), head);
             var objects = try from.objectDatabase().collectReachable(io, &.{oid}, .{});
             defer objects.deinit();
-            const commands = [_]sendpack.Command{.{ .name = "refs/heads/arrived", .old = hash.Oid.zero(oid.kind), .new = oid }};
+            const commands = [_]send_pack.Command{.{ .name = "refs/heads/arrived", .old = hash.Oid.zero(oid.kind), .new = oid }};
             for ([_]bool{ false, true }) |atomic| {
                 for ([_]enum { success, failure, cancellation }{ .success, .failure, .cancellation }) |outcome| {
                     const args = try std.mem.concat(gpa, []const u8, &.{ &.{ "--bare", fmtarg }, ref_format.initArgs() });

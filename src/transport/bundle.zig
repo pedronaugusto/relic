@@ -33,17 +33,17 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
-const revparse = @import("../revwalk/revparse.zig");
-const revwalk = @import("../walk/walk.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_walk = @import("../walk/walk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const fsck = @import("../object/fsck.zig");
-const indexpack = @import("../odb/indexpack.zig");
-const filterspec = @import("../wire.zig").filterspec;
+const index_pack = @import("../odb/index_pack.zig");
+const filter_spec = @import("../wire.zig").filter_spec;
 const message = @import("../object/message.zig");
 const fs = @import("../fs/fs.zig");
 const ignore = @import("../patterns.zig").ignore;
 const progress_mod = @import("../report.zig").progress;
-const revindex = @import("../odb/revindex.zig");
+const rev_index = @import("../odb/rev_index.zig");
 const ref_names = @import("../names.zig").ref;
 
 const Oid = hash.Oid;
@@ -143,7 +143,7 @@ pub const Header = struct {
                         return error.UnknownBundleCapability;
                 } else if (std.mem.startsWith(u8, capability, "filter=")) {
                     const spec = capability["filter=".len..];
-                    _ = filterspec.parse(a, spec) catch |err| switch (err) {
+                    _ = filter_spec.parse(a, spec) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.InvalidFilter => return error.InvalidFilter,
                     };
@@ -298,7 +298,7 @@ pub const Error = error{
     PrerequisitesNotConnected,
     /// A bundle in another object format than the repository's.
     ObjectFormatMismatch,
-} || Allocator.Error || odb_mod.Error || objectwalk.Error || indexpack.Error || OpenError || Io.File.Writer.Error || refs_mod.ReadError;
+} || Allocator.Error || odb_mod.Error || object_walk.Error || index_pack.Error || OpenError || Io.File.Writer.Error || refs_mod.ReadError;
 
 /// What `verify` found.
 pub const Verification = struct {
@@ -344,7 +344,7 @@ pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header, r
 
 /// Whether every object `tips` reach and `refs` do not is in `db`.
 fn connectedBelow(gpa: Allocator, io: Io, db: *odb_mod.Odb, tips: []const Oid, refs: []const Oid) Error!bool {
-    var collected = objectwalk.missing(gpa, io, db, tips, .{ .exclude = refs }) catch |err| switch (err) {
+    var collected = object_walk.missing(gpa, io, db, tips, .{ .exclude = refs }) catch |err| switch (err) {
         error.MissingObject, error.ObjectNotFound => return false,
         else => |e| return e,
     };
@@ -388,7 +388,7 @@ pub const UnbundleOptions = struct {
 /// `unbundle`: verify the prerequisites and index the pack into the
 /// repository, completing a thin pack from it; a filtered bundle's pack is
 /// kept as a promisor pack, as git keeps it. Returns what was received.
-pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Self.Error!indexpack.Result {
+pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Self.Error!index_pack.Result {
     var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     const tips = try repositoryTips(gpa, io, repo);
@@ -398,8 +398,8 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
         .fix_thin = true,
         .fsck = if (options.check_objects) &strict else null,
         .progress = options.progress,
-        .reverse_index = revindex.wanted(repo.configuration()),
-        .threads = indexpack.configuredThreads(repo.configuration()),
+        .reverse_index = rev_index.wanted(repo.configuration()),
+        .threads = index_pack.configuredThreads(repo.configuration()),
     });
 }
 
@@ -408,7 +408,7 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
 /// from a bundle does.
 pub const ReceiveInputs = struct { pack_dir: Io.Dir, bundle: *File, refs: []const Oid };
 
-pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: ReceiveInputs, options: indexpack.Options) Self.Error!indexpack.Result {
+pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: ReceiveInputs, options: index_pack.Options) Self.Error!index_pack.Result {
     const pack_dir = inputs.pack_dir;
     const bundle = inputs.bundle;
     const refs = inputs.refs;
@@ -470,7 +470,7 @@ pub const CreateError = error{
     InvalidFilter,
     NotACommit,
     WalkTooLong,
-} || Allocator.Error || odb_mod.Error || objectwalk.Error || revparse.Error || refs_mod.ReadError ||
+} || Allocator.Error || odb_mod.Error || object_walk.Error || rev_parse.Error || refs_mod.ReadError ||
     object.ParseError || Io.Writer.Error || fs.LockError || fs.CommitError || repo_mod.Error;
 
 pub const Target = struct { dir: Io.Dir, path: []const u8 };
@@ -494,16 +494,16 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     const a = arena_state.allocator();
     const kind = repo.objectFormat();
 
-    var filter: objectwalk.Filter = .none;
+    var filter: object_walk.Filter = .none;
     var filter_text: ?[]const u8 = null;
     if (request.filter) |text| {
-        const spec = filterspec.parse(a, text) catch |err| switch (err) {
+        const spec = filter_spec.parse(a, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidFilter => return error.InvalidFilter,
         };
         var sparse_seen = false;
         filter = try walkFilter(a, io, repo, spec, &sparse_seen);
-        filter_text = try filterspec.sendForm(a, text);
+        filter_text = try filter_spec.sendForm(a, text);
     }
     const min: Version = if (kind != .sha1 or request.filter != null) .v3 else .v2;
     const version = request.version orelse min;
@@ -515,16 +515,16 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     const Pending = struct { oid: Oid, name: []const u8, negative: bool, commit: ?Oid };
     var pending: std.ArrayList(Pending) = .empty;
     for (request.include) |name| {
-        const oid = try revparse.resolve(gpa, io, repo, name);
+        const oid = try rev_parse.resolve(gpa, io, repo, name);
         try pending.append(a, .{ .oid = oid, .name = name, .negative = false, .commit = commitOf(io, repo, oid) });
     }
     for (request.exclude) |name| {
-        const oid = try revparse.resolve(gpa, io, repo, name);
+        const oid = try rev_parse.resolve(gpa, io, repo, name);
         try pending.append(a, .{ .oid = oid, .name = name, .negative = true, .commit = commitOf(io, repo, oid) });
     }
 
     // The walk: what is shown, in order, and the boundary below it.
-    var walk: revwalk.Walk = .init(gpa, repo.objectDatabase());
+    var walk: rev_walk.Walk = .init(gpa, repo.objectDatabase());
     defer walk.deinit();
     for (pending.items) |p| {
         const c = p.commit orelse continue;
@@ -592,13 +592,13 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     try w.writeByte('\n');
     if (ref_count == 0) return error.EmptyBundle;
 
-    var collected = try objectwalk.missing(gpa, io, repo.objectDatabase(), wants.items, .{ .exclude = haves.items, .filter = filter });
+    var collected = try object_walk.missing(gpa, io, repo.objectDatabase(), wants.items, .{ .exclude = haves.items, .filter = filter });
     defer collected.deinit();
     _ = try repo.objectDatabase().writePackTo(io, w, collected.entries, request.pack);
     try w.flush();
 }
 
-fn walkFilter(a: Allocator, io: Io, repo: *Repository, spec: filterspec.Spec, sparse_seen: *bool) CreateError!objectwalk.Filter {
+fn walkFilter(a: Allocator, io: Io, repo: *Repository, spec: filter_spec.Spec, sparse_seen: *bool) CreateError!object_walk.Filter {
     return switch (spec) {
         .blob_none => .blob_none,
         .blob_limit => |v| .{ .blob_limit = v },
@@ -611,7 +611,7 @@ fn walkFilter(a: Allocator, io: Io, repo: *Repository, spec: filterspec.Spec, sp
             break :blk .{ .sparse = try sparseRules(a, io, repo, name) };
         },
         .combine => |parts| blk: {
-            const out = try a.alloc(objectwalk.Filter, parts.len);
+            const out = try a.alloc(object_walk.Filter, parts.len);
             for (parts, out) |part, *f| f.* = try walkFilter(a, io, repo, part, sparse_seen);
             break :blk .{ .combine = out };
         },
@@ -621,7 +621,7 @@ fn walkFilter(a: Allocator, io: Io, repo: *Repository, spec: filterspec.Spec, sp
 /// The sparse-checkout patterns in the blob `name` names, by any revision
 /// expression.
 fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!*const ignore.Rules {
-    const oid = revparse.resolve(a, io, repo, name) catch |err| switch (err) {
+    const oid = rev_parse.resolve(a, io, repo, name) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return error.SparseBlobMissing,
@@ -655,7 +655,7 @@ fn topoOrder(a: Allocator, io: Io, repo: *Repository, list: []const Oid) CreateE
         const found = try repo.objectDatabase().read(io, c);
         defer repo.objectDatabase().allocator().free(found.bytes);
         var commit = try object.Commit.parse(a, repo.objectFormat(), found.bytes);
-        const ps = try a.dupe(Oid, revwalk.parentsOf(repo.objectDatabase(), c, commit.parents));
+        const ps = try a.dupe(Oid, rev_walk.parentsOf(repo.objectDatabase(), c, commit.parents));
         commit.deinit();
         try parents.put(a, c, ps);
         for (ps) |p| if (indegree.getPtr(p)) |d| {

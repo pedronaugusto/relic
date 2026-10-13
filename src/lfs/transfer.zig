@@ -63,13 +63,13 @@ const repo_mod = @import("../repo/repo.zig");
 const fs = @import("../fs/fs.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const progress_mod = @import("../report.zig").progress;
-const timetext = @import("timetext.zig");
+const time_text = @import("time_text.zig");
 const lfsssh = @import("ssh.zig");
 const custom = @import("custom.zig");
 const remote_mod = @import("../wire.zig").remote;
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 const diff_mod = @import("../diff/diff.zig");
 const config_mod = @import("../config/config.zig");
 
@@ -314,7 +314,7 @@ pub const Action = struct {
     /// Whether the action, answered at `now`, expires within five seconds
     /// of it.
     pub fn expiredAt(a: Action, now: Io.Timestamp) bool {
-        const at = if (a.expires_at) |t| timetext.parseRfc3339(t) else null;
+        const at = if (a.expires_at) |t| time_text.parseRfc3339(t) else null;
         return lfsapi.expiresWithin(now, a.expires_in orelse 0, at, 5);
     }
 
@@ -1745,7 +1745,7 @@ pub fn parseSshBatch(a: Allocator, lines: []const []const u8) ParseSshBatchError
             } else if (std.mem.startsWith(u8, kv, "expires-in=")) {
                 action.expires_in = std.fmt.parseInt(i64, kv[11..], 10) catch return error.MalformedResponse;
             } else if (std.mem.startsWith(u8, kv, "expires-at=")) {
-                if (timetext.parseRfc3339(kv[11..]) == null) return error.MalformedResponse;
+                if (time_text.parseRfc3339(kv[11..]) == null) return error.MalformedResponse;
                 action.expires_at = kv[11..];
             }
         }
@@ -2105,7 +2105,7 @@ pub const FetchOptions = struct {
 };
 
 /// Errors from `fetch` and `pull`.
-pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
+pub const FetchError = Error || object_walk.Error || repo_mod.Error || error{
     /// A name in `refs` or `exclude` that names nothing here.
     RefNotFound,
     /// A recent fetch counts `lfs.fetchrecentrefsdays` back from now, and
@@ -2113,7 +2113,7 @@ pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
     LfsRecentNeedsTime,
     /// A tree nests deeper than `object.max_tree_depth`.
     TreeTooDeep,
-} || revwalk.Error || diff_mod.Error || index_mod.ReadError || index_mod.WriteError || fs.AtomicWriteError || fs.StatError;
+} || rev_walk.Error || diff_mod.Error || index_mod.ReadError || index_mod.WriteError || fs.AtomicWriteError || fs.StatError;
 
 /// Bring the LFS objects the trees at `options.refs` point at into the
 /// store, as `git lfs fetch <remote> <refs>` does. A path
@@ -2184,7 +2184,7 @@ fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repos
         for (unique.items) |tip| {
             const tip_time = commitTime(arena, io, repo, tip) orelse continue;
             const since = tip_time - commits_days * 86400;
-            var walk = revwalk.Walk.init(server.gpa, repo.objectDatabase());
+            var walk = rev_walk.Walk.init(server.gpa, repo.objectDatabase());
             defer walk.deinit();
             try walk.push(tip);
             while (try walk.next(io)) |c| {
@@ -2245,7 +2245,7 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
     if (options.history) {
         var exclude: std.ArrayList(Oid) = .empty;
         for (options.exclude) |name| try exclude.append(arena, (try resolve(arena, io, repo, name)).oid);
-        var collected = try objectwalk.missing(arena, io, repo.objectDatabase(), tips.items, .{ .exclude = exclude.items });
+        var collected = try object_walk.missing(arena, io, repo.objectDatabase(), tips.items, .{ .exclude = exclude.items });
         defer collected.deinit();
         for (collected.entries) |e| {
             if (e.hint.len == 0) continue;

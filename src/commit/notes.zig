@@ -35,11 +35,11 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const revparse = @import("../revwalk/revparse.zig");
-const revwalk = @import("../walk/walk.zig");
+const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_walk = @import("../walk/walk.zig");
 const message = @import("../object/message.zig");
 const diff = @import("../diff/diff.zig");
-const blobmerge = @import("../merge/blobmerge.zig");
+const blob_merge = @import("../merge/blob_merge.zig");
 const head_mod = @import("../repo/head.zig");
 
 const Oid = hash.Oid;
@@ -76,7 +76,7 @@ pub const Error = error{
     /// `notes.mergeStrategy` names no strategy.
     InvalidStrategy,
 } || Allocator.Error || odb_mod.Error || object.ParseError || object.TreeParseError || refs_mod.ReadError ||
-    refs_mod.TransactionError || repo_mod.WriteError || revparse.Error || revwalk.Error || diff.Error ||
+    refs_mod.TransactionError || repo_mod.WriteError || rev_parse.Error || rev_walk.Error || diff.Error ||
     head_mod.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
     Io.Dir.DeleteFileError || Io.File.OpenError || Io.File.Writer.Error || Io.Dir.CreateDirPathError || Io.Dir.DeleteTreeError || error{ NameTooLong, NotACommit };
 
@@ -186,7 +186,7 @@ pub const Notes = struct {
             return err;
         };
         errdefer t.deinit();
-        const tip = revparse.resolve(gpa, io, repo, ref) catch |err| switch (err) {
+        const tip = rev_parse.resolve(gpa, io, repo, ref) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.BadRevision => return t,
             else => |e| return e,
@@ -1166,7 +1166,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     const local_ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(local_ref);
     // `expand_loose_notes_ref`: a name that resolves stays as it is.
-    const remote_ref = if (revparse.resolve(gpa, io, repo, remote_in)) |_| try gpa.dupe(u8, remote_in) else |err| switch (err) {
+    const remote_ref = if (rev_parse.resolve(gpa, io, repo, remote_in)) |_| try gpa.dupe(u8, remote_in) else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => try expandRef(gpa, remote_in),
     };
@@ -1191,7 +1191,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     defer t.deinit();
 
     const local = try repo.refStore().readOid(gpa, io, local_ref);
-    const remote: ?Oid = revparse.resolve(gpa, io, repo, remote_ref) catch |err| switch (err) {
+    const remote: ?Oid = rev_parse.resolve(gpa, io, repo, remote_ref) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => blk: {
             if (!ref_names.checkFormat(remote_ref, .{})) return error.BadRemoteRef;
@@ -1208,7 +1208,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     } else if (remote == null) {
         result = local.?;
     } else {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = local.?, .b = remote.? }, .{});
+        const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = local.?, .b = remote.? }, .{});
         defer gpa.free(bases);
         const base: ?Oid = if (bases.len == 0) null else bases[0];
         if (base != null and remote.?.eql(base.?)) {
@@ -1365,8 +1365,8 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
         const base = try read(io, repo, p.base, &held[0]);
         const ours = try read(io, repo, p.local, &held[1]);
         const theirs = try read(io, repo, p.remote, &held[2]);
-        const style = if (repo.configuration().get("merge.conflictstyle")) |s| blobmerge.parseConflictStyle(s) orelse .merge else .merge;
-        if (blobmerge.blobs(gpa, base, ours, theirs, .{
+        const style = if (repo.configuration().get("merge.conflictstyle")) |s| blob_merge.parseConflictStyle(s) orelse .merge else .merge;
+        if (blob_merge.blobs(gpa, base, ours, theirs, .{
             .conflict_style = style,
             .labels = .{ .ours = local_ref, .theirs = remote_ref, .base = "" },
         })) |result_value| {

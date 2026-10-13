@@ -23,9 +23,9 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 const worktree = @import("../checkout/checkout.zig");
-const blobmerge = @import("blobmerge.zig");
+const blob_merge = @import("blob_merge.zig");
 const ort = @import("ort.zig");
 
 const Oid = hash.Oid;
@@ -42,12 +42,12 @@ pub const Error = error{
     OctopusFailed,
     /// A head names something that is not a commit.
     NotACommit,
-} || object.ParseError || worktree.Error || revwalk.Error || blobmerge.BlobError || odb_mod.Error;
+} || object.ParseError || worktree.Error || rev_walk.Error || blob_merge.BlobError || odb_mod.Error;
 
 /// How the file merges are made.
 pub const Options = struct {
     /// `merge.conflictStyle`, which `git merge-file` reads.
-    conflict_style: blobmerge.ConflictStyle = .merge,
+    conflict_style: blob_merge.ConflictStyle = .merge,
 };
 
 /// What an octopus left.
@@ -97,7 +97,7 @@ pub fn commits(gpa: Allocator, io: Io, db: *Odb, inputs: CommitInputs, options: 
             // Only the last head may leave a conflict.
             if (step.failed) return error.OctopusFailed;
         }
-        const common = try revwalk.mergeBasesMany(gpa, io, db, .{ .one = one, .others = merged_commits.items }, .{});
+        const common = try rev_walk.mergeBasesMany(gpa, io, db, .{ .one = one, .others = merged_commits.items }, .{});
         defer gpa.free(common);
         if (common.len == 0) return error.OctopusFailed;
         if (contains(common, one)) continue;
@@ -232,7 +232,7 @@ const Octopus = struct {
         // `merge-file`'s result, written over our side; a binary file it
         // refuses stays ours.
         var merged_oid = our.oid;
-        if (blobmerge.blobs(o.gpa, ancestor_text, our_text, their_text, .{
+        if (blob_merge.blobs(o.gpa, ancestor_text, our_text, their_text, .{
             .conflict_style = o.options.conflict_style,
             .labels = .{ .ours = try o.tempName(), .base = try o.tempName(), .theirs = try o.tempName() },
             .level = .zealous_alnum,

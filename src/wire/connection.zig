@@ -20,7 +20,7 @@ const Allocator = std.mem.Allocator;
 
 const program = @import("../process.zig").program;
 const warning = @import("../report.zig").warning;
-const pktline = @import("../codec.zig").pktline;
+const pkt_line = @import("../codec.zig").pkt_line;
 const progress = @import("../report.zig").progress;
 
 /// Which service is asked for.
@@ -131,8 +131,8 @@ pub const Connection = struct {
 
     /// Read one pkt-line, turning a transport failure into its own error
     /// and the end of the stream into `error.RemoteHungUp`.
-    pub fn readPacket(c: *Connection, r: *Io.Reader) Self.Error!pktline.Packet {
-        return pktline.read(r) catch |err| switch (err) {
+    pub fn readPacket(c: *Connection, r: *Io.Reader) Self.Error!pkt_line.Packet {
+        return pkt_line.read(r) catch |err| switch (err) {
             error.BadPacket => error.ProtocolError,
             error.EndOfStream => error.RemoteHungUp,
             error.ReadFailed => c.failure(),
@@ -258,7 +258,7 @@ pub const Process = struct {
     ) StartError!*Connection {
         const p = try gpa.create(Process);
         errdefer gpa.destroy(p);
-        const read_buffer = try gpa.alloc(u8, pktline.max_line + 4);
+        const read_buffer = try gpa.alloc(u8, pkt_line.max_line + 4);
         errdefer gpa.free(read_buffer);
         const write_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(write_buffer);

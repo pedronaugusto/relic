@@ -14,7 +14,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
 const refs_state = @import("../refs/state.zig");
-const reftablestack = @import("../refs/reftablestack.zig");
+const reftable_stack = @import("../refs/reftable/stack.zig");
 const signing = @import("../object/signing.zig");
 const repo_mod = @import("repo.zig");
 const worktree = @import("../checkout/checkout.zig");
@@ -941,7 +941,7 @@ test "a refresh updates reftable write settings together with the configuration"
     try std.testing.expectEqualStrings("8192", repo.configuration().get("reftable.blocksize").?);
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
     try std.testing.expect(try repo.refreshConfig(io, null));
-    try std.testing.expectEqualDeep(reftablestack.Options{ .lock = .{ .wait = .fromMilliseconds(200) } }, repo.refStore().reftableOptions());
+    try std.testing.expectEqualDeep(reftable_stack.Options{ .lock = .{ .wait = .fromMilliseconds(200) } }, repo.refStore().reftableOptions());
     try std.testing.expectEqual(cache, refs_state.get(repo.refStore()._state).cache);
 }
 

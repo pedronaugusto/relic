@@ -29,13 +29,13 @@ const odb_mod = @import("../odb/odb.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const diff = @import("../diff/diff.zig");
-const patchid = @import("../diff/patchid.zig");
-const revwalk = @import("../walk/walk.zig");
+const patch_id = @import("../diff/patch_id.zig");
+const rev_walk = @import("../walk/walk.zig");
 const abbrev = @import("../odb/abbrev.zig");
-const cquote = @import("../text.zig").cquote;
+const c_quote = @import("../text.zig").c_quote;
 const binarypatch = @import("binary.zig");
 const mailfmt = @import("../mail/format.zig");
-const unicodewidth = @import("../text.zig").unicodewidth;
+const unicode_width = @import("../text.zig").unicode_width;
 const message = @import("../object/message.zig");
 const attributes = @import("../patterns.zig").attributes;
 
@@ -60,7 +60,7 @@ pub const Error = error{
     /// A cover letter's shortlog in a repository with a `.mailmap`, which
     /// git applies there and this does not yet.
     MailmapUnsupported,
-} || revwalk.Error || diff.Error || diff.ConfigError || patchid.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
+} || rev_walk.Error || diff.Error || diff.ConfigError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
     Io.Dir.ReadFileAllocError;
 
 /// A name and an address.
@@ -371,7 +371,7 @@ const Selected = struct { list: []const Oid, in_list: []const Oid, walked: []con
 /// those whose patch id upstream has. `null` when there are none.
 fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, options: Options, binary: diff.BinaryRule) Error!?Selected {
     var list: std.ArrayList(Oid) = .empty;
-    var walk = revwalk.Walk.init(gpa, db);
+    var walk = rev_walk.Walk.init(gpa, db);
     defer walk.deinit();
     try walk.push(range.tip);
     if (range.upstream) |u| try walk.hide(u);
@@ -388,7 +388,7 @@ fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: 
         if (c.parents.len > 1) continue;
         try in_list.append(a, c.oid);
         if (upstream_ids.items.len != 0) {
-            if (try patchid.ofCommit(gpa, io, db, c.oid, binary)) |id| {
+            if (try patch_id.ofCommit(gpa, io, db, c.oid, binary)) |id| {
                 if (containsOid(upstream_ids.items, id)) continue;
             }
         }
@@ -421,14 +421,14 @@ fn subjectPrefix(a: Allocator, options: Options) Allocator.Error![]const u8 {
 /// The patch ids of the upstream's own commits, which
 /// `--ignore-if-in-upstream` leaves out of the series.
 fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, binary: diff.BinaryRule, out: *std.ArrayList(Oid)) Error!void {
-    var back = revwalk.Walk.init(gpa, db);
+    var back = rev_walk.Walk.init(gpa, db);
     defer back.deinit();
     // Asked only of a range with an upstream.
     try back.push(range.upstream.?);
     try back.hide(range.tip);
     while (try back.next(io)) |c| {
         if (c.parents.len > 1) continue;
-        if (try patchid.ofCommit(gpa, io, db, c.oid, binary)) |id| try out.append(a, id);
+        if (try patch_id.ofCommit(gpa, io, db, c.oid, binary)) |id| try out.append(a, id);
     }
 }
 
@@ -537,10 +537,10 @@ fn prepareBases(ctx: *Ctx, base: Oid, list: []const Oid) Error!Bases {
     for (list) |c| if (c.eql(base)) return error.BaseInRange;
     var common: Oid = list[0];
     for (list[1..]) |c| {
-        common = (try revwalk.mergeBase(gpa, ctx.io, ctx.db, common, c)) orelse return error.BaseNotAncestor;
+        common = (try rev_walk.mergeBase(gpa, ctx.io, ctx.db, common, c)) orelse return error.BaseNotAncestor;
     }
-    if (!try revwalk.isAncestor(gpa, ctx.io, ctx.db, .{ .ancestor = base, .descendant = common }, .{})) return error.BaseNotAncestor;
-    var walk = revwalk.Walk.init(gpa, ctx.db);
+    if (!try rev_walk.isAncestor(gpa, ctx.io, ctx.db, .{ .ancestor = base, .descendant = common }, .{})) return error.BaseNotAncestor;
+    var walk = rev_walk.Walk.init(gpa, ctx.db);
     defer walk.deinit();
     walk.sort = .topological;
     for (list) |c| try walk.push(c);
@@ -553,7 +553,7 @@ fn prepareBases(ctx: *Ctx, base: Oid, list: []const Oid) Error!Bases {
             if (l.eql(c.oid)) listed = true;
         }
         if (listed) continue;
-        const id = (try patchid.ofCommit(gpa, ctx.io, ctx.db, c.oid, ctx.binaryRule())) orelse continue;
+        const id = (try patch_id.ofCommit(gpa, ctx.io, ctx.db, c.oid, ctx.binaryRule())) orelse continue;
         try ids.append(ctx.a, id);
     }
     return .{ .base = base, .patch_ids = ids.items };
@@ -1086,11 +1086,11 @@ fn typeChanged(a: object.Mode, b: object.Mode) bool {
 
 fn quoteTwo(ctx: *Ctx, prefix: []const u8, path: []const u8) Allocator.Error![]const u8 {
     const a = ctx.a;
-    if (cquote.needsQuote(prefix, ctx.quote_path) or cquote.needsQuote(path, ctx.quote_path)) {
+    if (c_quote.needsQuote(prefix, ctx.quote_path) or c_quote.needsQuote(path, ctx.quote_path)) {
         var w: Io.Writer.Allocating = .init(a);
         w.writer.writeByte('"') catch return error.OutOfMemory;
-        cquote.writeBody(&w.writer, prefix, ctx.quote_path) catch return error.OutOfMemory;
-        cquote.writeBody(&w.writer, path, ctx.quote_path) catch return error.OutOfMemory;
+        c_quote.writeBody(&w.writer, prefix, ctx.quote_path) catch return error.OutOfMemory;
+        c_quote.writeBody(&w.writer, path, ctx.quote_path) catch return error.OutOfMemory;
         w.writer.writeByte('"') catch return error.OutOfMemory;
         return w.written();
     }
@@ -1098,7 +1098,7 @@ fn quoteTwo(ctx: *Ctx, prefix: []const u8, path: []const u8) Allocator.Error![]c
 }
 
 fn quoted(ctx: *Ctx, path: []const u8) Allocator.Error![]const u8 {
-    return cquote.alloc(ctx.a, path, ctx.quote_path);
+    return c_quote.alloc(ctx.a, path, ctx.quote_path);
 }
 
 fn writeAbbrev(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid, full: bool) Error!void {
@@ -1200,7 +1200,7 @@ fn summary(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change) Allocator.Error!v
 /// `pfx{old => new}sfx`, git's `pprint_rename`.
 fn pprintRename(ctx: *Ctx, a_name: []const u8, b_name: []const u8) Allocator.Error![]const u8 {
     const a = ctx.a;
-    if (cquote.needsQuote(a_name, ctx.quote_path) or cquote.needsQuote(b_name, ctx.quote_path)) {
+    if (c_quote.needsQuote(a_name, ctx.quote_path) or c_quote.needsQuote(b_name, ctx.quote_path)) {
         return std.mem.concat(a, u8, &.{ try quoted(ctx, a_name), " => ", try quoted(ctx, b_name) });
     }
     var pfx_length: usize = 0;
@@ -1259,7 +1259,7 @@ fn showStats(ctx: *Ctx, out: *std.ArrayList(u8), files: []StatFile) Allocator.Er
     var bin_width: usize = 0;
     for (files) |*f| {
         f.print_name = if (f.from_name) |from| try pprintRename(ctx, from, f.name) else try quoted(ctx, f.name);
-        const len = unicodewidth.strWidth(f.print_name);
+        const len = unicode_width.strWidth(f.print_name);
         if (max_len < len) max_len = len;
         if (f.binary) {
             const w = 14 + decimalWidth(f.added) + decimalWidth(f.deleted);
@@ -1288,21 +1288,21 @@ fn showStats(ctx: *Ctx, out: *std.ArrayList(u8), files: []StatFile) Allocator.Er
         var prefix: []const u8 = "";
         var name = f.print_name;
         var len: isize = @intCast(name_width);
-        var name_len = unicodewidth.strWidth(name);
+        var name_len = unicode_width.strWidth(name);
         if (name_width < name_len) {
             prefix = "...";
             len -= 3;
             if (len < 0) len = 0;
             while (name_len > len and name.len > 0) {
-                const decoded = unicodewidth.decode(name);
+                const decoded = unicode_width.decode(name);
                 const step: usize = if (decoded) |cp| cp.len else 1;
-                const cp_width: usize = if (decoded) |cp| @intCast(@max(unicodewidth.width(cp.char), 0)) else 1;
+                const cp_width: usize = if (decoded) |cp| @intCast(@max(unicode_width.width(cp.char), 0)) else 1;
                 name_len -= cp_width;
                 name = name[step..];
             }
             if (std.mem.findScalar(u8, name, '/')) |slash| name = name[slash..];
         }
-        const name_w: isize = @intCast(unicodewidth.strWidth(name));
+        const name_w: isize = @intCast(unicode_width.strWidth(name));
         const padding: usize = if (len - name_w < 0) 0 else @intCast(len - name_w);
         if (f.binary) {
             try out.print(a, " {s}{s}", .{ prefix, name });

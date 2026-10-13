@@ -24,7 +24,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const pktline = @import("relic").transport.pktline;
+const pkt_line = @import("relic").transport.pkt_line;
 
 const Mode = struct {
     delay: bool = false,
@@ -49,9 +49,9 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.startsWith(u8, arg, "--log=")) mode.log_dir = arg["--log=".len..];
     }
 
-    const in_buffer = try gpa.alloc(u8, pktline.max_line);
+    const in_buffer = try gpa.alloc(u8, pkt_line.max_line);
     var in = Io.File.stdin().readerStreaming(io, in_buffer);
-    const out_buffer = try gpa.alloc(u8, pktline.max_line);
+    const out_buffer = try gpa.alloc(u8, pkt_line.max_line);
     var out = Io.File.stdout().writerStreaming(io, out_buffer);
     const r = &in.interface;
     const w = &out.interface;
@@ -63,15 +63,15 @@ pub fn main(init: std.process.Init) !void {
     try expectLine(r, "git-filter-client");
     try expectLine(r, "version=2");
     try expectEnd(r);
-    try pktline.write(w, "git-filter-server\n");
-    try pktline.write(w, "version=2\n");
-    try pktline.flush(w);
+    try pkt_line.write(w, "git-filter-server\n");
+    try pkt_line.write(w, "version=2\n");
+    try pkt_line.flush(w);
     try w.flush();
     while (try readLine(r)) |_| {}
-    try pktline.write(w, "capability=clean\n");
-    if (mode.smudge) try pktline.write(w, "capability=smudge\n");
-    if (mode.delay) try pktline.write(w, "capability=delay\n");
-    try pktline.flush(w);
+    try pkt_line.write(w, "capability=clean\n");
+    if (mode.smudge) try pkt_line.write(w, "capability=smudge\n");
+    if (mode.delay) try pkt_line.write(w, "capability=delay\n");
+    try pkt_line.flush(w);
     try w.flush();
 
     var delayed: std.array_hash_map.String([]u8) = .empty;
@@ -135,24 +135,24 @@ pub fn main(init: std.process.Init) !void {
             }
         } else rot13(result);
 
-        try pktline.write(w, "status=success\n");
-        try pktline.flush(w);
+        try pkt_line.write(w, "status=success\n");
+        try pkt_line.flush(w);
         var rest = result;
         while (rest.len > 0) {
-            const n = @min(rest.len, pktline.max_data);
-            try pktline.write(w, rest[0..n]);
+            const n = @min(rest.len, pkt_line.max_data);
+            try pkt_line.write(w, rest[0..n]);
             rest = rest[n..];
         }
-        try pktline.flush(w);
+        try pkt_line.flush(w);
         // An empty list: the status before the content stands.
-        try pktline.flush(w);
+        try pkt_line.flush(w);
         try w.flush();
     }
 }
 
 fn status(w: *Io.Writer, value: []const u8) !void {
-    try pktline.print("status={s}\n", .{value}, w);
-    try pktline.flush(w);
+    try pkt_line.print("status={s}\n", .{value}, w);
+    try pkt_line.flush(w);
     try w.flush();
 }
 
@@ -167,7 +167,7 @@ fn rot13(bytes: []u8) void {
 }
 
 fn readPacket(r: *Io.Reader) !?[]const u8 {
-    return switch (try pktline.read(r)) {
+    return switch (try pkt_line.read(r)) {
         .data => |data| if (data.len == 0) null else data,
         else => null,
     };
@@ -207,9 +207,9 @@ fn listAvailable(gpa: Allocator, w: *Io.Writer, ready: *std.ArrayList([]const u8
     if (ready.items.len == 0) {
         for (delayed.keys()) |key| try ready.append(gpa, key);
     }
-    if (ready.pop()) |next| try pktline.print("pathname={s}\n", .{next}, w);
-    try pktline.flush(w);
-    try pktline.write(w, "status=success\n");
-    try pktline.flush(w);
+    if (ready.pop()) |next| try pkt_line.print("pathname={s}\n", .{next}, w);
+    try pkt_line.flush(w);
+    try pkt_line.write(w, "status=success\n");
+    try pkt_line.flush(w);
     try w.flush();
 }

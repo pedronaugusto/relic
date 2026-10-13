@@ -27,7 +27,7 @@ const Self = @This();
 
 const std = @import("std");
 const gitdate = @import("../text.zig").date;
-const httpsettings_mod = @import("../wire.zig").httpsettings;
+const httpsettings_mod = @import("../wire.zig").http_settings;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -36,16 +36,16 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 const refspec_mod = @import("../wire.zig").refspec;
 const ref_names = @import("../names.zig").ref;
 const remote_mod = @import("../wire.zig").remote;
 const program = @import("../process.zig").program;
 const protocol = @import("../wire.zig").protocol;
 const transport = @import("transport.zig");
-const sendpack = @import("../wire.zig").sendpack;
+const send_pack = @import("../wire.zig").send_pack;
 const odb_mod = @import("../odb/odb.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
 const warning = @import("../report.zig").warning;
@@ -78,7 +78,7 @@ pub const Error = error{
     NoPushDestination,
     /// The `pre-push` hook refused the push.
     PrePushRefused,
-} || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || revwalk.Error;
+} || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error;
 
 /// What a `pre-push` hook is shown: one line of its input.
 pub const PrePushUpdate = struct {
@@ -302,7 +302,7 @@ fn pushTo(
     const results = try judgeAll(arena, gpa, io, repo, remote, url, updates, &remote_refs, options);
     assert(results.len == updates.len);
 
-    var commands: std.ArrayList(sendpack.Command) = .empty;
+    var commands: std.ArrayList(send_pack.Command) = .empty;
     // What a remote helper is told beside: the local ref and the `+`.
     var sources: std.ArrayList(?[]const u8) = .empty;
     var forced: std.ArrayList(bool) = .empty;
@@ -453,7 +453,7 @@ fn send(
         if (r.unborn) continue;
         if (try repo.objectDatabase().exists(io, r.oid)) try exclude.append(arena, r.oid);
     }
-    var objects = try objectwalk.missing(gpa, io, repo.objectDatabase(), include.items, .{ .exclude = exclude.items });
+    var objects = try object_walk.missing(gpa, io, repo.objectDatabase(), include.items, .{ .exclude = exclude.items });
     defer objects.deinit();
 
     var remote_refs_pushed: std.ArrayList([]const u8) = .empty;
@@ -719,7 +719,7 @@ fn judge(
             const new_commit = commitOf(io, repo, result.new);
             if (old_commit == null or new_commit == null) {
                 reject = .rejected_needs_force;
-            } else if (!try revwalk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
+            } else if (!try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
                 reject = .rejected_non_fast_forward;
             }
         }

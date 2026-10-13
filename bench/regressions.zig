@@ -16,7 +16,7 @@ const hash = relic.hash;
 const odb_mod = relic.odb;
 const worktree = relic.worktree;
 const repo_mod = relic.repo;
-const dirscan = relic.worktree.dirscan;
+const dir_scan = relic.worktree.dir_scan;
 
 /// How many files the generated tree holds.
 ///
@@ -146,7 +146,7 @@ fn row0() !void {
         @tagName(builtin.optimize),
         fileCount(),
         directoryCount(),
-        dirscan.armFor(gpa, io, repo.workDirectory().?),
+        dir_scan.armFor(gpa, io, repo.workDirectory().?),
         repo.objectDatabase().timestamp_resolution.ns,
         cold_add_ms,
         warm_add_ms,
@@ -996,7 +996,7 @@ fn row9() !void {
         defer server.stop();
         var url_buf: [64]u8 = undefined;
         const url = try relic.transport.url.Url.parse(try std.mem.print(&url_buf, "http://127.0.0.1:{d}/repo.git", .{server.port}));
-        const conn = try relic.transport.smarthttp.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
+        const conn = try relic.transport.smart_http.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
         defer conn.deinit(io);
         const Pass = struct {
             conn: *relic.transport.connection.Connection,

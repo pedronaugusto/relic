@@ -4,7 +4,7 @@
 //! `git-upload-pack` there and talking to it over a pipe. relic has the
 //! repository's own reader and needs no second program: the other
 //! repository is opened in process, its refs are read as they are, and the
-//! objects a fetch needs are found with `objectwalk.missing` and written
+//! objects a fetch needs are found with `object_walk.missing` and written
 //! straight into this repository's `objects/pack` as one pack, from the
 //! other's object database. Nothing is spawned, and nothing goes through a
 //! wire format that both ends of the same process would only have to parse.
@@ -20,16 +20,16 @@ const repo_mod = @import("../repo/repo.zig");
 const odb_mod = @import("../odb/odb.zig");
 const pack = @import("../odb/pack.zig");
 const protocol = @import("../wire.zig").protocol;
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const url_mod = @import("../wire.zig").url;
 const object = @import("../object/object.zig");
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 const shallow_mod = @import("../walk/shallow.zig");
 const ref_names = @import("../names.zig").ref;
-const sendpack = @import("../wire.zig").sendpack;
+const send_pack = @import("../wire.zig").send_pack;
 const hidden_refs = @import("../wire.zig").hidden;
 const builtin = @import("builtin");
-const revindex = @import("../odb/revindex.zig");
+const rev_index = @import("../odb/rev_index.zig");
 const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;
@@ -43,7 +43,7 @@ pub const Error = errors: {
         /// `post-receive` and the rest — and relic runs no hook on another
         /// repository's behalf.
         RemoteHooksNotRun,
-    } || repo_mod.Error || objectwalk.Error || refs_mod.ReadError || refs_mod.TransactionError;
+    } || repo_mod.Error || object_walk.Error || refs_mod.ReadError || refs_mod.TransactionError;
 };
 
 /// Another repository, open.
@@ -194,7 +194,7 @@ pub const Remote = struct {
         const haves = with.haves;
         const include_tags = with.include_tags;
         const options = with.pack;
-        var collected = try objectwalk.missing(r.gpa, io, r.repo.objectDatabase(), wants, .{ .exclude = haves });
+        var collected = try object_walk.missing(r.gpa, io, r.repo.objectDatabase(), wants, .{ .exclude = haves });
         defer collected.deinit();
         if (collected.entries.len == 0) return null;
 
@@ -255,10 +255,10 @@ pub const Remote = struct {
         atomic: bool = false,
     };
 
-    pub const ReceiveInputs = struct { from: *odb_mod.Odb, commands: []const sendpack.Command, objects: []const odb_mod.PackEntry };
+    pub const ReceiveInputs = struct { from: *odb_mod.Odb, commands: []const send_pack.Command, objects: []const odb_mod.PackEntry };
 
     /// Errors from `receivePush`.
-    pub const ReceivePushError = ErrorNamespace.Error || sendpack.Error;
+    pub const ReceivePushError = ErrorNamespace.Error || send_pack.Error;
 
     /// Apply a push to this repository as `git-receive-pack` applies one:
     /// the objects copied from `from` as one pack, then each command under
@@ -277,13 +277,13 @@ pub const Remote = struct {
         io: Io,
         inputs: ReceiveInputs,
         options: ReceiveOptions,
-    ) ReceivePushError!sendpack.Report {
+    ) ReceivePushError!send_pack.Report {
         const from = inputs.from;
         const commands = inputs.commands;
         const objects = inputs.objects;
         try r.refuseHooks(io);
 
-        var report: sendpack.Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
+        var report: send_pack.Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
         errdefer report.arena.deinit();
         const arena = report.arena.allocator();
 
@@ -298,7 +298,7 @@ pub const Remote = struct {
         if (needs_pack and objects.len != 0) {
             var pack_dir = try r.repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
             defer pack_dir.close(io);
-            retained = try from.writePack(io, pack_dir, objects, .{ .keep = true, .reverse_index = revindex.wanted(r.repo.configuration()) });
+            retained = try from.writePack(io, pack_dir, objects, .{ .keep = true, .reverse_index = rev_index.wanted(r.repo.configuration()) });
             try r.repo.objectDatabase().refresh(io);
         }
 
@@ -314,7 +314,7 @@ pub const Remote = struct {
         var pushed: hash.Oid.Set = .empty;
         for (objects) |entry| try pushed.put(arena, entry.oid, {});
         var new_roots: hash.Oid.Set = .empty;
-        var refs: std.ArrayList(sendpack.RefReport) = .empty;
+        var refs: std.ArrayList(send_pack.RefReport) = .empty;
         var refused = false;
         for (commands) |command| {
             const name = try arena.dupe(u8, command.name);
@@ -345,7 +345,7 @@ pub const Remote = struct {
                     }
                 }
                 if (reason == null and deny_non_ff and !command.old.isZero()) {
-                    const ok = revwalk.isAncestor(gpa, io, r.repo.objectDatabase(), .{ .ancestor = command.old, .descendant = command.new }, .{}) catch false;
+                    const ok = rev_walk.isAncestor(gpa, io, r.repo.objectDatabase(), .{ .ancestor = command.old, .descendant = command.new }, .{}) catch false;
                     if (!ok) reason = "non-fast-forward";
                 }
             }
@@ -366,7 +366,7 @@ pub const Remote = struct {
     /// Write the commands that were accepted: all of them in one transaction
     /// when the push is atomic (and none if any was refused), otherwise each
     /// in a transaction of its own. What fails is reported against its ref.
-    fn commitCommands(r: *Remote, io: Io, commands: []const sendpack.Command, refs: []sendpack.RefReport, refused: bool, options: ReceiveOptions) ReceivePushError!void {
+    fn commitCommands(r: *Remote, io: Io, commands: []const send_pack.Command, refs: []send_pack.RefReport, refused: bool, options: ReceiveOptions) ReceivePushError!void {
         if (options.atomic) {
             if (refused) {
                 for (refs) |*ref| {
@@ -402,7 +402,7 @@ pub const Remote = struct {
         }
     }
 
-    fn hiddenPushReason(r: *Remote, io: Io, command: sendpack.Command) ErrorNamespace.Error![]const u8 {
+    fn hiddenPushReason(r: *Remote, io: Io, command: send_pack.Command) ErrorNamespace.Error![]const u8 {
         // After the objects are found to be there, before any of
         // receive-pack's own rules, as git rejects it.
         return if (command.new.isZero())
@@ -414,7 +414,7 @@ pub const Remote = struct {
     }
 
     /// The pusher's boundary commits `tip`'s pushed history reaches.
-    fn shallowRootsReached(arena: Allocator, io: Io, from: *odb_mod.Odb, tip: hash.Oid, pushed: *const hash.Oid.Set) (ErrorNamespace.Error || sendpack.Error)![]const hash.Oid {
+    fn shallowRootsReached(arena: Allocator, io: Io, from: *odb_mod.Odb, tip: hash.Oid, pushed: *const hash.Oid.Set) (ErrorNamespace.Error || send_pack.Error)![]const hash.Oid {
         var out: std.ArrayList(hash.Oid) = .empty;
         var seen: hash.Oid.Set = .empty;
         var stack: std.ArrayList(hash.Oid) = .empty;
@@ -436,7 +436,7 @@ pub const Remote = struct {
         return out.items;
     }
 
-    fn stage(tx: *refs_mod.Transaction, command: sendpack.Command) refs_mod.TransactionError!void {
+    fn stage(tx: *refs_mod.Transaction, command: send_pack.Command) refs_mod.TransactionError!void {
         const expected: refs_mod.Expected = if (command.old.isZero()) .must_not_exist else .{ .matches = command.old };
         if (command.new.isZero()) {
             try tx.delete(command.name, expected);

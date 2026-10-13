@@ -34,7 +34,7 @@ const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
 const program = @import("../process.zig").program;
-const pktline = @import("../codec.zig").pktline;
+const pkt_line = @import("../codec.zig").pkt_line;
 pub const native = @import("native.zig");
 pub const Error = Drivers.LoadError || RunCommandError || ProtocolError || Process.OpenError;
 
@@ -434,7 +434,7 @@ pub const Protocol = struct {
     /// `clean`, `smudge` and `delay` all offered.
     pub fn handshake(p: *Protocol) Self.ProtocolError!void {
         // `pktline.read` hands back a packet out of the reader's buffer.
-        assert(p.in.buffer.len >= pktline.max_line);
+        assert(p.in.buffer.len >= pkt_line.max_line);
         try p.line("git-filter-client\n");
         try p.line("version=2\n");
         try p.end();
@@ -469,7 +469,7 @@ pub const Protocol = struct {
     /// Send one file and read the answer. The content of a reply is
     /// allocated from `a`.
     pub fn request(p: *Protocol, a: Allocator, req: Request) Self.ProtocolError!Reply {
-        if (req.path.len > pktline.max_data - "pathname=\n".len) return error.FilterPathTooLong;
+        if (req.path.len > pkt_line.max_data - "pathname=\n".len) return error.FilterPathTooLong;
         try p.print("command={s}\n", .{@tagName(req.command)});
         try p.print("pathname={s}\n", .{req.path});
         if (req.treeish) |t| try p.print("treeish={s}\n", .{t});
@@ -478,8 +478,8 @@ pub const Protocol = struct {
         try p.flushOnly();
         var rest = req.content;
         while (rest.len > 0) {
-            const n = @min(rest.len, pktline.max_data);
-            pktline.write(p.out, rest[0..n]) catch return error.FilterGone;
+            const n = @min(rest.len, pkt_line.max_data);
+            pkt_line.write(p.out, rest[0..n]) catch return error.FilterGone;
             rest = rest[n..];
         }
         try p.end();
@@ -562,7 +562,7 @@ pub const Protocol = struct {
     /// a flush, a delimiter, a response end, and a packet with no data, and
     /// so does this.
     fn readPacket(p: *Protocol) ProtocolError!?[]const u8 {
-        const packet = pktline.read(p.in) catch |err| switch (err) {
+        const packet = pkt_line.read(p.in) catch |err| switch (err) {
             error.BadPacket => return error.FilterReply,
             error.EndOfStream, error.ReadFailed => return error.FilterGone,
         };
@@ -584,15 +584,15 @@ pub const Protocol = struct {
     }
 
     fn line(p: *Protocol, text: []const u8) ProtocolError!void {
-        pktline.write(p.out, text) catch return error.FilterGone;
+        pkt_line.write(p.out, text) catch return error.FilterGone;
     }
 
     fn print(p: *Protocol, comptime fmt: []const u8, args: anytype) ProtocolError!void {
-        pktline.print(fmt, args, p.out) catch return error.FilterGone;
+        pkt_line.print(fmt, args, p.out) catch return error.FilterGone;
     }
 
     fn flushOnly(p: *Protocol) ProtocolError!void {
-        pktline.flush(p.out) catch return error.FilterGone;
+        pkt_line.flush(p.out) catch return error.FilterGone;
     }
 
     /// A flush packet, and everything written so far sent.
@@ -634,9 +634,9 @@ pub const Process = struct {
         p.gpa = gpa;
         p.command = try gpa.dupe(u8, command);
         errdefer gpa.free(p.command);
-        p.in_buffer = try gpa.alloc(u8, pktline.max_line);
+        p.in_buffer = try gpa.alloc(u8, pkt_line.max_line);
         errdefer gpa.free(p.in_buffer);
-        p.out_buffer = try gpa.alloc(u8, pktline.max_line);
+        p.out_buffer = try gpa.alloc(u8, pkt_line.max_line);
         errdefer gpa.free(p.out_buffer);
 
         p.running = program.start(gpa, io, programs, .{
@@ -740,7 +740,7 @@ test "drivers are read from the configuration, the last value winning" {
 
 /// A scripted filter: its replies, and the requests written to it.
 const Scripted = struct {
-    buffer: [pktline.max_line]u8 = undefined,
+    buffer: [pkt_line.max_line]u8 = undefined,
     fixed: Io.Reader,
     limited: Io.Reader.Limited = undefined,
     sent: Io.Writer.Allocating,

@@ -24,7 +24,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
 const attributes = @import("../patterns.zig").attributes;
-const blobmerge = @import("blobmerge.zig");
+const blob_merge = @import("blob_merge.zig");
 
 const Oid = hash.Oid;
 
@@ -38,23 +38,23 @@ pub const Error = error{
     object.Tree.Builder.AddError || index_mod.ReadError;
 
 /// A content merge refuses data git classifies as binary.
-pub const BlobError = blobmerge.BlobError;
+pub const BlobError = blob_merge.BlobError;
 /// Which conflict body to write: `merge.conflictStyle`, parallax's.
-pub const ConflictStyle = blobmerge.ConflictStyle;
+pub const ConflictStyle = blob_merge.ConflictStyle;
 /// The style a `merge.conflictStyle` value names.
-pub const parseConflictStyle = blobmerge.parseConflictStyle;
+pub const parseConflictStyle = blob_merge.parseConflictStyle;
 /// What a conflict becomes: markers, one side, or both, parallax's.
-pub const Resolve = blobmerge.Resolve;
+pub const Resolve = blob_merge.Resolve;
 /// How far conflicts are narrowed, parallax's.
-pub const Level = blobmerge.Level;
+pub const Level = blob_merge.Level;
 /// The words after the markers.
-pub const Labels = blobmerge.Labels;
+pub const Labels = blob_merge.Labels;
 /// Options for a blob merge.
-pub const BlobOptions = blobmerge.BlobOptions;
+pub const BlobOptions = blob_merge.BlobOptions;
 /// The owned bytes produced by a blob merge.
-pub const BlobResult = blobmerge.BlobResult;
+pub const BlobResult = blob_merge.BlobResult;
 /// Merge `ours` and `theirs` against `ancestor`, as git's `ll_merge` does.
-pub const blobs = blobmerge.blobs;
+pub const blobs = blob_merge.blobs;
 /// Where a refusal writes the path that caused it.
 pub const Blocked = ort.Blocked;
 

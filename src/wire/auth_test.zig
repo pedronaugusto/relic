@@ -25,7 +25,7 @@ const credential = @import("credential.zig");
 const fetch_mod = @import("../transport/fetch.zig");
 const program = @import("../process.zig").program;
 const repo_mod = @import("../repo/repo.zig");
-const userconfig = @import("../config/userconfig.zig");
+const user_config = @import("../config/user_config.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const testlfs = @import("../testing/lfs.zig");
@@ -178,9 +178,9 @@ const Person = struct {
     }
 
     /// Open `dir` as this person's repository, with the configuration
-    /// their git would read: what `userconfig.locate` finds.
-    fn open(p: *Person, io: Io, dir: Io.Dir, locations: *userconfig.Locations) !repo_mod.Repository {
-        locations.* = try userconfig.locate(p.gpa, io, &p.env, .{ .environ = &p.env });
+    /// their git would read: what `user_config.locate` finds.
+    fn open(p: *Person, io: Io, dir: Io.Dir, locations: *user_config.Locations) !repo_mod.Repository {
+        locations.* = try user_config.locate(p.gpa, io, &p.env, .{ .environ = &p.env });
         const sources = locations.sources();
         return repo_mod.Repository.open(p.gpa, io, dir, .{
             .system_config = sources.system,
@@ -283,7 +283,7 @@ test "with only the person's environment, relic asks the helpers git asks: gh's 
         defer for (theirs) |t| gpa.free(t);
 
         try person.clearLogs(io, &names);
-        var locations: userconfig.Locations = undefined;
+        var locations: user_config.Locations = undefined;
         var repo = try person.open(io, by_relic.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();
@@ -358,7 +358,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         const theirs = try person.log(io, "manager");
         defer gpa.free(theirs);
         try person.clearLogs(io, &.{"manager"});
-        var locations: userconfig.Locations = undefined;
+        var locations: user_config.Locations = undefined;
         var repo = try person.open(io, by_relic.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();
@@ -391,7 +391,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
                 defer o.deinit(gpa);
                 try testing.expectEqual(std.mem.eql(u8, password, "secret"), o.succeeded());
             } else {
-                var locations: userconfig.Locations = undefined;
+                var locations: user_config.Locations = undefined;
                 var repo = try person.open(io, r.dir, &locations);
                 defer repo.deinit(io);
                 defer locations.deinit();
@@ -432,7 +432,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         var r = try testgit.Repo.init(gpa, io, &.{});
         defer r.deinit();
         try r.exec(io, &.{ "remote", "add", "origin", url });
-        var locations: userconfig.Locations = undefined;
+        var locations: user_config.Locations = undefined;
         var repo = try person.open(io, r.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();
@@ -493,7 +493,7 @@ test "a refusal says what git says: the server's words, the helpers asked, the p
         defer theirs.deinit(gpa);
         try testing.expect(!theirs.succeeded());
 
-        var locations: userconfig.Locations = undefined;
+        var locations: user_config.Locations = undefined;
         var repo = try person.open(io, r.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();
@@ -529,7 +529,7 @@ test "a refusal says what git says: the server's words, the helpers asked, the p
     var r = try testgit.Repo.init(gpa, io, &.{});
     defer r.deinit();
     try r.exec(io, &.{ "remote", "add", "origin", url });
-    var locations: userconfig.Locations = undefined;
+    var locations: user_config.Locations = undefined;
     var repo = try person.open(io, r.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
@@ -585,7 +585,7 @@ test "a helper's bearer token is sent as git sends it, and handed back with its 
     const theirs = try person.log(io, "helper");
     defer gpa.free(theirs);
     try person.clearLogs(io, &.{"helper"});
-    var locations: userconfig.Locations = undefined;
+    var locations: user_config.Locations = undefined;
     var repo = try person.open(io, by_relic.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
@@ -636,7 +636,7 @@ test "a helper's password past its password_expiry_utc is passed over for the ne
     defer for (theirs) |t| gpa.free(t);
     try person.clearLogs(io, names);
 
-    var locations: userconfig.Locations = undefined;
+    var locations: user_config.Locations = undefined;
     var repo = try person.open(io, by_relic.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
@@ -680,7 +680,7 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
     defer theirs.deinit(gpa);
     try testing.expect(theirs.succeeded());
 
-    var locations: userconfig.Locations = undefined;
+    var locations: user_config.Locations = undefined;
     var repo = try person.open(io, by_relic.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
@@ -741,7 +741,7 @@ test "ssh's refusal is named once ssh has ended, while something it started stil
     var r = try testgit.Repo.init(gpa, io, &.{});
     defer r.deinit();
     try r.exec(io, &.{ "remote", "add", "origin", "git@work-github:org/repo.git" });
-    var locations: userconfig.Locations = undefined;
+    var locations: user_config.Locations = undefined;
     var repo = try person.open(io, r.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
@@ -836,7 +836,7 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
         defer gpa.free(theirs);
         try person.tools.dir.deleteFile(io, "ssh.log");
 
-        var locations: userconfig.Locations = undefined;
+        var locations: user_config.Locations = undefined;
         var repo = try person.open(io, by_relic.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();
@@ -875,7 +875,7 @@ test "ssh's refusal of a key or a host is named, with what ssh said" {
         // git passes ssh's words through to the person.
         try testing.expect(std.mem.find(u8, theirs.stderr, case.said) != null);
 
-        var locations: userconfig.Locations = undefined;
+        var locations: user_config.Locations = undefined;
         var repo = try person.open(io, r.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();

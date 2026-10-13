@@ -41,9 +41,9 @@ const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const attributes = @import("../patterns.zig").attributes;
 const convert = @import("../checkout/convert.zig");
-const blobmerge = @import("../merge/blobmerge.zig");
+const blob_merge = @import("../merge/blob_merge.zig");
 const fs = @import("../fs/fs.zig");
-const safepath = @import("../names.zig").path;
+const safe_path = @import("../names.zig").path;
 const glob_mod = @import("../text.zig").glob;
 const rerere = @import("../merge/rerere.zig");
 const program = @import("../process.zig").program;
@@ -141,7 +141,7 @@ pub const Options = struct {
     three_way: bool = false,
     /// `--ours`, `--theirs`, `--union` for the three-way merge's
     /// conflicts.
-    resolve: blobmerge.Resolve = .markers,
+    resolve: blob_merge.Resolve = .markers,
     /// `--whitespace`; `null` reads `apply.whitespace` and falls back to
     /// `.warn` (`.nowarn` under `check`).
     whitespace: ?Whitespace = null,
@@ -1441,9 +1441,9 @@ fn threeWayMerge(st: *State, img: *Image, path: []const u8, base: Oid, ours: Oid
     defer db.allocator().free(o.bytes);
     const t = try db.read(st.io, theirs);
     defer db.allocator().free(t.bytes);
-    const style = if (st.repo.configuration().get("merge.conflictstyle")) |v| blobmerge.parseConflictStyle(v) orelse .merge else .merge;
+    const style = if (st.repo.configuration().get("merge.conflictstyle")) |v| blob_merge.parseConflictStyle(v) orelse .merge else .merge;
     _ = path;
-    var result = blobmerge.blobs(st.gpa, b.bytes, o.bytes, t.bytes, .{
+    var result = blob_merge.blobs(st.gpa, b.bytes, o.bytes, t.bytes, .{
         .conflict_style = style,
         .resolve = st.options.resolve,
     }) catch |err| switch (err) {
@@ -1729,8 +1729,8 @@ fn checkUnsafePath(p: *const FilePatch) bool {
     if (p.is_delete != .yes) new_name = p.new_name;
     // git's `verify_path(name, mode)`: the mode decides whether the name
     // may be `.gitmodules`.
-    if (old_name) |n| if (safepath.checkEntry(n, .worktree, patchparse.kind(p.old_mode) == patchparse.mode_symlink) != null) return false;
-    if (new_name) |n| if (safepath.checkEntry(n, .worktree, patchparse.kind(p.new_mode) == patchparse.mode_symlink) != null) return false;
+    if (old_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.old_mode) == patchparse.mode_symlink) != null) return false;
+    if (new_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.new_mode) == patchparse.mode_symlink) != null) return false;
     return true;
 }
 

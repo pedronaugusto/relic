@@ -24,7 +24,7 @@ const Self = @This();
 
 const std = @import("std");
 const gitdate = @import("../text.zig").date;
-const httpsettings_mod = @import("../wire.zig").httpsettings;
+const httpsettings_mod = @import("../wire.zig").http_settings;
 const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -36,17 +36,17 @@ const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
-const fetchpack = @import("../wire.zig").fetchpack;
+const fetch_pack = @import("../wire.zig").fetch_pack;
 const shallow_mod = @import("../walk/shallow.zig");
-const indexpack = @import("../odb/indexpack.zig");
-const revindex = @import("../odb/revindex.zig");
+const index_pack = @import("../odb/index_pack.zig");
+const rev_index = @import("../odb/rev_index.zig");
 const partial = @import("partial.zig");
 const worktree = @import("../checkout/checkout.zig");
 const filter = @import("../checkout/filter.zig");
 const url_mod = @import("../wire.zig").url;
 const program = @import("../process.zig").program;
 const transport = @import("transport.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 const protocol = @import("../wire.zig").protocol;
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
@@ -74,7 +74,7 @@ pub const Error = error{
     MissingObject,
     /// A remote name git would refuse.
     InvalidRemoteName,
-} || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
+} || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || object_walk.Error ||
     worktree.Error || Repository.WriteConfigError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError || fsck.LoadError;
 
@@ -159,7 +159,7 @@ pub const Options = struct {
     config: ?*const config_mod.Config = null,
     /// The caller's configuration beyond the new repository's: the
     /// system, XDG and global files and the environment's values, as
-    /// `userconfig.Locations.sources` gives them; `local` and `worktree`
+    /// `user_config.Locations.sources` gives them; `local` and `worktree`
     /// are not read. git reads them all during a clone, so the fetch's
     /// settings — a credential helper, `core.sshCommand` — come from them when
     /// `config` is `null`, the checkout's filters do — `filter.lfs.*` from
@@ -235,7 +235,7 @@ fn isEmpty(io: Io, dir: Io.Dir) Self.Error!bool {
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Self.Error!Repository {
-    var deepen: ?fetchpack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
+    var deepen: ?fetch_pack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
         .{ .depth = options.depth, .since = if (options.shallow_since) |t| t.toSeconds() else null, .not = options.shallow_exclude }
     else
         null;
@@ -375,7 +375,7 @@ fn moveHelperHead(arena: Allocator, io: Io, repo: *Repository, remote_format: ha
 const Receiving = struct {
     settings: ?*const config_mod.Config,
     remote_refs: []const protocol.RemoteRef,
-    deepen: ?fetchpack.Deepen,
+    deepen: ?fetch_pack.Deepen,
     /// The filter sent, which makes the pack a promisor pack.
     filter: ?[]const u8,
     single_branch: bool,
@@ -400,11 +400,11 @@ fn receiveObjects(
     var detached = ask.detached;
     var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
-    var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
+    var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
     // What the pack's objects name, collected as it is indexed, so that
     // whether it is connected is asked without reading it again.
-    var links: indexpack.Links = .init(gpa);
+    var links: index_pack.Links = .init(gpa);
     defer links.deinit();
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
     var rules = try fsck.forTransfer(gpa, io, ask.settings, .{ .kind = repo.objectFormat(), .scope = .fetch }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
@@ -418,7 +418,7 @@ fn receiveObjects(
         .filter = ask.filter,
     } }, .{
         .progress = options.progress,
-        .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = ask.filter != null, .warnings = options.warnings, .reverse_index = revindex.wanted(ask.settings), .links = &links, .threads = indexpack.configuredThreads(ask.settings) },
+        .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = ask.filter != null, .warnings = options.warnings, .reverse_index = rev_index.wanted(ask.settings), .links = &links, .threads = index_pack.configuredThreads(ask.settings) },
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });
@@ -641,7 +641,7 @@ fn promisorRefs(arena: Allocator, session: *const transport.Session, remote_refs
 
 /// Everything below what was asked for is here: what came in the pack is
 /// walked into; with no pack, what is here is.
-fn checkCloned(gpa: Allocator, io: Io, repo: *Repository, pack_dir: Io.Dir, pack_name: ?Oid, wants: []const Oid, links: *const indexpack.Links, promisor: bool) Error!void {
+fn checkCloned(gpa: Allocator, io: Io, repo: *Repository, pack_dir: Io.Dir, pack_name: ?Oid, wants: []const Oid, links: *const index_pack.Links, promisor: bool) Error!void {
     var fresh: ?pack.Index = null;
     defer if (fresh) |*index| index.deinit();
     if (pack_name) |name| {
@@ -651,9 +651,9 @@ fn checkCloned(gpa: Allocator, io: Io, repo: *Repository, pack_dir: Io.Dir, pack
         fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, .{ .kind = repo.objectFormat(), .max_bytes = 1 << 30 });
     }
     const connected = if (fresh) |*index|
-        objectwalk.checkReceived(gpa, io, repo.objectDatabase(), wants, .{ .fresh = index, .links = links, .missing_out = null, .promisor = promisor })
+        object_walk.checkReceived(gpa, io, repo.objectDatabase(), wants, .{ .fresh = index, .links = links, .missing_out = null, .promisor = promisor })
     else
-        objectwalk.checkConnected(gpa, io, repo.objectDatabase(), wants, .{ .fresh = null, .missing_out = null, .promisor = promisor });
+        object_walk.checkConnected(gpa, io, repo.objectDatabase(), wants, .{ .fresh = null, .missing_out = null, .promisor = promisor });
     connected catch |err| switch (err) {
         error.MissingObject => return error.MissingObject,
         else => |e| return e,

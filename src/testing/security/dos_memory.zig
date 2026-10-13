@@ -1,14 +1,14 @@
 //! Memory a client spends on a server: a fetch that says the same `have`
 //! again and again, which upload-pack kept once per line until git 2.51.1.
-//! The owner is `transport/uploadpack.zig`, where relic serves fetches:
+//! The owner is `transport/upload_pack.zig`, where relic serves fetches:
 //! each object a client has is kept once, whatever its type.
 
 const std = @import("std");
 const Io = std.Io;
 
 const local = @import("../../transport/local.zig");
-const uploadpack = @import("../../transport/uploadpack.zig");
-const pktline = @import("../../codec.zig").pktline;
+const upload_pack = @import("../../transport/upload_pack.zig");
+const pkt_line = @import("../../codec.zig").pkt_line;
 const protocol = @import("../../wire.zig").protocol;
 const testgit = @import("../git.zig");
 
@@ -31,19 +31,19 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
     defer request.deinit();
     const w = &request.writer;
     if (version == .v2) {
-        try pktline.write(w, "command=fetch\n");
-        try pktline.write(w, "object-format=sha1\n");
-        try pktline.delim(w);
+        try pkt_line.write(w, "command=fetch\n");
+        try pkt_line.write(w, "object-format=sha1\n");
+        try pkt_line.delim(w);
     }
-    try pktline.print("want {s}\n", .{commit}, w);
-    if (version != .v2) try pktline.flush(w);
-    for (0..repeat) |_| try pktline.print("have {s}\n", .{tree}, w);
-    try pktline.flush(w);
+    try pkt_line.print("want {s}\n", .{commit}, w);
+    if (version != .v2) try pkt_line.flush(w);
+    for (0..repeat) |_| try pkt_line.print("have {s}\n", .{tree}, w);
+    try pkt_line.flush(w);
 
     var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    var server = uploadpack.Server.init(gpa, io, &remote, version, .{ .stateless = true });
-    var in_buffer: [pktline.max_line]u8 = undefined;
+    var server = upload_pack.Server.init(gpa, io, &remote, version, .{ .stateless = true });
+    var in_buffer: [pkt_line.max_line]u8 = undefined;
     var request_reader: Io.Reader = .fixed(request.written());
     var in = request_reader.limited(.unlimited, &in_buffer);
     var answer: Io.Writer.Allocating = .init(gpa);
@@ -51,10 +51,10 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
     try server.serveRequest(&in.interface, &answer.writer);
 
     var count: usize = 0;
-    var buffer: [pktline.max_line]u8 = undefined;
+    var buffer: [pkt_line.max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(answer.written());
     var reader = fixed.limited(.unlimited, &buffer);
-    while (pktline.read(&reader.interface)) |packet| switch (packet) {
+    while (pkt_line.read(&reader.interface)) |packet| switch (packet) {
         .data => |line| {
             if (std.mem.startsWith(u8, line, "ACK ") and std.mem.find(u8, line, tree) != null) count += 1;
         },

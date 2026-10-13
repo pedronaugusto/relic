@@ -3,7 +3,7 @@
 //! that wraps the integer holding it, and with it a buffer's bounds, which
 //! a release build no longer checks. Each fix has its owner: the line
 //! numbering in parallax's line diff, reached through `diff.zig` and
-//! `merge/blobmerge.zig`; path building in the object walk (`walk/`);
+//! `merge/blob_merge.zig`; path building in the object walk (`walk/`);
 //! `pretty.zig`'s placeholders; `worktree/attributes.zig` (`patterns/`);
 //! and `patch/apply.zig`.
 
@@ -11,8 +11,8 @@ const std = @import("std");
 const Io = std.Io;
 
 const diff = @import("../../diff/diff.zig");
-const blobmerge = @import("../../merge/blobmerge.zig");
-const objectwalk = @import("../../walk/objectwalk.zig");
+const blob_merge = @import("../../merge/blob_merge.zig");
+const object_walk = @import("../../walk/object/walk.zig");
 const pretty = @import("../../pretty/pretty.zig");
 const archive = @import("../../archive.zig");
 const attributes = @import("../../patterns.zig").attributes;
@@ -40,7 +40,7 @@ test "git 2.3.10 (MAX_XDIFF_SIZE, no t/ test): a text too large for the line dif
     try std.testing.expectError(error.InputTooLarge, diff.unifiedBody(gpa, &out.writer, "", huge, .{}));
     // A merge takes a side larger than MAX_XDIFF_SIZE as binary, as git's
     // `ll_merge` does.
-    try std.testing.expectError(error.BinaryBlob, blobmerge.blobs(gpa, "a", unread(u8, blobmerge.max_text_size + 1), "", .{}));
+    try std.testing.expectError(error.BinaryBlob, blob_merge.blobs(gpa, "a", unread(u8, blob_merge.max_text_size + 1), "", .{}));
     // And an ordinary diff is unchanged by the checks.
     try diff.unifiedBody(gpa, &out.writer, "a\nb\n", "a\nc\n", .{});
     try std.testing.expect(out.written().len != 0);
@@ -55,7 +55,7 @@ test "CVE-2016-2324 (with CVE-2016-2315, no t/ test): an object walk names every
     const name = &@as([250]u8, @splat('n'));
     var tree = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = name, .oid = try h.blob(io, "leaf\n") }});
     for (1..depth) |_| tree = try h.writeTree(gpa, io, &.{.{ .mode = "40000", .name = name, .oid = tree }});
-    var collected = try objectwalk.missing(gpa, io, &h.db, &.{tree}, .{ .exclude = &.{} });
+    var collected = try object_walk.missing(gpa, io, &h.db, &.{tree}, .{ .exclude = &.{} });
     defer collected.deinit();
     var longest: usize = 0;
     for (collected.entries) |entry| longest = @max(longest, entry.hint.len);

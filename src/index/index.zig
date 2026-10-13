@@ -8,7 +8,7 @@
 //! `sdir` marks a sparse index: a directory the sparse cone leaves out may
 //! stand as one entry, its path ending in `/`, its mode `040000`, its name
 //! the tree's, and `skip-worktree` set. Such an entry is read, kept and
-//! written back as it is; `sparseindex` is what expands one into the files
+//! written back as it is; `sparse_index` is what expands one into the files
 //! under it and collapses them again.
 
 const ErrorNamespace = @This();
@@ -27,7 +27,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
-const safepath = @import("../names.zig").path;
+const safe_path = @import("../names.zig").path;
 const varint = @import("../codec.zig").varint;
 const odb_mod = @import("../odb/odb.zig");
 const testgit = @import("../testing/git.zig");
@@ -97,7 +97,7 @@ pub const Entry = struct {
     mode: object.Mode,
     /// 0 for a merged entry; 1, 2 and 3 are a conflict's stages: the
     /// base's version, ours and theirs, as a merge, cherry-pick, revert or
-    /// rebase that stops leaves them (`threeway.zig`).
+    /// rebase that stops leaves them (`three_way.zig`).
     stage: u2 = 0,
     /// git's `assume-valid` bit: the caller has promised the file has not
     /// changed and the stat is not to be trusted against it.
@@ -690,8 +690,8 @@ pub const Index = struct {
     /// the token of an answer that changed nothing else is not kept.
     fsmonitor_changed: bool = false,
     /// Whether the index is sparse: it carries `sdir`, and may hold sparse
-    /// directory entries. `sparseindex.expand` clears it and
-    /// `sparseindex.collapse` sets it; it decides whether `sdir` is written.
+    /// directory entries. `sparse_index.expand` clears it and
+    /// `sparse_index.collapse` sets it; it decides whether `sdir` is written.
     sparse: bool = false,
     /// The delete mask a split index carried, until it is merged.
     split_delete: ?ewah.Bits = null,
@@ -1082,7 +1082,7 @@ pub const Index = struct {
         // trailing slash only on a sparse directory; both are checked once
         // the extensions have been read.
         const stored = if (path.len > 1 and path[path.len - 1] == '/') path[0 .. path.len - 1] else path;
-        if (stored.len != 0 and !safepath.isSafeStoredPath(stored)) return error.InvalidEntryPath;
+        if (stored.len != 0 and !safe_path.isSafeStoredPath(stored)) return error.InvalidEntryPath;
 
         const mode_raw = std.mem.readInt(u32, b[24..28], .big);
         const mode = object.Mode.fromRaw(mode_raw) catch return error.InvalidMode;

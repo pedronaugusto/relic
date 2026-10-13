@@ -20,23 +20,24 @@
 //! | `odb` | Public concern. |
 //! | `odb.abbrev` | Module within `odb`. |
 //! | `odb.bitmap` | Module within `odb`. |
-//! | `odb.commitgraph` | Module within `odb`. |
-//! | `odb.commitgraph.bloom` | Module within `odb.commitgraph`. |
-//! | `odb.revindex` | Module within `odb`. |
-//! | `odb.indexpack` | Module within `odb`. |
+//! | `odb.commit_graph` | Module within `odb`. |
+//! | `odb.commit_graph.bloom` | Module within `odb.commit_graph`. |
+//! | `odb.rev_index` | Module within `odb`. |
+//! | `odb.index_pack` | Module within `odb`. |
 //! | `odb.pack` | Module within `odb`. |
 //! | `odb.delta` | Module within `odb`. |
 //! | `odb.midx` | Module within `odb`. |
 //! | `refs` | Public concern. |
-//! | `refs.reftablestack` | Module within `refs`. |
 //! | `refs.reftable` | Module within `refs`. |
+//! | `refs.reftable.table` | The reftable format: one table read and written. |
+//! | `refs.reftable.stack` | The stack of tables `tables.list` names: the ref store. |
 //! | `refs.names` | Module within `refs`. |
 //! | `config` | Public concern. |
 //! | `config.user` | Module within `config`. |
 //! | `index` | Public concern. |
 //! | `index.sparse` | Module within `index`. |
 //! | `worktree` | Public concern. |
-//! | `worktree.sparsecheckout` | Module within `worktree`. |
+//! | `worktree.sparse_checkout` | Module within `worktree`. |
 //! | `worktree.linked` | Module within `worktree`. |
 //! | `worktree.snapshot` | Module within `worktree`. |
 //! | `worktree.sparse` | Module within `worktree`. |
@@ -47,25 +48,26 @@
 //! | `worktree.fsmonitor` | Module within `worktree`. |
 //! | `worktree.filter` | Module within `worktree`. |
 //! | `worktree.filter.native` | Native content-filter protocol. |
-//! | `worktree.dirscan` | Module within `worktree`. |
-//! | `worktree.safepath` | Module within `worktree`. |
+//! | `worktree.dir_scan` | Module within `worktree`. |
+//! | `worktree.safe_path` | Module within `worktree`. |
 //! | `diff` | Public concern. |
 //! | `diff.blame` | Module within `diff`. |
-//! | `diff.patchid` | Module within `diff`. |
+//! | `diff.patch_id` | Module within `diff`. |
 //! | `diff.rename` | Module within `diff`. |
 //! | `diff.similarity` | Module within `diff`. |
-//! | `revwalk` | Public concern. |
-//! | `revwalk.bisect` | Module within `revwalk`. |
-//! | `revwalk.describe` | Module within `revwalk`. |
-//! | `revwalk.mailmap` | Module within `revwalk`. |
-//! | `revwalk.revparse` | Module within `revwalk`. |
-//! | `revwalk.shallow` | Module within `revwalk`. |
-//! | `revwalk.objectwalk` | Module within `revwalk`. |
-//! | `revwalk.objectfilter` | Module within `revwalk`. |
+//! | `rev_walk` | Public concern. |
+//! | `rev_walk.bisect` | Module within `rev_walk`. |
+//! | `rev_walk.describe` | Module within `rev_walk`. |
+//! | `rev_walk.mailmap` | Module within `rev_walk`. |
+//! | `rev_walk.rev_parse` | Module within `rev_walk`. |
+//! | `rev_walk.shallow` | Module within `rev_walk`. |
+//! | `rev_walk.object` | Module within `rev_walk`. |
+//! | `rev_walk.object.walk` | Module within `rev_walk.object`. |
+//! | `rev_walk.object.filter` | Module within `rev_walk.object`. |
 //! | `merge` | Public concern. |
 //! | `merge.rerere` | Module within `merge`. |
-//! | `merge.threeway` | Module within `merge`. |
-//! | `merge.subtreeshift` | Module within `merge`. |
+//! | `merge.three_way` | Module within `merge`. |
+//! | `merge.subtree_shift` | Module within `merge`. |
 //! | `merge.strategy` | Module within `merge`. |
 //! | `merge.ort` | Module within `merge`. |
 //! | `merge.octopus` | Module within `merge`. |
@@ -83,10 +85,10 @@
 //! | `commit.signing` | Module within `commit`. |
 //! | `commit.hooks` | Module within `commit`. |
 //! | `transport` | Public concern. |
-//! | `transport.filterspec` | Module within `transport`. |
+//! | `transport.filter_spec` | Module within `transport`. |
 //! | `transport.partial` | Module within `transport`. |
-//! | `transport.sideband` | Module within `transport`. |
-//! | `transport.httpsettings` | Module within `transport`. |
+//! | `transport.side_band` | Module within `transport`. |
+//! | `transport.http_settings` | Module within `transport`. |
 //! | `transport.hidden` | Module within `transport`. |
 //! | `transport.promisors` | Module within `transport`. |
 //! | `transport.push` | Module within `transport`. |
@@ -95,20 +97,20 @@
 //! | `transport.refspec` | Module within `transport`. |
 //! | `transport.remote` | Module within `transport`. |
 //! | `transport.url` | Module within `transport`. |
-//! | `transport.fetchpack` | Module within `transport`. |
-//! | `transport.sendpack` | Module within `transport`. |
+//! | `transport.fetch_pack` | Module within `transport`. |
+//! | `transport.send_pack` | Module within `transport`. |
 //! | `transport.local` | Module within `transport`. |
 //! | `transport.ssh` | Module within `transport`. |
-//! | `transport.smarthttp` | Module within `transport`. |
+//! | `transport.smart_http` | Module within `transport`. |
 //! | `transport.credential` | Module within `transport`. |
 //! | `transport.auth` | Module within `transport`. |
 //! | `transport.protocol` | Module within `transport`. |
 //! | `transport.connection` | Module within `transport`. |
-//! | `transport.pktline` | Module within `transport`. |
-//! | `transport.uploadpack` | Module within `transport`. |
+//! | `transport.pkt_line` | Module within `transport`. |
+//! | `transport.upload_pack` | Module within `transport`. |
 //! | `transport.bundle` | Module within `transport`. |
 //! | `transport.progress` | Module within `transport`. |
-//! | `transport.remotehelper` | Module within `transport`. |
+//! | `transport.remote_helper` | Module within `transport`. |
 //! | `transport.policy` | Module within `transport`. |
 //! | `submodule` | Public concern. |
 //! | `submodule.transport` | Module within `submodule`. |
@@ -130,15 +132,16 @@
 //! | `patch.mail` | Module within `patch`. |
 //! | `patch.format` | Module within `patch`. |
 //! | `patch.apply` | Module within `patch`. |
-//! | `patch.rangediff` | Module within `patch`. |
+//! | `patch.range_diff` | Module within `patch`. |
 //! | `grep` | Public concern. |
 //! | `archive` | Public concern. |
 //! | `pretty` | Public concern. |
 //! | `pretty.refs` | Module within `pretty`. |
 //! | `pretty.shortlog` | Module within `pretty`. |
 //! | `clean` | Public concern. |
-//! | `fastimport` | Public concern. |
-//! | `fastexport` | Public concern. |
+//! | `fast` | Public concern. |
+//! | `fast.importer` | Module within `fast`. |
+//! | `fast.exporter` | Module within `fast`. |
 //! | `maintenance` | Public concern. |
 
 pub const repo = @import("repo.zig");
@@ -150,7 +153,7 @@ pub const config = @import("config.zig");
 pub const index = @import("index.zig");
 pub const worktree = @import("worktree.zig");
 pub const diff = @import("diff.zig");
-pub const revwalk = @import("revwalk.zig");
+pub const rev_walk = @import("rev_walk.zig");
 pub const merge = @import("merge.zig");
 pub const commit = @import("commit.zig");
 pub const transport = @import("transport.zig");
@@ -161,7 +164,6 @@ pub const grep = @import("grep.zig");
 pub const archive = @import("archive.zig");
 pub const pretty = @import("pretty.zig");
 pub const clean = @import("clean.zig");
-pub const fastimport = @import("fastimport.zig");
-pub const fastexport = @import("fastexport.zig");
+pub const fast = @import("fast.zig");
 
 pub const maintenance = @import("maintenance.zig");

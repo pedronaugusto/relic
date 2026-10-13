@@ -26,22 +26,21 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "merge", .patterns = &.{"src/merge/**"} },
     .{ .name = "maintenance", .patterns = &.{"src/maintenance/**"} },
     .{ .name = "worktree", .patterns = &.{"src/worktree/**"} },
-    .{ .name = "revwalk", .patterns = &.{"src/revwalk/**"} },
+    .{ .name = "revwalk", .patterns = &.{"src/rev_walk/**"} },
     .{ .name = "pretty", .patterns = &.{"src/pretty/**"} },
     .{ .name = "commit", .patterns = &.{"src/commit/**"} },
     .{ .name = "patch", .patterns = &.{"src/patch/**"} },
-    .{ .name = "fastimport", .patterns = &.{"src/fastimport.zig"} },
-    .{ .name = "fastexport", .patterns = &.{"src/fastexport.zig"} },
+    .{ .name = "fast", .patterns = &.{ "src/fast.zig", "src/fast/**" } },
     .{ .name = "transport", .patterns = &.{"src/transport/**"} },
     .{ .name = "submodule", .patterns = &.{"src/submodule/**"} },
     .{ .name = "archive", .patterns = &.{"src/archive.zig"} },
     .{ .name = "clean", .patterns = &.{"src/clean.zig"} },
     .{ .name = "grep", .patterns = &.{"src/grep.zig"} },
     .{ .name = "lfs", .patterns = &.{"src/lfs/**"} },
-    .{ .name = "public", .patterns = &.{ "src/commit.zig", "src/config.zig", "src/diff.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/relic.zig", "src/repo.zig", "src/revwalk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" } },
+    .{ .name = "public", .patterns = &.{ "src/commit.zig", "src/config.zig", "src/diff.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/relic.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" } },
 };
 
-pub const required = [_][]const u8{ "src/relic.zig", "src/tests.zig", "src/archive_test.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/fastexport_test.zig", "src/fastimport_test.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/revwalk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
+pub const required = [_][]const u8{ "src/relic.zig", "src/tests.zig", "src/archive_test.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
 pub const entries: []const []const u8 = &.{};
 pub const modules: []const gantry.NamedModule = &.{
     .{ .name = "root", .path = "src/tests.zig", .from = "src/testing/concurrency.zig" },
@@ -64,7 +63,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "facade imports", .target = "src/pretty.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/refs.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/repo.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/revwalk.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/rev_walk.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/submodule.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/transport.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/worktree.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },

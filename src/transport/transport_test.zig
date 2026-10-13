@@ -3,7 +3,7 @@
 //! an HTTP server serving `git http-backend`, each started by the test on
 //! this machine.
 //!
-//! They live apart from `ssh.zig` and `smarthttp.zig` because they drive the
+//! They live apart from `ssh.zig` and `smart_http.zig` because they drive the
 //! operations above those modules, which the modules themselves do not
 //! import.
 

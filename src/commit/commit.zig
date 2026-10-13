@@ -25,7 +25,7 @@ const message = @import("../object/message.zig");
 const trailer = @import("../object/trailer.zig");
 
 const signing = @import("../object/signing.zig");
-const commithooks = @import("commithooks.zig");
+const commit_hooks = @import("commit_hooks.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -67,7 +67,7 @@ pub const Error = error{
     /// The message is the template's, unedited but for blank lines and
     /// sign-offs: git's "you did not edit the message".
     TemplateUntouched,
-} || trailer.Error || hooks.Error || commithooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
+} || trailer.Error || hooks.Error || commit_hooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
     error{NameTooLong};
 
@@ -161,7 +161,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
 
     // The files named as git names them to a hook: `.git/index` and
     // `.git/COMMIT_EDITMSG` from the top of the working tree.
-    const names = try commithooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
+    const names = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const message_path = try names.path(arena, "COMMIT_EDITMSG");
     const env = try names.env(arena, request.author);
 

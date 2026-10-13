@@ -13,7 +13,7 @@
 //! different tree.
 
 const ErrorNamespace = @This();
-const cquote = @import("../text.zig").cquote;
+const c_quote = @import("../text.zig").c_quote;
 const Self = @This();
 
 const std = @import("std");
@@ -534,7 +534,7 @@ fn parsePattern(a: Allocator, line: []const u8) Allocator.Error!?ParsedPattern {
     var i: usize = 0;
     var glob: []const u8 = undefined;
     if (line[0] == '"') {
-        const quoted = (try cquote.unquote(a, line)) orelse return null;
+        const quoted = (try c_quote.unquote(a, line)) orelse return null;
         glob = quoted.name;
         i = quoted.consumed;
     } else {

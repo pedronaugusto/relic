@@ -12,7 +12,7 @@ const testing = std.testing;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
-const revwalk = @import("walk.zig");
+const rev_walk = @import("walk.zig");
 const clone_mod = @import("../transport/clone.zig");
 const fetch_mod = @import("../transport/fetch.zig");
 const testgit = @import("../testing/git.zig");
@@ -95,7 +95,7 @@ fn expectSameShallow(gpa: Allocator, io: Io, by_git: Io.Dir, by_relic: Io.Dir) !
     defer repo.deinit(io);
     const head_text = try git(gpa, io, by_relic, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head_text);
-    var walk: revwalk.Walk = .init(gpa, repo.objectDatabase());
+    var walk: rev_walk.Walk = .init(gpa, repo.objectDatabase());
     defer walk.deinit();
     try walk.push(try Oid.parse(repo.objectFormat(), head_text));
     const count_text = try git(gpa, io, by_relic, &.{ "rev-list", "--count", "HEAD" });

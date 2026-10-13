@@ -33,7 +33,7 @@
 //! The connection settings are git's where git-lfs reads them as git does,
 //! and git-lfs's where it does not. The TLS ones — `http.sslVerify`,
 //! `http.sslCAInfo`, `http.sslCAPath` and their environment variables —
-//! come from `httpsettings.zig` for each request's URL, as `smarthttp`
+//! come from `http_settings.zig` for each request's URL, as `smart_http`
 //! takes them, and the connections are uplink's: TLS
 //! inside a proxy's tunnel, a server left unchecked where the settings say
 //! so. A client certificate is git-lfs's: `http.sslCert` and `http.sslKey`
@@ -63,7 +63,7 @@
 //! expire is not checked against one; a request refused because one has is
 //! retried with a fresh batch, which is how git-lfs retries every failed
 //! transfer anyway. Certificates to trust from `http.sslCAInfo` are checked
-//! against the time when they are loaded, as `smarthttp` checks them.
+//! against the time when they are loaded, as `smart_http` checks them.
 
 const ErrorNamespace = @This();
 const refs_mod = @import("../refs/refs.zig");
@@ -124,18 +124,18 @@ const http = std.http;
 const program = @import("../process.zig").program;
 const credential = @import("../wire.zig").credential;
 const auth_mod = @import("../wire.zig").auth;
-const httpsettings = @import("../wire.zig").httpsettings;
+const http_settings = @import("../wire.zig").http_settings;
 const url_mod = @import("../wire.zig").url;
 const remote_mod = @import("../wire.zig").remote;
 const repo_mod = @import("../repo/repo.zig");
 const lfs = @import("lfs.zig");
-const mimesniff = @import("mimesniff.zig");
+const mime_sniff = @import("mime_sniff.zig");
 const fs = @import("../fs/fs.zig");
 const object = @import("../object/object.zig");
 const netrc_mod = @import("netrc.zig");
-const timetext = @import("timetext.zig");
+const time_text = @import("time_text.zig");
 const lfsssh = @import("ssh.zig");
-const clientcert = @import("../wire.zig").clientcert;
+const client_cert = @import("../wire.zig").client_cert;
 const authorities = @import("../wire.zig").authorities;
 const uplink = @import("uplink");
 const cloak = @import("cloak");
@@ -246,7 +246,7 @@ pub const Error = error{
     /// relic was built without HTTP, and with it Git LFS: its `http` build
     /// option is off.
     HttpUnavailable,
-} || credential.Error || lfsssh.Error || clientcert.Error || Allocator.Error || Io.Cancelable;
+} || credential.Error || lfsssh.Error || client_cert.Error || Allocator.Error || Io.Cancelable;
 
 //=====================================================================
 // Settings
@@ -1080,7 +1080,7 @@ pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Self.Error!SshAuth
         .href = parsed.href,
         .headers = try headersOf(arena, parsed.header),
         .expires_in = parsed.expires_in orelse 0,
-        .expires_at = if (parsed.expires_at) |t| timetext.parseRfc3339(t) else null,
+        .expires_at = if (parsed.expires_at) |t| time_text.parseRfc3339(t) else null,
     };
 }
 
@@ -1983,9 +1983,9 @@ pub const Client = struct {
         const file = (store.open(io, pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
             return c.fail("object {s} is not in the store", io, .{&pointer.oid}, error.HttpStatus);
         defer file.close(io);
-        var head: [mimesniff.sniff_len]u8 = undefined;
+        var head: [mime_sniff.sniff_len]u8 = undefined;
         const n = file.readPositionalAll(io, &head, 0) catch return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
-        return mimesniff.contentType(head[0..n]);
+        return mime_sniff.contentType(head[0..n]);
     }
 
     fn extraHeaders(c: *Client, a: Allocator, url: []const u8) ErrorNamespace.Error![]const http.Header {
@@ -2003,14 +2003,14 @@ pub const Client = struct {
 
     /// The HTTP client for a request to `url`, with the settings git-lfs
     /// would use for it: git's TLS settings for the URL from
-    /// `httpsettings.zig`, which git-lfs reads as git does, the proxy
+    /// `http_settings.zig`, which git-lfs reads as git does, the proxy
     /// git-lfs's own rules choose (`proxyFor`), and git-lfs's timeouts
     /// (`timeoutsFor`), and git-lfs's client certificate for the host
     /// (`clientCertificate`).
     fn transportFor(c: *Client, scratch: Allocator, io: Io, request_url: []const u8, decompress: bool) ErrorNamespace.Error!*uplink.Client {
         const url = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", io, .{stripQuery(request_url)}, error.MalformedUrl);
         const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
-        const settings = httpsettings.resolve(scratch, c.settings.config, environ, url) catch |err| switch (err) {
+        const settings = http_settings.resolve(scratch, c.settings.config, environ, url) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidHttpSetting => return c.fail("an http.* setting for {s} does not parse", io, .{stripQuery(request_url)}, error.InvalidHttpSetting),
             error.HttpUnavailable => return error.HttpUnavailable,
@@ -2101,7 +2101,7 @@ pub const Client = struct {
     /// git-lfs's client certificate for `url`'s host: `http.sslCert` and
     /// `http.sslKey` for `https://<host>/`, by git-lfs's URL match, both or
     /// neither; `~` expanded, as git-lfs expands it.
-    fn clientCertificateFiles(c: *Client, scratch: Allocator, url: url_mod.Url, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!?clientcert.Files {
+    fn clientCertificateFiles(c: *Client, scratch: Allocator, url: url_mod.Url, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!?client_cert.Files {
         const host_url = if (url.port) |port|
             try scratch.print("https://{s}:{d}/", .{ url.host, port })
         else
@@ -2120,12 +2120,12 @@ pub const Client = struct {
     /// which relic keeps as `key_passphrases`.
     /// relic opens an encrypted PKCS #8 key the same way, which git-lfs
     /// does not read at all.
-    fn clientCertificate(c: *Client, arena: Allocator, io: Io, files: clientcert.Files) ErrorNamespace.Error!cloak.ClientAuth {
-        const key_path = clientcert.keyPath(files);
+    fn clientCertificate(c: *Client, arena: Allocator, io: Io, files: client_cert.Files) ErrorNamespace.Error!cloak.ClientAuth {
+        const key_path = client_cert.keyPath(files);
         var session: ?credential.Session = null;
         defer if (session) |*s| s.deinit();
         var passphrase: ?[]const u8 = null;
-        if (clientcert.keyIsEncrypted(arena, io, files)) {
+        if (client_cert.keyIsEncrypted(arena, io, files)) {
             // Git LFS names the key with slashes on Windows, unlike Git's
             // own certificate helper request.
             if (c.knownPassphrase(io, key_path)) |known| {
@@ -2138,7 +2138,7 @@ pub const Client = struct {
                 if (try s.fill(io, c.credentialOptions())) passphrase = s.password;
             }
         }
-        const auth = clientcert.load(c.gpa, io, files, .{ .arena = arena, .passphrase = passphrase }) catch |err| {
+        const auth = client_cert.load(c.gpa, io, files, .{ .arena = arena, .passphrase = passphrase }) catch |err| {
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Canceled => error.Canceled,
@@ -2163,8 +2163,8 @@ pub const Client = struct {
     }
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
-    /// `http.sslCAPath` besides them, as `smarthttp` does for git.
-    fn trust(c: *Client, arena: Allocator, io: Io, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!cloak.Trust.Snapshot {
+    /// `http.sslCAPath` besides them, as `smart_http` does for git.
+    fn trust(c: *Client, arena: Allocator, io: Io, settings: http_settings.Settings, environ: ?*const std.process.Environ.Map) ErrorNamespace.Error!cloak.Trust.Snapshot {
         const sources: authorities.Sources = .{
             .ca_info = if (settings.ca_info) |raw| try expandHome(arena, raw, environ) else null,
             .ca_path = if (settings.ca_path) |raw| try expandHome(arena, raw, environ) else null,
@@ -2634,7 +2634,7 @@ pub fn parseRetryAfter(value: []const u8, now: ?Io.Timestamp) ?Io.Duration {
     const text = std.mem.trim(u8, value, " \t");
     // A u64 of seconds is under 2^94 nanoseconds, well inside a Duration's i96.
     if (std.fmt.parseInt(u64, text, 10)) |n| return .fromNanoseconds(@as(i96, n) * std.time.ns_per_s) else |_| {}
-    const at = timetext.parseHttpDate(text) orelse return null;
+    const at = time_text.parseHttpDate(text) orelse return null;
     const from = (now orelse return null).toSeconds();
     return .fromSeconds(@max(0, at - from));
 }

@@ -3,7 +3,7 @@
 //! trailing dot made land in the same place -- so that two submodules, or
 //! a submodule and the superproject's own files, share one directory. The
 //! owner is `submodule.zig`'s populate, which clones only into a path that
-//! is new or empty, and `worktree/safepath.zig` for the names that alias
+//! is new or empty, and `worktree/safe_path.zig` for the names that alias
 //! one another.
 
 const std = @import("std");
@@ -12,7 +12,7 @@ const Io = std.Io;
 
 const submodule = @import("../../submodule/submodule.zig");
 const repo_mod = @import("../../repo/repo.zig");
-const safepath = @import("../../names.zig").path;
+const safe_path = @import("../../names.zig").path;
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 
@@ -22,8 +22,8 @@ test "CVE-2019-1349, t7450-bad-git-dotfiles 'prevent git~1 squatting on Windows'
     // On Windows the squatting paths themselves are refused: `d\a` is a
     // path and `d.` is `d`.
     if (builtin.target.os.tag == .windows) {
-        try std.testing.expectEqual(safepath.Reason.separator_inside_component, safepath.check("d\\a", .worktree).?.reason);
-        try std.testing.expectEqual(safepath.Reason.trailing_dot_or_space, safepath.check("d./a/x", .worktree).?.reason);
+        try std.testing.expectEqual(safe_path.Reason.separator_inside_component, safe_path.check("d\\a", .worktree).?.reason);
+        try std.testing.expectEqual(safe_path.Reason.trailing_dot_or_space, safe_path.check("d./a/x", .worktree).?.reason);
     }
     // Everywhere: files already in the submodule's path, as the aliased
     // checkout leaves them, keep the clone out.

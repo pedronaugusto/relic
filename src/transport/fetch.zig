@@ -23,7 +23,7 @@ const Self = @This();
 
 const std = @import("std");
 const gitdate = @import("../text.zig").date;
-const httpsettings_mod = @import("../wire.zig").httpsettings;
+const httpsettings_mod = @import("../wire.zig").http_settings;
 const keep_mod = @import("../odb/keep.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -35,10 +35,10 @@ const fs = @import("../fs/fs.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
-const revwalk = @import("../walk/walk.zig");
-const fetchpack = @import("../wire.zig").fetchpack;
+const rev_walk = @import("../walk/walk.zig");
+const fetch_pack = @import("../wire.zig").fetch_pack;
 const shallow_mod = @import("../walk/shallow.zig");
-const revindex = @import("../odb/revindex.zig");
+const rev_index = @import("../odb/rev_index.zig");
 const partial = @import("partial.zig");
 const config_mod = @import("../config/config.zig");
 const refspec_mod = @import("../wire.zig").refspec;
@@ -48,8 +48,8 @@ const url_mod = @import("../wire.zig").url;
 const program = @import("../process.zig").program;
 const protocol = @import("../wire.zig").protocol;
 const transport = @import("transport.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
-const indexpack = @import("../odb/indexpack.zig");
+const object_walk = @import("../walk/object/walk.zig");
+const index_pack = @import("../odb/index_pack.zig");
 const progress_mod = @import("../report.zig").progress;
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
@@ -83,8 +83,8 @@ pub const Error = error{
     /// An object below a fetched ref is not in the repository after the
     /// pack arrived. `Outcome` is not returned; `Options.missing` names it.
     MissingObject,
-} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || fsck.LoadError || config_mod.Config.SetError ||
-    revwalk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
+} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || fsck.LoadError || config_mod.Config.SetError ||
+    rev_walk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
 /// How a fetch runs.
 pub const Options = struct {
@@ -399,7 +399,7 @@ const Bringing = struct {
     remote_refs: []const protocol.RemoteRef,
     local: *const LocalIndex,
     local_refs: []const refs_mod.Named,
-    deepen: ?fetchpack.Deepen,
+    deepen: ?fetch_pack.Deepen,
     tags: remote_mod.TagMode,
     /// Whether a refspec that keeps refs asked for tags to follow.
     autotags: bool,
@@ -444,11 +444,11 @@ fn bringObjects(
     var pack_dir = try repo.commonDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     const boundary = try shallowList(arena, &repo.objectDatabase().shallow);
-    var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
+    var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
     // What the pack's objects name, collected as it is indexed, so that
     // whether it is connected is asked without reading it again.
-    var links: indexpack.Links = .init(gpa);
+    var links: index_pack.Links = .init(gpa);
     defer links.deinit();
     var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
         .wants = wants.oids,
@@ -525,7 +525,7 @@ const BoundaryChange = struct {
         arena: Allocator,
         gpa: Allocator,
         repo: *Repository,
-        info: *fetchpack.ShallowInfo,
+        info: *fetch_pack.ShallowInfo,
         advertised: []const Oid,
         deepened: bool,
     ) Error!void {
@@ -564,7 +564,7 @@ const Following = struct {
     map: []const MapEntry,
     tips: Tips,
     progress: ?progress_mod.Progress,
-    receive: indexpack.Options,
+    receive: index_pack.Options,
     keep: *?keep_mod.Token,
 };
 
@@ -848,15 +848,15 @@ fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, 
 
 /// How a fetched pack is received: checked by `checks`, its missing
 /// objects promised when `promisor`, its links kept in `links` when set.
-fn receiveOptions(repo: *Repository, checks: ?*const fsck.Rules, promisor: bool, warnings: ?*warning.Warnings, links: ?*indexpack.Links) indexpack.Options {
+fn receiveOptions(repo: *Repository, checks: ?*const fsck.Rules, promisor: bool, warnings: ?*warning.Warnings, links: ?*index_pack.Links) index_pack.Options {
     return .{
         .keep = true,
         .fsck = checks,
         .promised = promisor,
         .warnings = warnings,
-        .reverse_index = revindex.wanted(repo.configuration()),
+        .reverse_index = rev_index.wanted(repo.configuration()),
         .links = links,
-        .threads = indexpack.configuredThreads(repo.configuration()),
+        .threads = index_pack.configuredThreads(repo.configuration()),
     };
 }
 
@@ -872,7 +872,7 @@ const Received = struct {
     pack_dir: Io.Dir,
     /// The pack that came, if one did.
     pack: ?Oid,
-    links: *const indexpack.Links,
+    links: *const index_pack.Links,
     /// The map, then the tags fetched after it.
     passes: [2][]MapEntry,
     /// A shallow remote's roots this fetch did not ask for.
@@ -900,7 +900,7 @@ fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r
         fresh = try pack.Index.open(gpa, io, r.pack_dir, idx_name, .{ .kind = repo.objectFormat(), .max_bytes = 1 << 30 });
     }
     if (fresh) |*index| {
-        objectwalk.checkReceived(gpa, io, repo.objectDatabase(), all_tips.items, .{ .fresh = index, .links = r.links, .missing_out = r.missing, .promisor = r.promisor }) catch |err| switch (err) {
+        object_walk.checkReceived(gpa, io, repo.objectDatabase(), all_tips.items, .{ .fresh = index, .links = r.links, .missing_out = r.missing, .promisor = r.promisor }) catch |err| switch (err) {
             error.MissingObject => return error.MissingObject,
             else => |e| return e,
         };
@@ -1298,7 +1298,7 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
 }
 
 /// What the options ask of the boundary, as the protocol asks it.
-fn deepenRequest(repo: *Repository, options: Options) Error!?fetchpack.Deepen {
+fn deepenRequest(repo: *Repository, options: Options) Error!?fetch_pack.Deepen {
     if (options.unshallow) {
         if (repo.objectDatabase().shallow.count() == 0) return error.NotShallow;
         return .{ .depth = 0x7fff_ffff };
@@ -1439,7 +1439,7 @@ fn decide(
             "storing ref";
         return .{ .old = old, .result = .created, .message = message };
     }
-    if (try revwalk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
+    if (try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
         return .{ .old = old, .result = .fast_forward, .message = "fast-forward" };
     }
     if (force or entry.force) return .{ .old = old, .result = .forced, .message = "forced-update" };

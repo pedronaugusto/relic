@@ -6,7 +6,7 @@
 //! the name the index gives it. Writing, `Writer` makes the pack a repack or
 //! a push sends — to a file, or streamed to a writer — with deltas git's
 //! way, and `writeIndexFile` makes the `.idx`, byte for byte git's, for it
-//! and for a pack received by `indexpack.zig`.
+//! and for a pack received by `index_pack.zig`.
 
 const ErrorNamespace = @This();
 const Self = @This();
@@ -22,7 +22,7 @@ const warp = @import("warp");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const delta = @import("../codec.zig").delta;
-const revindex = @import("revindex.zig");
+const rev_index = @import("rev_index.zig");
 const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
@@ -1754,7 +1754,7 @@ pub const WriteOptions = struct {
     /// How hard the entries are compressed.
     compression: Compression = .default,
     /// Write `pack-<name>.rev` too, as git's pack-objects does while
-    /// `pack.writeReverseIndex` is on: `revindex.wanted`.
+    /// `pack.writeReverseIndex` is on: `rev_index.wanted`.
     reverse_index: bool = false,
     /// What `core.sharedRepository` asks of the files' permissions, which
     /// are otherwise git's read-only ones.
@@ -2222,7 +2222,7 @@ pub const Writer = struct {
         errdefer w.dir.deleteFile(io, idx_temp) catch {};
         var rev_temp_buf: [64]u8 = undefined;
         const rev_temp: ?[]const u8 = if (w.options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
-        if (rev_temp) |t| try revindex.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
+        if (rev_temp) |t| try rev_index.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
         // glint-ignore: Z026 -- the write's error is the one to report; a temporary reverse index left behind is what git gc prunes
         errdefer if (rev_temp) |t| w.dir.deleteFile(io, t) catch {};
 

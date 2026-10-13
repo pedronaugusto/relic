@@ -38,8 +38,8 @@ const repo_mod = @import("../repo/repo.zig");
 const fsck = @import("../object/fsck.zig");
 const promisors = @import("../wire.zig").promisors;
 const warning = @import("../report.zig").warning;
-const revindex = @import("../odb/revindex.zig");
-const filterspec = @import("../wire.zig").filterspec;
+const rev_index = @import("../odb/rev_index.zig");
+const filter_spec = @import("../wire.zig").filter_spec;
 const remote_mod = @import("../wire.zig").remote;
 
 const Oid = hash.Oid;
@@ -49,13 +49,13 @@ const Repository = repo_mod.Repository;
 pub const Error = error{NotAPartialClone} || transport.Error || remote_mod.Error || repo_mod.Error || Repository.WriteConfigError || odb_mod.Error || fsck.LoadError || Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error || std.mem.PrintError;
 
 /// Errors from reading a filter.
-pub const FilterError = filterspec.Error;
+pub const FilterError = filter_spec.Error;
 
 /// The filter as git sends it, after reading it as git's
-/// `list-objects-filter-options` reads it: `filterspec.sendForm`. The
+/// `list-objects-filter-options` reads it: `filter_spec.sendForm`. The
 /// result is `arena`'s, or `spec` itself.
 pub fn normalize(arena: Allocator, spec: []const u8) FilterError![]const u8 {
-    return filterspec.sendForm(arena, spec);
+    return filter_spec.sendForm(arena, spec);
 }
 
 /// The remote a partial clone was promised its objects by: the first with
@@ -301,7 +301,7 @@ pub const Lazy = struct {
             .tips = &.{},
             .include_tag = false,
             .filter = "blob:none",
-        } }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = revindex.wanted(repo.configuration()) } });
+        } }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = rev_index.wanted(repo.configuration()) } });
         defer fetched.deinit(io);
         if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
     }

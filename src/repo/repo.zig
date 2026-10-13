@@ -33,7 +33,7 @@ const attributes = @import("../patterns.zig").attributes;
 const worktree = @import("../checkout/checkout.zig");
 const worktrees = @import("../checkout/worktrees.zig");
 const filter = @import("../checkout/filter.zig");
-const reftablestack = @import("../refs/reftablestack.zig");
+const reftable_stack = @import("../refs/reftable/stack.zig");
 const signing = @import("../object/signing.zig");
 const diagnostic_mod = @import("../report.zig").diagnostic;
 const repository_format = @import("../discover.zig").format;
@@ -365,7 +365,7 @@ pub const Repository = struct {
         /// Values that beat every file, as `name=value`.
         config_overrides: []const []const u8 = &.{},
         /// Values that beat every file, after `config_overrides`, with the
-        /// name and value apart: what `userconfig.Locations.pairs` holds.
+        /// name and value apart: what `user_config.Locations.pairs` holds.
         config_pairs: []const config_mod.Sources.Pair = &.{},
         /// What is checked of who owns the repository found: git's own
         /// check unless asked otherwise. `safe.directory` is read from the
@@ -645,7 +645,7 @@ pub const Repository = struct {
         repo.data().odb.shallow = try shallow.read(gpa, io, repo.data().common_dir, format.kind);
         const store = try gpa.create(refs_mod.Store);
         errdefer gpa.destroy(store);
-        var stack_options: reftablestack.Options = if (format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{};
+        var stack_options: reftable_stack.Options = if (format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{};
         stack_options.shared = repo.data().shared;
         store.* = try refs_mod.Store.init(gpa, format.kind, repo.data().git_dir, repo.data().common_dir, .{
             .format = format.ref_storage,
@@ -776,8 +776,8 @@ pub const Repository = struct {
         return fs.Shared.parse(value) catch error.InvalidSharedMode;
     }
 
-    fn reftableOptions(config: *const config_mod.Config) ErrorNamespace.Error!reftablestack.Options {
-        var options: reftablestack.Options = .{};
+    fn reftableOptions(config: *const config_mod.Config) ErrorNamespace.Error!reftable_stack.Options {
+        var options: reftable_stack.Options = .{};
         const block_size = try config.getInt("reftable.blocksize", options.write.block_size);
         if (block_size > 0 and block_size < (1 << 24)) options.write.block_size = @intCast(block_size);
         const restart = try config.getInt("reftable.restartinterval", options.write.restart_interval);
@@ -1136,7 +1136,7 @@ pub const Repository = struct {
     /// What publishing a configuration changes beside it: the ref store's
     /// write policy, checked before anything is replaced.
     const ConfigPolicy = struct {
-        ref_options: reftablestack.Options,
+        ref_options: reftable_stack.Options,
         shared: fs.Shared,
         fsync: fs.Fsync,
     };

@@ -17,7 +17,7 @@
 const ErrorNamespace = @This();
 const Self = @This();
 
-// The modules relic's API puts under this one, as `relic.revwalk.<name>`.
+// The modules relic's API puts under this one, as `relic.rev_walk.<name>`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -26,7 +26,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
-const commitgraph = @import("../odb/commitgraph.zig");
+const commit_graph = @import("../odb/commit_graph.zig");
 const pathspec = @import("../patterns.zig").pathspec;
 const simplify = @import("simplify.zig");
 
@@ -99,7 +99,7 @@ pub const Walk = struct {
     /// one open. A commit the graph does not hold is read from the object
     /// database, so the answers do not depend on it — which is what an
     /// accelerator has to mean.
-    graph: ?*const commitgraph.Graph = null,
+    graph: ?*const commit_graph.Graph = null,
     /// `--first-parent`: from a commit that is wanted, only its first parent
     /// is followed. What the hidden commits reach is still marked through
     /// every parent, as git marks it.
@@ -505,7 +505,7 @@ pub fn isAncestor(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Ancestry, op
 pub const BaseOptions = struct {
     /// Parents and dates from a commit-graph, for the commits it holds.
     /// The answer does not change.
-    graph: ?*const commitgraph.Graph = null,
+    graph: ?*const commit_graph.Graph = null,
     /// Commits that exist only for the length of the computation.
     virtuals: []const Virtual = &.{},
 };
@@ -589,7 +589,7 @@ const Painter = struct {
     io: Io,
     db: *odb_mod.Odb,
     virtuals: []const Virtual = &.{},
-    graph: ?*const commitgraph.Graph = null,
+    graph: ?*const commit_graph.Graph = null,
     commits: std.AutoHashMapUnmanaged(OidKey, Loaded) = .empty,
     flags: std.AutoHashMapUnmanaged(OidKey, Flags) = .empty,
     /// How many entries in the queue are not stale, and how many of each
@@ -1081,7 +1081,7 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
     try repo.exec(io, &.{ "commit-graph", "write", "--reachable" });
     const objects = try git_dir.openDir(io, "objects", .{});
     defer objects.close(io);
-    var graph = (try commitgraph.Graph.open(gpa, io, objects, .sha1)).?;
+    var graph = (try commit_graph.Graph.open(gpa, io, objects, .sha1)).?;
     defer graph.deinit();
     const names = [_][]const u8{ "b0", "b1", "b2", "b3", "b4", "b5" };
     for (names) |x| {
@@ -1096,7 +1096,7 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
             const yo = try Oid.parse(.sha1, y_text);
             const expected = try repo.runInput(io, &.{ "merge-base", "--all", x, y }, "");
             defer gpa.free(expected);
-            for ([_]?*const commitgraph.Graph{ null, &graph }) |g| {
+            for ([_]?*const commit_graph.Graph{ null, &graph }) |g| {
                 const bases = try mergeBases(gpa, io, &db, .{ .a = xo, .b = yo }, .{ .graph = g });
                 defer gpa.free(bases);
                 var got: std.ArrayList(u8) = .empty;

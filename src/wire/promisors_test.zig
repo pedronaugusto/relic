@@ -9,8 +9,8 @@ const Io = std.Io;
 
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
-const uploadpack = @import("../transport/uploadpack.zig");
-const pktline = @import("../codec.zig").pktline;
+const upload_pack = @import("../transport/upload_pack.zig");
+const pkt_line = @import("../codec.zig").pkt_line;
 const fetch_mod = @import("../transport/fetch.zig");
 const warning = @import("../report.zig").warning;
 const testgit = @import("../testing/git.zig");
@@ -24,10 +24,10 @@ const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .wh
 /// The `promisor-remote=` line of a v2 advertisement, or `null`.
 fn promisorLine(gpa: Allocator, advertisement: []const u8) !?[]u8 {
     var fixed: Io.Reader = .fixed(advertisement);
-    var buffer: [pktline.max_line]u8 = undefined;
+    var buffer: [pkt_line.max_line]u8 = undefined;
     var in = fixed.limited(.unlimited, &buffer);
     while (true) {
-        const packet = pktline.read(&in.interface) catch return null;
+        const packet = pkt_line.read(&in.interface) catch return null;
         switch (packet) {
             .data => |raw| {
                 const line = std.mem.trimEnd(u8, raw, "\n");
@@ -82,7 +82,7 @@ test "a served repository advertises its promisor remotes as git's upload-pack d
 
     var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    var s: uploadpack.Server = .init(gpa, io, &remote, .v2, .{});
+    var s: upload_pack.Server = .init(gpa, io, &remote, .v2, .{});
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try s.advertise(&out.writer);
@@ -93,12 +93,12 @@ test "a served repository advertises its promisor remotes as git's upload-pack d
     // A client that names one in its request is taken to have it.
     var request: Io.Writer.Allocating = .init(gpa);
     defer request.deinit();
-    try pktline.write(&request.writer, "command=ls-refs\n");
-    try pktline.write(&request.writer, "promisor-remote=lop\n");
-    try pktline.delim(&request.writer);
-    try pktline.flush(&request.writer);
+    try pkt_line.write(&request.writer, "command=ls-refs\n");
+    try pkt_line.write(&request.writer, "promisor-remote=lop\n");
+    try pkt_line.delim(&request.writer);
+    try pkt_line.flush(&request.writer);
     var fixed: Io.Reader = .fixed(request.written());
-    var buffer: [pktline.max_line]u8 = undefined;
+    var buffer: [pkt_line.max_line]u8 = undefined;
     var in = fixed.limited(.unlimited, &buffer);
     var answer: Io.Writer.Allocating = .init(gpa);
     defer answer.deinit();

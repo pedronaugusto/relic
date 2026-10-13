@@ -15,7 +15,7 @@ const delta = @import("../codec.zig").delta;
 
 const std = @import("std");
 const policy_mod = @import("policy.zig");
-const indexpack_mod = @import("indexpack.zig");
+const indexpack_mod = @import("index_pack.zig");
 const shakedown = @import("shakedown");
 const airlock_testing = @import("airlock.testing");
 const builtin = @import("builtin");

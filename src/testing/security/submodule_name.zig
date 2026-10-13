@@ -3,7 +3,7 @@
 //! anywhere, and a name inside another's (`a` and `a/hooks`) shares its
 //! files. The owners are `submodule/gitmodules.zig` (the architecture's
 //! `config/`) for the name rule, `submodule.zig` for the `modules/<name>`
-//! layout, and `worktree/safepath.zig` with `object/fsck.zig` for a
+//! layout, and `worktree/safe_path.zig` with `object/fsck.zig` for a
 //! `.gitmodules` that is a symbolic link.
 
 const std = @import("std");

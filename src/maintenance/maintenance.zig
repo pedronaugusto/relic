@@ -9,7 +9,7 @@ const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
 const object = @import("../object/object.zig");
 const odb = @import("../odb/odb.zig");
-const graph_mod = @import("../odb/commitgraph.zig");
+const graph_mod = @import("../odb/commit_graph.zig");
 const diff = @import("../diff/diff.zig");
 const Oid = hash.Oid;
 const revwalk_mod = @import("../walk/walk.zig");
@@ -453,7 +453,7 @@ fn existsFile(io: Io, dir: Io.Dir, path: []const u8) Io.Dir.AccessError!bool {
 
 const bitmap_mod = @import("../odb/bitmap.zig");
 const bitmap_store = @import("../odb/bitmap/reachability.zig");
-const objectwalk = @import("../walk/objectwalk.zig");
+const object_walk = @import("../walk/object/walk.zig");
 
 /// How the optional bitmap extensions are written, with Git's defaults.
 pub const BitmapOptions = struct {
@@ -465,7 +465,7 @@ pub const BitmapOptions = struct {
     /// says for pack metadata.
     sync: ?fs.Sync = null,
 };
-pub const BitmapError = Error || MidxError || revwalk_mod.Error || objectwalk.Error || bitmap_mod.Error || bitmap_store.Error || error{ InvalidBitmapInput, BitmapNotClosed };
+pub const BitmapError = Error || MidxError || revwalk_mod.Error || object_walk.Error || bitmap_mod.Error || bitmap_store.Error || error{ InvalidBitmapInput, BitmapNotClosed };
 
 fn storedBitmap(gpa: Allocator, io: Io, db: *odb.Odb) BitmapError!?bitmap_store.Store {
     return bitmap_store.Store.open(gpa, io, db.objectsDirectory(), db.objectFormat()) catch |err| {
@@ -655,7 +655,7 @@ fn nameHashes(gpa: Allocator, arena: Allocator, io: Io, db: *odb.Odb, count: usi
             };
         }
     } else {
-        var collected = try objectwalk.missing(gpa, io, db, tips, .{ .exclude = &.{}, .use_bitmaps = false });
+        var collected = try object_walk.missing(gpa, io, db, tips, .{ .exclude = &.{}, .use_bitmaps = false });
         defer collected.deinit();
         for (collected.entries) |entry| if (name_positions.get(entry.oid)) |pos| {
             hashes[pos] = bitmap_mod.nameHash(entry.hint);

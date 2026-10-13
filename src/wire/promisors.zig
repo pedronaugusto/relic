@@ -21,7 +21,7 @@ const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 
 const config_mod = @import("../config/config.zig");
-const filterspec = @import("filterspec.zig");
+const filter_spec = @import("filter_spec.zig");
 const warning = @import("../report.zig").warning;
 
 /// A field beyond the name and URL.
@@ -364,7 +364,7 @@ fn storeFields(arena: Allocator, advertised: Info, stored: []const Info, fields:
     if (fields.isEmpty()) return;
     const mine = find(stored, advertised.name) orelse return;
     if (fields.partial_clone_filter) if (advertised.filter) |f| {
-        if (filterspec.sendForm(arena, f)) |_| {
+        if (filter_spec.sendForm(arena, f)) |_| {
             try storeOne(arena, advertised.name, .partial_clone_filter, f, mine.filter, out);
         } else |err| if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid filter '{s}' for remote '{s}' will not be stored: {s}", .{ f, advertised.name, @errorName(err) }) });
     };
@@ -384,7 +384,7 @@ fn storeOne(arena: Allocator, remote: []const u8, field: Field, new: []const u8,
 }
 
 /// Errors from `autoFilter`.
-pub const AutoFilterError = Allocator.Error || filterspec.Error;
+pub const AutoFilterError = Allocator.Error || filter_spec.Error;
 
 /// The filter `auto` stands for: the first of the client's promisor
 /// remotes, in their order, that the reply took with an advertised
@@ -394,7 +394,7 @@ pub fn autoFilter(arena: Allocator, config: *const config_mod.Config, taken: []c
     for (try remotes(arena, config)) |name| {
         const info = find(taken, name) orelse continue;
         const f = info.filter orelse continue;
-        const value = try filterspec.sendForm(arena, f);
+        const value = try filter_spec.sendForm(arena, f);
         return value;
     }
     return null;

@@ -5,7 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const unicodewidth = @import("../text.zig").unicodewidth;
+const unicode_width = @import("../text.zig").unicode_width;
 
 const weekday_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -143,7 +143,7 @@ pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, 
     line_len += encoding.len + 5;
     var at: usize = 0;
     while (at < line.len) {
-        const chrlen: usize = if (unicodewidth.decode(line[at..])) |decoded| decoded.len else 1;
+        const chrlen: usize = if (unicode_width.decode(line[at..])) |decoded| decoded.len else 1;
         const p = line[at .. at + chrlen];
         const special = chrlen > 1 or isRfc2047Special(p[0], kind);
         const encoded_len: usize = if (special) 3 * chrlen else 1;
@@ -238,12 +238,12 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                 continue;
             }
             if (assume_utf8) {
-                const decoded = unicodewidth.decode(text[pos..]) orelse {
+                const decoded = unicode_width.decode(text[pos..]) orelse {
                     assume_utf8 = false;
                     out.shrinkRetainingCapacity(orig_len);
                     continue :retry;
                 };
-                w += unicodewidth.width(decoded.char);
+                w += unicode_width.width(decoded.char);
                 pos += decoded.len;
             } else {
                 w += 1;

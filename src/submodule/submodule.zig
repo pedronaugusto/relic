@@ -16,7 +16,7 @@
 //!
 //! Names and paths come from `.gitmodules`, which arrives in a tree, so both
 //! are checked before either becomes a filesystem path: the name against
-//! git's rule for names, the path against every rule `safepath` holds, and
+//! git's rule for names, the path against every rule `safe_path` holds, and
 //! each component of the path for a symbolic link, which git refuses since
 //! the fix for a symlink that pointed a submodule's checkout into `.git`.
 //!
@@ -44,7 +44,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
-const safepath = @import("../names.zig").path;
+const safe_path = @import("../names.zig").path;
 const index_mod = @import("../index/index.zig");
 const config_mod = @import("../config/config.zig");
 const refs_mod = @import("../refs/refs.zig");
@@ -477,7 +477,7 @@ fn connect(
 /// symbolic link for any component, which is git's
 /// `validate_submodule_path`.
 fn validatePath(io: Io, wt: Io.Dir, path: []const u8, display: []const u8, refusal: ?*Refusal) Error!void {
-    if (safepath.check(path, .worktree)) |refused| {
+    if (safe_path.check(path, .worktree)) |refused| {
         return refuse(refusal, display, @tagName(refused.reason), error.UnsafePath);
     }
     var end: usize = 0;

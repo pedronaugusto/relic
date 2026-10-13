@@ -21,12 +21,12 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const merge = @import("../merge/merge.zig");
-const revwalk = @import("../walk/walk.zig");
-const threeway = @import("../merge/threeway.zig");
+const rev_walk = @import("../walk/walk.zig");
+const three_way = @import("../merge/three_way.zig");
 const refspec = @import("../wire.zig").refspec;
 const signing_mod = @import("../object/signing.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
-const commithooks = @import("commithooks.zig");
+const commit_hooks = @import("commit_hooks.zig");
 const program = @import("../process.zig").program;
 const filter = @import("../checkout/filter.zig");
 const ort = @import("../merge/ort.zig");
@@ -81,7 +81,7 @@ pub const Error = error{
     UnresolvedConflicts,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || threeway.Error || head_mod.Error || revwalk.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commithooks.Error;
+} || three_way.Error || head_mod.Error || rev_walk.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commit_hooks.Error;
 
 /// When a merge may be a fast-forward: `merge.ff` and `--ff`, `--no-ff`,
 /// `--ff-only`.
@@ -203,7 +203,7 @@ pub const Options = struct {
     /// `strategy.Settings.apply` reads them.
     strategy_options: []const []const u8 = &.{},
     /// The filter drivers and relic's own LFS the merged files go through,
-    /// as `Repository.loadFilters` gives them: `threeway.Options.filters`.
+    /// as `Repository.loadFilters` gives them: `three_way.Options.filters`.
     filters: ?*const filter.Drivers = null,
     /// The permission to run the filters' programs.
     programs: ?program.Programs = null,
@@ -220,7 +220,7 @@ pub const Options = struct {
     /// Caller-owned output for a refused write or failed signing program.
     diagnostic: ?*repo_mod.Diagnostic = null,
     /// Where a refusal writes the path that caused it.
-    blocked: ?*threeway.Blocked = null,
+    blocked: ?*three_way.Blocked = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
     /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
     rerere_autoupdate: ?bool = null,
@@ -240,7 +240,7 @@ pub const Outcome = struct {
     /// commit. `null` when nothing was committed.
     commit: ?Oid = null,
     /// The paths left conflicted, sorted.
-    conflicts: []const threeway.Conflict = &.{},
+    conflicts: []const three_way.Conflict = &.{},
     /// What git's merge says about the paths it merged, grouped by path.
     messages: []const ort.Message = &.{},
     /// Conflicted paths a resolution rerere recorded before resolved: in
@@ -281,7 +281,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
 /// Merge `targets` into the current branch, as `git merge` with them all
 /// does. A target `HEAD` or another target already reaches is dropped
 /// first. One left is merged by ort; two or more by git's octopus,
-/// `threeway.applyOctopus`, whose commit leaves `HEAD` out of its parents
+/// `three_way.applyOctopus`, whose commit leaves `HEAD` out of its parents
 /// when a target already contains it and a fast-forward is allowed.
 pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
@@ -326,7 +326,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     const target = reduced.heads[0];
-    const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = target.oid }, .{});
+    const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = target.oid }, .{});
     defer gpa.free(bases);
 
     if (bases.len == 0 and !options.allow_unrelated_histories) return error.UnrelatedHistories;
@@ -338,7 +338,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const their_tree = try repo.commitTree(io, target.oid);
 
     if (fast_forward != .never and bases.len == 1 and bases[0].eql(ours)) {
-        var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = our_tree, .ours = our_tree, .theirs = their_tree }, .{ .blocked = options.blocked });
+        var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = our_tree, .ours = our_tree, .theirs = their_tree }, .{ .blocked = options.blocked });
         defer outcome.deinit();
         try repo.writeIndex(io, &index);
         const log_message = try arena.print("{s}: Fast-forward", .{reflog_action});
@@ -353,7 +353,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const reversed = try arena.alloc(Oid, bases.len);
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = options.conflict_style orelse configuredStyle(repo);
-    var outcome = try threeway.applyCommits(gpa, io, repo, .{ .index = &index, .ours = ours, .theirs = target.oid, .bases = reversed }, .{
+    var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = &index, .ours = ours, .theirs = target.oid, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .theirs = target.name },
@@ -418,7 +418,7 @@ fn reduceHeads(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, oids
     var kept: std.ArrayList(Oid) = .empty;
     for (unique.items, 0..) |one, i| {
         const redundant = for (unique.items, 0..) |other, j| {
-            if (i != j and try revwalk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = one, .descendant = other }, .{})) break true;
+            if (i != j and try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = one, .descendant = other }, .{})) break true;
         } else false;
         if (!redundant) try kept.append(arena, one);
     }
@@ -446,13 +446,13 @@ fn octopus(
     if (!options.allow_unrelated_histories and !try shareHistory(gpa, arena, io, repo, ours, heads)) return error.UnrelatedHistories;
     // Up to date when `HEAD` reaches every head.
     for (heads) |one| {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = one }, .{});
+        const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = one }, .{});
         defer gpa.free(bases);
         if (bases.len == 0 or !bases[0].eql(one)) break;
     } else return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     if (fast_forward == .only) return error.NotFastForward;
 
-    var outcome = try threeway.applyOctopus(gpa, io, repo, .{ .index = index, .head = ours, .heads = heads }, .{
+    var outcome = try three_way.applyOctopus(gpa, io, repo, .{ .index = index, .head = ours, .heads = heads }, .{
         .blob = .{ .conflict_style = options.conflict_style orelse configuredStyle(repo) },
         .filters = options.filters,
         .programs = options.programs,
@@ -482,7 +482,7 @@ fn shareHistory(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, our
     for (heads) |one| {
         var next: std.ArrayList(Oid) = .empty;
         for (bases.items) |base| {
-            const found = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = one, .b = base }, .{});
+            const found = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = one, .b = base }, .{});
             defer gpa.free(found);
             try next.appendSlice(arena, found);
         }
@@ -512,7 +512,7 @@ fn commitOrStop(
     repo: *Repository,
     arena_instance: *std.heap.ArenaAllocator,
     index: *index_mod.Index,
-    outcome: *const threeway.Outcome,
+    outcome: *const three_way.Outcome,
     made: Made,
     options: Options,
 ) Error!Outcome {
@@ -522,7 +522,7 @@ fn commitOrStop(
     // The message as given, byte for byte; git's own title has no newline
     // at its end.
     try msg.appendSlice(arena, options.message orelse made.title);
-    const conflicts = try arena.dupe(threeway.Conflict, outcome.conflicts);
+    const conflicts = try arena.dupe(three_way.Conflict, outcome.conflicts);
     for (conflicts) |*c| c.path = try arena.dupe(u8, c.path);
     const messages = try ort.dupeMessages(arena, outcome.messages);
     var merge_heads: std.ArrayList(u8) = .empty;
@@ -536,7 +536,7 @@ fn commitOrStop(
         // `prepare_to_commit`: `pre-merge-commit` first, then the message,
         // signed off, into `MERGE_MSG` beside `MERGE_HEAD` for the message
         // hooks, and back out of it.
-        const h = try commithooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
+        const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
         if (options.signoff) try message.appendSignoff(arena, &msg, options.who, try message.trailerSettings(arena, repo.configuration()));
         var text: []const u8 = msg.items;
         if (h.runner) |runner| {
@@ -654,7 +654,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     try repo.writeIndex(io, &index);
 
-    const h = try commithooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
+    const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const author = options.author orelse options.who;
     const given = options.message orelse ((try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
     const raw = try h.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
@@ -679,7 +679,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
 /// Undo a merge that stopped: `git merge --abort`, which is `git reset
 /// --merge`. Changes a person made before the merge, to paths the merge did
 /// not touch, survive it.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Self.Error!void {
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*three_way.Blocked) Self.Error!void {
     if (!inProgress(io, repo)) return error.NoMergeInProgress;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);

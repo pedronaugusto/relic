@@ -12,7 +12,7 @@ const Io = std.Io;
 
 const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
-const sparsecheckout = @import("../worktree/sparsecheckout.zig");
+const sparse_checkout = @import("../worktree/sparse_checkout.zig");
 const lfsapi = @import("../lfs/api.zig");
 
 const Repository = repo_mod.Repository;
@@ -392,13 +392,13 @@ test "sparse-checkout leaves the repository's configuration what the files say" 
     var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
     defer repo.deinit(io);
     try expectValue(&repo, "core.sparsecheckout", null);
-    _ = try sparsecheckout.set(io, &repo, &.{"a"}, .{});
+    _ = try sparse_checkout.set(io, &repo, &.{"a"}, .{});
     try expectValue(&repo, "extensions.worktreeconfig", "true");
     try expectValue(&repo, "core.sparsecheckout", "true");
     try expectValue(&repo, "core.sparsecheckoutcone", "true");
     try testing.expect(repo.configuration().sources.worktree != null);
     try testing.expect(!try repo.refreshConfig(io, null));
-    _ = try sparsecheckout.disable(io, &repo);
+    _ = try sparse_checkout.disable(io, &repo);
     try expectValue(&repo, "core.sparsecheckout", "false");
     try testing.expect(!try repo.refreshConfig(io, null));
 }

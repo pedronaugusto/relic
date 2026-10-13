@@ -34,7 +34,7 @@ const message = @import("../object/message.zig");
 const mailinfo = @import("../mail/mail.zig");
 const apply_mod = @import("apply.zig");
 const patchparse = @import("patch.zig");
-const threeway = @import("../merge/threeway.zig");
+const three_way = @import("../merge/three_way.zig");
 const reset = @import("../commit/reset.zig");
 const rerere = @import("../merge/rerere.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
@@ -81,7 +81,7 @@ pub const Error = error{
     UnmergedIndex,
     /// `abort` would lose changes made since the session stopped.
     LocalChangesWouldBeOverwritten,
-} || mailinfo.Error || apply_mod.Error || threeway.Error || rerere.Error || hooks_mod.Error ||
+} || mailinfo.Error || apply_mod.Error || three_way.Error || rerere.Error || hooks_mod.Error ||
     repo_mod.WriteError || head_mod.Error || index_mod.ReadError || index_mod.WriteError || worktree.Error ||
     Io.Dir.ReadFileAllocError || Io.Dir.DeleteTreeError || Io.Dir.RealPathError;
 
@@ -201,7 +201,7 @@ const Session = struct {
     cur: usize = 1,
     last: usize = 0,
     prec: usize = 4,
-    threeway: bool = false,
+    three_way: bool = false,
     quiet: bool = false,
     signoff: bool = false,
     utf8: bool = true,
@@ -449,7 +449,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     s.cur = 1;
     s.last = count;
 
-    s.threeway = options.three_way orelse (config.getBool("am.threeway", false) catch false);
+    s.three_way = options.three_way orelse (config.getBool("am.threeway", false) catch false);
     s.quiet = options.quiet;
     s.signoff = options.signoff;
     s.utf8 = options.utf8;
@@ -459,7 +459,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     s.quoted_cr = options.quoted_cr;
     s.apply_opt = try applyWords(a, options.apply);
 
-    try s.writeBool("threeway", s.threeway);
+    try s.writeBool("threeway", s.three_way);
     try s.writeBool("quiet", s.quiet);
     try s.writeBool("sign", s.signoff);
     try s.writeBool("utf8", s.utf8);
@@ -523,7 +523,7 @@ fn reload(s: *Session) Error!void {
         s.author_date = parsed[2];
     }
     s.msg = try s.read("final-commit");
-    s.threeway = std.mem.eql(u8, try s.readTrim("threeway"), "t");
+    s.three_way = std.mem.eql(u8, try s.readTrim("threeway"), "t");
     s.quiet = std.mem.eql(u8, try s.readTrim("quiet"), "t");
     s.signoff = std.mem.eql(u8, try s.readTrim("sign"), "t");
     s.utf8 = std.mem.eql(u8, try s.readTrim("utf8"), "t");
@@ -695,7 +695,7 @@ fn applyPatch(s: *Session, outcome_conflicts: *[]const []const u8) Error!Applied
     } else |err| {
         if (!patchFailure(err)) return err;
     }
-    if (!s.threeway) return .failed;
+    if (!s.three_way) return .failed;
     return fallBackThreeway(s, patch, options, outcome_conflicts);
 }
 
@@ -758,7 +758,7 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
 
     const our_tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(s);
     const label = try s.a.print("{s}", .{subjectOf(s.msg.?)});
-    var outcome = try threeway.apply(gpa, io, repo, .{ .index = &current, .base = base_tree, .ours = our_tree, .theirs = their_tree }, .{
+    var outcome = try three_way.apply(gpa, io, repo, .{ .index = &current, .base = base_tree, .ours = our_tree, .theirs = their_tree }, .{
         .blob = .{ .algorithm = .histogram, .labels = .{ .ours = "HEAD", .base = "constructed fake ancestor", .theirs = label } },
         .directory_renames = .off,
     });

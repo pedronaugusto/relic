@@ -47,7 +47,7 @@ pub const Options = struct {
     programs: ?program.Programs = null,
     /// The person's configuration, for `core.sshCommand`, `http.*` and the
     /// credential helpers, which a new submodule repository does not yet
-    /// have: see `userconfig.locate`.
+    /// have: see `user_config.locate`.
     config: ?*const config_mod.Config = null,
     prompt: ?credential.Prompt = null,
     progress: ?progress_mod.Progress = null,

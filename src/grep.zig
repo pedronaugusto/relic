@@ -35,7 +35,7 @@ const attributes = @import("patterns.zig").attributes;
 const ere = @import("text.zig").ere;
 const pathspec_mod = @import("patterns.zig").pathspec;
 const fs = @import("fs/fs.zig");
-const userdiff = @import("diff/userdiff.zig");
+const user_diff = @import("diff/user_diff.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -565,7 +565,7 @@ const FileState = struct {
     name: []const u8,
     content: []const u8,
     /// How function lines are found, under `-p` or `-W`.
-    rule: ?*const userdiff.Rule,
+    rule: ?*const user_diff.Rule,
     last_shown: usize = 0,
 
     /// The line from `bol` to `eol`, which ends it or the content.
@@ -830,7 +830,7 @@ const Item = struct {
     /// What the `diff` attribute says of it being binary, if anything.
     binary: ?bool = null,
     /// How its function lines are found, under `-p` or `-W`.
-    rule: ?*const userdiff.Rule = null,
+    rule: ?*const user_diff.Rule = null,
 };
 
 fn collectIndex(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, cached: bool, items: *std.ArrayList(Item)) Error!void {
@@ -903,7 +903,7 @@ fn isBinaryContent(bytes: []const u8) bool {
 /// What the attributes say of each item: binary or not by `diff`, and
 /// under `-p` or `-W` the driver `diff` names, whose rules are compiled
 /// once each into `rules`.
-fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, functions: bool, rules: *std.array_hash_map.String(*userdiff.Rule)) Error!void {
+fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, functions: bool, rules: *std.array_hash_map.String(*user_diff.Rule)) Error!void {
     const config = repo.configuration();
     for (items) |*item| {
         var driver: ?[]const u8 = null;
@@ -921,8 +921,8 @@ fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attr
         // a name no driver has, and none at all, are git's default
         const key = driver orelse "";
         item.rule = rules.get(key) orelse blk: {
-            const rule = try a.create(userdiff.Rule);
-            rule.* = try userdiff.Rule.init(gpa, config, driver);
+            const rule = try a.create(user_diff.Rule);
+            rule.* = try user_diff.Rule.init(gpa, config, driver);
             errdefer rule.deinit();
             try rules.put(a, try a.dupe(u8, key), rule);
             break :blk rule;
@@ -1089,7 +1089,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     defer if (attrs) |*x| x.deinit();
     if (repo.workDirectory() != null) attrs = try repo.loadAttrs(io);
     defer if (attrs) |*x| x.leave();
-    var rules: std.array_hash_map.String(*userdiff.Rule) = .empty;
+    var rules: std.array_hash_map.String(*user_diff.Rule) = .empty;
     defer for (rules.values()) |rule| rule.deinit();
     const functions = fmt.funcname or fmt.funcbody;
     try applyAttributes(a, gpa, io, repo, if (attrs) |*x| x else null, items.items, functions, &rules);

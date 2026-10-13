@@ -36,10 +36,10 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const merge = @import("../merge/merge.zig");
-const threeway = @import("../merge/threeway.zig");
+const three_way = @import("../merge/three_way.zig");
 const signing_mod = @import("../object/signing.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
-const commithooks = @import("commithooks.zig");
+const commit_hooks_mod = @import("commit_hooks.zig");
 const filter = @import("../checkout/filter.zig");
 const strategy = @import("../merge/strategy.zig");
 const reset = @import("reset.zig");
@@ -52,8 +52,8 @@ const todo = @import("todo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const merging = @import("merging.zig");
 const sequencer = @import("sequencer.zig");
-const patchid = @import("../diff/patchid.zig");
-const revwalk = @import("../walk/walk.zig");
+const patch_id = @import("../diff/patch_id.zig");
+const rev_walk = @import("../walk/walk.zig");
 const diff = @import("../diff/diff.zig");
 const program = @import("../process.zig").program;
 const repo_mod = @import("../repo/repo.zig");
@@ -101,7 +101,7 @@ pub const Error = error{
     MergeCommit,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || sequencer.Error || merging.Error || program.Error || patchid.Error || revwalk.Error || worktrees.Error;
+} || sequencer.Error || merging.Error || program.Error || patch_id.Error || rev_walk.Error || worktrees.Error;
 
 /// A message a person would be shown in an editor, and what they would
 /// see.
@@ -194,7 +194,7 @@ pub const Options = struct {
     /// between steps, with `strategy` naming ort as git's rebase does.
     strategy_options: []const []const u8 = &.{},
     /// The filter drivers and relic's own LFS the merged files go through,
-    /// as `Repository.loadFilters` gives them: `threeway.Options.filters`.
+    /// as `Repository.loadFilters` gives them: `three_way.Options.filters`.
     filters: ?*const filter.Drivers = null,
     /// `null` asks `merge.conflictStyle`.
     conflict_style: ?merge.ConflictStyle = null,
@@ -210,7 +210,7 @@ pub const Options = struct {
     /// Where messages a person would edit go.
     messages: ?Messages = null,
     /// Where a refusal writes the path that caused it.
-    blocked: ?*threeway.Blocked = null,
+    blocked: ?*three_way.Blocked = null,
 };
 
 /// Why a rebase stopped.
@@ -245,7 +245,7 @@ pub const Outcome = struct {
     exec: ?[]const u8 = null,
     exec_status: u32 = 0,
     /// The paths left conflicted, sorted.
-    conflicts: []const threeway.Conflict = &.{},
+    conflicts: []const three_way.Conflict = &.{},
     /// When the rebase finished: every commit it rewrote and what it became.
     rewritten: []const Rewritten = &.{},
 
@@ -304,7 +304,7 @@ const Run = struct {
     /// The message being built for the current pick.
     msg: std.ArrayList(u8) = .empty,
     have_message: bool = false,
-    conflicts: []const threeway.Conflict = &.{},
+    conflicts: []const three_way.Conflict = &.{},
 
     fn state(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
         try head_mod.writeState(r.io, r.repo.gitDirectory(), path(name), bytes);
@@ -550,12 +550,12 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
         var ids: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
         for (sides.left) |oid| {
             if ((try w.load(oid)).parents.len > 1) continue;
-            const id = (try patchid.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
+            const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
             try ids.put(r.arena, id.bytes, {});
         }
         for (sides.right) |oid| {
             if ((try w.load(oid)).parents.len > 1) continue;
-            const id = (try patchid.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
+            const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
             if (ids.contains(id.bytes)) try same.put(r.arena, oid.bytes, {});
         }
     }
@@ -820,14 +820,14 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
 
     // Already on top of `onto`, with a straight line from it: nothing to do.
     const branch_base = blk: {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = onto, .b = tip.orig_head }, .{});
+        const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = onto, .b = tip.orig_head }, .{});
         defer gpa.free(bases);
         break :blk if (bases.len == 1) bases[0] else null;
     };
     const preemptive = !options.interactive and options.todo == null and options.exec.len == 0 and
         !options.autosquash and !options.force;
     if (preemptive and branch_base != null and branch_base.?.eql(onto)) up_to_date: {
-        const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = upstream, .b = tip.orig_head }, .{});
+        const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = upstream, .b = tip.orig_head }, .{});
         defer gpa.free(bases);
         if (bases.len != 1 or !bases[0].eql(onto)) break :up_to_date;
         if (!try isLinear(&r, onto, tip.orig_head)) break :up_to_date;
@@ -1044,7 +1044,7 @@ fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error
     var index = try r.repo.openIndex(r.io);
     defer index.deinit();
     const from_tree = if (h.oid) |oid| try r.repo.commitTree(r.io, oid) else try r.repo.objectDatabase().write(r.io, .tree, "");
-    var outcome = try threeway.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, base) }, .{ .blocked = r.options.blocked });
+    var outcome = try three_way.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, base) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
     try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
     try r.repo.refStore().root().write(r.repo.allocator(), r.io, .orig_head, orig_head);
@@ -1062,7 +1062,7 @@ fn checkoutTip(r: *Run, tip: Tip, name: []const u8) Error!void {
     var index = try r.repo.openIndex(r.io);
     defer index.deinit();
     const from_tree = try r.repo.commitTree(r.io, h.oid orelse return error.UnbornBranch);
-    var outcome = try threeway.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, tip.orig_head) }, .{ .blocked = r.options.blocked });
+    var outcome = try three_way.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, tip.orig_head) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
     try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
     const log = try r.arena.print("rebase: checkout {s}", .{name});
@@ -1431,7 +1431,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     // The commit sits on `HEAD` already: reuse it.
     if (r.allow_ff and !is_fixup and parent != null and parent.?.eql(head_oid)) {
         try writeAuthorScript(r, commit.author);
-        var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = commit.tree }, .{ .blocked = r.options.blocked });
+        var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = commit.tree }, .{ .blocked = r.options.blocked });
         outcome.deinit();
         try repo.writeIndex(io, &index);
         try head_mod.advance(io, repo, head, source.oid, .{ .who = r.options.who, .message = "rebase: fast-forward" });
@@ -1457,7 +1457,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
 
     const base_tree = if (parent) |p| try repo.commitTree(io, p) else null;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var outcome = try threeway.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = commit.tree }, .{
+    var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = commit.tree }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = if (parent != null) parent_label else "(empty tree)", .theirs = label },
@@ -1548,7 +1548,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
     // sign-off, unless `commit.cleanup` says otherwise; an edited message
     // is cleaned of comments as an editor's is.
     const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else configuredCleanup(repo);
-    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
+    const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     // An edited message is `git commit -n -e`'s: its hooks see the author
     // and the editor the person has.
     var edit_env = try commit_hooks.env(arena, author);
@@ -1636,7 +1636,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
 
 /// Leave a stopped pick's conflicts at the foot of its message, commented,
 /// and in the run.
-fn noteConflicts(r: *Run, conflicts: []const threeway.Conflict) Error!void {
+fn noteConflicts(r: *Run, conflicts: []const three_way.Conflict) Error!void {
     const arena = r.arena;
     try r.msg.append(arena, '\n');
     try r.msg.appendSlice(arena, r.comment);
@@ -1647,7 +1647,7 @@ fn noteConflicts(r: *Run, conflicts: []const threeway.Conflict) Error!void {
         try r.msg.appendSlice(arena, conflict.path);
         try r.msg.append(arena, '\n');
     }
-    const copied = try arena.dupe(threeway.Conflict, conflicts);
+    const copied = try arena.dupe(three_way.Conflict, conflicts);
     for (copied) |*c| c.path = try arena.dupe(u8, c.path);
     r.conflicts = copied;
 }
@@ -1697,7 +1697,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     const current = try readSource(r, head.oid.?);
     // `git commit --amend` behind an editor: all four of its hooks, told
     // the commit it amends, with the author it keeps.
-    const commit_hooks = try commithooks.Hooks.init(r.arena, r.io, r.repo, .{ .runner = r.options.hooks, .verify = true });
+    const commit_hooks = try commit_hooks_mod.Hooks.init(r.arena, r.io, r.repo, .{ .runner = r.options.hooks, .verify = true });
     var e = try commit_hooks.env(r.arena, current.commit.author);
     e.editor = true;
     var proposed = message.fromSubject(current.commit.message);
@@ -2253,7 +2253,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     // the heads, named by their object names.
     if (merge_heads.items.len > 1) return mergeAsGitMerge(r, item, merge_heads.items, author);
 
-    const bases = try revwalk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = head_oid, .b = merge_head }, .{});
+    const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = head_oid, .b = merge_head }, .{});
     defer gpa.free(bases);
     if (bases.len != 0 and bases[0].eql(merge_head)) return null;
 
@@ -2272,7 +2272,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
     const ref_name = try r.arena.print("refs/rewritten/{s}", .{name});
-    var outcome = try threeway.applyCommits(gpa, io, repo, .{ .index = &index, .ours = head_oid, .theirs = merge_head, .bases = reversed }, .{
+    var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = &index, .ours = head_oid, .theirs = merge_head, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .theirs = if (lookupRewritten(r, name)) ref_name else name },
@@ -2287,7 +2287,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     try repo.writeIndex(io, &index);
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
     if (!outcome.isClean()) {
-        const copied = try r.arena.dupe(threeway.Conflict, outcome.conflicts);
+        const copied = try r.arena.dupe(three_way.Conflict, outcome.conflicts);
         for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
         r.conflicts = copied;
         _ = try rerere.afterStop(gpa, io, repo, &index, .{ .arena = r.arena, .autoupdate = r.options.rerere_autoupdate });
@@ -2328,7 +2328,7 @@ fn reuseMerge(r: *Run, h: head_mod.Head, original: Oid, merge_heads: []const Oid
     var index = try repo.openIndex(io);
     defer index.deinit();
     const head_tree = try repo.commitTree(io, head_oid);
-    var outcome = try threeway.apply(r.gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = source.commit.tree }, .{ .blocked = r.options.blocked });
+    var outcome = try three_way.apply(r.gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = source.commit.tree }, .{ .blocked = r.options.blocked });
     outcome.deinit();
     try repo.writeIndex(io, &index);
     try head_mod.advance(io, repo, h, original, .{ .who = r.options.who, .message = "rebase: fast-forward" });
@@ -2372,7 +2372,7 @@ fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_heads: []const Oid, author: o
     });
     defer outcome.deinit();
     if (outcome.result == .conflicted) {
-        const copied = try r.arena.dupe(threeway.Conflict, outcome.conflicts);
+        const copied = try r.arena.dupe(three_way.Conflict, outcome.conflicts);
         for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
         r.conflicts = copied;
     }
@@ -2572,7 +2572,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     const proposed = (try r.readState("message")).?;
     // `git commit -n -e -F message`: only the message hooks around it, an
     // editor's as the person's editor left it.
-    const commit_hooks = try commithooks.Hooks.init(r.arena, io, repo, .{ .runner = r.options.hooks, .verify = false });
+    const commit_hooks = try commit_hooks_mod.Hooks.init(r.arena, io, repo, .{ .runner = r.options.hooks, .verify = false });
     var hook_env: hooksEnv = null;
     var shown = proposed;
     if (commit_hooks.runner) |runner| {

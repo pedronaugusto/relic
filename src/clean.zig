@@ -34,8 +34,8 @@ const index_mod = @import("index/index.zig");
 const ignore = @import("patterns.zig").ignore;
 const pathspec_mod = @import("patterns.zig").pathspec;
 const gitlink = @import("discover.zig").gitlink;
-const dirscan = @import("checkout/dirscan.zig");
-const cquote = @import("text.zig").cquote;
+const dir_scan = @import("checkout/dir_scan.zig");
+const c_quote = @import("text.zig").c_quote;
 const config_core = @import("config/config.zig");
 const fs = @import("fs/fs.zig");
 
@@ -52,7 +52,7 @@ pub const Error = error{
     BareRepository,
     /// A directory nested deeper than a walk goes.
     TreeTooDeep,
-} || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || ignore.Error || dirscan.Error ||
+} || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || ignore.Error || dir_scan.Error ||
     gitlink.Error || Io.Writer.Error || config_core.ValueError;
 
 /// What happens to ignored paths: kept (the default), removed with the
@@ -272,7 +272,7 @@ const Walk = struct {
             names.deinit(w.gpa);
         }
         {
-            var scan = try dirscan.Scan.init(w.gpa, w.io, dir);
+            var scan = try dir_scan.Scan.init(w.gpa, w.io, dir);
             defer scan.deinit();
             while (try scan.next()) |item| {
                 const name = try w.gpa.dupe(u8, item.name);
@@ -494,7 +494,7 @@ const Remover = struct {
                 return;
             },
         }
-        try cquote.write(w, path, r.quote_fully);
+        try c_quote.write(w, path, r.quote_fully);
         try w.writeByte('\n');
     }
 

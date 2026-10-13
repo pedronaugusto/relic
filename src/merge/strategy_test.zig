@@ -13,7 +13,7 @@ const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
 const ort = @import("ort.zig");
 const strategy = @import("strategy.zig");
-const blobmerge = @import("blobmerge.zig");
+const blob_merge = @import("blob_merge.zig");
 const testgit = @import("../testing/git.zig");
 
 const Oid = hash.Oid;
@@ -76,7 +76,7 @@ fn expectSameMerges(
     repo: *testgit.Repo,
     cases: []const Case,
     words: []const []const u8,
-    style: blobmerge.ConflictStyle,
+    style: blob_merge.ConflictStyle,
 ) !void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -297,7 +297,7 @@ test "the whitespace strategy options merge as git's do" {
         &.{ "ignore-space-change", "theirs" },
     };
     for (word_sets) |words| {
-        for ([_]blobmerge.ConflictStyle{ .merge, .diff3, .zdiff3 }) |style| {
+        for ([_]blob_merge.ConflictStyle{ .merge, .diff3, .zdiff3 }) |style| {
             try expectSameMerges(gpa, io, &repo, cases.items, words, style);
         }
     }

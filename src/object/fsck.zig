@@ -33,7 +33,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("object.zig");
 const config_mod = @import("../config/config.zig");
 const gitmodules = @import("../config/gitmodules.zig");
-const safepath = @import("../names.zig").path;
+const safe_path = @import("../names.zig").path;
 const ref_names = @import("../names.zig").ref;
 const warning = @import("../report.zig").warning;
 
@@ -700,30 +700,30 @@ fn checkTree(gpa: Allocator, r: *Reporter, kind: Kind, bytes: []const u8, found:
         has_empty_name = has_empty_name or name.len == 0;
         has_dot = has_dot or std.mem.eql(u8, name, ".");
         has_dotdot = has_dotdot or std.mem.eql(u8, name, "..");
-        has_dotgit = has_dotgit or safepath.isHfsDot(name, "git") or safepath.isNtfsDotGit(name);
+        has_dotgit = has_dotgit or safe_path.isHfsDot(name, "git") or safe_path.isNtfsDotGit(name);
         has_zero_pad = has_zero_pad or rest[0] == '0';
         has_large_name = has_large_name or name.len > r.rules.max_entry_len;
 
         const is_link = entry.mode & s_ifmt == s_iflnk;
-        if (safepath.isHfsDot(name, "gitmodules") or safepath.isNtfsDot(name, "gitmodules", "gi7eba")) {
+        if (safe_path.isHfsDot(name, "gitmodules") or safe_path.isNtfsDot(name, "gitmodules", "gi7eba")) {
             if (!is_link) {
                 if (found) |f| try f.modules.put(gpa, entry.oidValue(kind), {});
             } else _ = try r.report(.gitmodules_symlink, "");
         }
-        if (safepath.isHfsDot(name, "gitattributes") or safepath.isNtfsDot(name, "gitattributes", "gi7d29")) {
+        if (safe_path.isHfsDot(name, "gitattributes") or safe_path.isNtfsDot(name, "gitattributes", "gi7d29")) {
             if (!is_link) {
                 if (found) |f| try f.attributes.put(gpa, entry.oidValue(kind), {});
             } else _ = try r.report(.gitattributes_symlink, "");
         }
         if (is_link) {
-            if (safepath.isHfsDot(name, "gitignore") or safepath.isNtfsDot(name, "gitignore", "gi250a")) _ = try r.report(.gitignore_symlink, "");
-            if (safepath.isHfsDot(name, "mailmap") or safepath.isNtfsDot(name, "mailmap", "maba30")) _ = try r.report(.mailmap_symlink, "");
+            if (safe_path.isHfsDot(name, "gitignore") or safe_path.isNtfsDot(name, "gitignore", "gi250a")) _ = try r.report(.gitignore_symlink, "");
+            if (safe_path.isHfsDot(name, "mailmap") or safe_path.isNtfsDot(name, "mailmap", "maba30")) _ = try r.report(.mailmap_symlink, "");
         }
         var backslash = std.mem.findScalar(u8, name, '\\');
         while (backslash) |at| {
             const after = name[at + 1 ..];
-            has_dotgit = has_dotgit or safepath.isNtfsDotGit(after);
-            if (safepath.isNtfsDot(after, "gitmodules", "gi7eba")) {
+            has_dotgit = has_dotgit or safe_path.isNtfsDotGit(after);
+            if (safe_path.isNtfsDot(after, "gitmodules", "gi7eba")) {
                 if (!is_link) {
                     if (found) |f| try f.modules.put(gpa, entry.oidValue(kind), {});
                 } else _ = try r.report(.gitmodules_symlink, "");

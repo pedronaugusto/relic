@@ -39,7 +39,7 @@ const index_mod = @import("../index/index.zig");
 const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const attributes = @import("../patterns.zig").attributes;
-const blobmerge = @import("blobmerge.zig");
+const blob_merge = @import("blob_merge.zig");
 const fs = @import("../fs/fs.zig");
 const head_mod = @import("../repo/head.zig");
 const diff_mod = @import("../diff/diff.zig");
@@ -573,7 +573,7 @@ fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: u32) Erro
 
 /// `ll_merge` with its defaults: the driver the path's attributes name,
 /// Myers, and `merge.conflictStyle`.
-fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs: []const u8, size: u32, labels: blobmerge.Labels) Error!struct { bytes: []const u8, clean: bool } {
+fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs: []const u8, size: u32, labels: blob_merge.Labels) Error!struct { bytes: []const u8, clean: bool } {
     // `find_ll_merge_driver`: set is text, unset binary, a name the driver
     // of that name, and nothing said `merge.default`.
     var name: ?[]const u8 = r.repo.configuration().get("merge.default");
@@ -586,7 +586,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
             .unspecified => {},
         };
     }
-    var resolve: blobmerge.Resolve = .markers;
+    var resolve: blob_merge.Resolve = .markers;
     if (name) |driver| {
         if (r.repo.configuration().get(try r.arena.print("merge.{s}.driver", .{driver})) != null) {
             return error.UnsupportedMergeDriver;
@@ -595,8 +595,8 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
         } else if (std.mem.eql(u8, driver, "union")) resolve = .both;
     }
     const style_text = r.repo.configuration().get("merge.conflictstyle");
-    const style = if (style_text) |text| blobmerge.parseConflictStyle(text) orelse .merge else .merge;
-    var merged = blobmerge.blobs(r.arena, base, ours, theirs, .{
+    const style = if (style_text) |text| blob_merge.parseConflictStyle(text) orelse .merge else .merge;
+    var merged = blob_merge.blobs(r.arena, base, ours, theirs, .{
         .labels = labels,
         .marker_size = size,
         .resolve = resolve,
@@ -1074,7 +1074,7 @@ test "a marker ends at a space, a tab or a line end, as git's isspace has it, an
         try std.testing.expectEqualStrings(want, n.text);
     }
     // The markers a merge writes at a size past a byte's are the ones read.
-    var merged = try blobmerge.blobs(a, "base\n", "mine\n", "yours\n", .{ .marker_size = 300 });
+    var merged = try blob_merge.blobs(a, "base\n", "mine\n", "yours\n", .{ .marker_size = 300 });
     defer merged.deinit();
     try std.testing.expect(std.mem.startsWith(u8, merged.bytes, @as([300]u8, @splat('<')) ++ " "));
     try std.testing.expectEqual(@as(i8, 1), (try normalize(a, merged.bytes, 300, .sha1)).conflicts);

@@ -1,6 +1,5 @@
 //! Public refs namespace. Implementation is in `refs/refs.zig`.
 
-pub const reftablestack = @import("refs/reftablestack.zig");
 pub const reftable = @import("refs/reftable.zig");
 pub const names = @import("names.zig").ref;
 pub const packed_header = @import("refs/refs.zig").packed_header;

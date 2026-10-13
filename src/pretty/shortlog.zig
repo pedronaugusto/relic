@@ -1,7 +1,7 @@
 //! `git shortlog`: commits grouped by who made them, as git groups, sorts
 //! and prints them.
 //!
-//! A shortlog is fed commits in the order a walk gives them -- `revwalk.Walk`
+//! A shortlog is fed commits in the order a walk gives them -- `rev_walk.Walk`
 //! gives `git rev-list`'s -- and prints each group's subjects oldest first,
 //! the groups in byte order of their names, or with `numbered` by how many
 //! commits each has, ties kept in that order. A group is the author's name
@@ -29,8 +29,8 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const message = @import("../object/message.zig");
 const trailer = @import("../object/trailer.zig");
-const mailmap_mod = @import("../revwalk/mailmap.zig");
-const unicodewidth = @import("../text.zig").unicodewidth;
+const mailmap_mod = @import("../rev_walk/mailmap.zig");
+const unicode_width = @import("../text.zig").unicode_width;
 const config_mod = @import("../config/config.zig");
 const pretty = @import("pretty.zig");
 
@@ -432,12 +432,12 @@ pub fn addWrappedText(gpa: Allocator, text: []const u8, out: *std.ArrayList(u8),
                 continue;
             }
             if (assume_utf8) {
-                const decoded = unicodewidth.decode(text[i..]) orelse {
+                const decoded = unicode_width.decode(text[i..]) orelse {
                     assume_utf8 = false;
                     out.shrinkRetainingCapacity(orig_len);
                     continue :retry;
                 };
-                w += unicodewidth.width(decoded.char);
+                w += unicode_width.width(decoded.char);
                 i += decoded.len;
             } else {
                 w += 1;
@@ -473,7 +473,7 @@ test "a subject folds where git's -w folds it" {
 
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
-const revwalk = @import("../walk/walk.zig");
+const rev_walk = @import("../walk/walk.zig");
 
 fn commitAs(io: Io, r: *testgit.Repo, author: []const u8, committer: []const u8, msg: []const u8) !void {
     const lt = std.mem.findScalar(u8, committer, '<').?;
@@ -491,7 +491,7 @@ fn shortlogOf(gpa: Allocator, io: Io, repo: *repo_mod.Repository, options: Optio
     defer settings_arena.deinit();
     var s = try Shortlog.init(gpa, try configured(settings_arena.allocator(), repo.configuration(), options));
     defer s.deinit();
-    var walk: revwalk.Walk = .init(gpa, repo.objectDatabase());
+    var walk: rev_walk.Walk = .init(gpa, repo.objectDatabase());
     defer walk.deinit();
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);

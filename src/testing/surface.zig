@@ -94,7 +94,7 @@ test "publishing facades cover every implementation declaration" {
     try covers(relic.index, index_mod);
     try covers(relic.worktree, checkout_mod);
     try covers(relic.diff, diff_mod);
-    try covers(relic.revwalk, walk_mod);
+    try covers(relic.rev_walk, walk_mod);
     try covers(relic.merge, merge_mod);
     try covers(relic.commit, commit_mod);
     try covers(relic.transport, transport_mod);
@@ -132,39 +132,39 @@ test "every public namespace and owned type names its errors" {
 }
 
 const index = relic.index;
-const objectwalk = relic.revwalk.objectwalk;
+const object_walk = relic.rev_walk.object.walk;
 const notes = relic.commit.notes;
 const trailer = relic.commit.trailer;
 
 test "public options signatures stay within five positional inputs" {
-    inline for (.{ index.Index.read, objectwalk.missing, objectwalk.checkConnected, objectwalk.checkReceived, notes.copy, trailer.process, trailer.amend }) |operation| {
+    inline for (.{ index.Index.read, object_walk.missing, object_walk.checkConnected, object_walk.checkReceived, notes.copy, trailer.process, trailer.amend }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
     try std.testing.expect(!@hasDecl(index.Index, "readWithResolution"));
-    try std.testing.expect(!@hasDecl(objectwalk, "missingWith"));
-    try std.testing.expect(!@hasDecl(objectwalk, "checkConnectedWith"));
+    try std.testing.expect(!@hasDecl(object_walk, "missingWith"));
+    try std.testing.expect(!@hasDecl(object_walk, "checkConnectedWith"));
 }
 
 test "tree and ancestry requests stay within five positional inputs" {
-    inline for (.{ relic.merge.trees, relic.merge.ort.trees, relic.merge.ort.commits, relic.merge.octopus.commits, relic.revwalk.mergeBases, relic.revwalk.mergeBasesMany, relic.revwalk.isAncestor, relic.diff.tree }) |operation| {
+    inline for (.{ relic.merge.trees, relic.merge.ort.trees, relic.merge.ort.commits, relic.merge.octopus.commits, relic.rev_walk.mergeBases, relic.rev_walk.mergeBasesMany, relic.rev_walk.isAncestor, relic.diff.tree }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
 test "worktree merge and reset requests stay within five positional inputs" {
-    inline for (.{ relic.merge.threeway.apply, relic.merge.threeway.applyCommits, relic.merge.threeway.applyOctopus, relic.commit.reset.toTree, relic.commit.sequencer.resetMerge }) |operation| {
+    inline for (.{ relic.merge.three_way.apply, relic.merge.three_way.applyCommits, relic.merge.three_way.applyOctopus, relic.commit.reset.toTree, relic.commit.sequencer.resetMerge }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
 test "diff output and attribution requests stay within five positional inputs" {
-    inline for (.{ relic.diff.unified, relic.diff.blame.file, relic.diff.patchid.ofTrees }) |operation| {
+    inline for (.{ relic.diff.unified, relic.diff.blame.file, relic.diff.patch_id.ofTrees }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
 test "pack storage requests stay within five positional inputs" {
-    inline for (.{ relic.odb.pack.Index.open, relic.odb.pack.Pack.open, relic.odb.pack.Pack.inflateWith, relic.odb.pack.Pack.readAtInto, relic.odb.pack.Writer.open, relic.odb.pack.Writer.openStream, relic.odb.pack.writeIndexFile, relic.odb.revindex.write, relic.odb.indexpack.receive, relic.odb.bitmap.encode }) |operation| {
+    inline for (.{ relic.odb.pack.Index.open, relic.odb.pack.Pack.open, relic.odb.pack.Pack.inflateWith, relic.odb.pack.Pack.readAtInto, relic.odb.pack.Writer.open, relic.odb.pack.Writer.openStream, relic.odb.pack.writeIndexFile, relic.odb.rev_index.write, relic.odb.index_pack.receive, relic.odb.bitmap.encode }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
     try std.testing.expect(!@hasDecl(relic.odb.pack.Writer, "init"));
@@ -196,7 +196,7 @@ test "how a program ended is conduit's Term, where it is shown" {
 }
 
 test "transport and LFS requests stay within five positional inputs" {
-    inline for (.{ relic.transport.Session.open, relic.transport.Session.fetch, relic.transport.fetchpack.fetch, relic.transport.sendpack.send, relic.transport.local.Remote.receivePush, relic.transport.bundle.receive, relic.transport.bundle.create, relic.lfs.api.sshInvocation, relic.lfs.push.beforePush }) |operation| {
+    inline for (.{ relic.transport.Session.open, relic.transport.Session.fetch, relic.transport.fetch_pack.fetch, relic.transport.send_pack.send, relic.transport.local.Remote.receivePush, relic.transport.bundle.receive, relic.transport.bundle.create, relic.lfs.api.sshInvocation, relic.lfs.push.beforePush }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
@@ -208,13 +208,13 @@ test "working tree requests stay within five positional inputs" {
 }
 
 test "ref log and table requests stay within five positional inputs" {
-    inline for (.{ relic.refs.Store.appendLog, relic.refs.Store.expireLog, relic.refs.reftablestack.appendLog, relic.refs.reftablestack.compactIn, relic.refs.reftable.write, reflog_mod.expire }) |operation| {
+    inline for (.{ relic.refs.Store.appendLog, relic.refs.Store.expireLog, relic.refs.reftable.stack.appendLog, relic.refs.reftable.stack.compactIn, relic.refs.reftable.table.write, reflog_mod.expire }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }
 
 test "history archive and maintenance requests stay within five positional inputs" {
-    inline for (.{ relic.archive.archive, relic.patch.rangediff.compute, relic.patch.rangediff.write, relic.worktree.linked.add, relic.worktree.linked.move, relic.revwalk.bisect.mark, relic.maintenance.writePackBitmap, relic.maintenance.writeMidxBitmap, relic.merge.subtreeshift.shift }) |operation| {
+    inline for (.{ relic.archive.archive, relic.patch.range_diff.compute, relic.patch.range_diff.write, relic.worktree.linked.add, relic.worktree.linked.move, relic.rev_walk.bisect.mark, relic.maintenance.writePackBitmap, relic.maintenance.writeMidxBitmap, relic.merge.subtree_shift.shift }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }

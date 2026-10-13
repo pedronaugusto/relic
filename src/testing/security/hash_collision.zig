@@ -1,7 +1,7 @@
 //! SHA-1 collisions: two different objects with one name, which SHAttered
 //! showed can be made, so that a received object quietly stands in for one
 //! already held. The owners are `hash/sha1dc.zig` (the detecting SHA-1, on
-//! for every name a database takes) and `odb/indexpack.zig`, which compares
+//! for every name a database takes) and `odb/index_pack.zig`, which compares
 //! a received object with the one of its name already in the database.
 
 const std = @import("std");
@@ -10,7 +10,7 @@ const Io = std.Io;
 const hash = @import("../../hash/hash.zig");
 const sha1dc = @import("../../hash/sha1dc.zig");
 const odb_mod = @import("../../odb/odb.zig");
-const indexpack = @import("../../odb/indexpack.zig");
+const index_pack = @import("../../odb/index_pack.zig");
 const testgit = @import("../git.zig");
 
 test "git 2.13.0 SHAttered, t0013-sha1dc 'test-sha1 detects shattered pdf': the colliding blocks are detected and named as SHA-1 names them" {
@@ -69,8 +69,8 @@ test "git 2.13.0 SHAttered, t5300-pack-object 'make sure index-pack detects the 
     var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     var in: Io.Reader = .fixed(pack);
-    var diagnostic: indexpack.Diagnostic = .{};
-    try std.testing.expectError(error.HashCollision, indexpack.receive(gpa, io, &db, .{ .pack_dir = pack_dir, .in = &in }, .{ .diagnostic = &diagnostic }));
+    var diagnostic: index_pack.Diagnostic = .{};
+    try std.testing.expectError(error.HashCollision, index_pack.receive(gpa, io, &db, .{ .pack_dir = pack_dir, .in = &in }, .{ .diagnostic = &diagnostic }));
     var hex: [hash.max_hex_len]u8 = undefined;
     try std.testing.expectEqualStrings(b, diagnostic.oid.?.hex(&hex));
     var it = pack_dir.iterate();
