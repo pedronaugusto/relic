@@ -301,8 +301,9 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const ours = head.oid orelse return error.UnbornBranch;
     const fast_forward = options.fast_forward orelse configuredFastForward(repo);
 
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) {
             if (options.blocked) |b| b.set(entry.path);
@@ -321,7 +322,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         try action.appendSlice(arena, target.name);
     }
     const reflog_action = action.items;
-    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &index, head, reduced, reflog_action, fast_forward, options);
+    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &locked_index, head, reduced, reflog_action, fast_forward, options);
 
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
@@ -338,9 +339,9 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const their_tree = try repo.commitTree(io, target.oid);
 
     if (fast_forward != .never and bases.len == 1 and bases[0].eql(ours)) {
-        var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = our_tree, .ours = our_tree, .theirs = their_tree }, .{ .blocked = options.blocked });
+        var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = our_tree, .ours = our_tree, .theirs = their_tree }, .{ .blocked = options.blocked });
         defer outcome.deinit();
-        try repo.writeIndex(io, &index);
+        try locked_index.commit(io);
         const log_message = try arena.print("{s}: Fast-forward", .{reflog_action});
         try head_mod.advance(io, repo, head, target.oid, .{ .who = options.who, .message = log_message });
         if (options.hooks) |runner| _ = try runner.postMerge(io, .{ .squash = false });
@@ -353,7 +354,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const reversed = try arena.alloc(Oid, bases.len);
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = options.conflict_style orelse configuredStyle(repo);
-    var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = &index, .ours = ours, .theirs = target.oid, .bases = reversed }, .{
+    var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = index, .ours = ours, .theirs = target.oid, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .theirs = target.name },
@@ -366,9 +367,9 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         .inner_messages = options.inner_messages,
     });
     defer outcome.deinit();
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
-    return commitOrStop(gpa, io, repo, &arena_instance, &index, &outcome, .{
+    return commitOrStop(gpa, io, repo, &arena_instance, &outcome, .{
         .head = head,
         .parents = &.{ ours, target.oid },
         .merged = &.{target.oid},
@@ -431,7 +432,7 @@ fn octopus(
     io: Io,
     repo: *Repository,
     arena_instance: *std.heap.ArenaAllocator,
-    index: *index_mod.Index,
+    locked: *Repository.LockedIndex,
     head: head_mod.Head,
     reduced: Reduced,
     reflog_action: []const u8,
@@ -439,6 +440,7 @@ fn octopus(
     options: Options,
 ) Error!Outcome {
     const arena = arena_instance.allocator();
+    const index = &locked.index;
     const ours = head.oid.?;
     const heads = try arena.alloc(Oid, reduced.heads.len);
     for (reduced.heads, heads) |target, *oid| oid.* = target.oid;
@@ -459,11 +461,11 @@ fn octopus(
         .blocked = options.blocked,
     });
     defer outcome.deinit();
-    try repo.writeIndex(io, index);
+    try locked.commit(io);
     var parents: std.ArrayList(Oid) = .empty;
     if (!reduced.head_subsumed or fast_forward == .never) try parents.append(arena, ours);
     try parents.appendSlice(arena, heads);
-    return commitOrStop(gpa, io, repo, arena_instance, index, &outcome, .{
+    return commitOrStop(gpa, io, repo, arena_instance, &outcome, .{
         .head = head,
         .parents = parents.items,
         .merged = heads,
@@ -511,7 +513,6 @@ fn commitOrStop(
     io: Io,
     repo: *Repository,
     arena_instance: *std.heap.ArenaAllocator,
-    index: *index_mod.Index,
     outcome: *const three_way.Outcome,
     made: Made,
     options: Options,
@@ -588,7 +589,7 @@ fn commitOrStop(
     try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
     try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
     var reused: []const []const u8 = &.{};
-    if (!outcome.isClean()) reused = try rerere.afterStop(gpa, io, repo, index, .{ .arena = arena, .autoupdate = options.rerere_autoupdate });
+    if (!outcome.isClean()) reused = try rerere.afterStop(gpa, io, repo, .{ .arena = arena, .autoupdate = options.rerere_autoupdate });
     return .{
         .gpa = gpa,
         .arena = arena_instance.state,
@@ -646,13 +647,14 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const mode = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MODE")) orelse "";
     const kept: []const Oid = if (std.mem.eql(u8, mode, "no-ff")) parents.items else try reduceHeads(gpa, arena, io, repo, parents.items);
 
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnresolvedConflicts;
     }
-    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try repo.writeIndex(io, &index);
+    const tree = try worktree.writeTree(gpa, io, index, repo.objectDatabase());
+    try locked_index.commit(io);
 
     const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const author = options.author orelse options.who;
@@ -684,10 +686,11 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const current = head.oid orelse return error.UnbornBranch;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, current), .mode = .merge, .blocked = blocked });
-    try repo.writeIndex(io, &index);
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    try reset.toTree(gpa, io, repo, .{ .index = index, .tree = try repo.commitTree(io, current), .mode = .merge, .blocked = blocked });
+    try locked_index.commit(io);
     try removeMergeState(io, repo);
     // `git reset` records where it moved from and logs the move, even to
     // where it already was.

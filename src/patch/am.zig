@@ -717,8 +717,9 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
         else => return .failed,
     };
     defer parsed.deinit();
-    var current = try repo.openIndex(io);
-    defer current.deinit();
+    var locked_current = try repo.lockIndex(io);
+    defer locked_current.deinit(io);
+    const current = &locked_current.index;
     var fake: Index = .initEmpty(gpa, repo.objectFormat());
     defer fake.deinit();
     for (parsed.files) |f| {
@@ -758,20 +759,20 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
 
     const our_tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(s);
     const label = try s.a.print("{s}", .{subjectOf(s.msg.?)});
-    var outcome = try three_way.apply(gpa, io, repo, .{ .index = &current, .base = base_tree, .ours = our_tree, .theirs = their_tree }, .{
+    var outcome = try three_way.apply(gpa, io, repo, .{ .index = current, .base = base_tree, .ours = our_tree, .theirs = their_tree }, .{
         .blob = .{ .algorithm = .histogram, .labels = .{ .ours = "HEAD", .base = "constructed fake ancestor", .theirs = label } },
         .directory_renames = .off,
     });
     defer outcome.deinit();
-    try repo.writeIndex(io, &current);
+    try locked_current.commit(io);
     if (!outcome.isClean()) {
-        _ = try rerere.afterStop(gpa, io, repo, &current, .{ .arena = s.a, .autoupdate = null });
+        _ = try rerere.afterStop(gpa, io, repo, .{ .arena = s.a, .autoupdate = null });
         var paths: std.ArrayList([]const u8) = .empty;
         for (outcome.conflicts) |c| try paths.append(s.a, try s.a.dupe(u8, c.path));
         conflicts.* = paths.items;
         return .conflicts;
     }
-    if (!try indexHasChanges(s, &current)) return .no_changes;
+    if (!try indexHasChanges(s, current)) return .no_changes;
     return .applied;
 }
 
@@ -787,10 +788,11 @@ fn doCommit(s: *Session) Error!void {
     if (s.options.verify) {
         if (!try runHook(s, "pre-applypatch", &.{})) return error.HookRejected;
     }
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try repo.writeIndex(io, &index);
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    const tree = try worktree.writeTree(gpa, io, index, repo.objectDatabase());
+    try locked_index.commit(io);
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
 
@@ -954,10 +956,11 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(&s);
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = tree, .mode = .merge, .blocked = null });
-    try repo.writeIndex(io, &index);
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    try reset.toTree(gpa, io, repo, .{ .index = index, .tree = tree, .mode = .merge, .blocked = null });
+    try locked_index.commit(io);
     try next(&s);
     try reload(&s);
     return run(&s, &arena_instance, false);
@@ -988,13 +991,14 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     try rerere.clear(gpa, io, repo);
     const orig = try repo.refStore().root().read(gpa, io, .orig_head);
     const target_tree = if (orig) |o| try repo.commitTree(io, o) else try emptyTree(&s);
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    reset.toTree(gpa, io, repo, .{ .index = &index, .tree = target_tree, .mode = .merge, .blocked = null }) catch |err| switch (err) {
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    reset.toTree(gpa, io, repo, .{ .index = index, .tree = target_tree, .mode = .merge, .blocked = null }) catch |err| switch (err) {
         error.LocalChangesWouldBeOverwritten => return error.LocalChangesWouldBeOverwritten,
         else => |e| return e,
     };
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
     if (orig) |o| {
         try head_mod.advance(io, repo, head, o, .{ .who = who, .message = "am --abort" });
     } else if (head.branch) |branch| {

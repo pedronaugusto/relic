@@ -2360,8 +2360,9 @@ pub fn pull(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOpt
 /// clean.
 pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const lfs.Store) transfer.FetchError!struct { replaced: u32, left: u32 } {
     const wt = repo.workDirectory() orelse return .{ .replaced = 0, .left = 0 };
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     var replaced: u32 = 0;
     var left: u32 = 0;
     for (index.entries.items) |*entry| {
@@ -2395,7 +2396,7 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
         if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
         replaced += 1;
     }
-    if (replaced != 0) try repo.writeIndex(io, &index);
+    if (replaced != 0) try locked_index.commit(io);
     return .{ .replaced = replaced, .left = left };
 }
 

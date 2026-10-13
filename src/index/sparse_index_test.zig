@@ -287,7 +287,10 @@ test "status, write-tree and add on a sparse index say what they say on the full
     try sparseindex_mod.expand(gpa, io, &widened, repo.objectDatabase(), null);
     try expectSameEntries(&full, &widened);
 
-    try repo.writeIndex(io, &index);
+    var locked = try repo.lockIndex(io);
+    defer locked.deinit(io);
+    std.mem.swap(index_mod.Index, &locked.index, &index);
+    try locked.commit(io);
     try git.exec(io, &.{ "fsck", "--no-progress" });
     const after = try git.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
     defer gpa.free(after);

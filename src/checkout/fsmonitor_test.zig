@@ -109,10 +109,11 @@ const Pair = struct {
         const gpa = pair.gpa;
         var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
         defer repo.deinit(io);
-        var index = try repo.openIndex(io);
-        defer index.deinit();
+        var locked_index = try repo.lockIndex(io);
+        defer locked_index.deinit(io);
+        const index = &locked_index.index;
         const source = (try fsmonitor.configured(repo.configuration(), .{ .environ = &pair.env })).?;
-        var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
+        var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
             .rules = try repo.worktreeRules(),
             .head_tree = try repo.headTree(io),
             .untracked = untracked,
@@ -120,7 +121,7 @@ const Pair = struct {
         });
         defer result.deinit();
         // As git's status: written when the monitor's state changed.
-        if (index.fsmonitor_changed) try repo.writeIndex(io, &index);
+        if (index.fsmonitor_changed) try locked_index.commit(io);
         return porcelain(gpa, result.entries);
     }
 
@@ -325,16 +326,17 @@ test "a program's own change source decides what status looks at" {
             const g = std.testing.allocator;
             var repo = try repo_mod.Repository.open(g, io_, repo_dir.dir, .{});
             defer repo.deinit(io_);
-            var index = try repo.openIndex(io_);
-            defer index.deinit();
-            var result = try worktree.status(g, io_, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
+            var locked_index = try repo.lockIndex(io_);
+            defer locked_index.deinit(io_);
+            const index = &locked_index.index;
+            var result = try worktree.status(g, io_, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
                 .rules = try repo.worktreeRules(),
                 .head_tree = try repo.headTree(io_),
                 .untracked = untracked,
                 .fsmonitor = feed.source(),
             });
             defer result.deinit();
-            try repo.writeIndex(io_, &index);
+            try locked_index.commit(io_);
             return porcelain(g, result.entries);
         }
     };

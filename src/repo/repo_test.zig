@@ -1552,3 +1552,60 @@ test "a repository whose HEAD holds no ref still opens, with no branch for onbra
     try std.testing.expect(repo.configuration().context.branch == null);
     try std.testing.expect(!try repo.refreshConfig(io, .{}));
 }
+
+test "an index writer holds index.lock from its read to its write: git and relic wait their turn and no change is lost" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "a.txt", "a\n");
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    {
+        var locked = try repo.lockIndex(io);
+        defer locked.deinit(io);
+        _ = try worktree.addAll(gpa, io, git.dir, .{ .index = &locked.index, .db = repo.objectDatabase() }, .{});
+        // While relic holds the index, a second writer is refused, relic
+        // or git, and changes nothing.
+        try std.testing.expectError(error.LockHeld, repo.lockIndex(io));
+        try git.writeFile(io, "b.txt", "b\n");
+        var refused = try git.capture(io, &.{ "add", "b.txt" });
+        defer refused.deinit(gpa);
+        try std.testing.expect(refused.code != 0);
+        try std.testing.expect(std.mem.find(u8, refused.stderr, "index.lock") != null);
+        try locked.commit(io);
+    }
+    // git's write after relic's keeps relic's entry, and relic's next
+    // write reads git's.
+    try git.exec(io, &.{ "add", "b.txt" });
+    {
+        var locked = try repo.lockIndex(io);
+        defer locked.deinit(io);
+        try std.testing.expect(locked.index.find("a.txt") != null);
+        try std.testing.expect(locked.index.find("b.txt") != null);
+    }
+    // A lock git holds refuses relic in turn.
+    try git.writeFile(io, ".git/index.lock", "");
+    try std.testing.expectError(error.LockHeld, repo.lockIndex(io));
+}
+
+test "a linked worktree's split index is read with the shared index beside it, in its own git directory" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "a.txt", "a\n");
+    try git.exec(io, &.{ "add", "a.txt" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+    try git.exec(io, &.{ "worktree", "add", "-q", "linked" });
+    var linked = try git.dir.openDir(io, "linked", .{});
+    defer linked.close(io);
+    try linked.writeFile(io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try git.exec(io, &.{ "-C", "linked", "update-index", "--split-index", "--add", "b.txt" });
+    var repo = try repo_mod.Repository.open(gpa, io, linked, .{});
+    defer repo.deinit(io);
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    try std.testing.expect(index.find("a.txt") != null);
+    try std.testing.expect(index.find("b.txt") != null);
+}

@@ -465,8 +465,9 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
 
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) {
             if (r.options.blocked) |b| b.set(entry.path);
@@ -476,7 +477,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     // With `--no-commit` the merge starts from what is staged; otherwise
     // from `HEAD`, and the index must be `HEAD`.
     const head_tree: Oid = if (r.options.no_commit)
-        try worktree.writeTree(gpa, io, &index, repo.objectDatabase())
+        try worktree.writeTree(gpa, io, index, repo.objectDatabase())
     else if (head.oid) |h|
         try repo.commitTree(io, h)
     else
@@ -496,9 +497,9 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         const ff = if (parent) |p| (head.oid != null and p.eql(head.oid.?)) else head.oid == null;
         if (ff) {
             const their_tree = commit.tree;
-            var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = their_tree }, .{ .blocked = r.options.blocked });
+            var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = head_tree, .ours = head_tree, .theirs = their_tree }, .{ .blocked = r.options.blocked });
             defer outcome.deinit();
-            try repo.writeIndex(io, &index);
+            try locked_index.commit(io);
             const log = try arena.print("{s}: fast-forward", .{r.action.name()});
             try head_mod.advance(io, repo, head, oid, .{ .who = r.options.who, .message = log });
             try updateAbortSafety(gpa, io, repo);
@@ -538,7 +539,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.trailers);
 
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse try emptyTree(io, repo) }, .{
+    var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse try emptyTree(io, repo) }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = base_label, .theirs = next_label },
@@ -550,7 +551,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
 
     if (!outcome.isClean()) try noteConflicts(r, &msg, outcome.conflicts);
@@ -565,7 +566,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     if (!clean) {
         try updateAbortSafety(gpa, io, repo);
         // git runs rerere once the pick has stopped.
-        _ = try rerere.afterStop(gpa, io, repo, &index, .{ .arena = arena, .autoupdate = r.options.rerere_autoupdate });
+        _ = try rerere.afterStop(gpa, io, repo, .{ .arena = arena, .autoupdate = r.options.rerere_autoupdate });
         return .conflicted;
     }
 
@@ -874,8 +875,9 @@ fn commitStaged(r: *Replay) Error!Oid {
     const io = r.io;
     const repo = r.repo;
     const arena = r.arena;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) {
             if (r.options.blocked) |b| b.set(entry.path);
@@ -884,8 +886,8 @@ fn commitStaged(r: *Replay) Error!Oid {
     }
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
-    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try repo.writeIndex(io, &index);
+    const tree = try worktree.writeTree(gpa, io, index, repo.objectDatabase());
+    try locked_index.commit(io);
 
     const picked = try repo.refStore().root().read(gpa, io, .cherry_pick_head);
     var author = r.options.who;
@@ -1058,10 +1060,11 @@ pub fn resetMerge(
     defer head.deinit(gpa);
     const current = head.oid orelse return error.UnbornBranch;
     const to = target orelse current;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, to), .mode = .merge, .blocked = blocked });
-    try repo.writeIndex(io, &index);
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    try reset.toTree(gpa, io, repo, .{ .index = index, .tree = try repo.commitTree(io, to), .mode = .merge, .blocked = blocked });
+    try locked_index.commit(io);
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, current);
     var buf: ["reset: moving to ".len + hash.max_hex_len]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;

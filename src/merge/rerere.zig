@@ -669,22 +669,26 @@ pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
         try head_mod.removeState(io, repo.gitDirectory(), name);
     }
     try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    var outcome = try run(gpa, io, repo, &index, .{ .autoupdate = false });
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    var outcome = try run(gpa, io, repo, index, .{ .autoupdate = false });
     outcome.deinit();
 }
 
-/// Run rerere on a stop, as git does once a merge has left conflicts,
-/// writing the index again when it staged a resolution. The paths it
-/// resolved come back in `arena`.
+/// Run rerere on a stop, as git does once a merge has left conflicts and
+/// written its index: the index is taken under its lock, and written again
+/// when rerere staged a resolution. The paths it resolved come back in
+/// `arena`.
 pub const AfterStopOptions = struct { arena: Allocator, autoupdate: ?bool = null };
 
-pub fn afterStop(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: AfterStopOptions) Self.Error![]const []const u8 {
+pub fn afterStop(gpa: Allocator, io: Io, repo: *Repository, options: AfterStopOptions) Self.Error![]const []const u8 {
     const arena = options.arena;
-    var outcome = try run(gpa, io, repo, index, .{ .autoupdate = options.autoupdate });
+    var locked = try repo.lockIndex(io);
+    defer locked.deinit(io);
+    var outcome = try run(gpa, io, repo, &locked.index, .{ .autoupdate = options.autoupdate });
     defer outcome.deinit();
-    if (outcome.staged.len != 0) try repo.writeIndex(io, index);
+    if (outcome.staged.len != 0) try locked.commit(io);
     var reused: std.ArrayList([]const u8) = .empty;
     for (outcome.resolved) |p| try reused.append(arena, try arena.dupe(u8, p));
     for (outcome.staged) |p| try reused.append(arena, try arena.dupe(u8, p));

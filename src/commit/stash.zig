@@ -290,7 +290,7 @@ const Ctx = struct {
     ignore_rules: ignore.Rules,
     attrs: attributes.Attrs,
     rules: worktree.Rules,
-    index: Index,
+    locked: Repository.LockedIndex,
     programs: ?program.Programs,
     /// What a file in the working tree is stored as: line endings, clean
     /// filters and LFS, as `addAll` stores it.
@@ -314,7 +314,7 @@ const Ctx = struct {
             .ignore_rules = try repo.loadIgnore(io),
             .attrs = undefined,
             .rules = try repo.worktreeRules(),
-            .index = undefined,
+            .locked = undefined,
             .programs = programs,
             .conv = undefined,
         };
@@ -327,7 +327,7 @@ const Ctx = struct {
         defer repo.allocator().free(required);
         ctx.rules.required_filters = try arena.dupe([]const u8, required);
         ctx.rules.filters = filters;
-        ctx.index = try repo.openIndex(io);
+        ctx.locked = try repo.lockIndex(io);
         ctx.conv = .open(repo.allocator(), io, .{
             .wt = wt,
             .kind = repo.objectFormat(),
@@ -335,7 +335,7 @@ const Ctx = struct {
             .required_filters = ctx.rules.required_filters,
             .drivers = filters,
             .programs = programs,
-            .index = &ctx.index,
+            .index = &ctx.locked.index,
             .db = repo.objectDatabase(),
         });
     }
@@ -347,14 +347,14 @@ const Ctx = struct {
 
     fn deinit(ctx: *Ctx) void {
         ctx.conv.deinit(ctx.io);
-        ctx.index.deinit();
+        ctx.locked.deinit(ctx.io);
         ctx.attrs.deinit();
         ctx.ignore_rules.deinit();
         ctx.* = undefined;
     }
 
     fn unmerged(ctx: *Ctx) bool {
-        for (ctx.index.entries.items) |e| {
+        for (ctx.locked.index.entries.items) |e| {
             if (e.stage != 0) return true;
         }
         return false;
@@ -378,7 +378,7 @@ const Ctx = struct {
         else if (indexed_mode == .exec) .exec else .file;
 
         if (entry) |e| {
-            if (e.mode == mode and !ctx.index.isRacy(e.*) and
+            if (e.mode == mode and !ctx.locked.index.isRacy(e.*) and
                 e.stat.matches(found.stat, ctx.rules.check_stat, ctx.rules.timestamp_resolution))
             {
                 return .{ .mode = mode, .oid = e.oid };
@@ -406,7 +406,7 @@ const Ctx = struct {
     }
 
     fn stage0(ctx: *Ctx, path: []const u8) ?*index_mod.Entry {
-        return ctx.index.findStage(path, 0);
+        return ctx.locked.index.findStage(path, 0);
     }
 };
 
@@ -453,7 +453,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     const head_commit = try object.Commit.parse(arena, repo.objectFormat(), try arena.dupe(u8, head_bytes.bytes));
     var head_map = try worktree.flatten(arena, io, repo.objectDatabase(), head_commit.tree);
 
-    if (options.untracked == .none) try requireTracked(arena, &ctx.index, options.paths, options.refusal);
+    if (options.untracked == .none) try requireTracked(arena, &ctx.locked.index, options.paths, options.refusal);
 
     // What differs, and what the working-tree commit takes from the disk:
     // every tracked path whose file is not what `HEAD` has.
@@ -462,7 +462,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     while (head_it.next()) |key| {
         if (parsed_paths.matches(key.*)) try candidates.put(arena, key.*, {});
     }
-    for (ctx.index.entries.items) |e| {
+    for (ctx.locked.index.entries.items) |e| {
         if (parsed_paths.matches(e.path)) try candidates.put(arena, e.path, {});
     }
     var updates: std.ArrayList(Update) = .empty;
@@ -504,7 +504,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     const label = try arena.print("{s}: {s} {s}", .{ branch, abbrev, subject });
 
     // `I`: the index as it stands.
-    const index_tree = try worktree.writeTree(gpa, io, &ctx.index, repo.objectDatabase());
+    const index_tree = try worktree.writeTree(gpa, io, &ctx.locked.index, repo.objectDatabase());
     const index_commit = try writeCommit(io, repo, index_tree, &.{head.oid}, options.who, try arena.print("index on {s}\n", .{label}));
 
     // `U`: the untracked files, in a tree of their own.
@@ -540,7 +540,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     }
 
     try resetAfterPush(&ctx, &head_map, head_commit.tree, index_tree, untracked_files.items, options);
-    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = repo.indexLock() });
+    try ctx.locked.commit(io);
     return stash_commit;
 }
 
@@ -578,7 +578,7 @@ fn untrackedTree(ctx: *Ctx, paths: []const []const u8) Error!Oid {
 fn workTree(ctx: *Ctx, updates: []const Update) Error!Oid {
     var temp: Index = .initEmpty(ctx.gpa, ctx.repo.objectFormat());
     defer temp.deinit();
-    try temp.addMany(ctx.index.entries.items);
+    try temp.addMany(ctx.locked.index.entries.items);
     for (updates) |u| {
         if (u.side == null) {
             _ = temp.remove(u.path);
@@ -592,7 +592,7 @@ fn workTree(ctx: *Ctx, updates: []const Update) Error!Oid {
 }
 
 fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const u8)) Error!void {
-    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt, .{ .index = &ctx.index, .db = ctx.repo.objectDatabase() }, .{
+    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt, .{ .index = &ctx.locked.index, .db = ctx.repo.objectDatabase() }, .{
         .rules = ctx.rules,
         .programs = ctx.programs,
         .untracked = .all,
@@ -663,9 +663,9 @@ fn resetAfterPush(
             };
             if (std.Io.Dir.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, ctx.wt, parent);
         }
-        _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .tree = head_tree }, checkout_options);
+        _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .tree = head_tree }, checkout_options);
         if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
-            _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .tree = index_tree }, checkout_options);
+            _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .tree = index_tree }, checkout_options);
         }
         return;
     }
@@ -674,7 +674,7 @@ fn resetAfterPush(
     var paths: std.array_hash_map.String(void) = .empty;
     var head_it = head_map.keyIterator();
     while (head_it.next()) |key| if (ctx.paths.?.matches(key.*)) try paths.put(ctx.arena, key.*, {});
-    for (ctx.index.entries.items) |e| if (ctx.paths.?.matches(e.path)) try paths.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
+    for (ctx.locked.index.entries.items) |e| if (ctx.paths.?.matches(e.path)) try paths.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
     for (untracked) |path| try paths.put(ctx.arena, path, {});
     var writes: std.ArrayList(worktree.PathWrite) = .empty;
     for (paths.keys()) |path| {
@@ -684,21 +684,21 @@ fn resetAfterPush(
         if (sameSide(entrySide(entry), want) and sameSide(on_disk, want)) continue;
         try writes.append(ctx.arena, .{ .path = path, .blob = if (want) |w| .{ .mode = w.mode, .oid = w.oid } else null });
     }
-    _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = writes.items }, checkout_options);
+    _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
 
     if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
         var index_map = try worktree.flatten(ctx.arena, io, db, index_tree);
         var keep: std.array_hash_map.String(void) = .empty;
         var it = index_map.keyIterator();
         while (it.next()) |key| if (ctx.paths.?.matches(key.*)) try keep.put(ctx.arena, key.*, {});
-        for (ctx.index.entries.items) |e| if (ctx.paths.?.matches(e.path)) try keep.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
+        for (ctx.locked.index.entries.items) |e| if (ctx.paths.?.matches(e.path)) try keep.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
         writes.clearRetainingCapacity();
         for (keep.keys()) |path| {
             const want = mapSide(&index_map, path);
             if (sameSide(entrySide(ctx.stage0(path)), want)) continue;
             try writes.append(ctx.arena, .{ .path = path, .blob = if (want) |w| .{ .mode = w.mode, .oid = w.oid } else null });
         }
-        _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = writes.items }, checkout_options);
+        _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
     }
 }
 
@@ -804,7 +804,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     const db = repo.objectDatabase();
 
     if (ctx.unmerged()) return error.UnmergedIndex;
-    const current_tree = try worktree.writeTree(gpa, io, &ctx.index, db);
+    const current_tree = try worktree.writeTree(gpa, io, &ctx.locked.index, db);
 
     // `--index`: the stash's staged changes, merged onto the index as it is.
     const use_index = options.index orelse (repo.configuration().getBool("stash.index", false) catch false);
@@ -857,7 +857,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     if (stash.untracked_tree) |tree| try untrackedWrites(arena, io, ctx.wt, db, tree, options.refusal, &untracked_writes);
 
     const checkout_options = ctx.checkoutOptions();
-    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = writes.items }, checkout_options);
+    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
 
     const result_alloc = result_arena.allocator();
     var conflicts: std.ArrayList([]const u8) = .empty;
@@ -866,25 +866,25 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         // The index is the merge's: what reconciled is staged, and every
         // conflict sits at its stages.
         for (result.conflicts) |c| {
-            _ = ctx.index.remove(c.path);
-            const tree_cache = try ctx.index.cacheTree();
+            _ = ctx.locked.index.remove(c.path);
+            const tree_cache = try ctx.locked.index.cacheTree();
             tree_cache.invalidate(c.path);
             try conflicts.append(result_alloc, try result_alloc.dupe(u8, c.path));
         }
         for (result.index.entries.items) |e| {
             if (e.stage == 0) continue;
-            try ctx.index.add(e);
+            try ctx.locked.index.add(e);
         }
         std.mem.sort([]const u8, conflicts.items, {}, lessThanPath);
     } else if (restored_index) |tree| {
-        _ = try worktree.resetIndex(gpa, io, &ctx.index, db, tree);
+        _ = try worktree.resetIndex(gpa, io, &ctx.locked.index, db, tree);
         applied_index = true;
     } else {
         try unstageUnlessNew(&ctx, &current_map);
     }
 
-    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.index, .db = db, .writes = untracked_writes.items }, checkout_options);
-    try ctx.index.write(io, repo.gitDirectory(), "index", .{ .lock = repo.indexLock() });
+    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = untracked_writes.items }, checkout_options);
+    try ctx.locked.commit(io);
 
     return .{
         .gpa = gpa,
@@ -1042,9 +1042,9 @@ fn unstageUnlessNew(ctx: *Ctx, before: *std.StringHashMapUnmanaged(TreeEntry)) E
         const path = pair.key_ptr.*;
         const was: merge.Side = .{ .mode = pair.value_ptr.mode, .oid = pair.value_ptr.oid };
         if (sameSide(entrySide(ctx.stage0(path)), was)) continue;
-        const tree_cache = try ctx.index.cacheTree();
+        const tree_cache = try ctx.locked.index.cacheTree();
         tree_cache.invalidate(path);
-        try ctx.index.add(.{ .path = path, .oid = was.oid, .mode = was.mode, .stat = .none });
+        try ctx.locked.index.add(.{ .path = path, .oid = was.oid, .mode = was.mode, .stat = .none });
     }
 }
 

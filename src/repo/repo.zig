@@ -1432,25 +1432,64 @@ pub const Repository = struct {
         return blob.bytes;
     }
 
-    /// Errors from `writeIndex`.
+    /// Errors from `LockedIndex.commit`.
     pub const WriteIndexError = index_mod.WriteError || ErrorNamespace.Error;
 
-    /// Open the repository's own index.
-    /// Write `index` as this repository's index, as git writes one: a
-    /// racily clean entry is smudged only where its file changed, read
-    /// through the repository's own rules and attributes.
-    pub fn writeIndex(repo: *Repository, io: Io, index: *index_mod.Index) WriteIndexError!void {
-        const wt = repo.data().work_dir orelse return index.write(io, repo.data().git_dir, "index", .{ .lock = repo.indexLock() });
-        var attrs = try repo.loadAttrs(io);
-        defer attrs.deinit();
-        var rules = try repo.worktreeRules();
-        rules.attrs = &attrs;
-        var check: worktree.RacyCheck = .{ .gpa = repo.data().gpa, .io = io, .wt = wt, .rules = rules };
-        try index.write(io, repo.data().git_dir, "index", .{ .racy = check.racy(), .lock = repo.indexLock() });
+    /// Errors from `lockIndex`.
+    pub const LockIndexError = fs.LockFile.OpenError || index_mod.ReadError;
+
+    /// The repository's index, held under `index.lock` from its read to its
+    /// write, as git's `repo_hold_locked_index` holds it: no other writer's
+    /// change lands between the two and is lost, and a second writer is
+    /// refused while this one holds it.
+    pub const LockedIndex = struct {
+        /// The index as read under the lock. Change it, or put another in
+        /// its place, then `commit`.
+        index: index_mod.Index,
+        /// Private: `index.lock`.
+        lock: fs.LockFile,
+        /// Private: the lock's write buffer.
+        buffer: []u8,
+        /// Private: the repository whose index this is.
+        repo: *Repository,
+
+        /// Write the index as git writes one, a racily clean entry smudged
+        /// only where its file changed, read through the repository's own
+        /// rules and attributes, and put it in place.
+        pub fn commit(locked: *LockedIndex, io: Io) WriteIndexError!void {
+            const repo = locked.repo;
+            const wt = repo.data().work_dir orelse return locked.index.commitTo(io, &locked.lock, .{});
+            var attrs = try repo.loadAttrs(io);
+            defer attrs.deinit();
+            var rules = try repo.worktreeRules();
+            rules.attrs = &attrs;
+            var check: worktree.RacyCheck = .{ .gpa = repo.data().gpa, .io = io, .wt = wt, .rules = rules };
+            try locked.index.commitTo(io, &locked.lock, .{ .racy = check.racy() });
+        }
+
+        /// Give the lock up, the index file as it was unless `commit` put
+        /// this one in its place, and release the index.
+        pub fn deinit(locked: *LockedIndex, io: Io) void {
+            locked.lock.deinit(io);
+            locked.repo.data().gpa.free(locked.buffer);
+            locked.index.deinit();
+            locked.* = undefined;
+        }
+    };
+
+    /// Take `index.lock` and read the index under it.
+    pub fn lockIndex(repo: *Repository, io: Io) LockIndexError!LockedIndex {
+        const gpa = repo.data().gpa;
+        const buffer = try gpa.alloc(u8, 64 * 1024);
+        errdefer gpa.free(buffer);
+        var lock = try fs.LockFile.open(gpa, io, repo.data().git_dir, .{ .sub_path = "index", .buffer = buffer }, repo.indexLock());
+        errdefer lock.deinit(io);
+        const index = try repo.openIndex(io);
+        return .{ .index = index, .lock = lock, .buffer = buffer, .repo = repo };
     }
 
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", .{ .git_dir = repo.data().common_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution });
+        return index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution });
     }
 
     /// Open an index anywhere.
@@ -1463,7 +1502,7 @@ pub const Repository = struct {
         dir: Io.Dir,
         sub_path: []const u8,
     ) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.data().common_dir, .kind = repo.objectFormat() });
+        return index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat() });
     }
 
     /// What `HEAD` resolves to, or `null` on an unborn branch.

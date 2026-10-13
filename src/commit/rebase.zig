@@ -1041,12 +1041,13 @@ fn skipUnnecessaryPicks(r: *Run, base_in: Oid) Error!Oid {
 fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error!void {
     var h = try r.head();
     defer h.deinit(r.gpa);
-    var index = try r.repo.openIndex(r.io);
-    defer index.deinit();
+    var locked_index = try r.repo.lockIndex(r.io);
+    defer locked_index.deinit(r.io);
+    const index = &locked_index.index;
     const from_tree = if (h.oid) |oid| try r.repo.commitTree(r.io, oid) else try r.repo.objectDatabase().write(r.io, .tree, "");
-    var outcome = try three_way.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, base) }, .{ .blocked = r.options.blocked });
+    var outcome = try three_way.apply(r.gpa, r.io, r.repo, .{ .index = index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, base) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
-    try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
+    try locked_index.commit(r.io);
     try r.repo.refStore().root().write(r.repo.allocator(), r.io, .orig_head, orig_head);
     const log = try r.reflogMessage("start", try r.arena.print("checkout {s}", .{onto_name}));
     try head_mod.detach(r.io, r.repo, h.oid, base, .{ .who = r.options.who, .message = log });
@@ -1059,12 +1060,13 @@ fn checkoutTip(r: *Run, tip: Tip, name: []const u8) Error!void {
     var h = try r.head();
     defer h.deinit(r.gpa);
     if (h.branch != null and tip.head_name != null and std.mem.eql(u8, h.branch.?, tip.head_name.?)) return;
-    var index = try r.repo.openIndex(r.io);
-    defer index.deinit();
+    var locked_index = try r.repo.lockIndex(r.io);
+    defer locked_index.deinit(r.io);
+    const index = &locked_index.index;
     const from_tree = try r.repo.commitTree(r.io, h.oid orelse return error.UnbornBranch);
-    var outcome = try three_way.apply(r.gpa, r.io, r.repo, .{ .index = &index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, tip.orig_head) }, .{ .blocked = r.options.blocked });
+    var outcome = try three_way.apply(r.gpa, r.io, r.repo, .{ .index = index, .base = from_tree, .ours = from_tree, .theirs = try r.repo.commitTree(r.io, tip.orig_head) }, .{ .blocked = r.options.blocked });
     outcome.deinit();
-    try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
+    try locked_index.commit(r.io);
     const log = try r.arena.print("rebase: checkout {s}", .{name});
     if (tip.head_name) |branch| {
         try head_mod.attach(r.io, r.repo, branch, h.oid, .{ .who = r.options.who, .message = log });
@@ -1413,8 +1415,9 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     defer head.deinit(gpa);
     const head_oid = head.oid orelse return error.UnbornBranch;
     const head_tree = try repo.commitTree(io, head_oid);
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnmergedIndex;
     }
@@ -1431,9 +1434,9 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     // The commit sits on `HEAD` already: reuse it.
     if (r.allow_ff and !is_fixup and parent != null and parent.?.eql(head_oid)) {
         try writeAuthorScript(r, commit.author);
-        var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = commit.tree }, .{ .blocked = r.options.blocked });
+        var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = head_tree, .ours = head_tree, .theirs = commit.tree }, .{ .blocked = r.options.blocked });
         outcome.deinit();
-        try repo.writeIndex(io, &index);
+        try locked_index.commit(io);
         try head_mod.advance(io, repo, head, source.oid, .{ .who = r.options.who, .message = "rebase: fast-forward" });
         if (command == .reword) try reword(r, reflog_action);
         return .ok;
@@ -1457,7 +1460,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
 
     const base_tree = if (parent) |p| try repo.commitTree(io, p) else null;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var outcome = try three_way.apply(gpa, io, repo, .{ .index = &index, .base = base_tree, .ours = head_tree, .theirs = commit.tree }, .{
+    var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = base_tree, .ours = head_tree, .theirs = commit.tree }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = if (parent != null) parent_label else "(empty tree)", .theirs = label },
@@ -1469,14 +1472,14 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
     if (!outcome.isClean()) try noteConflicts(r, outcome.conflicts);
     try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", r.msg.items);
     // A rebase takes care of the commit itself, so a conflict leaves no
     // `CHERRY_PICK_HEAD`, as git's leaves none. rerere runs on the stop.
     if (!outcome.isClean()) {
-        _ = try rerere.afterStop(gpa, io, repo, &index, .{ .arena = arena, .autoupdate = r.options.rerere_autoupdate });
+        _ = try rerere.afterStop(gpa, io, repo, .{ .arena = arena, .autoupdate = r.options.rerere_autoupdate });
         return .conflict;
     }
     if (command == .pick or command == .reword or command == .edit) {
@@ -1980,10 +1983,11 @@ fn doReset(r: *Run, arg: []const u8) Error!void {
     const end = std.mem.findAny(u8, arg, " \t\n\r") orelse arg.len;
     const name = arg[0..end];
     const target = try lookupLabel(r, name);
-    var index = try r.repo.openIndex(r.io);
-    defer index.deinit();
-    try reset.toTree(r.gpa, r.io, r.repo, .{ .index = &index, .tree = try r.repo.commitTree(r.io, target), .mode = .merge, .blocked = r.options.blocked });
-    try index.write(r.io, r.repo.gitDirectory(), "index", .{ .lock = r.repo.indexLock() });
+    var locked_index = try r.repo.lockIndex(r.io);
+    defer locked_index.deinit(r.io);
+    const index = &locked_index.index;
+    try reset.toTree(r.gpa, r.io, r.repo, .{ .index = index, .tree = try r.repo.commitTree(r.io, target), .mode = .merge, .blocked = r.options.blocked });
+    try locked_index.commit(r.io);
     var h = try r.head();
     defer h.deinit(r.gpa);
     const log = try r.arena.print("rebase (reset): '{s}'", .{name});
@@ -2265,14 +2269,15 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     try repo.refStore().special().write(repo.allocator(), io, .merge_head, try r.hex(merge_head));
     try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MODE", "no-ff");
 
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     // The bases oldest first, as git hands them to its recursive merge.
     const reversed = try r.arena.alloc(Oid, bases.len);
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
     const ref_name = try r.arena.print("refs/rewritten/{s}", .{name});
-    var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = &index, .ours = head_oid, .theirs = merge_head, .bases = reversed }, .{
+    var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = index, .ours = head_oid, .theirs = merge_head, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .theirs = if (lookupRewritten(r, name)) ref_name else name },
@@ -2284,13 +2289,13 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
     if (!outcome.isClean()) {
         const copied = try r.arena.dupe(three_way.Conflict, outcome.conflicts);
         for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
         r.conflicts = copied;
-        _ = try rerere.afterStop(gpa, io, repo, &index, .{ .arena = r.arena, .autoupdate = r.options.rerere_autoupdate });
+        _ = try rerere.afterStop(gpa, io, repo, .{ .arena = r.arena, .autoupdate = r.options.rerere_autoupdate });
         if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
         _ = r.items.orderedRemove(0);
         return finishOutcome(r, .stopped, .conflict, item.commit);
@@ -2325,12 +2330,13 @@ fn reuseMerge(r: *Run, h: head_mod.Head, original: Oid, merge_heads: []const Oid
     const source = try readSource(r, original);
     const parents = source.commit.parents;
     if (!r.allow_ff or parents.len != 1 + merge_heads.len or !parents[0].eql(head_oid) or !sameOids(parents[1..], merge_heads)) return false;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     const head_tree = try repo.commitTree(io, head_oid);
-    var outcome = try three_way.apply(r.gpa, io, repo, .{ .index = &index, .base = head_tree, .ours = head_tree, .theirs = source.commit.tree }, .{ .blocked = r.options.blocked });
+    var outcome = try three_way.apply(r.gpa, io, repo, .{ .index = index, .base = head_tree, .ours = head_tree, .theirs = source.commit.tree }, .{ .blocked = r.options.blocked });
     outcome.deinit();
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
     try head_mod.advance(io, repo, h, original, .{ .who = r.options.who, .message = "rebase: fast-forward" });
     try recordInRewritten(r, original, peekCommand(r, 1));
     return true;
@@ -2510,8 +2516,9 @@ fn freeRun(r: *Run) void {
 fn commitStagedChanges(r: *Run) Error!void {
     const io = r.io;
     const repo = r.repo;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) {
             if (r.options.blocked) |b| b.set(entry.path);
@@ -2528,7 +2535,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     defer h.deinit(r.gpa);
     const head_oid = h.oid orelse return error.UnbornBranch;
     const head_tree = try repo.commitTree(io, head_oid);
-    var status = try worktree.status(r.gpa, io, wt, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules, .head_tree = head_tree, .untracked = .no });
+    var status = try worktree.status(r.gpa, io, wt, .{ .index = index, .db = repo.objectDatabase() }, .{ .rules = rules, .head_tree = head_tree, .untracked = .no });
     defer status.deinit();
     var staged = false;
     for (status.entries) |entry| {
@@ -2551,8 +2558,8 @@ fn commitStagedChanges(r: *Run) Error!void {
         return;
     }
 
-    const tree = try worktree.writeTree(r.gpa, io, &index, repo.objectDatabase());
-    try repo.writeIndex(io, &index);
+    const tree = try worktree.writeTree(r.gpa, io, index, repo.objectDatabase());
+    try locked_index.commit(io);
     var parents: std.ArrayList(Oid) = .empty;
     if (amend) {
         try parents.appendSlice(r.arena, try parentsOf(r, head_oid));
@@ -2614,10 +2621,11 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         defer freeRun(&r);
         try rerere.clear(gpa, io, repo);
         const current = try r.headOid();
-        var index = try repo.openIndex(io);
-        defer index.deinit();
-        try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, current), .mode = .hard, .blocked = options.blocked });
-        try repo.writeIndex(io, &index);
+        var locked_index = try repo.lockIndex(io);
+        defer locked_index.deinit(io);
+        const index = &locked_index.index;
+        try reset.toTree(gpa, io, repo, .{ .index = index, .tree = try repo.commitTree(io, current), .mode = .hard, .blocked = options.blocked });
+        try locked_index.commit(io);
         try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
         try repo.refStore().root().delete(repo.allocator(), io, .revert_head);
         try merging.removeMergeState(io, repo);
@@ -2634,10 +2642,11 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     const tip = try readBasicState(&r);
     var h = try r.head();
     defer h.deinit(gpa);
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    try reset.toTree(gpa, io, repo, .{ .index = &index, .tree = try repo.commitTree(io, tip.orig_head), .mode = .hard, .blocked = null });
-    try repo.writeIndex(io, &index);
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    try reset.toTree(gpa, io, repo, .{ .index = index, .tree = try repo.commitTree(io, tip.orig_head), .mode = .hard, .blocked = null });
+    try locked_index.commit(io);
     const target = tip.head_name orelse try r.hex(tip.orig_head);
     const log = try r.arena.print("rebase (abort): returning to {s}", .{target});
     if (tip.head_name) |branch| {

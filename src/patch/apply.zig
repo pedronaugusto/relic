@@ -479,9 +479,11 @@ const State = struct {
     check_index: bool,
     cached: bool,
     update_index: bool = false,
-    /// The index applied to: the caller's, or `owned_index`.
+    /// The index applied to: the caller's, `owned_index` for a check, or
+    /// `locked_index`'s for an update of the repository's.
     index: ?*Index = null,
     owned_index: ?Index = null,
+    locked_index: ?Repository.LockedIndex = null,
     fn_table: std.StringHashMapUnmanaged(PathState) = .empty,
     removed_symlinks: std.StringHashMapUnmanaged(void) = .empty,
     kept_symlinks: std.StringHashMapUnmanaged(void) = .empty,
@@ -580,6 +582,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     };
     defer st.conv.deinit(io);
     defer if (st.owned_index) |*ix| ix.deinit();
+    defer if (st.locked_index) |*locked| locked.deinit(io);
     defer if (rules.attrs) |attrs| attrs.leave();
     _ = &rules;
 
@@ -610,10 +613,10 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     if (st.apply) {
         try writeOutResults(&st, list.items, &conflicted);
         std.mem.sort([]const u8, conflicted.items, {}, lessPath);
-        if (conflicted.items.len != 0 and !st.cached) {
-            if (st.index) |ix| _ = try rerere.afterStop(gpa, io, repo, ix, .{ .arena = a, .autoupdate = null });
+        if (st.locked_index) |*locked| try locked.commit(io);
+        if (conflicted.items.len != 0 and !st.cached and st.index != null) {
+            _ = try rerere.afterStop(gpa, io, repo, .{ .arena = a, .autoupdate = null });
         }
-        if (st.update_index and options.index == null) try repo.writeIndex(io, st.index.?);
     }
 
     const files = try resultFiles(a, list.items);
@@ -691,6 +694,11 @@ fn parsePatches(gpa: Allocator, a: Allocator, text: []const u8, options: Options
 fn useIndex(st: *State) Error!void {
     if (st.options.index) |ix| {
         st.index = ix;
+        return;
+    }
+    if (st.update_index) {
+        st.locked_index = try st.repo.lockIndex(st.io);
+        st.index = &st.locked_index.?.index;
         return;
     }
     st.owned_index = try st.repo.openIndex(st.io);

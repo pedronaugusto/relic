@@ -449,16 +449,12 @@ const Op = struct {
         const io = op.io;
         if (try fs.statAt(io, repo.gitDirectory(), "index") == null) return .{};
 
-        const buffer = try repo.allocator().alloc(u8, 64 * 1024);
-        defer repo.allocator().free(buffer);
-        var lock = try fs.LockFile.open(repo.allocator(), io, repo.gitDirectory(), .{ .sub_path = "index", .buffer = buffer }, repo.indexLock());
-        defer lock.deinit(io);
-
-        var index = try repo.openIndex(io);
-        defer index.deinit();
+        var locked = try repo.lockIndex(io);
+        defer locked.deinit(io);
+        const index = &locked.index;
         var unmarked: u32 = 0;
         if (op.state.enabled and !try repo.configuration().getBool("sparse.expectfilesoutsideofpatterns", false)) {
-            unmarked = try sparse_index.clearSkipFromPresent(repo.allocator(), io, repo.workDirectory().?, &index, repo.objectDatabase());
+            unmarked = try sparse_index.clearSkipFromPresent(repo.allocator(), io, repo.workDirectory().?, index, repo.objectDatabase());
         }
 
         var rules = try repo.worktreeRules();
@@ -466,20 +462,16 @@ const Op = struct {
         defer attrs.deinit();
         rules.attrs = &attrs;
 
-        const update = try worktree.applySparse(repo.allocator(), io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .patterns = patterns }, .{ .rules = rules });
+        const update = try worktree.applySparse(repo.allocator(), io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase(), .patterns = patterns }, .{ .rules = rules });
 
         // git decides at every write whether the index may be sparse: sparse
         // checkout on, in cone mode, with `index.sparse`, and patterns that
         // really are a cone. Otherwise it is written full.
         const may_collapse = op.state.enabled and op.state.cone and op.state.sparse_index and patterns.cone != null;
-        if (!may_collapse or !try sparse_index.collapse(repo.allocator(), io, &index, repo.objectDatabase(), patterns)) {
-            try sparse_index.expand(repo.allocator(), io, &index, repo.objectDatabase(), null);
+        if (!may_collapse or !try sparse_index.collapse(repo.allocator(), io, index, repo.objectDatabase(), patterns)) {
+            try sparse_index.expand(repo.allocator(), io, index, repo.objectDatabase(), null);
         }
-        index.writeTo(lock.writer(), .{}) catch |err| switch (err) {
-            error.WriteFailed => return error.WriteFailed,
-            else => |e| return e,
-        };
-        try lock.commit(io);
+        try locked.commit(io);
         return .{ .update = update, .index_written = true, .unmarked = unmarked };
     }
 };

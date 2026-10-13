@@ -175,12 +175,13 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
 
     // `pre-commit` may have staged something, so the index is read now and
     // not before.
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnmergedIndex;
     }
-    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
+    const tree = try worktree.writeTree(gpa, io, index, repo.objectDatabase());
 
     // What the new commit sits on, and what an amend carries over.
     var parents: []const Oid = &.{};
@@ -248,7 +249,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     }
 
     // The cache tree now names every directory, and the index keeps it.
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
 
     var outcome: Outcome = .{ .commit = new, .tree = tree, .previous = current };
     if (options.hooks) |runner| {

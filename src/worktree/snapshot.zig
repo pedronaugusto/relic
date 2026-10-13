@@ -146,7 +146,7 @@ pub const Store = struct {
         rules.attrs = &attrs;
         rules.filters = if (drivers) |*d| d else null;
         var staged = if (source_repo) |r|
-            try index.Index.read(store.gpa, io, r.gitDirectory(), "index", .{ .git_dir = r.commonDirectory(), .kind = r.objectFormat(), .timestamp_resolution = r.objectDatabase().timestamp_resolution })
+            try index.Index.read(store.gpa, io, r.gitDirectory(), "index", .{ .git_dir = r.gitDirectory(), .kind = r.objectFormat(), .timestamp_resolution = r.objectDatabase().timestamp_resolution })
         else
             index.Index.initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();

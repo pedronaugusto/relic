@@ -94,11 +94,12 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     try git.writeFile(io, "dir/b.txt", "b\n");
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    _ = try relic.worktree.addAll(gpa, io, git.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
-    const tree = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try repo.writeIndex(io, &index);
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
+    _ = try relic.worktree.addAll(gpa, io, git.dir, .{ .index = index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
+    const tree = try relic.worktree.writeTree(gpa, io, index, repo.objectDatabase());
+    try locked_index.commit(io);
     const commit = try repo.writeCommit(io, .{ .tree = tree, .author = who, .committer = who, .message = "first\n" }, .{});
     {
         var tx = repo.beginRefs();

@@ -1399,13 +1399,20 @@ pub const Index = struct {
         defer index.gpa.free(buffer);
         var lock = try fs.LockFile.open(index.gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, options.lock);
         defer lock.deinit(io);
+        try index.commitTo(io, &lock, options);
+    }
+
+    /// Write the index into `lock`, already held on the file it replaces,
+    /// and put it in place: the end of a write whose lock was taken before
+    /// the index was read, as git's `repo_hold_locked_index` takes it.
+    pub fn commitTo(index: *Index, io: Io, lock: *fs.LockFile, options: WriteOptions) Self.WriteError!void {
         try index.writeTo(lock.writer(), options);
         try lock.commit(io);
         // The file just written is the racy cutoff from now on, as git's
         // `do_write_index` takes it: an entry written in its second is
         // racy for a caller that keeps this index and does not read it
         // again.
-        if (dir.statFile(io, sub_path, .{})) |stat| {
+        if (lock.dir.statFile(io, lock.target, .{})) |stat| {
             const s = fs.Stat.fromIo(stat, .{});
             index.racy_cutoff_sec = s.mtime_sec;
             index.racy_cutoff_nsec = s.mtime_nsec;

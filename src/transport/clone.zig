@@ -837,16 +837,17 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     const required = try repo.requiredFilters(gpa);
     defer gpa.free(required);
     rules.required_filters = required;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     // A new clone's working tree has nothing in it to lose, as git's
     // clone takes it.
-    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase(), .tree = tree }, .{
         .rules = rules,
         .programs = programs,
         .force = true,
     });
-    try repo.writeIndex(io, &index);
+    try locked_index.commit(io);
 }
 
 /// A local path as git's clone records it, through `absolute_pathdup`: an

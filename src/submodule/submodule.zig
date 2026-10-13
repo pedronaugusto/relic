@@ -1552,8 +1552,9 @@ fn checkoutCommit(
 ) Error!void {
     const work = sub.workDirectory() orelse return error.BareRepository;
     const tree = try sub.commitTree(io, commit);
-    var index = try sub.openIndex(io);
-    defer index.deinit();
+    var locked_index = try sub.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     var ignore_rules = try sub.loadIgnore(io);
     defer ignore_rules.deinit();
     var attrs = try sub.loadAttrs(io);
@@ -1566,7 +1567,7 @@ fn checkoutCommit(
     rules.required_filters = required;
 
     if (!force) {
-        var current = try worktree.status(gpa, io, work, .{ .index = &index, .db = sub.objectDatabase() }, .{
+        var current = try worktree.status(gpa, io, work, .{ .index = index, .db = sub.objectDatabase() }, .{
             .rules = rules,
             .head_tree = try sub.headTree(io),
             .untracked = .no,
@@ -1584,11 +1585,11 @@ fn checkoutCommit(
     var refusal: worktree.Refusal = .{};
     // `git checkout`, or with `--force` `git checkout -f`, as git's
     // submodule update runs it.
-    _ = worktree.checkout(gpa, io, work, .{ .index = &index, .db = sub.objectDatabase(), .tree = tree }, .{ .rules = rules, .refusal = &refusal, .force = force }) catch |err| switch (err) {
+    _ = worktree.checkout(gpa, io, work, .{ .index = index, .db = sub.objectDatabase(), .tree = tree }, .{ .rules = rules, .refusal = &refusal, .force = force }) catch |err| switch (err) {
         error.UnsafePath => return refuse(options.refusal, display, refusal.path(), error.UnsafePath),
         else => |e| return e,
     };
-    try index.write(io, sub.gitDirectory(), "index", .{ .lock = sub.indexLock() });
+    try locked_index.commit(io);
 
     var hex: [hash.max_hex_len]u8 = undefined;
     var from_hex: [hash.max_hex_len]u8 = undefined;
