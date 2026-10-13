@@ -107,7 +107,6 @@ pub const max_discovery_depth: u8 = 64;
 /// Caller-owned output for repository and history operations.
 pub const Diagnostic = diagnostic_mod.Diagnostic;
 
-
 /// Errors from `templateDir`.
 pub const TemplateDirError = Allocator.Error || error{MalformedValue};
 

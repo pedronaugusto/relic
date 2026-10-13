@@ -22,12 +22,12 @@ const Context = struct {
             var rules = try relic.worktree.ignore.Rules.init(c.gpa, .{ .case_fold = false });
             defer rules.deinit();
             try rules.addText(patterns, "", ".gitignore", 1);
-            c.checksum +%= @intFromBool(rules.match("d/a.log", false).excluded);
+            c.checksum +%= @intFromBool(rules.match("d/a.log", .file).excluded);
         }
     }
 
     fn ignoreMatch(c: *Context, units: u64) !void {
-        for (0..units) |i| c.checksum +%= @intFromBool(c.rules.matchPath(paths[i % paths.len], false).excluded);
+        for (0..units) |i| c.checksum +%= @intFromBool(c.rules.matchPath(paths[i % paths.len], .file).excluded);
     }
 
     fn includeIf(c: *Context, units: u64) !void {
@@ -41,7 +41,7 @@ const Context = struct {
             try attrs.addText("*.zig diff=zig\n*.bin -diff\n*.txt text\n", "", ".gitattributes", 1);
             var arena: std.heap.ArenaAllocator = .init(c.gpa);
             defer arena.deinit();
-            const found = try attrs.lookup(arena.allocator(), "src/main.zig", false);
+            const found = try attrs.lookup(arena.allocator(), "src/main.zig", .file);
             c.checksum +%= @intFromBool(found.value("diff") != null);
         }
     }

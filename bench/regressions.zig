@@ -581,7 +581,7 @@ fn row4() !void {
         fn all(a: @This()) void {
             var excluded: usize = 0;
             for (a.paths) |p| {
-                if (a.rules.matchPath(p, false).excluded) excluded += 1;
+                if (a.rules.matchPath(p, .file).excluded) excluded += 1;
             }
             std.mem.doNotOptimizeAway(excluded);
         }
@@ -599,7 +599,7 @@ fn row4() !void {
             defer arena.deinit();
             var found: usize = 0;
             for (l.paths) |p| {
-                found += (try l.attrs.lookup(arena.allocator(), p, false)).items.len;
+                found += (try l.attrs.lookup(arena.allocator(), p, .file)).items.len;
                 _ = arena.reset(.retain_capacity);
             }
             std.mem.doNotOptimizeAway(found);
@@ -618,8 +618,8 @@ fn row4() !void {
         @tagName(builtin.optimize), ignore_lines.len, levels.len,                                                          attribute_lines.len, path_count,
         load_ms,                    match_ms,         match_ms * std.time.ns_per_ms / @as(f64, @floatFromInt(path_count)), lookup_ms,           lookup_ms * std.time.ns_per_ms / @as(f64, @floatFromInt(path_count)),
     });
-    try std.testing.expect(rules.matchPath("src/d1/a.o", false).excluded);
-    try std.testing.expect(!rules.matchPath("src/d1/keep.log", false).excluded);
+    try std.testing.expect(rules.matchPath("src/d1/a.o", .file).excluded);
+    try std.testing.expect(!rules.matchPath("src/d1/keep.log", .file).excluded);
 }
 
 fn row5() !void {
