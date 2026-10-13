@@ -996,6 +996,7 @@ pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const 
     const arena = arena_state.allocator();
     var store_settings = try lfs.Lfs.load(gpa, io, repo.configuration(), .{
         .common_dir = repo.commonDirectory(),
+        .shared = repo.sharedPermissions(),
         .work_dir = repo.workDirectory(),
     });
     defer store_settings.deinit();

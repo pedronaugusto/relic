@@ -1335,7 +1335,7 @@ pub const Repository = struct {
             text = try repo.lfsconfigText(io);
             with.config_text = text;
         }
-        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), .{ .common = repo.data().common_dir, .work = repo.data().work_dir }, with);
+        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), .{ .common = repo.data().common_dir, .work = repo.data().work_dir, .shared = repo.data().shared }, with);
     }
 
     /// Errors from `loadFilters`: the drivers', and those of finding

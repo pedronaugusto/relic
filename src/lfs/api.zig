@@ -2551,7 +2551,7 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .work_dir = null, .lfsconfig = lfsconfig });
+        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions(), .work_dir = null, .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
         s.client = try Client.open(gpa, io, &s.settings, .{ .remote = s.remote, .where = .{ .base = s.base_path, .fetch_head = s.fetch_head }, .reach = options });
         return s;

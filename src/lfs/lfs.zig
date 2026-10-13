@@ -324,6 +324,9 @@ pub const Store = struct {
     /// `lfs`, or `lfs.storage`, `/`-separated. An absolute path stands on
     /// its own.
     root: []const u8,
+    /// What `core.sharedRepository` asks of the directories and objects
+    /// the store makes, as git-lfs gives them the repository's permissions.
+    shared: fs.Shared = .umask,
 
     /// The longest path `objectPath` writes.
     pub const max_path = std.Io.Dir.max_path_bytes;
@@ -387,7 +390,7 @@ pub const Store = struct {
     pub fn install(store: *const Store, io: Io, source: *Io.Reader, expected: ?*const Pointer) InstallError!Pointer {
         var tmp_dir_buf: [max_path]u8 = undefined;
         const tmp_dir = std.mem.print(&tmp_dir_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
-        try store.base.createDirPath(io, tmp_dir);
+        try fs.makeDirs(io, store.base, tmp_dir, store.shared);
         var name_buf: [64]u8 = undefined;
         const name = fs.tempName(io, &name_buf, "relic-");
         var tmp_buf: [max_path]u8 = undefined;
@@ -416,7 +419,8 @@ pub const Store = struct {
         var object_buf: [max_path]u8 = undefined;
         const object_path = try store.objectPath(&object_buf, &pointer.oid);
         if (try store.contains(io, &pointer)) return pointer;
-        try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
+        try fs.makeDirs(io, store.base, std.Io.Dir.path.dirnamePosix(object_path).?, store.shared);
+        fs.adjustShared(io, store.base, tmp_path, store.shared);
         try fs.rename(io, store.base, tmp_path, object_path);
         installed = true;
         return pointer;
@@ -594,6 +598,10 @@ pub const Lfs = struct {
     /// How `load` behaves.
     pub const Options = struct {
         common_dir: Io.Dir,
+        /// The repository's `core.sharedRepository`
+        /// (`Repository.sharedPermissions`), which the store's directories
+        /// and objects are made with.
+        shared: fs.Shared,
         work_dir: ?Io.Dir = null,
         /// Leave every pointer as it is on checkout.
         skip_smudge: bool = false,
@@ -655,7 +663,7 @@ pub const Lfs = struct {
             .gpa = gpa,
             .arena = arena_instance.state,
             .extensions = extensions,
-            .store = .{ .base = common_dir, .root = root },
+            .store = .{ .base = common_dir, .root = root, .shared = options.shared },
             .settings = .{
                 .fetch_include = fetch_include,
                 .fetch_exclude = fetch_exclude,
@@ -708,6 +716,7 @@ test "settings that outgrow the arena's first block are all freed with it" {
     defer tmp.cleanup();
     var lfs = try Lfs.load(gpa, io, &config, .{
         .common_dir = tmp.dir,
+        .shared = .umask,
         .work_dir = null,
     });
     defer lfs.deinit();
@@ -889,6 +898,7 @@ test "settings come from the configuration first and .lfsconfig second" {
     defer config.deinit();
     var l = try Lfs.load(gpa, io, &config, .{
         .common_dir = tmp.dir,
+        .shared = .umask,
         .work_dir = tmp.dir,
     });
     defer l.deinit();

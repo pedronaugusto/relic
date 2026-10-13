@@ -33,6 +33,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
+const fs = @import("../fs/fs.zig");
 const program = @import("../process.zig").program;
 const pkt_line = @import("../codec.zig").pkt_line;
 pub const native = @import("native.zig");
@@ -67,7 +68,9 @@ pub const Drivers = struct {
     };
     pub const LoadError = native.Error || config_mod.ValueError;
     pub const Error = LoadError;
-    pub const Directories = struct { common: Io.Dir, work: ?Io.Dir = null };
+    /// The repository's directories, and its `core.sharedRepository` for
+    /// what a native driver writes into them.
+    pub const Directories = struct { common: Io.Dir, work: ?Io.Dir = null, shared: fs.Shared };
 
     /// The drivers `config` defines, with no LFS of relic's own. Every
     /// string is copied, so the result does not borrow the configuration.
@@ -122,6 +125,7 @@ pub const Drivers = struct {
         if (options.native_provider) |provider| {
             drivers.native_driver = try provider.load(gpa, io, config, .{
                 .common_dir = directories.common,
+                .shared = directories.shared,
                 .work_dir = directories.work,
                 .skip_smudge = options.skip_smudge,
                 .config_text = options.config_text,

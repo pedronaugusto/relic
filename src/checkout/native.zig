@@ -134,6 +134,9 @@ pub const Provider = struct {
 
 pub const LoadOptions = struct {
     common_dir: Io.Dir,
+    /// The repository's `core.sharedRepository`, for what a driver writes
+    /// into it.
+    shared: fs.Shared,
     work_dir: ?Io.Dir = null,
     config_text: ?[]const u8 = null,
     skip_smudge: bool = false,

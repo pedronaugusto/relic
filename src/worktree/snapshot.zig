@@ -135,7 +135,7 @@ pub const Store = struct {
             const lfsconfig = try r.lfsconfigText(io);
             defer if (lfsconfig) |text| r.allocator().free(text);
             // Native LFS writes to the private store, never to the source.
-            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), .{ .common = store.dir, .work = wt }, .{ .config_text = lfsconfig, .native_provider = options.native_provider });
+            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), .{ .common = store.dir, .work = wt, .shared = r.sharedPermissions() }, .{ .config_text = lfsconfig, .native_provider = options.native_provider });
             // lfs.storage belongs to the source's storage policy. Its rules
             // still apply, but even an absolute storage path cannot redirect
             // a snapshot write out of the private store.

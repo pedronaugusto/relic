@@ -19,7 +19,7 @@ pub const Options = struct { fetch: ?lfs.Fetcher = null, skip_smudge: bool = fal
 pub fn load(gpa: Allocator, io: Io, repository: *repo.Repository, options: Options) Error!filter.Drivers {
     const text = try repository.lfsconfigText(io);
     defer if (text) |bytes| repository.allocator().free(bytes);
-    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = repository.commonDirectory(), .work = repository.workDirectory() }, .{
+    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = repository.commonDirectory(), .work = repository.workDirectory(), .shared = repository.sharedPermissions() }, .{
         .native_provider = provider(&options),
         .skip_smudge = options.skip_smudge,
         .config_text = text,
@@ -44,6 +44,7 @@ fn loadDriver(gpa: Allocator, io: Io, context: ?*const anyopaque, configuration:
         .fetch = with.fetch,
         .lfs = try lfs.Lfs.load(gpa, io, configuration, .{
             .common_dir = options.common_dir,
+            .shared = options.shared,
             .work_dir = options.work_dir,
             .skip_smudge = options.skip_smudge or with.skip_smudge or (isGitLfs(commands) and skipsSmudge(commands)),
             .lfsconfig = options.config_text,
@@ -299,11 +300,11 @@ test "native LFS selection owns settings, preserves custom commands and hash-onl
     defer tmp.cleanup();
     var cfg = try config.Config.parseText(gpa, "[filter \"lfs\"]\nprocess = git-lfs filter-process\n", .local);
     defer cfg.deinit();
-    var ordinary = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir }, .{});
+    var ordinary = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{});
     defer ordinary.deinit(io);
     try testing.expect(ordinary.resolve("lfs") == .program);
     var options: Options = .{};
-    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir }, .{ .native_provider = provider(&options) });
+    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
     options.skip_smudge = true;
     try testing.expect(!settings(&drivers).skip_smudge);
@@ -351,7 +352,7 @@ test "native LFS batches delayed files once and isolates session state" {
     };
     var fetch: Fetch = .{};
     const options: Options = .{ .fetch = .{ .context = &fetch, .fetchFn = Fetch.fetch } };
-    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir }, .{ .native_provider = provider(&options) });
+    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
     const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
     defer session.deinit(io);
@@ -393,7 +394,7 @@ test "native LFS propagates batched cancellation and releases pending state" {
     };
     var fetch: Fetch = .{};
     const options: Options = .{ .fetch = .{ .context = &fetch, .fetchFn = Fetch.fetch } };
-    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir }, .{ .native_provider = provider(&options) });
+    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
     const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
     var source: Io.Reader = .fixed("missing");
@@ -421,7 +422,7 @@ test "native LFS allocator failures release driver and pending delivery" {
             };
             var context: u8 = 0;
             const options: Options = .{ .fetch = .{ .context = &context, .fetchFn = fetch.run } };
-            var drivers = try filter.Drivers.load(gpa, testing.io, configuration, .{ .common = dir, .work = dir }, .{ .native_provider = provider(&options) });
+            var drivers = try filter.Drivers.load(gpa, testing.io, configuration, .{ .common = dir, .work = dir, .shared = .umask }, .{ .native_provider = provider(&options) });
             defer drivers.deinit(testing.io);
             const session = try drivers.native_driver.?.open(gpa, testing.io, .{ .wt = dir });
             defer session.deinit(testing.io);

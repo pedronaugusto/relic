@@ -1964,6 +1964,7 @@ fn copyLocal(
     defer remote.deinit(io);
     var remote_lfs = lfs.Lfs.load(gpa, io, remote.configuration(), .{
         .common_dir = remote.commonDirectory(),
+        .shared = remote.sharedPermissions(),
         .work_dir = null,
     }) catch return error.LfsLocalRemoteUnreadable;
     defer remote_lfs.deinit();

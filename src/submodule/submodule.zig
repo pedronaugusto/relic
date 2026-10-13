@@ -1244,12 +1244,7 @@ fn relocate(
     try validateGitDir(arena, io, repo.gitDirectory(), module.name, display, refusal);
     const target = try modulePath(arena, module.name);
     if (try fs.statAt(io, repo.gitDirectory(), target) != null) return refuse(refusal, display, target, error.GitDirExists);
-    if (std.Io.Dir.path.dirnamePosix(target)) |parent| {
-        repo.gitDirectory().createDirPath(io, parent) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
-    }
+    if (std.Io.Dir.path.dirnamePosix(target)) |parent| try fs.makeDirs(io, repo.gitDirectory(), parent, repo.sharedPermissions());
     try wt.rename(dot_git, repo.gitDirectory(), target, io);
 
     var work = try wt.openDir(io, path, .{});
@@ -1473,7 +1468,7 @@ fn populate(
         // git's `clone_submodule` under `--init`: a path that is there and
         // is not an empty directory is not cloned into.
         if (options.init and !try emptyOrAbsent(io, wt, path)) return refuse(options.refusal, display, url, error.DirectoryNotEmpty);
-        try repo.gitDirectory().createDirPath(io, target);
+        try fs.makeDirs(io, repo.gitDirectory(), target, repo.sharedPermissions());
         const dir = try repo.gitDirectory().openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
         transport.cloneFn(gpa, io, transport.context, url, dir) catch |err| switch (err) {

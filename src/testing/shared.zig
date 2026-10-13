@@ -183,3 +183,56 @@ test "a core.sharedRepository mode the owner cannot read and write refuses the r
     try std.testing.expectEqual(relic.repo.fs.Shared.umask, try relic.repo.fs.Shared.parse("false"));
     try std.testing.expectEqual(relic.repo.fs.Shared{ .mode = 0o666 }, try relic.repo.fs.Shared.parse("0666"));
 }
+
+/// The permission bits of `path` under `dir`.
+fn modeOf(dir: Io.Dir, path: []const u8) !u32 {
+    return switch (platstat.full(dir, path)) {
+        .found => |f| f.mode & 0o7777,
+        else => error.FileNotFound,
+    };
+}
+
+test "core.sharedRepository reaches the shallow file, MERGE_RR, and LFS objects and their directories, as git's index and fan-out" {
+    if (!std.Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_][]const u8{ "umask", "group", "all", "0640", "0660" }) |setting| {
+        var r = try testgit.Repo.init(gpa, io, &.{});
+        defer r.deinit();
+        try r.exec(io, &.{ "config", "core.sharedRepository", setting });
+        try r.exec(io, &.{ "config", "rerere.enabled", "true" });
+        try r.writeFile(io, "a.txt", "a\n");
+        try r.exec(io, &.{ "add", "a.txt" });
+        try r.exec(io, &.{ "commit", "-q", "-m", "one" });
+        var git_dir = try r.gitDir(io);
+        defer git_dir.close(io);
+        const file_mode = try modeOf(git_dir, "index");
+
+        var repo = try Repository.open(gpa, io, r.dir, .{});
+        defer repo.deinit(io);
+        const head = (try repo.refStore().resolve(gpa, io, "HEAD")).?;
+        defer gpa.free(head.name);
+        // The fan-out directory git made for the commit, after the setting.
+        var hex: [relic.hash.max_hex_len]u8 = undefined;
+        var fan_out_buf: [16]u8 = undefined;
+        const dir_mode = try modeOf(git_dir, try std.mem.print(&fan_out_buf, "objects/{s}", .{head.oid.hex(&hex)[0..2]}));
+        try repo.objectDatabase().shallow.put(gpa, head.oid, {});
+        try repo.writeShallow(io);
+        try std.testing.expectEqual(file_mode, try modeOf(git_dir, "shallow"));
+
+        var locked = try repo.lockIndex(io);
+        defer locked.deinit(io);
+        var outcome = try relic.merge.rerere.run(gpa, io, &repo, &locked.index, .{});
+        outcome.deinit();
+        try std.testing.expectEqual(file_mode, try modeOf(git_dir, "MERGE_RR"));
+
+        var lfs = try relic.lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
+        defer lfs.deinit();
+        var source: Io.Reader = .fixed("object\n");
+        const pointer = try lfs.store.install(io, &source, null);
+        var path_buf: [relic.lfs.Store.max_path]u8 = undefined;
+        const object_path = try lfs.store.objectPath(&path_buf, &pointer.oid);
+        try std.testing.expectEqual(file_mode & 0o666, try modeOf(git_dir, object_path) & 0o666);
+        try std.testing.expectEqual(dir_mode, try modeOf(git_dir, std.Io.Dir.path.dirnamePosix(object_path).?));
+    }
+}
