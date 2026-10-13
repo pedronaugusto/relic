@@ -24,13 +24,13 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.1#071738b5f733cb0b9ef83532bba6bd831a5dd540",
-            .hash = "airlock-0.3.1-rfvu6Bz1BQA9KJ2iSefdcu14GkFIAdFUjR1_DKQWMpNE",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.2#0af34d07caed0ae8443b07571333ae7ec7a6edcb",
+            .hash = "airlock-0.3.2-rfvu6Ob1BQBCOTYxQucy40Sc7Eluv0c8fGuA5cbMoihI",
         },
 
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.2.2#64c6c85ef069c973e47b3bee5d6111f7f5d0d96b",
-            .hash = "warp-0.2.2-JASxFbVKEQBqE5eOyPPosK2EqqC60G-Ns4ZfuIqAeXLz",
+            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.2.4#69e1307133a1ff5287153ace37cc81af94e22ed4",
+            .hash = "warp-0.2.4-JASxFfZPEQB723jNTEMLFi7hth2dUP2eZS6cUODiYYSb",
         },
 
         .cloak = .{
@@ -57,13 +57,13 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.4#7059ac4735977a3b2a6ba7629199d1d65efe5f57",
-            .hash = "preflight-0.4.4-LX1Zwg6UDgBdRptbzIdTBoXi521er_P0zhf25E4Uu-lJ",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.5#22e928fba1b897fd5888cc7ef92037b29e1d8e06",
+            .hash = "preflight-0.4.5-LX1ZwgeZDgD4Mmm3Cxjy04JQkPBUlcYKDQa9BPv4_GWW",
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.0#2c72de95e1701064fae7564bb991adb62c61313b",
-            .hash = "shakedown-0.4.0-BR8U4xDpFQAKO5NeqbUkAEbbDdba3UKJjmPA5nuZvF1Z",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.1#1fd9fd619b105a65c7478525dfd83f24004e1b8a",
+            .hash = "shakedown-0.4.1-BR8U4z_qFQBovSS7wrfzvzZO0Vb8tTGeXEXcEUBXzxQE",
         },
     },
 }
