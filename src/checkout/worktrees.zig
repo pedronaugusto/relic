@@ -280,9 +280,7 @@ pub fn add(
     const name = inputs.name;
     const dest_dir = inputs.dest_dir;
     const common_dir = refs.commonDir();
-    // The name becomes a directory under `worktrees/`, so it is held to
-    // the rules of a name written to the disk.
-    if (safe_path.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
+    try checkId(name);
     if (options.detach_at == null) {
         if (options.branch) |branch| {
             var ref_buf: [512]u8 = undefined;
@@ -413,6 +411,7 @@ pub fn remove(
     name: []const u8,
     options: RemoveOptions,
 ) Self.Error!void {
+    try checkId(name);
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -479,8 +478,17 @@ pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!Pru
     return outcome;
 }
 
+/// A worktree's id names a directory under `worktrees/`, so every entry
+/// point holds it to the rules of a name written to the disk: one
+/// component, never `.` or `..`, nothing a platform would take for another
+/// name.
+fn checkId(name: []const u8) ErrorNamespace.Error!void {
+    if (safe_path.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
+}
+
 /// Put a `locked` file beside a worktree, with an optional reason.
 pub fn lock(io: Io, common_dir: Io.Dir, name: []const u8, reason: []const u8) Self.Error!void {
+    try checkId(name);
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -491,6 +499,7 @@ pub fn lock(io: Io, common_dir: Io.Dir, name: []const u8, reason: []const u8) Se
 
 /// Remove the `locked` file.
 pub fn unlock(io: Io, common_dir: Io.Dir, name: []const u8) Self.Error!void {
+    try checkId(name);
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -513,6 +522,7 @@ pub fn repair(
     name: []const u8,
     dest_dir: Io.Dir,
 ) Self.Error!void {
+    try checkId(name);
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -550,6 +560,8 @@ pub fn move(
     const name = inputs.name;
     const new_parent = inputs.new_parent;
     const new_name = inputs.new_name;
+    try checkId(name);
+    try checkId(new_name);
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{}) catch return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
     var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;
@@ -567,4 +579,14 @@ pub fn move(
     var moved = try new_parent.openDir(io, new_name, .{ .iterate = true });
     defer moved.close(io);
     try repair(io, common_dir, name, moved);
+}
+
+test "every entry point refuses a worktree id that is not one name under worktrees/" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "..", ".", "a/b", "../escape", "" }) |id| {
+        try std.testing.expectError(error.InvalidWorktreeName, lock(io, tmp.dir, id, ""));
+        try std.testing.expectError(error.InvalidWorktreeName, unlock(io, tmp.dir, id));
+    }
 }
