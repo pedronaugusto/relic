@@ -1,6 +1,6 @@
 .{
     .name = .relic,
-    .version = "0.4.2",
+    .version = "0.5.0",
     .dependencies = .{
         .conduit = .{
             .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.7.0#f4c09c1f830581c87a9f97f5d5cedcf32183c7a9",

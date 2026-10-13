@@ -6,9 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-13
+
 ### Breaking
 
 - `wire.clientcert.Files` takes `cert_format` and `key_format`, a `clientcert.Format` (`pem` or `der`) that `Format.parse` reads from `http.sslCertType` and `http.sslKeyType`, where it took the setting's text. `wire.hidden.Service` is `wire.connection.Service`, the one enum of the two services.
+
+### Changed
+
+- Pins conduit 0.7.0, sweep 0.2.2, parallax 0.2.2, uplink 0.2.5, airlock 0.3.1, warp 0.2.2, cloak 0.3.0, strand 0.8.3, preflight 0.4.2 and shakedown 0.3.2.
 
 ## [0.4.2] - 2026-10-13
 
@@ -994,7 +1000,8 @@ Decisions worth knowing before reading the source:
 - **`working-tree-encoding` and a required filter are refusals, with the
   value.** Passing the bytes through would write a blob git would not write.
 
-[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/pedronaugusto/relic/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/pedronaugusto/relic/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/pedronaugusto/relic/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/pedronaugusto/relic/compare/v0.3.0...v0.4.0
