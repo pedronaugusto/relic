@@ -8,4 +8,5 @@ pub const encoding = @import("text/encoding.zig");
 pub const ere = @import("text/ere.zig");
 pub const glob = @import("text/glob.zig");
 pub const percent = @import("text/percent.zig");
+pub const quote = @import("text/quote.zig");
 pub const unicode_width = @import("text/unicode_width.zig");

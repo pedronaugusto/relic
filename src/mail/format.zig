@@ -3,6 +3,7 @@
 //! `date.c`, `pretty.c` and `utf8.c` produce them.
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 
 const unicode_width = @import("../text.zig").unicode_width;
@@ -117,13 +118,9 @@ fn isPrint(c: u8) bool {
     return c >= 0x20 and c < 0x7f;
 }
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == 0x0b or c == 0x0c or c == '\r';
-}
-
 fn isRfc2047Special(c: u8, kind: Rfc2047Kind) bool {
     if (nonAscii(c) or !isPrint(c)) return true;
-    if (isSpace(c) or c == '=' or c == '?' or c == '_') return true;
+    if (ctype.isSpace(c) or c == '=' or c == '?' or c == '_') return true;
     if (kind != .address) return false;
     return !(std.ascii.isAlphanumeric(c) or c == '!' or c == '*' or c == '+' or c == '-' or c == '/');
 }
@@ -185,7 +182,7 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
         while (true) {
             while (escapeLen(text[pos..])) |skip| pos += skip;
             const c: u8 = if (pos < text.len) text[pos] else 0;
-            if (c == 0 or isSpace(c)) {
+            if (c == 0 or ctype.isSpace(c)) {
                 if (w <= width or space == null) {
                     var start = bol;
                     if (c == 0 and pos == start) return;
@@ -205,7 +202,7 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                             try out.append(gpa, '\n');
                             // new_line
                             try out.append(gpa, '\n');
-                            pos = next + @intFromBool(isSpace(nc));
+                            pos = next + @intFromBool(ctype.isSpace(nc));
                             bol = pos;
                             space = null;
                             indent = indent2;
@@ -213,7 +210,7 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                             continue;
                         } else if (!std.ascii.isAlphanumeric(nc)) {
                             try out.append(gpa, '\n');
-                            pos = next + @intFromBool(next < text.len and isSpace(text[next]));
+                            pos = next + @intFromBool(next < text.len and ctype.isSpace(text[next]));
                             bol = pos;
                             space = null;
                             indent = indent2;
@@ -229,7 +226,7 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                     // new_line
                     try out.append(gpa, '\n');
                     const s = space.?;
-                    pos = s + @intFromBool(s < text.len and isSpace(text[s]));
+                    pos = s + @intFromBool(s < text.len and ctype.isSpace(text[s]));
                     bol = pos;
                     space = null;
                     indent = indent2;

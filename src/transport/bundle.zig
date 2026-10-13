@@ -23,6 +23,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -128,7 +129,7 @@ pub const Header = struct {
             // C reads the line up to its first NUL; `strbuf_rtrim` then
             // takes whitespace off the end of the whole line.
             var text = line.items;
-            while (text.len > 0 and isSpace(text[text.len - 1])) text = text[0 .. text.len - 1];
+            while (text.len > 0 and ctype.isSpace(text[text.len - 1])) text = text[0 .. text.len - 1];
             if (std.mem.findScalar(u8, text, 0)) |nul| text = text[0..nul];
 
             if (h.version == .v3 and text.len > 0 and text[0] == '@') {
@@ -166,7 +167,7 @@ pub const Header = struct {
                 break :blk Oid.parse(h.object_format, lower[0..hex_len]) catch return error.MalformedBundleHeader;
             };
             const rest = text[hex_len..];
-            if (rest.len != 0 and !isSpace(rest[0])) return error.MalformedBundleHeader;
+            if (rest.len != 0 and !ctype.isSpace(rest[0])) return error.MalformedBundleHeader;
             if (is_prereq) {
                 try prerequisites.append(a, .{ .oid = oid });
             } else {
@@ -236,10 +237,6 @@ fn readLine(a: Allocator, r: *Io.Reader, line: *std.ArrayList(u8)) (Allocator.Er
         try line.append(a, byte);
         if (byte == '\n') return true;
     }
-}
-
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
 /// Errors from opening a bundle file.

@@ -17,6 +17,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
@@ -74,10 +75,6 @@ fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
 }
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == 0x0b or c == 0x0c or c == '\r';
-}
-
 /// git's `is_from_line`: `From ` and, somewhere before the end, a time
 /// with its colons and a year after 1990.
 pub fn isFromLine(line: []const u8) bool {
@@ -94,7 +91,7 @@ pub fn isFromLine(line: []const u8) bool {
         !isDigit(line[colon + 1]) or !isDigit(line[colon + 2])) return false;
     // the year: strtol from three past the colon
     var i = colon + 3;
-    while (i < len and isSpace(line[i])) i += 1;
+    while (i < len and ctype.isSpace(line[i])) i += 1;
     var neg = false;
     if (i < len and (line[i] == '-' or line[i] == '+')) {
         neg = line[i] == '-';
@@ -121,7 +118,7 @@ pub fn split(gpa: Allocator, mbox: []const u8, options: SplitOptions) Self.Error
     var messages: std.ArrayList([]const u8) = .empty;
     var at: usize = 0;
     // leading whitespace before the first message
-    while (at < mbox.len and isSpace(mbox[at])) at += 1;
+    while (at < mbox.len and ctype.isSpace(mbox[at])) at += 1;
     if (at >= mbox.len) return .{ .arena = arena, .messages = &.{} };
     var line = nextWholeLine(mbox, &at).?;
     var done = false;
@@ -273,13 +270,13 @@ const State = struct {
 
 fn rtrim(s: []const u8) []const u8 {
     var end = s.len;
-    while (end > 0 and isSpace(s[end - 1])) end -= 1;
+    while (end > 0 and ctype.isSpace(s[end - 1])) end -= 1;
     return s[0..end];
 }
 
 fn trim(s: []const u8) []const u8 {
     var start: usize = 0;
-    while (start < s.len and isSpace(s[start])) start += 1;
+    while (start < s.len and ctype.isSpace(s[start])) start += 1;
     return rtrim(s[start..]);
 }
 
@@ -293,10 +290,10 @@ fn cleanupSpace(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) {
-        if (isSpace(s[i])) {
+        if (ctype.isSpace(s[i])) {
             try out.append(a, ' ');
             i += 1;
-            while (i < s.len and isSpace(s[i])) i += 1;
+            while (i < s.len and ctype.isSpace(s[i])) i += 1;
         } else {
             try out.append(a, s[i]);
             i += 1;
@@ -348,7 +345,7 @@ fn skipHeader(line: []const u8, hdr: []const u8) ?[]const u8 {
     if (rest.len == 0 or rest[0] != ':') return null;
     rest = rest[1..];
     var i: usize = 0;
-    while (i < rest.len and isSpace(rest[i])) i += 1;
+    while (i < rest.len and ctype.isSpace(rest[i])) i += 1;
     return rest[i..];
 }
 
@@ -459,7 +456,7 @@ fn decodeHeader(s: *State, it: []const u8) Error![]const u8 {
         var ep = in + ep_rel;
         if (in != ep) {
             var scan = in;
-            while (scan < ep and isSpace(it[scan])) scan += 1;
+            while (scan < ep and ctype.isSpace(it[scan])) scan += 1;
             if (scan != ep or in == 0) try out.appendSlice(a, it[in..ep]);
         }
         ep += 2;
@@ -582,12 +579,12 @@ pub fn patchbreak(line: []const u8) bool {
     if (line.len < 4) return false;
     if (std.mem.startsWith(u8, line, "---")) {
         // git reads the NUL past a four-byte line, which is no space.
-        if (line[3] == ' ' and (line.len == 4 or !isSpace(line[4]))) return true;
+        if (line[3] == ' ' and (line.len == 4 or !ctype.isSpace(line[4]))) return true;
         var i: usize = 3;
         while (i < line.len) : (i += 1) {
             const c = line[i];
             if (c == '\n') return true;
-            if (!isSpace(c)) break;
+            if (!ctype.isSpace(c)) break;
         }
         return false;
     }
@@ -605,7 +602,7 @@ pub fn isScissorsLine(line_raw: []const u8) bool {
     var in_perforation = false;
     var c: usize = 0;
     while (c < line.len) : (c += 1) {
-        if (isSpace(line[c])) {
+        if (ctype.isSpace(line[c])) {
             if (in_perforation) {
                 perforation += 1;
                 gap += 1;
@@ -664,8 +661,8 @@ fn checkInbodyHeader(s: *State, line: []const u8) Error!bool {
         return true;
     }
     try flushInbodyHeaderAccum(s);
-    if (std.mem.startsWith(u8, line, ">From") and line.len > 5 and isSpace(line[5])) return isFormatPatchSeparator(line[1..]);
-    if (std.mem.startsWith(u8, line, "[PATCH]") and line.len > 7 and isSpace(line[7])) {
+    if (std.mem.startsWith(u8, line, ">From") and line.len > 5 and ctype.isSpace(line[5])) return isFormatPatchSeparator(line[1..]);
+    if (std.mem.startsWith(u8, line, "[PATCH]") and line.len > 7 and ctype.isSpace(line[7])) {
         s.s_hdr[1] = try s.a.dupe(u8, line);
         return true;
     }
@@ -863,7 +860,7 @@ fn cleanupSubject(a: Allocator, subject_in: []const u8, keep_non_patch: bool) Al
                     subject.replaceRangeAssumeCapacity(at, remove, "");
                 } else {
                     at += remove;
-                    if (at < subject.items.len and isSpace(subject.items[at])) at += 1;
+                    if (at < subject.items.len and ctype.isSpace(subject.items[at])) at += 1;
                 }
                 continue;
             },
@@ -895,7 +892,7 @@ fn handleFrom(s: *State, from: []const u8) Error!void {
     if (s.email.items.len != 0 and std.mem.findScalarPos(u8, f.items, at + 1, '@') != null) return;
     while (at > 0) {
         const c = f.items[at - 1];
-        if (isSpace(c)) break;
+        if (ctype.isSpace(c)) break;
         if (c == '<') {
             f.items[at - 1] = ' ';
             break;
@@ -982,7 +979,7 @@ pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Self.Error!I
     const a = result.arena.allocator();
     var s: State = .{ .a = a, .options = options, .input = mail };
     // leading whitespace, and nothing else, is an empty patch
-    while (s.pos < mail.len and isSpace(mail[s.pos])) s.pos += 1;
+    while (s.pos < mail.len and ctype.isSpace(mail[s.pos])) s.pos += 1;
     if (s.pos >= mail.len) return error.EmptyPatch;
     var rest: ?[]const u8 = null;
     while (try readOneHeaderLine(&s, &rest)) |line| _ = try checkHeader(&s, line, .primary, true);

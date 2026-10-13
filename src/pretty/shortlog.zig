@@ -21,6 +21,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -270,14 +271,14 @@ pub const Shortlog = struct {
         if (s.options.summary) return;
 
         var oneline = oneline_in;
-        while (oneline.len > 0 and isSpace(oneline[0])) oneline = oneline[1..];
+        while (oneline.len > 0 and ctype.isSpace(oneline[0])) oneline = oneline[1..];
         const eol = std.mem.findScalar(u8, oneline, '\n') orelse oneline.len;
         if (std.mem.startsWith(u8, oneline, "[PATCH")) {
             if (std.mem.findScalar(u8, oneline, ']')) |eob| {
                 if (eob < eol) oneline = oneline[eob + 1 ..];
             }
         }
-        while (oneline.len > 0 and isSpace(oneline[0]) and oneline[0] != '\n') oneline = oneline[1..];
+        while (oneline.len > 0 and ctype.isSpace(oneline[0]) and oneline[0] != '\n') oneline = oneline[1..];
         const subject = try message.onelineSubject(s.arena.allocator(), oneline);
         try record.subjects.append(s.gpa, subject);
     }
@@ -320,14 +321,10 @@ pub const Shortlog = struct {
     }
 };
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
 /// `split_ident_line`'s name: up to the `<`, without whitespace after it.
 fn trimName(name: []const u8) []const u8 {
     var end = name.len;
-    while (end > 0 and isSpace(name[end - 1])) end -= 1;
+    while (end > 0 and ctype.isSpace(name[end - 1])) end -= 1;
     return name[0..end];
 }
 
@@ -388,7 +385,7 @@ pub fn addWrappedText(gpa: Allocator, text: []const u8, out: *std.ArrayList(u8),
                 i += skip;
             }
             const c = at(text, i);
-            if (c == 0 or isSpace(c)) {
+            if (c == 0 or ctype.isSpace(c)) {
                 var new_line = false;
                 if (w <= width or space == null) {
                     var start = bol;
@@ -423,7 +420,7 @@ pub fn addWrappedText(gpa: Allocator, text: []const u8, out: *std.ArrayList(u8),
                 if (new_line) {
                     try out.append(gpa, '\n');
                     const sp = space.?;
-                    i = sp + @intFromBool(isSpace(at(text, sp)));
+                    i = sp + @intFromBool(ctype.isSpace(at(text, sp)));
                     bol = i;
                     space = null;
                     indent = indent2;

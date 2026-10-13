@@ -14,6 +14,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.config.<name>`.
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -1161,7 +1162,7 @@ pub const Config = struct {
                 })
             else blk: {
                 var name_start: usize = 0;
-                while (name_start < line.text.len and isSpace(line.text[name_start])) name_start += 1;
+                while (name_start < line.text.len and ctype.isSpace(line.text[name_start])) name_start += 1;
                 const name_end = name_start + line.name.len;
                 break :blk try config.gpa.print("{s} = {s}{s}", .{
                     line.text[0..name_end],
@@ -1550,12 +1551,6 @@ pub fn escapeValue(gpa: Allocator, value: []const u8) Allocator.Error![]u8 {
     return out.toOwnedSlice();
 }
 
-/// git's `isspace`, which is these four and not the vertical tab or the form
-/// feed.
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
 /// What git drops at either end of an unquoted value: its `isspace` short of
 /// the line break, which ends the value instead.
 fn isValueSpace(c: u8) bool {
@@ -1591,7 +1586,7 @@ fn parseLines(gpa: Allocator, names: Allocator, text: []const u8, out: *std.Arra
             start = offset;
             continue;
         }
-        if (isSpace(c)) {
+        if (ctype.isSpace(c)) {
             offset += 1;
             continue;
         }
@@ -1703,7 +1698,7 @@ fn parseSectionHeader(names: Allocator, text: []const u8, at: usize) ParseError!
     while (true) : (i += 1) {
         if (i >= text.len) return error.MalformedSectionHeader;
         const c = text[i];
-        if (c == ']' or isSpace(c)) break;
+        if (c == ']' or ctype.isSpace(c)) break;
         if (!isKeyChar(c) and c != '.') return error.MalformedSectionHeader;
     }
     const spelled = text[at + 1 .. i];
@@ -1723,7 +1718,7 @@ fn parseSectionHeader(names: Allocator, text: []const u8, at: usize) ParseError!
         };
     }
 
-    while (i < text.len and isSpace(text[i])) : (i += 1) {
+    while (i < text.len and ctype.isSpace(text[i])) : (i += 1) {
         if (text[i] == '\n') return error.MalformedSectionHeader;
     }
     if (i >= text.len or text[i] != '"') return error.MalformedSectionHeader;

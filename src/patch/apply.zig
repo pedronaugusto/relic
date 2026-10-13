@@ -25,6 +25,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -369,14 +370,10 @@ const Line = struct {
     flag: u8,
 };
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == 0x0b or c == 0x0c or c == '\r';
-}
-
 fn hashLine(bytes: []const u8) u24 {
     var h: u32 = 0;
     for (bytes) |c| {
-        if (!isSpace(c)) h = h *% 3 +% c;
+        if (!ctype.isSpace(c)) h = h *% 3 +% c;
     }
     return @truncate(h);
 }
@@ -898,10 +895,10 @@ fn fuzzyMatchLines(s1_in: []const u8, s2_in: []const u8) bool {
     var i: usize = 0;
     var j: usize = 0;
     while (i < s1.len and j < s2.len) {
-        if (isSpace(s1[i])) {
-            if (!isSpace(s2[j])) return false;
-            while (i < s1.len and isSpace(s1[i])) i += 1;
-            while (j < s2.len and isSpace(s2[j])) j += 1;
+        if (ctype.isSpace(s1[i])) {
+            if (!ctype.isSpace(s2[j])) return false;
+            while (i < s1.len and ctype.isSpace(s1[i])) i += 1;
+            while (j < s2.len and ctype.isSpace(s2[j])) j += 1;
         } else {
             if (s1[i] != s2[j]) return false;
             i += 1;
@@ -965,7 +962,7 @@ fn lineByLineFuzzyMatch(gpa: Allocator, img: *const Image, preimage: *Image, pos
     }
     const preimage_eof = preoff;
     while (i < preimage.lines.items.len) : (i += 1) preoff += preimage.lines.items[i].len;
-    for (preimage.buf.items[preimage_eof..preoff]) |c| if (!isSpace(c)) return false;
+    for (preimage.buf.items[preimage_eof..preoff]) |c| if (!ctype.isSpace(c)) return false;
     var fixed: std.ArrayList(u8) = .empty;
     defer fixed.deinit(gpa);
     try fixed.appendSlice(gpa, img.buf.items[current .. current + imgoff]);
@@ -1011,7 +1008,7 @@ fn matchFragment(
         while (i < preimage_limit) : (i += 1) end += preimage.lines.items[i].len;
         var all_space = true;
         for (preimage.buf.items[0..end]) |c| {
-            if (!isSpace(c)) {
+            if (!ctype.isSpace(c)) {
                 all_space = false;
                 break;
             }
@@ -1043,7 +1040,7 @@ fn matchFragment(
         const fixstart = fixed.items.len;
         const oldlen = preimage.lines.items[i].len;
         _ = try whitespace.fixCopy(gpa, &fixed, preimage.buf.items[orig .. orig + oldlen], ws_rule);
-        for (fixed.items[fixstart..]) |c| if (!isSpace(c)) return false;
+        for (fixed.items[fixstart..]) |c| if (!ctype.isSpace(c)) return false;
         orig += oldlen;
     }
     try updatePrePostImages(gpa, preimage, postimage, fixed.items);

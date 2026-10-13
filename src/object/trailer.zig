@@ -15,6 +15,7 @@
 
 const fs = @import("../fs/fs.zig");
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -226,11 +227,6 @@ pub const Commands = struct {
 // reading
 // ---------------------------------------------------------------------------
 
-/// git's `isspace`: space, tab, newline and carriage return.
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
 fn charAt(s: []const u8, i: usize) u8 {
     return if (i < s.len) s[i] else 0;
 }
@@ -250,8 +246,8 @@ fn equalPrefixIgnoreCase(a: []const u8, b: []const u8, n: usize) bool {
 fn trim(text: []const u8) []const u8 {
     var start: usize = 0;
     var end = text.len;
-    while (start < end and isSpace(text[start])) start += 1;
-    while (end > start and isSpace(text[end - 1])) end -= 1;
+    while (start < end and ctype.isSpace(text[start])) start += 1;
+    while (end > start and ctype.isSpace(text[end - 1])) end -= 1;
     return text[start..end];
 }
 
@@ -312,7 +308,7 @@ fn lastLine(buf: []const u8, len: usize) ?usize {
 fn isBlankLine(line: []const u8) bool {
     for (line) |c| {
         if (c == '\n') return true;
-        if (!isSpace(c)) return false;
+        if (!ctype.isSpace(c)) return false;
     }
     return true;
 }
@@ -370,7 +366,7 @@ fn endOfLogMessage(input_in: []const u8, no_divider: bool, comment: []const u8) 
     if (!no_divider) {
         var s: usize = 0;
         while (s < input.len) : (s = nextLine(input, s)) {
-            if (std.mem.startsWith(u8, input[s..], "---") and isSpace(charAt(input, s + 3))) {
+            if (std.mem.startsWith(u8, input[s..], "---") and ctype.isSpace(charAt(input, s + 3))) {
                 end = s;
                 break;
             }
@@ -427,7 +423,7 @@ fn blockStart(settings: Settings, buf: []const u8, len: usize) usize {
             possible_continuation_lines = 0;
             recognized_prefix = true;
         } else if (findSeparator(buf[l..], settings.separators)) |sep| {
-            if (sep >= 1 and !isSpace(bol[0])) {
+            if (sep >= 1 and !ctype.isSpace(bol[0])) {
                 trailer_lines += 1;
                 possible_continuation_lines = 0;
                 if (!recognized_prefix) {
@@ -438,13 +434,13 @@ fn blockStart(settings: Settings, buf: []const u8, len: usize) usize {
                         }
                     }
                 }
-            } else if (isSpace(bol[0])) {
+            } else if (ctype.isSpace(bol[0])) {
                 possible_continuation_lines += 1;
             } else {
                 non_trailer_lines += 1 + possible_continuation_lines;
                 possible_continuation_lines = 0;
             }
-        } else if (isSpace(bol[0])) {
+        } else if (ctype.isSpace(bol[0])) {
             possible_continuation_lines += 1;
         } else {
             non_trailer_lines += 1 + possible_continuation_lines;
@@ -480,7 +476,7 @@ pub fn block(arena: Allocator, settings: Settings, msg_in: []const u8, options: 
         const next = @min(nextLine(msg, at), end);
         const piece = msg[at..next];
         at = next;
-        if (last != null and isSpace(piece[0])) {
+        if (last != null and ctype.isSpace(piece[0])) {
             lines.items[last.?] = try std.mem.concat(arena, u8, &.{ lines.items[last.?], piece });
             continue;
         }
@@ -504,7 +500,7 @@ fn unfold(arena: Allocator, value: []const u8) Allocator.Error![]const u8 {
         var c = value[i];
         i += 1;
         if (c == '\n') {
-            while (i < value.len and isSpace(value[i])) i += 1;
+            while (i < value.len and ctype.isSpace(value[i])) i += 1;
             c = ' ';
         }
         try out.append(arena, c);
@@ -589,7 +585,7 @@ fn lastNonSpace(s: []const u8) u8 {
     var i = s.len;
     while (i > 0) {
         i -= 1;
-        if (!isSpace(s[i])) return s[i];
+        if (!ctype.isSpace(s[i])) return s[i];
     }
     return 0;
 }
@@ -630,7 +626,7 @@ fn formatItems(gpa: Allocator, settings: Settings, options: Options, items: []co
             if (options.separator) |sep| if (out.items.len != origlen) try out.appendSlice(gpa, sep);
             try out.appendSlice(gpa, item.value);
             if (options.separator != null) {
-                while (out.items.len > 0 and isSpace(out.items[out.items.len - 1])) _ = out.pop();
+                while (out.items.len > 0 and ctype.isSpace(out.items[out.items.len - 1])) _ = out.pop();
             } else try out.append(gpa, '\n');
         }
     }

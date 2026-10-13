@@ -28,6 +28,7 @@ const signing = @import("../object/signing.zig");
 const commit_hooks = @import("commit_hooks.zig");
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -324,7 +325,7 @@ fn restIsEmpty(text: []const u8, start: usize) bool {
             continue;
         }
         while (i < eol) : (i += 1) {
-            if (!isSpace(text[i])) return false;
+            if (!ctype.isSpace(text[i])) return false;
         }
         i += 1;
     }
@@ -364,14 +365,10 @@ fn isEmpty(text: []const u8, cleanup: Cleanup, comment: []const u8) bool {
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, comment)) continue;
         for (line) |c| {
-            if (!isSpace(c)) return false;
+            if (!ctype.isSpace(c)) return false;
         }
     }
     return true;
-}
-
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
 /// git's `stripspace`: trailing whitespace off every line, runs of blank
@@ -392,7 +389,7 @@ pub fn stripspace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Alloca
             if (std.mem.startsWith(u8, line, prefix)) continue;
         }
         var kept = line.len;
-        while (kept > 0 and isSpace(line[kept - 1])) kept -= 1;
+        while (kept > 0 and ctype.isSpace(line[kept - 1])) kept -= 1;
         if (kept != 0) {
             if (empties > 0 and out.items.len > 0) try out.append(gpa, '\n');
             empties = 0;

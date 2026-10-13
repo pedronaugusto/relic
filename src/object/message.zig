@@ -11,6 +11,7 @@
 //! takes arbitrary bytes.
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
@@ -48,12 +49,6 @@ pub const cut_line = "------------------------ >8 ------------------------";
 /// The prefix of the line `-x` adds.
 pub const cherry_picked_prefix = "(cherry picked from commit ";
 
-/// git's `isspace`, which is narrower than C's: no vertical tab and no form
-/// feed.
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
 /// `strbuf_stripspace`: trailing whitespace off every line, comment lines
 /// out when `comment` is given, blank lines off both ends, and a run of
 /// blank lines inside collapsed to one. What remains ends in a newline, or
@@ -71,7 +66,7 @@ pub fn stripSpace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Alloca
             if (std.mem.startsWith(u8, line, prefix)) continue;
         }
         var len = line.len;
-        while (len > 0 and isSpace(line[len - 1])) len -= 1;
+        while (len > 0 and ctype.isSpace(line[len - 1])) len -= 1;
         if (len == 0) {
             empties += 1;
             continue;
@@ -97,7 +92,7 @@ pub fn cleanup(gpa: Allocator, text: []const u8, mode: Cleanup, comment: []const
 fn isBlankLine(line: []const u8) bool {
     for (line) |c| {
         if (c == '\n') return true;
-        if (!isSpace(c)) return false;
+        if (!ctype.isSpace(c)) return false;
     }
     return true;
 }
@@ -213,7 +208,7 @@ pub fn onelineSubject(gpa: Allocator, msg: []const u8) Allocator.Error![]u8 {
     while (at < msg.len) {
         const next = nextLine(msg, at);
         var line = msg[at..next];
-        while (line.len > 0 and isSpace(line[line.len - 1])) line = line[0 .. line.len - 1];
+        while (line.len > 0 and ctype.isSpace(line[line.len - 1])) line = line[0 .. line.len - 1];
         if (line.len == 0) break;
         if (out.items.len != 0) try out.append(gpa, ' ');
         try out.appendSlice(gpa, line);

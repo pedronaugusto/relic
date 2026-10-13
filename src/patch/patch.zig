@@ -20,6 +20,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -267,18 +268,12 @@ fn startsWith(buf: []const u8, prefix: []const u8) bool {
     return std.mem.startsWith(u8, buf, prefix);
 }
 
-fn isSpace(c: u8) bool {
-    // git's isspace: space, tab, newline, vertical tab, form feed, carriage
-    // return
-    return c == ' ' or c == '\t' or c == '\n' or c == 0x0b or c == 0x0c or c == '\r';
-}
-
 fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
 }
 
 fn isDevNull(s: []const u8) bool {
-    return startsWith(s, "/dev/null") and s.len > 9 and isSpace(s[9]);
+    return startsWith(s, "/dev/null") and s.len > 9 and ctype.isSpace(s[9]);
 }
 
 const term_space = 1;
@@ -413,7 +408,7 @@ fn findNameCommon(p: *Parser, line: []const u8, def: ?[]const u8, p_value: usize
     const limit = end orelse line.len;
     while (i < limit) {
         const c = line[i];
-        if (end == null and isSpace(c)) {
+        if (end == null and ctype.isSpace(c)) {
             if (c == '\n') break;
             if (nameTerminate(c, terminate)) break;
         }
@@ -582,7 +577,7 @@ fn gitHeaderName(p: *Parser, full_line: []const u8) Allocator.Error!?[]const u8 
         const first = (try c_quote.unquote(p.a, line)) orelse return null;
         const first_name = skipTreePrefix(p.p_value, first.name) orelse return null;
         var second = first.consumed;
-        while (second < line.len and isSpace(line[second])) second += 1;
+        while (second < line.len and ctype.isSpace(line[second])) second += 1;
         if (second >= line.len) return null;
         if (line[second] == '"') {
             const sp = (try c_quote.unquote(p.a, line[second..])) orelse return null;
@@ -601,7 +596,7 @@ fn gitHeaderName(p: *Parser, full_line: []const u8) Allocator.Error!?[]const u8 
     if (std.mem.findScalar(u8, name, '"')) |q| {
         const sp = (try c_quote.unquote(p.a, name[q..])) orelse return null;
         const np = skipTreePrefix(p.p_value, sp.name) orelse return null;
-        if (np.len < q and std.mem.startsWith(u8, name, np) and isSpace(name[np.len])) return np;
+        if (np.len < q and std.mem.startsWith(u8, name, np) and ctype.isSpace(name[np.len])) return np;
         return null;
     }
     const eol = std.mem.findScalar(u8, name, '\n') orelse return null;
@@ -627,7 +622,7 @@ fn parseModeLine(p: *Parser, rest: []const u8, line: usize) Error!Mode {
     while (i < rest.len and rest[i] >= '0' and rest[i] <= '7') : (i += 1) {
         mode = mode *% 8 +% (rest[i] - '0');
     }
-    if (i == 0 or i >= rest.len or !isSpace(rest[i])) return p.fail(error.InvalidMode, line);
+    if (i == 0 or i >= rest.len or !ctype.isSpace(rest[i])) return p.fail(error.InvalidMode, line);
     return canonMode(mode);
 }
 
@@ -671,7 +666,7 @@ const optable = [_]struct { str: []const u8, kind: HeaderLine }{
 
 fn strtoulPercent(s: []const u8) ?u8 {
     var i: usize = 0;
-    while (i < s.len and isSpace(s[i])) i += 1;
+    while (i < s.len and ctype.isSpace(s[i])) i += 1;
     var v: u64 = 0;
     const start = i;
     while (i < s.len and isDigit(s[i])) : (i += 1) {
@@ -961,7 +956,7 @@ fn parseBinaryHunk(p: *Parser, at: *usize) Error!?BinaryHunk {
     var origlen: usize = 0;
     {
         var i: usize = 0;
-        while (i < orig.len and isSpace(orig[i]) and orig[i] != '\n') i += 1;
+        while (i < orig.len and ctype.isSpace(orig[i]) and orig[i] != '\n') i += 1;
         _ = parseNum(orig[i..], &origlen);
     }
     p.linenr += 1;

@@ -21,6 +21,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const quote = @import("../text.zig").quote;
 const ctype = @import("../text.zig").ctype;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
@@ -317,58 +318,6 @@ fn detectFormat(input: []const u8) Error!Format {
     return error.PatchFormatUnknown;
 }
 
-/// git's `sq_quote_buf`.
-fn sqQuote(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
-    try out.append(a, '\'');
-    for (text) |c| {
-        if (c == '\'' or c == '!') {
-            try out.appendSlice(a, "'\\");
-            try out.append(a, c);
-            try out.append(a, '\'');
-        } else try out.append(a, c);
-    }
-    try out.append(a, '\'');
-}
-
-/// git's `sq_dequote_step` over a whole string: the words, or `null`.
-fn sqDequoteWords(a: Allocator, text: []const u8) Allocator.Error!?[]const []const u8 {
-    var words: std.ArrayList([]const u8) = .empty;
-    if (text.len == 0) return words.items;
-    var at: usize = 0;
-    while (true) {
-        if (at >= text.len or text[at] != '\'') return null;
-        var word: std.ArrayList(u8) = .empty;
-        var i = at + 1;
-        var after: ?usize = null;
-        while (true) {
-            if (i >= text.len) return null;
-            const c = text[i];
-            if (c != '\'') {
-                try word.append(a, c);
-                i += 1;
-                continue;
-            }
-            // out of the quotes
-            i += 1;
-            if (i >= text.len) break;
-            if (text[i] == '\\' and i + 2 < text.len and (text[i + 1] == '\'' or text[i + 1] == '!') and text[i + 2] == '\'') {
-                try word.append(a, text[i + 1]);
-                i += 3;
-                continue;
-            }
-            after = i;
-            break;
-        }
-        try words.append(a, word.items);
-        const n = after orelse break;
-        if (!ctype.isSpace(text[n])) return null;
-        at = n;
-        while (at < text.len and ctype.isSpace(text[at])) at += 1;
-        if (at >= text.len) return null;
-    }
-    return words.items;
-}
-
 /// The `git apply` words `options` stand for, in the order `git am`
 /// collects them.
 fn applyWords(a: Allocator, o: ApplyOptions) Allocator.Error![]const []const u8 {
@@ -477,7 +426,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     var opt_text: std.ArrayList(u8) = .empty;
     for (s.apply_opt) |w| {
         try opt_text.append(a, ' ');
-        try sqQuote(a, &opt_text, w);
+        try quote.sq(a, &opt_text, w);
     }
     try s.writeText("apply-opt", opt_text.items);
     try s.writeText("applying", "");
@@ -538,7 +487,7 @@ fn reload(s: *Session) Error!void {
     s.scissors = if (std.mem.eql(u8, scissors, "t")) true else if (std.mem.eql(u8, scissors, "f")) false else null;
     const qcr = try s.readTrim("quoted-cr");
     s.quoted_cr = if (qcr.len == 0) null else std.meta.stringToEnum(mailinfo.QuotedCr, qcr) orelse return error.MalformedState;
-    s.apply_opt = (try sqDequoteWords(s.a, try s.readTrim("apply-opt"))) orelse return error.MalformedState;
+    s.apply_opt = (try quote.sqDequoteWords(s.a, try s.readTrim("apply-opt"))) orelse return error.MalformedState;
 }
 
 /// `parse_key_value_squoted` over `author-script`.
@@ -549,7 +498,7 @@ fn parseAuthorScript(a: Allocator, text: []const u8) Error![3][]const u8 {
         if (line.len == 0) continue;
         const eq = std.mem.findScalar(u8, line, '=') orelse return error.MalformedState;
         const key = line[0..eq];
-        const words = (try sqDequoteWords(a, line[eq + 1 ..])) orelse return error.MalformedState;
+        const words = (try quote.sqDequoteWords(a, line[eq + 1 ..])) orelse return error.MalformedState;
         if (words.len != 1) return error.MalformedState;
         const slot: usize = if (std.mem.eql(u8, key, "GIT_AUTHOR_NAME")) 0 else if (std.mem.eql(u8, key, "GIT_AUTHOR_EMAIL")) 1 else if (std.mem.eql(u8, key, "GIT_AUTHOR_DATE")) 2 else return error.MalformedState;
         if (out[slot] != null) return error.MalformedState;
@@ -565,11 +514,11 @@ fn parseAuthorScript(a: Allocator, text: []const u8) Error![3][]const u8 {
 fn writeAuthorScript(s: *Session) Error!void {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(s.a, "GIT_AUTHOR_NAME=");
-    try sqQuote(s.a, &out, s.author_name.?);
+    try quote.sq(s.a, &out, s.author_name.?);
     try out.appendSlice(s.a, "\nGIT_AUTHOR_EMAIL=");
-    try sqQuote(s.a, &out, s.author_email.?);
+    try quote.sq(s.a, &out, s.author_email.?);
     try out.appendSlice(s.a, "\nGIT_AUTHOR_DATE=");
-    try sqQuote(s.a, &out, s.author_date.?);
+    try quote.sq(s.a, &out, s.author_date.?);
     try out.append(s.a, '\n');
     try s.writeText("author-script", out.items);
 }

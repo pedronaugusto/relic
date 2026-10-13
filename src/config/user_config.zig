@@ -24,6 +24,8 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
+const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
@@ -180,69 +182,34 @@ pub fn parseParameters(arena: Allocator, text: []const u8) Self.Error![]const co
     var cur: ?usize = 0;
     while (cur) |at| {
         if (at >= text.len) break;
-        const key = try dequoteStep(arena, text, at) orelse return error.MalformedConfigEnvironment;
+        const key = try quote.sqDequoteStep(arena, text, at) orelse return error.MalformedConfigEnvironment;
         var next = key.next;
-        if (next == null or isSpace(text[next.?])) {
+        if (next == null or ctype.isSpace(text[next.?])) {
             // The old form, 'name=value'.
-            const eq = std.mem.findScalar(u8, key.text, '=');
-            const name = key.text[0 .. eq orelse key.text.len];
+            const eq = std.mem.findScalar(u8, key.word, '=');
+            const name = key.word[0 .. eq orelse key.word.len];
             if (name.len == 0) return error.MalformedConfigEnvironment;
-            try out.append(arena, .{ .name = name, .value = if (eq) |e| key.text[e + 1 ..] else null });
+            try out.append(arena, .{ .name = name, .value = if (eq) |e| key.word[e + 1 ..] else null });
         } else if (text[next.?] == '=') {
             const after = next.? + 1;
             var value: ?[]const u8 = null;
             if (after < text.len and text[after] == '\'') {
-                const v = try dequoteStep(arena, text, after) orelse return error.MalformedConfigEnvironment;
-                if (v.next) |n| if (!isSpace(text[n])) return error.MalformedConfigEnvironment;
-                value = v.text;
+                const v = try quote.sqDequoteStep(arena, text, after) orelse return error.MalformedConfigEnvironment;
+                if (v.next) |n| if (!ctype.isSpace(text[n])) return error.MalformedConfigEnvironment;
+                value = v.word;
                 next = v.next;
-            } else if (after >= text.len or isSpace(text[after])) {
+            } else if (after >= text.len or ctype.isSpace(text[after])) {
                 next = after;
             } else return error.MalformedConfigEnvironment;
-            try out.append(arena, .{ .name = key.text, .value = value });
+            try out.append(arena, .{ .name = key.word, .value = value });
         } else return error.MalformedConfigEnvironment;
         if (next) |n| {
             var k = n;
-            while (k < text.len and isSpace(text[k])) k += 1;
+            while (k < text.len and ctype.isSpace(text[k])) k += 1;
             cur = k;
         } else cur = null;
     }
     return out.items;
-}
-
-const Step = struct {
-    text: []const u8,
-    /// Where the text goes on after the word; `null` at its end.
-    next: ?usize,
-};
-
-/// git's `sq_dequote_step`: one single-quoted word at `start`, or `null`
-/// when there is none or it does not end.
-fn dequoteStep(arena: Allocator, text: []const u8, start: usize) Allocator.Error!?Step {
-    if (start >= text.len or text[start] != '\'') return null;
-    var out: std.ArrayList(u8) = .empty;
-    var i = start;
-    while (true) {
-        i += 1;
-        if (i >= text.len) return null;
-        if (text[i] != '\'') {
-            try out.append(arena, text[i]);
-            continue;
-        }
-        // Out of the quotes.
-        i += 1;
-        if (i >= text.len) return .{ .text = out.items, .next = null };
-        if (text[i] == '\\' and i + 2 < text.len and (text[i + 1] == '\'' or text[i + 1] == '!') and text[i + 2] == '\'') {
-            try out.append(arena, text[i + 1]);
-            i += 2;
-            continue;
-        }
-        return .{ .text = out.items, .next = i };
-    }
-}
-
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
 fn isTrue(value: ?[]const u8) bool {

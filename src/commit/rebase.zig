@@ -28,6 +28,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
@@ -1220,8 +1221,10 @@ pub fn parseAuthorScript(text: []const u8, buf: []u8) ParseAuthorScriptError!obj
         if (line.len == 0) continue;
         const eq = std.mem.findScalar(u8, line, '=') orelse return error.MalformedState;
         const key = line[0..eq];
-        const value = try unquote(line[eq + 1 ..], buf[used..]);
-        used += value.len;
+        // In the caller's buffer: `sq_dequote` keeps the word where it was.
+        var fixed: std.heap.FixedBufferAllocator = .init(buf[used..]);
+        const value = (quote.sqDequote(fixed.allocator(), line[eq + 1 ..]) catch return error.MalformedState) orelse return error.MalformedState;
+        used += fixed.end_index;
         if (std.mem.eql(u8, key, "GIT_AUTHOR_NAME")) {
             name = value;
         } else if (std.mem.eql(u8, key, "GIT_AUTHOR_EMAIL")) {
@@ -1240,34 +1243,6 @@ pub fn parseAuthorScript(text: []const u8, buf: []u8) ParseAuthorScriptError!obj
     const minutes = decimal.digits(i16, zone[3..5]) orelse return error.MalformedState;
     const offset = (hours * 60 + minutes) * @as(i16, if (zone[0] == '-') -1 else 1);
     return .{ .name = name orelse return error.MalformedState, .email = email orelse return error.MalformedState, .when_secs = secs, .offset_minutes = offset };
-}
-
-/// `sq_dequote`: a shell single-quoted word, `'\''` meaning a quote.
-fn unquote(text: []const u8, out: []u8) error{MalformedState}![]const u8 {
-    if (text.len < 2 or text[0] != '\'') return error.MalformedState;
-    var n: usize = 0;
-    var i: usize = 1;
-    while (true) {
-        if (i >= text.len) return error.MalformedState;
-        const c = text[i];
-        if (c != '\'') {
-            if (n >= out.len) return error.MalformedState;
-            out[n] = c;
-            n += 1;
-            i += 1;
-            continue;
-        }
-        // A closing quote: the end, or `'\''`.
-        if (i + 1 == text.len) return out[0..n];
-        if (std.mem.startsWith(u8, text[i + 1 ..], "\\''")) {
-            if (n >= out.len) return error.MalformedState;
-            out[n] = '\'';
-            n += 1;
-            i += 4;
-            continue;
-        }
-        return error.MalformedState;
-    }
 }
 
 //=========================================================================

@@ -15,6 +15,7 @@
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -77,16 +78,11 @@ pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: diff.TreeInputs
     return Oid.fromRaw(db.objectFormat(), result[0..raw_len]) catch unreachable;
 }
 
-/// git's `isspace`: no vertical tab and no form feed.
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
 /// The bytes of `text` that are not whitespace, in `buf`.
 fn withoutSpace(text: []const u8, buf: []u8) []const u8 {
     var n: usize = 0;
     for (text) |c| {
-        if (isSpace(c)) continue;
+        if (ctype.isSpace(c)) continue;
         buf[n] = c;
         n += 1;
     }
@@ -95,7 +91,7 @@ fn withoutSpace(text: []const u8, buf: []u8) []const u8 {
 
 fn addPath(h: *hash.Hasher, path: []const u8) void {
     for (path) |c| {
-        if (isSpace(c)) continue;
+        if (ctype.isSpace(c)) continue;
         h.update(&.{c});
     }
 }

@@ -30,6 +30,8 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
+const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
@@ -565,7 +567,7 @@ fn readPaths(c: *Ctx) Error![]const []const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (lines.peek() == null and line.len == 0) break;
-        const words = (try sqDequote(c.a, std.mem.trim(u8, line, " \t\r\x0b\x0c"))) orelse return error.MalformedNames;
+        const words = (try quote.sqDequoteWords(c.a, std.mem.trim(u8, line, " \t\r\x0b\x0c"))) orelse return error.MalformedNames;
         try out.appendSlice(c.a, words);
     }
     return out.items;
@@ -975,59 +977,6 @@ fn checkoutName(c: *Ctx, name: []const u8) Error!void {
 // ---------------------------------------------------------------------------
 // The commands: git's `builtin/bisect.c`.
 
-/// `sq_quote_buf`.
-fn sqQuote(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
-    try out.append(a, '\'');
-    for (text) |ch| {
-        if (ch == '\'' or ch == '!') {
-            try out.appendSlice(a, "'\\");
-            try out.append(a, ch);
-            try out.append(a, '\'');
-        } else try out.append(a, ch);
-    }
-    try out.append(a, '\'');
-}
-
-/// `sq_dequote_to_strvec`: `null` for text that does not dequote.
-fn sqDequote(a: Allocator, text: []const u8) Allocator.Error!?[]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    if (text.len == 0) return out.items;
-    var at: usize = 0;
-    while (true) {
-        if (at >= text.len or text[at] != '\'') return null;
-        var word: std.ArrayList(u8) = .empty;
-        at += 1;
-        var ended = false;
-        while (true) {
-            if (at >= text.len) return null;
-            const ch = text[at];
-            at += 1;
-            if (ch != '\'') {
-                try word.append(a, ch);
-                continue;
-            }
-            if (at >= text.len) {
-                ended = true;
-                break;
-            }
-            if (text[at] == '\\' and at + 2 < text.len and (text[at + 1] == '\'' or text[at + 1] == '!') and text[at + 2] == '\'') {
-                try word.append(a, text[at + 1]);
-                at += 3;
-                continue;
-            }
-            break;
-        }
-        try out.append(a, word.items);
-        if (ended) return out.items;
-        if (!isSpace(text[at])) return null;
-        while (at < text.len and isSpace(text[at])) at += 1;
-    }
-}
-
-fn isSpace(ch: u8) bool {
-    return ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r';
-}
-
 /// `git bisect start [--term-{bad,new}=<term> --term-{good,old}=<term>]
 /// [--no-checkout] [--first-parent] [--reset-when-found[=<where>]] [<bad>
 /// [<good>...]] [--] [<pathspec>...]`, `args` as git is given them: they
@@ -1101,7 +1050,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     if (args.len > 0 and pathspec_pos < args.len - 1) {
         for (args[pathspec_pos..]) |arg| {
             try names.append(c.a, ' ');
-            try sqQuote(c.a, &names, arg);
+            try quote.sq(c.a, &names, arg);
         }
     }
 
@@ -1141,7 +1090,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     try log_line.appendSlice(c.a, "git bisect start");
     for (args) |arg| {
         try log_line.append(c.a, ' ');
-        try sqQuote(c.a, &log_line, arg);
+        try quote.sq(c.a, &log_line, arg);
     }
     try log_line.append(c.a, '\n');
     try c.appendState("BISECT_LOG", log_line.items);
@@ -1283,7 +1232,7 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, o
         } else if (std.mem.startsWith(u8, p, "git-bisect")) {
             p = p["git-bisect".len..];
         } else continue;
-        if (p.len == 0 or !isSpace(p[0])) continue;
+        if (p.len == 0 or !ctype.isSpace(p[0])) continue;
         p = std.mem.trimStart(u8, p, " \t");
         const word_end = std.mem.findAny(u8, p, " \t") orelse p.len;
         const word = p[0..word_end];
@@ -1291,7 +1240,7 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, o
         if (try getTerms(&c)) |recorded| t = recorded;
         try checkAndSetTerms(&c, &t, word);
         if (std.mem.eql(u8, word, "start")) {
-            const argv = (try sqDequote(c.a, rev)) orelse &.{};
+            const argv = (try quote.sqDequoteWords(c.a, rev)) orelse &.{};
             const step = try startWith(&c, &t, argv);
             switch (step) {
                 .waiting, .testing => continue,
@@ -1310,7 +1259,7 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, o
         if (std.mem.eql(u8, word, "terms")) {
             // `bisect_terms`, as git prints it.
             const recorded = (try getTerms(&c)) orelse return error.NoTermsDefined;
-            const argv = (try sqDequote(c.a, rev)) orelse &.{};
+            const argv = (try quote.sqDequoteWords(c.a, rev)) orelse &.{};
             if (argv.len == 1) {
                 if (oneOf(argv[0], &.{ "--term-good", "--term-old" })) {
                     try c.print("{s}\n", .{recorded.good});
@@ -1364,7 +1313,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u
     var command: std.ArrayList(u8) = .empty;
     for (argv) |arg| {
         try command.append(c.a, ' ');
-        try sqQuote(c.a, &command, arg);
+        try quote.sq(c.a, &command, arg);
     }
     const line = std.mem.trimStart(u8, command.items, " \t\n\r");
     var first = true;
@@ -1454,16 +1403,16 @@ fn fuzzQuote(_: void, case: *shakedown.Case) anyerror!void {
     var buf: [256]u8 = undefined;
     const input = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
     case.source.bytes(input);
-    _ = try sqDequote(a, input);
+    _ = try quote.sqDequoteWords(a, input);
     var words = std.mem.splitScalar(u8, input, 0);
     var quoted: std.ArrayList(u8) = .empty;
     var expected: std.ArrayList([]const u8) = .empty;
     while (words.next()) |w| {
         if (quoted.items.len != 0) try quoted.append(a, ' ');
-        try sqQuote(a, &quoted, w);
+        try quote.sq(a, &quoted, w);
         try expected.append(a, w);
     }
-    const back = (try sqDequote(a, quoted.items)).?;
+    const back = (try quote.sqDequoteWords(a, quoted.items)).?;
     try std.testing.expectEqual(expected.items.len, back.len);
     for (expected.items, back) |x, y| try std.testing.expectEqualStrings(x, y);
 }

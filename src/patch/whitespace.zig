@@ -4,6 +4,7 @@
 //! --check` read lines through it.
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 
@@ -119,10 +120,6 @@ pub fn forAttribute(attribute: Attribute, configured: Rule) ParseError!Rule {
     };
 }
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == 0x0b or c == 0x0c or c == '\r';
-}
-
 /// The errors `line` has under `rule`: a set of the bits above. `line`
 /// includes its newline, if it has one.
 pub fn check(line_in: []const u8, rule: Rule) Rule {
@@ -140,7 +137,7 @@ pub fn check(line_in: []const u8, rule: Rule) Rule {
         var i = len;
         while (i > 0) {
             i -= 1;
-            if (isSpace(line[i])) {
+            if (ctype.isSpace(line[i])) {
                 trailing_whitespace = i;
                 result |= blank_at_eol;
             } else break;
@@ -193,7 +190,7 @@ pub fn errorString(gpa: Allocator, ws: Rule) Allocator.Error![]u8 {
 
 /// Whether the line is only whitespace.
 pub fn blankLine(line: []const u8) bool {
-    for (line) |c| if (!isSpace(c)) return false;
+    for (line) |c| if (!ctype.isSpace(c)) return false;
     return true;
 }
 
@@ -226,8 +223,8 @@ pub fn fixCopy(gpa: Allocator, dst: *std.ArrayList(u8), src_in: []const u8, rule
                 len -= 1;
             }
         }
-        if (len > 0 and isSpace(src[len - 1])) {
-            while (len > 0 and isSpace(src[len - 1])) len -= 1;
+        if (len > 0 and ctype.isSpace(src[len - 1])) {
+            while (len > 0 and ctype.isSpace(src[len - 1])) len -= 1;
             fixed = true;
         }
     }

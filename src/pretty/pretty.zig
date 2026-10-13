@@ -17,6 +17,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -290,12 +291,8 @@ fn getOneLine(msg: []const u8) usize {
     return i;
 }
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == 0x0b or c == 0x0c or c == '\r';
-}
-
 fn isBlank(line: []const u8) bool {
-    for (line) |c| if (!isSpace(c)) return false;
+    for (line) |c| if (!ctype.isSpace(c)) return false;
     return true;
 }
 
@@ -591,7 +588,7 @@ fn messagePart(a: Allocator, out: *std.ArrayList(u8), msg: []const u8, which: u8
                 const len = getOneLine(r);
                 if (len == 0 or isBlank(r[0..len])) break;
                 var line = r[0..len];
-                while (line.len > 0 and isSpace(line[line.len - 1])) line = line[0 .. line.len - 1];
+                while (line.len > 0 and ctype.isSpace(line[line.len - 1])) line = line[0 .. line.len - 1];
                 if (!first) try out.append(a, ' ');
                 try out.appendSlice(a, line);
                 first = false;

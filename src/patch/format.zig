@@ -638,14 +638,10 @@ fn getOneLine(msg: []const u8) usize {
     return i;
 }
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == 0x0b or c == 0x0c or c == '\r';
-}
-
 /// The length without trailing whitespace; zero means blank.
 fn trimmedLen(line: []const u8) usize {
     var len = line.len;
-    while (len > 0 and isSpace(line[len - 1])) len -= 1;
+    while (len > 0 and ctype.isSpace(line[len - 1])) len -= 1;
     return len;
 }
 
@@ -781,7 +777,7 @@ fn remainder(ctx: *Ctx, out: *std.ArrayList(u8), msg_in: []const u8) Allocator.E
 }
 
 fn rtrim(out: *std.ArrayList(u8)) void {
-    while (out.items.len > 0 and isSpace(out.items[out.items.len - 1])) _ = out.pop();
+    while (out.items.len > 0 and ctype.isSpace(out.items[out.items.len - 1])) _ = out.pop();
 }
 
 fn extraHeaders(ctx: *Ctx) Allocator.Error![]const u8 {
@@ -1478,11 +1474,11 @@ fn coverShortlog(ctx: *Ctx, out: *std.ArrayList(u8), list: []const Oid) Error!vo
         var oneline: std.ArrayList(u8) = .empty;
         _ = try formatSubject(a, &oneline, skipBlankLines(msg), " ");
         var s: []const u8 = if (oneline.items.len > 0) oneline.items else "<none>";
-        while (s.len > 0 and isSpace(s[0])) s = s[1..];
+        while (s.len > 0 and ctype.isSpace(s[0])) s = s[1..];
         if (std.mem.startsWith(u8, s, "[PATCH")) {
             if (std.mem.findScalar(u8, s, ']')) |eob| s = s[eob + 1 ..];
         }
-        while (s.len > 0 and isSpace(s[0]) and s[0] != '\n') s = s[1..];
+        while (s.len > 0 and ctype.isSpace(s[0]) and s[0] != '\n') s = s[1..];
         var subject: std.ArrayList(u8) = .empty;
         _ = try formatSubject(a, &subject, s, " ");
         const name = c.author.name;

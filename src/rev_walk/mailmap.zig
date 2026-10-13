@@ -31,6 +31,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -52,12 +53,6 @@ pub const Identity = struct {
 /// Errors from loading a repository's mailmap.
 pub const LoadError = Allocator.Error || Io.File.Reader.Error || Io.Dir.ReadFileAllocError ||
     error{MalformedValue} || odb_mod.Error;
-
-/// git's `isspace`: space, tab, newline and carriage return, and not the
-/// vertical tab or form feed C's adds.
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
 
 /// Keys compared as `strcasecmp` compares them: ASCII case folded.
 pub const Folded = struct {
@@ -288,11 +283,11 @@ fn parseNameAndEmail(buffer: []const u8, allow_empty_email: bool) Parsed {
     const right = std.mem.findScalarPos(u8, buffer, left + 1, '>') orelse return .{};
     if (!allow_empty_email and left + 1 == right) return .{};
     var nstart: usize = 0;
-    while (nstart < left and isSpace(buffer[nstart])) nstart += 1;
+    while (nstart < left and ctype.isSpace(buffer[nstart])) nstart += 1;
     // `nend` is the last byte of the name, one before `<` to start with;
     // a name of nothing leaves it before `nstart`.
     var nend: isize = @as(isize, @intCast(left)) - 1;
-    while (nend > @as(isize, @intCast(nstart)) and isSpace(buffer[@intCast(nend)])) nend -= 1;
+    while (nend > @as(isize, @intCast(nstart)) and ctype.isSpace(buffer[@intCast(nend)])) nend -= 1;
     const name: ?[]const u8 = if (@as(isize, @intCast(nstart)) <= nend) buffer[nstart..@intCast(nend + 1)] else null;
     const rest = buffer[right + 1 ..];
     return .{ .name = name, .email = buffer[left + 1 .. right], .rest = if (rest.len == 0) null else rest };
@@ -417,7 +412,7 @@ fn compareWithGit(gpa: Allocator, io: Io, seed: u64) !void {
     for (args.items[1..]) |contact| {
         const lt = std.mem.findScalar(u8, contact, '<').?;
         var name = contact[0..lt];
-        while (name.len > 0 and isSpace(name[name.len - 1])) name = name[0 .. name.len - 1];
+        while (name.len > 0 and ctype.isSpace(name[name.len - 1])) name = name[0 .. name.len - 1];
         const email = contact[lt + 1 .. contact.len - 1];
         const shown = m.map(name, email);
         if (shown.name.len != 0) try got.writer.print("{s} ", .{shown.name});
