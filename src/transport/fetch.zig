@@ -503,7 +503,7 @@ fn bringObjects(
         .missing = b.options.missing,
     });
 
-    if (boundary_change.moved) try shallow_mod.write(gpa, io, repo.commonDirectory(), &repo.objectDatabase().shallow);
+    if (boundary_change.moved) try repo.writeShallow(io);
     return .{ .pack = fetched.pack, .objects = fetched.objects, .backfill = backfill, .tokens = .{ fetched.keep, tag_keep } };
 }
 

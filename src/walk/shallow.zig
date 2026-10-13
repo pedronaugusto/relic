@@ -34,7 +34,11 @@ pub const ReadError = error{
 } || Allocator.Error || Io.Dir.ReadFileAllocError;
 
 /// Errors from reading or writing the file.
-pub const Error = ReadError || fs.LockError || fs.CommitError || Io.Dir.DeleteFileError;
+pub const Error = error{
+    /// The file changed since it was read: another writer's boundary would
+    /// be lost.
+    ShallowChanged,
+} || ReadError || fs.LockFile.OpenError || fs.CommitError || fs.StatError || Io.Dir.DeleteFileError;
 
 /// The commits at the boundary, or an empty set for a whole repository.
 /// The set is the caller's.
@@ -54,15 +58,40 @@ pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Re
     return set;
 }
 
+/// What the file was when it was read: its stat, or `null` when there was
+/// none. A write refuses to replace a file that changed since.
+pub const Seen = ?fs.Stat;
+
+/// What `common_dir`'s shallow file is now.
+pub fn seen(io: Io, common_dir: Io.Dir) fs.StatError!Seen {
+    const entry = (try fs.statAt(io, common_dir, file_name)) orelse return null;
+    return entry.stat;
+}
+
+/// How `write` takes its lock.
+pub const WriteOptions = struct {
+    /// The file as it was read; another writer's change since is
+    /// `error.ShallowChanged`, as git's `check_shallow_file_for_update`
+    /// dies on it.
+    seen: Seen,
+    /// What `core.sharedRepository` asks of the file's permissions.
+    shared: fs.Shared = .umask,
+};
+
 /// Replace the file with `set`, sorted as git sorts it, or remove it when
-/// `set` is empty.
-pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set) Self.Error!void {
+/// `set` is empty, under `shallow.lock`. What the file is afterwards comes
+/// back, for the next write to check against.
+pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set, options: WriteOptions) Self.Error!Seen {
+    var buffer: [4096]u8 = undefined;
+    var lock = try fs.LockFile.open(gpa, io, common_dir, .{ .sub_path = file_name, .buffer = &buffer }, .{ .sync = .none, .shared = options.shared });
+    defer lock.deinit(io);
+    if (!same(try seen(io, common_dir), options.seen)) return error.ShallowChanged;
     if (set.count() == 0) {
         common_dir.deleteFile(io, file_name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,
         };
-        return;
+        return null;
     }
     const sorted = try gpa.alloc(Oid, set.count());
     defer gpa.free(sorted);
@@ -74,12 +103,17 @@ pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set) Se
             return a.order(b) == .lt;
         }
     }.lessThan);
-    var buffer: [4096]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, common_dir, .{ .sub_path = file_name, .buffer = &buffer }, .{ .sync = .none });
-    defer lock.deinit(io);
     const w = lock.writer();
     for (sorted) |oid| try w.print("{f}\n", .{oid});
     try lock.commit(io);
+    return seen(io, common_dir);
+}
+
+fn same(a: Seen, b: Seen) bool {
+    const x = a orelse return b == null;
+    const y = b orelse return false;
+    return x.mtime_sec == y.mtime_sec and x.mtime_nsec == y.mtime_nsec and x.ctime_sec == y.ctime_sec and
+        x.ctime_nsec == y.ctime_nsec and x.ino == y.ino and x.dev == y.dev and x.size == y.size;
 }
 
 /// The boundary after a fetch: `current`, with every commit in `added`
@@ -102,7 +136,7 @@ test "the file is written sorted, read back, and removed when the boundary goes"
     var empty: Oid.Set = .empty;
     var set = try apply(gpa, &empty, &.{ a, b }, &.{});
     defer set.deinit(gpa);
-    try write(gpa, io, tmp.dir, &set);
+    const written = try write(gpa, io, tmp.dir, &set, .{ .seen = null });
     const text = try tmp.dir.readFileAlloc(io, file_name, gpa, .unlimited);
     defer gpa.free(text);
     try std.testing.expectEqualStrings(@as([40]u8, @splat('a')) ++ "\n" ++ @as([40]u8, @splat('b')) ++ "\n", text);
@@ -112,7 +146,11 @@ test "the file is written sorted, read back, and removed when the boundary goes"
 
     var none = try apply(gpa, &back, &.{}, &.{ a, b });
     defer none.deinit(gpa);
-    try write(gpa, io, tmp.dir, &none);
+    // A file another writer changed since it was read is not replaced.
+    try tmp.dir.writeFile(io, .{ .sub_path = file_name, .data = @as([40]u8, @splat('c')) ++ "\n" ++ @as([40]u8, @splat('d')) ++ "\n\n" });
+    try std.testing.expectError(error.ShallowChanged, write(gpa, io, tmp.dir, &none, .{ .seen = written }));
+    try std.testing.expectError(error.ShallowChanged, write(gpa, io, tmp.dir, &none, .{ .seen = null }));
+    _ = try write(gpa, io, tmp.dir, &none, .{ .seen = try seen(io, tmp.dir) });
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, file_name, .{}));
     var whole = try read(gpa, io, tmp.dir, .sha1);
     defer whole.deinit(gpa);

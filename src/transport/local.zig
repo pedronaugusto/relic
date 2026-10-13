@@ -43,7 +43,7 @@ pub const Error = errors: {
         /// `post-receive` and the rest — and relic runs no hook on another
         /// repository's behalf.
         RemoteHooksNotRun,
-    } || repo_mod.Error || object_walk.Error || refs_mod.ReadError || refs_mod.TransactionError;
+    } || repo_mod.Error || repo_mod.Repository.WriteShallowError || object_walk.Error || refs_mod.ReadError || refs_mod.TransactionError;
 };
 
 /// Another repository, open.
@@ -357,7 +357,7 @@ pub const Remote = struct {
         if (new_roots.count() != 0) {
             var it = new_roots.keyIterator();
             while (it.next()) |root| try r.repo.objectDatabase().shallow.put(r.repo.allocator(), root.*, {});
-            try shallow_mod.write(gpa, io, r.repo.commonDirectory(), &r.repo.objectDatabase().shallow);
+            try r.repo.writeShallow(io);
         }
         report.refs = refs.items;
         return report;

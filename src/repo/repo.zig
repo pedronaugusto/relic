@@ -224,6 +224,9 @@ const RepositoryData = struct {
     fsync: fs.Fsync = .default,
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
+    /// The shallow file as it was read or last written: a write over
+    /// another writer's change is refused.
+    shallow_seen: shallow.Seen = null,
     lfsconfig_mutex: Io.Mutex = .init,
     /// Commits read through `commitInfo` and `commitTree`, kept.
     commits: commit_cache.Cache = .{},
@@ -665,6 +668,7 @@ pub const Repository = struct {
         odb_options.fsync = repo.data().fsync;
         repo.data().odb = try odb_mod.Odb.open(gpa, io, repo.data().common_dir, format.kind, odb_options);
         errdefer repo.data().odb.deinit(io);
+        repo.data().shallow_seen = try shallow.seen(io, repo.data().common_dir);
         repo.data().odb.shallow = try shallow.read(gpa, io, repo.data().common_dir, format.kind);
         const store = try gpa.create(refs_mod.Store);
         errdefer gpa.destroy(store);
@@ -1434,6 +1438,19 @@ pub const Repository = struct {
 
     /// Errors from `LockedIndex.commit`.
     pub const WriteIndexError = index_mod.WriteError || ErrorNamespace.Error;
+
+    /// Errors from `writeShallow`.
+    pub const WriteShallowError = shallow.Error;
+
+    /// Write the shallow boundary the object database holds to
+    /// `.git/shallow`, or remove the file when there is none, with the
+    /// repository's shared mode: refused (`ShallowChanged`) when another
+    /// writer changed the file since this repository read it, as git
+    /// refuses it.
+    pub fn writeShallow(repo: *Repository, io: Io) WriteShallowError!void {
+        const d = repo.data();
+        d.shallow_seen = try shallow.write(d.gpa, io, d.common_dir, &d.odb.shallow, .{ .seen = d.shallow_seen, .shared = d.shared });
+    }
 
     /// Errors from `lockIndex`.
     pub const LockIndexError = fs.LockFile.OpenError || index_mod.ReadError;

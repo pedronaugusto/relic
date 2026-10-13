@@ -438,7 +438,7 @@ fn receiveObjects(
         var empty: Oid.Set = .empty;
         repo.objectDatabase().shallow.deinit(gpa);
         repo.objectDatabase().shallow = try shallow_mod.apply(gpa, &empty, shallow_info.shallow.items, shallow_info.unshallow.items);
-        try shallow_mod.write(gpa, io, repo.commonDirectory(), &repo.objectDatabase().shallow);
+        try repo.writeShallow(io);
     }
     // A single branch's tags are those the pack brought, which is what
     // git's clone keeps of them.
