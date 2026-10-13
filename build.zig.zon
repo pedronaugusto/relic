@@ -13,8 +13,8 @@
         },
 
         .parallax = .{
-            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.2#61548610414ad46cf032992f4b2d3301c20eb5c0",
-            .hash = "parallax-0.2.2-lz9Br9ZcBgCklZCAQwEMhn1yjbvWuEIxO6dmaSbg9fo5",
+            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.3#405f4ba1f8ec4876e4f698fa4f2408ccf148112d",
+            .hash = "parallax-0.2.3-lz9BrxFdBgBa1e-bFu930edNT8j3EeSeEsrDMC4eYZzD",
         },
 
         .uplink = .{
@@ -24,8 +24,8 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.2#0af34d07caed0ae8443b07571333ae7ec7a6edcb",
-            .hash = "airlock-0.3.2-rfvu6Ob1BQBCOTYxQucy40Sc7Eluv0c8fGuA5cbMoihI",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.3#280cc4dcbec26c23693c654b57a7ea5ff5dec446",
+            .hash = "airlock-0.3.3-rfvu6CH2BQDWTME6f1H9XSu-WvQv1ny1678JE6v6EODU",
         },
 
         .warp = .{
