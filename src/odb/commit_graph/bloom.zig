@@ -1,5 +1,10 @@
-//! Git's changed-path Bloom hashes. Version one preserves git's signed-byte bug.
+//! Git's changed-path Bloom hashes. Version one keeps git's `char` bug:
+//! each path byte is widened as the platform's C `char`, so a byte with the
+//! high bit set hashes differently where `char` is signed (x86, every Apple
+//! and Windows target) than where it is unsigned (Linux on ARM, RISC-V,
+//! PowerPC), just as git's own filters do.
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 /// Settings stored at the start of the commit-graph's BDAT chunk.
@@ -10,12 +15,16 @@ pub const Settings = struct {
     max_changed_paths: usize = 512,
 };
 
+/// Whether git's `char` is signed where relic runs.
+const char_signed = (builtin.target.cCharSignedness() orelse .signed) == .signed;
+
 fn byte(c: u8, version: u32) u32 {
-    if (version == 1) return @bitCast(@as(i32, @as(i8, @bitCast(c))));
+    if (version == 1 and char_signed) return @bitCast(@as(i32, @as(i8, @bitCast(c))));
     return c;
 }
 
-/// The seeded Murmur3 hash git uses for a path, including version one's sign extension.
+/// The seeded Murmur3 hash git uses for a path, version one widening bytes
+/// as the platform's `char`.
 pub fn murmur(seed_value: u32, path: []const u8, version: u32) u32 {
     var seed = seed_value;
     var at: usize = 0;

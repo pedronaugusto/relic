@@ -123,7 +123,26 @@ pub fn templateDir(gpa: Allocator, config: *const config_mod.Config) TemplateDir
 const LfsconfigCache = struct {
     key: LfsconfigKey,
     text: ?[]u8,
+    /// When the key was taken, by the wall clock files are stamped from.
+    seen_at: i96,
+
+    /// Whether the key can prove nothing changed since: each file in it
+    /// was stamped well before it was looked at. A file stamped close to
+    /// that moment can be rewritten at the same size inside one tick of
+    /// the filesystem's clock and keep every time it had, git's racy-clean
+    /// case, so it is read again instead.
+    fn settled(cache: LfsconfigCache) bool {
+        const cutoff = cache.seen_at - racy_window_ns;
+        if (cache.key.worktree) |w| if (!w.before(cutoff)) return false;
+        if (cache.key.index) |ix| if (!ix.file.before(cutoff)) return false;
+        return true;
+    }
 };
+
+/// How far behind the moment it was looked at a file's times must lie for
+/// a rewrite to be sure to move them: filesystems stamp from a coarse clock
+/// (a scheduler tick on Linux, about 16ms on Windows, two seconds on FAT).
+const racy_window_ns: i96 = 2 * std.time.ns_per_s;
 
 const LfsconfigKey = struct {
     /// The working tree's `.lfsconfig`, when there is one: nothing else
@@ -142,6 +161,9 @@ const FileStamp = struct {
 
     fn of(st: Io.File.Stat) FileStamp {
         return .{ .size = st.size, .mtime = st.mtime.nanoseconds, .ctime = st.ctime.nanoseconds, .inode = st.inode };
+    }
+    fn before(stamp: FileStamp, cutoff: i96) bool {
+        return stamp.mtime < cutoff and stamp.ctime < cutoff;
     }
 };
 
@@ -1395,16 +1417,15 @@ pub const Repository = struct {
     /// tree file's size, times and inode, the index's own checksum and
     /// stat, `HEAD`'s commit — and handed out again while those stay the
     /// same, so a status that asks each time reads neither the index nor
-    /// `HEAD`'s tree again.
+    /// `HEAD`'s tree again. A file stamped within two seconds of being
+    /// looked at proves nothing yet and is read again.
     pub fn lfsconfigText(repo: *Repository, io: Io) LfsconfigError!?[]u8 {
         try repo.data().lfsconfig_mutex.lock(io);
         defer repo.data().lfsconfig_mutex.unlock(io);
+        const seen_at = Io.Clock.real.now(io).nanoseconds;
         const key = try repo.lfsconfigKey(io);
         if (repo.data().lfsconfig_cache) |cached| {
-            // Windows file timestamps can stay unchanged when a same-size
-            // worktree file is rewritten immediately. Re-read that small
-            // file rather than handing out stale settings.
-            if (std.meta.eql(cached.key, key) and !(builtin.target.os.tag == .windows and key.worktree != null)) {
+            if (std.meta.eql(cached.key, key) and cached.settled()) {
                 return if (cached.text) |t| try repo.data().gpa.dupe(u8, t) else null;
             }
         }
@@ -1412,7 +1433,7 @@ pub const Repository = struct {
         errdefer if (text) |t| repo.data().gpa.free(t);
         const kept = if (text) |t| try repo.data().gpa.dupe(u8, t) else null;
         if (repo.data().lfsconfig_cache) |old| if (old.text) |t| repo.data().gpa.free(t);
-        repo.data().lfsconfig_cache = .{ .key = key, .text = kept };
+        repo.data().lfsconfig_cache = .{ .key = key, .text = kept, .seen_at = seen_at };
         return text;
     }
 
