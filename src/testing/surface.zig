@@ -78,6 +78,7 @@ test "module tables equal the exported namespace tree" {
 
 fn covers(comptime facade: type, comptime implementation: type) !void {
     inline for (@typeInfo(implementation).@"struct".decl_names) |name| {
+        if (!@hasDecl(facade, name)) std.debug.print("{s} does not publish {s}\n", .{ @typeName(facade), name });
         try std.testing.expect(@hasDecl(facade, name));
         if (@hasDecl(facade, name))
             try std.testing.expect(@TypeOf(@field(facade, name)) == @TypeOf(@field(implementation, name)));

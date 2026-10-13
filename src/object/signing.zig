@@ -74,6 +74,19 @@ pub const Error = error{
     Io.File.WritePositionalError || Io.Dir.DeleteFileError || Io.Dir.OpenError ||
     error{MalformedValue};
 
+/// Where a tag message's signature starts — the last line that opens
+/// one — or its length: git's `parse_signed_buffer`.
+pub fn signedOffset(text: []const u8) usize {
+    var match = text.len;
+    var at: usize = 0;
+    while (at < text.len) {
+        if (Format.of(text[at..]) != null) match = at;
+        const nl = std.mem.findScalarPos(u8, text, at, '\n');
+        at = if (nl) |n| n + 1 else text.len;
+    }
+    return match;
+}
+
 /// The kinds of signature git makes.
 pub const Format = enum {
     openpgp,

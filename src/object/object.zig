@@ -488,6 +488,26 @@ pub const ParseError = error{
     UnknownObjectType,
 } || Allocator.Error;
 
+/// Where a commit or tag header's value lies in the object's bytes.
+pub const HeaderSpan = struct { start: usize, end: usize };
+
+/// git's `find_commit_header`: the first line of the value of the first
+/// header named exactly `key` at or after `from`, before the blank line
+/// that ends the headers. The one header search for every reader that
+/// does not parse the whole object.
+pub fn findHeader(buf: []const u8, from: usize, key: []const u8) ?HeaderSpan {
+    var line = from;
+    while (line < buf.len and buf[line] != '\n') {
+        const eol = std.mem.findScalarPos(u8, buf, line, '\n') orelse buf.len;
+        const text = buf[line..eol];
+        if (text.len > key.len and std.mem.startsWith(u8, text, key) and text[key.len] == ' ') {
+            return .{ .start = line + key.len + 1, .end = eol };
+        }
+        line = eol + 1;
+    }
+    return null;
+}
+
 /// A commit object.
 ///
 /// `parse` allocates the parent list and the extra headers and borrows

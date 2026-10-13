@@ -2372,11 +2372,8 @@ const Patterns = struct {
 
 /// The value of the header `key` in an object's headers.
 fn headerValue(buf: []const u8, key: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, headerBlock(buf), '\n');
-    while (lines.next()) |line| {
-        if (line.len > key.len and std.mem.startsWith(u8, line, key) and line[key.len] == ' ') return line[key.len + 1 ..];
-    }
-    return null;
+    const h = object.findHeader(buf, 0, key) orelse return null;
+    return buf[h.start..h.end];
 }
 
 fn headerBlock(buf: []const u8) []const u8 {

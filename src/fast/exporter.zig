@@ -322,7 +322,7 @@ const Exporter = struct {
 
         var encoding: ?[]const u8 = null;
         if (cursor < buf.len and buf[cursor] == '\n') {
-            if (findHeader(buf, cursor + 1, "encoding")) |h| {
+            if (object.findHeader(buf, cursor + 1, "encoding")) |h| {
                 encoding = buf[h.start..h.end];
                 cursor = h.end;
             }
@@ -402,7 +402,7 @@ const Exporter = struct {
         var start = pos;
         var end = pos;
         while (start + 1 <= buf.len) {
-            const h = findHeader(buf, start + 1, header) orelse break;
+            const h = object.findHeader(buf, start + 1, header) orelse break;
             var text: std.ArrayList(u8) = .empty;
             errdefer text.deinit(ex.gpa);
             try text.appendSlice(ex.gpa, buf[h.start..h.end]);
@@ -525,7 +525,7 @@ const Exporter = struct {
         }
         var body = message orelse "";
         if (message) |m| {
-            const sig_offset = fast_import.signedOffset(m);
+            const sig_offset = signing.signedOffset(m);
             if (sig_offset < m.len) switch (ex.options.signed_tags) {
                 .verbatim => {},
                 .strip => body = m[0..sig_offset],
@@ -642,22 +642,6 @@ fn treeOf(kind: hash.Kind, buf: []const u8) Error!Oid {
     return Oid.parse(kind, buf[5..][0..hex_len]) catch error.MalformedCommit;
 }
 
-const Header = struct { start: usize, end: usize };
-
-/// git's `find_commit_header`: the value of the first header `key` at or
-/// after `from`, before the blank line.
-fn findHeader(buf: []const u8, from: usize, key: []const u8) ?Header {
-    var line = from;
-    while (line < buf.len and buf[line] != '\n') {
-        const eol = std.mem.findScalarPos(u8, buf, line, '\n') orelse buf.len;
-        const text = buf[line..eol];
-        if (text.len > key.len and std.mem.startsWith(u8, text, key) and text[key.len] == ' ') {
-            return .{ .start = line + key.len + 1, .end = eol };
-        }
-        line = eol + 1;
-    }
-    return null;
-}
 
 /// git's `depth_first`: a directory's contents before the directory, and a
 /// rename after what shares its path.
@@ -673,7 +657,7 @@ fn depthFirst(_: void, a: diff.Change, b: diff.Change) bool {
 
 test "a commit's header is found by its name alone" {
     const buf = "tree 1\nauthor a\ncommitter c\nencoding ISO-8859-1\n\nmessage\nencoding no\n";
-    const h = findHeader(buf, 0, "encoding").?;
+    const h = object.findHeader(buf, 0, "encoding").?;
     try std.testing.expectEqualStrings("ISO-8859-1", buf[h.start..h.end]);
-    try std.testing.expect(findHeader(buf, 0, "gpgsig") == null);
+    try std.testing.expect(object.findHeader(buf, 0, "gpgsig") == null);
 }

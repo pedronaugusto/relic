@@ -14,6 +14,7 @@ pub const FullName = @import("config/config.zig").FullName;
 pub const splitFullName = @import("config/config.zig").splitFullName;
 pub const parseBool = @import("config/config.zig").parseBool;
 pub const parseInteger = @import("config/config.zig").parseInteger;
+pub const interpolatePath = @import("config/config.zig").interpolatePath;
 pub const checkKey = @import("config/config.zig").checkKey;
 pub const escapeValue = @import("config/config.zig").escapeValue;
 pub const unquote = @import("config/config.zig").unquote;

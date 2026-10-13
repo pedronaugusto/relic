@@ -867,7 +867,7 @@ const Importer = struct {
         const message = try imp.readData();
         defer imp.gpa.free(message);
         var body: []const u8 = message;
-        const sig_offset = signedOffset(message);
+        const sig_offset = signing.signedOffset(message);
         if (sig_offset < message.len) switch (imp.signed_tags) {
             .verbatim => {},
             .strip => body = message[0..sig_offset],
@@ -1799,18 +1799,6 @@ fn validSignatureFormat(text: []const u8) bool {
     return false;
 }
 
-/// Where a tag message's signature starts — the last line that opens
-/// one — or its length: git's `parse_signed_buffer`.
-pub fn signedOffset(message: []const u8) usize {
-    var match = message.len;
-    var at: usize = 0;
-    while (at < message.len) {
-        if (signing.Format.of(message[at..]) != null) match = at;
-        const nl = std.mem.findScalarPos(u8, message, at, '\n');
-        at = if (nl) |n| n + 1 else message.len;
-    }
-    return match;
-}
 
 /// A signature as a commit header: its lines joined by a newline and a
 /// space, as git's `add_gpgsig_to_commit` writes them.
