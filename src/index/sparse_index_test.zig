@@ -2,6 +2,8 @@ const std = @import("std");
 const sparseindex_mod = @import("sparse_index.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const builtin = @import("builtin");
+const fs = @import("../fs/fs.zig");
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("index.zig");
@@ -294,7 +296,7 @@ test "status, write-tree and add on a sparse index say what they say on the full
     try git.exec(io, &.{ "fsck", "--no-progress" });
     const after = try git.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
     defer gpa.free(after);
-    const ours = try relicStatus(gpa, io, &repo, &index);
+    const ours = try relicStatus(gpa, io, &repo, &locked.index);
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(after, ours);
 }
@@ -336,4 +338,35 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     const status = try git.run(io, &.{ "status", "--porcelain" });
     defer gpa.free(status);
     try std.testing.expectEqualStrings("", status);
+}
+
+test "a file changed behind its old modification time is seen through its status-change time under core.trustCtime, as git sees it" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // Windows keeps no status-change time.
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "f", "aaaa\n");
+    try git.exec(io, &.{ "add", "f" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const before = try git.dir.statFile(io, "f", .{});
+    // The index is written well after the file, so the entry is not racy.
+    const later: Io.Timestamp = .{ .nanoseconds = before.mtime.nanoseconds + 10 * std.time.ns_per_s };
+    try fs.setTimestamps(io, git.dir, ".git/index", .{ .modify_timestamp = .{ .new = later }, .access_timestamp = .{ .new = later } });
+    // Same size, and the modification time put back: only the
+    // status-change time moved, by more than a second for a git that keeps
+    // no nanoseconds.
+    try io.sleep(.fromMilliseconds(1100), .awake);
+    try git.writeFile(io, "f", "bbbb\n");
+    try fs.setTimestamps(io, git.dir, "f", .{ .modify_timestamp = .{ .new = before.mtime }, .access_timestamp = .{ .new = before.mtime } });
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    const ours = try relicStatus(gpa, io, &repo, &index);
+    defer gpa.free(ours);
+    const theirs = try git.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
+    defer gpa.free(theirs);
+    try std.testing.expectEqualStrings(" M f\n", theirs);
+    try std.testing.expectEqualStrings(theirs, ours);
 }

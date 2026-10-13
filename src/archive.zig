@@ -597,7 +597,7 @@ const Walk = struct {
 
     fn walk(wk: *Walk, tree_oid: Oid, base: []const u8) Error!void {
         // The directories queued are the ones this walk is inside.
-        if (wk.queued.items.len > object.max_tree_depth) return error.TreeTooDeep;
+        if (wk.queued.items.len > wk.repo.settings().max_tree_depth) return error.TreeTooDeep;
         const db = wk.repo.objectDatabase();
         const found = try db.read(wk.io, tree_oid);
         defer db.allocator().free(found.bytes);
@@ -698,8 +698,8 @@ fn formatSubst(wk: *Walk, commit: Oid, src: []const u8) Error![]const u8 {
     return out.items;
 }
 
-fn anyMatch(a: Allocator, io: Io, db: *odb_mod.Odb, tree_oid: Oid, base: []const u8, spec: *const pathspec_mod.Pathspec, depth: u32) Error!bool {
-    if (depth > object.max_tree_depth) return error.TreeTooDeep;
+fn anyMatch(a: Allocator, io: Io, db: *odb_mod.Odb, tree_oid: Oid, base: []const u8, spec: *const pathspec_mod.Pathspec, depth: u32, max_depth: u32) Error!bool {
+    if (depth > max_depth) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
     const tree = object.Tree.parse(db.objectFormat(), found.bytes);
@@ -708,7 +708,7 @@ fn anyMatch(a: Allocator, io: Io, db: *odb_mod.Odb, tree_oid: Oid, base: []const
         const path = try std.mem.concat(a, u8, &.{ base, entry.name });
         if (entry.mode == .tree) {
             if (spec.matchesDir(path)) return true;
-            if (spec.couldMatchUnder(path) and try anyMatch(a, io, db, entry.oid, try std.mem.concat(a, u8, &.{ path, "/" }), spec, depth + 1)) return true;
+            if (spec.couldMatchUnder(path) and try anyMatch(a, io, db, entry.oid, try std.mem.concat(a, u8, &.{ path, "/" }), spec, depth + 1, max_depth)) return true;
         } else if (spec.matches(path)) return true;
     }
     return false;
@@ -775,7 +775,7 @@ pub fn archive(gpa: Allocator, io: Io, inputs: Inputs, w: *Io.Writer, options: O
         if (p.len == 0) continue;
         var one = try pathspec_mod.parse(gpa, &.{p});
         defer one.deinit();
-        if (!try anyMatch(a, io, db, tree, "", &one, 0)) return error.PathspecNoMatch;
+        if (!try anyMatch(a, io, db, tree, "", &one, 0, inputs.repo.settings().max_tree_depth)) return error.PathspecNoMatch;
     }
     var spec = try pathspec_mod.parse(gpa, options.pathspecs);
     defer spec.deinit();

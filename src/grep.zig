@@ -65,7 +65,7 @@ pub const Error = error{
     BareRepository,
     /// The object to search is not a commit or a tree.
     NotATree,
-    /// The tree nests deeper than `object.max_tree_depth`.
+    /// The tree nests deeper than `core.maxTreeDepth`.
     TreeTooDeep,
 } || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || attributes.Error || Io.Writer.Error ||
     odb_mod.Error || object.TreeParseError;
@@ -854,7 +854,7 @@ fn collectIndex(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_m
 }
 
 fn collectTree(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, tree_oid: Oid, prefix: []const u8, name_prefix: []const u8, items: *std.ArrayList(Item), depth: u32) Error!void {
-    if (depth > object.max_tree_depth) return error.TreeTooDeep;
+    if (depth > repo.settings().max_tree_depth) return error.TreeTooDeep;
     const db = repo.objectDatabase();
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);

@@ -20,6 +20,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.rev_walk.<name>`.
 
 const std = @import("std");
+const object_depth = @import("../object/object.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -110,6 +111,9 @@ pub const Walk = struct {
     /// that matter -- one not reached from a hidden commit, or one given
     /// hidden -- has that parent alone, so the others are not walked.
     paths: ?*const pathspec.Pathspec = null,
+    /// `core.maxTreeDepth`, how deep `paths` may look into a tree: a caller
+    /// with a repository gives `Repository.settings().max_tree_depth`.
+    max_tree_depth: u32 = object_depth.max_tree_depth,
 
     /// The commits given, in the order given: git's pending list.
     pending: std.ArrayList(Pending) = .empty,
@@ -255,7 +259,7 @@ pub const Walk = struct {
     fn simplifyCommit(walk: *Walk, io: Io, n: *Node) ErrorNamespace.Error!void {
         const paths = walk.paths orelse return;
         if (n.parents.len == 0) {
-            n.treesame = try simplify.sameWithin(walk.gpa, io, walk.db, null, n.tree, paths);
+            n.treesame = try simplify.sameWithin(walk.gpa, io, walk.db, null, n.tree, .{ .paths = paths, .max_depth = walk.max_tree_depth });
             return;
         }
         var relevant_parents: usize = 0;
@@ -271,7 +275,7 @@ pub const Walk = struct {
             // parent alone.
             if (i == 1 and walk.first_parent) break;
             try walk.parse(io, p);
-            if (try simplify.sameWithin(walk.gpa, io, walk.db, p.tree, n.tree, paths)) {
+            if (try simplify.sameWithin(walk.gpa, io, walk.db, p.tree, n.tree, .{ .paths = paths, .max_depth = walk.max_tree_depth })) {
                 if (!relevant) continue;
                 const only = try walk.gpa.alloc(Oid, 1);
                 only[0] = parent_oid;

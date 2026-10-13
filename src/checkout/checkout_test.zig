@@ -976,7 +976,7 @@ test "a file whose stat went stale is compared as it would be added, under the a
     try h.reload(gpa, io);
     for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| {
         const entry = h.index.find(path).?;
-        try std.testing.expect(!entry.stat.matches(try statOf(io, h.repo.dir, path), .full, .nanosecond));
+        try std.testing.expect(!entry.stat.matches(try statOf(io, h.repo.dir, path), .{ .resolution = .nanosecond }));
         try std.testing.expect(!try worktree.differsFromIndex(gpa, io, h.repo.dir, .{ .index = &h.index, .entry = entry.* }, h.worktreeRules()));
     }
     // What it entered to read them, it gave back.

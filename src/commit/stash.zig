@@ -379,7 +379,7 @@ const Ctx = struct {
 
         if (entry) |e| {
             if (e.mode == mode and !ctx.locked.index.isRacy(e.*) and
-                e.stat.matches(found.stat, ctx.rules.check_stat, ctx.rules.timestamp_resolution))
+                e.stat.matches(found.stat, ctx.rules.statCompare()))
             {
                 return .{ .mode = mode, .oid = e.oid };
             }

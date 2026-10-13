@@ -417,11 +417,21 @@ pub const Stat = struct {
         minimal,
     };
 
-    /// Whether a cached stat still describes the file on the disk.
-    ///
-    /// The status-change time is never compared. git compares it only under
-    /// `core.trustCtime`, and a machine running a desktop search indexer
-    /// changes it without the content changing.
+    /// How a cached stat is compared with the one on the disk.
+    pub const Compare = struct {
+        /// `core.checkStat`.
+        check: Check = .full,
+        /// `core.trustCtime`: compare the status-change time too, under a
+        /// `full` check, as git does by default.
+        trust_ctime: bool = true,
+        /// How fine a time the filesystem keeps.
+        resolution: Resolution,
+    };
+
+    /// Whether a cached stat still describes the file on the disk: git's
+    /// `match_stat_data`. The status-change time counts only under
+    /// `core.trustCtime` with a full check, as in git; a machine whose
+    /// indexer changes it without the content changing turns it off.
     ///
     /// `resolution` is how fine a modification time the filesystem keeps,
     /// which decides how much of the nanosecond field means anything. A
@@ -429,12 +439,18 @@ pub const Stat = struct {
     /// here", because that is what an index written by an implementation
     /// without them looks like and re-hashing a whole working tree over it
     /// would be a poor trade.
-    pub fn matches(cached: Stat, current: Stat, check: Check, resolution: Resolution) bool {
+    pub fn matches(cached: Stat, current: Stat, compare: Compare) bool {
+        const resolution = compare.resolution;
         if (cached.mtime_sec != current.mtime_sec) return false;
         if (cached.mtime_nsec != 0 and current.mtime_nsec != 0 and
             !resolution.sameSubsecond(cached.mtime_nsec, current.mtime_nsec)) return false;
+        if (compare.trust_ctime and compare.check == .full) {
+            if (cached.ctime_sec != current.ctime_sec) return false;
+            if (cached.ctime_nsec != 0 and current.ctime_nsec != 0 and
+                !resolution.sameSubsecond(cached.ctime_nsec, current.ctime_nsec)) return false;
+        }
         if (cached.size != current.size) return false;
-        if (check == .minimal) return true;
+        if (compare.check == .minimal) return true;
         if (cached.ino != 0 and current.ino != 0 and cached.ino != current.ino) return false;
         if (cached.uid != current.uid or cached.gid != current.gid) return false;
         // `st_dev` is deliberately not compared. git leaves it out of the
@@ -1370,18 +1386,18 @@ test "a stat shortcut believes exactly as many nanoseconds as were measured" {
     const c: Stat = .{ .mtime_sec = 1000, .mtime_nsec = 2_500_000, .size = 7 };
 
     // Every nanosecond kept: half a microsecond apart is a different file.
-    try std.testing.expect(!a.matches(b, .full, .nanosecond));
+    try std.testing.expect(!a.matches(b, .{ .resolution = .nanosecond }));
     // Milliseconds kept: half a microsecond is below what the filesystem
     // records, a millisecond and a half is not.
     const millisecond: Resolution = .{ .ns = 1_000_000, .measured = true };
-    try std.testing.expect(a.matches(b, .full, millisecond));
-    try std.testing.expect(!a.matches(c, .full, millisecond));
+    try std.testing.expect(a.matches(b, .{ .resolution = millisecond }));
+    try std.testing.expect(!a.matches(c, .{ .resolution = millisecond }));
     // Seconds kept: the nanosecond field says nothing at all.
-    try std.testing.expect(a.matches(b, .full, .second));
-    try std.testing.expect(a.matches(c, .full, .second));
+    try std.testing.expect(a.matches(b, .{ .resolution = .second }));
+    try std.testing.expect(a.matches(c, .{ .resolution = .second }));
     // And the size still decides, whatever the resolution.
     const bigger: Stat = .{ .mtime_sec = 1000, .mtime_nsec = 1_000_000, .size = 8 };
-    try std.testing.expect(!a.matches(bigger, .full, .second));
+    try std.testing.expect(!a.matches(bigger, .{ .resolution = .second }));
 }
 
 test "one stat and two stats describe a path the same way" {
@@ -1736,4 +1752,12 @@ test "sized read releases its hint allocation when a grown file exceeds the limi
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "grown", .data = "twelve bytes" });
     try std.testing.expectError(error.StreamTooLong, readFileSized(std.testing.allocator, std.testing.io, tmp.dir, "grown", .{ .size = 1, .max_bytes = 4 }));
+}
+
+test "a changed status-change time says a file may have changed under core.trustCtime and a full check, as in git" {
+    const a: Stat = .{ .mtime_sec = 1000, .ctime_sec = 1000, .size = 7 };
+    const b: Stat = .{ .mtime_sec = 1000, .ctime_sec = 1001, .size = 7 };
+    try std.testing.expect(!a.matches(b, .{ .resolution = .nanosecond }));
+    try std.testing.expect(a.matches(b, .{ .trust_ctime = false, .resolution = .nanosecond }));
+    try std.testing.expect(a.matches(b, .{ .check = .minimal, .resolution = .nanosecond }));
 }

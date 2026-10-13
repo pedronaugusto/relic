@@ -105,6 +105,8 @@ pub const Rules = struct {
     ignore_case: bool = false,
     /// How much of a cached stat to believe, from `core.checkStat`.
     check_stat: fs.Stat.Check = .full,
+    /// `core.trustCtime`.
+    trust_ctime: bool = true,
     /// How fine a modification time the working tree's filesystem records.
     /// `Repository.worktreeRules` fills it in from what the object database
     /// measured at open; the default believes every nanosecond, which is
@@ -118,6 +120,11 @@ pub const Rules = struct {
     /// symlink is written as a file holding its target, which is what that
     /// setting means, and the outcome records it.
     symlinks: bool = builtin.target.os.tag != .windows,
+
+    /// How a cached stat is compared with the disk under these rules.
+    pub fn statCompare(r: Rules) fs.Stat.Compare {
+        return .{ .check = r.check_stat, .trust_ctime = r.trust_ctime, .resolution = r.timestamp_resolution };
+    }
 };
 
 /// What `addAll` changed.
@@ -546,7 +553,7 @@ const Walker = struct {
             const racy = w.index.isRacy(entry.*);
             if (!racy and !entry.intent_to_add and
                 entry.mode == mode and
-                entry.stat.matches(found.stat, w.options.rules.check_stat, w.options.rules.timestamp_resolution))
+                entry.stat.matches(found.stat, w.options.rules.statCompare()))
             {
                 w.outcome.unchanged += 1;
                 return;
@@ -1447,7 +1454,7 @@ const StatusScan = struct {
             return .type_changed;
         }
         if (entry.mode != mode) return .modified;
-        if (!s.index.isRacy(entry.*) and entry.stat.matches(found.stat, s.options.rules.check_stat, s.options.rules.timestamp_resolution)) {
+        if (!s.index.isRacy(entry.*) and entry.stat.matches(found.stat, s.options.rules.statCompare())) {
             return .unmodified;
         }
         // The stat says it may have changed; the content says whether it
@@ -2028,7 +2035,7 @@ const CheckoutWrite = struct {
         const entry = c.index.find(path) orelse return false;
         if (!entry.oid.eql(want.oid) or entry.mode != want.mode or c.index.isRacy(entry.*)) return false;
         const on_disk = try fs.statAt(c.io, c.wt, path) orelse return false;
-        return entry.stat.matches(on_disk.stat, c.options.rules.check_stat, c.options.rules.timestamp_resolution);
+        return entry.stat.matches(on_disk.stat, c.options.rules.statCompare());
     }
 
     /// Write one path, or hand a regular file to `batch`, or leave one a
@@ -2894,7 +2901,7 @@ pub fn differsFromIndex(
     const found = (try fs.statAt(io, wt, entry.path)) orelse return false;
     if (found.kind == .directory) return true;
     if (modeOnDisk(found, entry.mode, rules) != entry.mode) return true;
-    if (!index.isRacy(entry) and entry.stat.matches(found.stat, rules.check_stat, rules.timestamp_resolution)) {
+    if (!index.isRacy(entry) and entry.stat.matches(found.stat, rules.statCompare())) {
         return false;
     }
     var scratch: std.heap.ArenaAllocator = .init(gpa);
@@ -3106,7 +3113,7 @@ pub fn applySparse(
                 // git's `verify_uptodate`: a stat that does not match is a
                 // change, without reading the file, and only a racy entry
                 // whose stat does match has its content compared.
-                if (!entry.stat.matches(found.stat, options.rules.check_stat, options.rules.timestamp_resolution)) {
+                if (!entry.stat.matches(found.stat, options.rules.statCompare())) {
                     outcome.kept_dirty += 1;
                     continue;
                 }

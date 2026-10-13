@@ -224,12 +224,52 @@ const RepositoryData = struct {
     fsync: fs.Fsync = .default,
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
+    /// The engines' `core` settings, from the published configuration.
+    settings: Settings = undefined,
     /// The shallow file as it was read or last written: a write over
     /// another writer's change is refused.
     shallow_seen: shallow.Seen = null,
     lfsconfig_mutex: Io.Mutex = .init,
     /// Commits read through `commitInfo` and `commitTree`, kept.
     commits: commit_cache.Cache = .{},
+};
+
+/// The `core` settings engines take, read once from a published
+/// configuration with git's defaults: what the working tree is like and how
+/// far to believe it.
+pub const Settings = struct {
+    /// `core.ignoreCase`: the working tree folds case.
+    ignore_case: bool,
+    /// `core.fileMode`: the executable bit is real (git's default where
+    /// the platform has one).
+    file_mode: bool,
+    /// `core.symlinks`: links are made as links (not on Windows by default).
+    symlinks: bool,
+    /// `core.checkStat`: how much of a stat to compare.
+    check_stat: fs.Stat.Check,
+    /// `core.trustCtime`: whether a changed status-change time says the
+    /// file may have changed (git's default: true).
+    trust_ctime: bool,
+    /// `core.maxTreeDepth`: how deep a tree may nest (git's default 2048).
+    max_tree_depth: u32,
+
+    /// The settings `config` gives, git's defaults where it gives none.
+    pub fn of(config: *const config_mod.Config) ErrorNamespace.Error!Settings {
+        const check: fs.Stat.Check = if (config.get("core.checkstat")) |text|
+            (if (std.ascii.eqlIgnoreCase(text, "default")) .full else if (std.ascii.eqlIgnoreCase(text, "minimal")) .minimal else return error.MalformedValue)
+        else
+            .full;
+        const depth = try config.getInt("core.maxtreedepth", object.max_tree_depth);
+        if (depth < 0 or depth > std.math.maxInt(u32)) return error.MalformedValue;
+        return .{
+            .ignore_case = try config.getBool("core.ignorecase", false),
+            .file_mode = try config.getBool("core.filemode", Io.File.Permissions.has_executable_bit),
+            .symlinks = try config.getBool("core.symlinks", builtin.target.os.tag != .windows),
+            .check_stat = check,
+            .trust_ctime = try config.getBool("core.trustctime", true),
+            .max_tree_depth = @intCast(depth),
+        };
+    }
 };
 
 pub const Repository = struct {
@@ -663,6 +703,7 @@ pub const Repository = struct {
         errdefer config_owner.destroy(repo.data().config_state);
         repo.data().shared = try sharedOf(repo.configuration());
         repo.data().fsync = try fsyncOf(repo.configuration());
+        repo.data().settings = try Settings.of(repo.configuration());
         var odb_options = options.odb;
         odb_options.shared = repo.data().shared;
         odb_options.fsync = repo.data().fsync;
@@ -1169,6 +1210,7 @@ pub const Repository = struct {
         ref_options: reftable_stack.Options,
         shared: fs.Shared,
         fsync: fs.Fsync,
+        settings: Settings,
     };
 
     /// Whether `next` may be published, and the policy it sets: the same
@@ -1190,6 +1232,7 @@ pub const Repository = struct {
                 repo.refStore().reftableOptions(),
             .shared = try sharedOf(next),
             .fsync = try fsyncOf(next),
+            .settings = try Settings.of(next),
         };
     }
 
@@ -1205,6 +1248,14 @@ pub const Repository = struct {
         repo.data().odb.configureWrites(policy.shared, policy.fsync);
         repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;
+        repo.data().settings = policy.settings;
+    }
+
+    /// The `core` settings the engines take, as the published configuration
+    /// says: parsed once each time one is published, so a malformed value
+    /// refuses the configuration as git refuses it.
+    pub fn settings(repo: *const Repository) Settings {
+        return repo.data().settings;
     }
 
     fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) ErrorNamespace.Error!void {
@@ -1228,7 +1279,6 @@ pub const Repository = struct {
 
     fn coreChoice(repo: *const Repository, comptime T: type, comptime boolean: bool, setting: []const u8, fallback: T) ErrorNamespace.Error!T {
         const text = repo.configuration().get(setting) orelse return fallback;
-        if (T == fs.Stat.Check and std.ascii.eqlIgnoreCase(text, "default")) return .full;
         inline for (@typeInfo(T).@"enum".field_names) |name| {
             if ((!boolean or (!std.mem.eql(u8, name, "true") and !std.mem.eql(u8, name, "false"))) and std.ascii.eqlIgnoreCase(text, name)) return @field(T, name);
         }
@@ -1242,11 +1292,12 @@ pub const Repository = struct {
     pub fn worktreeRules(repo: *const Repository) Self.Error!worktree.Rules {
         return .{
             .core = try repo.coreSettings(),
-            .ignore_case = try repo.configuration().getBool("core.ignorecase", false),
-            .check_stat = try repo.coreChoice(@TypeOf(@as(worktree.Rules, .{}).check_stat), false, "core.checkstat", .full),
+            .ignore_case = repo.data().settings.ignore_case,
+            .check_stat = repo.data().settings.check_stat,
+            .trust_ctime = repo.data().settings.trust_ctime,
             .timestamp_resolution = repo.data().odb.timestamp_resolution,
-            .file_mode = try repo.configuration().getBool("core.filemode", Io.File.Permissions.has_executable_bit),
-            .symlinks = try repo.configuration().getBool("core.symlinks", builtin.target.os.tag != .windows),
+            .file_mode = repo.data().settings.file_mode,
+            .symlinks = repo.data().settings.symlinks,
         };
     }
 
@@ -1255,7 +1306,7 @@ pub const Repository = struct {
     /// The result is the caller's, and a walk pushes and pops deeper levels
     /// into it as it goes.
     pub fn loadIgnore(repo: *Repository, io: Io) Self.Error!ignore.Rules {
-        const case_fold = try repo.configuration().getBool("core.ignorecase", false);
+        const case_fold = repo.data().settings.ignore_case;
         var rules = try ignore.Rules.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer rules.deinit();
         const excludes = try repo.configuration().getPath(repo.data().gpa, "core.excludesfile");
@@ -1296,7 +1347,7 @@ pub const Repository = struct {
 
     /// Load the attributes for the working tree's root.
     pub fn loadAttrs(repo: *Repository, io: Io) Self.Error!attributes.Attrs {
-        const case_fold = try repo.configuration().getBool("core.ignorecase", false);
+        const case_fold = repo.data().settings.ignore_case;
         var attrs = try attributes.Attrs.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer attrs.deinit();
         const file = try repo.configuration().getPath(repo.data().gpa, "core.attributesfile");
