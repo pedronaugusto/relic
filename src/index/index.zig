@@ -1080,11 +1080,12 @@ pub const Index = struct {
         }
         errdefer gpa.free(path);
 
-        // An empty name is only legal in a split index's overlay, and a
-        // trailing slash only on a sparse directory; both are checked once
-        // the extensions have been read.
-        const stored = if (path.len > 1 and path[path.len - 1] == '/') path[0 .. path.len - 1] else path;
-        if (stored.len != 0 and !safe_path.isSafeStoredPath(stored)) return error.InvalidEntryPath;
+        // A path is not checked here, as git's `do_read_index` checks none:
+        // the checkout that would write one refuses it (`names.path`), so an
+        // index another platform wrote opens wherever git opens it. An empty
+        // name is only legal in a split index's overlay, and a trailing
+        // slash only on a sparse directory; both are checked once the
+        // extensions have been read.
 
         const mode_raw = std.mem.readInt(u32, b[24..28], .big);
         const mode = object.Mode.fromRaw(mode_raw) catch return error.InvalidMode;

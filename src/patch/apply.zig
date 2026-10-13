@@ -1725,7 +1725,7 @@ fn hasSymlinkLeadingPath(st: *State, name: []const u8) Error!bool {
     return false;
 }
 
-fn checkUnsafePath(p: *const FilePatch) bool {
+fn checkUnsafePath(p: *const FilePatch, protect: safe_path.Protect) bool {
     var old_name: ?[]const u8 = null;
     var new_name: ?[]const u8 = null;
     if (p.is_delete == .yes) {
@@ -1734,8 +1734,8 @@ fn checkUnsafePath(p: *const FilePatch) bool {
     if (p.is_delete != .yes) new_name = p.new_name;
     // git's `verify_path(name, mode)`: the mode decides whether the name
     // may be `.gitmodules`.
-    if (old_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.old_mode) == patchparse.mode_symlink) != null) return false;
-    if (new_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.new_mode) == patchparse.mode_symlink) != null) return false;
+    if (old_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.old_mode) == patchparse.mode_symlink, protect) != null) return false;
+    if (new_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.new_mode) == patchparse.mode_symlink, protect) != null) return false;
     return true;
 }
 
@@ -1773,7 +1773,7 @@ fn checkPatch(st: *State, entry: *Entry) Error!bool {
         if (patchparse.kind(p.old_mode) != patchparse.kind(p.new_mode)) return st.fail(entry, .mode_mismatch);
     }
     const unsafe_ok = st.options.unsafe_paths and !st.check_index;
-    if (!unsafe_ok and !checkUnsafePath(p)) return st.fail(entry, .invalid_path);
+    if (!unsafe_ok and !checkUnsafePath(p, st.rules.protect)) return st.fail(entry, .invalid_path);
     if (p.is_delete != .yes) {
         if (try pathIsBeyondSymlink(st, p.new_name.?)) return st.fail(entry, .beyond_symlink);
     }

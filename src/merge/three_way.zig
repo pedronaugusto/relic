@@ -15,6 +15,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const names_path = @import("../names/path.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -398,7 +399,7 @@ fn carry(
         return err;
     };
 
-    const outcome_removed = try removeGone(io, wt, index, changes.items, &desired);
+    const outcome_removed = try removeGone(io, wt, index, changes.items, &desired, rules.protect);
     var write_attrs = try repo.loadAttrs(io);
     defer write_attrs.deinit();
     try mergedAttributes(arena, io, db, &write_attrs, merged, changes.items);
@@ -468,7 +469,7 @@ const Desired = std.array_hash_map.String(?TreeEntry);
 /// Remove what the merge takes away, last path first, so that a directory
 /// the merge turns into a file is gone before the file is written. How
 /// many went.
-fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const u8, desired: *const Desired) Error!u32 {
+fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const u8, desired: *const Desired, protect: names_path.Protect) Error!u32 {
     var removed: u32 = 0;
     var i = changes.len;
     while (i > 0) {
@@ -484,7 +485,7 @@ fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const 
             removed += 1;
             continue;
         }
-        try worktree.removeEntry(io, wt, path);
+        try worktree.removeEntry(io, wt, path, protect);
         removed += 1;
     }
     return removed;

@@ -1042,7 +1042,7 @@ const Importer = struct {
             b.root = try imp.newNode(oid);
             return;
         }
-        if (!validPath(path, mode)) return error.InvalidPath;
+        if (!validPath(path, mode, imp.repo.settings().protect)) return error.InvalidPath;
         _ = try imp.setPath(b.root, path, oid, mode, null);
     }
 
@@ -1064,7 +1064,7 @@ const Importer = struct {
             b.root = leaf.sub orelse try imp.newNode(leaf.oid);
             return;
         }
-        if (!validPath(dest, leaf.mode)) return error.InvalidPath;
+        if (!validPath(dest, leaf.mode, imp.repo.settings().protect)) return error.InvalidPath;
         _ = try imp.setPath(b.root, dest, leaf.oid, leaf.mode, leaf.sub);
     }
 
@@ -1787,11 +1787,12 @@ fn checkDepth(path: []const u8) Error!void {
     if (std.mem.countScalar(u8, path, '/') >= object.max_tree_depth) return error.TreeTooDeep;
 }
 
-/// git's `verify_path`, with `core.protectNTFS` and `core.protectHFS` on:
-/// no empty, `.` or `..` component, no spelling of `.git` NTFS or HFS+
-/// opens as it, nor of `.gitmodules` for a symlink.
-fn validPath(path: []const u8, mode: u32) bool {
-    return safe_path.checkEntry(path, .stored, mode == 0o120000) == null;
+/// git's `verify_path`, as the repository's `core.protectNTFS` and
+/// `core.protectHFS` say: no empty, `.` or `..` component, no spelling of
+/// `.git` a protected file system opens as it, nor of `.gitmodules` for a
+/// symlink.
+fn validPath(path: []const u8, mode: u32, protect: safe_path.Protect) bool {
+    return safe_path.checkEntry(path, .stored, mode == 0o120000, protect) == null;
 }
 
 fn validSignatureFormat(text: []const u8) bool {

@@ -129,7 +129,7 @@ pub fn toTree(
     var i = remove.items.len;
     while (i > 0) {
         i -= 1;
-        try worktree.removeEntry(io, wt, remove.items[i]);
+        try worktree.removeEntry(io, wt, remove.items[i], rules.protect);
     }
     var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
@@ -146,7 +146,7 @@ pub fn toTree(
             if (found.kind == .directory) try wt.deleteTree(io, path);
         }
         // Validate before `enter` consults a directory in the working tree.
-        if (path_mod.checkEntry(path, .worktree, want.mode == .symlink) != null) return error.UnsafePath;
+        if (path_mod.checkEntry(path, .worktree, want.mode == .symlink, rules.protect) != null) return error.UnsafePath;
         try write_attrs.enter(io, wt, path);
         const written = try worktree.writeEntry(gpa, io, wt, .{ .db = db, .conv = &conv, .path = path, .mode = want.mode, .oid = want.oid, .rules = rules });
         try stats.put(arena, path, written.stat);

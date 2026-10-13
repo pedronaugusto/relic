@@ -11,6 +11,7 @@ const hooks = @import("../hooks/hooks.zig");
 const program = @import("../process.zig").program;
 
 const fs = @import("../fs/fs.zig");
+const names_path = @import("../names/path.zig");
 const discover_directory = @import("../discover/directory.zig");
 const safe = @import("safe.zig");
 
@@ -253,6 +254,9 @@ pub const Settings = struct {
     trust_ctime: bool,
     /// `core.maxTreeDepth`: how deep a tree may nest (git's default 2048).
     max_tree_depth: u32,
+    /// `core.protectNTFS` (on everywhere) and `core.protectHFS` (on macOS):
+    /// the spellings of `.git` another file system opens as it.
+    protect: names_path.Protect,
 
     /// The settings `config` gives, git's defaults where it gives none.
     pub fn of(config: *const config_mod.Config) ErrorNamespace.Error!Settings {
@@ -269,6 +273,10 @@ pub const Settings = struct {
             .check_stat = check,
             .trust_ctime = try config.getBool("core.trustctime", true),
             .max_tree_depth = @intCast(depth),
+            .protect = .{
+                .ntfs = try config.getBool("core.protectntfs", true),
+                .hfs = try config.getBool("core.protecthfs", builtin.target.os.tag == .macos),
+            },
         };
     }
 };
@@ -1277,6 +1285,7 @@ pub const Repository = struct {
             .timestamp_resolution = repo.data().odb.timestamp_resolution,
             .file_mode = repo.data().settings.file_mode,
             .symlinks = repo.data().settings.symlinks,
+            .protect = repo.data().settings.protect,
         };
     }
 

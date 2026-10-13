@@ -55,8 +55,10 @@ pub const Harness = struct {
         h.* = undefined;
     }
 
+    /// The rules git's own tests check out hostile trees with:
+    /// `core.protectHFS` and `core.protectNTFS` both on, on every platform.
     pub fn worktreeRules(h: *Harness) worktree.Rules {
-        return .{ .ignore = &h.rules, .attrs = &h.attrs };
+        return .{ .ignore = &h.rules, .attrs = &h.attrs, .protect = .{ .ntfs = true, .hfs = true } };
     }
 
     /// Check `root` out into the working tree, and say which rule refused

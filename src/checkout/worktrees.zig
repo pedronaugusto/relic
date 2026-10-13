@@ -483,7 +483,7 @@ pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!Pru
 /// component, never `.` or `..`, nothing a platform would take for another
 /// name.
 fn checkId(name: []const u8) ErrorNamespace.Error!void {
-    if (safe_path.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
+    if (safe_path.checkComponent(name, .worktree, .{}) != null) return error.InvalidWorktreeName;
 }
 
 /// Put a `locked` file beside a worktree, with an optional reason.

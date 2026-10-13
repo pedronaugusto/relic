@@ -458,7 +458,7 @@ fn parseMergeRr(arena: Allocator, text: []const u8, kind: hash.Kind) (Allocator.
         }
         if (rest[0] != '\t') return error.MalformedMergeRr;
         // The path is read and rewritten in the working tree.
-        if (!path_mod.isSafeStoredPath(rest[1..])) return error.MalformedMergeRr;
+        if (!path_mod.isSafeStoredPath(rest[1..], .{ .ntfs = true, .hfs = true })) return error.MalformedMergeRr;
         try rr.put(arena, try arena.dupe(u8, rest[1..]), .{ .hex = try arena.dupe(u8, hex), .variant = variant });
     }
     return rr;

@@ -82,8 +82,16 @@ pub const Use = enum {
     stored,
 };
 
+/// Which spellings of `.git` and `.gitmodules` another file system opens as
+/// them are refused, beside the plain ones: git's `core.protectNTFS`
+/// (default on everywhere) and `core.protectHFS` (default on macOS).
+pub const Protect = struct {
+    ntfs: bool = true,
+    hfs: bool = builtin.target.os.tag == .macos,
+};
+
 /// Whether a single path component is allowed, and why not when it is not.
-pub fn checkComponent(name: []const u8, use: Use) ?Reason {
+pub fn checkComponent(name: []const u8, use: Use, protect: Protect) ?Reason {
     if (name.len == 0) return .empty;
     if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return .dot_component;
     const windows = builtin.target.os.tag == .windows;
@@ -92,11 +100,14 @@ pub fn checkComponent(name: []const u8, use: Use) ?Reason {
         // No git path holds a NUL, whatever the platform.
         if (c == 0 or (windows and use == .worktree and (c < 0x20 or c == 0x7f))) return .control_character;
     }
-    if (isNtfsDotGit(name) or isHfsDot(name, "git") or isGitName(name)) return .git_directory;
+    // `.git` in any case is refused always, as git's `verify_dotfile` does;
+    // the spellings another file system opens as it, as the setting says.
+    if (std.ascii.eqlIgnoreCase(name, ".git")) return .git_directory;
+    if ((protect.ntfs and (isNtfsDotGit(name) or isGitName(name))) or (protect.hfs and isHfsDot(name, "git"))) return .git_directory;
     // What follows a backslash is a component of its own on an NTFS volume,
     // a Linux one mounted from Windows included, so `.\.GIT\x` is refused
-    // on every platform as git's `verify_path` refuses it.
-    if (afterBackslash(isNtfsDotGit, name)) return .git_directory;
+    // wherever NTFS is protected, as git's `verify_path` refuses it.
+    if (protect.ntfs and afterBackslash(isNtfsDotGit, name)) return .git_directory;
     if (use == .stored or !windows) return null;
     if (std.mem.findScalar(u8, name, ':')) |colon| {
         if (isGitName(name[0..colon])) return .git_directory;
@@ -163,6 +174,11 @@ pub fn dosDrivePrefixLen(path: []const u8) usize {
 /// or spaces (checked by the caller above), the NTFS 8.3 alias `git~1`, and
 /// `.git` reached through a short name generated for a longer one beginning
 /// `git~`.
+/// `.gitmodules` in any case: what a link may never be named.
+fn isGitmodulesName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, ".gitmodules");
+}
+
 fn isGitName(base: []const u8) bool {
     if (base.len == 4 and std.ascii.eqlIgnoreCase(base, ".git")) return true;
     // The 8.3 alias NTFS generates for `.git` is `git~1`; other digits are
@@ -209,7 +225,7 @@ pub const Refusal = struct {
 
 /// Whether a whole `/`-separated path is allowed, and which component
 /// decided when it is not.
-pub fn check(path: []const u8, use: Use) ?Refusal {
+pub fn check(path: []const u8, use: Use, protect: Protect) ?Refusal {
     if (path.len == 0) return .{ .reason = .empty, .component = path };
     // A backslash and `C:\x` or `C:x` name something outside the working
     // tree where they are separators.
@@ -221,7 +237,7 @@ pub fn check(path: []const u8, use: Use) ?Refusal {
     }
     var it = std.mem.splitScalar(u8, path, '/');
     while (it.next()) |component| {
-        if (checkComponent(component, use)) |reason| {
+        if (checkComponent(component, use, protect)) |reason| {
             return .{ .reason = reason, .component = component };
         }
     }
@@ -231,13 +247,13 @@ pub fn check(path: []const u8, use: Use) ?Refusal {
 /// Whether a whole path is allowed for an entry that is, or is not, a
 /// symbolic link: `check`, and for a link git's `verify_path` rule that no
 /// component spells `.gitmodules`.
-pub fn checkEntry(path: []const u8, use: Use, symlink: bool) ?Refusal {
-    if (check(path, use)) |refused| return refused;
+pub fn checkEntry(path: []const u8, use: Use, symlink: bool, protect: Protect) ?Refusal {
+    if (check(path, use, protect)) |refused| return refused;
     if (!symlink) return null;
     var it = std.mem.splitScalar(u8, path, '/');
     while (it.next()) |component| {
-        if (isHfsDot(component, "gitmodules") or isNtfsDotGitmodules(component) or
-            afterBackslash(isNtfsDotGitmodules, component))
+        if (isGitmodulesName(component) or (protect.hfs and isHfsDot(component, "gitmodules")) or
+            (protect.ntfs and (isNtfsDotGitmodules(component) or afterBackslash(isNtfsDotGitmodules, component))))
         {
             return .{ .reason = .symlinked_gitmodules, .component = component };
         }
@@ -246,13 +262,13 @@ pub fn checkEntry(path: []const u8, use: Use, symlink: bool) ?Refusal {
 }
 
 /// Whether a path may be written into a working tree.
-pub fn isSafeWorktreePath(path: []const u8) bool {
-    return check(path, .worktree) == null;
+pub fn isSafeWorktreePath(path: []const u8, protect: Protect) bool {
+    return check(path, .worktree, protect) == null;
 }
 
 /// Whether a path may be stored in a tree or an index.
-pub fn isSafeStoredPath(path: []const u8) bool {
-    return check(path, .stored) == null;
+pub fn isSafeStoredPath(path: []const u8, protect: Protect) bool {
+    return check(path, .stored, protect) == null;
 }
 
 /// The byte at `i`, or NUL past the end, as git's NUL-terminated buffers
@@ -407,38 +423,38 @@ test "the git directory is refused in every spelling" {
         "git~12",     ".git.", ".git ", ".git:", ".git::$INDEX_ALLOCATION",
         ".git:$DATA",
     }) |name| {
-        try std.testing.expect(checkComponent(name, .worktree) != null);
-        try std.testing.expect(checkComponent(name, .stored) != null);
+        try std.testing.expect(checkComponent(name, .worktree, .{ .ntfs = true, .hfs = true }) != null);
+        try std.testing.expect(checkComponent(name, .stored, .{ .ntfs = true, .hfs = true }) != null);
     }
-    try std.testing.expect(checkComponent(".gitignore", .worktree) == null);
-    try std.testing.expect(checkComponent("gitk", .worktree) == null);
-    try std.testing.expect(checkComponent("git~x", .worktree) == null);
+    try std.testing.expect(checkComponent(".gitignore", .worktree, .{ .ntfs = true, .hfs = true }) == null);
+    try std.testing.expect(checkComponent("gitk", .worktree, .{ .ntfs = true, .hfs = true }) == null);
+    try std.testing.expect(checkComponent("git~x", .worktree, .{ .ntfs = true, .hfs = true }) == null);
 }
 
 test "device names are refused with and without an extension where Windows opens them" {
     for ([_][]const u8{ "con", "CON", "aux", "nul.txt", "com1", "LPT9.tar.gz", "prn" }) |name| {
         if (builtin.target.os.tag == .windows) {
-            try std.testing.expectEqual(Reason.device_name, checkComponent(name, .worktree).?);
-        } else try std.testing.expectEqual(null, checkComponent(name, .worktree));
+            try std.testing.expectEqual(Reason.device_name, checkComponent(name, .worktree, .{ .ntfs = true, .hfs = true }).?);
+        } else try std.testing.expectEqual(null, checkComponent(name, .worktree, .{ .ntfs = true, .hfs = true }));
     }
-    try std.testing.expect(checkComponent("console", .worktree) == null);
-    try std.testing.expect(checkComponent("com0", .worktree) == null);
-    try std.testing.expect(checkComponent("com10", .worktree) == null);
+    try std.testing.expect(checkComponent("console", .worktree, .{ .ntfs = true, .hfs = true }) == null);
+    try std.testing.expect(checkComponent("com0", .worktree, .{ .ntfs = true, .hfs = true }) == null);
+    try std.testing.expect(checkComponent("com10", .worktree, .{ .ntfs = true, .hfs = true }) == null);
 }
 
 test "traversal and separators are refused" {
-    try std.testing.expectEqual(Reason.dot_component, check("a/../b", .stored).?.reason);
-    try std.testing.expectEqual(Reason.dot_component, check("./a", .stored).?.reason);
-    try std.testing.expectEqual(Reason.absolute, check("/etc/passwd", .stored).?.reason);
-    try std.testing.expectEqual(Reason.control_character, checkComponent("a\x00b", .stored).?);
-    try std.testing.expect(check("a/b/c.txt", .worktree) == null);
+    try std.testing.expectEqual(Reason.dot_component, check("a/../b", .stored, .{ .ntfs = true, .hfs = true }).?.reason);
+    try std.testing.expectEqual(Reason.dot_component, check("./a", .stored, .{ .ntfs = true, .hfs = true }).?.reason);
+    try std.testing.expectEqual(Reason.absolute, check("/etc/passwd", .stored, .{ .ntfs = true, .hfs = true }).?.reason);
+    try std.testing.expectEqual(Reason.control_character, checkComponent("a\x00b", .stored, .{ .ntfs = true, .hfs = true }).?);
+    try std.testing.expect(check("a/b/c.txt", .worktree, .{ .ntfs = true, .hfs = true }) == null);
     for ([_]Use{ .stored, .worktree }) |use| {
         if (builtin.target.os.tag == .windows) {
-            try std.testing.expectEqual(Reason.absolute, check("C:/Windows", use).?.reason);
-            try std.testing.expectEqual(Reason.separator_inside_component, checkComponent("a\\b", use).?);
+            try std.testing.expectEqual(Reason.absolute, check("C:/Windows", use, .{ .ntfs = true, .hfs = true }).?.reason);
+            try std.testing.expectEqual(Reason.separator_inside_component, checkComponent("a\\b", use, .{ .ntfs = true, .hfs = true }).?);
         } else {
-            try std.testing.expect(check("C:/Windows", use) == null);
-            try std.testing.expect(checkComponent("a\\b", use) == null);
+            try std.testing.expect(check("C:/Windows", use, .{ .ntfs = true, .hfs = true }) == null);
+            try std.testing.expect(checkComponent("a\\b", use, .{ .ntfs = true, .hfs = true }) == null);
         }
     }
 }
@@ -447,33 +463,33 @@ test "a path refuses what git's verify_path refuses on this platform, and no mor
     // Names only Windows cannot create, which a Linux or macOS tree holds
     // and git writes there.
     for ([_][]const u8{ "d/aux.c", "a\tb", "t.", "x ", "con", "ab:c", "v1." }) |path| {
-        try std.testing.expectEqual(null, check(path, .stored));
+        try std.testing.expectEqual(null, check(path, .stored, .{ .ntfs = true, .hfs = true }));
         if (builtin.target.os.tag == .windows) {
-            try std.testing.expect(check(path, .worktree) != null);
-        } else try std.testing.expectEqual(null, check(path, .worktree));
+            try std.testing.expect(check(path, .worktree, .{ .ntfs = true, .hfs = true }) != null);
+        } else try std.testing.expectEqual(null, check(path, .worktree, .{ .ntfs = true, .hfs = true }));
     }
     for ([_][]const u8{ ".git", "a/.GIT/b", ".git.", ".git ", "git~1", ".git:x", ".git::$INDEX_ALLOCATION", ".g\u{200c}it", "../a", "" }) |path| {
-        try std.testing.expect(check(path, .stored) != null);
-        try std.testing.expect(check(path, .worktree) != null);
+        try std.testing.expect(check(path, .stored, .{ .ntfs = true, .hfs = true }) != null);
+        try std.testing.expect(check(path, .worktree, .{ .ntfs = true, .hfs = true }) != null);
     }
 }
 
 test "trailing dots and spaces are refused where Windows strips them" {
     for ([_][]const u8{ "x.", "x " }) |name| {
         if (builtin.target.os.tag == .windows) {
-            try std.testing.expectEqual(Reason.trailing_dot_or_space, checkComponent(name, .worktree).?);
-        } else try std.testing.expectEqual(null, checkComponent(name, .worktree));
+            try std.testing.expectEqual(Reason.trailing_dot_or_space, checkComponent(name, .worktree, .{ .ntfs = true, .hfs = true }).?);
+        } else try std.testing.expectEqual(null, checkComponent(name, .worktree, .{ .ntfs = true, .hfs = true }));
     }
-    try std.testing.expect(checkComponent(".x", .worktree) == null);
+    try std.testing.expect(checkComponent(".x", .worktree, .{ .ntfs = true, .hfs = true }) == null);
 }
 
 test "a symbolic link may not be .gitmodules in any spelling, and a file may" {
     for ([_][]const u8{ ".gitmodules", ".GitModules", "sub/.gitmodules", "gitmod~1", "GI7EBA~1", ".git\u{200c}modules" }) |path| {
-        try std.testing.expectEqual(Reason.symlinked_gitmodules, checkEntry(path, .worktree, true).?.reason);
-        try std.testing.expectEqual(null, checkEntry(path, .stored, false));
+        try std.testing.expectEqual(Reason.symlinked_gitmodules, checkEntry(path, .worktree, true, .{ .ntfs = true, .hfs = true }).?.reason);
+        try std.testing.expectEqual(null, checkEntry(path, .stored, false, .{ .ntfs = true, .hfs = true }));
     }
     for ([_][]const u8{ ".gitmodulesx", "gitmodules", ".gitattributes" }) |path| {
-        try std.testing.expectEqual(null, checkEntry(path, .worktree, true));
+        try std.testing.expectEqual(null, checkEntry(path, .worktree, true, .{ .ntfs = true, .hfs = true }));
     }
 }
 
@@ -485,8 +501,8 @@ fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [256]u8 = undefined;
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
-    _ = check(input, .worktree);
-    _ = check(input, .stored);
+    _ = check(input, .worktree, .{ .ntfs = true, .hfs = true });
+    _ = check(input, .stored, .{ .ntfs = true, .hfs = true });
 }
 
 /// All errors reported by this namespace.

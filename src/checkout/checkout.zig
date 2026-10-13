@@ -105,6 +105,9 @@ pub const Rules = struct {
     ignore_case: bool = false,
     /// How much of a cached stat to believe, from `core.checkStat`.
     check_stat: fs.Stat.Check = .full,
+    /// `core.protectNTFS` and `core.protectHFS`: the spellings of `.git`
+    /// another file system opens as it, refused in what is written.
+    protect: safe_path.Protect = .{},
     /// `core.trustCtime`.
     trust_ctime: bool = true,
     /// How fine a modification time the working tree's filesystem records.
@@ -498,7 +501,7 @@ const Walker = struct {
     /// is staged as git's `add -A` stages it: a gitlink to the commit it has
     /// checked out, its directory never walked.
     fn stageRepository(w: *Walker, path: []const u8, found: fs.Entry) Error!void {
-        if (!safe_path.isSafeStoredPath(path)) {
+        if (!safe_path.isSafeStoredPath(path, w.options.rules.protect)) {
             w.outcome.unsafe_paths += 1;
             return;
         }
@@ -541,7 +544,7 @@ const Walker = struct {
             try w.markSeen(path);
             return;
         }
-        if (!safe_path.isSafeStoredPath(path)) {
+        if (!safe_path.isSafeStoredPath(path, w.options.rules.protect)) {
             w.outcome.unsafe_paths += 1;
             return;
         }
@@ -1820,7 +1823,7 @@ fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEn
     var check_it = wanted.iterator();
     while (check_it.next()) |entry| {
         const path = entry.key_ptr.*;
-        if (safe_path.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink)) |refused| {
+        if (safe_path.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink, options.rules.protect)) |refused| {
             if (options.refusal) |out| out.set(refused.reason, path);
             return error.UnsafePath;
         }
@@ -2477,7 +2480,7 @@ pub fn writePaths(
     defer if (options.rules.attrs) |attrs| attrs.leave();
     for (writes) |w| {
         const symlink = if (w.blob) |b| b.mode == .symlink else false;
-        if (safe_path.checkEntry(w.path, .worktree, symlink)) |refused| {
+        if (safe_path.checkEntry(w.path, .worktree, symlink, options.rules.protect)) |refused| {
             if (options.refusal) |out| out.set(refused.reason, w.path);
             return error.UnsafePath;
         }
@@ -2634,7 +2637,7 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
     const mode = options.mode;
     const oid = options.oid;
     const rules = options.rules;
-    if (safe_path.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
+    if (safe_path.checkEntry(path, .worktree, mode == .symlink, options.rules.protect) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path);
     var written: Written = .{ .stat = .none };
     switch (mode) {
@@ -2675,7 +2678,7 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
     const mode = options.mode;
     const bytes = options.bytes;
     const rules = options.rules;
-    if (safe_path.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
+    if (safe_path.checkEntry(path, .worktree, mode == .symlink, options.rules.protect) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path);
     if (try fs.statAt(io, wt, path)) |found| {
         if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
@@ -2709,8 +2712,8 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
 
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
-pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
-    if (safe_path.check(path, .worktree) != null) return error.UnsafePath;
+pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8, protect: safe_path.Protect) Self.Error!void {
+    if (safe_path.check(path, .worktree, protect) != null) return error.UnsafePath;
     // A file past a symbolic link is not the working tree's: git's
     // `unlink_entry` leaves it.
     if (!try realLeadingPath(io, wt, path)) return;
@@ -3153,7 +3156,7 @@ pub fn applySparse(
             continue;
         }
         if (included and entry.skip_worktree) {
-            if (safe_path.checkEntry(entry.path, .worktree, entry.mode == .symlink)) |refused| {
+            if (safe_path.checkEntry(entry.path, .worktree, entry.mode == .symlink, options.rules.protect)) |refused| {
                 if (options.refusal) |out| out.set(refused.reason, entry.path);
                 return error.UnsafePath;
             }

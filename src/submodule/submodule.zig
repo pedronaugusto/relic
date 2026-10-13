@@ -477,8 +477,8 @@ fn connect(
 /// Refuse a path that must never become a filesystem path, and one with a
 /// symbolic link for any component, which is git's
 /// `validate_submodule_path`.
-fn validatePath(io: Io, wt: Io.Dir, path: []const u8, display: []const u8, refusal: ?*Refusal) Error!void {
-    if (safe_path.check(path, .worktree)) |refused| {
+fn validatePath(io: Io, wt: Io.Dir, path: []const u8, display: []const u8, refusal: ?*Refusal, protect: safe_path.Protect) Error!void {
+    if (safe_path.check(path, .worktree, protect)) |refused| {
         return refuse(refusal, display, @tagName(refused.reason), error.UnsafePath);
     }
     var end: usize = 0;
@@ -986,7 +986,7 @@ fn syncIn(
         const module = entry.module orelse continue;
         if (!try isActive(arena, repo, module.name, entry.path)) continue;
         const display = try join(arena, prefix, entry.path);
-        try validatePath(io, wt, entry.path, display, options.refusal);
+        try validatePath(io, wt, entry.path, display, options.refusal, repo.settings().protect);
 
         var for_super: []const u8 = "";
         var for_sub: []const u8 = "";
@@ -1060,7 +1060,7 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
 
     for (listing.entries) |entry| {
         const module = entry.module orelse continue;
-        try validatePath(io, wt, entry.path, entry.path, options.refusal);
+        try validatePath(io, wt, entry.path, entry.path, options.refusal, repo.settings().protect);
 
         const on_disk = try fs.statAt(io, wt, entry.path);
         if (on_disk != null and on_disk.?.kind == .directory) {
@@ -1194,7 +1194,7 @@ fn absorbIn(
 
     for (listing.entries) |entry| {
         const display = try join(arena, prefix, entry.path);
-        try validatePath(io, wt, entry.path, display, options.refusal);
+        try validatePath(io, wt, entry.path, display, options.refusal, repo.settings().protect);
         const dot_git = try arena.print("{s}/.git", .{entry.path});
         const git_entry = (try fs.statAt(io, wt, dot_git)) orelse continue;
 
@@ -1386,7 +1386,7 @@ fn updateIn(
             continue;
         }
         const url = try resolvedUrl(arena, io, repo, module, display, options.refusal);
-        try validatePath(io, wt, entry.path, display, options.refusal);
+        try validatePath(io, wt, entry.path, display, options.refusal, repo.settings().protect);
         try validateGitDir(arena, io, repo.gitDirectory(), module.name, display, options.refusal);
 
         const dot_git = try arena.print("{s}/.git", .{entry.path});

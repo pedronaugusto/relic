@@ -1295,7 +1295,7 @@ test "nothing is written or removed past a symbolic link in the working tree, an
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "elsewhere/f", .{}));
 
     // Removing `d/keep` removes nothing: it is not the working tree's.
-    try worktree.removeEntry(io, h.repo.dir, "d/keep");
+    try worktree.removeEntry(io, h.repo.dir, "d/keep", .{});
     try h.repo.dir.access(io, "elsewhere/keep", .{});
 
     _ = try worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, options);
