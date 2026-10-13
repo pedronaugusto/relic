@@ -126,6 +126,22 @@ const Run = struct {
     rules: worktree.Rules,
     /// Per conflict name, which variants have a preimage and a postimage.
     dirs: std.StringHashMapUnmanaged(std.ArrayList(u8)) = .empty,
+    /// `MERGE_RR.lock`, held from `MERGE_RR`'s read to its write, as git's
+    /// `setup_rerere` holds it: a second rerere in the same repository is
+    /// refused rather than losing the first one's records.
+    lock: ?fs.LockFile = null,
+    lock_buffer: [4096]u8 = undefined,
+
+    /// Take `MERGE_RR.lock`. `r` stays where it is until `release`.
+    fn hold(r: *Run) Error!void {
+        r.lock = try fs.LockFile.open(r.gpa, r.io, r.repo.gitDirectory(), .{ .sub_path = "MERGE_RR", .buffer = &r.lock_buffer }, .{ .sync = .none, .shared = r.repo.sharedPermissions() });
+    }
+
+    /// Give `MERGE_RR.lock` up, `MERGE_RR` unchanged unless it was written.
+    fn release(r: *Run) void {
+        if (r.lock) |*lock| lock.deinit(r.io);
+        r.lock = null;
+    }
 
     fn pathOf(r: *Run, id: Id, file: []const u8) Allocator.Error![]const u8 {
         if (id.variant <= 0) return r.arena.print("rr-cache/{s}/{s}", .{ id.hex, file });
@@ -338,6 +354,8 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
     const autoupdate = options.autoupdate orelse (repo.configuration().getBool("rerere.autoupdate", false) catch false);
 
+    try r.hold();
+    defer r.release();
     var rr = try readMergeRr(&r);
 
     // `find_conflict`: regular files at both stage 2 and stage 3.
@@ -477,7 +495,9 @@ fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
         } else try out.print(r.arena, "{s}\t{s}", .{ id.hex, path });
         try out.append(r.arena, 0);
     }
-    try state_file.write(r.io, r.repo.gitDirectory(), "MERGE_RR", out.items);
+    const lock = &r.lock.?;
+    try lock.writer().writeAll(out.items);
+    try lock.commit(r.io);
 }
 
 fn isReg(mode: object.Mode) bool {
@@ -638,6 +658,8 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = repo.workDirectory() orelse return error.BareRepository, .rules = .{} };
+    try r.hold();
+    defer r.release();
     // `read_rr`, which refuses a corrupt `MERGE_RR` as git's dies on one:
     // each conflict name becomes a directory name below.
     const rr = try readMergeRr(&r);
@@ -861,6 +883,8 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
     var r = try startRun(gpa, arena, io, repo, &attrs);
+    try r.hold();
+    defer r.release();
     var rr = try readMergeRr(&r);
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -1128,4 +1152,28 @@ fn fuzzNormalize(_: void, case: *shakedown.Case) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try normalize(arena.allocator(), text, 7, .sha1);
+}
+
+test "a rerere run holds MERGE_RR.lock from its read to its write, and is refused while another holds it" {
+    const testgit = @import("../testing/git.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var g = try testgit.Repo.init(gpa, io, &.{});
+    defer g.deinit();
+    try g.exec(io, &.{ "config", "rerere.enabled", "true" });
+    try g.writeFile(io, "f", "base\n");
+    try g.exec(io, &.{ "add", "f" });
+    try g.exec(io, &.{ "commit", "-q", "-m", "base" });
+    var repo = try Repository.open(gpa, io, g.dir, .{});
+    defer repo.deinit(io);
+    try g.writeFile(io, ".git/MERGE_RR.lock", "");
+    var locked = try repo.lockIndex(io);
+    defer locked.deinit(io);
+    try std.testing.expectError(error.LockHeld, run(gpa, io, &repo, &locked.index, .{}));
+    try std.testing.expectError(error.LockHeld, clear(gpa, io, &repo));
+    try g.dir.deleteFile(io, ".git/MERGE_RR.lock");
+    var outcome = try run(gpa, io, &repo, &locked.index, .{});
+    outcome.deinit();
+    try g.dir.access(io, ".git/MERGE_RR", .{});
+    try std.testing.expectError(error.FileNotFound, g.dir.access(io, ".git/MERGE_RR.lock", .{}));
 }
