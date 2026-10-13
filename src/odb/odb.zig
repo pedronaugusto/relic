@@ -24,6 +24,7 @@ const Io = std.Io;
 const warp = @import("warp");
 
 const hash = @import("../hash/hash.zig");
+const commit_graph_mod = @import("commit_graph.zig");
 const object = @import("../object/object.zig");
 
 const Oid = hash.Oid;
@@ -1153,6 +1154,13 @@ pub const Odb = struct {
         var receiving = options;
         receiving.keep = true;
         return indexpack_mod.receive(db.allocator(), io, db, .{ .pack_dir = dir, .in = input }, receiving);
+    }
+
+    /// The commit-graph of this database's objects, when there is one it
+    /// can read: one that does not read as a graph is no graph, as git's
+    /// readers take it. The caller deinits it.
+    pub fn commitGraph(db: *const Odb, io: Io) commit_graph_mod.Graph.Error!?commit_graph_mod.Graph {
+        return commit_graph_mod.Graph.openUsable(db.backendData().gpa, io, db.objectsDirectory(), db.objectFormat());
     }
 
     /// The writable pack directory, made with the shared mode when it is

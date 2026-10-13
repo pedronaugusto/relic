@@ -305,7 +305,7 @@ fn threeKinds(gpa: std.mem.Allocator, io: std.Io) !testgit.Repo {
         const base = try gpa.print(".git/objects/pack/pack-{s}.{s}", .{ std.mem.trim(u8, made, "\n"), if (i == 0) "keep" else "promisor" });
         defer gpa.free(base);
         try r.writeFile(io, base, "");
-        try r.exec(io, &.{ "prune-packed" });
+        try r.exec(io, &.{"prune-packed"});
     }
     return r;
 }

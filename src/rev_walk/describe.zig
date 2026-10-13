@@ -781,9 +781,7 @@ const NameRev = struct {
 
     fn setCutoff(nr: *NameRev, io: Io, cmit: Oid) Error!void {
         if (try nr.repo.configuration().getBool("core.commitgraph", true)) {
-            const objects = try nr.repo.commonDirectory().openDir(io, "objects", .{});
-            defer objects.close(io);
-            if (try commit_graph.Graph.openUsable(nr.gpa, io, objects, nr.repo.objectFormat())) |graph_value| {
+            if (try nr.repo.objectDatabase().commitGraph(io)) |graph_value| {
                 var graph = graph_value;
                 defer graph.deinit();
                 if (graph.find(cmit) != null) return;
