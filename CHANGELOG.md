@@ -9,6 +9,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - Every public namespace whose name ran two words together is snake_case, the family's one naming convention, and the names that shared a prefix are one namespace each: `fast` (was `fastimport` and `fastexport`) with `fast.importer` and `fast.exporter`; `rev_walk` (was `revwalk`) with `rev_walk.rev_parse` and `rev_walk.object` (was `objectwalk` and `objectfilter`) with `object.walk` and `object.filter`; `odb.commit_graph`, `odb.rev_index`, `odb.index_pack`; `refs.reftable` with `reftable.table` (the format, was `refs.reftable`) and `reftable.stack` (was `refs.reftablestack`); `worktree.sparse_checkout`, `worktree.dir_scan`, `worktree.safe_path`; `diff.patch_id`; `merge.three_way`, `merge.subtree_shift`; `transport.filter_spec`, `transport.side_band`, `transport.http_settings`, `transport.fetch_pack`, `transport.send_pack`, `transport.smart_http`, `transport.pkt_line`, `transport.upload_pack`, `transport.remote_helper`; `patch.range_diff`. Names git spells as one word stay one: `reftable`, `refspec`, `gitlink`, `gitmodules`, `mailmap`, `fsmonitor`, `shortlog`, `rerere`, `netrc`, `midx`, `sha1dc`.
+- `worktree.ignore`, `worktree.attributes` and `worktree.sparse` take a path's kind as sweep names it (`.file` or `.dir`), where they took `is_dir: bool`: `Rules.match`, `Rules.matchPath`, `Checker.excluded`, `Checker.match`, `Attrs.lookup`, `Patterns.includes`, `Cone.match`. Their rules, attributes and patterns hold the set caches their queries run on, so one thread at a time asks them; the spin locks that made threads take turns are gone, and so is the one behind a pattern longer than sweep compiles as a `Pattern`.
+- `worktree.ignore.Checker.release` is `toRules`, as a value moved out is named in Zig.
+- `repo.CreateOptions` is `repo.Repository.CreateOptions`, beside `Repository.create`.
+- `Repository.refreshConfig`, `writeConfig`, `editConfig` and `writeCommit` take an options struct last (`RefreshConfigOptions`, `WriteConfigOptions`, `EditConfigOptions`, `WriteCommitOptions`) whose `diagnostic` is the one their trailing `?*Diagnostic` was: `.{}` for none.
+- `repo.program.Child` is `conduit.Child`, conduit's own type, where it was a wrapper over it; `process.child` is gone.
+- `transport.connection.Connection.VTable.close` is `deinit`, the one word that releases a connection.
+- `lfs.ssh.Connection.readStatus` is `readAnswer`, and `readStatusWithData` is `readHead`, which returns an `lfs.ssh.Head`.
+
+### Fixed
+
+- upload-pack's advertisement reports a failure reading refs or objects as that failure, where it reported every one as `WriteFailed`.
+
+### Changed
+
+- The test that ran `python3` to make zlib streams for warp's decoder is gone: the decoder's corpus is warp's.
 
 ## [0.5.0] - 2026-10-13
 
