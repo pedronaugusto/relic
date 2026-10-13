@@ -11,6 +11,7 @@ const hooks = @import("../hooks/hooks.zig");
 const program = @import("../process.zig").program;
 
 const fs = @import("../fs/fs.zig");
+const discover_directory = @import("../discover/directory.zig");
 const safe = @import("safe.zig");
 
 const std = @import("std");
@@ -92,7 +93,7 @@ pub const Error = error{
     /// `core.sharedRepository` is a mode that leaves the owner unable to
     /// read or write.
     InvalidSharedMode,
-} || object.ParseError || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
+} || object.ParseError || discover_directory.Error || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
     config_mod.ParseError || config_mod.ValueError || odb_mod.Error ||
@@ -485,7 +486,7 @@ pub const Repository = struct {
 
             // The directory may itself be a git directory — a bare
             // repository, or `.git` handed in directly.
-            if (looksLikeGitDir(io, current)) {
+            if (discover_directory.isGitDirectory(io, current)) {
                 const git_dir = try current.openDir(io, ".", .{ .iterate = true });
                 errdefer git_dir.close(io);
                 try checkBare(gpa, io, options, git_dir);
@@ -542,7 +543,7 @@ pub const Repository = struct {
         if (st.kind != .file) {
             if (st.kind != .directory) return null;
             const git_dir = dir.openDir(io, ".git", .{ .iterate = true }) catch return null;
-            if (looksLikeGitDir(io, git_dir)) return git_dir;
+            if (discover_directory.isGitDirectory(io, git_dir)) return git_dir;
             git_dir.close(io);
             return null;
         }
@@ -552,7 +553,7 @@ pub const Repository = struct {
         }) orelse return error.BrokenGitFile;
         defer gpa.free(target);
         const git_dir = gitfile.open(io, dir, target, .{ .iterate = true }) catch return error.BrokenGitFile;
-        if (looksLikeGitDir(io, git_dir)) return git_dir;
+        if (discover_directory.isGitDirectory(io, git_dir)) return git_dir;
         git_dir.close(io);
         return error.BrokenGitFile;
     }
@@ -613,12 +614,10 @@ pub const Repository = struct {
     }
 
     fn withCommon(gpa: Allocator, io: Io, git_dir: Io.Dir, work_dir: ?Io.Dir) ErrorNamespace.Error!Discovered {
+        _ = gpa;
         // `commondir` makes this a linked worktree: everything shared lives
         // where it points.
-        if (try fs.readFileAlloc(gpa, io, git_dir, "commondir", 4096)) |text| {
-            defer gpa.free(text);
-            const target = std.mem.trim(u8, text, " \t\r\n");
-            const common = try git_dir.openDir(io, target, .{ .iterate = true });
+        if (try discover_directory.openCommon(io, git_dir)) |common| {
             return .{
                 .git_dir = git_dir,
                 .common_dir = common,
@@ -632,26 +631,6 @@ pub const Repository = struct {
             .work_dir = work_dir,
             .common_is_separate = false,
         };
-    }
-
-    /// git's `is_git_directory`: a `HEAD`, and `objects` and `refs` here
-    /// or in the directory `commondir` names, as a linked worktree's git
-    /// directory has them.
-    fn looksLikeGitDir(io: Io, dir: Io.Dir) bool {
-        dir.access(io, "HEAD", .{}) catch return false;
-        var buf: [4096]u8 = undefined;
-        if (dir.readFile(io, "commondir", &buf)) |text| {
-            const target = std.mem.trim(u8, text, " \t\r\n");
-            // one that does not open is reported by the open that follows
-            var common = dir.openDir(io, target, .{}) catch return true;
-            defer common.close(io);
-            common.access(io, "objects", .{}) catch return false;
-            common.access(io, "refs", .{}) catch return false;
-            return true;
-        } else |_| {}
-        dir.access(io, "objects", .{}) catch return false;
-        dir.access(io, "refs", .{}) catch return false;
-        return true;
     }
 
     /// Whether two handles are one directory: the same inode on the same
@@ -883,7 +862,7 @@ pub const Repository = struct {
                 error.PathAlreadyExists => return error.RepositoryExists,
                 else => |e| return e,
             };
-        } else if (looksLikeGitDir(io, dir)) {
+        } else if (discover_directory.isGitDirectory(io, dir)) {
             return error.RepositoryExists;
         }
         var git_dir = try dir.openDir(io, git_path, .{ .iterate = true });

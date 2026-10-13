@@ -22,6 +22,7 @@ const fs = @import("../fs/fs.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repository_format = @import("format.zig");
 const gitfile = @import("gitfile.zig");
+const directory = @import("directory.zig");
 
 const Oid = hash.Oid;
 
@@ -81,7 +82,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
         via_file = true;
         break :blk gitfile.open(io, work, target, .{ .iterate = true }) catch return null;
     };
-    if (!isGitDirectory(io, git_dir)) {
+    if (!directory.isGitDirectory(io, git_dir)) {
         git_dir.close(io);
         return null;
     }
@@ -92,24 +93,11 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
         .common_is_separate = false,
         .via_file = via_file,
     };
-    const common_text = fs.readFileAlloc(gpa, io, git_dir, "commondir", 4096) catch |err| switch (err) {
-        error.OutOfMemory => {
-            git_dir.close(io);
-            return error.OutOfMemory;
-        },
-        else => null,
-    };
-    if (common_text) |text| {
-        defer gpa.free(text);
-        const target = std.mem.trim(u8, text, " \t\r\n");
-        const common = (if (std.Io.Dir.path.isAbsolute(target))
-            Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
-        else
-            git_dir.openDir(io, target, .{ .iterate = true })) catch null;
-        if (common) |dir| {
-            result.common_dir = dir;
-            result.common_is_separate = true;
-        }
+    // `isGitDirectory` opened it already: one that does not open is not a
+    // git directory, and was refused there.
+    if (directory.openCommon(io, git_dir) catch null) |dir| {
+        result.common_dir = dir;
+        result.common_is_separate = true;
     }
     return result;
 }
@@ -173,14 +161,6 @@ pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Oi
     return resolved.oid;
 }
 
-/// Whether `dir` holds what a git directory must: `HEAD`, `objects` and
-/// `refs`. What git's `is_git_directory` asks before it trusts one.
-pub fn isGitDirectory(io: Io, dir: Io.Dir) bool {
-    dir.access(io, "HEAD", .{}) catch return false;
-    dir.access(io, "objects", .{}) catch return false;
-    dir.access(io, "refs", .{}) catch return false;
-    return true;
-}
 
 const testgit = @import("../testing/git.zig");
 

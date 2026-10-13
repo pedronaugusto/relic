@@ -17,6 +17,7 @@ const refs_state = @import("../refs/state.zig");
 const reftable_stack = @import("../refs/reftable/stack.zig");
 const signing = @import("../object/signing.zig");
 const repo_mod = @import("repo.zig");
+const discover_directory = @import("../discover/directory.zig");
 const worktree = @import("../checkout/checkout.zig");
 const worktrees = @import("../checkout/worktrees.zig");
 const Oid = hash.Oid;
@@ -1608,4 +1609,48 @@ test "a linked worktree's split index is read with the shared index beside it, i
     defer index.deinit();
     try std.testing.expect(index.find("a.txt") != null);
     try std.testing.expect(index.find("b.txt") != null);
+}
+
+test "a directory is taken for a git directory exactly where git's rev-parse takes it: HEAD, objects and refs, through commondir" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const Layout = struct { name: []const u8, head: ?[]const u8, objects: bool = true, refs: bool = true, commondir: ?[]const u8 = null };
+    const zero40 = "0123456789abcdef0123456789abcdef01234567";
+    const layouts = [_]Layout{
+        .{ .name = "symref", .head = "ref: refs/heads/main\n" },
+        .{ .name = "spaced", .head = "ref: \t refs/heads/main\n" },
+        .{ .name = "detached", .head = zero40 ++ "\n" },
+        .{ .name = "detached-bare-line", .head = zero40 },
+        .{ .name = "outside-refs", .head = "ref: heads/main\n" },
+        .{ .name = "garbage", .head = "nonsense\n" },
+        .{ .name = "short-hex", .head = "0123456789abcdef\n" },
+        .{ .name = "no-head", .head = null },
+        .{ .name = "no-objects", .head = "ref: refs/heads/main\n", .objects = false },
+        .{ .name = "no-refs", .head = "ref: refs/heads/main\n", .refs = false },
+        .{ .name = "common", .head = "ref: refs/heads/main\n", .objects = false, .refs = false, .commondir = "../shared" },
+        .{ .name = "common-missing", .head = "ref: refs/heads/main\n", .objects = false, .refs = false, .commondir = "../nowhere" },
+    };
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    const root = try r.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try r.isolated.?.put("GIT_CEILING_DIRECTORIES", root);
+    for (layouts) |layout| {
+        try r.dir.createDirPath(io, layout.name);
+        var top = try r.dir.openDir(io, layout.name, .{});
+        defer top.close(io);
+        try top.createDirPath(io, "shared/objects");
+        try top.createDirPath(io, "shared/refs");
+        try top.createDirPath(io, ".git");
+        var git_dir = try top.openDir(io, ".git", .{});
+        defer git_dir.close(io);
+        if (layout.head) |text| try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = text });
+        if (layout.objects) try git_dir.createDirPath(io, "objects");
+        if (layout.refs) try git_dir.createDirPath(io, "refs");
+        if (layout.commondir) |text| try git_dir.writeFile(io, .{ .sub_path = "commondir", .data = text });
+        var said = try r.capture(io, &.{ "-C", layout.name, "rev-parse", "--git-dir" });
+        defer said.deinit(gpa);
+        const git_takes_it = said.code == 0;
+        try std.testing.expectEqual(git_takes_it, discover_directory.isGitDirectory(io, git_dir));
+    }
 }

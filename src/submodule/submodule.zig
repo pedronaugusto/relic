@@ -33,6 +33,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.submodule.<name>`.
 const gitmodules = @import("../config/gitmodules.zig");
 const gitlink = @import("../discover.zig").gitlink;
+const discover = @import("../discover.zig");
 const gitfile = @import("../discover.zig").gitfile;
 
 const std = @import("std");
@@ -497,7 +498,7 @@ fn validateGitDir(arena: Allocator, io: Io, git_dir: Io.Dir, name: []const u8, d
         const prefix = try arena.print("modules/{s}", .{name[0..i]});
         var dir = git_dir.openDir(io, prefix, .{}) catch continue;
         defer dir.close(io);
-        if (gitlink.isGitDirectory(io, dir)) return refuse(refusal, display, prefix, error.GitDirInsideGitDir);
+        if (discover.directory.isGitDirectory(io, dir)) return refuse(refusal, display, prefix, error.GitDirInsideGitDir);
     }
 }
 
@@ -1080,7 +1081,7 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
             var module_dir = repo.gitDirectory().openDir(io, try modulePath(arena, module.name), .{}) catch null;
             if (module_dir) |*dir| {
                 defer dir.close(io);
-                if (gitlink.isGitDirectory(io, dir.*)) try setCoreWorktree(io, repo, dir.*, null);
+                if (discover.directory.isGitDirectory(io, dir.*)) try setCoreWorktree(io, repo, dir.*, null);
             }
         }
         wt.createDirPath(io, entry.path) catch |err| switch (err) {
@@ -1210,7 +1211,7 @@ fn absorbIn(
             const module = entry.module orelse return refuse(options.refusal, display, "", error.NoSubmoduleMapping);
             var module_dir = repo.gitDirectory().openDir(io, try modulePath(arena, module.name), .{}) catch continue;
             defer module_dir.close(io);
-            if (!gitlink.isGitDirectory(io, module_dir)) continue;
+            if (!discover.directory.isGitDirectory(io, module_dir)) continue;
             var work = try wt.openDir(io, entry.path, .{});
             defer work.close(io);
             try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
@@ -1450,7 +1451,7 @@ fn populate(
     const target = try modulePath(arena, module.name);
     var module_dir: Io.Dir = blk: {
         if (repo.gitDirectory().openDir(io, target, .{})) |dir| {
-            if (gitlink.isGitDirectory(io, dir)) {
+            if (discover.directory.isGitDirectory(io, dir)) {
                 dir.deleteFile(io, "index") catch |err| switch (err) {
                     error.FileNotFound => {},
                     else => |e| {
@@ -1475,7 +1476,7 @@ fn populate(
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),
             else => |e| return e,
         };
-        if (!gitlink.isGitDirectory(io, dir)) return refuse(options.refusal, display, url, error.TransportFailed);
+        if (!discover.directory.isGitDirectory(io, dir)) return refuse(options.refusal, display, url, error.TransportFailed);
         outcome.cloned += 1;
         break :blk dir;
     };
