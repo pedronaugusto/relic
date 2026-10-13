@@ -2370,7 +2370,7 @@ pub const Odb = struct {
     pub fn packLoose(odb: *Odb, io: Io, options: RepackOptions) ErrorNamespace.Error!RepackReport {
         var collected = try odb.collectLoose(io, .{ .threads = options.pack.threads });
         defer collected.deinit();
-        return odb.packCollected(io, collected.entries, options, false);
+        return odb.packCollected(io, collected.entries, options, false, &.{});
     }
 
     /// Put every object the writable directory holds, loose and packed, into
@@ -2379,9 +2379,87 @@ pub const Odb = struct {
     /// The same order as `packLoose`, and the same rule: nothing is taken
     /// away until the new pack is written, durable and readable here.
     pub fn repack(odb: *Odb, io: Io, options: RepackOptions) ErrorNamespace.Error!RepackReport {
-        var collected = try odb.collectAll(io, .{ .threads = options.pack.threads });
+        const gpa = odb.backendData().gpa;
+        // As git's `repack -a`: a pack with a `.keep` stays as it is and its
+        // objects go into no new pack, and the objects of promisor packs go
+        // into a promisor pack of their own, so a partial clone still knows
+        // which objects a promisor remote can send again.
+        var kept: std.ArrayList([]u8) = .empty;
+        defer freeNames(gpa, &kept);
+        var promised: std.ArrayList([]u8) = .empty;
+        defer freeNames(gpa, &promised);
+        {
+            const source = odb.writableSource();
+            const pack_dir = try odb.openPackDirectory(io);
+            defer pack_dir.close(io);
+            for (source.packs.items) |named| {
+                if (try hasCompanion(io, pack_dir, named.name, ".keep")) {
+                    try kept.append(gpa, try gpa.dupe(u8, named.name));
+                } else if (try hasCompanion(io, pack_dir, named.name, ".promisor")) {
+                    try promised.append(gpa, try gpa.dupe(u8, named.name));
+                }
+            }
+        }
+        const set_aside = try gpa.alloc([]const u8, kept.items.len + promised.items.len);
+        defer gpa.free(set_aside);
+        for (kept.items, 0..) |name, i| set_aside[i] = name;
+        for (promised.items, kept.items.len..) |name, i| set_aside[i] = name;
+
+        var collected = try odb.collectWritable(io, .{ .threads = options.pack.threads, .exclude_packs = set_aside }, true);
         defer collected.deinit();
-        return odb.packCollected(io, collected.entries, options, options.remove_packs);
+        if (promised.items.len == 0) return odb.packCollected(io, collected.entries, options, options.remove_packs, kept.items);
+
+        // The promisor pack is written first, so the packs it replaces are
+        // gone only once both new packs are in place.
+        var promised_entries: std.ArrayList(PackEntry) = .empty;
+        defer promised_entries.deinit(gpa);
+        var seen: Oid.Set = .empty;
+        defer seen.deinit(gpa);
+        // An object a kept pack holds stays there alone.
+        for (kept.items) |base| {
+            const p = odb.findPackByName(base) orelse continue;
+            var it = p.index.iterate();
+            while (try it.next()) |found| try seen.put(gpa, found.oid, {});
+        }
+        for (promised.items) |base| {
+            const p = odb.findPackByName(base) orelse continue;
+            var it = p.index.iterate();
+            while (try it.next()) |found| {
+                if ((try seen.fetchPut(gpa, found.oid, {})) != null) continue;
+                try promised_entries.append(gpa, .{ .oid = found.oid, .in_pack = true });
+            }
+        }
+        var keep_too: std.ArrayList([]const u8) = .empty;
+        defer keep_too.deinit(gpa);
+        try keep_too.appendSlice(gpa, @ptrCast(kept.items));
+        var promisor_base_buf: [hash.max_hex_len + 8]u8 = undefined;
+        if (promised_entries.items.len != 0) {
+            const pack_dir = try odb.openPackDirectory(io);
+            defer pack_dir.close(io);
+            const written = try odb.writePack(io, pack_dir, promised_entries.items, options.pack);
+            try odb.writePromisor(io, written.name, "", .replace);
+            try odb.refresh(io);
+            var hex: [hash.max_hex_len]u8 = undefined;
+            // unreachable: a hex name is at most max_hex_len digits, the prefix five bytes
+            try keep_too.append(gpa, std.mem.print(&promisor_base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable);
+        }
+        return odb.packCollected(io, collected.entries, options, options.remove_packs, keep_too.items);
+    }
+
+    fn freeNames(gpa: Allocator, names: *std.ArrayList([]u8)) void {
+        for (names.items) |name| gpa.free(name);
+        names.deinit(gpa);
+    }
+
+    /// Whether `<base><extension>` is beside the pack.
+    fn hasCompanion(io: Io, pack_dir: Io.Dir, base: []const u8, extension: []const u8) ErrorNamespace.Error!bool {
+        var name_buf: [160]u8 = undefined;
+        const name = std.mem.print(&name_buf, "{s}{s}", .{ base, extension }) catch return error.NameTooLong;
+        pack_dir.access(io, name, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => |e| return e,
+        };
+        return true;
     }
 
     fn packCollected(
@@ -2390,6 +2468,9 @@ pub const Odb = struct {
         entries: []const PackEntry,
         options: RepackOptions,
         remove_packs: bool,
+        /// Packs a removal leaves however it was asked: kept packs, and the
+        /// promisor pack just written.
+        leave: []const []const u8,
     ) ErrorNamespace.Error!RepackReport {
         if (entries.len == 0) return .{};
         const collected: struct { entries: []const PackEntry } = .{ .entries = entries };
@@ -2484,18 +2565,23 @@ pub const Odb = struct {
                 // same name: the new pack *is* the old one, and removing it
                 // would remove the repository.
                 if (std.mem.eql(u8, old_base, base)) continue;
-                var keep_name: [128]u8 = undefined;
-                const marker = std.mem.print(&keep_name, "{s}.keep", .{old_base}) catch return error.NameTooLong;
-                if (pack_dir.access(io, marker, .{})) |_| continue else |err| if (err != error.FileNotFound) return err;
-                var name_buf: [128]u8 = undefined;
-                var removed = false;
-                for ([_][]const u8{ ".idx", ".pack", ".rev", ".bitmap" }) |extension| {
-                    const name = std.mem.print(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
-                    if (pack_dir.deleteFile(io, name)) {
-                        if (std.mem.eql(u8, extension, ".pack")) removed = true;
-                    } else |_| {}
+                for (leave) |left| {
+                    if (std.mem.eql(u8, old_base, left)) break;
+                } else {
+                    if (try hasCompanion(io, pack_dir, old_base, ".keep")) continue;
+                    var name_buf: [160]u8 = undefined;
+                    var removed = false;
+                    // Every companion goes with its pack, the `.pack` and
+                    // `.idx` last so a reader never finds an index whose
+                    // pack is gone first.
+                    for ([_][]const u8{ ".bitmap", ".rev", ".mtimes", ".promisor", ".pack", ".idx" }) |extension| {
+                        const name = std.mem.print(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
+                        if (pack_dir.deleteFile(io, name)) {
+                            if (std.mem.eql(u8, extension, ".pack")) removed = true;
+                        } else |_| {}
+                    }
+                    if (removed) report.packs_removed += 1;
                 }
-                if (removed) report.packs_removed += 1;
             }
             try odb.reopenPacks(io, 0);
         }

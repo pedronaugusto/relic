@@ -249,3 +249,82 @@ test "local receive owns a keep token with default receive options" {
 test {
     _ = @import("local_push_keep.zig");
 }
+
+/// Each pack in `.git/objects/pack`, as `<marker> <object count>`, sorted:
+/// `keep`, `promisor` or `plain`, and how many objects `git verify-pack`
+/// says it holds.
+fn packSet(gpa: std.mem.Allocator, io: std.Io, r: *testgit.Repo) ![]u8 {
+    var dir = try r.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer dir.close(io);
+    var lines: std.ArrayList([]u8) = .empty;
+    defer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
+        const base = entry.name[0 .. entry.name.len - ".pack".len];
+        var buf: [128]u8 = undefined;
+        const marker: []const u8 = if (dir.access(io, try std.mem.print(&buf, "{s}.keep", .{base}), .{})) |_| "keep" else |_| if (dir.access(io, try std.mem.print(&buf, "{s}.promisor", .{base}), .{})) |_| "promisor" else |_| "plain";
+        const count = try r.run(io, &.{ "verify-pack", "-v", try std.mem.print(&buf, ".git/objects/pack/{s}.idx", .{base}) });
+        defer gpa.free(count);
+        var n: usize = 0;
+        var objects = std.mem.splitScalar(u8, count, '\n');
+        while (objects.next()) |line| {
+            if (line.len > 40 and std.mem.findScalar(u8, line[0..40], ' ') == null) n += 1;
+        }
+        try lines.append(gpa, try gpa.print("{s} {d}", .{ marker, n }));
+    }
+    std.mem.sort([]u8, lines.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    return std.mem.join(gpa, "\n", lines.items);
+}
+
+/// A repository with a kept pack, a promisor pack and loose objects.
+fn threeKinds(gpa: std.mem.Allocator, io: std.Io) !testgit.Repo {
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    errdefer r.deinit();
+    for ([_][]const u8{ "k", "p", "l" }, 0..) |name, i| {
+        try r.writeFile(io, name, name);
+        try r.exec(io, &.{ "add", name });
+        var msg_buf: [8]u8 = undefined;
+        try r.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg_buf, "c{d}", .{i}) });
+        if (i == 2) break;
+        const tip = try r.line(io, &.{ "rev-parse", "HEAD" });
+        defer gpa.free(tip);
+        const input = try gpa.print("{s}\n", .{tip});
+        defer gpa.free(input);
+        const listed = try r.runInput(io, &.{ "rev-list", "--objects", "--no-object-names", "--stdin" }, input);
+        defer gpa.free(listed);
+        const made = try r.runInput(io, &.{ "pack-objects", ".git/objects/pack/pack" }, listed);
+        defer gpa.free(made);
+        const base = try gpa.print(".git/objects/pack/pack-{s}.{s}", .{ std.mem.trim(u8, made, "\n"), if (i == 0) "keep" else "promisor" });
+        defer gpa.free(base);
+        try r.writeFile(io, base, "");
+        try r.exec(io, &.{ "prune-packed" });
+    }
+    return r;
+}
+
+test "repack leaves a kept pack as it is and keeps promisor objects in a promisor pack, as git's repack -a -d" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var theirs = try threeKinds(gpa, io);
+    defer theirs.deinit();
+    var ours = try threeKinds(gpa, io);
+    defer ours.deinit();
+    try theirs.exec(io, &.{ "repack", "-a", "-d", "-q" });
+    var repo = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+    defer repo.deinit(io);
+    _ = try repo.objectDatabase().repack(io, .{ .remove_packs = true });
+    const want = try packSet(gpa, io, &theirs);
+    defer gpa.free(want);
+    const got = try packSet(gpa, io, &ours);
+    defer gpa.free(got);
+    try std.testing.expectEqualStrings(want, got);
+    try ours.exec(io, &.{ "fsck", "--no-progress" });
+}
