@@ -30,6 +30,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -995,9 +996,10 @@ const Merge = struct {
         const applied = (try m.attributesOf(path)) orelse
             return .{ .driver = try m.namedDriver(path, m.options.default_driver), .marker_size = marker_size };
         if (applied.value("conflict-marker-size")) |text| {
-            if (std.fmt.parseInt(i32, text, 10)) |size| {
+            // git's `atoi`: the number the value starts with.
+            if (std.math.cast(i32, decimal.strtol(text, 10, 32).value)) |size| {
                 if (size > 0) marker_size = @intCast(size);
-            } else |_| {}
+            }
         }
         // `find_ll_merge_driver`: set is text, unset binary, a name the
         // driver of that name, and nothing said `merge.default`.

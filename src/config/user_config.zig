@@ -24,6 +24,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -146,7 +147,8 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
     // Values above every file.
     var pairs: std.ArrayList(config_mod.Sources.Pair) = .empty;
     if (environ.get("GIT_CONFIG_COUNT")) |count_text| {
-        const count = std.fmt.parseUnsigned(u32, std.mem.trim(u8, count_text, " "), 10) catch return error.MalformedConfigEnvironment;
+        // git's `strtoul(env, &endp, 10)`, all of it.
+        const count = decimal.whole(u32, count_text, 10) orelse return error.MalformedConfigEnvironment;
         for (0..count) |i| {
             var key_buf: [32]u8 = undefined;
             var value_buf: [32]u8 = undefined;

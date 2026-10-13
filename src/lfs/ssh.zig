@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -265,7 +266,7 @@ fn text(data: []const u8) []const u8 {
 
 fn parseStatus(line: []const u8) ?u16 {
     if (!std.mem.startsWith(u8, line, "status ")) return null;
-    return std.fmt.parseInt(u16, line["status ".len..], 10) catch null;
+    return decimal.goInt(u16, line["status ".len..]);
 }
 
 /// The connections of one operation to one remote.

@@ -92,6 +92,9 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     // the published configuration is the repository's to replace
     .{ .name = "gitfile owner", .kind = .string, .tokens = &.{ "gitdir: ", "gitdir:" }, .owners = &[_][]const u8{ "src/discover/gitfile.zig", "src/config/config.zig" } ++ tests },
     .{ .name = "configuration owner", .tokens = &.{"config_state"}, .owners = &[_][]const u8{"src/repo/repo.zig"} ++ tests },
+    // a number in git's data is read by one of git's grammars, never by
+    // Zig's, which takes `+` and `_`
+    .{ .name = "number grammars", .tokens = &.{ "parseInt", "parseUnsigned" }, .owners = &[_][]const u8{ "src/text/**", "src/config/config.zig" } ++ tests },
 };
 
 // The owner requires every production edge to count. No re-export exemptions.

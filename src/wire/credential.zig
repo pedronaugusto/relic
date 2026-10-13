@@ -28,6 +28,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -587,7 +588,10 @@ pub const Session = struct {
                 s.oauth_refresh_token = try s.gpa.dupe(u8, value);
             } else if (std.mem.eql(u8, key, "password_expiry_utc")) {
                 // Zero, or a number too large, is no expiry, as git reads it.
-                s.password_expiry_utc = std.fmt.parseUnsigned(i64, value, 10) catch null;
+                // git's `parse_timestamp(value, NULL, 10)`: the number the
+                // value starts with, whatever follows it.
+                const read = decimal.strtoul(value, 10, 64);
+                s.password_expiry_utc = if (read.overflow) null else std.math.cast(i64, read.value);
                 if (s.password_expiry_utc == 0) s.password_expiry_utc = null;
             } else if (std.mem.eql(u8, key, "state[]")) {
                 const owned = try s.gpa.dupe(u8, value);

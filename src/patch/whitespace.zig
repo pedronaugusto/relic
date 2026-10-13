@@ -4,6 +4,7 @@
 //! --check` read lines through it.
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 
 /// A rule set: the bits below and, in the low six bits, the tab width.
@@ -74,7 +75,8 @@ pub fn parse(text: []const u8) ParseError!Rule {
             break;
         }
         if (std.mem.startsWith(u8, word, "tabwidth=")) {
-            const width = std.fmt.parseInt(u32, leadingDigits(word["tabwidth=".len..]), 10) catch 0;
+            // git's `atoi`: the number the value starts with.
+            const width = std.math.cast(u32, decimal.strtol(word["tabwidth=".len..], 10, 32).value) orelse 0;
             if (width > 0 and width < 0o100) {
                 rule &= ~tab_width_mask;
                 rule |= width;
@@ -85,12 +87,6 @@ pub fn parse(text: []const u8) ParseError!Rule {
     }
     if (rule & tab_in_indent != 0 and rule & indent_with_non_tab != 0) return error.ConflictingWhitespaceRules;
     return rule;
-}
-
-fn leadingDigits(s: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
-    return s[0..i];
 }
 
 /// What the `whitespace` attribute says for a path.

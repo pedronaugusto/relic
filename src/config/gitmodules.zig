@@ -24,6 +24,7 @@ const testgit = @import("../testing/git.zig");
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
@@ -415,7 +416,7 @@ fn curlUrlIsSafe(url: []const u8) bool {
 fn validPort(text: []const u8) bool {
     std.debug.assert(text[0] == ':');
     if (text.len == 1) return true;
-    const port = std.fmt.parseInt(u32, text[1..], 10) catch return false;
+    const port = decimal.digits(u32, text[1..]) orelse return false;
     return port >= 1 and port <= 65535;
 }
 

@@ -71,6 +71,7 @@ const config_mod = @import("../config/config.zig");
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const gitdate = @import("../text.zig").date;
 const percent = @import("../text.zig").percent;
 const warp = @import("warp");
@@ -357,7 +358,7 @@ pub const Settings = struct {
     /// set or is not one.
     pub fn getInt(s: *const Settings, full_name: []const u8, fallback: i64) i64 {
         const entry = s.lastEntry(full_name) orelse return fallback;
-        return config_mod.parseInt(entry.value orelse "") catch fallback;
+        return config_mod.parseInteger(entry.value orelse "") catch fallback;
     }
 
     /// git-lfs's URL-scoped lookup: `<section>.<url>.<key>` for the
@@ -2625,7 +2626,7 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
         try scratch.print("https://{s}", .{url.host});
     var activity: i64 = 30;
     if (try settings.urlGet(scratch, "lfs", host_url, "activitytimeout")) |text| {
-        activity = std.fmt.parseInt(i64, std.mem.trim(u8, text, " \t"), 10) catch 0;
+        activity = decimal.goInt(i64, std.mem.trim(u8, text, " \t")) orelse 0;
     }
     return .{
         .connect = .fromSeconds(if (dial < 1) 30 else dial),
@@ -2641,7 +2642,7 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
 pub fn parseRetryAfter(value: []const u8, now: ?Io.Timestamp) ?Io.Duration {
     const text = std.mem.trim(u8, value, " \t");
     // A u64 of seconds is under 2^94 nanoseconds, well inside a Duration's i96.
-    if (std.fmt.parseInt(u64, text, 10)) |n| return .fromNanoseconds(@as(i96, n) * std.time.ns_per_s) else |_| {}
+    if (decimal.goInt(u64, text)) |n| return .fromNanoseconds(@as(i96, n) * std.time.ns_per_s);
     const at = time_text.parseHttpDate(text) orelse return null;
     const from = (now orelse return null).toSeconds();
     return .fromSeconds(@max(0, at - from));

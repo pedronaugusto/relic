@@ -25,6 +25,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -331,7 +332,7 @@ pub const Rules = struct {
         if (problem == .large_pathname) {
             if (std.mem.findScalar(u8, value, ':')) |colon| {
                 level_text = value[0..colon];
-                const n = config_mod.parseInt(value[colon + 1 ..]) catch return error.InvalidFsckValue;
+                const n = config_mod.parseInteger(value[colon + 1 ..]) catch return error.InvalidFsckValue;
                 r.max_entry_len = std.math.cast(usize, n) orelse return error.InvalidFsckValue;
             }
         }
@@ -990,7 +991,7 @@ fn checkIdent(r: *Reporter, bytes: []const u8, at: *usize) Allocator.Error!bool 
         p += 1;
     }
     if (!overflow) {
-        const seconds = std.fmt.parseInt(u64, bytes[digits_start..p], 10) catch std.math.maxInt(u64);
+        const seconds = decimal.digits(u64, bytes[digits_start..p]) orelse std.math.maxInt(u64);
         overflow = seconds > std.math.maxInt(i64);
     }
     if (overflow) return r.report(.bad_date_overflow, "");

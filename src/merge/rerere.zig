@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const path_mod = @import("../names.zig").path;
@@ -186,9 +187,10 @@ const Run = struct {
         const attrs = r.rules.attrs orelse return 7;
         const applied = try attrs.lookup(r.arena, path, .file);
         if (applied.value("conflict-marker-size")) |text| {
-            if (std.fmt.parseInt(i32, text, 10)) |size| {
+            // git's `atoi`: the number the value starts with.
+            if (std.math.cast(i32, decimal.strtol(text, 10, 32).value)) |size| {
                 if (size > 0) return @intCast(size);
-            } else |_| {}
+            }
         }
         return 7;
     }
@@ -211,9 +213,7 @@ const max_variant: i32 = 1 << 16;
 /// A variant as rerere writes one: decimal digits, no sign, at most
 /// `max_variant`.
 fn parseVariant(text: []const u8) ?i32 {
-    if (text.len == 0) return null;
-    for (text) |c| if (!std.ascii.isDigit(c)) return null;
-    const variant = std.fmt.parseInt(i32, text, 10) catch return null;
+    const variant = decimal.digits(i32, text) orelse return null;
     return if (variant <= max_variant) variant else null;
 }
 
@@ -1055,7 +1055,7 @@ fn mtimeOf(r: *Run, sub: []const u8) Error!i64 {
 /// `never` and `false` for none, `now` and `all` for everything.
 fn expiryInDays(repo: *Repository, key: []const u8, cutoff: *i64, now: i64) Error!void {
     const text = repo.configuration().get(key) orelse return;
-    if (config_mod.parseInt(text)) |days| {
+    if (config_mod.parseInteger(text)) |days| {
         if (days >= std.math.minInt(i32) and days <= std.math.maxInt(i32)) {
             cutoff.* = now - days * 86400;
             return;

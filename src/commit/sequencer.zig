@@ -367,7 +367,7 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
         const value = entry.value orelse "true";
         // git reads these as a boolean or a number, a number being true
         // unless it is zero.
-        const on = config_mod.parseBool(value) catch ((config_mod.parseInt(value) catch return error.MalformedState) != 0);
+        const on = config_mod.parseBool(value) catch ((config_mod.parseInteger(value) catch return error.MalformedState) != 0);
         const key = entry.name;
         if (std.mem.eql(u8, key, "no-commit")) {
             options.no_commit = on;
@@ -388,7 +388,7 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
         } else if (std.mem.eql(u8, key, "allow-ff")) {
             options.allow_ff = on;
         } else if (std.mem.eql(u8, key, "mainline")) {
-            const n = config_mod.parseInt(value) catch return error.MalformedState;
+            const n = config_mod.parseInteger(value) catch return error.MalformedState;
             options.mainline = if (n > 0) std.math.cast(u32, n) orelse return error.MalformedState else null;
         } else if (std.mem.eql(u8, key, "strategy")) {
             if (!std.mem.eql(u8, value, "ort") and !std.mem.eql(u8, value, "recursive")) return error.UnsupportedStrategy;

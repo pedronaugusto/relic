@@ -116,7 +116,7 @@ pub const Settings = struct {
         } else if (std.mem.eql(u8, name, "extraheader")) {
             if (value.len == 0) headers.clearRetainingCapacity() else try headers.append(arena, value);
         } else if (std.mem.eql(u8, name, "postbuffer")) {
-            const n = config_mod.parseInt(value) catch return error.InvalidHttpSetting;
+            const n = config_mod.parseInteger(value) catch return error.InvalidHttpSetting;
             settings.post_buffer = @intCast(std.math.clamp(n, 1024, 1 << 30));
         } else if (std.mem.eql(u8, name, "useragent")) {
             settings.user_agent = value;

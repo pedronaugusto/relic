@@ -19,6 +19,7 @@
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -548,7 +549,9 @@ const Negotiation = struct {
             return true;
         }
         if (std.mem.startsWith(u8, line, "deepen-since ")) {
-            n.deepen_since = std.fmt.parseInt(i64, line["deepen-since ".len..], 10) catch return error.ProtocolError;
+            // git's `parse_timestamp(arg, &end, 0)`, the whole argument.
+            const since = decimal.whole(u64, line["deepen-since ".len..], 0) orelse return error.ProtocolError;
+            n.deepen_since = std.math.cast(i64, since) orelse return error.ProtocolError;
             return true;
         }
         if (std.mem.startsWith(u8, line, "deepen-not ")) {
@@ -560,7 +563,9 @@ const Negotiation = struct {
             return true;
         }
         if (std.mem.startsWith(u8, line, "deepen ")) {
-            n.depth = std.fmt.parseUnsigned(u32, line["deepen ".len..], 10) catch return error.ProtocolError;
+            // git's `strtol(arg, &end, 0)`, the whole argument, above zero.
+            const depth = decimal.whole(i64, line["deepen ".len..], 0) orelse return error.ProtocolError;
+            n.depth = std.math.cast(u32, depth) orelse return error.ProtocolError;
             if (n.depth == 0) return error.ProtocolError;
             return true;
         }

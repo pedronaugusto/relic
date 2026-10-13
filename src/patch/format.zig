@@ -441,7 +441,7 @@ fn containsOid(oids: []const Oid, oid: Oid) bool {
 /// asked: `diff.algorithm` and `diff.context`.
 pub fn configuredDiff(config: *const config_mod.Config) diff.ConfigError!diff.Options {
     var out = try diff.configured(config, .{});
-    if (config.get("diff.context")) |v| out.context = @intCast(@max(0, config_mod.parseInt(v) catch 3));
+    if (config.get("diff.context")) |v| out.context = @intCast(@max(0, config_mod.parseInteger(v) catch 3));
     return out;
 }
 
@@ -450,7 +450,7 @@ pub fn configuredDiff(config: *const config_mod.Config) diff.ConfigError!diff.Op
 /// and `diff.renameLimit`.
 pub fn configuredRenames(config: *const config_mod.Config) ?diff.RenameOptions {
     var r: diff.RenameOptions = .{};
-    if (config.get("diff.renamelimit")) |v| r.limit = @intCast(@max(0, config_mod.parseInt(v) catch 1000));
+    if (config.get("diff.renamelimit")) |v| r.limit = @intCast(@max(0, config_mod.parseInteger(v) catch 1000));
     const setting = config.get("diff.renames") orelse return r;
     if (std.ascii.eqlIgnoreCase(setting, "copies") or std.ascii.eqlIgnoreCase(setting, "copy")) {
         r.detect_copies = true;

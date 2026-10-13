@@ -21,6 +21,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -403,9 +404,9 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
         } else if (std.mem.startsWith(u8, w, "--exclude=")) {
             try limits.append(a, .{ .pattern = w["--exclude=".len..], .include = false });
         } else if (std.mem.startsWith(u8, w, "-C")) {
-            o.min_context = std.fmt.parseInt(usize, w[2..], 10) catch return error.UnsupportedApplyOption;
+            o.min_context = decimal.whole(usize, w[2..], 10) orelse return error.UnsupportedApplyOption;
         } else if (std.mem.startsWith(u8, w, "-p")) {
-            o.strip = std.fmt.parseInt(usize, w[2..], 10) catch return error.UnsupportedApplyOption;
+            o.strip = decimal.whole(usize, w[2..], 10) orelse return error.UnsupportedApplyOption;
         } else if (std.mem.eql(u8, w, "--reject")) {
             o.reject = true;
         } else return error.UnsupportedApplyOption;
@@ -512,8 +513,9 @@ fn load(gpa: Allocator, a: Allocator, io: Io, repo: *Repository, options: Option
 }
 
 fn reload(s: *Session) Error!void {
-    s.cur = std.fmt.parseInt(usize, try s.readTrim("next"), 10) catch return error.MalformedState;
-    s.last = std.fmt.parseInt(usize, try s.readTrim("last"), 10) catch return error.MalformedState;
+    // git's `strtol(sb.buf, NULL, 10)`: the number each starts with.
+    s.cur = std.math.cast(usize, decimal.strtol(try s.readTrim("next"), 10, 64).value) orelse return error.MalformedState;
+    s.last = std.math.cast(usize, decimal.strtol(try s.readTrim("last"), 10, 64).value) orelse return error.MalformedState;
     s.author_name = null;
     s.author_email = null;
     s.author_date = null;

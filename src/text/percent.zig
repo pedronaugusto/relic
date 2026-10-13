@@ -71,7 +71,7 @@ test "escapes are read as git reads them" {
     const testing = std.testing;
     try testing.expectEqual(@as(?u8, 0x41), hexPair('4', '1'));
     try testing.expectEqual(@as(?u8, 0xff), hexPair('F', 'f'));
-    // A sign is not a digit, as `parseInt` would take it.
+    // A sign is not a digit, as Zig's integer parser would take it.
     try testing.expectEqual(@as(?u8, null), hexPair('+', '1'));
     try testing.expectEqual(@as(?u8, null), hexPair(' ', '1'));
     try testing.expectEqual(@as(?u8, null), escapeAt("%4", 0));

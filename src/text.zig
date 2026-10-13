@@ -2,6 +2,7 @@
 
 pub const c_quote = @import("text/c_quote.zig");
 pub const date = @import("text/date.zig");
+pub const decimal = @import("text/decimal.zig");
 pub const encoding = @import("text/encoding.zig");
 pub const ere = @import("text/ere.zig");
 pub const glob = @import("text/glob.zig");

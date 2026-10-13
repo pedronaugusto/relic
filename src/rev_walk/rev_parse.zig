@@ -24,6 +24,7 @@
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -140,7 +141,7 @@ const Resolver = struct {
         if (cp > 0 and (name[cp - 1] == '^' or name[cp - 1] == '~')) {
             const kind = name[cp - 1];
             const digits = name[cp..];
-            const n: u32 = if (digits.len == 0) 1 else std.fmt.parseUnsigned(u32, digits, 10) catch return error.BadRevision;
+            const n: u32 = if (digits.len == 0) 1 else decimal.digits(u32, digits) orelse return error.BadRevision;
             const base = try r.one(name[0 .. cp - 1]);
             return if (kind == '^') r.parent(base, n) else r.ancestor(base, n);
         }
@@ -236,7 +237,7 @@ const Resolver = struct {
         }
         if (what.len > 1 and what[0] == '-') {
             if (base.len != 0) return error.BadRevision;
-            const n = std.fmt.parseUnsigned(u32, what[1..], 10) catch return error.BadRevision;
+            const n = decimal.digits(u32, what[1..]) orelse return error.BadRevision;
             return r.previousBranch(n);
         }
         // All digits is an entry's place, or seconds since the epoch from

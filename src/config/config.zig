@@ -1047,7 +1047,7 @@ pub const Config = struct {
     /// what git accepts for a size.
     pub fn getInt(config: *const Config, full_name: []const u8, fallback: i64) Self.ValueError!i64 {
         const value = config.get(full_name) orelse return fallback;
-        return parseInt(value);
+        return parseInteger(value);
     }
 
     /// The value of `full_name` as a path, with a leading `~/` expanded
@@ -1429,7 +1429,7 @@ pub fn parseBool(raw: []const u8) Self.ValueError!bool {
     for (falsy) |f| {
         if (std.ascii.eqlIgnoreCase(raw, f)) return false;
     }
-    const n = parseInt(raw) catch return error.NotABoolean;
+    const n = parseInteger(raw) catch return error.NotABoolean;
     return n != 0;
 }
 
@@ -1437,7 +1437,7 @@ pub fn parseBool(raw: []const u8) Self.ValueError!bool {
 /// `strtoimax` in base 0 -- leading blanks and a sign, `0x` for
 /// hexadecimal, a leading `0` for octal -- then a `k`, `m` or `g` size
 /// suffix, and nothing after.
-pub fn parseInt(raw: []const u8) Self.ValueError!i64 {
+pub fn parseInteger(raw: []const u8) Self.ValueError!i64 {
     var i: usize = 0;
     while (i < raw.len and (raw[i] == ' ' or (raw[i] >= '\t' and raw[i] <= '\r'))) i += 1;
     var negative = false;
@@ -2038,10 +2038,10 @@ test "integers and booleans read as git config --type reads them" {
 }
 
 test "integers take git's size suffixes" {
-    try std.testing.expectEqual(@as(i64, 1024), try parseInt("1k"));
-    try std.testing.expectEqual(@as(i64, 5 * 1024 * 1024), try parseInt("5M"));
-    try std.testing.expectEqual(@as(i64, -7), try parseInt("-7"));
-    try std.testing.expectError(error.NotAnInteger, parseInt("x"));
+    try std.testing.expectEqual(@as(i64, 1024), try parseInteger("1k"));
+    try std.testing.expectEqual(@as(i64, 5 * 1024 * 1024), try parseInteger("5M"));
+    try std.testing.expectEqual(@as(i64, -7), try parseInteger("-7"));
+    try std.testing.expectError(error.NotAnInteger, parseInteger("x"));
 }
 
 test "typed getters unquote values before parsing them" {

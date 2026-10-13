@@ -10,6 +10,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.object.<name>`.
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -79,10 +80,8 @@ pub fn parseHeader(bytes: []const u8) HeaderParseError!struct { header: Header, 
     const digits = line[space + 1 ..];
     if (digits.len == 0) return error.InvalidObjectSize;
     if (digits.len > 1 and digits[0] == '0') return error.InvalidObjectSize;
-    // Digits only, as git reads it: `parseInt` would also take a sign and
-    // `_` separators, and give one object several spellings.
-    for (digits) |c| if (c < '0' or c > '9') return error.InvalidObjectSize;
-    const size = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidObjectSize;
+    // Digits only, as git reads it: one object has one spelling.
+    const size = decimal.digits(u64, digits) orelse return error.InvalidObjectSize;
     return .{ .header = .{ .type = t, .size = size }, .len = nul + 1 };
 }
 
@@ -418,7 +417,7 @@ pub const Signature = struct {
         while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
         if (rest.len == 0) return .{ .name = name, .email = email, .when_secs = 0, .offset_minutes = 0 };
         const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
-        const secs = std.fmt.parseInt(i64, rest[0..space], 10) catch return error.InvalidSignatureTime;
+        const secs = decimal.digits(i64, rest[0..space]) orelse return error.InvalidSignatureTime;
         var offset: i16 = 0;
         if (space < rest.len) {
             var zone = rest[space + 1 ..];
@@ -435,8 +434,8 @@ pub const Signature = struct {
             '-' => -1,
             else => return error.InvalidSignatureTime,
         };
-        const hours = std.fmt.parseInt(i16, zone[1..3], 10) catch return error.InvalidSignatureTime;
-        const minutes = std.fmt.parseInt(i16, zone[3..5], 10) catch return error.InvalidSignatureTime;
+        const hours = decimal.digits(i16, zone[1..3]) orelse return error.InvalidSignatureTime;
+        const minutes = decimal.digits(i16, zone[3..5]) orelse return error.InvalidSignatureTime;
         return sign * (hours * 60 + minutes);
     }
 };

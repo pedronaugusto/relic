@@ -22,6 +22,7 @@ const ErrorNamespace = @This();
 const unicode_width = @import("../text.zig").unicode_width;
 const builtin = @import("builtin");
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const revparse_mod = @import("../rev_walk/rev_parse.zig");
 const Allocator = std.mem.Allocator;
@@ -499,26 +500,24 @@ fn parseTrailerOptions(arena: Allocator, arg: ?[]const u8) Error!trailer.Options
     return options;
 }
 
-fn parseUnsigned(text: []const u8) ?u32 {
-    // git's `strtoul_ui`: digits only, no sign, fits an int
-    if (text.len == 0) return null;
-    for (text) |c| if (!std.ascii.isDigit(c)) return null;
-    return std.fmt.parseUnsigned(u32, text, 10) catch null;
+fn strtoulUi(text: []const u8) ?u32 {
+    // git's `strtoul_ui`: no minus anywhere, then `strtoul` over all of it
+    if (std.mem.findScalar(u8, text, '-') != null) return null;
+    return decimal.whole(u32, text, 10);
 }
 
-fn parseSigned(text: []const u8) ?i32 {
+fn strtolI(text: []const u8) ?i32 {
     // git's `strtol_i`
-    if (text.len == 0) return null;
-    return std.fmt.parseInt(i32, text, 10) catch null;
+    return decimal.whole(i32, text, 10);
 }
 
 fn parseRefnameOption(arg: ?[]const u8) Error!RefnameOption {
     const text = arg orelse return .normal;
     if (std.mem.eql(u8, text, "short")) return .short;
     for ([_][]const u8{ "lstrip=", "strip=" }) |prefix| {
-        if (std.mem.startsWith(u8, text, prefix)) return .{ .lstrip = parseSigned(text[prefix.len..]) orelse return error.BadFieldArgument };
+        if (std.mem.startsWith(u8, text, prefix)) return .{ .lstrip = strtolI(text[prefix.len..]) orelse return error.BadFieldArgument };
     }
-    if (std.mem.startsWith(u8, text, "rstrip=")) return .{ .rstrip = parseSigned(text["rstrip=".len..]) orelse return error.BadFieldArgument };
+    if (std.mem.startsWith(u8, text, "rstrip=")) return .{ .rstrip = strtolI(text["rstrip=".len..]) orelse return error.BadFieldArgument };
     return error.BadFieldArgument;
 }
 
@@ -577,7 +576,7 @@ fn isColour(word: []const u8) bool {
         return true;
     }
     // a number from -1 to 255
-    const n = std.fmt.parseInt(i32, word, 10) catch return false;
+    const n = decimal.whole(i64, word, 10) orelse return false;
     return n >= -1 and n <= 255;
 }
 
@@ -952,7 +951,7 @@ pub const Listing = struct {
                     atom.trailers = try parseTrailerOptions(l.a(), text["trailers:".len..]);
                 } else if (std.mem.startsWith(u8, text, "lines=")) {
                     atom.contents = .lines;
-                    atom.lines = parseUnsigned(text["lines=".len..]) orelse return error.BadFieldArgument;
+                    atom.lines = strtoulUi(text["lines=".len..]) orelse return error.BadFieldArgument;
                 } else return error.BadFieldArgument;
             },
             .describe => try l.parseDescribeArgument(atom, arg),
@@ -965,7 +964,7 @@ pub const Listing = struct {
                 if (std.mem.eql(u8, text, "short")) {
                     atom.oid = .short;
                 } else if (std.mem.startsWith(u8, text, "short=")) {
-                    const n = parseUnsigned(text["short=".len..]) orelse return error.BadFieldArgument;
+                    const n = strtoulUi(text["short=".len..]) orelse return error.BadFieldArgument;
                     if (n == 0) return error.BadFieldArgument;
                     atom.oid = .{ .length = @max(n, abbrev_mod.minimum) };
                 } else return error.BadFieldArgument;
@@ -1064,7 +1063,7 @@ pub const Listing = struct {
                 rest = m.rest;
             } else if (matchArgValue(rest, "abbrev")) |m| {
                 const v = m.value orelse return error.BadFieldArgument;
-                const n = std.fmt.parseInt(i64, v, 10) catch return error.BadFieldArgument;
+                const n = decimal.whole(i32, v, 10) orelse return error.BadFieldArgument;
                 if (n < 0) return error.BadFieldArgument;
                 atom.describe.abbrev = @intCast(@min(n, std.math.maxInt(u32)));
                 rest = m.rest;
@@ -1092,8 +1091,8 @@ pub const Listing = struct {
             if (std.mem.startsWith(u8, s, "position=")) {
                 atom.@"align".position = alignPosition(s["position=".len..]) orelse return error.BadFieldArgument;
             } else if (std.mem.startsWith(u8, s, "width=")) {
-                width = parseUnsigned(s["width=".len..]) orelse return error.BadFieldArgument;
-            } else if (parseUnsigned(s)) |w| {
+                width = strtoulUi(s["width=".len..]) orelse return error.BadFieldArgument;
+            } else if (strtoulUi(s)) |w| {
                 width = w;
             } else if (alignPosition(s)) |p| {
                 atom.@"align".position = p;
@@ -1622,13 +1621,13 @@ pub const Listing = struct {
             var i: usize = 0;
             while (i < after.len and std.ascii.isDigit(after[i])) i += 1;
             if (i == 0) return .{};
-            const secs = std.fmt.parseInt(i64, after[0..i], 10) catch return .{};
+            const secs = decimal.digits(i64, after[0..i]) orelse return .{};
             var j = i;
             while (j < after.len and (after[j] == ' ' or after[j] == '\t')) j += 1;
             var k = j;
             if (k < after.len and (after[k] == '+' or after[k] == '-')) k += 1;
             while (k < after.len and std.ascii.isDigit(after[k])) k += 1;
-            const tz = std.fmt.parseInt(i32, after[j..k], 10) catch 0;
+            const tz = std.math.cast(i32, decimal.strtol(after[j..k], 10, 32).value) orelse 0;
             var out: std.ArrayList(u8) = .empty;
             gitdate.show(ar, &out, secs, tz, atom.date orelse .{}, l.context.clock) catch |err| switch (err) {
                 error.DateNeedsClock => return error.DateNeedsClock,

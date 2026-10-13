@@ -28,6 +28,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -1232,11 +1233,11 @@ pub fn parseAuthorScript(text: []const u8, buf: []u8) ParseAuthorScriptError!obj
     const d = date orelse return error.MalformedState;
     if (d.len < 2 or d[0] != '@') return error.MalformedState;
     const space = std.mem.findScalar(u8, d, ' ') orelse return error.MalformedState;
-    const secs = std.fmt.parseInt(i64, d[1..space], 10) catch return error.MalformedState;
+    const secs = decimal.digits(i64, d[1..space]) orelse return error.MalformedState;
     const zone = d[space + 1 ..];
     if (zone.len != 5 or (zone[0] != '+' and zone[0] != '-')) return error.MalformedState;
-    const hours = std.fmt.parseInt(i16, zone[1..3], 10) catch return error.MalformedState;
-    const minutes = std.fmt.parseInt(i16, zone[3..5], 10) catch return error.MalformedState;
+    const hours = decimal.digits(i16, zone[1..3]) orelse return error.MalformedState;
+    const minutes = decimal.digits(i16, zone[3..5]) orelse return error.MalformedState;
     const offset = (hours * 60 + minutes) * @as(i16, if (zone[0] == '-') -1 else 1);
     return .{ .name = name orelse return error.MalformedState, .email = email orelse return error.MalformedState, .when_secs = secs, .offset_minutes = offset };
 }
@@ -2468,7 +2469,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
     const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
     try r.items.appendSlice(r.arena, list.items.items);
     if (try r.readState("msgnum")) |n| {
-        r.done_nr = std.fmt.parseInt(usize, std.mem.trim(u8, n, " \n"), 10) catch return error.MalformedState;
+        r.done_nr = decimal.whole(usize, std.mem.trimEnd(u8, n, " \n"), 10) orelse return error.MalformedState;
     }
     return r;
 }

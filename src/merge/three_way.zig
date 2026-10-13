@@ -693,7 +693,7 @@ fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settin
 fn configuredRenameLimit(repo: *Repository) i64 {
     for ([_][]const u8{ "merge.renamelimit", "diff.renamelimit" }) |key| {
         const text = repo.configuration().get(key) orelse continue;
-        return config_mod.parseInt(text) catch 0;
+        return config_mod.parseInteger(text) catch 0;
     }
     return 0;
 }

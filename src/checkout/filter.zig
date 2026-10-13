@@ -27,6 +27,7 @@
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -446,8 +447,8 @@ pub const Protocol = struct {
         if (!std.mem.eql(u8, welcome, "git-filter-server")) return error.FilterHandshake;
         const version_line = (try p.readLine()) orelse return error.FilterHandshake;
         if (!std.mem.startsWith(u8, version_line, "version=")) return error.FilterHandshake;
-        const version_text = std.mem.trimStart(u8, version_line["version=".len..], " \t\n\r\x0b\x0c");
-        const version = std.fmt.parseInt(i32, version_text, 10) catch return error.FilterHandshake;
+        // git's `strtol_i`, all of the rest of the line.
+        const version = decimal.whole(i32, version_line["version=".len..], 10) orelse return error.FilterHandshake;
         if (try p.readLine() != null) return error.FilterHandshake;
         if (version != 2) return error.FilterHandshake;
 

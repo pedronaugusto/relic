@@ -49,6 +49,7 @@ const ErrorNamespace = @This();
 const transfer = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1707,7 +1708,7 @@ pub fn parseSshBatch(a: Allocator, lines: []const []const u8) ParseSshBatchError
         while (it.next()) |f| try fields.append(a, f);
         if (fields.items.len < 3) return error.MalformedResponse;
         const oid = fields.items[0];
-        const size = std.fmt.parseInt(u64, fields.items[1], 10) catch return error.MalformedResponse;
+        const size = decimal.goInt(u64, fields.items[1]) orelse return error.MalformedResponse;
         if (out.items.len == 0 or !std.mem.eql(u8, out.items[out.items.len - 1].oid, oid)) {
             try out.append(a, .{ .oid = oid, .size = size, .actions = .{} });
         }
@@ -1722,7 +1723,7 @@ pub fn parseSshBatch(a: Allocator, lines: []const []const u8) ParseSshBatchError
             } else if (std.mem.startsWith(u8, kv, "token=")) {
                 action.token = kv[6..];
             } else if (std.mem.startsWith(u8, kv, "expires-in=")) {
-                action.expires_in = std.fmt.parseInt(i64, kv[11..], 10) catch return error.MalformedResponse;
+                action.expires_in = decimal.goInt(i64, kv[11..]) orelse return error.MalformedResponse;
             } else if (std.mem.startsWith(u8, kv, "expires-at=")) {
                 if (time_text.parseRfc3339(kv[11..]) == null) return error.MalformedResponse;
                 action.expires_at = kv[11..];
@@ -1793,7 +1794,7 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
         conn.skipData(io) catch |err| return sshRetry(state, err);
         return .{ .fail = "the server's answer gave no size" };
     };
-    _ = std.fmt.parseInt(u64, size_text, 10) catch {
+    _ = decimal.goInt(u64, size_text) orelse {
         conn.skipData(io) catch |err| return sshRetry(state, err);
         return .{ .fail = "the server's answer gave a size that is not one" };
     };

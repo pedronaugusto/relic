@@ -78,7 +78,7 @@ pub fn configured(config: *const config_mod.Config, programs: program.Programs) 
         return null;
     } else |_| {}
     if (value.len == 0) return null;
-    const version: ?u2 = if (config.get("core.fsmonitorhookversion")) |text| switch (std.fmt.parseInt(i64, text, 10) catch return error.InvalidFsmonitorHookVersion) {
+    const version: ?u2 = if (config.get("core.fsmonitorhookversion")) |text| switch (config_mod.parseInteger(text) catch return error.InvalidFsmonitorHookVersion) {
         1 => 1,
         2 => 2,
         else => return error.InvalidFsmonitorHookVersion,

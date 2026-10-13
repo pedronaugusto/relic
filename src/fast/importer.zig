@@ -24,6 +24,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -278,7 +279,7 @@ pub const Marks = struct {
             if (line.len == 0 and lines.peek() == null) break;
             if (line.len < 2 or line[0] != ':') return error.CorruptMarks;
             const space = std.mem.findScalar(u8, line, ' ') orelse return error.CorruptMarks;
-            const mark = std.fmt.parseInt(u64, line[1..space], 10) catch return error.CorruptMarks;
+            const mark = decimal.whole(u64, line[1..space], 10) orelse return error.CorruptMarks;
             if (mark == 0) return error.CorruptMarks;
             const oid = Oid.parse(kind, line[space + 1 ..]) catch return error.CorruptMarks;
             try m.map.put(gpa, mark, oid);
@@ -1290,7 +1291,7 @@ const Importer = struct {
         var i: usize = 1;
         while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {}
         if (i == 1) return error.MalformedCommand;
-        const mark = std.fmt.parseInt(u64, text[1..i], 10) catch return error.MalformedCommand;
+        const mark = decimal.digits(u64, text[1..i]) orelse return error.MalformedCommand;
         return .{ .mark = mark, .len = i };
     }
 
@@ -1747,7 +1748,7 @@ fn leadingNumber(text: []const u8) ?u64 {
     var i: usize = 0;
     while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {}
     if (i == 0) return null;
-    return std.fmt.parseInt(u64, text[0..i], 10) catch null;
+    return decimal.digits(u64, text[0..i]);
 }
 
 fn parseOctal(text: []const u8) ?u32 {
@@ -1770,11 +1771,13 @@ fn isHex(text: []const u8) bool {
 fn validRawDate(text: []const u8, strict: bool) bool {
     const space = std.mem.findScalar(u8, text, ' ') orelse return false;
     if (space == 0) return false;
-    _ = std.fmt.parseInt(u64, text[0..space], 10) catch return false;
+    const seconds = decimal.strtoul(text, 10, 64);
+    if (seconds.overflow or seconds.end == 0 or seconds.end != space) return false;
     const zone = text[space + 1 ..];
     if (zone.len < 2 or (zone[0] != '+' and zone[0] != '-')) return false;
-    const value = std.fmt.parseInt(u64, zone[1..], 10) catch return false;
-    if (!std.ascii.isDigit(zone[1])) return false;
+    const read = decimal.strtoul(zone[1..], 10, 64);
+    if (read.overflow or read.end == 0 or read.end != zone.len - 1) return false;
+    const value: u64 = @intCast(read.value);
     return !(strict and value > 1400);
 }
 

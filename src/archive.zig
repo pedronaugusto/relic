@@ -29,6 +29,7 @@ const hash = @import("hash/hash.zig");
 const object = @import("object/object.zig");
 const odb_mod = @import("odb/odb.zig");
 const repo_mod = @import("repo/repo.zig");
+const config_mod = @import("config/config.zig");
 const worktree = @import("checkout/checkout.zig");
 const attributes = @import("patterns.zig").attributes;
 const convert = @import("checkout/convert.zig");
@@ -720,13 +721,10 @@ fn tarUmask(repo: *Repository, user: ?u32) Error!u32 {
     const raw = repo.configuration().get("tar.umask") orelse return 0o002;
     const text = std.mem.trim(u8, raw, " \t");
     if (std.mem.eql(u8, text, "user")) return user orelse fs.processUmask();
-    const value = if (std.mem.startsWith(u8, text, "0x") or std.mem.startsWith(u8, text, "0X"))
-        std.fmt.parseInt(u32, text[2..], 16)
-    else if (text.len > 1 and text[0] == '0')
-        std.fmt.parseInt(u32, text[1..], 8)
-    else
-        std.fmt.parseInt(u32, text, 10);
-    return (value catch return error.InvalidTarUmask) & 0o7777;
+    // git's `git_config_int`: base 0 and a size suffix, as every integer
+    // setting is read.
+    const value = config_mod.parseInteger(text) catch return error.InvalidTarUmask;
+    return @intCast(value & 0o7777);
 }
 
 /// `git archive <tree-ish> [<path>...]`: write the archive to `w`.

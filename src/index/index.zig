@@ -19,6 +19,7 @@ const Self = @This();
 const ewah = @import("../codec.zig").ewah;
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -307,11 +308,12 @@ pub const CacheTree = struct {
         offset.* = nul + 1;
 
         const space = std.mem.findScalarPos(u8, data, offset.*, ' ') orelse return error.CorruptCacheTree;
-        const entry_count = std.fmt.parseInt(i64, data[offset.*..space], 10) catch return error.CorruptCacheTree;
+        // git's `strtol`: what reaches the space.
+        const entry_count = decimal.whole(i64, data[offset.*..space], 10) orelse return error.CorruptCacheTree;
         offset.* = space + 1;
 
         const newline = std.mem.findScalarPos(u8, data, offset.*, '\n') orelse return error.CorruptCacheTree;
-        const subtree_count = std.fmt.parseInt(u32, data[offset.*..newline], 10) catch return error.CorruptCacheTree;
+        const subtree_count = decimal.whole(u32, data[offset.*..newline], 10) orelse return error.CorruptCacheTree;
         offset.* = newline + 1;
 
         var oid: ?Oid = null;
@@ -537,7 +539,7 @@ pub const ResolveUndo = struct {
             var modes: [3]u32 = @splat(0);
             for (&modes) |*mode| {
                 const end = std.mem.findScalarPos(u8, data, offset, 0) orelse return error.CorruptResolveUndo;
-                mode.* = std.fmt.parseInt(u32, data[offset..end], 8) catch return error.CorruptResolveUndo;
+                mode.* = decimal.whole(u32, data[offset..end], 8) orelse return error.CorruptResolveUndo;
                 offset = end + 1;
             }
             var oids: [3]?Oid = @splat(null);

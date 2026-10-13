@@ -16,6 +16,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const airlock_mod = @import("airlock.testing");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -1182,7 +1183,7 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
         return .{ .held = true, .pid = null, .holder_alive = null };
     const line = text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
     if (!std.mem.startsWith(u8, line, "pid ")) return .{ .held = true, .pid = null, .holder_alive = null };
-    const pid = std.fmt.parseInt(u32, line[4..], 10) catch
+    const pid = decimal.digits(u32, line[4..]) orelse
         return .{ .held = true, .pid = null, .holder_alive = null };
     return .{ .held = true, .pid = pid, .holder_alive = processAlive(pid) };
 }

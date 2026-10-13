@@ -18,7 +18,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
-const fs = @import("../fs/fs.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repository_format = @import("format.zig");
 const gitfile = @import("gitfile.zig");
@@ -160,7 +159,6 @@ pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Oi
     gpa.free(resolved.name);
     return resolved.oid;
 }
-
 
 const testgit = @import("../testing/git.zig");
 

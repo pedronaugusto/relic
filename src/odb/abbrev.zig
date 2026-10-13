@@ -28,7 +28,7 @@ pub fn defaultLength(config: *const config_mod.Config, db: *const odb_mod.Odb) u
     const hex_len = db.objectFormat().hexLen();
     if (config.get("core.abbrev")) |text| {
         if (!std.ascii.eqlIgnoreCase(text, "auto")) {
-            if (config_mod.parseInt(text)) |n| {
+            if (config_mod.parseInteger(text)) |n| {
                 if (n < minimum) return minimum;
                 return @min(@as(usize, @intCast(n)), hex_len);
             } else |_| {}

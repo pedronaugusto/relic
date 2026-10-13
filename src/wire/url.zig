@@ -11,6 +11,7 @@
 
 const Self = @This();
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
@@ -275,7 +276,7 @@ fn splitPort(url: *Url, suffix: []const u8) ParseError!void {
     if (suffix.len == 0) return;
     if (suffix[0] != ':') return error.MalformedUrl;
     if (suffix.len == 1) return;
-    url.port = std.fmt.parseInt(u16, suffix[1..], 10) catch return error.MalformedUrl;
+    url.port = decimal.whole(u16, suffix[1..], 10) orelse return error.MalformedUrl;
 }
 
 /// git's `url_is_local_not_ssh`: no colon, or a slash before the first

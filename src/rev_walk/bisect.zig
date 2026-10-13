@@ -30,6 +30,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -1641,7 +1642,7 @@ const Twin = struct {
     fn verdict(t: *Twin, io: Io, first_bad: usize, skip: []const usize, no_checkout: bool) ![]const u8 {
         const text = if (no_checkout) try t.git.run(io, &.{ "show", "BISECT_HEAD:n" }) else try t.git.readFile(io, "n");
         defer t.git.gpa.free(text);
-        const n = try std.fmt.parseInt(usize, std.mem.trim(u8, text, "\n"), 10);
+        const n = decimal.digits(usize, std.mem.trim(u8, text, "\n")) orelse return error.TestUnexpectedResult;
         for (skip) |s| if (s == n) return "skip";
         return if (n >= first_bad) "bad" else "good";
     }
