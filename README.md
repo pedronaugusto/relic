@@ -96,7 +96,7 @@ const commit = try repo.writeCommit(io, .{
     .author = who,
     .committer = who,
     .message = "first commit\n",
-}, null);
+}, .{});
 
 // Move the branch under its lock, then append the reflog.
 var tx = repo.beginRefs();
