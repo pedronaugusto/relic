@@ -2439,7 +2439,7 @@ pub const Odb = struct {
         }
         var keep_too: std.ArrayList([]const u8) = .empty;
         defer keep_too.deinit(gpa);
-        try keep_too.appendSlice(gpa, @ptrCast(kept.items));
+        for (kept.items) |name| try keep_too.append(gpa, name);
         var promisor_base_buf: [hash.max_hex_len + 8]u8 = undefined;
         if (promised_entries.items.len != 0) {
             const pack_dir = try odb.openPackDirectory(io);
@@ -2567,33 +2567,41 @@ pub const Odb = struct {
             // process still holds open is one Windows will not let it
             // remove.
             try odb.reopenPacks(io, 0);
-            for (old_packs.items) |old_base| {
-                // A repack of the same objects with the same settings writes
-                // the same bytes, which gives the same checksum and so the
-                // same name: the new pack *is* the old one, and removing it
-                // would remove the repository.
-                if (std.mem.eql(u8, old_base, base)) continue;
-                for (leave) |left| {
-                    if (std.mem.eql(u8, old_base, left)) break;
-                } else {
-                    if (try hasCompanion(io, pack_dir, old_base, ".keep")) continue;
-                    var name_buf: [160]u8 = undefined;
-                    var removed = false;
-                    // Every companion goes with its pack, the `.pack` and
-                    // `.idx` last so a reader never finds an index whose
-                    // pack is gone first.
-                    for ([_][]const u8{ ".bitmap", ".rev", ".mtimes", ".promisor", ".pack", ".idx" }) |extension| {
-                        const name = std.mem.print(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
-                        if (pack_dir.deleteFile(io, name)) {
-                            if (std.mem.eql(u8, extension, ".pack")) removed = true;
-                        } else |_| {}
-                    }
-                    if (removed) report.packs_removed += 1;
-                }
-            }
+            report.packs_removed = try removeOldPacks(io, pack_dir, old_packs.items, base, leave);
             try odb.reopenPacks(io, 0);
         }
         return report;
+    }
+
+    /// Remove the packs `old_packs` names but the one just written, those
+    /// `leave` names and kept ones, each with every companion; how many went.
+    fn removeOldPacks(io: Io, pack_dir: Io.Dir, old_packs: []const []u8, base: []const u8, leave: []const []const u8) ErrorNamespace.Error!u32 {
+        var count: u32 = 0;
+        for (old_packs) |old_base| {
+            // A repack of the same objects with the same settings writes
+            // the same bytes, which gives the same checksum and so the
+            // same name: the new pack *is* the old one, and removing it
+            // would remove the repository.
+            if (std.mem.eql(u8, old_base, base)) continue;
+            for (leave) |left| {
+                if (std.mem.eql(u8, old_base, left)) break;
+            } else {
+                if (try hasCompanion(io, pack_dir, old_base, ".keep")) continue;
+                var name_buf: [160]u8 = undefined;
+                var removed = false;
+                // Every companion goes with its pack, the `.pack` and
+                // `.idx` last so a reader never finds an index whose
+                // pack is gone first.
+                for ([_][]const u8{ ".bitmap", ".rev", ".mtimes", ".promisor", ".pack", ".idx" }) |extension| {
+                    const name = std.mem.print(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
+                    if (pack_dir.deleteFile(io, name)) {
+                        if (std.mem.eql(u8, extension, ".pack")) removed = true;
+                    } else |_| {}
+                }
+                if (removed) count += 1;
+            }
+        }
+        return count;
     }
 
     /// Close and re-open every pack of one source, so that a pack removed
