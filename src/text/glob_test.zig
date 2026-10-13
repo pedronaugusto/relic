@@ -71,24 +71,6 @@ test "a pattern too long for a compiled one is a set of one, and still exact" {
     try std.testing.expectEqual(@as(?usize, null), compiled.ancestor("abx/en/d"));
 }
 
-test "one long glob answers several threads at once" {
-    var compiled: glob.Glob = try .compile(std.testing.allocator, repeat("*", 9000) ++ "x/end", .{});
-    defer compiled.deinit();
-    const Ask = struct {
-        fn run(g: *const glob.Glob, wrong: *std.atomic.Value(u32)) void {
-            for (0..2000) |_| {
-                if (!g.matches("abx/end")) _ = wrong.fetchAdd(1, .monotonic);
-                if (g.matches("abx/ends")) _ = wrong.fetchAdd(1, .monotonic);
-            }
-        }
-    };
-    var wrong: std.atomic.Value(u32) = .init(0);
-    var threads: [4]std.Thread = undefined;
-    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Ask.run, .{ &compiled, &wrong });
-    for (threads) |t| t.join();
-    try std.testing.expectEqual(@as(u32, 0), wrong.load(.monotonic));
-}
-
 test "the prefix a pattern matches, in one pass" {
     var dir: glob.Glob = try .compile(std.testing.allocator, "art/deep", .{});
     defer dir.deinit();

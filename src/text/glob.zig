@@ -5,8 +5,8 @@
 //! sweep does the matching, in time linear in the subject. git takes a
 //! pattern of any length, so this does too: a pattern too long for sweep's
 //! one-shot match is compiled, and one too long for a compiled `Pattern` is
-//! a set of one entry. A malformed pattern matches nothing, as git's matcher
-//! answers for one.
+//! a set of one entry with its cache, sweep's caller-owned scratch. A
+//! malformed pattern matches nothing, as git's matcher answers for one.
 
 const ErrorNamespace = @This();
 const std = @import("std");
@@ -48,8 +48,10 @@ pub fn matches(gpa: Allocator, pattern: []const u8, subject: []const u8, options
     return glob.matches(subject);
 }
 
-/// A pattern compiled once, for one asked about many subjects. Immutable
-/// after `compile`; any number of threads may query it at once.
+/// A pattern compiled once, for one asked about many subjects. A glob past
+/// sweep's compiled length holds the set cache its queries run on, so one
+/// thread at a time asks a glob; a thread of its own compiles its own.
+/// Queries never wait and never allocate.
 pub const Glob = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -67,18 +69,12 @@ pub const Glob = struct {
         long: *Long,
     };
 
-    /// A set of one entry and the cache its queries run in. A cache serves
-    /// one query at a time, so queries take turns on it; matching never
-    /// waits on anything else, so a turn is as short as one query.
+    /// A set of one entry and the cache its queries run in, at one address
+    /// for as long as the cache refers to the set.
     const Long = struct {
         gpa: Allocator,
         set: sweep.Set,
         cache: sweep.Set.Cache,
-        turn: std.atomic.Mutex,
-
-        fn take(l: *Long) void {
-            while (!l.turn.tryLock()) std.atomic.spinLoopHint();
-        }
     };
 
     /// Compiles `pattern`, which is copied: nothing stays borrowed.
@@ -103,7 +99,7 @@ pub const Glob = struct {
         // pattern past that is the same exhaustion an allocation reports.
         long.* = .{ .gpa = gpa, .set = builder.build() catch |err| switch (err) {
             error.OutOfMemory, error.PatternTooLong => return error.OutOfMemory,
-        }, .cache = undefined, .turn = .unlocked };
+        }, .cache = undefined };
         errdefer long.set.deinit();
         long.cache = try .init(gpa, &long.set, .{ .capacity = sweep.Set.Bytes.fromRaw(1 << 16) });
         return .{ .compiled = .{ .long = long } };
@@ -127,11 +123,7 @@ pub const Glob = struct {
         switch (g.compiled) {
             .none => return false,
             .pattern => |*p| return p.matches(subject),
-            .long => |l| {
-                l.take();
-                defer l.turn.unlock();
-                return l.set.any(&l.cache, subject, .file);
-            },
+            .long => |l| return l.set.any(&l.cache, subject, .file),
         }
     }
 
@@ -143,8 +135,6 @@ pub const Glob = struct {
             .none => return null,
             .pattern => |*p| return p.ancestor(subject),
             .long => |l| {
-                l.take();
-                defer l.turn.unlock();
                 var steps = l.set.ancestors(&l.cache, subject, .file);
                 while (steps.next()) |step| if (step.last != null) return step.end;
                 return null;
