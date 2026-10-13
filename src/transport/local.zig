@@ -24,7 +24,6 @@ const object_walk = @import("../walk/object/walk.zig");
 const url_mod = @import("../wire.zig").url;
 const object = @import("../object/object.zig");
 const rev_walk = @import("../walk/walk.zig");
-const shallow_mod = @import("../walk/shallow.zig");
 const ref_names = @import("../names.zig").ref;
 const send_pack = @import("../wire.zig").send_pack;
 const hidden_refs = @import("../wire.zig").hidden;
