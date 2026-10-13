@@ -22,8 +22,8 @@ test "CVE-2019-1349, t7450-bad-git-dotfiles 'prevent git~1 squatting on Windows'
     // On Windows the squatting paths themselves are refused: `d\a` is a
     // path and `d.` is `d`.
     if (builtin.target.os.tag == .windows) {
-        try std.testing.expectEqual(safe_path.Reason.separator_inside_component, safe_path.check("d\\a", .worktree).?.reason);
-        try std.testing.expectEqual(safe_path.Reason.trailing_dot_or_space, safe_path.check("d./a/x", .worktree).?.reason);
+        try std.testing.expectEqual(safe_path.Reason.separator_inside_component, safe_path.check("d\\a", .worktree, .{}).?.reason);
+        try std.testing.expectEqual(safe_path.Reason.trailing_dot_or_space, safe_path.check("d./a/x", .worktree, .{}).?.reason);
     }
     // Everywhere: files already in the submodule's path, as the aliased
     // checkout leaves them, keep the clone out.
