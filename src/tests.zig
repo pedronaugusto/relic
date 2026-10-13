@@ -112,6 +112,7 @@ test {
         _ = @import("patch/apply_test.zig");
         _ = @import("patch/format_test.zig");
         _ = @import("patch/am_test.zig");
+        _ = @import("commit/in_progress_test.zig");
         _ = @import("grep_test.zig");
         _ = @import("archive_test.zig");
         _ = @import("clean_test.zig");

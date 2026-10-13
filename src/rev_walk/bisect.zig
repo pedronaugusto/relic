@@ -30,6 +30,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -202,7 +203,7 @@ const Ctx = struct {
     }
 
     fn writeState(c: *Ctx, name: []const u8, bytes: []const u8) Error!void {
-        try head_mod.writeState(c.io, c.dir(), name, bytes);
+        try state_file.write(c.io, c.dir(), name, bytes);
     }
 
     fn appendState(c: *Ctx, name: []const u8, bytes: []const u8) Error!void {

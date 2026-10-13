@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const path_mod = @import("../names.zig").path;
 const Allocator = std.mem.Allocator;
@@ -104,7 +105,7 @@ pub const Outcome = struct {
 /// `.git/rr-cache` is there.
 pub fn enabled(io: Io, repo: *Repository) bool {
     const setting = repo.configuration().getBool("rerere.enabled", false) catch null;
-    if (repo.configuration().get("rerere.enabled") == null) return head_mod.stateExists(io, repo.commonDirectory(), "rr-cache");
+    if (repo.configuration().get("rerere.enabled") == null) return state_file.exists(io, repo.commonDirectory(), "rr-cache");
     return setting orelse false;
 }
 
@@ -154,15 +155,15 @@ const Run = struct {
     }
 
     fn readFile(r: *Run, sub: []const u8) ?[]u8 {
-        return head_mod.readState(r.arena, r.io, r.repo.commonDirectory(), sub) catch null;
+        return state_file.read(r.arena, r.io, r.repo.commonDirectory(), sub) catch null;
     }
 
     fn writeFile(r: *Run, sub: []const u8, bytes: []const u8) Error!void {
-        try head_mod.writeState(r.io, r.repo.commonDirectory(), sub, bytes);
+        try state_file.write(r.io, r.repo.commonDirectory(), sub, bytes);
     }
 
     fn removeFile(r: *Run, sub: []const u8) Error!void {
-        try head_mod.removeState(r.io, r.repo.commonDirectory(), sub);
+        try state_file.remove(r.io, r.repo.commonDirectory(), sub);
     }
 
     fn markerSize(r: *Run, path: []const u8) Error!u32 {
@@ -409,7 +410,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 /// `read_rr`: `MERGE_RR`'s records, by path, each conflict's directory
 /// scanned on the way.
 fn readMergeRr(r: *Run) Error!std.array_hash_map.String(?Id) {
-    const text = (try head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), "MERGE_RR")) orelse return .empty;
+    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), "MERGE_RR")) orelse return .empty;
     var rr = try parseMergeRr(r.arena, text, r.repo.objectFormat());
     for (rr.values()) |slot| {
         const id = slot.?;
@@ -476,7 +477,7 @@ fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
         } else try out.print(r.arena, "{s}\t{s}", .{ id.hex, path });
         try out.append(r.arena, 0);
     }
-    try head_mod.writeState(r.io, r.repo.gitDirectory(), "MERGE_RR", out.items);
+    try state_file.write(r.io, r.repo.gitDirectory(), "MERGE_RR", out.items);
 }
 
 fn isReg(mode: object.Mode) bool {
@@ -656,7 +657,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
             else => return err,
         };
     }
-    try head_mod.removeState(io, repo.gitDirectory(), "MERGE_RR");
+    try state_file.remove(io, repo.gitDirectory(), "MERGE_RR");
 }
 
 /// What `git commit` does to a stop's files once the commit that ends it
@@ -666,7 +667,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
 pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     try repo.refStore().special().delete(io, .merge_head);
     for ([_][]const u8{ "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
-        try head_mod.removeState(io, repo.gitDirectory(), name);
+        try state_file.remove(io, repo.gitDirectory(), name);
     }
     try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
     var locked_index = try repo.lockIndex(io);

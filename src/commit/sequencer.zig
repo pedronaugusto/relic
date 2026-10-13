@@ -17,6 +17,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -251,10 +252,11 @@ const head_path = "sequencer/head";
 const safety_path = "sequencer/abort-safety";
 const opts_path = "sequencer/opts";
 
-/// The action the first line of `.git/sequencer/todo` names, as
+/// The action the first line of `.git/sequencer/todo` names: the command a
+/// stopped sequence of picks or reverts last ran, as git's
 /// `sequencer_get_last_command` reads it.
-fn lastCommand(gpa: Allocator, io: Io, repo: *Repository) ?Action {
-    const text = (head_mod.readState(gpa, io, repo.gitDirectory(), todo_path) catch return null) orelse return null;
+pub fn lastCommand(gpa: Allocator, io: Io, repo: *Repository) ?Action {
+    const text = (state_file.read(gpa, io, repo.gitDirectory(), todo_path) catch return null) orelse return null;
     defer gpa.free(text);
     var at: usize = 0;
     while (at < text.len and (text[at] == ' ' or text[at] == '\t' or text[at] == '\r' or text[at] == '\n')) at += 1;
@@ -336,12 +338,12 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         any = true;
         w.print("\tdefault-msg-cleanup = {s}\n", .{@tagName(mode)}) catch return error.OutOfMemory;
     }
-    if (any) try head_mod.writeState(io, repo.gitDirectory(), opts_path, out.written());
+    if (any) try state_file.write(io, repo.gitDirectory(), opts_path, out.written());
 }
 
 /// Apply what `.git/sequencer/opts` says on top of `options`.
 fn readOpts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, options: *Options) Error!void {
-    const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), opts_path)) orelse return;
+    const text = (try state_file.read(gpa, io, repo.gitDirectory(), opts_path)) orelse return;
     defer gpa.free(text);
     try parseOpts(gpa, arena, text, options);
 }
@@ -406,14 +408,14 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
 /// Write `abort-safety`: where `HEAD` is now, so an abort can tell whether
 /// something else has moved it since.
 fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
-    if (!head_mod.stateExists(io, repo.gitDirectory(), seq_dir)) return;
+    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) return;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     var buf: [hash.max_hex_len + 1]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     // unreachable: a hex name is at most max_hex_len digits, the buffer with its newline
     const text = std.mem.print(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch unreachable;
-    try head_mod.writeState(io, repo.gitDirectory(), safety_path, text);
+    try state_file.write(io, repo.gitDirectory(), safety_path, text);
 }
 
 fn removeSequencerState(io: Io, repo: *Repository) Error!void {
@@ -555,7 +557,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
 
     if (!outcome.isClean()) try noteConflicts(r, &msg, outcome.conflicts);
-    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
+    try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
 
     // The pseudo-ref a continuation reads the commit back from.
     const clean = outcome.isClean();
@@ -622,7 +624,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
             .keep => allow_empty_commit = true,
             .drop => {
                 try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-                try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+                try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
                 try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
                 try updateAbortSafety(gpa, io, repo);
                 return .dropped;
@@ -646,9 +648,9 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     var text: []const u8 = msg;
     if (commit_hooks.exists(io, "prepare-commit-msg")) {
-        try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", text);
+        try state_file.write(io, repo.gitDirectory(), "COMMIT_EDITMSG", text);
         _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
-        text = (try head_mod.readState(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+        text = (try state_file.read(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
     const cleaned = try message.cleanup(arena, text, cleanup, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
@@ -664,7 +666,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-    try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+    try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
     try updateAbortSafety(gpa, io, repo);
     try r.made.append(arena, made);
     return .committed;
@@ -758,7 +760,7 @@ fn start(gpa: Allocator, io: Io, repo: *Repository, action: Action, commits: []c
     };
     var hex: [hash.max_hex_len]u8 = undefined;
     const head_text = if (head.oid) |oid| try arena.print("{s}\n", .{oid.hex(&hex)}) else "\n";
-    try head_mod.writeState(io, repo.gitDirectory(), head_path, head_text);
+    try state_file.write(io, repo.gitDirectory(), head_path, head_text);
     try writeOpts(gpa, io, repo, action, options);
     try updateAbortSafety(gpa, io, repo);
     return runSequence(&r, &arena_instance, items.items);
@@ -805,7 +807,7 @@ fn saveTodo(r: *Replay, items: []const todo.Item) Error!void {
         }
     };
     const bytes = try todo.toBytes(r.arena, items, .{ .short = .{ .context = r, .shortenFn = Shorten.shorten } });
-    try head_mod.writeState(r.io, r.repo.gitDirectory(), todo_path, bytes);
+    try state_file.write(r.io, r.repo.gitDirectory(), todo_path, bytes);
 }
 
 /// How a sheet's names are resolved: any name a commit goes by, with its
@@ -856,7 +858,7 @@ pub const ResolverContext = struct {
 
 /// Read `.git/sequencer/todo`.
 fn readTodo(r: *Replay) Error!todo.List {
-    const text = (try head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), todo_path)) orelse return error.NoSequencerInProgress;
+    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), todo_path)) orelse return error.NoSequencerInProgress;
     var context: ResolverContext = .{ .repo = r.repo, .io = r.io };
     const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment });
     if (list.count() == 0) return error.MalformedState;
@@ -896,7 +898,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
-    const given = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
+    const given = (try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
     const raw = try commit_hooks.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
     const cleaned = try message.cleanup(arena, raw, .strip, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
@@ -935,7 +937,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     try readOpts(gpa, arena, io, repo, &opts);
     var r = try newReplay(gpa, arena, io, repo, action, opts);
 
-    if (!head_mod.stateExists(io, repo.gitDirectory(), todo_path)) {
+    if (!state_file.exists(io, repo.gitDirectory(), todo_path)) {
         _ = try commitStaged(&r);
         return finishOutcome(&r, &arena_instance, .committed, null);
     }
@@ -985,7 +987,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
     try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = options.who, .blocked = options.blocked });
-    if (!head_mod.stateExists(io, repo.gitDirectory(), seq_dir)) {
+    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) {
         const arena_instance: std.heap.ArenaAllocator = .init(gpa);
         return .{ .gpa = gpa, .arena = arena_instance.state };
     }
@@ -997,7 +999,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// `HEAD` since the sequence last did, in which case `HEAD` is left where it
 /// is, as git leaves it. The state goes either way.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*three_way.Blocked) Self.Error!void {
-    const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), head_path)) orelse {
+    const text = (try state_file.read(gpa, io, repo.gitDirectory(), head_path)) orelse {
         if (!repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) and
             !repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.NoSequencerInProgress;
         return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = who, .blocked = blocked });
@@ -1027,7 +1029,7 @@ fn currentHead(gpa: Allocator, io: Io, repo: *Repository) Error!Oid {
 fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
-    const text = (try head_mod.readState(gpa, io, repo.gitDirectory(), safety_path)) orelse {
+    const text = (try state_file.read(gpa, io, repo.gitDirectory(), safety_path)) orelse {
         return head.oid == null;
     };
     defer gpa.free(text);

@@ -21,6 +21,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const state_file = @import("../repo/state.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -188,7 +189,7 @@ pub const Outcome = struct {
 /// Whether an `am` session is in progress: `rebase-apply` with `next` and
 /// `last` in it.
 pub fn inProgress(io: Io, repo: *Repository) bool {
-    return head_mod.stateExists(io, repo.gitDirectory(), state_dir ++ "/next") and head_mod.stateExists(io, repo.gitDirectory(), state_dir ++ "/last");
+    return state_file.exists(io, repo.gitDirectory(), state_dir ++ "/next") and state_file.exists(io, repo.gitDirectory(), state_dir ++ "/last");
 }
 
 const Session = struct {
@@ -222,7 +223,7 @@ const Session = struct {
     }
 
     fn write(s: *Session, name: []const u8, bytes: []const u8) Error!void {
-        try head_mod.writeState(s.io, s.repo.gitDirectory(), try s.path(name), bytes);
+        try state_file.write(s.io, s.repo.gitDirectory(), try s.path(name), bytes);
     }
 
     /// git's `write_file`: the text with its line completed.
@@ -236,7 +237,7 @@ const Session = struct {
     }
 
     fn read(s: *Session, name: []const u8) Error!?[]const u8 {
-        const bytes = (try head_mod.readState(s.a, s.io, s.repo.gitDirectory(), try s.path(name))) orelse return null;
+        const bytes = (try state_file.read(s.a, s.io, s.repo.gitDirectory(), try s.path(name))) orelse return null;
         return bytes;
     }
 
@@ -246,11 +247,11 @@ const Session = struct {
     }
 
     fn remove(s: *Session, name: []const u8) Error!void {
-        try head_mod.removeState(s.io, s.repo.gitDirectory(), try s.path(name));
+        try state_file.remove(s.io, s.repo.gitDirectory(), try s.path(name));
     }
 
     fn exists(s: *Session, name: []const u8) Error!bool {
-        return head_mod.stateExists(s.io, s.repo.gitDirectory(), try s.path(name));
+        return state_file.exists(s.io, s.repo.gitDirectory(), try s.path(name));
     }
 
     fn msgnum(s: *Session) Allocator.Error![]const u8 {
@@ -418,7 +419,7 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
 pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []const u8, options: Options) Self.Error!Outcome {
     if (repo.workDirectory() == null) return error.BareRepository;
     if (inProgress(io, repo)) return error.AmInProgress;
-    if (head_mod.stateExists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
+    if (state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
@@ -1020,6 +1021,6 @@ pub fn quit(io: Io, repo: *Repository) Self.Error!void {
 /// and `--quit` remove a stray one; with none there either, there is
 /// nothing to end.
 fn destroyStray(io: Io, repo: *Repository) Self.Error!void {
-    if (!head_mod.stateExists(io, repo.gitDirectory(), state_dir)) return error.NoAmInProgress;
+    if (!state_file.exists(io, repo.gitDirectory(), state_dir)) return error.NoAmInProgress;
     try destroy(io, repo);
 }

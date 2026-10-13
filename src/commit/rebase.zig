@@ -28,6 +28,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -278,7 +279,7 @@ fn path(comptime name: []const u8) []const u8 {
 
 /// Whether a rebase is waiting: `.git/rebase-merge` is there.
 pub fn inProgress(io: Io, repo: *Repository) bool {
-    return head_mod.stateExists(io, repo.gitDirectory(), state_dir);
+    return state_file.exists(io, repo.gitDirectory(), state_dir);
 }
 
 /// A running or resumed rebase: its options, its sheet, and where it is.
@@ -307,19 +308,19 @@ const Run = struct {
     conflicts: []const three_way.Conflict = &.{},
 
     fn state(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
-        try head_mod.writeState(r.io, r.repo.gitDirectory(), path(name), bytes);
+        try state_file.write(r.io, r.repo.gitDirectory(), path(name), bytes);
     }
 
     fn readState(r: *Run, comptime name: []const u8) Error!?[]u8 {
-        return head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), path(name));
+        return state_file.read(r.arena, r.io, r.repo.gitDirectory(), path(name));
     }
 
     fn removeState(r: *Run, comptime name: []const u8) Error!void {
-        try head_mod.removeState(r.io, r.repo.gitDirectory(), path(name));
+        try state_file.remove(r.io, r.repo.gitDirectory(), path(name));
     }
 
     fn hasState(r: *Run, comptime name: []const u8) bool {
-        return head_mod.stateExists(r.io, r.repo.gitDirectory(), path(name));
+        return state_file.exists(r.io, r.repo.gitDirectory(), path(name));
     }
 
     fn appendState(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
@@ -809,7 +810,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     var r = try newRun(gpa, io, arena_state, repo, options);
 
     if (inProgress(io, repo)) return error.RebaseInProgress;
-    if (head_mod.stateExists(io, repo.gitDirectory(), "rebase-apply")) return error.ApplyBackendInProgress;
+    if (state_file.exists(io, repo.gitDirectory(), "rebase-apply")) return error.ApplyBackendInProgress;
     if (merging.inProgress(io, repo) or sequencer.inProgress(io, repo) != null) return error.OperationInProgress;
     if (options.exec.len != 0 and options.programs == null) return error.ExecNotPermitted;
 
@@ -1310,7 +1311,7 @@ fn pickOne(r: *Run) Error!?Outcome {
         // resolve with.
         const squash_msg = (try r.readState("message-squash")) orelse "";
         try r.state("message", squash_msg);
-        try head_mod.writeState(r.io, r.repo.gitDirectory(), "MERGE_MSG", squash_msg);
+        try state_file.write(r.io, r.repo.gitDirectory(), "MERGE_MSG", squash_msg);
     }
     try errorWithPatch(r, commit, false);
     _ = r.items.orderedRemove(0);
@@ -1475,7 +1476,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     try locked_index.commit(io);
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
     if (!outcome.isClean()) try noteConflicts(r, outcome.conflicts);
-    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", r.msg.items);
+    try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", r.msg.items);
     // A rebase takes care of the commit itself, so a conflict leaves no
     // `CHERRY_PICK_HEAD`, as git's leaves none. rerere runs on the stop.
     if (!outcome.isClean()) {
@@ -1496,7 +1497,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
             .keep => allow_empty = true,
             .drop => {
                 try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-                try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+                try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
                 try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
                 return .ok;
             },
@@ -1562,15 +1563,15 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         .fixup => try message.cleanup(arena, (try r.readState("message-fixup")).?, cleanup, r.comment),
         .squash_edit => blk: {
             const proposed = (try r.readState("message-squash")).?;
-            try head_mod.writeState(io, repo.gitDirectory(), "SQUASH_MSG", proposed);
+            try state_file.write(io, repo.gitDirectory(), "SQUASH_MSG", proposed);
             // git points `REBASE_HEAD` at the commit before it runs `git
             // commit` for the message.
             try repo.refStore().root().write(repo.allocator(), io, .rebase_head, item.commit.?);
             var shown = proposed;
             if (commit_hooks.runner) |runner| {
-                try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
+                try state_file.write(io, repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
                 _ = try runner.prepareCommitMsg(io, edit_env, try commit_hooks.path(arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
-                shown = (try head_mod.readState(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+                shown = (try state_file.read(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
             }
             break :blk try edited(r, .squash, shown);
         },
@@ -1585,11 +1586,11 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
             .fixup => (try r.readState("message-fixup")).?,
             .squash_edit => unreachable,
         };
-        try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", raw);
+        try state_file.write(io, repo.gitDirectory(), "COMMIT_EDITMSG", raw);
         const e = try commit_hooks.env(arena, null);
         const file = try commit_hooks.path(arena, "COMMIT_EDITMSG");
         _ = try commit_hooks.runner.?.prepareCommitMsg(io, e, file, .{ .source = .message, .commit = null });
-        const back = (try head_mod.readState(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+        const back = (try state_file.read(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
         final_text = try message.cleanup(arena, back, cleanup, r.comment);
     }
     const extra: []const object.ExtraHeader = if (amending) try extraHeadersOf(r, head_oid) else &.{};
@@ -1607,7 +1608,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
     if (msg_source == .squash_edit) {
         // `git commit` takes the message's files away before its last hooks.
         try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-        try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+        try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
     }
     if (commit_hooks.runner) |runner| {
         if (msg_source == .squash_edit) {
@@ -1618,12 +1619,12 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         if (amending) _ = try runner.postRewriteBy(io, .amend, &.{.{ .old = head_oid, .new = made }}, if (msg_source == .squash_edit) author else null);
     }
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-    try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+    try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
     if (msg_source == .squash_edit) {
         // An edited message is committed with `git commit`, which takes
         // `AUTO_MERGE` away as it finishes; git points `REBASE_HEAD` at the
         // commit first, and it stays there until the next instruction.
-        try head_mod.removeState(io, repo.gitDirectory(), "SQUASH_MSG");
+        try state_file.remove(io, repo.gitDirectory(), "SQUASH_MSG");
         try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
     }
     if (command == .reword) try reword(r, reflog_action);
@@ -1707,15 +1708,15 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     const file = try commit_hooks.path(r.arena, "COMMIT_EDITMSG");
     if (commit_hooks.runner) |runner| {
         _ = try runner.preCommit(r.io, e);
-        try head_mod.writeState(r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
+        try state_file.write(r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
         _ = try runner.prepareCommitMsg(r.io, e, file, .{ .source = .commit, .commit = "HEAD" });
-        proposed = (try head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+        proposed = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
     var text = try edited(r, .reword, proposed);
     if (commit_hooks.runner) |runner| {
-        try head_mod.writeState(r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG", text);
+        try state_file.write(r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG", text);
         _ = try runner.commitMsg(r.io, e, file);
-        const back = (try head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+        const back = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
         text = try message.cleanup(r.arena, back, .strip, r.comment);
     }
     const made = try r.repo.writeCommit(r.io, .{
@@ -1997,7 +1998,7 @@ fn doReset(r: *Run, arg: []const u8) Error!void {
 /// `update-ref`: remember where `HEAD` is for a ref to be moved when the
 /// rebase finishes.
 fn doUpdateRef(r: *Run, ref: []const u8) Error!void {
-    const text = (try head_mod.readState(r.arena, r.io, r.repo.gitDirectory(), path("update-refs"))) orelse return;
+    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), path("update-refs"))) orelse return;
     const records = try parseUpdateRefs(r, text);
     const new = try r.headOid();
     for (records.items) |*rec| {
@@ -2189,12 +2190,12 @@ fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), di
         .direct => {},
     };
     for ([_][]const u8{ "rebase-apply/head-name", "rebase-merge/head-name" }) |sub| {
-        const text = (try head_mod.readState(arena, r.io, dir, sub)) orelse continue;
+        const text = (try state_file.read(arena, r.io, dir, sub)) orelse continue;
         const name = std.mem.trim(u8, text, " \t\r\n");
         if (std.mem.startsWith(u8, name, "refs/heads/")) try map.put(arena, name, where);
         break;
     }
-    if (try head_mod.readState(arena, r.io, dir, "BISECT_START")) |text| {
+    if (try state_file.read(arena, r.io, dir, "BISECT_START")) |text| {
         const name = std.mem.trim(u8, text, " \t\r\n");
         // A bisection started from a detached `HEAD` names a commit.
         if (name.len != 0) {
@@ -2203,7 +2204,7 @@ fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), di
             }
         }
     }
-    if (try head_mod.readState(arena, r.io, dir, "rebase-merge/update-refs")) |text| {
+    if (try state_file.read(arena, r.io, dir, "rebase-merge/update-refs")) |text| {
         const records = try parseUpdateRefs(r, text);
         for (records.items) |rec| try map.put(arena, rec.ref, where);
     }
@@ -2251,7 +2252,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     }
     r.have_message = true;
     try writeAuthorScript(r, author);
-    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", r.msg.items);
+    try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", r.msg.items);
 
     // An octopus is git's `git merge -s octopus --no-ff -F MERGE_MSG` of
     // the heads, named by their object names.
@@ -2267,7 +2268,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     if (r.options.strategy_options.len != 0) return mergeAsGitMerge(r, item, &.{merge_head}, author);
 
     try repo.refStore().special().write(repo.allocator(), io, .merge_head, try r.hex(merge_head));
-    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MODE", "no-ff");
+    try state_file.write(io, repo.gitDirectory(), "MERGE_MODE", "no-ff");
 
     var locked_index = try repo.lockIndex(io);
     defer locked_index.deinit(io);
@@ -2476,7 +2477,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
 /// and `--quit` start from, as git's read only what they undo, so a sheet
 /// it cannot read does not keep a rebase from being given up.
 fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Run {
-    if (head_mod.stateExists(io, repo.gitDirectory(), "rebase-apply")) return error.ApplyBackendInProgress;
+    if (state_file.exists(io, repo.gitDirectory(), "rebase-apply")) return error.ApplyBackendInProgress;
     if (!inProgress(io, repo)) return error.NoRebaseInProgress;
     const arena_state = try gpa.create(std.heap.ArenaAllocator);
     arena_state.* = .init(gpa);
@@ -2554,7 +2555,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     }
     if (is_clean) {
         try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-        try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+        try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
         return;
     }
 
@@ -2586,9 +2587,9 @@ fn commitStagedChanges(r: *Run) Error!void {
         var e = try commit_hooks.env(r.arena, author);
         e.editor = true;
         hook_env = e;
-        try head_mod.writeState(io, repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
+        try state_file.write(io, repo.gitDirectory(), "COMMIT_EDITMSG", proposed);
         _ = try runner.prepareCommitMsg(io, e, try commit_hooks.path(r.arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
-        shown = (try head_mod.readState(r.arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+        shown = (try state_file.read(r.arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
     const text = try edited(r, .resolved, shown);
     const made = try repo.writeCommit(io, .{
@@ -2603,7 +2604,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     const log = try r.arena.print("rebase (continue): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-    try head_mod.removeState(io, repo.gitDirectory(), "MERGE_MSG");
+    try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
     try r.removeState("amend");
     // The commit is `git commit`'s, which records resolutions as it ends.
     try rerere.afterCommit(r.gpa, io, repo);

@@ -6,6 +6,7 @@ pub const rebase = @import("commit/rebase.zig");
 pub const sequencer = @import("commit/sequencer.zig");
 pub const merging = @import("commit/merging.zig");
 pub const stash = @import("commit/stash.zig");
+pub const in_progress = @import("commit/in_progress.zig");
 pub const message = @import("object/message.zig");
 pub const trailer = @import("object/trailer.zig");
 pub const head = @import("repo/head.zig");

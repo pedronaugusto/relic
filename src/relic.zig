@@ -12,6 +12,7 @@
 //! | `repo.fs` | Module within `repo`. |
 //! | `repo.safe` | Module within `repo`. |
 //! | `repo.ident` | Module within `repo`. |
+//! | `repo.state` | The state files an operation keeps in the git directory: written, read and removed in one place. |
 //! | `hash` | Public concern. |
 //! | `hash.sha1` | Module within `hash`. |
 //! | `hash.sha1dc` | Module within `hash`. |
@@ -78,6 +79,7 @@
 //! | `commit.sequencer` | Module within `commit`. |
 //! | `commit.merging` | Module within `commit`. |
 //! | `commit.stash` | Module within `commit`. |
+//! | `commit.in_progress` | `read`: which operations a worktree is in the middle of, as `git status` says. |
 //! | `commit.message` | Module within `commit`. |
 //! | `commit.trailer` | Module within `commit`. |
 //! | `commit.head` | Module within `commit`. |

@@ -15,6 +15,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const state_file = @import("../repo/state.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -38,7 +39,6 @@ const glob_mod = @import("../text.zig").glob;
 const worktree = @import("../checkout/checkout.zig");
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
-const index_mod = @import("../index/index.zig");
 const diagnostic = @import("../report.zig").diagnostic;
 const config = @import("../config/config.zig");
 
@@ -547,11 +547,11 @@ fn commitOrStop(
                 .{ .name = "GIT_EDITOR", .value = ":" },
             } });
             try repo.refStore().special().write(repo.allocator(), io, .merge_head, merge_heads.items);
-            try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", text);
+            try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", text);
             const message_path = try h.path(arena, "MERGE_MSG");
             _ = try runner.prepareCommitMsg(io, e, message_path, .{ .source = .merge, .commit = null });
             if (h.verify) _ = try runner.commitMsg(io, e, message_path);
-            text = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
+            text = (try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
         }
         const cleaned = try message.cleanup(arena, text, cleanupMode(repo, false), comment);
         if (cleaned.len == 0) return error.EmptyMessage;
@@ -586,8 +586,8 @@ fn commitOrStop(
             try msg.append(arena, '\n');
         }
     }
-    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
-    try head_mod.writeState(io, repo.gitDirectory(), "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
+    try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
+    try state_file.write(io, repo.gitDirectory(), "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
     var reused: []const []const u8 = &.{};
     if (!outcome.isClean()) reused = try rerere.afterStop(gpa, io, repo, .{ .arena = arena, .autoupdate = options.rerere_autoupdate });
     return .{
@@ -644,7 +644,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     }
     // `git commit` drops a parent another reaches unless the merge was
     // asked not to fast-forward: an octopus that went past `HEAD`.
-    const mode = (try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MODE")) orelse "";
+    const mode = (try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MODE")) orelse "";
     const kept: []const Oid = if (std.mem.eql(u8, mode, "no-ff")) parents.items else try reduceHeads(gpa, arena, io, repo, parents.items);
 
     var locked_index = try repo.lockIndex(io);
@@ -658,7 +658,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
 
     const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const author = options.author orelse options.who;
-    const given = options.message orelse ((try head_mod.readState(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
+    const given = options.message orelse ((try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
     const raw = try h.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
     const comment = message.commentString(repo.configuration().get("core.commentchar"), raw);
     const cleaned = try message.cleanup(arena, raw, options.cleanup, comment);
@@ -703,7 +703,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
 pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
     try repo.refStore().special().delete(io, .merge_head);
     for ([_][]const u8{ "MERGE_RR", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
-        try head_mod.removeState(io, repo.gitDirectory(), name);
+        try state_file.remove(io, repo.gitDirectory(), name);
     }
     try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
 }

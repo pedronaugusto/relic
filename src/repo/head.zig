@@ -147,35 +147,3 @@ fn appendHeadLog(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error
         .policy = repo.reflogPolicy(),
     });
 }
-
-/// Replace the state file `sub_path` under `dir` with `bytes`, making the
-/// directories above it.
-pub fn writeState(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) Self.Error!void {
-    if (std.Io.Dir.path.dirnamePosix(sub_path)) |parent| {
-        dir.createDirPath(io, parent) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
-    }
-    try fs.atomicWrite(io, dir, sub_path, bytes, .{ .prefix = ".relic-", .sync = .none });
-}
-
-/// The state file `sub_path` under `dir`, or `null`. The bytes are the
-/// caller's.
-pub fn readState(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.ReadFileAllocError!?[]u8 {
-    return fs.readFileAlloc(gpa, io, dir, sub_path, 64 << 20);
-}
-
-/// Remove the state file `sub_path` under `dir`, which need not exist.
-pub fn removeState(io: Io, dir: Io.Dir, sub_path: []const u8) Self.Error!void {
-    dir.deleteFile(io, sub_path) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => {},
-        else => |e| return e,
-    };
-}
-
-/// Whether the state file or directory `sub_path` under `dir` is there.
-pub fn stateExists(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
-    dir.access(io, sub_path, .{}) catch return false;
-    return true;
-}
