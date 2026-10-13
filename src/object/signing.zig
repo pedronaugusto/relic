@@ -279,7 +279,7 @@ pub const Signer = struct {
         var format_programs: std.EnumArray(Format, []const u8) = undefined;
         for (std.enums.values(Format)) |each| {
             format_programs.set(each, if (chosen.get(each)) |raw|
-                try expandPath(arena, config, try unquote(arena, raw))
+                try config_mod.interpolatePath(arena, try unquote(arena, raw), config.context.home)
             else
                 each.defaultProgram());
         }
@@ -290,7 +290,7 @@ pub const Signer = struct {
         else
             .undefined;
 
-        const signing_key: ?[]const u8 = if (config.get("user.signingkey")) |raw| try expandPath(arena, config, try unquote(arena, raw)) else null;
+        const signing_key: ?[]const u8 = if (config.get("user.signingkey")) |raw| try config_mod.interpolatePath(arena, try unquote(arena, raw), config.context.home) else null;
         const default_key_command: ?[]const u8 = if (config.get("gpg.ssh.defaultkeycommand")) |raw| try unquote(arena, raw) else null;
         const allowed_signers = try config.getPath(arena, "gpg.ssh.allowedsignersfile");
         const revocation_file = try config.getPath(arena, "gpg.ssh.revocationfile");
@@ -821,12 +821,6 @@ fn unquote(arena: Allocator, value: []const u8) (Allocator.Error || error{Malfor
     return arena.dupe(u8, value);
 }
 
-fn expandPath(arena: Allocator, config: *const config_mod.Config, text: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.startsWith(u8, text, "~/")) {
-        if (config.context.home) |home| return arena.print("{s}/{s}", .{ home, text[2..] });
-    }
-    return text;
-}
 
 /// A command line split into words the way git splits
 /// `gpg.ssh.defaultKeyCommand`: at whitespace, with single and double quotes

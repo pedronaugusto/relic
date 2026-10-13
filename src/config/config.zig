@@ -1051,16 +1051,11 @@ pub const Config = struct {
         return parseInteger(value);
     }
 
-    /// The value of `full_name` as a path, with a leading `~/` expanded
-    /// against `Context.home`. The result is the caller's.
+    /// The value of `full_name` as a path, `interpolatePath`'d against
+    /// `Context.home`. The result is the caller's.
     pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) Allocator.Error!?[]u8 {
         const value = config.get(full_name) orelse return null;
-        const home = config.context.home orelse "";
-        const path = if (std.mem.startsWith(u8, value, "~/") and config.context.home != null)
-            try gpa.print("{s}/{s}", .{ home, value[2..] })
-        else
-            try gpa.dupe(u8, value);
-        return path;
+        return try interpolatePath(gpa, value, config.context.home);
     }
 
     /// Every subsection name under `section`, in order and without
@@ -1432,6 +1427,17 @@ pub fn parseBool(raw: []const u8) Self.ValueError!bool {
     }
     const n = parseInteger(raw) catch return error.NotABoolean;
     return n != 0;
+}
+
+/// git's `interpolate_path` for the home it is given: `~` alone or a
+/// leading `~/` is that home; with no home the path stays as it is. The
+/// result is the caller's.
+pub fn interpolatePath(gpa: Allocator, path: []const u8, home: ?[]const u8) Allocator.Error![]u8 {
+    if (home) |h| {
+        if (std.mem.eql(u8, path, "~")) return gpa.dupe(u8, h);
+        if (std.mem.startsWith(u8, path, "~/")) return gpa.print("{s}/{s}", .{ h, path[2..] });
+    }
+    return gpa.dupe(u8, path);
 }
 
 /// git's integer spellings, as its `git_parse_signed` reads them:

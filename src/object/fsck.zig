@@ -395,13 +395,8 @@ pub const Rules = struct {
             const raw = entry.value orelse return error.MissingValue;
             const value = raw;
             if (std.ascii.eqlIgnoreCase(entry.name, "skiplist")) {
-                var path = value;
-                var expanded: ?[]u8 = null;
-                defer if (expanded) |e| gpa.free(e);
-                if (std.mem.startsWith(u8, value, "~/")) if (config.context.home) |home| {
-                    expanded = try gpa.print("{s}/{s}", .{ home, value[2..] });
-                    path = expanded.?;
-                };
+                const path = try config_mod.interpolatePath(gpa, value, config.context.home);
+                defer gpa.free(path);
                 try r.readSkipList(gpa, io, kind, path);
                 continue;
             }

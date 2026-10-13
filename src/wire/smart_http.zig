@@ -459,11 +459,10 @@ const Http = struct {
         };
     }
 
+    /// A path setting as git reads it, `~` the `HOME` of `environ`.
     fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) Allocator.Error![]const u8 {
-        if (!std.mem.startsWith(u8, path, "~/")) return path;
         const env = environ orelse return path;
-        const home = env.get("HOME") orelse return path;
-        return std.Io.Dir.path.join(arena, &.{ home, path[2..] });
+        return config_mod.interpolatePath(arena, path, env.get("HOME"));
     }
 
     /// The proxy, and its credential: the user and password its URL
