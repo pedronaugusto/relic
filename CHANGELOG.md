@@ -32,10 +32,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A directory is a git directory only with a `HEAD` that names a ref or an object and with `objects` and `refs` in its common directory, as git's `is_git_directory` asks.
 - A worktree id is one name in every worktree entry point.
 - An index git wrote with names Windows refuses opens: paths are checked by the checkout that would write them.
+- A version-one changed-path Bloom filter hashes a byte with the high bit as the platform's `char`, as git does, so relic's commit-graph matches git's byte for byte on Linux on ARM too.
+- A file's stat builds where `st_dev` is unsigned, as on FreeBSD.
+- A `.lfsconfig` rewritten at the same size within one tick of the filesystem's clock is read again on every platform, not only on Windows.
 
 ### Changed
 
 - The LFS lockable-file tests and the cancelled-ssh fetch run on Windows; every test still skipped there says why at the test.
+- Pins airlock 0.3.3, parallax 0.2.3 and warp 0.2.4.
 
 ## [0.6.0] - 2026-10-13
 

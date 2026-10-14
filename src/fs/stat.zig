@@ -136,7 +136,7 @@ pub fn full(dir: Io.Dir, sub_path: []const u8) FullResult {
                 .mode = st.mode,
                 .kind = kindFromMode(st.mode),
                 .extra = .{
-                    .dev = @truncate(@as(u64, @bitCast(@as(i64, st.dev)))),
+                    .dev = deviceBits(st.dev),
                     .uid = @truncate(st.uid),
                     .gid = @truncate(st.gid),
                 },
@@ -205,7 +205,7 @@ pub fn statAt(dir: Io.Dir, sub_path: []const u8) Extra {
             const rc = std.c.fstatat(dir.handle, path, &st, std.c.AT.SYMLINK_NOFOLLOW);
             if (rc != 0) return .{};
             return .{
-                .dev = @truncate(@as(u64, @bitCast(@as(i64, st.dev)))),
+                .dev = deviceBits(st.dev),
                 .uid = @truncate(st.uid),
                 .gid = @truncate(st.gid),
             };
@@ -237,3 +237,11 @@ test "a missing path is zeros, not an error" {
 
 /// All errors reported by this namespace.
 pub const Error = error{};
+
+/// `st_dev` as the 32 bits git keeps of it, whether the platform's type is
+/// signed (macOS) or unsigned (Linux, FreeBSD).
+fn deviceBits(dev: anytype) u32 {
+    const T = @TypeOf(dev);
+    const bits = @typeInfo(T).int.bits;
+    return @truncate(@as(@Int(.unsigned, bits), @bitCast(dev)));
+}
