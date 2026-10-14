@@ -45,7 +45,11 @@ pub const ParseError = error{
     /// A value given as `Sources.command` under a name git refuses; see
     /// `checkKey`.
     InvalidKey,
-} || Allocator.Error || Io.Dir.ReadFileAllocError;
+    /// An include path or a `gitdir:./` condition relative to no file: one
+    /// given on the command line ("relative config includes must come from
+    /// files").
+    RelativeIncludeOutsideFile,
+} || PathError || Io.Dir.ReadFileAllocError;
 
 /// Whether an entry is `remote.<name>.url` with a value: what git's
 /// `hasconfig:remote.*.url:` gathers.
@@ -60,6 +64,14 @@ pub const ValueError = error{
     NotABoolean,
     /// The value was not a number, with or without a `k`, `m` or `g`.
     NotAnInteger,
+} || Allocator.Error;
+
+/// Errors from expanding a path setting.
+pub const PathError = error{
+    /// A path whose `~` names no home (none set, or no such user) or that
+    /// begins `%(prefix)/`, git's own install directory, which relic has
+    /// none of: git's `interpolate_path` gives up on it, and so does this.
+    UnexpandablePath,
 } || Allocator.Error;
 
 /// One line of a configuration file, in the order the file holds them.
@@ -305,6 +317,10 @@ pub const Context = struct {
 
 /// How deep `include.path` may nest before it is refused.
 pub const max_include_depth: u8 = 10;
+
+/// The largest configuration file read. git reads one whole whatever its
+/// size; this bounds what a hostile file can make a reader hold.
+pub const max_file_bytes = 1 << 30;
 
 /// A merged view of every configuration file that applies.
 ///
@@ -647,7 +663,7 @@ pub const Config = struct {
         const read = if (path.contents) |bytes|
             try config.gpa.dupe(u8, bytes)
         else
-            try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, 1 << 24);
+            try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, max_file_bytes);
         try config.remember(path, read);
         const text = read orelse return;
         const owned_path = config.gpa.dupe(u8, path.sub_path) catch |err| {
@@ -785,21 +801,30 @@ pub const Config = struct {
                     absoluteDirOf(io, dir, config.files.items[entry.file_index].path, &dir_buf)
                 else
                     null;
+                // A `gitdir:./` pattern needs a file to be relative to.
+                if (level == .command and relativeCondition(entry.subsection)) return error.RelativeIncludeOutsideFile;
                 if (try config.includeHolds(io, entry.subsection, including_dir)) include_path = value;
                 conditional = true;
             }
-            const path = include_path orelse continue;
-            if (level == .command and !std.Io.Dir.path.isAbsolute(path) and !std.mem.startsWith(u8, path, "~/")) continue;
-
-            var buf: [4096]u8 = undefined;
+            const raw_path = include_path orelse continue;
+            // git's `handle_path_include`: the path expanded, then taken
+            // beside the including file unless absolute, and read when it is
+            // there. A missing file is skipped; one that cannot be expanded,
+            // read or parsed is an error, as git's is.
+            const path = try interpolatePath(config.gpa, raw_path, config.context.home);
+            defer config.gpa.free(path);
+            if (!std.Io.Dir.path.isAbsolute(path) and level == .command) return error.RelativeIncludeOutsideFile;
             const including_path = config.files.items[entry.file_index].path;
-            const resolved = config.resolveIncludePath(path, including_path, &buf) orelse continue;
-            config.addFile(io, .{ .dir = dir, .sub_path = resolved }, level, false, depth + 1, conditional) catch |err| switch (err) {
-                error.IncludeTooDeep, error.RemoteUrlInConditionalInclude => return err,
-                // git treats an unreadable or malformed include as absent.
-                else => continue,
-            };
+            const resolved = try resolveIncludePath(config.gpa, path, including_path);
+            defer config.gpa.free(resolved);
+            try config.addFile(io, .{ .dir = dir, .sub_path = resolved }, level, false, depth + 1, conditional);
         }
+    }
+
+    /// Whether a condition's pattern starts from the including file.
+    fn relativeCondition(condition: []const u8) bool {
+        const pattern = std.mem.cutPrefix(u8, condition, "gitdir:") orelse std.mem.cutPrefix(u8, condition, "gitdir/i:") orelse return false;
+        return pattern.len >= 2 and pattern[0] == '.' and (pattern[1] == '/' or (builtin.target.os.tag == .windows and pattern[1] == '\\'));
     }
 
     /// The directory of `sub_path` under `dir`, absolute, links resolved,
@@ -811,16 +836,14 @@ pub const Config = struct {
         return std.Io.Dir.path.dirnamePosix(path);
     }
 
-    fn resolveIncludePath(config: *const Config, path: []const u8, including_path: []const u8, buf: []u8) ?[]const u8 {
-        if (std.mem.startsWith(u8, path, "~/")) {
-            const home = config.context.home orelse return null;
-            return std.mem.print(buf, "{s}/{s}", .{ home, path[2..] }) catch null;
-        }
-        if (std.Io.Dir.path.isAbsolute(path)) return path;
+    /// An expanded include path: absolute as it is, else beside the
+    /// including file. The result is the caller's.
+    fn resolveIncludePath(gpa: Allocator, path: []const u8, including_path: []const u8) Allocator.Error![]u8 {
+        if (std.Io.Dir.path.isAbsolute(path)) return gpa.dupe(u8, path);
         if (std.Io.Dir.path.dirname(including_path)) |parent| {
-            if (parent.len != 0) return std.mem.print(buf, "{s}/{s}", .{ parent, path }) catch null;
+            if (parent.len != 0) return gpa.print("{s}/{s}", .{ parent, path });
         }
-        return path;
+        return gpa.dupe(u8, path);
     }
 
     /// Whether an `includeIf` condition holds.
@@ -936,11 +959,21 @@ pub const Config = struct {
         return glob_mod.matches(config.gpa, pattern, url, .{});
     }
 
-    fn expandCondition(config: *const Config, buffer: []u8, pattern: []const u8) Allocator.Error!?[]u8 {
+    fn expandCondition(config: *const Config, buffer: []u8, pattern_raw: []const u8) Allocator.Error!?[]u8 {
+        // git's `prepare_include_condition_pattern`: the pattern through
+        // `interpolate_path`, kept as it is where that gives up.
+        const expanded: ?[]u8 = if (pattern_raw.len != 0 and pattern_raw[0] == '~')
+            interpolatePath(config.gpa, pattern_raw, config.context.home) catch |err| switch (err) {
+                error.UnexpandablePath => null,
+                error.OutOfMemory => return error.OutOfMemory,
+            }
+        else
+            null;
+        defer if (expanded) |e| config.gpa.free(e);
+        const pattern = expanded orelse pattern_raw;
         const suffix = if (std.mem.endsWith(u8, pattern, "/")) "**" else "";
-        if (std.mem.startsWith(u8, pattern, "~/")) {
-            const home = config.context.home orelse return null;
-            const joined = try joinCondition(config.gpa, buffer, &.{ home, "/", pattern[2..], suffix });
+        if (expanded != null) {
+            const joined = try joinCondition(config.gpa, buffer, &.{ "", pattern, suffix });
             return joined;
         }
         const prefix = if (!std.mem.startsWith(u8, pattern, "/") and !std.mem.startsWith(u8, pattern, "**") and
@@ -1053,7 +1086,7 @@ pub const Config = struct {
 
     /// The value of `full_name` as a path, `interpolatePath`'d against
     /// `Context.home`. The result is the caller's.
-    pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) Allocator.Error!?[]u8 {
+    pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) PathError!?[]u8 {
         const value = config.get(full_name) orelse return null;
         return try interpolatePath(gpa, value, config.context.home);
     }
@@ -1429,15 +1462,36 @@ pub fn parseBool(raw: []const u8) Self.ValueError!bool {
     return n != 0;
 }
 
-/// git's `interpolate_path` for the home it is given: `~` alone or a
-/// leading `~/` is that home; with no home the path stays as it is. The
-/// result is the caller's.
-pub fn interpolatePath(gpa: Allocator, path: []const u8, home: ?[]const u8) Allocator.Error![]u8 {
-    if (home) |h| {
-        if (std.mem.eql(u8, path, "~")) return gpa.dupe(u8, h);
-        if (std.mem.startsWith(u8, path, "~/")) return gpa.print("{s}/{s}", .{ h, path[2..] });
-    }
-    return gpa.dupe(u8, path);
+/// git's `interpolate_path`: `~` alone or before a `/` is `home`, `~user`
+/// is that user's home directory, and anything else is the path as it is.
+/// No home, no such user, and git's own `%(prefix)/` are
+/// `error.UnexpandablePath`, as git gives up on them. The result is the
+/// caller's.
+pub fn interpolatePath(gpa: Allocator, path: []const u8, home: ?[]const u8) PathError![]u8 {
+    if (std.mem.startsWith(u8, path, "%(prefix)/")) return error.UnexpandablePath;
+    if (path.len == 0 or path[0] != '~') return gpa.dupe(u8, path);
+    const slash = std.mem.findScalar(u8, path, '/') orelse path.len;
+    const user = path[1..slash];
+    const dir = if (user.len == 0) home orelse return error.UnexpandablePath else try userHome(gpa, user);
+    defer if (user.len != 0) gpa.free(dir);
+    return gpa.print("{s}{s}", .{ dir, path[slash..] });
+}
+
+/// The home directory of `user`, from the password database, where the
+/// platform has one this can ask. The result is the caller's.
+fn userHome(gpa: Allocator, user: []const u8) PathError![]u8 {
+    if (comptime !builtin.link_libc or builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.UnexpandablePath;
+    const name = try gpa.dupeSentinel(u8, user, 0);
+    defer gpa.free(name);
+    // The reentrant call: a library's caller may have threads.
+    var entry: std.c.passwd = undefined;
+    var found: ?*std.c.passwd = null;
+    const buffer = try gpa.alloc(u8, 16 * 1024);
+    defer gpa.free(buffer);
+    if (std.c.getpwnam_r(name, &entry, buffer.ptr, buffer.len, &found) != 0) return error.UnexpandablePath;
+    const record = found orelse return error.UnexpandablePath;
+    const dir = record.dir orelse return error.UnexpandablePath;
+    return gpa.dupe(u8, std.mem.span(dir));
 }
 
 /// git's integer spellings, as its `git_parse_signed` reads them:
@@ -2074,6 +2128,37 @@ test "relative includes start beside the including file" {
     defer config.deinit();
     try std.testing.expectEqualStrings("nested", config.get("fixture.value").?);
     try std.testing.expectEqualStrings("cfg/child", config.origin("fixture.value").?.path);
+}
+
+test "an include is read as git's handle_path_include reads it: a missing file skipped, a broken one an error, a path expanded" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "cfg", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "cfg/broken", .data = "[unclosed\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "cfg/child", .data = "[fixture]\n\tvalue = nested\n" });
+    const Case = struct { main: []const u8, want: ?[]const u8 = null, err: ?anyerror = null };
+    for ([_]Case{
+        .{ .main = "[include]\n\tpath = missing\n[fixture]\n\tvalue = own\n", .want = "own" },
+        .{ .main = "[include]\n\tpath = broken\n", .err = error.MalformedSectionHeader },
+        .{ .main = "[include]\n\tpath = %(prefix)/etc/x\n", .err = error.UnexpandablePath },
+        .{ .main = "[include]\n\tpath = ~/child\n", .want = "nested" },
+    }) |case| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "cfg/main", .data = case.main });
+        const home = try tmp.dir.realPathFileAlloc(io, "cfg", gpa);
+        defer gpa.free(home);
+        var config = Config.openFile(gpa, io, .{ .dir = tmp.dir, .sub_path = "cfg/main" }, .local, .{ .home = home }) catch |err| {
+            try std.testing.expectEqual(case.err.?, err);
+            continue;
+        };
+        defer config.deinit();
+        try std.testing.expect(case.err == null);
+        try std.testing.expectEqualStrings(case.want.?, config.get("fixture.value").?);
+    }
+    // From the command line, a relative path names no file.
+    try std.testing.expectError(error.RelativeIncludeOutsideFile, Config.open(gpa, io, .{ .pairs = &.{.{ .name = "include.path", .value = "child" }} }, .{}));
+    try std.testing.expectError(error.RelativeIncludeOutsideFile, Config.open(gpa, io, .{ .pairs = &.{.{ .name = "includeIf.gitdir:./x/.path", .value = "/child" }} }, .{}));
 }
 
 test "a full name splits at the first dot and the last" {
@@ -2795,4 +2880,4 @@ test "long includeIf patterns expand without a fixed buffer" {
 }
 
 /// All errors reported by this namespace.
-pub const Error = ParseError || ValueError || Config.IsStaleError || Config.SetError || CheckKeyError || UnquoteError || Allocator.Error || Self.ParseError || Self.ValueError;
+pub const Error = ParseError || ValueError || PathError || Config.IsStaleError || Config.SetError || CheckKeyError || UnquoteError || Allocator.Error || Self.ParseError || Self.ValueError;

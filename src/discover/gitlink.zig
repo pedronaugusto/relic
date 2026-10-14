@@ -148,6 +148,8 @@ pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Oi
         error.IncludeTooDeep,
         error.RemoteUrlInConditionalInclude,
         error.InvalidKey,
+        error.UnexpandablePath,
+        error.RelativeIncludeOutsideFile,
         => return null,
         else => |e| return e,
     };

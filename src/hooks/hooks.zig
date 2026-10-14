@@ -61,7 +61,7 @@ pub const Error = error{
 
 /// Errors from making a runner.
 pub const InitError = Allocator.Error || Io.Dir.RealPathError ||
-    error{ MalformedValue, NameTooLong };
+    error{ MalformedValue, NameTooLong, UnexpandablePath };
 
 /// Where a hook's output goes.
 pub const Output = enum {

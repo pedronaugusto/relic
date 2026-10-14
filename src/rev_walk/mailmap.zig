@@ -52,7 +52,7 @@ pub const Identity = struct {
 
 /// Errors from loading a repository's mailmap.
 pub const LoadError = Allocator.Error || Io.File.Reader.Error || Io.Dir.ReadFileAllocError ||
-    error{MalformedValue} || odb_mod.Error;
+    error{ MalformedValue, UnexpandablePath } || odb_mod.Error;
 
 /// Keys compared as `strcasecmp` compares them: ASCII case folded.
 pub const Folded = struct {

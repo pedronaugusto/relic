@@ -110,7 +110,7 @@ pub const max_discovery_depth: u8 = 64;
 pub const Diagnostic = diagnostic_mod.Diagnostic;
 
 /// Errors from `templateDir`.
-pub const TemplateDirError = Allocator.Error || error{MalformedValue};
+pub const TemplateDirError = Allocator.Error || error{ MalformedValue, UnexpandablePath };
 
 /// `init.templateDir` in `config`, as git reads it for `git init`, with
 /// `~/` expanded; `null` when it is not set. The path is `gpa`'s.
@@ -1324,7 +1324,7 @@ pub const Repository = struct {
 
     /// Errors from naming one of the repository's files as a path.
     pub const PathError = Allocator.Error || Io.Dir.RealPathFileAllocError ||
-        std.process.CurrentPathAllocError || error{MalformedValue};
+        std.process.CurrentPathAllocError || error{ MalformedValue, UnexpandablePath };
 
     /// The files `loadIgnore` reads, named.
     pub fn ignoreSources(repo: *const Repository, gpa: Allocator, io: Io) PathError!IgnoreSources {

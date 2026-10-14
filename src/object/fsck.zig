@@ -283,7 +283,7 @@ pub const LoadError = errors: {
         FsckFatalLowered,
         /// `largePathname`'s length is not a number.
         InvalidFsckValue,
-        /// A `skipList` that could not be read.
+        /// A `skipList` that could not be read, or whose `~` names no home.
         SkipListUnreadable,
         /// A `skipList` line that is not one full object name.
         InvalidSkipListEntry,
@@ -395,7 +395,10 @@ pub const Rules = struct {
             const raw = entry.value orelse return error.MissingValue;
             const value = raw;
             if (std.ascii.eqlIgnoreCase(entry.name, "skiplist")) {
-                const path = try config_mod.interpolatePath(gpa, value, config.context.home);
+                const path = config_mod.interpolatePath(gpa, value, config.context.home) catch |err| return switch (err) {
+                    error.UnexpandablePath => error.SkipListUnreadable,
+                    error.OutOfMemory => error.OutOfMemory,
+                };
                 defer gpa.free(path);
                 try r.readSkipList(gpa, io, kind, path);
                 continue;

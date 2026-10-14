@@ -278,7 +278,7 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 /// A path that is not absolute is the working tree's, where git runs
 /// `commit`, and `~/` is the home the repository was opened with. The text
 /// is `gpa`'s.
-pub fn template(gpa: Allocator, io: Io, repo: *Repository) Allocator.Error!?[]u8 {
+pub fn template(gpa: Allocator, io: Io, repo: *Repository) (Allocator.Error || error{UnexpandablePath})!?[]u8 {
     const path = (try repo.configuration().getPath(gpa, "commit.template")) orelse return null;
     defer gpa.free(path);
     const dir = if (std.Io.Dir.path.isAbsolute(path)) Io.Dir.cwd() else repo.workDirectory() orelse Io.Dir.cwd();

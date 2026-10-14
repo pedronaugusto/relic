@@ -108,7 +108,12 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
     if (l.home) |h| l.home = try arena.dupe(u8, h);
 
     // The system file.
-    if (isTrue(environ.get("GIT_CONFIG_NOSYSTEM"))) {
+    // git's `git_env_bool`: a value that is no boolean is an error.
+    const no_system = if (environ.get("GIT_CONFIG_NOSYSTEM")) |text|
+        config_mod.parseBool(text) catch return error.MalformedConfigEnvironment
+    else
+        false;
+    if (no_system) {
         l.system_known = true;
     } else if (environ.get("GIT_CONFIG_SYSTEM")) |path| {
         l.system = try arena.dupe(u8, path);
@@ -149,8 +154,11 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
     // Values above every file.
     var pairs: std.ArrayList(config_mod.Sources.Pair) = .empty;
     if (environ.get("GIT_CONFIG_COUNT")) |count_text| {
-        // git's `strtoul(env, &endp, 10)`, all of it.
-        const count = decimal.whole(u32, count_text, 10) orelse return error.MalformedConfigEnvironment;
+        // git's `strtoul(env, &endp, 10)`, all of it, and no more than an
+        // `int` holds ("bogus count", "too many entries").
+        const read = decimal.strtoul(count_text, 10, 64);
+        if (read.end != count_text.len or read.value > std.math.maxInt(i32)) return error.MalformedConfigEnvironment;
+        const count: u32 = @intCast(read.value);
         for (0..count) |i| {
             var key_buf: [32]u8 = undefined;
             var value_buf: [32]u8 = undefined;
@@ -210,11 +218,6 @@ pub fn parseParameters(arena: Allocator, text: []const u8) Self.Error![]const co
         } else cur = null;
     }
     return out.items;
-}
-
-fn isTrue(value: ?[]const u8) bool {
-    const v = value orelse return false;
-    return config_mod.parseBool(v) catch false;
 }
 
 fn exists(io: Io, path: []const u8) bool {
@@ -352,6 +355,54 @@ fn relicCommandValues(gpa: Allocator, io: Io, pairs: []const config_mod.Sources.
         try out.append(gpa, '\n');
     }
     return out.toOwnedSlice(gpa);
+}
+
+test "GIT_CONFIG_COUNT is read by strtoul and GIT_CONFIG_NOSYSTEM as a boolean, refused where git refuses them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var home = testing.tmpDir(.{});
+    defer home.cleanup();
+    const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(home_path);
+    var env: Environ.Map = .init(gpa);
+    defer env.deinit();
+    const path = try testgit.searchPath(gpa);
+    defer gpa.free(path);
+    try env.put("PATH", path);
+    try testgit.keepSystemVariables(gpa, &env);
+    try env.put("HOME", home_path);
+    try testgit.noRepositoryAbove(&env, home_path);
+    try env.put("XDG_CONFIG_HOME", home_path);
+    try env.put("GIT_CONFIG_KEY_0", "x.a");
+    try env.put("GIT_CONFIG_VALUE_0", "one");
+    const Case = struct { count: []const u8, no_system: []const u8 = "1" };
+    for ([_]Case{
+        .{ .count = "1" },                       .{ .count = "" },           .{ .count = " 1" },
+        .{ .count = "+1" },                      .{ .count = "01" },         .{ .count = "1x" },
+        .{ .count = "-1" },                      .{ .count = "2147483648" }, .{ .count = "0", .no_system = "yes" },
+        .{ .count = "0", .no_system = "maybe" },
+    }) |case| {
+        try env.put("GIT_CONFIG_COUNT", case.count);
+        try env.put("GIT_CONFIG_NOSYSTEM", case.no_system);
+        const theirs = try gitCommandValues(gpa, io, home.dir, &env);
+        defer if (theirs) |t| gpa.free(t);
+        var l = locate(gpa, io, &env, null) catch |err| {
+            try testing.expectEqual(error.MalformedConfigEnvironment, err);
+            testing.expect(theirs == null) catch |e| {
+                std.debug.print("git read count [{s}], no-system {s}\n", .{ case.count, case.no_system });
+                return e;
+            };
+            continue;
+        };
+        defer l.deinit();
+        const ours = try relicCommandValues(gpa, io, l.pairs);
+        defer gpa.free(ours);
+        testing.expect(theirs != null) catch |err| {
+            std.debug.print("git refused count [{s}], no-system {s}\n", .{ case.count, case.no_system });
+            return err;
+        };
+        try testing.expectEqualStrings(theirs.?, ours);
+    }
 }
 
 test "GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are read as git reads them, both quotings, and refused where git refuses them" {

@@ -50,6 +50,8 @@ const Oid = hash.Oid;
 
 /// Errors from signing and verifying.
 pub const Error = error{
+    /// A program or key path whose `~` names no home.
+    UnexpandablePath,
     /// Signing is asked for, by the caller or by `commit.gpgSign` or
     /// `tag.gpgSign`, and the caller gave no `program.Programs` to run the
     /// signer with. The object is not written unsigned in its place.

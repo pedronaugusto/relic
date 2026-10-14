@@ -314,8 +314,14 @@ const Http = struct {
         if (url.scheme == .https) {
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{
-                    .cert = try expandHome(arena, cert, environ),
-                    .key = if (settings.ssl_key) |k| try expandHome(arena, k, environ) else null,
+                    .cert = expandHome(arena, cert, environ) catch |err| return switch (err) {
+                        error.UnexpandablePath => h.fail(error.InvalidHttpSetting, "http.sslCert"),
+                        error.OutOfMemory => error.OutOfMemory,
+                    },
+                    .key = if (settings.ssl_key) |k| expandHome(arena, k, environ) catch |err| return switch (err) {
+                        error.UnexpandablePath => h.fail(error.InvalidHttpSetting, "http.sslKey"),
+                        error.OutOfMemory => error.OutOfMemory,
+                    } else null,
                     .cert_format = client_cert.Format.parse(settings.ssl_cert_type) catch return h.fail(error.SslCertTypeUnsupported, "http.sslCertType"),
                     .key_format = client_cert.Format.parse(settings.ssl_key_type) catch return h.fail(error.SslCertTypeUnsupported, "http.sslKeyType"),
                 }, settings.ssl_cert_password_protected, &h.cert_credentials);
@@ -445,8 +451,14 @@ const Http = struct {
     fn trustAuthorities(h: *Http, settings: http_settings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
         const arena = h.arena.allocator();
         const sources: authorities.Sources = .{
-            .ca_info = if (settings.ca_info) |raw| try expandHome(arena, raw, environ) else null,
-            .ca_path = if (settings.ca_path) |raw| try expandHome(arena, raw, environ) else null,
+            .ca_info = if (settings.ca_info) |raw| expandHome(arena, raw, environ) catch |err| return switch (err) {
+                error.UnexpandablePath => h.fail(error.SslCertificateUnreadable, settings.ca_info_from orelse "http.sslCAInfo"),
+                error.OutOfMemory => error.OutOfMemory,
+            } else null,
+            .ca_path = if (settings.ca_path) |raw| expandHome(arena, raw, environ) catch |err| return switch (err) {
+                error.UnexpandablePath => h.fail(error.SslCertificateUnreadable, "http.sslCAPath"),
+                error.OutOfMemory => error.OutOfMemory,
+            } else null,
         };
         var failed: authorities.Failed = undefined;
         h.trust = authorities.load(h.gpa, h.io, sources, &failed) catch |err| return switch (err) {
@@ -460,7 +472,7 @@ const Http = struct {
     }
 
     /// A path setting as git reads it, `~` the `HOME` of `environ`.
-    fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) Allocator.Error![]const u8 {
+    fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) config_mod.PathError![]const u8 {
         const env = environ orelse return path;
         return config_mod.interpolatePath(arena, path, env.get("HOME"));
     }
