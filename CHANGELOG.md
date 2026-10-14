@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-14
+
 ### Breaking
 
 - Pins uplink 0.4.1, cloak 0.4.0, strand 0.10.2 and warp 0.3.1, whose types relic's options carry: an HTTP timeout is `uplink.Duration`, aegis's duration in nanoseconds, where it was `Io.Duration`.
