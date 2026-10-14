@@ -13,7 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `odb.pack.Index` reads version 1 indexes (`Index.version`); `Index.Located.crc` and `Index.crcAt` are `?u32`, `null` in version 1, whose entries a repack writes again rather than copies. `UnsupportedIndexVersion` is gone.
 - `index.Index` reads the extended flag word in any version and refuses a bit git does not know (`UnknownEntryFlags`); a `TREE`, `REUC` or `FSMN` that cannot be read is dropped and said in `Index.dropped`, where it refused the index; unknown optional extensions such as `UNTR` are read but no longer written back; a split index's `link` is held to its shared index (`CorruptLinkExtension`).
 - `config.interpolatePath` and `Config.getPath` return `config.PathError`: `~user` expands to that user's home, and no home, no such user and `%(prefix)/` are `UnexpandablePath`, as git's `interpolate_path` gives up on them. An include that cannot be expanded or that does not parse is an error and only a missing one is skipped; a relative include or `gitdir:./` condition from the command line is `RelativeIncludeOutsideFile`.
-- `patterns.attributes.Attrs.addText` takes a `Form`: `.file` as git reads a file (a UTF-8 BOM passed over, a line ending at a NUL) or `.blob` as it reads one from the index or a tree (ending at its first NUL).
+- `patterns.attributes.Attributes.isTrue` says whether an attribute is set and nothing more. `patterns.attributes.Attrs.addText` takes a `Form`: `.file` as git reads a file (a UTF-8 BOM passed over, a line ending at a NUL) or `.blob` as it reads one from the index or a tree (ending at its first NUL).
 - `patterns.pathspec.parse` refuses `""` (`EmptyPathspec`), short magic git has no mnemonic for and a `prefix:` that is not a number (`InvalidPathspecMagic`).
 - `refs.Format.parse`, `extensions.refStorage` and `extensions.objectFormat` take a format's name exactly.
 
@@ -27,6 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An attributes line is read as git's `parse_attr_line`: a CR is blank, a name no attribute may have or one beginning `builtin_` passes the line over, `-a=b` unsets `a`, a negative pattern is ignored, and `[attr] x` is a pattern.
 - `GIT_CONFIG_COUNT` is read by `strtoul` and no more than an `int` holds; a `GIT_CONFIG_NOSYSTEM` that is no boolean is an error.
 - A configuration file is read up to 1 GiB, where 16 MiB was the cap.
+- An in-tree `.gitignore` that is a symbolic link is not read, as git does not follow one.
+- `export-ignore` and `export-subst` take effect only when set, git's `ATTR_TRUE`, never for a value.
 
 ## [0.8.0] - 2026-10-14
 
