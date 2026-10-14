@@ -95,7 +95,7 @@ test "an ident reads as git log reads it: name, email and date, a malformed tail
         "A <a@b> 1",            "A <a@b> 1 0000",  "A <a@b>c> 7 +0000", "A\t<a@b>\t9\t-0230",
         "A a@b 1 +0000",        "<a@b> 3 +0000",   "A <> 4 +0000",
     }) |ident| {
-        const text = try std.fmt.allocPrint(gpa, "tree {s}\nauthor {s}\ncommitter C <c@d> 5 +0000\n\nm\n", .{ tree.hex(&tree_hex), ident });
+        const text = try gpa.print("tree {s}\nauthor {s}\ncommitter C <c@d> 5 +0000\n\nm\n", .{ tree.hex(&tree_hex), ident });
         defer gpa.free(text);
         const oid = try c.literally(io, "commit", text);
         const out = try c.git(io, &.{ "log", "-1", "--format=%an|%ae|%at" }, oid);
@@ -169,7 +169,7 @@ test "a tag reads as git cat-file reads it: a header line with no space kept, an
     const blob = try c.literally(io, "blob", "x\n");
     var hex: [40]u8 = undefined;
     for ([_][]const u8{ "tagger T <t@u> 1 +0000\n", "tagger T t@u 1 +0000\n", "", "tagger T <t@u> 1 +0000\nlonely\n" }) |rest| {
-        const text = try std.fmt.allocPrint(gpa, "object {s}\ntype blob\ntag v1\n{s}\nmessage\n", .{ blob.hex(&hex), rest });
+        const text = try gpa.print("object {s}\ntype blob\ntag v1\n{s}\nmessage\n", .{ blob.hex(&hex), rest });
         defer gpa.free(text);
         const oid = try c.literally(io, "tag", text);
         const shown = try c.git(io, &.{ "cat-file", "-p" }, oid);

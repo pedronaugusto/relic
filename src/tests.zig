@@ -63,6 +63,7 @@ test {
         _ = @import("refs/refs_test.zig");
         _ = @import("discover/format.zig");
         _ = @import("discover/gitfile.zig");
+        _ = @import("discover/directory.zig");
         _ = @import("codec/ewah.zig");
         _ = @import("text/ere.zig");
         _ = @import("text/percent.zig");
@@ -187,6 +188,7 @@ test {
     _ = @import("process/program.zig");
     _ = @import("refs/reflog.zig");
     _ = @import("refs/reftable/stack/transaction.zig");
+    _ = @import("refs/reftable/stack/cache.zig");
     _ = @import("repo/safe.zig");
     _ = @import("report/progress.zig");
     _ = @import("report/warning.zig");

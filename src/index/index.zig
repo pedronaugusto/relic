@@ -844,65 +844,7 @@ pub const Index = struct {
             if (offset + size > body.len) return error.TruncatedIndex;
             const data = body[offset..][0..size];
             offset += size;
-
-            // an extension given twice: the later one stands, as in git
-            // One that cannot be read is dropped and said, as git drops it.
-            if (std.mem.eql(u8, &signature, "TREE")) {
-                const tree = CacheTree.parse(gpa, kind, data) catch |err| switch (err) {
-                    error.CorruptCacheTree => null,
-                    else => |e| return e,
-                };
-                if (index.cache_tree) |*t| t.deinit();
-                index.cache_tree = tree;
-                index.dropped.cache_tree = tree == null;
-            } else if (std.mem.eql(u8, &signature, "REUC")) {
-                const undo = ResolveUndo.parse(gpa, kind, data) catch |err| switch (err) {
-                    error.CorruptResolveUndo => null,
-                    else => |e| return e,
-                };
-                if (index.resolve_undo) |*r| r.deinit();
-                index.resolve_undo = undo;
-                index.dropped.resolve_undo = undo == null;
-            } else if (std.mem.eql(u8, &signature, "link")) {
-                try index.parseLink(gpa, data);
-            } else if (std.mem.eql(u8, &signature, "EOIE")) {
-                // A cache of one byte offset into this very file. Copying it
-                // into a file whose entries have moved would point it at the
-                // wrong place, so what is kept is that it was there and the
-                // offset is taken again on write.
-                index.had_end_of_index_entries = true;
-            } else if (std.mem.eql(u8, &signature, "IEOT")) {
-                // The same, once per block of entries. How many blocks it
-                // named is kept, because that is a reader's choice and not
-                // something to invent; the offsets are taken again.
-                if (data.len >= 4) {
-                    const version_field = std.mem.readInt(u32, data[0..4], .big);
-                    if (version_field == ieot_version) {
-                        index.entry_offset_blocks = @intCast((data.len - 4) / 8);
-                    }
-                }
-            } else if (std.mem.eql(u8, &signature, "sdir")) {
-                // It carries nothing; being there is what it says.
-                index.sparse = true;
-            } else if (std.mem.eql(u8, &signature, "FSMN")) {
-                index.parseFsmonitor(gpa, data) catch |err| switch (err) {
-                    error.CorruptFsmonitor, error.TruncatedBitmap, error.CorruptBitmap, error.BitmapTooLarge => {
-                        if (index.fsmonitor_token) |old| gpa.free(old);
-                        index.fsmonitor_token = null;
-                        index.dropped.fsmonitor = true;
-                    },
-                    else => |e| return e,
-                };
-            } else if (signature[0] >= 'A' and signature[0] <= 'Z') {
-                const copy = try gpa.dupe(u8, data);
-                index.unknown.append(gpa, .{ .signature = signature, .data = copy }) catch |err| {
-                    gpa.free(copy);
-                    return err;
-                };
-            } else {
-                index.unsupported_extension = signature;
-                return error.UnsupportedExtension;
-            }
+            try index.readExtension(gpa, signature, data);
         }
 
         // A split index's overlay carries its replacements with empty names,
@@ -964,6 +906,68 @@ pub const Index = struct {
             const is_dirty = next < positions.len and positions[next] == at;
             if (is_dirty) next += 1;
             entry.fsmonitor_valid = !is_dirty and entry.mode != .gitlink;
+        }
+    }
+
+    /// One extension the file carries, after the entries.
+    fn readExtension(index: *Index, gpa: Allocator, signature: [4]u8, data: []const u8) ReadError!void {
+        // an extension given twice: the later one stands, as in git
+        // One that cannot be read is dropped and said, as git drops it.
+        if (std.mem.eql(u8, &signature, "TREE")) {
+            const tree = CacheTree.parse(gpa, index.kind, data) catch |err| switch (err) {
+                error.CorruptCacheTree => null,
+                else => |e| return e,
+            };
+            if (index.cache_tree) |*t| t.deinit();
+            index.cache_tree = tree;
+            index.dropped.cache_tree = tree == null;
+        } else if (std.mem.eql(u8, &signature, "REUC")) {
+            const undo = ResolveUndo.parse(gpa, index.kind, data) catch |err| switch (err) {
+                error.CorruptResolveUndo => null,
+                else => |e| return e,
+            };
+            if (index.resolve_undo) |*r| r.deinit();
+            index.resolve_undo = undo;
+            index.dropped.resolve_undo = undo == null;
+        } else if (std.mem.eql(u8, &signature, "link")) {
+            try index.parseLink(gpa, data);
+        } else if (std.mem.eql(u8, &signature, "EOIE")) {
+            // A cache of one byte offset into this very file. Copying it
+            // into a file whose entries have moved would point it at the
+            // wrong place, so what is kept is that it was there and the
+            // offset is taken again on write.
+            index.had_end_of_index_entries = true;
+        } else if (std.mem.eql(u8, &signature, "IEOT")) {
+            // The same, once per block of entries. How many blocks it
+            // named is kept, because that is a reader's choice and not
+            // something to invent; the offsets are taken again.
+            if (data.len >= 4) {
+                const version_field = std.mem.readInt(u32, data[0..4], .big);
+                if (version_field == ieot_version) {
+                    index.entry_offset_blocks = @intCast((data.len - 4) / 8);
+                }
+            }
+        } else if (std.mem.eql(u8, &signature, "sdir")) {
+            // It carries nothing; being there is what it says.
+            index.sparse = true;
+        } else if (std.mem.eql(u8, &signature, "FSMN")) {
+            index.parseFsmonitor(gpa, data) catch |err| switch (err) {
+                error.CorruptFsmonitor, error.TruncatedBitmap, error.CorruptBitmap, error.BitmapTooLarge => {
+                    if (index.fsmonitor_token) |old| gpa.free(old);
+                    index.fsmonitor_token = null;
+                    index.dropped.fsmonitor = true;
+                },
+                else => |e| return e,
+            };
+        } else if (signature[0] >= 'A' and signature[0] <= 'Z') {
+            const copy = try gpa.dupe(u8, data);
+            index.unknown.append(gpa, .{ .signature = signature, .data = copy }) catch |err| {
+                gpa.free(copy);
+                return err;
+            };
+        } else {
+            index.unsupported_extension = signature;
+            return error.UnsupportedExtension;
         }
     }
 
