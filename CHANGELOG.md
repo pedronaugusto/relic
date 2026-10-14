@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
 ### Breaking
 
 - An index is written under the lock it was read under: `Repository.lockIndex` takes `index.lock`, reads the index, and its `LockedIndex.commit` writes it as git does (`Index.commitTo` writes into a held lock); `Repository.writeIndex` is gone. `merge.rerere.afterStop` takes the lock itself and no index.
@@ -1056,7 +1058,8 @@ Decisions worth knowing before reading the source:
 - **`working-tree-encoding` and a required filter are refusals, with the
   value.** Passing the bytes through would write a blob git would not write.
 
-[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/pedronaugusto/relic/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/pedronaugusto/relic/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/pedronaugusto/relic/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/pedronaugusto/relic/compare/v0.4.1...v0.4.2
