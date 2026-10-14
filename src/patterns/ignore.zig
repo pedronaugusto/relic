@@ -142,6 +142,10 @@ pub const Rules = struct {
             ".gitignore"
         else
             std.mem.print(&path_buf, "{s}/.gitignore", .{base}) catch return;
+        // An in-tree `.gitignore` is read only as a file, never through a
+        // symbolic link, as git's `PATTERN_NOFOLLOW` reads it.
+        const found = (fs.statAt(io, wt, path) catch return) orelse return;
+        if (found.kind != .file) return;
         try rules.addFileIfPresent(io, wt, path, base, path, depth + 2);
     }
 
@@ -616,4 +620,28 @@ test "level sets retain negation, precedence and ancestor decisions under alloca
             try std.testing.expect(rules.matchPath("sub/special.log", .file).excluded);
         }
     }.exercise, .{});
+}
+
+test "an in-tree .gitignore that is a link is not read, as git does not follow one" {
+    const testgit = @import("../testing/git.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "elsewhere", "*.log\n");
+    repo.dir.symLink(io, "elsewhere", ".gitignore", .{}) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    try repo.writeFile(io, "a.log", "x\n");
+    repo.report_failures = false;
+    // git: not ignored, since its .gitignore is a link it does not read.
+    const listed = try repo.run(io, &.{ "ls-files", "--others", "--exclude-standard", "--", "a.log" });
+    defer gpa.free(listed);
+    try std.testing.expectEqualStrings("a.log\n", listed);
+    var rules = try Rules.init(gpa, .{ .case_fold = false });
+    defer rules.deinit();
+    try rules.addDirectory(io, repo.dir, "", 0);
+    try std.testing.expect(!rules.match("a.log", .file).excluded);
 }
