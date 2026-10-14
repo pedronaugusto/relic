@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-14
+
 ### Added
 
 - `repo.fs.permissionsAt` (a path's permissions without following a link: its mode, or on Windows its attributes), `repo.fs.sameFile` (one file by the platform's identity) and `repo.fs.validityAt` (a stat for telling whether a file changed, as git's `stat_validity`).
