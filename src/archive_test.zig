@@ -66,7 +66,9 @@ fn fixture(io: Io, git: *testgit.Repo) !void {
     const long_dir = "a-directory-name-that-is-quite-long/another-directory-name-that-is-long-too/and-a-third-one";
     try git.writeFile(io, long_dir ++ "/file-with-a-long-name-as-well.txt", "long path\n");
     try git.writeFile(io, @as([120]u8, @splat('x')) ++ "/" ++ @as([120]u8, @splat('y')) ++ "/" ++ @as([30]u8, @splat('z')), "longer than ustar holds\n");
-    try git.writeFile(io, ".gitattributes", "ignored/ export-ignore\nnotes/*.md export-ignore\ncrlf.txt eol=crlf\nversion.txt export-subst\n");
+    // A value is not git's `ATTR_TRUE`: this file is archived as it is.
+    try git.writeFile(io, "valued.txt", "kept $Format:%H$\n");
+    try git.writeFile(io, ".gitattributes", "ignored/ export-ignore\nnotes/*.md export-ignore\ncrlf.txt eol=crlf\nversion.txt export-subst\nvalued.txt export-ignore=yes export-subst=yes\n");
     try git.exec(io, &.{ "add", "-A" });
     try git.exec(io, &.{ "update-index", "--chmod=+x", "bin/run.sh" });
     if (builtin.target.os.tag != .windows) {

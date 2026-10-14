@@ -122,6 +122,13 @@ pub const Attributes = struct {
         return state.isSet();
     }
 
+    /// Whether `name` is set and nothing more, git's `ATTR_TRUE`: a value
+    /// is not true.
+    pub fn isTrue(a: Attributes, name: []const u8) bool {
+        const state = a.get(name) orelse return false;
+        return state == .set;
+    }
+
     /// The value of `name`, or `null` when it is unset or has no value.
     pub fn value(a: Attributes, name: []const u8) ?[]const u8 {
         const state = a.get(name) orelse return null;

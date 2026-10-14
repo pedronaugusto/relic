@@ -612,7 +612,7 @@ const Walk = struct {
                 if (!wk.spec.couldMatchUnder(path) and !wk.spec.matchesDir(path)) continue;
                 const dir_path = try std.mem.concat(wk.a, u8, &.{ path, "/" });
                 const applied = try wk.lookup(path, true);
-                if (applied.isSet("export-ignore")) continue;
+                if (applied.isTrue("export-ignore")) continue;
                 const depth = wk.queued.items.len;
                 const written = wk.written_dirs;
                 try wk.queued.append(wk.a, .{ .oid = entry.oid, .path = try std.mem.concat(wk.a, u8, &.{ wk.options.prefix, dir_path }), .mode = mode });
@@ -627,7 +627,7 @@ const Walk = struct {
             // attributes are asked, as git's queue writes them
             try wk.writeQueued();
             const applied = try wk.lookup(path, false);
-            if (applied.isSet("export-ignore")) continue;
+            if (applied.isTrue("export-ignore")) continue;
             const out_path = if (entry.mode == .gitlink)
                 try std.mem.concat(wk.a, u8, &.{ wk.options.prefix, path, "/" })
             else
@@ -646,7 +646,7 @@ const Walk = struct {
                     else => return error.UnsupportedAttribute,
                 };
                 if (wk.commit) |c| {
-                    if (applied.isSet("export-subst")) content = try formatSubst(wk, c, content);
+                    if (applied.isTrue("export-subst")) content = try formatSubst(wk, c, content);
                 }
             }
             var is_binary = false;
