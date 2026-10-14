@@ -38,7 +38,7 @@ const Context = struct {
         for (0..units) |_| {
             var attrs = try relic.worktree.attributes.Attrs.init(c.gpa, .{ .case_fold = false });
             defer attrs.deinit();
-            try attrs.addText("*.zig diff=zig\n*.bin -diff\n*.txt text\n", "", ".gitattributes", 1, .file);
+            try attrs.addText("*.zig diff=zig\n*.bin -diff\n*.txt text\n", .{ .base = "", .source = ".gitattributes", .precedence = 1 });
             var arena: std.heap.ArenaAllocator = .init(c.gpa);
             defer arena.deinit();
             const found = try attrs.lookup(arena.allocator(), "src/main.zig", .file);

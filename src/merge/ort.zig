@@ -967,7 +967,7 @@ const Merge = struct {
             return;
         if (!isReg(version.mode)) return;
         const text = try attrs.arena.allocator().dupe(u8, try m.readBlob(version.oid));
-        try attrs.addText(text, "", ".gitattributes", 1, .blob);
+        try attrs.addText(text, .{ .base = "", .source = ".gitattributes", .precedence = 1, .form = .blob });
         m.merged_attributes_blob = version.oid;
     }
 

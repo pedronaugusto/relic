@@ -3,12 +3,14 @@
 pub const user = @import("config/user_config.zig");
 pub const ParseError = @import("config/config.zig").ParseError;
 pub const ValueError = @import("config/config.zig").ValueError;
+pub const PathError = @import("config/config.zig").PathError;
 pub const Level = @import("config/config.zig").Level;
 pub const SourceFile = @import("config/config.zig").SourceFile;
 pub const Entry = @import("config/config.zig").Entry;
 pub const Sources = @import("config/config.zig").Sources;
 pub const Context = @import("config/config.zig").Context;
 pub const max_include_depth = @import("config/config.zig").max_include_depth;
+pub const max_file_bytes = @import("config/config.zig").max_file_bytes;
 pub const Config = @import("config/config.zig").Config;
 pub const FullName = @import("config/config.zig").FullName;
 pub const splitFullName = @import("config/config.zig").splitFullName;

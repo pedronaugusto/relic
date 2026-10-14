@@ -515,7 +515,7 @@ fn mergedAttributes(
         if (merged.merged_attributes_blob) |oid| {
             const found = try db.read(io, oid);
             defer db.allocator().free(found.bytes);
-            try write_attrs.addText(try arena.dupe(u8, found.bytes), "", ".gitattributes", 1, .blob);
+            try write_attrs.addText(try arena.dupe(u8, found.bytes), .{ .base = "", .source = ".gitattributes", .precedence = 1, .form = .blob });
         }
     }
     try worktree.addTreeAttributes(arena, io, db, write_attrs, &merged_entries);
