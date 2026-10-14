@@ -162,7 +162,11 @@ fn decideText(text: []const u8) Self.Error!Format {
 
 test "a format is what the repository's own configuration says, as git's verify_repository_format decides it" {
     try std.testing.expectEqual(Format{}, try decideText(""));
-    try std.testing.expectEqual(Format{ .kind = .sha256, .ref_storage = .reftable }, try decideText("[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n\trefStorage = Reftable\n"));
+    try std.testing.expectEqual(Format{ .kind = .sha256, .ref_storage = .reftable }, try decideText("[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n\trefStorage = reftable\n"));
+    // A format's name exactly, as git's `ref_storage_format_by_name` and
+    // `hash_algo_by_name` match them.
+    try std.testing.expectError(error.UnsupportedRefStorage, decideText("[core]\n\trepositoryformatversion = 1\n[extensions]\n\trefStorage = Reftable\n"));
+    try std.testing.expectError(error.UnknownObjectFormat, decideText("[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = SHA256\n"));
     try std.testing.expectEqual(Format{ .worktree_config = true }, try decideText("[extensions]\n\tworktreeConfig = true\n"));
     // version 1's extensions at version 0, and what no release knows
     try std.testing.expectError(error.UnsupportedExtension, decideText("[extensions]\n\trefstorage = reftable\n"));

@@ -43,8 +43,14 @@ fn startsWithHex(text: []const u8, n: usize) bool {
 /// has none: a linked worktree's shared directory. A relative name is taken
 /// from `git_dir`, as git's `get_common_dir_noenv` takes it.
 pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?Io.Dir {
-    var buf: [4096]u8 = undefined;
-    const text = git_dir.readFile(io, "commondir", &buf) catch return null;
+    var buf: [Io.Dir.max_path_bytes + 2]u8 = undefined;
+    // One that is there but cannot be read is an error, as git dies on it
+    // ("failed to read"), never a repository without one.
+    const text = git_dir.readFile(io, "commondir", &buf) catch |err| return switch (err) {
+        error.FileNotFound => null,
+        error.Canceled => error.Canceled,
+        else => error.BrokenCommonDir,
+    };
     const target = std.mem.trimEnd(u8, text, "\r\n");
     if (target.len == 0) return error.BrokenCommonDir;
     const opened = if (std.Io.Dir.path.isAbsolute(target))
@@ -68,4 +74,14 @@ pub fn isGitDirectory(io: Io, dir: Io.Dir) bool {
     where.access(io, "objects", .{}) catch return false;
     where.access(io, "refs", .{}) catch return false;
     return true;
+}
+
+test "a commondir that is there but cannot be read is an error, never a repository without one" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "commondir");
+    try std.testing.expectError(error.BrokenCommonDir, openCommon(io, tmp.dir));
+    try tmp.dir.deleteDir(io, "commondir");
+    try std.testing.expect((try openCommon(io, tmp.dir)) == null);
 }

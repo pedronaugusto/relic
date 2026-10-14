@@ -50,9 +50,16 @@ pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Re
         else => |e| return e,
     };
     defer gpa.free(text);
-    var lines = std.mem.tokenizeAny(u8, text, "\r\n");
-    while (lines.next()) |line| {
-        const oid = Oid.parse(kind, line) catch return error.MalformedShallowFile;
+    // git's `is_repository_shallow`: each line begins with an object name,
+    // whatever follows it on the line, and a line that does not, an empty
+    // one among them, is "bad shallow line".
+    var at: usize = 0;
+    while (at < text.len) {
+        const end = std.mem.findScalarPos(u8, text, at, '\n') orelse text.len;
+        const line = text[at..end];
+        at = end + 1;
+        if (line.len < kind.hexLen()) return error.MalformedShallowFile;
+        const oid = Oid.parse(kind, line[0..kind.hexLen()]) catch return error.MalformedShallowFile;
         try set.put(gpa, oid, {});
     }
     return set;
@@ -154,4 +161,21 @@ test "the file is written sorted, read back, and removed when the boundary goes"
     var whole = try read(gpa, io, tmp.dir, .sha1);
     defer whole.deinit(gpa);
     try std.testing.expectEqual(@as(u32, 0), whole.count());
+}
+
+test "the shallow file is read as git's is_repository_shallow reads it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = "1111111111111111111111111111111111111111";
+    const b = "2222222222222222222222222222222222222222";
+    try tmp.dir.writeFile(io, .{ .sub_path = file_name, .data = a ++ "\r\n" ++ b ++ " trailing" });
+    var set = try read(gpa, io, tmp.dir, .sha1);
+    defer set.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 2), set.count());
+    for ([_][]const u8{ a ++ "\n\n", "\n", a[0..39] ++ "\n", "g" ++ a[1..] ++ "\n" }) |text| {
+        try tmp.dir.writeFile(io, .{ .sub_path = file_name, .data = text });
+        try std.testing.expectError(error.MalformedShallowFile, read(gpa, io, tmp.dir, .sha1));
+    }
 }

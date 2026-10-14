@@ -118,6 +118,9 @@ pub const Stack = struct {
         };
         stack.list = text;
 
+        // git's `parse_names`: every name ends with a newline, the last
+        // one too, and a list that does not is a format error.
+        if (text.len > 0 and text[text.len - 1] != '\n') return error.MalformedTablesList;
         var names: std.ArrayList([]const u8) = .empty;
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |line| {
@@ -518,3 +521,16 @@ pub const internal = struct {
     pub const empty = Stack.empty;
     pub const closeUnclaimed = Stack.closeUnclaimed;
 };
+
+test "a tables.list whose last name has no newline is refused, as git's parse_names refuses it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "tables.list", .data = "0x000000000001-0x000000000001-01234567.ref" });
+    try std.testing.expectError(error.MalformedTablesList, Stack.load(gpa, io, tmp.dir, .sha1));
+    // Empty is an empty stack.
+    try tmp.dir.writeFile(io, .{ .sub_path = "tables.list", .data = "" });
+    var empty = try Stack.load(gpa, io, tmp.dir, .sha1);
+    defer empty.deinit();
+}

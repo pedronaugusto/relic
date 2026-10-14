@@ -22,6 +22,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
+const decimal = @import("../text.zig").decimal;
 
 const Oid = hash.Oid;
 
@@ -231,9 +232,8 @@ pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash
     var entries: std.ArrayList(Entry) = .empty;
     errdefer entries.deinit(gpa);
 
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    var lines: Lines = .{ .bytes = bytes };
     while (lines.next()) |line| {
-        if (line.len == 0) continue;
         // A line git cannot parse is one it skips, and the log's other entries stand.
         const entry = parseLine(line, kind) catch continue;
         try entries.append(gpa, entry);
@@ -282,9 +282,8 @@ pub fn expire(
     defer gpa.free(bytes);
 
     var count: usize = 0;
-    var counting = std.mem.splitScalar(u8, bytes, '\n');
+    var counting: Lines = .{ .bytes = bytes };
     while (counting.next()) |line| {
-        if (line.len == 0) continue;
         // A line git cannot parse is one it skips, and the log's other entries stand.
         _ = parseLine(line, kind) catch continue;
         count += 1;
@@ -294,9 +293,8 @@ pub fn expire(
     var hex: [hash.max_hex_len]u8 = undefined;
     var last_kept: ?Oid = null;
     var seen: usize = 0;
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    var lines: Lines = .{ .bytes = bytes };
     while (lines.next()) |line| {
-        if (line.len == 0) continue;
         // A line git cannot parse is one it skips, and the log's other entries stand.
         const entry = parseLine(line, kind) catch continue;
         seen += 1;
@@ -353,6 +351,23 @@ pub fn delete(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) DeleteEr
     };
 }
 
+/// A log's lines, each without its newline: a last line with none is no
+/// line, as git's reader skips it.
+const Lines = struct {
+    bytes: []const u8,
+    at: usize = 0,
+
+    fn next(l: *Lines) ?[]const u8 {
+        const end = std.mem.findScalarPos(u8, l.bytes, l.at, '\n') orelse return null;
+        defer l.at = end + 1;
+        return l.bytes[l.at..end];
+    }
+};
+
+/// git's `show_one_reflog_ent`: `old SP new SP name <email> SP time SP
+/// ±hhmm`, the time a nonzero `strtoumax`, the zone's sign and four digits
+/// read by `strtol`, then the message after one tab, or straight after the
+/// zone where no tab follows it. Anything else is a line git skips.
 fn parseLine(line: []const u8, kind: hash.Kind) ReadError!Entry {
     const hex_len = kind.hexLen();
     if (line.len < hex_len * 2 + 2) return error.MalformedReflogEntry;
@@ -361,15 +376,21 @@ fn parseLine(line: []const u8, kind: hash.Kind) ReadError!Entry {
     const new = Oid.parse(kind, line[hex_len + 1 ..][0..hex_len]) catch return error.MalformedReflogEntry;
     if (line[hex_len * 2 + 1] != ' ') return error.MalformedReflogEntry;
     const rest = line[hex_len * 2 + 2 ..];
-    const tab = std.mem.findScalar(u8, rest, '\t');
-    const ident = if (tab) |at| rest[0..at] else rest;
-    const message = if (tab) |at| rest[at + 1 ..] else "";
-    return .{
-        .old = old,
-        .new = new,
-        .who = try object.Signature.parse(ident),
-        .message = message,
-    };
+    const email_end = std.mem.findScalar(u8, rest, '>') orelse return error.MalformedReflogEntry;
+    if (email_end + 1 >= rest.len or rest[email_end + 1] != ' ') return error.MalformedReflogEntry;
+    const after = rest[email_end + 2 ..];
+    const time = decimal.strtoul(after, 10, 64);
+    if (time.value == 0) return error.MalformedReflogEntry;
+    const message = after[time.end..];
+    if (message.len < 6 or message[0] != ' ' or (message[1] != '+' and message[1] != '-')) return error.MalformedReflogEntry;
+    for (message[2..6]) |c| if (!std.ascii.isDigit(c)) return error.MalformedReflogEntry;
+    const hhmm = decimal.strtol(message[1..], 10, 64).value;
+    const minutes = @divTrunc(hhmm, 100) * 60 + @rem(hhmm, 100);
+    const text = if (message.len > 6 and message[6] == '\t') message[7..] else message[6..];
+    var who = object.Signature.parse(rest[0 .. email_end + 1]) catch return error.MalformedReflogEntry;
+    who.when_secs = std.math.cast(i64, time.value) orelse std.math.maxInt(i64);
+    who.offset_minutes = std.math.cast(i16, minutes) orelse 0;
+    return .{ .old = old, .new = new, .who = who, .message = text };
 }
 
 test "an appended entry reads back" {
@@ -424,6 +445,36 @@ test "a malformed line leaves the other entries readable, as git skips it" {
     defer log.deinit();
     try std.testing.expectEqual(@as(usize, 2), log.entries.len);
     try std.testing.expectEqualStrings("second", log.entries[1].message);
+}
+
+test "a log line reads as git's show_one_reflog_ent reads it, and one it skips is skipped" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "logs/refs/heads");
+    const zero = &@as([40]u8, @splat('0'));
+    const one = &@as([40]u8, @splat('1'));
+    const lead = zero ++ " " ++ one ++ " ";
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/refs/heads/main", .data = lead ++ "A <a@b> 7 +0130\ttab\n" ++
+        lead ++ "A <a@b> 8 -0200 no tab\n" ++
+        lead ++ "A <a@b> 0 +0000\tzero time\n" ++
+        lead ++ "A <a@b>  9 +0000\ttwo spaces\n" ++
+        lead ++ "A <a@b> 9 0000\tno sign\n" ++
+        lead ++ "A <a@b> 9 +000\tshort zone\n" ++
+        lead ++ "A <a@b>9 +0000\tno space\n" ++
+        lead ++ "A <a@b> 10 +0000\tno newline" });
+    var log = try read(gpa, io, tmp.dir, "refs/heads/main", .sha1);
+    defer log.deinit();
+    // The spaces `strtoumax` skips before a number are skipped.
+    try std.testing.expectEqual(@as(usize, 3), log.entries.len);
+    try std.testing.expectEqualStrings("tab", log.entries[0].message);
+    try std.testing.expectEqual(@as(i16, 90), log.entries[0].who.offset_minutes);
+    try std.testing.expectEqualStrings("A", log.entries[0].who.name);
+    try std.testing.expectEqualStrings(" no tab", log.entries[1].message);
+    try std.testing.expectEqual(@as(i16, -120), log.entries[1].who.offset_minutes);
+    try std.testing.expectEqualStrings("two spaces", log.entries[2].message);
+    try std.testing.expectEqual(@as(i64, 9), log.entries[2].who.when_secs);
 }
 
 test "the policy decides which refs get a log" {

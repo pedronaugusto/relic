@@ -21,6 +21,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const names = @import("../names.zig").ref;
+const ctype = @import("../text.zig").ctype;
 const ReadError = @import("value.zig").ReadError;
 
 const Oid = hash.Oid;
@@ -87,36 +88,49 @@ pub fn parse(gpa: Allocator, kind: Kind, bytes: []u8) ReadError!Listing {
     errdefer entries.deinit(gpa);
     var fully_peeled = false;
 
+    // git's `create_snapshot` and `next_record`, where git dies on a line it
+    // cannot read, a `MalformedPackedRefs` here. Only the first line may be
+    // a comment, and it is the traits header.
     const hex_len = kind.hexLen();
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
-    var first = true;
+    var pos: usize = 0;
+    if (bytes.len > 0 and bytes[0] == '#') {
+        const eol = std.mem.findScalar(u8, bytes, '\n') orelse return error.MalformedPackedRefs;
+        const traits = std.mem.cutPrefix(u8, bytes[0..eol], "# pack-refs with: ") orelse return error.MalformedPackedRefs;
+        var it = std.mem.splitScalar(u8, traits, ' ');
+        while (it.next()) |trait| {
+            if (std.mem.eql(u8, trait, "fully-peeled")) fully_peeled = true;
+        }
+        pos = eol + 1;
+    }
     var sorted = true;
-    while (lines.next()) |raw| {
-        var line = raw;
-        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-        if (line.len == 0) continue;
-        if (line[0] == '#') {
-            if (first and std.mem.find(u8, line, "fully-peeled") != null) fully_peeled = true;
-            first = false;
-            continue;
-        }
-        first = false;
-        if (line[0] == '^') {
-            if (entries.items.len == 0) return error.MalformedPackedRefs;
-            const oid = Oid.parse(kind, std.mem.trim(u8, line[1..], " \t")) catch return error.MalformedPackedRefs;
-            entries.items[entries.items.len - 1].peeled = oid;
-            continue;
-        }
-        if (line.len < hex_len + 2) return error.MalformedPackedRefs;
-        const oid = Oid.parse(kind, line[0..hex_len]) catch return error.MalformedPackedRefs;
-        if (line[hex_len] != ' ') return error.MalformedPackedRefs;
+    while (pos < bytes.len) {
+        const rest = bytes[pos..];
+        // An object name, one space character, the name, a newline.
+        if (rest.len < hex_len + 2) return error.MalformedPackedRefs;
+        const oid = Oid.parse(kind, rest[0..hex_len]) catch return error.MalformedPackedRefs;
+        if (!ctype.isSpace(rest[hex_len])) return error.MalformedPackedRefs;
+        const eol = std.mem.findScalarPos(u8, rest, hex_len + 1, '\n') orelse return error.MalformedPackedRefs;
+        const name = rest[hex_len + 1 .. eol];
+        if (std.mem.findScalar(u8, name, 0) != null) return error.MalformedPackedRefs;
         // A name no ref may have stays in the listing, as git's snapshot
         // keeps it broken: a lookup by a ref's name never finds it, a
         // listing reports it, a deletion by its name removes it, and a
-        // rewrite of the file keeps it.
-        const name = line[hex_len + 1 ..];
+        // rewrite of the file keeps it. One that reaches outside the ref
+        // store git dies on ("packed refname is dangerous").
+        const broken = !names.checkFormat(name, .{ .allow_onelevel = true });
+        if (broken and !names.isSafe(name)) return error.MalformedPackedRefs;
+        pos += eol + 1;
+        var peeled: ?Oid = null;
+        if (pos < bytes.len and bytes[pos] == '^') {
+            const value = bytes[pos + 1 ..];
+            if (value.len < hex_len + 1 or value[hex_len] != '\n') return error.MalformedPackedRefs;
+            const peel = Oid.parse(kind, value[0..hex_len]) catch return error.MalformedPackedRefs;
+            // A broken ref's peeled value is not believed.
+            if (!broken) peeled = peel;
+            pos += 1 + hex_len + 1;
+        }
         if (entries.items.len != 0 and std.mem.order(u8, entries.items[entries.items.len - 1].name, name) != .lt) sorted = false;
-        try entries.append(gpa, .{ .name = name, .oid = oid, .peeled = null, .broken = !names.checkFormat(name, .{ .allow_onelevel = true }) });
+        try entries.append(gpa, .{ .name = name, .oid = oid, .peeled = peeled, .broken = broken });
     }
     // A stable sort, so that of two lines naming one ref the first stays
     // first, which is the one a lookup finds.
@@ -239,6 +253,43 @@ pub const Cache = struct {
         c.current = null;
     }
 };
+
+test "packed-refs is read by git's exact grammar: a traits header first, a space, a newline after every line" {
+    const gpa = std.testing.allocator;
+    const a = "1111111111111111111111111111111111111111";
+    const b = "2222222222222222222222222222222222222222";
+    {
+        var listing = try parse(gpa, .sha1, try gpa.dupe(u8, "# pack-refs with: peeled fully-peeled sorted \n" ++ a ++ " refs/tags/t\n^" ++ b ++ "\n" ++ a ++ "\trefs/heads/tab\n"));
+        defer listing.deinit();
+        try std.testing.expect(listing.fully_peeled);
+        try std.testing.expect(listing.find("refs/tags/t").?.peeled.?.eql(try Oid.parse(.sha1, b)));
+        // Any space character after the name of the object, as `isspace`.
+        try std.testing.expect(listing.find("refs/heads/tab") != null);
+    }
+    {
+        // A CR is part of the name, which no ref may have: kept, broken.
+        var listing = try parse(gpa, .sha1, try gpa.dupe(u8, a ++ " refs/heads/cr\r\n"));
+        defer listing.deinit();
+        try std.testing.expect(listing.entries[0].broken);
+    }
+    for ([_][]const u8{
+        "# a comment\n",
+        "# pack-refs with: peeled",
+        a ++ " refs/heads/x\n# later comment\n",
+        a ++ " refs/heads/x\n\n",
+        a ++ " refs/heads/x",
+        a ++ "refs/heads/x\n",
+        a ++ " refs/heads/x\n^" ++ b ++ " \n",
+        a ++ " refs/heads/x\n^" ++ b,
+        a ++ " refs/heads/x\x00y\n",
+        a ++ " ../escape\n",
+    }) |text| {
+        std.testing.expectError(error.MalformedPackedRefs, parse(gpa, .sha1, try gpa.dupe(u8, text))) catch |err| {
+            std.debug.print("read: {s}\n", .{text});
+            return err;
+        };
+    }
+}
 
 test "a listing finds the first of two lines naming one ref, sorted or not" {
     const gpa = std.testing.allocator;

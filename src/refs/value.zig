@@ -77,10 +77,11 @@ pub const Format = enum {
         };
     }
 
-    /// The format `extensions.refStorage` names, in any case, or `null`.
+    /// The format `extensions.refStorage` names, exactly as git's
+    /// `ref_storage_format_by_name` matches it, or `null`.
     pub fn parse(text: []const u8) ?Format {
         inline for (comptime std.enums.values(Format)) |format| {
-            if (std.ascii.eqlIgnoreCase(text, format.name())) return format;
+            if (std.mem.eql(u8, text, format.name())) return format;
         }
         return null;
     }

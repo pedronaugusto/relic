@@ -237,8 +237,12 @@ const Resolver = struct {
         }
         if (what.len > 1 and what[0] == '-') {
             if (base.len != 0) return error.BadRevision;
-            const n = decimal.digits(u32, what[1..]) orelse return error.BadRevision;
-            return r.previousBranch(n);
+            // git's `interpret_nth_prior_checkout` reads the count with
+            // `strtol` (spaces and a sign before it, leading zeros), which
+            // must end at the brace and be above zero.
+            const read = decimal.strtol(what[1..], 10, 64);
+            if (read.end != what.len - 1 or read.value <= 0) return error.BadRevision;
+            return r.previousBranch(std.math.cast(u32, read.value) orelse std.math.maxInt(u32));
         }
         // All digits is an entry's place, or seconds since the epoch from
         // 100000000 on, as git reads it; anything else is a date.
@@ -651,7 +655,8 @@ test "@{-N} reads the branch a checkout left as a name or an object name, never 
     try r.exec(io, &.{ "checkout", "-q", "main" });
     var repo = try Repository.open(gpa, io, r.dir, .{});
     defer repo.deinit(io);
-    for ([_][]const u8{ "@{-1}", "@{-2}", "@{-3}" }) |expr| {
+    // The count as `strtol` reads it: spaces and a sign before it, zeros.
+    for ([_][]const u8{ "@{-1}", "@{-2}", "@{-3}", "@{-01}", "@{- 2}", "@{-+3}" }) |expr| {
         const theirs = try r.line(io, &.{ "rev-parse", expr });
         defer gpa.free(theirs);
         var hex: [hash.max_hex_len]u8 = undefined;
