@@ -1012,7 +1012,7 @@ test "an idle kept connection does not block another client" {
     defer gpa.free(first);
     const second = try server.url(gpa, "moved/second");
     defer gpa.free(second);
-    var idle: uplink.Client = .init(gpa, .{ .timeouts = .{ .activity = .fromSeconds(10) }, .redirects = .none });
+    var idle: uplink.Client = .init(gpa, .{ .timeouts = .{ .activity = .literal("10s") }, .redirects = .none });
     defer idle.deinit(io);
     {
         var response = try idle.send(io, .{ .url = first });
@@ -1022,7 +1022,7 @@ test "an idle kept connection does not block another client" {
     }
     // The first client's connection stays pooled while the second makes a
     // request. Closing it before this request would hide a serialized server.
-    var active: uplink.Client = .init(gpa, .{ .timeouts = .{ .activity = .fromSeconds(10) }, .redirects = .none });
+    var active: uplink.Client = .init(gpa, .{ .timeouts = .{ .activity = .literal("10s") }, .redirects = .none });
     defer active.deinit(io);
     {
         var response = try active.send(io, .{ .url = second });

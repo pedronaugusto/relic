@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Pins uplink 0.4.1, cloak 0.4.0, strand 0.10.2 and warp 0.3.1, whose types relic's options carry: an HTTP timeout is `uplink.Duration`, aegis's duration in nanoseconds, where it was `Io.Duration`.
+
+### Changed
+
+- Pins conduit 0.7.1 (reactor 0.4); preflight 0.5.2 and shakedown 0.4.2 for development.
+- HTTPS speaks TLS 1.2 as well as TLS 1.3 (cloak 0.4), and a client certificate with an RSA key answers a server that asks for one, signing with RSA-PSS. In TLS 1.2 an Ed25519 key is answered with no certificate: cloak does not sign a whole TLS 1.2 handshake yet.
+
 ## [0.7.1] - 2026-10-14
 
 ### Added

@@ -2035,7 +2035,7 @@ pub const Client = struct {
             ca_info orelse "",
             ca_path orelse "",
             verify,
-            if (timeouts.activity) |d| d.nanoseconds else -1,
+            if (timeouts.activity) |d| @as(i128, d.raw()) else -1,
             if (cert_files) |f| f.cert else "",
             if (cert_files) |f| f.key orelse "" else "",
             decompress,
@@ -2629,10 +2629,16 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
         activity = decimal.goInt(i64, std.mem.trim(u8, text, " \t")) orelse 0;
     }
     return .{
-        .connect = .fromSeconds(if (dial < 1) 30 else dial),
-        .handshake = .fromSeconds(if (handshake < 1) 30 else handshake),
-        .activity = if (activity > 0) .fromSeconds(activity) else null,
+        .connect = seconds(if (dial < 1) 30 else dial),
+        .handshake = seconds(if (handshake < 1) 30 else handshake),
+        .activity = if (activity > 0) seconds(activity) else null,
     };
+}
+
+/// `n` seconds, above zero, as uplink's span; one past what it holds is the
+/// longest there is.
+fn seconds(n: i64) uplink.Duration {
+    return .fromRaw(std.math.mul(u64, @intCast(n), std.time.ns_per_s) catch std.math.maxInt(u64)); // safe: n is above zero at every call
 }
 
 /// How long a `Retry-After` value asks to wait, as git-lfs reads it: whole
@@ -2954,9 +2960,9 @@ test "git-lfs's timeouts are read as git-lfs reads them: 30 seconds unless set, 
         var t = try testSettings(case.text, null);
         defer freeSettings(&t);
         const timeouts = try timeoutsFor(&t.settings, a, try url_mod.Url.parse(case.url));
-        try testing.expectEqual(Io.Duration.fromSeconds(case.connect), timeouts.connect.?);
-        try testing.expectEqual(Io.Duration.fromSeconds(case.handshake), timeouts.handshake.?);
-        if (case.activity) |secs| try testing.expectEqual(Io.Duration.fromSeconds(secs), timeouts.activity.?) else try testing.expectEqual(@as(?Io.Duration, null), timeouts.activity);
+        try testing.expectEqual(seconds(case.connect), timeouts.connect.?);
+        try testing.expectEqual(seconds(case.handshake), timeouts.handshake.?);
+        if (case.activity) |secs| try testing.expectEqual(seconds(secs), timeouts.activity.?) else try testing.expectEqual(@as(?uplink.Duration, null), timeouts.activity);
     }
 }
 

@@ -103,10 +103,22 @@ fn lfs(c: Context, root: []const u8) !void {
     const bin = try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" });
     const executable = try std.Io.Dir.path.join(c.a, &.{ bin, if (builtin.target.os.tag == .windows) "git-lfs.exe" else "git-lfs" });
     if (c.exists(executable)) return;
+    // The host's own system and processor, from git-lfs's sha256sums.
+    const arm = builtin.target.cpu.arch == .aarch64;
+    if (!arm and builtin.target.cpu.arch != .x86_64) return error.UnsupportedHost;
     const asset, const digest = switch (builtin.target.os.tag) {
-        .linux => .{ "git-lfs-linux-amd64-v3.8.0.tar.gz", "e455e00f15d9b95661b8d53498ffb0c3367962cf1ec73c31ab7369516cd6ab8d" },
-        .macos => .{ "git-lfs-darwin-arm64-v3.8.0.zip", "caff76a7d070d8160c89bc39b6e85d98f24135b6fed038a3b4de2590d25102d8" },
-        .windows => .{ "git-lfs-windows-amd64-v3.8.0.zip", "b62e7b8ceddee635f691233d77de8eaa4b213e9209e0173811d8cfa77f7882c1" },
+        .linux => if (arm)
+            .{ "git-lfs-linux-arm64-v3.8.0.tar.gz", "ac9c8efac980bb0505ead384d087e2acb6486fd8498691a2165fa174ec6118c2" }
+        else
+            .{ "git-lfs-linux-amd64-v3.8.0.tar.gz", "e455e00f15d9b95661b8d53498ffb0c3367962cf1ec73c31ab7369516cd6ab8d" },
+        .macos => if (arm)
+            .{ "git-lfs-darwin-arm64-v3.8.0.zip", "caff76a7d070d8160c89bc39b6e85d98f24135b6fed038a3b4de2590d25102d8" }
+        else
+            .{ "git-lfs-darwin-amd64-v3.8.0.zip", "f1c17aeca0b4eaab9ea606226477dbed3b84b56fe0811a9f967d2ea2b2393c53" },
+        .windows => if (arm)
+            .{ "git-lfs-windows-arm64-v3.8.0.zip", "72403a96eae6689c3a4038c99e5d9e0938ef5552c71a234aef65ef0c314af081" }
+        else
+            .{ "git-lfs-windows-amd64-v3.8.0.zip", "b62e7b8ceddee635f691233d77de8eaa4b213e9209e0173811d8cfa77f7882c1" },
         else => return error.UnsupportedHost,
     };
     const archive = try std.Io.Dir.path.join(c.a, &.{ root, asset });
