@@ -65,6 +65,11 @@ pub const ReadError = error{
     UnsortedIndex,
     /// A split index whose shared file is not beside it.
     SharedIndexMissing,
+    /// A split index whose `link` extension does not fit its shared index:
+    /// bytes after its bitmaps, a position past the shared index's end, a
+    /// replacement with a name or an addition without one (git's
+    /// `read_link_extension` and `merge_base_index`).
+    CorruptLinkExtension,
     /// A `TREE` extension that does not describe the entries it sits on.
     CorruptCacheTree,
     /// A `REUC` extension that ran off its own end.
@@ -72,6 +77,9 @@ pub const ReadError = error{
     /// An `FSMN` extension of a version other than 1 or 2, or one that ran
     /// off its own end.
     CorruptFsmonitor,
+    /// An entry's extended flags hold a bit git does not know: "unknown
+    /// index entry format".
+    UnknownEntryFlags,
 } || Allocator.Error || Io.Dir.ReadFileAllocError || ewah.Error || varint.Error;
 
 /// Errors from writing an index.
@@ -190,6 +198,21 @@ pub const CacheTreeNode = struct {
 ///
 /// An invalidated node carries an entry count of -1 and no object name, which
 /// is what an edit under it leaves behind.
+/// Extensions an index read dropped because they could not be read.
+pub const Dropped = struct {
+    /// `TREE`, which git's `cache_tree_read` gives up on silently.
+    cache_tree: bool = false,
+    /// `REUC`: "Index records invalid resolve-undo information".
+    resolve_undo: bool = false,
+    /// `FSMN`: "corrupt fsmonitor extension".
+    fsmonitor: bool = false,
+
+    /// Whether any was dropped.
+    pub fn any(d: Dropped) bool {
+        return d.cache_tree or d.resolve_undo or d.fsmonitor;
+    }
+};
+
 pub const CacheTree = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -267,6 +290,8 @@ pub const CacheTree = struct {
             for (stack.items) |*open| open.node.deinit(gpa);
             stack.deinit(gpa);
         }
+        // The root, or it is not the whole tree.
+        if (data.len == 0 or data[0] != 0) return error.CorruptCacheTree;
         const first = try parseNode(gpa, kind, data, &offset);
         stack.append(gpa, .{ .node = first.node, .wanted = first.subtrees }) catch |err| {
             var node = first.node;
@@ -306,14 +331,9 @@ pub const CacheTree = struct {
         const raw_name = data[offset.*..nul];
         offset.* = nul + 1;
 
-        const space = std.mem.findScalarPos(u8, data, offset.*, ' ') orelse return error.CorruptCacheTree;
-        // git's `strtol`: what reaches the space.
-        const entry_count = decimal.whole(i64, data[offset.*..space], 10) orelse return error.CorruptCacheTree;
-        offset.* = space + 1;
-
-        const newline = std.mem.findScalarPos(u8, data, offset.*, '\n') orelse return error.CorruptCacheTree;
-        const subtree_count = decimal.whole(u32, data[offset.*..newline], 10) orelse return error.CorruptCacheTree;
-        offset.* = newline + 1;
+        const entry_count: i64 = try treeInt(data, offset, ' ');
+        const subtrees = try treeInt(data, offset, '\n');
+        const subtree_count = std.math.cast(u32, subtrees) orelse return error.CorruptCacheTree;
 
         var oid: ?Oid = null;
         if (entry_count >= 0) {
@@ -333,6 +353,19 @@ pub const CacheTree = struct {
             },
             .subtrees = subtree_count,
         };
+    }
+
+    /// git's `parse_int` in `cache-tree.c` and the byte after it: any number
+    /// of minus signs, then decimal digits into an `int`, which wraps.
+    fn treeInt(data: []const u8, offset: *usize, end: u8) ReadError!i32 {
+        var at = offset.*;
+        var negative = false;
+        while (at < data.len and data[at] == '-') : (at += 1) negative = !negative;
+        var value: i32 = 0;
+        while (at < data.len and std.ascii.isDigit(data[at])) : (at += 1) value = value *% 10 +% @as(i32, data[at] - '0');
+        if (at == offset.* or at >= data.len or data[at] != end) return error.CorruptCacheTree;
+        offset.* = at + 1;
+        return if (negative) 0 -% value else value;
     }
 
     fn write(t: *const CacheTree, w: *Io.Writer) Io.Writer.Error!void {
@@ -646,12 +679,18 @@ pub const Index = struct {
     entries: std.ArrayList(Entry) = .empty,
     cache_tree: ?CacheTree = null,
     resolve_undo: ?ResolveUndo = null,
-    /// Optional extensions this package does not interpret, kept byte for
-    /// byte and written back in the order they were read.
+    /// Optional extensions this package does not interpret, as they were
+    /// read. They are not written back, as git writes back none it does not
+    /// know: one such as `UNTR` describes the working tree as it was, which
+    /// a write here does not keep true.
     unknown: std.ArrayList(RawExtension) = .empty,
     /// The mandatory extension that was refused, when `read` returned
     /// `error.UnsupportedExtension`. Four bytes, valid until `deinit`.
     unsupported_extension: [4]u8 = @splat(0),
+    /// The optional extensions the file read carried that could not be
+    /// read and were dropped, as git drops them: the index reads without
+    /// them, and a caller may say so.
+    dropped: Dropped = .{},
     /// The index file's own modification time in seconds, which is the racy
     /// cutoff. Zero for an index that has never been on a disk.
     racy_cutoff_sec: u32 = 0,
@@ -713,6 +752,8 @@ pub const Index = struct {
         for (index.unknown.items) |e| index.gpa.free(e.data);
         index.unknown.deinit(index.gpa);
         if (index.fsmonitor_token) |t| index.gpa.free(t);
+        if (index.split_delete) |*b| b.deinit();
+        if (index.split_replace) |*b| b.deinit();
         index.* = undefined;
     }
 
@@ -805,14 +846,23 @@ pub const Index = struct {
             offset += size;
 
             // an extension given twice: the later one stands, as in git
+            // One that cannot be read is dropped and said, as git drops it.
             if (std.mem.eql(u8, &signature, "TREE")) {
-                const tree = try CacheTree.parse(gpa, kind, data);
+                const tree = CacheTree.parse(gpa, kind, data) catch |err| switch (err) {
+                    error.CorruptCacheTree => null,
+                    else => |e| return e,
+                };
                 if (index.cache_tree) |*t| t.deinit();
                 index.cache_tree = tree;
+                index.dropped.cache_tree = tree == null;
             } else if (std.mem.eql(u8, &signature, "REUC")) {
-                const undo = try ResolveUndo.parse(gpa, kind, data);
+                const undo = ResolveUndo.parse(gpa, kind, data) catch |err| switch (err) {
+                    error.CorruptResolveUndo => null,
+                    else => |e| return e,
+                };
                 if (index.resolve_undo) |*r| r.deinit();
                 index.resolve_undo = undo;
+                index.dropped.resolve_undo = undo == null;
             } else if (std.mem.eql(u8, &signature, "link")) {
                 try index.parseLink(gpa, data);
             } else if (std.mem.eql(u8, &signature, "EOIE")) {
@@ -835,7 +885,14 @@ pub const Index = struct {
                 // It carries nothing; being there is what it says.
                 index.sparse = true;
             } else if (std.mem.eql(u8, &signature, "FSMN")) {
-                try index.parseFsmonitor(gpa, data);
+                index.parseFsmonitor(gpa, data) catch |err| switch (err) {
+                    error.CorruptFsmonitor, error.TruncatedBitmap, error.CorruptBitmap, error.BitmapTooLarge => {
+                        if (index.fsmonitor_token) |old| gpa.free(old);
+                        index.fsmonitor_token = null;
+                        index.dropped.fsmonitor = true;
+                    },
+                    else => |e| return e,
+                };
             } else if (signature[0] >= 'A' and signature[0] <= 'Z') {
                 const copy = try gpa.dupe(u8, data);
                 index.unknown.append(gpa, .{ .signature = signature, .data = copy }) catch |err| {
@@ -927,7 +984,12 @@ pub const Index = struct {
         var deletes = try ewah.read(gpa, rest);
         errdefer deletes.bits.deinit();
         rest = rest[deletes.len..];
-        const replaces = try ewah.read(gpa, rest);
+        var replaces = try ewah.read(gpa, rest);
+        // "garbage at the end of link extension"
+        if (replaces.len != rest.len) {
+            replaces.bits.deinit();
+            return error.CorruptLinkExtension;
+        }
         index.split_delete = deletes.bits;
         index.split_replace = replaces.bits;
     }
@@ -957,24 +1019,33 @@ pub const Index = struct {
             merged.deinit(gpa);
         }
 
-        // The overlay's first entries, the ones with an empty path, replace
-        // positions in the shared index in order; the rest are additions.
+        // git's `merge_base_index`: no position past the shared index's end;
+        // the overlay's first entries, each with an empty name, replace
+        // positions in the shared index in order, before any is deleted, so
+        // a position both replaced and deleted is gone; the rest are
+        // additions, each with a name.
+        for ([_]?ewah.Bits{ index.split_delete, index.split_replace }) |maybe| if (maybe) |bits| {
+            if (bits.positions.len != 0 and bits.positions[bits.positions.len - 1] >= shared.entries.items.len) return error.CorruptLinkExtension;
+        };
         var replacement: usize = 0;
         for (shared.entries.items, 0..) |base_entry, base_at| {
             const pos: u32 = @intCast(base_at);
+            const replaced = if (index.split_replace) |bits| bits.isSet(pos) else false;
+            if (replaced) {
+                // "too many replacements"
+                if (replacement >= index.entries.items.len) return error.CorruptLinkExtension;
+                if (index.entries.items[replacement].path.len != 0) return error.CorruptLinkExtension;
+                replacement += 1;
+            }
             if (index.split_delete) |bits| {
                 if (bits.isSet(pos)) continue;
             }
             try merged.ensureUnusedCapacity(gpa, 1);
-            if (index.split_replace) |bits| {
-                if (bits.isSet(pos)) {
-                    if (replacement >= index.entries.items.len) return error.TruncatedIndex;
-                    var overlay = index.entries.items[replacement];
-                    replacement += 1;
-                    overlay.path = try gpa.dupe(u8, base_entry.path);
-                    merged.appendAssumeCapacity(overlay);
-                    continue;
-                }
+            if (replaced) {
+                var overlay = index.entries.items[replacement - 1];
+                overlay.path = try gpa.dupe(u8, base_entry.path);
+                merged.appendAssumeCapacity(overlay);
+                continue;
             }
             merged.appendAssumeCapacity(.{
                 .path = try gpa.dupe(u8, base_entry.path),
@@ -988,6 +1059,7 @@ pub const Index = struct {
             });
         }
         for (index.entries.items[replacement..]) |extra| {
+            if (extra.path.len == 0) return error.CorruptLinkExtension;
             try merged.ensureUnusedCapacity(gpa, 1);
             var copy = extra;
             copy.path = try gpa.dupe(u8, extra.path);
@@ -1036,14 +1108,16 @@ pub const Index = struct {
         const b = body[start..];
 
         const flags = std.mem.readInt(u16, b[40 + raw_len ..][0..2], .big);
+        // git reads the extended flag word whatever the version says, and
+        // refuses a bit in it it does not know.
         const extended = flags & 0x4000 != 0;
-        if (extended and version < 3) return error.TruncatedIndex;
         var at = fixed;
         var skip_worktree = false;
         var intent_to_add = false;
         if (extended) {
             if (start + at + 2 > body.len) return error.TruncatedIndex;
             const extra = std.mem.readInt(u16, b[at..][0..2], .big);
+            if (extra & ~@as(u16, 0x6000) != 0) return error.UnknownEntryFlags;
             at += 2;
             skip_worktree = extra & 0x4000 != 0;
             intent_to_add = extra & 0x2000 != 0;
@@ -1623,10 +1697,6 @@ pub const Index = struct {
             try writeExtension(out, "REUC", undo_body.written());
             hashExtensionHeader(&ext_hasher, "REUC", undo_body.written().len);
         }
-        for (index.unknown.items) |extension| {
-            try writeExtension(out, &extension.signature, extension.data);
-            hashExtensionHeader(&ext_hasher, &extension.signature, extension.data.len);
-        }
         // `FSMN` after the untracked cache, as git writes them: version 2,
         // the token, and the entries not vouched for.
         if (index.fsmonitor_token) |token| {
@@ -1963,18 +2033,21 @@ test "the offset caches are written on request, and kept by an index that had th
     try std.testing.expectEqualSlices(u8, plain, dropped);
 }
 
-test "an unknown optional extension survives a round trip byte for byte" {
+test "an unknown optional extension is read and not written back, as git drops one it does not know" {
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);
     defer index.deinit();
-    try index.unknown.append(gpa, .{
-        .signature = "ZZZZ".*,
-        .data = try gpa.dupe(u8, "opaque bytes"),
-    });
-    const bytes = try index.toBytes(.{});
-    defer gpa.free(bytes);
+    const plain = try index.toBytes(.{});
+    defer gpa.free(plain);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    try bytes.appendSlice(gpa, plain[0 .. plain.len - 20]);
+    try bytes.appendSlice(gpa, "ZZZZ\x00\x00\x00\x0copaque bytes");
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(bytes.items);
+    try bytes.appendSlice(gpa, hasher.final().raw());
 
-    var back = try Index.parse(gpa, .sha1, bytes);
+    var back = try Index.parse(gpa, .sha1, bytes.items);
     defer back.deinit();
     try std.testing.expectEqual(@as(usize, 1), back.unknown.items.len);
     try std.testing.expectEqualStrings("ZZZZ", &back.unknown.items[0].signature);
@@ -1982,20 +2055,23 @@ test "an unknown optional extension survives a round trip byte for byte" {
 
     const again = try back.toBytes(.{});
     defer gpa.free(again);
-    try std.testing.expectEqualSlices(u8, bytes, again);
+    try std.testing.expectEqualSlices(u8, plain, again);
 }
 
 test "an unknown mandatory extension is refused by name" {
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);
     defer index.deinit();
-    try index.unknown.append(gpa, .{
-        .signature = "zzzz".*,
-        .data = try gpa.dupe(u8, "x"),
-    });
-    const bytes = try index.toBytes(.{});
-    defer gpa.free(bytes);
-    try std.testing.expectError(error.UnsupportedExtension, Index.parse(gpa, .sha1, bytes));
+    const plain = try index.toBytes(.{});
+    defer gpa.free(plain);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    try bytes.appendSlice(gpa, plain[0 .. plain.len - 20]);
+    try bytes.appendSlice(gpa, "zzzz\x00\x00\x00\x01x");
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(bytes.items);
+    try bytes.appendSlice(gpa, hasher.final().raw());
+    try std.testing.expectError(error.UnsupportedExtension, Index.parse(gpa, .sha1, bytes.items));
 }
 
 test "a sparse directory entry reads and writes back, and needs sdir" {
@@ -2187,7 +2263,7 @@ test "a split index is checked once merged: no empty name, no name twice, and th
     // Overlays whose additions are an empty name, and the shared name again.
     const Case = struct { paths: []const []const u8, err: anyerror };
     for ([_]Case{
-        .{ .paths = &.{ "", "b" }, .err = error.InvalidEntryPath },
+        .{ .paths = &.{ "", "b" }, .err = error.CorruptLinkExtension },
         .{ .paths = &.{"a"}, .err = error.UnsortedIndex },
     }) |case| {
         var overlay: Index = .initEmpty(gpa, .sha1);
@@ -2216,6 +2292,85 @@ test "a split index is checked once merged: no empty name, no name twice, and th
     try std.testing.expectError(error.ChecksumMismatch, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 }));
 }
 
+test "a split index's link is held to its shared index as git's merge_base_index holds it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const oid = try Oid.parse(.sha1, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+    const other_oid = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
+
+    var shared: Index = .initEmpty(gpa, .sha1);
+    defer shared.deinit();
+    try shared.add(.{ .path = "a", .oid = oid, .mode = .file });
+    try shared.add(.{ .path = "b", .oid = oid, .mode = .file });
+    const shared_bytes = try shared.toBytes(.{});
+    defer gpa.free(shared_bytes);
+    const base = try Oid.fromRaw(.sha1, shared_bytes[shared_bytes.len - 20 ..]);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const shared_name = try gpa.print("sharedindex.{s}", .{base.hex(&hex)});
+    defer gpa.free(shared_name);
+    try tmp.dir.writeFile(io, .{ .sub_path = shared_name, .data = shared_bytes });
+
+    const Case = struct { deletes: u64, replaces: u64, overlay: []const []const u8, garbage: bool = false, want: ?[]const u8 };
+    for ([_]Case{
+        // `b` replaced by the overlay's nameless entry.
+        .{ .deletes = 0, .replaces = 0b10, .overlay = &.{""}, .want = "a b2" },
+        // Replaced and deleted: the replacement is taken, then the entry goes.
+        .{ .deletes = 0b1, .replaces = 0b1, .overlay = &.{""}, .want = "b" },
+        // Past the shared index's end, either bitmap.
+        .{ .deletes = 0, .replaces = 0b100, .overlay = &.{""}, .want = null },
+        .{ .deletes = 0b100, .replaces = 0, .overlay = &.{}, .want = null },
+        // A replacement with a name, more replacements than entries.
+        .{ .deletes = 0, .replaces = 0b1, .overlay = &.{"x"}, .want = null },
+        .{ .deletes = 0, .replaces = 0b11, .overlay = &.{""}, .want = null },
+        // Bytes after the bitmaps.
+        .{ .deletes = 0, .replaces = 0, .overlay = &.{}, .garbage = true, .want = null },
+    }) |case| {
+        var overlay: Index = .initEmpty(gpa, .sha1);
+        defer overlay.deinit();
+        for (case.overlay) |path| try overlay.entries.append(gpa, .{ .path = try gpa.dupe(u8, path), .oid = other_oid, .mode = .file });
+        const plain = try overlay.toBytes(.{});
+        defer gpa.free(plain);
+        var data: std.ArrayList(u8) = .empty;
+        defer data.deinit(gpa);
+        try data.appendSlice(gpa, base.raw());
+        for ([_]u64{ case.deletes, case.replaces }) |word| {
+            const encoded = try ewah.write(gpa, &.{word}, 64);
+            defer gpa.free(encoded);
+            try data.appendSlice(gpa, encoded);
+        }
+        if (case.garbage) try data.append(gpa, 0);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        try out.appendSlice(gpa, plain[0 .. plain.len - 20]);
+        try out.appendSlice(gpa, "link");
+        var size: [4]u8 = undefined;
+        std.mem.writeInt(u32, &size, @intCast(data.items.len), .big);
+        try out.appendSlice(gpa, &size);
+        try out.appendSlice(gpa, data.items);
+        var hasher: hash.Hasher = .init(.sha1);
+        hasher.update(out.items);
+        try out.appendSlice(gpa, hasher.final().raw());
+        try tmp.dir.writeFile(io, .{ .sub_path = "index", .data = out.items });
+
+        const want = case.want orelse {
+            try std.testing.expectError(error.CorruptLinkExtension, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 }));
+            continue;
+        };
+        var index = try Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 });
+        defer index.deinit();
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        for (index.entries.items, 0..) |e, i| {
+            if (i != 0) try got.append(gpa, ' ');
+            try got.appendSlice(gpa, e.path);
+            if (e.oid.eql(other_oid)) try got.append(gpa, '2');
+        }
+        try std.testing.expectEqualStrings(want, got.items);
+    }
+}
+
 test "entries out of order are refused on the way out, not asserted" {
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);
@@ -2226,17 +2381,20 @@ test "entries out of order are refused on the way out, not asserted" {
     try std.testing.expectError(error.UnsortedIndex, index.toBytes(.{}));
 }
 
-test "a cache tree nested past any tree, or claiming more subtrees than it holds, is refused without a crash" {
+test "a cache tree nested past any tree, claiming more subtrees than it holds, or not the whole tree, is dropped without a crash, as git drops one it cannot read" {
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);
     defer index.deinit();
     const plain = try index.toBytes(.{});
     defer gpa.free(plain);
-    for ([_]usize{ 300_000, 0 }) |depth| {
+    for ([_]usize{ 300_000, 0, 1 }) |depth| {
         var data: std.ArrayList(u8) = .empty;
         defer data.deinit(gpa);
         if (depth == 0) {
             try data.appendSlice(gpa, "\x00-1 4000000000\n");
+        } else if (depth == 1) {
+            // A root with a name: not the whole tree.
+            try data.appendSlice(gpa, "x\x00-1 0\n");
         } else {
             try data.appendSlice(gpa, "\x00-1 1\n");
             for (0..depth) |_| try data.appendSlice(gpa, "x\x00-1 1\n");
@@ -2252,8 +2410,51 @@ test "a cache tree nested past any tree, or claiming more subtrees than it holds
         var hasher: hash.Hasher = .init(.sha1);
         hasher.update(bytes.items);
         try bytes.appendSlice(gpa, hasher.final().raw());
-        try std.testing.expectError(error.CorruptCacheTree, Index.parse(gpa, .sha1, bytes.items));
+        var read = try Index.parse(gpa, .sha1, bytes.items);
+        defer read.deinit();
+        try std.testing.expect(read.cache_tree == null);
+        try std.testing.expect(read.dropped.cache_tree);
     }
+}
+
+test "a cache tree's counts are read as git's parse_int reads them" {
+    var offset: usize = 0;
+    try std.testing.expectEqual(@as(i32, -1), try CacheTree.treeInt("-1 ", &offset, ' '));
+    offset = 0;
+    try std.testing.expectEqual(@as(i32, 5), try CacheTree.treeInt("--5\n", &offset, '\n'));
+    offset = 0;
+    // A minus alone is a number, zero.
+    try std.testing.expectEqual(@as(i32, 0), try CacheTree.treeInt("- ", &offset, ' '));
+    for ([_][]const u8{ "+1 ", " 1 ", "1x ", "", "1" }) |text| {
+        offset = 0;
+        try std.testing.expectError(error.CorruptCacheTree, CacheTree.treeInt(text, &offset, ' '));
+    }
+}
+
+test "an entry's extended flags are read in any version, and a bit git does not know is refused" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    index.version = 3;
+    const oid = try Oid.parse(.sha1, "1111111111111111111111111111111111111111");
+    try index.add(.{ .path = "a", .oid = oid, .mode = .file, .skip_worktree = true });
+    const bytes = try index.toBytes(.{});
+    defer gpa.free(bytes);
+    // The same file said to be version 2.
+    std.mem.writeInt(u32, bytes[4..8], 2, .big);
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(bytes[0 .. bytes.len - 20]);
+    @memcpy(bytes[bytes.len - 20 ..], hasher.final().raw());
+    var two = try Index.parse(gpa, .sha1, bytes);
+    defer two.deinit();
+    try std.testing.expect(two.entries.items[0].skip_worktree);
+    // A bit beside skip-worktree and intent-to-add.
+    const flags_at = 12 + 40 + 20 + 2;
+    bytes[flags_at] |= 0x10;
+    hasher = .init(.sha1);
+    hasher.update(bytes[0 .. bytes.len - 20]);
+    @memcpy(bytes[bytes.len - 20 ..], hasher.final().raw());
+    try std.testing.expectError(error.UnknownEntryFlags, Index.parse(gpa, .sha1, bytes));
 }
 
 test "fuzz: any bytes are an index or a named error" {

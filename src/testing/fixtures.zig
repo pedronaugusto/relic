@@ -467,33 +467,29 @@ test "a split index is read whole and loses no entry" {
     try std.testing.expectEqualStrings(listed, after);
 }
 
-test "fsmonitor and untracked-cache extensions survive a round trip" {
+test "an untracked cache git wrote is read, dropped on write, and git's status is still right" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
-    // `core.untrackedCache` makes git write `UNTR`. `core.fsmonitor` set to
-    // a hook path makes it write `FSMN` — the token is opaque and a file
-    // watcher will supply it later, so what matters now is that neither is
-    // lost when this rewrites the index.
+    // `core.untrackedCache` makes git write `UNTR`, which records what the
+    // working tree's directories held. relic does not keep it up to date,
+    // so it is not written back: git builds it again.
     try repo.exec(io, &.{ "config", "core.untrackedCache", "true" });
     for (0..8) |i| {
         var buf: [32]u8 = undefined;
         try repo.writeFile(io, try std.mem.print(&buf, "d{d}/f{d}.txt", .{ i % 3, i }), "x\n");
     }
-    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "add", "d0", "d1" });
     try repo.exec(io, &.{ "update-index", "--untracked-cache" });
-    try repo.exec(io, &.{ "status", "--porcelain" });
+    const before = try repo.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
+    defer gpa.free(before);
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    const original = try repo.readFile(io, ".git/index");
-    defer gpa.free(original);
-
     var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
     defer index.deinit();
-
     var saw_untracked_cache = false;
     for (index.unknown.items) |extension| {
         if (std.mem.eql(u8, &extension.signature, "UNTR")) saw_untracked_cache = true;
@@ -502,7 +498,16 @@ test "fsmonitor and untracked-cache extensions survive a round trip" {
 
     const written = try index.toBytes(.{});
     defer gpa.free(written);
-    try std.testing.expectEqualSlices(u8, original, written);
+    try std.testing.expect(std.mem.find(u8, written, "UNTR") == null);
+    try repo.writeFile(io, ".git/index", written);
+    // A file the cache did not see, then git's status with and without it.
+    try repo.writeFile(io, "d2/new.txt", "x\n");
+    const after = try repo.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
+    defer gpa.free(after);
+    try std.testing.expect(std.mem.find(u8, after, "?? d2/new.txt") != null);
+    const without = try std.mem.replaceOwned(u8, gpa, after, "?? d2/new.txt\n", "");
+    defer gpa.free(without);
+    try std.testing.expectEqualStrings(before, without);
 }
 
 test "an annotated tag written is one git reads, and its gpgsig header survives" {
