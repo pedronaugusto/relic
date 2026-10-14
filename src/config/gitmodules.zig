@@ -351,7 +351,8 @@ fn curlUrl(url: []const u8) ?[]const u8 {
 }
 
 /// `url_decode` leaves a `%` that is not followed by two hex digits as it
-/// is, so only a well-formed escape can produce a newline.
+/// is, and `%00` too (git's `0 < hex2chr`), so only a well-formed escape of
+/// a newline can produce one.
 fn decodesToNewline(url: []const u8) bool {
     var i: usize = 0;
     while (i < url.len) : (i += 1) {
@@ -642,7 +643,8 @@ test "names and urls: this refuses exactly what git fsck refuses" {
         "../sub",         "https://h:99999/x", "https://h:22/x",     "https://h/%zz",
         "https://h/../x", "https://h/a/../x",  "http::nohost",       "ssh://h/x",
         "user@h:repo",    "./a/../b",          "git://h/a%0ab",      "git://h/a%0Ab",
-        "git://h/ok",     "x%+ay",
+        "git://h/ok",     "x%+ay",             "./a%00%0ab",         "git://h/a%00%0a",
+        "./a%0",          "./a%0a%00",
     };
     for (urls) |url| {
         try expectFsckAgrees("n", url, checkUrl(url));

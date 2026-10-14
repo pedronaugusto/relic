@@ -109,7 +109,7 @@ pub fn prepare(
     var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, .{ .shared = shared, .sync = .none });
     errdefer lock.deinit(io);
 
-    const text = (try fs.readFileAlloc(gpa, io, dir, sub_path, 1 << 24)) orelse try gpa.alloc(u8, 0);
+    const text = (try fs.readFileAlloc(gpa, io, dir, sub_path, config.max_file_bytes)) orelse try gpa.alloc(u8, 0);
     defer gpa.free(text);
     var file = try config.Config.parseText(gpa, text, level);
     defer file.deinit();
