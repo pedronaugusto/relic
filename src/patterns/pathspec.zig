@@ -16,11 +16,15 @@ const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 const glob_mod = @import("../text.zig").glob;
+const decimal = @import("../text.zig").decimal;
 
 /// Errors from reading a pathspec.
 pub const Error = error{
-    /// Magic git does not know, or a long form without its `)`.
+    /// Magic git does not know, short or long, a long form without its `)`,
+    /// or a `prefix:` that is not a number.
     InvalidPathspecMagic,
+    /// `""`, which git refuses ("empty string is not a valid pathspec").
+    EmptyPathspec,
     /// `:(attr:...)`, which needs attributes this does not consult.
     UnsupportedPathspecMagic,
     /// `literal` and `glob` together, which git refuses.
@@ -251,6 +255,7 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
         var icase = false;
         var glob = false;
         var literal = false;
+        if (spec.len == 0) return error.EmptyPathspec;
         var rest = spec;
         if (rest.len > 0 and rest[0] == ':') {
             if (rest.len > 1 and rest[1] == '(') {
@@ -268,15 +273,23 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
                         literal = true;
                     } else if (std.mem.startsWith(u8, w, "attr:")) {
                         return error.UnsupportedPathspecMagic;
-                    } else if (std.mem.startsWith(u8, w, "prefix:")) {} else return error.InvalidPathspecMagic;
+                    } else if (std.mem.startsWith(u8, w, "prefix:")) {
+                        // A number `strtol` reads to the end of the word.
+                        if (decimal.strtol(w["prefix:".len..], 10, 64).end != w.len - "prefix:".len) return error.InvalidPathspecMagic;
+                    } else return error.InvalidPathspecMagic;
                 }
                 rest = rest[close + 1 ..];
             } else {
                 var i: usize = 1;
+                // git's `parse_short_magic`: `/` and `!` (or `^`) are the
+                // mnemonics; another character of its magic class is magic
+                // git has no mnemonic for, which it refuses; anything else
+                // ends the magic.
                 while (i < rest.len and rest[i] != ':') : (i += 1) {
                     switch (rest[i]) {
                         '/' => {},
                         '!', '^' => exclude = true,
+                        '"', '#', '%', '&', '\'', ',', '-', ';', '<', '=', '>', '@', '_', '`', '~' => return error.InvalidPathspecMagic,
                         else => break,
                     }
                 }
@@ -361,4 +374,54 @@ test "fuzz: any pathspec parses or is refused by name, and any path is asked of 
             _ = p.how(path, .{ .directory = true });
         }
     }.one, .{});
+}
+
+test "a pathspec's magic is read as git's parse_short_magic and parse_long_magic read it, and an empty one refused" {
+    const testgit = @import("../testing/git.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    const files = [_][]const u8{ "a", "b/c", "xyz", "-a", "%a", "_a" };
+    for (files) |f| try repo.writeFile(io, f, "x\n");
+    try repo.exec(io, &.{ "add", "--", "." });
+    repo.report_failures = false;
+    for ([_][]const u8{
+        "",              ":/",            ":!a",          ":^a",       ":-a",          ":%a",
+        ":_a",           ":/a",           ":xyz",         ":(top)a",   ":(prefix:0)a", ":(prefix:x)a",
+        ":(prefix:1 )a", ":(prefix:+0)a", ":(nonsense)a", ":(exclude", ":(,top,)a",
+    }) |spec| {
+        const theirs: ?[]u8 = repo.run(io, &.{ "ls-files", "--", spec }) catch |err| switch (err) {
+            error.GitFailed => null,
+            else => |e| return e,
+        };
+        defer if (theirs) |t| gpa.free(t);
+        var p = parse(gpa, &.{spec}) catch |err| {
+            std.testing.expect(theirs == null) catch |e| {
+                std.debug.print("relic refused [{s}] ({t}), git listed:\n{s}", .{ spec, err, theirs.? });
+                return e;
+            };
+            continue;
+        };
+        defer p.deinit();
+        var ours: std.ArrayList(u8) = .empty;
+        defer ours.deinit(gpa);
+        // ls-files lists in index order, which is byte order here.
+        var sorted = files;
+        std.mem.sort([]const u8, &sorted, {}, struct {
+            fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.order(u8, x, y) == .lt;
+            }
+        }.lessThan);
+        for (sorted) |f| if (p.matches(f)) try ours.print(gpa, "{s}\n", .{f});
+        std.testing.expect(theirs != null) catch |e| {
+            std.debug.print("git refused [{s}], relic listed:\n{s}", .{ spec, ours.items });
+            return e;
+        };
+        std.testing.expectEqualStrings(theirs.?, ours.items) catch |e| {
+            std.debug.print("spec [{s}]\n", .{spec});
+            return e;
+        };
+    }
 }
