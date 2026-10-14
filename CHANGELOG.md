@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `repo.fs.permissionsAt` (a path's permissions without following a link: its mode, or on Windows its attributes), `repo.fs.sameFile` (one file by the platform's identity) and `repo.fs.validityAt` (a stat for telling whether a file changed, as git's `stat_validity`).
+
+### Fixed
+
+- On Windows a file's stat is git for Windows' own: its creation time as the change time, no inode, a link's target length as its size. An index relic writes there no longer looks changed in every entry to git, and an index git refreshed no longer looks changed to relic, which had kept files a sparse checkout removes.
+- On Windows a lockable file's read-only attribute is read from the file: the standard library reports no attributes there, so taking a lock never made a read-only file writable again.
+- On Windows a forced checkout replaces a link to a directory standing where a directory goes, and `repo.fs.deleteFile` removes such a link, not what it points at, as git for Windows' `unlink` does.
+
 ## [0.7.0] - 2026-10-14
 
 ### Breaking

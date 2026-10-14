@@ -64,8 +64,7 @@ pub const Seen = ?fs.Stat;
 
 /// What `common_dir`'s shallow file is now.
 pub fn seen(io: Io, common_dir: Io.Dir) fs.StatError!Seen {
-    const entry = (try fs.statAt(io, common_dir, file_name)) orelse return null;
-    return entry.stat;
+    return fs.validityAt(io, common_dir, file_name);
 }
 
 /// How `write` takes its lock.

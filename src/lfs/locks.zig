@@ -1028,12 +1028,9 @@ pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const 
 /// away, as git-lfs does; a file that is not there is left alone. Returns
 /// whether a file was there.
 fn setWritable(io: Io, wt: Io.Dir, path: []const u8, writable: bool) Error!bool {
-    const st = wt.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return false,
-        else => |e| return e,
-    };
-    if (st.kind != .file) return false;
-    const now = st.permissions;
+    const found = (try fs.permissionsAt(io, wt, path)) orelse return false;
+    if (found.kind != .file) return false;
+    const now = found.permissions;
     const wanted = fs.withReadOnly(now, !writable);
     if (wanted != now) try fs.setFilePermissions(io, wt, path, wanted);
     return true;

@@ -53,7 +53,7 @@ fn modes(gpa: Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.String(std.Arr
         std.mem.replaceScalar(u8, path, '\\', '/');
         const kind = if (entry.kind == .directory) dirKindOf(path) else kindOf(path);
         const k = kind orelse continue;
-        const found = switch (platstat.full(dir, entry.path)) {
+        const found = switch (platstat.full(io, dir, entry.path)) {
             .found => |f| f,
             else => continue,
         };
@@ -185,8 +185,8 @@ test "a core.sharedRepository mode the owner cannot read and write refuses the r
 }
 
 /// The permission bits of `path` under `dir`.
-fn modeOf(dir: Io.Dir, path: []const u8) !u32 {
-    return switch (platstat.full(dir, path)) {
+fn modeOf(io: Io, dir: Io.Dir, path: []const u8) !u32 {
+    return switch (platstat.full(io, dir, path)) {
         .found => |f| f.mode & 0o7777,
         else => error.FileNotFound,
     };
@@ -206,7 +206,7 @@ test "core.sharedRepository reaches the shallow file, MERGE_RR, and LFS objects 
         try r.exec(io, &.{ "commit", "-q", "-m", "one" });
         var git_dir = try r.gitDir(io);
         defer git_dir.close(io);
-        const file_mode = try modeOf(git_dir, "index");
+        const file_mode = try modeOf(io, git_dir, "index");
 
         var repo = try Repository.open(gpa, io, r.dir, .{});
         defer repo.deinit(io);
@@ -215,16 +215,16 @@ test "core.sharedRepository reaches the shallow file, MERGE_RR, and LFS objects 
         // The fan-out directory git made for the commit, after the setting.
         var hex: [relic.hash.max_hex_len]u8 = undefined;
         var fan_out_buf: [16]u8 = undefined;
-        const dir_mode = try modeOf(git_dir, try std.mem.print(&fan_out_buf, "objects/{s}", .{head.oid.hex(&hex)[0..2]}));
+        const dir_mode = try modeOf(io, git_dir, try std.mem.print(&fan_out_buf, "objects/{s}", .{head.oid.hex(&hex)[0..2]}));
         try repo.objectDatabase().shallow.put(gpa, head.oid, {});
         try repo.writeShallow(io);
-        try std.testing.expectEqual(file_mode, try modeOf(git_dir, "shallow"));
+        try std.testing.expectEqual(file_mode, try modeOf(io, git_dir, "shallow"));
 
         var locked = try repo.lockIndex(io);
         defer locked.deinit(io);
         var outcome = try relic.merge.rerere.run(gpa, io, &repo, &locked.index, .{});
         outcome.deinit();
-        try std.testing.expectEqual(file_mode, try modeOf(git_dir, "MERGE_RR"));
+        try std.testing.expectEqual(file_mode, try modeOf(io, git_dir, "MERGE_RR"));
 
         var lfs = try relic.lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
         defer lfs.deinit();
@@ -232,7 +232,7 @@ test "core.sharedRepository reaches the shallow file, MERGE_RR, and LFS objects 
         const pointer = try lfs.store.install(io, &source, null);
         var path_buf: [relic.lfs.Store.max_path]u8 = undefined;
         const object_path = try lfs.store.objectPath(&path_buf, &pointer.oid);
-        try std.testing.expectEqual(file_mode & 0o666, try modeOf(git_dir, object_path) & 0o666);
-        try std.testing.expectEqual(dir_mode, try modeOf(git_dir, std.Io.Dir.path.dirnamePosix(object_path).?));
+        try std.testing.expectEqual(file_mode & 0o666, try modeOf(io, git_dir, object_path) & 0o666);
+        try std.testing.expectEqual(dir_mode, try modeOf(io, git_dir, std.Io.Dir.path.dirnamePosix(object_path).?));
     }
 }

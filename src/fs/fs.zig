@@ -494,7 +494,7 @@ pub const StatError = Io.File.OpenError || Io.File.StatError;
 /// walk over a working tree asks this once per entry, so the difference is a
 /// syscall per file.
 pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
-    switch (platstat.full(dir, sub_path)) {
+    switch (platstat.full(io, dir, sub_path)) {
         .absent => return null,
         .found => |f| return .{
             .stat = .fromFull(f),
@@ -514,6 +514,42 @@ pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
         .kind = s.kind,
         .executable = isExecutable(s.permissions),
     };
+}
+
+/// What `sub_path` is now, for telling whether it changed since it was last
+/// looked at, as git's `stat_validity` does: the index's stat, with the
+/// platform's own file id as its inode where the index keeps none
+/// (Windows), so a file replaced by a rename reads as changed even where
+/// Windows carries the old creation time over to the new file.
+pub fn validityAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Stat {
+    switch (platstat.full(io, dir, sub_path)) {
+        .absent => return null,
+        .found => |f| {
+            var stat: Stat = .fromFull(f);
+            stat.ino = @truncate(f.file_id);
+            return stat;
+        },
+        .unavailable => return if (try statAt(io, dir, sub_path)) |found| found.stat else null,
+    }
+}
+
+/// Whether `a_path` in `a` and `b_path` in `b` are one file: the same file
+/// on the same device, by the platform's identity rather than the index's,
+/// which has no inode on Windows. `false` when either cannot be looked at.
+pub fn sameFile(io: Io, a: Io.Dir, a_path: []const u8, b: Io.Dir, b_path: []const u8) bool {
+    const fa = identity(io, a, a_path) orelse return false;
+    const fb = identity(io, b, b_path) orelse return false;
+    return fa.id == fb.id and fa.dev == fb.dev;
+}
+
+fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) ?struct { id: u64, dev: u32 } {
+    switch (platstat.full(io, dir, sub_path)) {
+        .found => |f| return .{ .id = f.file_id, .dev = f.extra.dev },
+        .absent => return null,
+        .unavailable => {},
+    }
+    const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch return null;
+    return .{ .id = @truncate(@as(u128, @bitCast(@as(i128, s.inode)))), .dev = platstat.statAt(dir, sub_path).dev };
 }
 
 /// Whether a permission set has the owner's execute bit.
@@ -807,10 +843,36 @@ pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) I
 /// nothing.
 fn clearReadOnly(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
     if (builtin.target.os.tag != .windows) return false;
-    const st = dir.statFile(io, sub_path, .{}) catch return false;
-    if (!isReadOnly(st.permissions)) return false;
-    setFilePermissions(io, dir, sub_path, withReadOnly(st.permissions, false)) catch return false;
+    const found = (permissionsAt(io, dir, sub_path) catch return false) orelse return false;
+    if (!isReadOnly(found.permissions)) return false;
+    setFilePermissions(io, dir, sub_path, withReadOnly(found.permissions, false)) catch return false;
     return true;
+}
+
+/// What a path's permissions are, and what it is.
+pub const Permissions = struct {
+    kind: Io.File.Kind,
+    permissions: Io.File.Permissions,
+};
+
+/// The permissions of `sub_path` in `dir`, without following a link, or
+/// `null` if nothing is there: the mode bits, or on Windows the file's
+/// attributes, read-only among them, which `std.Io`'s stat leaves out in
+/// 0.17 (it reports no attributes at all there).
+pub fn permissionsAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Permissions {
+    switch (platstat.full(io, dir, sub_path)) {
+        .absent => return null,
+        .found => |f| return .{ .kind = f.kind, .permissions = f.permissions },
+        // Where the platform answers everything else, a stat that cannot be
+        // taken is named by `std.Io`; on Windows its answer would be no
+        // attributes, which is not the file's.
+        .unavailable => if (builtin.target.os.tag == .windows) return error.Unexpected,
+    }
+    const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => |e| return e,
+    };
+    return .{ .kind = s.kind, .permissions = s.permissions };
 }
 
 /// Whether nobody may write the file: no write bit at all, or Windows's
@@ -930,7 +992,7 @@ pub const Shared = union(enum) {
 /// was rather than failing it.
 pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) void {
     if (shared == .umask or !Io.File.Permissions.has_executable_bit) return;
-    const found = switch (platstat.full(dir, sub_path)) {
+    const found = switch (platstat.full(io, dir, sub_path)) {
         .found => |f| f,
         .absent, .unavailable => return,
     };
@@ -980,7 +1042,14 @@ pub fn setFilePermissions(io: Io, dir: Io.Dir, sub_path: []const u8, permissions
     if (builtin.target.os.tag != .windows) return dir.setFilePermissions(io, sub_path, permissions, .{});
     const file = try openAttributesWindows(dir, sub_path);
     defer file.close(io);
-    try file.setPermissions(io, permissions);
+    // Only the attributes a program may set are written, as
+    // `SetFileAttributes` takes them; what the file system keeps for itself
+    // (a directory, a reparse point, compression) is not the caller's.
+    const settable: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x1000 | 0x2000;
+    const wanted = @backingInt(permissions) & settable;
+    // A zero would leave the attributes as they are: no attributes at all is
+    // `FILE_ATTRIBUTE_NORMAL`.
+    try file.setPermissions(io, @fromBackingInt(if (wanted == 0) 0x80 else wanted));
 }
 
 /// `Dir.setTimestamps`, on Windows as well, where the standard library's
@@ -1032,7 +1101,7 @@ pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]co
         .windows => return ownedWindows(io, dir, sub_path, home),
         .wasi => return false,
         else => {
-            const found = switch (platstat.full(dir, sub_path)) {
+            const found = switch (platstat.full(io, dir, sub_path)) {
                 .found => |f| f,
                 .absent, .unavailable => return false,
             };
@@ -1142,11 +1211,25 @@ fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameErro
 
 /// Remove a file, taking a read-only attribute off first where the
 /// platform will not remove a read-only file, as git for Windows does.
+///
+/// A link to a directory is a directory to Windows's file calls, so there it
+/// is removed as one, the link and not what it points at, as git for
+/// Windows' `unlink` removes it.
 pub fn deleteFile(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
     dir.deleteFile(io, sub_path) catch |err| switch (err) {
         error.AccessDenied, error.PermissionDenied => {
             if (!clearReadOnly(io, dir, sub_path)) return err;
             return dir.deleteFile(io, sub_path);
+        },
+        error.IsDir => {
+            if (builtin.target.os.tag != .windows) return err;
+            const found = (statAt(io, dir, sub_path) catch return err) orelse return error.FileNotFound;
+            if (found.kind != .sym_link) return err;
+            // A link holds nothing, so it is never `DirNotEmpty`.
+            dir.deleteDir(io, sub_path) catch |e| return switch (e) {
+                error.DirNotEmpty => err,
+                else => |other| other,
+            };
         },
         else => |e| return e,
     };
@@ -1422,7 +1505,10 @@ test "one stat and two stats describe a path the same way" {
         const one = (try statAt(io, dir, name)).?;
         // The two-call path, which is what a platform without a full stat
         // takes. Both must agree, or a walk would see a different working
-        // tree depending on the platform.
+        // tree depending on the platform. Windows has a full stat, git for
+        // Windows' own, whose inode is zero and whose change time is the
+        // creation time where `std.Io` has the file id and the attribute
+        // change; `windows_git_stat` below holds it to git's.
         const s = try dir.statFile(io, name, .{ .follow_symlinks = false });
         const two: Entry = .{
             .stat = .fromIo(s, platstat.statAt(dir, name)),
@@ -1432,7 +1518,7 @@ test "one stat and two stats describe a path the same way" {
         try std.testing.expectEqual(two.kind, one.kind);
         try std.testing.expectEqual(two.executable, one.executable);
         try std.testing.expectEqual(two.stat.size, one.stat.size);
-        try std.testing.expectEqual(two.stat.ino, one.stat.ino);
+        if (builtin.target.os.tag != .windows) try std.testing.expectEqual(two.stat.ino, one.stat.ino);
         try std.testing.expectEqual(two.stat.dev, one.stat.dev);
         try std.testing.expectEqual(two.stat.uid, one.stat.uid);
         try std.testing.expectEqual(two.stat.gid, one.stat.gid);
@@ -1440,6 +1526,53 @@ test "one stat and two stats describe a path the same way" {
         try std.testing.expectEqual(two.stat.mtime_nsec, one.stat.mtime_nsec);
     }
     try std.testing.expect((try statAt(io, dir, "not-there")) == null);
+}
+
+test "on Windows a stat is git for Windows' own: no inode, the creation time, the read-only attribute as the write bit" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "f", .data = "some bytes\n" });
+    const created = (try statAt(io, tmp.dir, "f")).?.stat;
+    try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+    try tmp.dir.writeFile(io, .{ .sub_path = "f", .data = "more bytes, and more\n" });
+    const ours = (try statAt(io, tmp.dir, "f")).?.stat;
+    try std.testing.expectEqual(@as(u32, 0), ours.ino);
+    try std.testing.expectEqual(@as(u32, 21), ours.size);
+    // The change time git keeps is the creation, which a write leaves; the
+    // last change, which `std.Io` reports, moved with the write.
+    try std.testing.expectEqual(created.ctime_sec, ours.ctime_sec);
+    try std.testing.expectEqual(created.ctime_nsec, ours.ctime_nsec);
+    const changed = Stat.fromIo(try tmp.dir.statFile(io, "f", .{ .follow_symlinks = false }), .{});
+    try std.testing.expect(changed.ctime_sec != ours.ctime_sec or changed.ctime_nsec != ours.ctime_nsec);
+
+    const before = (try permissionsAt(io, tmp.dir, "f")).?;
+    try std.testing.expect(!isReadOnly(before.permissions));
+    try setFilePermissions(io, tmp.dir, "f", withReadOnly(before.permissions, true));
+    const locked = (try permissionsAt(io, tmp.dir, "f")).?;
+    try std.testing.expect(isReadOnly(locked.permissions));
+    try std.testing.expect((try statAt(io, tmp.dir, "f")).?.stat.size == 21);
+    try setFilePermissions(io, tmp.dir, "f", withReadOnly(locked.permissions, false));
+    try std.testing.expect(!isReadOnly((try permissionsAt(io, tmp.dir, "f")).?.permissions));
+}
+
+test "a link to a directory is removed as a link, and what it points at stays" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "target");
+    try tmp.dir.writeFile(io, .{ .sub_path = "target/keep", .data = "mine\n" });
+    tmp.dir.symLink(io, "target", "link", .{ .is_directory = true }) catch |err| switch (err) {
+        // A link needs a privilege Windows may not grant.
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    try deleteFile(io, tmp.dir, "link");
+    try std.testing.expect((try statAt(io, tmp.dir, "link")) == null);
+    try tmp.dir.access(io, "target/keep", .{});
+    // A directory itself is still refused, as a file removal must.
+    if (builtin.target.os.tag == .windows) try std.testing.expectError(error.IsDir, deleteFile(io, tmp.dir, "target"));
 }
 
 test "a sized read gives the whole file whatever the size said" {

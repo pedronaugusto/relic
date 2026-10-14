@@ -13,6 +13,13 @@
 //! pays one `fstatat` per entry rather than two. `extra` remains for a caller
 //! that has the `std.Io` stat already.
 //!
+//! On Windows the stat is git for Windows' own (`mingw_lstat`): the change
+//! time git keeps is the file's creation time, the inode is zero, a link's
+//! size is its target's length, and the mode's write bit is the read-only
+//! attribute. `std.Io`'s stat there reports the attribute-change time, the
+//! file id and no attributes at all, so an index relic wrote would look
+//! changed to git in every entry, and the other way round.
+//!
 //! This is the one place the package goes around `std.Io`, and it goes around
 //! it only where `std.Io.File.Stat` cannot answer. Everything that can come
 //! from `std.Io` does.
@@ -46,9 +53,18 @@ pub const Full = struct {
     mtime_ns: i128,
     ctime_ns: i128,
     size: u64,
+    /// The inode git's index keeps: zero on Windows, where git's own stat
+    /// reports none.
     inode: u64,
-    /// The permission and type bits, as the platform reports them.
+    /// The file's identity on its volume, for telling two paths apart: the
+    /// inode, or on Windows the file id.
+    file_id: u64,
+    /// The permission and type bits, as the platform reports them, and on
+    /// Windows as git for Windows makes them from the attributes.
     mode: u32,
+    /// The permissions as `std.Io` sets them: the mode, or on Windows the
+    /// file's attributes.
+    permissions: Io.File.Permissions,
     kind: Io.File.Kind,
     extra: Extra,
 };
@@ -70,7 +86,8 @@ pub const FullResult = union(enum) {
 /// `unavailable` is the answer on a platform that has no such call and on any
 /// failure that is not a missing path, so the caller falls back to `std.Io`
 /// and gets its named error rather than a guess.
-pub fn full(dir: Io.Dir, sub_path: []const u8) FullResult {
+pub fn full(io: Io, dir: Io.Dir, sub_path: []const u8) FullResult {
+    if (builtin.target.os.tag == .windows) return fullWindows(io, dir, sub_path);
     if (!supported) return .unavailable;
     var path_buf: [4096]u8 = undefined;
     if (sub_path.len >= path_buf.len) return .unavailable;
@@ -109,7 +126,9 @@ pub fn full(dir: Io.Dir, sub_path: []const u8) FullResult {
                 .ctime_ns = @as(i128, statx.ctime.sec) * std.time.ns_per_s + statx.ctime.nsec,
                 .size = statx.size,
                 .inode = statx.ino,
+                .file_id = statx.ino,
                 .mode = statx.mode,
+                .permissions = modePermissions(statx.mode),
                 .kind = kindFromMode(statx.mode),
                 .extra = .{
                     .dev = @truncate(linuxDev(statx)),
@@ -133,7 +152,9 @@ pub fn full(dir: Io.Dir, sub_path: []const u8) FullResult {
                 .ctime_ns = @as(i128, ctime.sec) * std.time.ns_per_s + ctime.nsec,
                 .size = @intCast(@max(st.size, 0)),
                 .inode = st.ino,
+                .file_id = st.ino,
                 .mode = st.mode,
+                .permissions = modePermissions(st.mode),
                 .kind = kindFromMode(st.mode),
                 .extra = .{
                     .dev = deviceBits(st.dev),
@@ -143,6 +164,93 @@ pub fn full(dir: Io.Dir, sub_path: []const u8) FullResult {
             } };
         },
     }
+}
+
+/// The permissions a POSIX mode names, as `std.Io`'s type holds them.
+pub fn modePermissions(mode: u32) Io.File.Permissions {
+    return if (Io.File.Permissions.has_executable_bit) .fromMode(@intCast(mode & 0o7777)) else .default_file;
+}
+
+/// git for Windows' `mingw_lstat`, through one handle opened to read
+/// attributes and nothing else, on the link itself rather than its target.
+fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8) FullResult {
+    const windows = std.os.windows;
+    var path_w = Io.Threaded.sliceToPrefixedFileW(dir.handle, sub_path, .{}) catch return .unavailable;
+    // The directory itself is the empty name relative to it; Windows has no
+    // `.`.
+    if (std.mem.eql(u8, sub_path, ".")) path_w.len = 0;
+    const span = path_w.span();
+    var object_name = windows.UNICODE_STRING.init(span);
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var handle: windows.HANDLE = undefined;
+    switch (windows.ntdll.NtCreateFile(
+        &handle,
+        .{
+            .STANDARD = .{ .SYNCHRONIZE = true },
+            .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
+        },
+        &.{
+            .RootDirectory = if (Io.Dir.path.isAbsoluteWindowsWtf16(span)) null else dir.handle,
+            .ObjectName = &object_name,
+        },
+        &iosb,
+        null,
+        .{ .NORMAL = true },
+        .VALID_FLAGS,
+        .OPEN,
+        .{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
+        null,
+        0,
+    )) {
+        .SUCCESS => {},
+        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND, .NOT_A_DIRECTORY => return .absent,
+        else => return .unavailable,
+    }
+    defer windows.CloseHandle(handle);
+
+    var info: windows.FILE.ALL_INFORMATION = undefined;
+    switch (windows.ntdll.NtQueryInformationFile(handle, &iosb, &info, @sizeOf(windows.FILE.ALL_INFORMATION), .All)) {
+        // More than the buffer holds is the name, which this does not use.
+        .SUCCESS, .BUFFER_OVERFLOW => {},
+        else => return .unavailable,
+    }
+    const attributes = info.BasicInformation.FileAttributes;
+    // A reparse point is a link when it is a name surrogate, as `std.Io`
+    // reads it, so a junction is never walked through either.
+    const kind: Io.File.Kind = if (attributes.REPARSE_POINT) kind: {
+        var tag: windows.FILE.ATTRIBUTE_TAG_INFO = undefined;
+        switch (windows.ntdll.NtQueryInformationFile(handle, &iosb, &tag, @sizeOf(windows.FILE.ATTRIBUTE_TAG_INFO), .AttributeTag)) {
+            .SUCCESS => {},
+            else => return .unavailable,
+        }
+        break :kind if (tag.ReparseTag.IsSurrogate) .sym_link else .unknown;
+    } else if (attributes.DIRECTORY) .directory else .file;
+
+    // git's `file_attr_to_st_mode`: read for the owner always, write unless
+    // read-only, and no execute bit anywhere.
+    const type_bits: u32 = switch (kind) {
+        .sym_link => 0o120000,
+        .directory => 0o040000,
+        else => if (attributes.DIRECTORY) 0o040000 else 0o100000,
+    };
+    const mode: u32 = type_bits | 0o400 | @as(u32, if (attributes.READONLY) 0 else 0o200);
+    // A link's size is its target's length, as `lstat` gives it and the
+    // index records it.
+    const size: u64 = if (kind == .sym_link) size: {
+        var target: [Io.Dir.max_path_bytes]u8 = undefined;
+        break :size dir.readLink(io, sub_path, &target) catch return .unavailable;
+    } else @bitCast(info.StandardInformation.EndOfFile);
+    return .{ .found = .{
+        .mtime_ns = windows.fromSysTime(info.BasicInformation.LastWriteTime).nanoseconds,
+        .ctime_ns = windows.fromSysTime(info.BasicInformation.CreationTime).nanoseconds,
+        .size = size,
+        .inode = 0,
+        .file_id = @bitCast(info.InternalInformation.IndexNumber),
+        .mode = mode,
+        .permissions = @fromBackingInt(@as(u32, @bitCast(attributes))),
+        .kind = kind,
+        .extra = .{},
+    } };
 }
 
 fn linuxDev(statx: std.os.linux.Statx) u64 {

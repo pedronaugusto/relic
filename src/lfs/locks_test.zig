@@ -22,6 +22,7 @@ const testlfs = @import("../testing/lfs.zig");
 const lt = @import("transfer_test.zig");
 const lfs = @import("lfs.zig");
 const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
 
 const Fixture = lt.Fixture;
 
@@ -76,10 +77,25 @@ const Pair = struct {
 
 /// What git-lfs changes on a lockable file: its permission bits, or on
 /// Windows its read-only attribute.
+/// The first directory of a Windows `PATH` holding `name`.
+fn directoryHolding(io: Io, path: []const u8, name: []const u8) ![]const u8 {
+    var dirs = std.mem.tokenizeScalar(u8, path, ';');
+    while (dirs.next()) |dir| {
+        var buf: [Io.Dir.max_path_bytes]u8 = undefined;
+        const candidate = std.mem.print(&buf, "{s}\\{s}", .{ dir, name }) catch continue;
+        if (!Io.Dir.path.isAbsolute(candidate)) continue;
+        Io.Dir.accessAbsolute(io, candidate, .{}) catch continue;
+        return dir;
+    }
+    return error.FileNotFound;
+}
+
 fn mode(io: Io, d: Io.Dir, path: []const u8) !u32 {
-    const st = try d.statFile(io, path, .{});
-    if (builtin.target.os.tag == .windows) return @as(u32, @intCast(@backingInt(st.permissions))) & file_attribute_readonly;
-    return @intCast(st.permissions.toMode() & 0o777);
+    // On Windows the read-only attribute, which `std.Io`'s stat does not
+    // report there.
+    const found = (try fs.permissionsAt(io, d, path)) orelse return error.FileNotFound;
+    if (builtin.target.os.tag == .windows) return @as(u32, @intCast(@backingInt(found.permissions))) & file_attribute_readonly;
+    return @intCast(found.permissions.toMode() & 0o777);
 }
 
 /// `FILE_ATTRIBUTE_READONLY`.
@@ -324,13 +340,25 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
         if (Io.File.Permissions.has_executable_bit) try file.setPermissions(io, .fromMode(0o755));
     }
 
-    // No git-lfs anywhere on the path the hooks are run with.
+    // No git-lfs anywhere on the path the hooks are run with. On Windows
+    // that path keeps the directory `sh` is in: git for Windows starts a
+    // `#!/bin/sh` hook through the interpreter's name on `PATH`, as relic
+    // does, so without it the hook could not start at all.
     try fx.tmp.dir.createDirPath(io, "empty-path");
     const empty = try fx.path("empty-path");
     defer gpa.free(empty);
     var bare_env = try fx.env.clone(gpa);
     defer bare_env.deinit();
-    try bare_env.put("PATH", empty);
+    if (builtin.target.os.tag == .windows) {
+        const sh_dir = try directoryHolding(io, fx.env.get("PATH") orelse "", "sh.exe");
+        var lfs_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+        const beside = try std.mem.print(&lfs_buf, "{s}\\git-lfs.exe", .{sh_dir});
+        // The test means nothing where git-lfs sits beside `sh`.
+        try testing.expectError(error.FileNotFound, Io.Dir.accessAbsolute(io, beside, .{}));
+        const both = try std.mem.concat(gpa, u8, &.{ empty, ";", sh_dir });
+        defer gpa.free(both);
+        try bare_env.put("PATH", both);
+    } else try bare_env.put("PATH", empty);
 
     var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
     defer repo.deinit(io);

@@ -663,12 +663,9 @@ pub const Repository = struct {
         };
     }
 
-    /// Whether two handles are one directory: the same inode on the same
-    /// device.
+    /// Whether two handles are one directory.
     fn sameDir(io: Io, a: Io.Dir, b: Io.Dir) bool {
-        const sa = (fs.statAt(io, a, ".") catch return false) orelse return false;
-        const sb = (fs.statAt(io, b, ".") catch return false) orelse return false;
-        return sa.stat.ino == sb.stat.ino and sa.stat.dev == sb.stat.dev;
+        return fs.sameFile(io, a, ".", b, ".");
     }
 
     fn finish(gpa: Allocator, io: Io, discovered: Discovered, options: OpenOptions) ErrorNamespace.Error!Repository {

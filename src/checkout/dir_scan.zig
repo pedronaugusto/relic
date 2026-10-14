@@ -28,6 +28,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const fs = @import("../fs/fs.zig");
+const platstat = @import("../fs/stat.zig");
 /// Whether this platform has a call that reads a batch of entries with their
 /// stats. A run-time `ENOTSUP` from the volume is still possible, and is a
 /// fallback rather than a failure.
@@ -397,7 +398,9 @@ fn parseEntry(bytes: []const u8) ?Parsed {
                     .ctime_ns = @as(i128, ctime_sec) * std.time.ns_per_s + ctime_nsec,
                     .size = size,
                     .inode = fileid,
+                    .file_id = fileid,
                     .mode = mode,
+                    .permissions = platstat.modePermissions(mode),
                     .kind = kind,
                     .extra = .{ .dev = devid, .uid = uid, .gid = gid },
                 }),
