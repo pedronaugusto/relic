@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-14
+
 ### Breaking
 
 - `object.Signature.parse` reads an ident as git's `split_ident_line`: a malformed date or zone is a person with no date, never `InvalidSignatureTime`. A commit whose author or committer git cannot read parses with `Signature.unknown` and `Commit.malformed_idents` set, a tag whose tagger git cannot read has none, and a header line with no space is an extra header with no value; fsck still refuses each.
