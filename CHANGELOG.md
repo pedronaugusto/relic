@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `object.Signature.parse` reads an ident as git's `split_ident_line`: a malformed date or zone is a person with no date, never `InvalidSignatureTime`. A commit whose author or committer git cannot read parses with `Signature.unknown` and `Commit.malformed_idents` set, a tag whose tagger git cannot read has none, and a header line with no space is an extra header with no value; fsck still refuses each.
+- `object.Mode.parse` reads any number of octal digits and folds them as git's `canon_mode` (`Mode.canonical`): only the owner's execute bit makes a file executable, and `0` and every value of no other type is a gitlink. A tree entry whose name holds a `/` reads, as git reads it, and fsck reports it.
+- `odb.pack.Index` reads version 1 indexes (`Index.version`); `Index.Located.crc` and `Index.crcAt` are `?u32`, `null` in version 1, whose entries a repack writes again rather than copies. `UnsupportedIndexVersion` is gone.
+- `index.Index` reads the extended flag word in any version and refuses a bit git does not know (`UnknownEntryFlags`); a `TREE`, `REUC` or `FSMN` that cannot be read is dropped and said in `Index.dropped`, where it refused the index; unknown optional extensions such as `UNTR` are read but no longer written back; a split index's `link` is held to its shared index (`CorruptLinkExtension`).
+- `config.interpolatePath` and `Config.getPath` return `config.PathError`: `~user` expands to that user's home, and no home, no such user and `%(prefix)/` are `UnexpandablePath`, as git's `interpolate_path` gives up on them. An include that cannot be expanded or that does not parse is an error and only a missing one is skipped; a relative include or `gitdir:./` condition from the command line is `RelativeIncludeOutsideFile`.
+- `patterns.attributes.Attrs.addText` takes a `Form`: `.file` as git reads a file (a UTF-8 BOM passed over, a line ending at a NUL) or `.blob` as it reads one from the index or a tree (ending at its first NUL).
+- `patterns.pathspec.parse` refuses `""` (`EmptyPathspec`), short magic git has no mnemonic for and a `prefix:` that is not a number (`InvalidPathspecMagic`).
+- `refs.Format.parse`, `extensions.refStorage` and `extensions.objectFormat` take a format's name exactly.
+
+### Fixed
+
+- `packed-refs` is read by git's grammar: a traits header only as the first line, any space character after the object name, a newline after every line, the peeled line exactly, a name that reaches outside the store refused, and a broken name's peeled value dropped.
+- A reflog line is read as git's `show_one_reflog_ent`: a last line with no newline, a zero time, or a zone that is not a sign and four digits is skipped, and the message starts after one tab.
+- A `tables.list` whose last name has no newline is refused; a `.git/shallow` line is an object name and whatever follows, an empty line refused; `@{-n}` is read with `strtol`; a `commondir` that is there but cannot be read is an error.
+- An alternates file is cut as git's `parse_alt_odb_entries` cuts it: a CR stays in the path, broken quoting reads the line as it is, a quoted name may hold a newline, and the byte after a closing quote is passed over.
+- An `@<stamp>` past a time's range is no stamp, and the date goes on to the general reader.
+- An attributes line is read as git's `parse_attr_line`: a CR is blank, a name no attribute may have or one beginning `builtin_` passes the line over, `-a=b` unsets `a`, a negative pattern is ignored, and `[attr] x` is a pattern.
+- `GIT_CONFIG_COUNT` is read by `strtoul` and no more than an `int` holds; a `GIT_CONFIG_NOSYSTEM` that is no boolean is an error.
+- A configuration file is read up to 1 GiB, where 16 MiB was the cap.
+
 ## [0.8.0] - 2026-10-14
 
 ### Breaking
