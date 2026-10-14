@@ -363,27 +363,16 @@ pub const Attrs = struct {
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw_line| {
             line_number += 1;
-            var line = raw_line;
-            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            if (line.len >= max_line_length) continue;
-            line = std.mem.trim(u8, line, " \t");
-            if (line.len == 0 or line[0] == '#') continue;
-
-            if (std.mem.startsWith(u8, line, "[attr]")) {
-                // A macro is defined only at the top: the root's file, the
-                // global one or `info/attributes`. git refuses one further
-                // down with a warning, as `READ_ATTR_MACRO_OK` allows.
-                if (base.len != 0) continue;
-                const rest = std.mem.trim(u8, line["[attr]".len..], " \t");
-                const space = std.mem.findAny(u8, rest, " \t") orelse continue;
-                const name = rest[0..space];
-                const assignments = try parseAssignments(a, rest[space + 1 ..]);
-                try attrs.macros.append(a, .{ .name = name, .assignments = assignments, .precedence = precedence });
-                continue;
+            const line = (try parseLine(a, raw_line, base.len == 0)) orelse continue;
+            switch (line) {
+                .macro => |macro| {
+                    try attrs.macros.append(a, .{ .name = macro.name, .assignments = macro.assignments, .precedence = precedence });
+                    continue;
+                },
+                .rule => {},
             }
-
-            const parsed = (try parsePattern(a, line)) orelse continue;
-            const assignments = try parseAssignments(a, parsed.rest);
+            const parsed = line.rule.pattern;
+            const assignments = line.rule.assignments;
             if (assignments.len == 0) continue;
             if (!try sets.add(&builder, parsed.glob, parsed.anchored, parsed.dir_only, attrs.case_fold)) continue;
             try rules.append(a, .{
@@ -529,21 +518,55 @@ const ParsedPattern = struct {
     glob: []const u8,
     anchored: bool,
     dir_only: bool,
-    rest: []const u8,
 };
 
-fn parsePattern(a: Allocator, line: []const u8) Allocator.Error!?ParsedPattern {
-    var i: usize = 0;
-    var glob: []const u8 = undefined;
-    if (line[0] == '"') {
-        const quoted = (try c_quote.unquote(a, line)) orelse return null;
-        glob = quoted.name;
-        i = quoted.consumed;
+/// git's `blank` in `attr.c`: a carriage return is as blank as a space.
+const blank = " \t\r\n";
+
+/// One line of an attributes file, as git's `parse_attr_line` reads it.
+const Line = union(enum) {
+    rule: struct { pattern: ParsedPattern, assignments: []Assignment },
+    macro: struct { name: []const u8, assignments: []Assignment },
+};
+
+/// git's `parse_attr_line`: `null` for a blank line, a comment, and every
+/// line git passes over with a warning -- one `max_line_length` long or
+/// longer, a macro where none may be defined, a name no attribute may have
+/// (or `builtin_`, git's own), a negative pattern.
+fn parseLine(a: Allocator, raw: []const u8, macro_ok: bool) Allocator.Error!?Line {
+    if (raw.len >= Attrs.max_line_length) return null;
+    const cp = std.mem.trimStart(u8, raw, blank);
+    if (cp.len == 0 or cp[0] == '#') return null;
+    var name: []const u8 = undefined;
+    var states: []const u8 = undefined;
+    const quoted = if (cp[0] == '"') try c_quote.unquote(a, cp) else null;
+    if (quoted) |q| {
+        name = q.name;
+        states = cp[q.consumed..];
     } else {
-        const space = std.mem.findAny(u8, line, " \t") orelse return null;
-        glob = line[0..space];
-        i = space;
+        const len = std.mem.findAny(u8, cp, blank) orelse cp.len;
+        name = cp[0..len];
+        states = cp[len..];
     }
+    const macro_prefix = "[attr]";
+    const is_macro = name.len > macro_prefix.len and std.mem.startsWith(u8, name, macro_prefix);
+    if (is_macro) {
+        if (!macro_ok) return null;
+        const rest = std.mem.trimStart(u8, name[macro_prefix.len..], blank);
+        name = rest[0 .. std.mem.findAny(u8, rest, blank) orelse rest.len];
+        if (!attrNameValid(name)) return null;
+    }
+    states = std.mem.trimStart(u8, states, blank);
+    const assignments = (try parseAssignments(a, states)) orelse return null;
+    if (is_macro) return .{ .macro = .{ .name = name, .assignments = assignments } };
+    // "Negative patterns are ignored in git attributes".
+    if (name.len > 0 and name[0] == '!') return null;
+    const pattern = parsePattern(name) orelse return null;
+    return .{ .rule = .{ .pattern = pattern, .assignments = assignments } };
+}
+
+fn parsePattern(name: []const u8) ?ParsedPattern {
+    var glob = name;
     var anchored = false;
     var dir_only = false;
     if (glob.len > 0 and glob[glob.len - 1] == '/') {
@@ -557,27 +580,44 @@ fn parsePattern(a: Allocator, line: []const u8) Allocator.Error!?ParsedPattern {
         anchored = true;
     }
     if (glob.len == 0) return null;
-    return .{ .glob = glob, .anchored = anchored, .dir_only = dir_only, .rest = line[i..] };
+    return .{ .glob = glob, .anchored = anchored, .dir_only = dir_only };
 }
 
-fn parseAssignments(a: Allocator, text: []const u8) Allocator.Error![]Assignment {
-    var count: usize = 0;
-    var words = std.mem.tokenizeAny(u8, text, " \t");
-    while (words.next() != null) count += 1;
-    const out = try a.alloc(Assignment, count);
-    words.reset();
-    for (out) |*assignment| {
-        const word = words.next().?;
-        assignment.* = if (word[0] == '-')
-            .{ .name = word[1..], .state = .unset }
+/// git's `parse_attr`, over a line's states: `name`, `-name`, `!name` and
+/// `name=value`, a `-` or `!` taking the name before any `=`. `null` when a
+/// name is not one an attribute may have, which refuses the whole line.
+fn parseAssignments(a: Allocator, text: []const u8) Allocator.Error!?[]Assignment {
+    var out: std.ArrayList(Assignment) = .empty;
+    var cp = text;
+    while (cp.len != 0) {
+        const ep = std.mem.findAny(u8, cp, blank) orelse cp.len;
+        const word = cp[0..ep];
+        const equals = std.mem.findScalar(u8, word, '=');
+        const len = equals orelse ep;
+        const negated = word[0] == '-' or word[0] == '!';
+        const attr_name = if (negated) word[1..len] else word[0..len];
+        if (!attrNameValid(attr_name) or std.mem.startsWith(u8, attr_name, "builtin_")) return null;
+        try out.append(a, if (word[0] == '-')
+            .{ .name = attr_name, .state = .unset }
         else if (word[0] == '!')
-            .{ .name = word[1..], .state = .unspecified }
-        else if (std.mem.findScalar(u8, word, '=')) |eq|
-            .{ .name = word[0..eq], .state = .{ .value = word[eq + 1 ..] } }
+            .{ .name = attr_name, .state = .unspecified }
+        else if (equals) |eq|
+            .{ .name = attr_name, .state = .{ .value = word[eq + 1 ..] } }
         else
-            .{ .name = word, .state = .set };
+            .{ .name = attr_name, .state = .set });
+        cp = std.mem.trimStart(u8, cp[ep..], blank);
     }
-    return out;
+    return try out.toOwnedSlice(a);
+}
+
+/// git's `attr_name_valid`: letters, digits, `-`, `.` and `_`, not empty
+/// and not beginning with `-`.
+fn attrNameValid(name: []const u8) bool {
+    if (name.len == 0 or name[0] == '-') return false;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '.' and c != '_') return false;
+    }
+    return true;
 }
 
 /// The settings from `core` that take part in line-ending conversion.
@@ -1172,4 +1212,57 @@ test "attribute queries release their scratch on every allocation failure" {
             try std.testing.expectEqualStrings("long", result.value("diff").?);
         }
     }.query, .{&attrs});
+}
+
+test "an attributes file is read as git check-attr reads it, line for line" {
+    const testgit = @import("../testing/git.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    const text = "*.a foo\n" ++
+        "*.b -foo bar=1\n" ++
+        "*.c foo\r\n" ++
+        "  *.d   foo\t bar  \n" ++
+        "*.e -foo=x\n" ++
+        "*.f !foo\n" ++
+        "*.g foo bad!name\n" ++
+        "*.h builtin_x foo\n" ++
+        "!*.i foo\n" ++
+        "\"*.j\" foo\n" ++
+        "[attr]m foo -bar\n" ++
+        "*.k m\n" ++
+        "[attr] n foo\n" ++
+        "*.l n\n" ++
+        "*.m x.y=z -bar\n";
+    try repo.writeFile(io, ".gitattributes", text);
+    var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
+    defer attrs.deinit();
+    try attrs.addText(text, "", ".gitattributes", 1);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const names = [_][]const u8{ "foo", "bar", "m", "n", "x.y" };
+    for ([_][]const u8{ "x.a", "x.b", "x.c", "x.d", "x.e", "x.f", "x.g", "x.h", "x.i", "x.j", "x.k", "x.l", "x.m" }) |path| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.append(gpa, "check-attr");
+        try argv.appendSlice(gpa, &names);
+        try argv.appendSlice(gpa, &.{ "--", path });
+        const theirs = try repo.run(io, argv.items);
+        defer gpa.free(theirs);
+        const found = try attrs.lookup(arena.allocator(), path, .file);
+        var ours: std.ArrayList(u8) = .empty;
+        defer ours.deinit(gpa);
+        for (names) |name| {
+            const said: []const u8 = if (found.get(name)) |state| switch (state) {
+                .set => "set",
+                .unset => "unset",
+                .unspecified => "unspecified",
+                .value => |v| v,
+            } else "unspecified";
+            try ours.print(gpa, "{s}: {s}: {s}\n", .{ path, name, said });
+        }
+        try std.testing.expectEqualStrings(theirs, ours.items);
+    }
 }
