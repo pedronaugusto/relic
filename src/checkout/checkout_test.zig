@@ -656,7 +656,7 @@ test "core.safecrlf refuses irreversible staging and reports warnings" {
     const gpa = std.testing.allocator;
     var h = try Harness.init(gpa, io, &.{});
     defer h.deinit(io);
-    try h.attrs.addText("*.txt text\n", "", "info/attributes", attributes.info_precedence);
+    try h.attrs.addText("*.txt text\n", "", "info/attributes", attributes.info_precedence, .file);
     try h.repo.writeFile(io, "mixed.txt", "one\r\ntwo\n");
 
     var rules = h.worktreeRules();

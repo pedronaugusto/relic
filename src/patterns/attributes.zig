@@ -349,20 +349,35 @@ pub const Attrs = struct {
             error.StreamTooLong => return,
             else => |e| return e,
         } orelse return;
-        try attrs.addText(bytes, base, source, precedence);
+        try attrs.addText(bytes, base, source, precedence, .file);
     }
 
     /// Add a level from text already in memory, which must outlive the
     /// attributes.
-    pub fn addText(attrs: *Attrs, text: []const u8, base: []const u8, source: []const u8, precedence: u32) Self.Error!void {
+    /// How git reads an attributes text: a file line by line (a UTF-8 BOM
+    /// before the first line passed over, each line ending at a NUL in it),
+    /// or a blob from the index or a tree as one C string (ending at its
+    /// first NUL, no BOM passed over).
+    pub const Form = enum { file, blob };
+
+    pub fn addText(attrs: *Attrs, text: []const u8, base: []const u8, source: []const u8, precedence: u32, form: Form) Self.Error!void {
         const a = attrs.arena.allocator();
         var rules: std.ArrayList(Rule) = .empty;
         var builder: sets.Builder = try .init(attrs.gpa);
         defer builder.deinit();
         var line_number: u32 = 0;
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        while (lines.next()) |raw_line| {
+        const read = switch (form) {
+            .file => text,
+            .blob => text[0 .. std.mem.findScalar(u8, text, 0) orelse text.len],
+        };
+        var lines = std.mem.splitScalar(u8, read, '\n');
+        while (lines.next()) |whole_line| {
             line_number += 1;
+            var raw_line = whole_line;
+            if (form == .file) {
+                if (line_number == 1) raw_line = std.mem.cutPrefix(u8, raw_line, "\xef\xbb\xbf") orelse raw_line;
+                raw_line = raw_line[0 .. std.mem.findScalar(u8, raw_line, 0) orelse raw_line.len];
+            }
             const line = (try parseLine(a, raw_line, base.len == 0)) orelse continue;
             switch (line) {
                 .macro => |macro| {
@@ -971,7 +986,7 @@ test "text=auto normalises a text file and leaves a binary one" {
     const gpa = std.testing.allocator;
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText("* text=auto\n", "", ".gitattributes", 1);
+    try attrs.addText("* text=auto\n", "", ".gitattributes", 1, .file);
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1036,7 +1051,7 @@ test "-text turns conversion off whatever the configuration says" {
     const gpa = std.testing.allocator;
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText("*.bin -text\n", "", ".gitattributes", 1);
+    try attrs.addText("*.bin -text\n", "", ".gitattributes", 1, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = try attrs.lookup(arena.allocator(), "x.bin", .file);
@@ -1049,7 +1064,7 @@ test "the eol attribute beats core.eol" {
     const gpa = std.testing.allocator;
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText("*.txt text eol=crlf\n*.sh text eol=lf\n", "", ".gitattributes", 1);
+    try attrs.addText("*.txt text eol=crlf\n*.sh text eol=lf\n", "", ".gitattributes", 1, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
@@ -1068,7 +1083,7 @@ test "a macro expands, and the built-in binary macro is there" {
     const gpa = std.testing.allocator;
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText("[attr]mine -text diff=zig\n*.zz mine\n*.png binary\n", "", ".gitattributes", 1);
+    try attrs.addText("[attr]mine -text diff=zig\n*.zz mine\n*.png binary\n", "", ".gitattributes", 1, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
@@ -1095,7 +1110,7 @@ test "macros naming each other many times over expand once each, where each expa
         try text.append(gpa, '\n');
     }
     try text.appendSlice(gpa, "[attr]m8 leaf\n* m0\n");
-    try attrs.addText(text.items, "", ".gitattributes", 1);
+    try attrs.addText(text.items, "", ".gitattributes", 1, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const found = try attrs.lookup(arena.allocator(), "f", .file);
@@ -1107,14 +1122,14 @@ test "a deeper file wins, and info/attributes wins over both" {
     const gpa = std.testing.allocator;
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText("* text\n", "", ".gitattributes", 1);
-    try attrs.addText("* -text\n", "sub", "sub/.gitattributes", 2);
+    try attrs.addText("* text\n", "", ".gitattributes", 1, .file);
+    try attrs.addText("* -text\n", "sub", "sub/.gitattributes", 2, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const deep = try attrs.lookup(arena.allocator(), "sub/a.txt", .file);
     try std.testing.expectEqual(State.unset, deep.get("text").?);
 
-    try attrs.addText("* text=auto\n", "", "info/attributes", info_precedence);
+    try attrs.addText("* text=auto\n", "", "info/attributes", info_precedence, .file);
     const highest = try attrs.lookup(arena.allocator(), "sub/a.txt", .file);
     try std.testing.expectEqualStrings("auto", highest.value("text").?);
 }
@@ -1123,7 +1138,7 @@ test "an unimplemented setting is named" {
     const gpa = std.testing.allocator;
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText("*.po working-tree-encoding=SHIFT-JIS\n*.txt working-tree-encoding=UTF-16\n*.lfs filter=lfs\n", "", ".gitattributes", 1);
+    try attrs.addText("*.po working-tree-encoding=SHIFT-JIS\n*.txt working-tree-encoding=UTF-16\n*.lfs filter=lfs\n", "", ".gitattributes", 1, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
@@ -1154,7 +1169,7 @@ fn fuzzAttrs(_: void, case: *shakedown_mod.Case) anyerror!void {
     case.source.bytes(path);
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    attrs.addText(text, "", "fuzz", 1) catch return;
+    attrs.addText(text, "", "fuzz", 1, .file) catch return;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = attrs.lookup(arena.allocator(), path, .file) catch return;
@@ -1167,7 +1182,7 @@ test "quoted attributes decode C escapes once" {
     const gpa = std.testing.allocator;
     var attrs = try Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText("\"tab\\tname\" diff=tab\n\"quote\\\"name\" diff=quote\n\"octal\\040name\" diff=octal\n", "", ".gitattributes", 1);
+    try attrs.addText("\"tab\\tname\" diff=tab\n\"quote\\\"name\" diff=quote\n\"octal\\040name\" diff=octal\n", "", ".gitattributes", 1, .file);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const cases = .{ .{ "tab\tname", "tab" }, .{ "quote\"name", "quote" }, .{ "octal name", "octal" } };
@@ -1183,8 +1198,8 @@ test "attribute sets survive every allocation failure and keep precedence" {
         fn exercise(gpa: Allocator) !void {
             var attrs = try Attrs.init(gpa, .{ .case_fold = true });
             defer attrs.deinit();
-            try attrs.addText("[attr]source text diff=zig\n*.zig source\n*.bin binary\n", "", ".gitattributes", 1);
-            try attrs.addText("*.ZIG diff=deep\n", "src", "src/.gitattributes", 2);
+            try attrs.addText("[attr]source text diff=zig\n*.zig source\n*.bin binary\n", "", ".gitattributes", 1, .file);
+            try attrs.addText("*.ZIG diff=deep\n", "src", "src/.gitattributes", 2, .file);
             var arena = std.heap.ArenaAllocator.init(gpa);
             defer arena.deinit();
             const found = try attrs.lookup(arena.allocator(), "src/main.Zig", .file);
@@ -1201,7 +1216,7 @@ test "attribute queries release their scratch on every allocation failure" {
     var attrs = try Attrs.init(gpa, .{});
     defer attrs.deinit();
     const pattern = &@as([1800]u8, @splat('?'));
-    try attrs.addText(pattern ++ " text\n" ++ pattern ++ " diff=long\n", "", ".gitattributes", 1);
+    try attrs.addText(pattern ++ " text\n" ++ pattern ++ " diff=long\n", "", ".gitattributes", 1, .file);
     var no_resize = shakedown_mod.alloc.NoResize.init(gpa);
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn query(a: Allocator, loaded: *const Attrs) !void {
@@ -1235,15 +1250,16 @@ test "an attributes file is read as git check-attr reads it, line for line" {
         "*.k m\n" ++
         "[attr] n foo\n" ++
         "*.l n\n" ++
-        "*.m x.y=z -bar\n";
+        "*.m x.y=z -bar\n" ++
+        "*.n foo\x00bar\n*.o foo\n";
     try repo.writeFile(io, ".gitattributes", text);
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText(text, "", ".gitattributes", 1);
+    try attrs.addText(text, "", ".gitattributes", 1, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const names = [_][]const u8{ "foo", "bar", "m", "n", "x.y" };
-    for ([_][]const u8{ "x.a", "x.b", "x.c", "x.d", "x.e", "x.f", "x.g", "x.h", "x.i", "x.j", "x.k", "x.l", "x.m" }) |path| {
+    for ([_][]const u8{ "x.a", "x.b", "x.c", "x.d", "x.e", "x.f", "x.g", "x.h", "x.i", "x.j", "x.k", "x.l", "x.m", "x.n", "x.o" }) |path| {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
         try argv.append(gpa, "check-attr");

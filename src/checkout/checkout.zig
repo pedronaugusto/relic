@@ -2428,7 +2428,7 @@ pub fn addTreeAttributes(
         const found = try db.read(io, item.value_ptr.oid);
         defer db.allocator().free(found.bytes);
         const depth: u32 = if (base.len == 0) 0 else @intCast(std.mem.count(u8, base, "/") + 1);
-        try attrs.addText(try arena.dupe(u8, found.bytes), base, path, depth + 1);
+        try attrs.addText(try arena.dupe(u8, found.bytes), base, path, depth + 1, .blob);
     }
 }
 

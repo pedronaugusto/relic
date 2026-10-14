@@ -107,7 +107,7 @@ test "CVE-2022-23521, t0003-attributes 'large attributes line ignored in tree' a
     try text.print(gpa, "a {d:0>2045}trailing attribute\n", .{1});
     // One byte shorter is a line like any other.
     try text.print(gpa, "kept {d:0>2042}\n", .{1});
-    try attrs.addText(text.items, "", ".gitattributes", 1);
+    try attrs.addText(text.items, "", ".gitattributes", 1, .file);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     try std.testing.expectEqual(@as(usize, 0), (try attrs.lookup(arena.allocator(), "path", .file)).items.len);

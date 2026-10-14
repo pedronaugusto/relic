@@ -590,7 +590,7 @@ fn row4() !void {
 
     var attrs = try worktree.attributes.Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    try attrs.addText(attribute_text.items, "", ".gitattributes", 1);
+    try attrs.addText(attribute_text.items, "", ".gitattributes", 1, .file);
     const Lookup = struct {
         attrs: *const worktree.attributes.Attrs,
         paths: []const []const u8,
