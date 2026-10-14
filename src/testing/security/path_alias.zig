@@ -177,6 +177,22 @@ test "CVE-2019-1353, t1014-read-tree-confusing and t0060-path-utils (MINGW): the
     }
 }
 
+test "a tree entry whose name holds a slash reads, and is checked out as the path it spells, as git does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var h = try hostile.Harness.init(gpa, io);
+    defer h.deinit(io);
+    const blob = try h.blob(io, "x\n");
+    const tree = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = "a/b", .oid = blob }});
+    try std.testing.expectEqual(null, try h.checkout(gpa, io, tree));
+    try h.repo.dir.access(io, "a/b", .{});
+    // Through the name, never past what the path rules allow.
+    const up = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = "../escape", .oid = blob }});
+    try std.testing.expect(try h.checkout(gpa, io, up) != null);
+    const git = try h.writeTree(gpa, io, &.{.{ .mode = "100644", .name = ".git/config", .oid = blob }});
+    try std.testing.expect(try h.checkout(gpa, io, git) != null);
+}
+
 test "CVE-2019-1354, verify_path under protectNTFS: a name holding a backslash is a path where Windows checks it out, and a file name elsewhere" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

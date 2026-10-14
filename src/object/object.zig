@@ -134,21 +134,33 @@ pub const Mode = enum(u32) {
         };
     }
 
-    /// The mode an octal tree field names.
-    ///
-    /// `100664` and `100664`-shaped historical modes fold to `file`, and a
-    /// bare `0` directory to `tree`, which is what git's own reader does; a
-    /// mode that is none of those is `error.InvalidMode`.
+    /// The mode an octal tree field names, as git's tree reader takes it:
+    /// `get_mode` reads octal digits, at least one and as many as there are,
+    /// wrapping as C's `unsigned int` does, and `canon_mode` folds the value
+    /// to one of the five. Anything but an octal digit is
+    /// `error.InvalidMode` ("malformed mode in tree entry").
     pub const ParseError = error{InvalidMode};
 
     pub fn parse(octal: []const u8) Mode.ParseError!Mode {
-        if (octal.len == 0 or octal.len > 6) return error.InvalidMode;
+        if (octal.len == 0) return error.InvalidMode;
         var value: u32 = 0;
         for (octal) |c| {
             if (c < '0' or c > '7') return error.InvalidMode;
-            value = value * 8 + (c - '0');
+            value = value *% 8 +% (c - '0');
         }
-        return fromRaw(value);
+        return canonical(value);
+    }
+
+    /// git's `canon_mode`: a regular file is executable by its owner's bit
+    /// alone, a link and a directory are theirs by type, and every other
+    /// value, `0` among them, is a gitlink.
+    pub fn canonical(value: u32) Mode {
+        return switch (value & 0o170000) {
+            0o100000 => if (value & 0o100 != 0) .exec else .file,
+            0o120000 => .symlink,
+            0o040000 => .tree,
+            else => .gitlink,
+        };
     }
 
     /// Errors from `fromRaw`.
@@ -258,8 +270,11 @@ pub const Tree = struct {
             const after_mode = rest[space + 1 ..];
             const nul = std.mem.findScalar(u8, after_mode, 0) orelse return error.TruncatedTree;
             const name = after_mode[0..nul];
+            // An empty name is "empty filename in tree entry". A name with a
+            // `/` in it reads, as git reads one, and is checked out as the
+            // path it spells under the checkout's path rules; fsck reports it
+            // (`fullPathname`).
             if (name.len == 0) return error.InvalidEntryName;
-            if (std.mem.findScalar(u8, name, '/') != null) return error.InvalidEntryName;
             const raw_len = it.tree.kind.rawLen();
             const oid_start = space + 1 + nul + 1;
             if (rest.len < oid_start + raw_len) return error.TruncatedTree;
@@ -1079,7 +1094,26 @@ test "modes read and write the way a tree carries them" {
     try std.testing.expectEqualStrings("120000", Mode.symlink.text(&buf));
     try std.testing.expectEqual(Mode.file, try Mode.parse("100664"));
     try std.testing.expectEqual(Mode.tree, try Mode.parse("40000"));
-    try std.testing.expectError(error.InvalidMode, Mode.parse("777777"));
+}
+
+test "a tree's mode folds as git's canon_mode folds it" {
+    // The owner's execute bit alone makes a file executable.
+    try std.testing.expectEqual(Mode.exec, try Mode.parse("100700"));
+    try std.testing.expectEqual(Mode.file, try Mode.parse("100655"));
+    // A link and a directory by their type bits, whatever else is set.
+    try std.testing.expectEqual(Mode.symlink, try Mode.parse("120644"));
+    try std.testing.expectEqual(Mode.tree, try Mode.parse("040755"));
+    // Everything else, nothing at all among it, is a gitlink.
+    try std.testing.expectEqual(Mode.gitlink, try Mode.parse("0"));
+    try std.testing.expectEqual(Mode.gitlink, try Mode.parse("777777"));
+    try std.testing.expectEqual(Mode.gitlink, try Mode.parse("1"));
+    // As many digits as there are, wrapping as an unsigned int: eleven
+    // digits leave the low 32 bits, here a file.
+    try std.testing.expectEqual(Mode.file, try Mode.parse("00000100644"));
+    try std.testing.expectEqual(Mode.file, try Mode.parse("40000100644"));
+    try std.testing.expectError(error.InvalidMode, Mode.parse(""));
+    try std.testing.expectError(error.InvalidMode, Mode.parse("10064x"));
+    try std.testing.expectError(error.InvalidMode, Mode.parse("-1"));
 }
 
 test "a loose object header parses and refuses a padded size" {
@@ -1133,7 +1167,7 @@ fn fuzzObject(_: void, case: *shakedown.Case) anyerror!void {
     // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = Signature.parse(input) catch {};
     // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = Mode.parse(input[0..@min(input.len, 6)]) catch {};
+    _ = Mode.parse(input[0..@min(input.len, 16)]) catch {};
 }
 
 /// All errors reported by this namespace.

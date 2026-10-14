@@ -381,7 +381,10 @@ fn matchObjectHeaderDate(date: []const u8) ?Parsed {
     if (date.len == 0 or !isDigit(date[0])) return null;
     var i: usize = 0;
     var stamp: i64 = 0;
-    while (i < date.len and isDigit(date[i])) : (i += 1) stamp = stamp *| 10 +| (date[i] - '0');
+    // A stamp past what a time holds is git's `TIME_MAX`, which it refuses.
+    while (i < date.len and isDigit(date[i])) : (i += 1) {
+        stamp = std.math.add(i64, std.math.mul(i64, stamp, 10) catch return null, date[i] - '0') catch return null;
+    }
     if (at(date, i) != ' ' or (at(date, i + 1) != '+' and at(date, i + 1) != '-')) return null;
     const sign = date[i + 1];
     const zstart = i + 2;
@@ -1214,6 +1217,9 @@ test "mail dates read as git reads them" {
     try std.testing.expectEqual(Parsed{ .secs = 1700000000, .offset_minutes = -300 }, parse("2023-11-14 17:13:20 -0500", ctx).?);
     try std.testing.expectEqual(Parsed{ .secs = 1700000000, .offset_minutes = 120 }, parse("@1700000000 +0200", ctx).?);
     try std.testing.expect(parse("not a date", ctx) == null);
+    // A stamp past a time's range is not a stamp, as git's `TIME_MAX` is
+    // not: the text goes on to the general reader, as in git.
+    if (parse("@99999999999999999999 +0000", ctx)) |p| try std.testing.expect(p.secs != std.math.maxInt(i64));
 }
 
 test "fuzz: any text is a date or no date, never a crash" {

@@ -79,9 +79,9 @@ const no_block = std.math.maxInt(u64);
 pub const IndexError = error{
     /// The file was shorter than its own headers say.
     TruncatedIndex,
-    /// A version 1 index. git still reads them; this does not, by name.
-    UnsupportedIndexVersion,
-    /// The magic was there but the version was neither 1 nor 2.
+    /// The magic was there but the version was not 2: git's "index file
+    /// is version %d; this build only handles version 2". A version 1 index
+    /// has no magic at all.
     UnknownIndexVersion,
     /// The fanout does not rise, or its last entry is not the object count.
     CorruptIndexFanout,
@@ -94,9 +94,10 @@ pub const IndexError = error{
     ChecksumMismatch,
 } || Allocator.Error || Io.Dir.ReadFileAllocError;
 
-/// A packfile's `.idx`, version 2.
+/// A packfile's `.idx`, version 2 or the version 1 git still reads.
 ///
-/// The whole file is held in memory: it is about twenty-six bytes per object
+/// Version 1 has no magic, no CRCs and no 64-bit offsets: each entry is a
+/// 4-byte offset and a name, after the fanout. The whole file is held in memory: it is about twenty-six bytes per object
 /// and every lookup is a bisection inside it, so there is nothing to gain by
 /// leaving it on the disk.
 pub const Index = struct {
@@ -105,9 +106,15 @@ pub const Index = struct {
     gpa: Allocator,
     kind: Kind,
     bytes: []const u8,
+    /// 1 or 2.
+    version: u32,
     /// How many objects the pack holds.
     count: u32,
+    fanout_at: usize,
     names_at: usize,
+    /// From one name to the next: the name, and in version 1 the offset
+    /// beside it.
+    names_stride: usize,
     crcs_at: usize,
     offsets_at: usize,
     large_at: usize,
@@ -122,9 +129,10 @@ pub const Index = struct {
         index: u32,
         /// The byte offset of its entry in the pack.
         offset: u64,
-        /// The CRC32 of its compressed entry, which the index carries so a
-        /// corrupt pack is caught without inflating it.
-        crc: u32,
+        /// The CRC32 of its compressed entry, which a version 2 index
+        /// carries so a corrupt pack is caught without inflating it; `null`
+        /// in version 1, which has none.
+        crc: ?u32,
     };
 
     pub const OpenOptions = struct {
@@ -132,7 +140,7 @@ pub const Index = struct {
         max_bytes: usize = 1 << 30,
     };
 
-    /// Read `sub_path` in `dir` as a version 2 index.
+    /// Read `sub_path` in `dir` as a pack index.
     ///
     /// `max_bytes` bounds the read; an index larger than that is
     /// `error.StreamTooLong` rather than an allocation nobody asked for.
@@ -155,9 +163,8 @@ pub const Index = struct {
         const raw_len = kind.rawLen();
         if (bytes.len < 8) return error.TruncatedIndex;
         // Version 1 has no magic at all: it begins with its fanout. That is
-        // how the two are told apart, and why the magic is checked before
-        // the length.
-        if (!std.mem.eql(u8, bytes[0..4], idx_magic)) return error.UnsupportedIndexVersion;
+        // how the two are told apart, as git's `load_idx` tells them.
+        if (!std.mem.eql(u8, bytes[0..4], idx_magic)) return parseVersion1(gpa, kind, bytes);
         const version = std.mem.readInt(u32, bytes[4..8], .big);
         if (version != 2) return error.UnknownIndexVersion;
         if (bytes.len < 8 + 1024 + 2 * raw_len) return error.TruncatedIndex;
@@ -194,8 +201,11 @@ pub const Index = struct {
             .gpa = gpa,
             .kind = kind,
             .bytes = bytes,
+            .version = 2,
             .count = count,
+            .fanout_at = fanout_at,
             .names_at = names_at,
+            .names_stride = raw_len,
             .crcs_at = crcs_at,
             .offsets_at = offsets_at,
             .large_at = large_at,
@@ -203,23 +213,72 @@ pub const Index = struct {
             .pack_checksum = pack_checksum,
         };
 
-        // The fanout must agree with the names it indexes, and the names must
-        // rise. Both are cheap and both are how a truncated or shuffled index
-        // is caught before a lookup silently misses.
+        try index.checkOrder();
+        return index;
+    }
+
+    /// git's version 1: the fanout, then a 4-byte offset and a name per
+    /// object, then the two checksums, and exactly that many bytes.
+    fn parseVersion1(gpa: Allocator, kind: Kind, bytes: []u8) Self.IndexError!Index {
+        const raw_len = kind.rawLen();
+        if (bytes.len < 1024 + 2 * raw_len) return error.TruncatedIndex;
+        var previous: u32 = 0;
+        for (0..256) |i| {
+            const value = std.mem.readInt(u32, bytes[i * 4 ..][0..4], .big);
+            if (value < previous) return error.CorruptIndexFanout;
+            previous = value;
+        }
+        const count = previous;
+        const stride = 4 + raw_len;
+        if (bytes.len != 1024 + @as(u64, count) * stride + 2 * raw_len) return error.TruncatedIndex;
+
+        var checksum_hasher: hash.Hasher = .init(kind);
+        checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
+        // unreachable: the slice is cut to the format's raw length
+        const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
+        if (!checksum_hasher.final().eql(stored_checksum)) return error.ChecksumMismatch;
+
+        const index: Index = .{
+            .gpa = gpa,
+            .kind = kind,
+            .bytes = bytes,
+            .version = 1,
+            .count = count,
+            .fanout_at = 0,
+            .names_at = 1024 + 4,
+            .names_stride = stride,
+            .crcs_at = 0,
+            .offsets_at = 1024,
+            .large_at = 0,
+            .large_count = 0,
+            // unreachable: the slice is cut to the format's raw length
+            .pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable,
+        };
+        try index.checkOrder();
+        return index;
+    }
+
+    /// The fanout must agree with the names it indexes, and the names must
+    /// rise. Both are cheap and both are how a truncated or shuffled index
+    /// is caught before a lookup silently misses.
+    fn checkOrder(index: Index) Self.IndexError!void {
         var i: u32 = 1;
-        while (i < count) : (i += 1) {
+        while (i < index.count) : (i += 1) {
             const a = index.rawNameAt(i - 1);
             const b = index.rawNameAt(i);
             if (std.mem.order(u8, a, b) != .lt) return error.UnsortedIndex;
         }
         for (0..256) |bucket| {
-            const end = std.mem.readInt(u32, bytes[fanout_at + bucket * 4 ..][0..4], .big);
-            if (end > count) return error.CorruptIndexFanout;
+            const end = index.fanout(bucket);
+            if (end > index.count) return error.CorruptIndexFanout;
             if (end > 0 and index.rawNameAt(end - 1)[0] > bucket) return error.CorruptIndexFanout;
-            if (end < count and index.rawNameAt(end)[0] < bucket) return error.CorruptIndexFanout;
+            if (end < index.count and index.rawNameAt(end)[0] < bucket) return error.CorruptIndexFanout;
         }
+    }
 
-        return index;
+    /// How many names begin with a byte up to `bucket`.
+    fn fanout(index: Index, bucket: usize) u32 {
+        return std.mem.readInt(u32, index.bytes[index.fanout_at + bucket * 4 ..][0..4], .big);
     }
 
     /// Release the index.
@@ -230,7 +289,7 @@ pub const Index = struct {
 
     fn rawNameAt(index: Index, i: u32) []const u8 {
         const raw_len = index.kind.rawLen();
-        return index.bytes[index.names_at + @as(usize, i) * raw_len ..][0..raw_len];
+        return index.bytes[index.names_at + @as(usize, i) * index.names_stride ..][0..raw_len];
     }
 
     /// The name of the object at position `i`.
@@ -241,6 +300,7 @@ pub const Index = struct {
 
     /// The pack offset of the object at position `i`.
     pub fn offsetAt(index: Index, i: u32) Self.IndexError!u64 {
+        if (index.version == 1) return std.mem.readInt(u32, index.bytes[index.offsets_at + @as(usize, i) * index.names_stride ..][0..4], .big);
         const small = std.mem.readInt(u32, index.bytes[index.offsets_at + @as(usize, i) * 4 ..][0..4], .big);
         if (small & 0x8000_0000 == 0) return small;
         const row = small & 0x7fff_ffff;
@@ -248,8 +308,10 @@ pub const Index = struct {
         return std.mem.readInt(u64, index.bytes[index.large_at + @as(usize, row) * 8 ..][0..8], .big);
     }
 
-    /// The CRC32 of the compressed entry at position `i`.
-    pub fn crcAt(index: Index, i: u32) u32 {
+    /// The CRC32 of the compressed entry at position `i`; `null` in a
+    /// version 1 index, which carries none.
+    pub fn crcAt(index: Index, i: u32) ?u32 {
+        if (index.version == 1) return null;
         return std.mem.readInt(u32, index.bytes[index.crcs_at + @as(usize, i) * 4 ..][0..4], .big);
     }
 
@@ -257,8 +319,8 @@ pub const Index = struct {
     pub fn find(index: Index, oid: Oid) Self.IndexError!?Located {
         if (oid.kind != index.kind) return null;
         const raw = oid.raw();
-        var lo: u32 = if (raw[0] == 0) 0 else std.mem.readInt(u32, index.bytes[8 + (@as(usize, raw[0]) - 1) * 4 ..][0..4], .big);
-        var hi: u32 = std.mem.readInt(u32, index.bytes[8 + @as(usize, raw[0]) * 4 ..][0..4], .big);
+        var lo: u32 = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
+        var hi: u32 = index.fanout(raw[0]);
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
             switch (std.mem.order(u8, index.rawNameAt(mid), raw)) {
@@ -299,8 +361,8 @@ pub const Index = struct {
         var lo: u32 = 0;
         var hi: u32 = index.count;
         if (prefix.len >= 2) {
-            lo = if (raw[0] == 0) 0 else std.mem.readInt(u32, index.bytes[8 + (@as(usize, raw[0]) - 1) * 4 ..][0..4], .big);
-            hi = std.mem.readInt(u32, index.bytes[8 + @as(usize, raw[0]) * 4 ..][0..4], .big);
+            lo = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
+            hi = index.fanout(raw[0]);
         }
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
@@ -1356,11 +1418,22 @@ test "the delta cache is byte-bounded and least recently used" {
     try std.testing.expectEqual(@as(usize, 6), cache.bytes);
 }
 
-test "a version 1 index is refused by name" {
+test "an index with no magic is read as version 1, and a version past 2 is refused by name" {
     const gpa = std.testing.allocator;
+    // A version 1 index of no objects: the fanout, then the two checksums.
     var bytes = try gpa.alloc(u8, 1024 + 40);
     @memset(bytes, 0);
-    try std.testing.expectError(error.UnsupportedIndexVersion, Index.parse(gpa, .sha1, bytes));
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(bytes[0 .. 1024 + 20]);
+    @memcpy(bytes[1024 + 20 ..], hasher.final().raw());
+    var empty = try Index.parse(gpa, .sha1, bytes);
+    try std.testing.expectEqual(@as(u32, 1), empty.version);
+    try std.testing.expectEqual(@as(u32, 0), empty.count);
+    empty.deinit();
+    // One byte more than its count asks for.
+    bytes = try gpa.alloc(u8, 1024 + 41);
+    @memset(bytes, 0);
+    try std.testing.expectError(error.TruncatedIndex, Index.parse(gpa, .sha1, bytes));
     bytes = try gpa.alloc(u8, 8 + 1024 + 40);
     @memset(bytes, 0);
     @memcpy(bytes[0..4], idx_magic);

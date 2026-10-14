@@ -284,4 +284,5 @@ test {
 
 test {
     _ = @import("testing/codec_object.zig");
+    _ = @import("testing/object_corpus.zig");
 }

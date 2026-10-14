@@ -110,6 +110,20 @@ pub const Unquoted = struct {
 /// `unquote_c_style` gives up too: an unknown escape, an octal escape
 /// whose first digit is above 3, or no closing quote.
 pub fn unquote(gpa: Allocator, text: []const u8) Allocator.Error!?Unquoted {
+    return unquoteUntil(gpa, text, .line);
+}
+
+/// Where a quoted name may run to.
+pub const Extent = enum {
+    /// The line it is on: a newline ends it unclosed.
+    line,
+    /// The whole string, newlines and all, as `unquote_c_style` scans a
+    /// buffer that holds a whole file (the alternates file).
+    string,
+};
+
+/// `unquote`, over `extent`.
+pub fn unquoteUntil(gpa: Allocator, text: []const u8, extent: Extent) Allocator.Error!?Unquoted {
     if (text.len == 0 or text[0] != '"') return null;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -153,9 +167,10 @@ pub fn unquote(gpa: Allocator, text: []const u8) Allocator.Error!?Unquoted {
                 };
                 try out.append(gpa, byte);
             },
-            // a NUL or a newline ends the line the name is on, as the C
-            // string git scans ends
-            0, '\n' => break,
+            // a NUL ends the C string git scans, and a newline the line
+            // the name is on
+            0 => break,
+            '\n' => if (extent == .line) break else try out.append(gpa, c),
             else => try out.append(gpa, c),
         }
     }

@@ -56,56 +56,53 @@ pub const Alternates = struct {
     }
 };
 
-fn alternateLine(raw: []const u8) ?[]const u8 {
-    const line = std.mem.trimEnd(u8, raw, "\r");
-    if (line.len == 0 or line[0] == '#') return null;
-    return line;
-}
+/// One entry of an alternates file, cut as git's `parse_alt_odb_entries`
+/// cuts the whole file: a comment runs to the newline, a quoted path to its
+/// closing quote, anything else to the newline with nothing trimmed (a CR
+/// stays part of the path). Broken quoting is read as an unquoted path.
+/// After either, one more byte is passed over, which is the newline.
+const AlternateEntry = struct {
+    /// The path, the caller's; `null` for a comment or an empty entry.
+    path: ?[]u8,
+    /// The bytes of the file the entry took.
+    start: usize,
+    end: usize,
+};
 
-/// Git accepts C-style quoted lines for names that cannot be written raw.
-/// Malformed quoted lines name no directory, as an inaccessible path does.
-fn parseAlternate(gpa: Allocator, raw: []const u8) Allocator.Error!?[]u8 {
-    const line = alternateLine(raw) orelse return null;
-    if (line[0] != '"') {
-        const value = try gpa.dupe(u8, line);
-        return value;
+const c_quote = @import("../text.zig").c_quote;
+
+fn nextAlternate(gpa: Allocator, text: []const u8, cursor: *usize) Allocator.Error!?AlternateEntry {
+    const start = cursor.*;
+    if (start >= text.len) return null;
+    const rest = text[start..];
+    var path: ?[]u8 = null;
+    var taken: usize = undefined;
+    const quoted = if (rest[0] == '"') try c_quote.unquoteUntil(gpa, rest, .string) else null;
+    if (rest[0] == '#') {
+        taken = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
+    } else if (quoted) |q| {
+        path = q.name;
+        taken = q.consumed;
+    } else {
+        taken = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
+        path = try gpa.dupe(u8, rest[0..taken]);
     }
-    if (line.len < 2 or line[line.len - 1] != '"') return null;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    var i: usize = 1;
-    while (i < line.len - 1) : (i += 1) {
-        var c = line[i];
-        if (c == '\\') {
-            i += 1;
-            if (i >= line.len - 1) return null;
-            c = switch (line[i]) {
-                'a' => 7,
-                'b' => 8,
-                'f' => 12,
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'v' => 11,
-                '\\' => '\\',
-                '"' => '"',
-                '0'...'3' => blk: {
-                    if (i + 2 >= line.len - 1) return null;
-                    const d1 = line[i + 1];
-                    const d2 = line[i + 2];
-                    if (d1 < '0' or d1 > '7' or d2 < '0' or d2 > '7') return null;
-                    const value = (line[i] - '0') * 64 + (d1 - '0') * 8 + (d2 - '0');
-                    i += 2;
-                    break :blk value;
-                },
-                else => return null,
+    if (taken < rest.len) taken += 1;
+    cursor.* = start + taken;
+    // A C string ends at its first NUL, and an empty path names nothing.
+    if (path) |p| {
+        const len = std.mem.findScalar(u8, p, 0) orelse p.len;
+        if (len == 0) {
+            gpa.free(p);
+            path = null;
+        } else if (len < p.len) {
+            path = if (gpa.resize(p, len)) p[0..len] else blk: {
+                defer gpa.free(p);
+                break :blk try gpa.dupe(u8, p[0..len]);
             };
-        } else if (c == '"') return null;
-        try out.append(gpa, c);
+        }
     }
-    if (out.items.len == 0 or std.mem.findScalar(u8, out.items, 0) != null) return null;
-    const value = try out.toOwnedSlice(gpa);
-    return value;
+    return .{ .path = path, .start = start, .end = cursor.* };
 }
 
 fn appendAlternatePath(gpa: Allocator, out: *std.ArrayList(u8), path: []const u8) Allocator.Error!void {
@@ -314,8 +311,8 @@ pub const Odb = struct {
             for (paths.items) |path| gpa.free(path);
             paths.deinit(gpa);
         }
-        var lines = std.mem.splitScalar(u8, file, '\n');
-        while (lines.next()) |raw| if (try parseAlternate(gpa, raw)) |path| {
+        var cursor: usize = 0;
+        while (try nextAlternate(gpa, file, &cursor)) |entry| if (entry.path) |path| {
             paths.append(gpa, path) catch {
                 gpa.free(path);
                 return error.OutOfMemory;
@@ -349,20 +346,15 @@ pub const Odb = struct {
         defer content.deinit(odb.backendData().gpa);
         var changed = false;
         var cursor: usize = 0;
-        while (cursor < listed.text.len) {
-            const end = std.mem.findScalarPos(u8, listed.text, cursor, '\n') orelse listed.text.len;
-            const raw = listed.text[cursor..end];
-            if (try parseAlternate(odb.backendData().gpa, raw)) |existing| {
+        while (try nextAlternate(odb.backendData().gpa, listed.text, &cursor)) |entry| {
+            if (entry.path) |existing| {
                 defer odb.backendData().gpa.free(existing);
                 if (std.mem.eql(u8, existing, path)) {
                     changed = true;
-                    cursor = @min(end + 1, listed.text.len);
                     continue;
                 }
             }
-            const next = @min(end + 1, listed.text.len);
-            try content.appendSlice(odb.backendData().gpa, listed.text[cursor..next]);
-            cursor = next;
+            try content.appendSlice(odb.backendData().gpa, listed.text[entry.start..entry.end]);
         }
         if (changed) try odb.writeAlternates(io, content.items);
     }
@@ -396,9 +388,9 @@ pub const Odb = struct {
         if (depth > odb.backendData().options.max_alternate_depth) return;
         const text = (try fs.readFileAlloc(odb.backendData().gpa, io, dir, "info/alternates", 1 << 20)) orelse return;
         defer odb.backendData().gpa.free(text);
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        while (lines.next()) |raw_line| {
-            const line = (try parseAlternate(odb.backendData().gpa, raw_line)) orelse continue;
+        var cursor: usize = 0;
+        while (try nextAlternate(odb.backendData().gpa, text, &cursor)) |entry| {
+            const line = entry.path orelse continue;
             defer odb.backendData().gpa.free(line);
             const alt = (try opening.openDirectory(io, dir, line)) orelse continue;
             if (try odb.alreadySource(io, alt)) {
@@ -1305,8 +1297,8 @@ pub const Odb = struct {
     /// Rehash every object the database holds against its own name.
     ///
     /// Loose objects are inflated and named; every pack is checked against
-    /// its trailing checksum, every entry against the CRC its index carries,
-    /// and every object against the name the index gives it.
+    /// its trailing checksum, every entry against the CRC a version 2 index
+    /// carries, and every object against the name the index gives it.
     pub fn verify(odb: *Odb, io: Io) ErrorNamespace.Error!Report {
         var report: Report = .{};
         for (odb.backendData().sources.items) |*source| {
@@ -1461,7 +1453,9 @@ pub const Odb = struct {
             if (i == c.items.len) return c.checksum.update(c.span);
             const item = &c.items[i];
             const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
-            if (warp.Crc32.hash(stored) != c.p.index.crcAt(item.position)) return error.ChecksumMismatch;
+            // A version 1 index has no CRC; the inflate and the name below
+            // check the entry there, as git's verify does.
+            if (c.p.index.crcAt(item.position)) |crc| if (warp.Crc32.hash(stored) != crc) return error.ChecksumMismatch;
             if (item.body.len == 0) return;
             const len: usize = @intCast(item.header.size);
             var stream: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
@@ -1866,6 +1860,10 @@ pub const Odb = struct {
         for (ordered, 0..) |item, pos| {
             if (item.loose) continue;
             const at = (try odb.locatePacked(item.oid)) orelse continue;
+            // An entry with no CRC to check it by (a version 1 index) is
+            // written from its object, as git reuses one only once it has
+            // inflated it; nothing unchecked is copied.
+            const crc = at.crc orelse continue;
             const entry = try at.pack.entryHeaderAt(io, at.offset);
             const order = try orderOf(gpa, &orders, at.pack);
             const stored: Stored = .{
@@ -1873,7 +1871,7 @@ pub const Odb = struct {
                 .entry_at = at.offset,
                 .len = std.math.cast(usize, order.endOf(at.pack, at.offset) - at.offset) orelse continue,
                 .data_from = @intCast(entry.data_at - at.offset),
-                .crc = at.crc,
+                .crc = crc,
             };
             const base_oid = switch (entry.kind) {
                 .object => {
@@ -1905,7 +1903,7 @@ pub const Odb = struct {
     }
 
     /// Where `oid` is in this database's packs, with its CRC.
-    fn locatePacked(odb: *Odb, oid: Oid) ErrorNamespace.Error!?struct { pack: *pack.Pack, offset: u64, crc: u32 } {
+    fn locatePacked(odb: *Odb, oid: Oid) ErrorNamespace.Error!?struct { pack: *pack.Pack, offset: u64, crc: ?u32 } {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const p = &source.packs.items[located.at].pack;
@@ -4221,9 +4219,26 @@ test "alternate path quoting round trips comment prefixes and control bytes" {
     defer encoded.deinit(gpa);
     const path = "#quoted\\name\n\x01";
     try appendAlternatePath(gpa, &encoded, path);
-    const decoded = (try parseAlternate(gpa, encoded.items)).?;
+    var cursor: usize = 0;
+    const decoded = (try nextAlternate(gpa, encoded.items, &cursor)).?.path.?;
     defer gpa.free(decoded);
     try std.testing.expectEqualStrings(path, decoded);
+}
+
+test "an alternates file is cut as git's parse_alt_odb_entries cuts it" {
+    const gpa = std.testing.allocator;
+    const text = "# c\n../plain\r\n\"a\"xb\n\"quo\\\\ted\"\n\n\"\"\n\"bad\\q\"\n\"multi\nline\"\n\"unclosed";
+    var cursor: usize = 0;
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(gpa);
+    while (try nextAlternate(gpa, text, &cursor)) |entry| if (entry.path) |p| {
+        defer gpa.free(p);
+        try got.print(gpa, "[{s}]", .{p});
+    };
+    // A CR stays in the path; the byte after a closing quote is passed
+    // over, whatever it is; broken quoting reads the line as it is; a
+    // quoted name may hold a newline, the file being one string to git.
+    try std.testing.expectEqualStrings("[../plain\r][a][b][quo\\ted][\"bad\\q\"][multi\nline][\"unclosed]", got.items);
 }
 
 test "git reads an alternate relic wrote and relic reads one git wrote" {
@@ -4397,7 +4412,7 @@ test "an index offset past its pack is refused by verify, not read as another en
     defer index.deinit();
     const entries = try gpa.alloc(pack.IndexEntry, index.count);
     defer gpa.free(entries);
-    for (entries, 0..) |*e, i| e.* = .{ .oid = index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)), .crc = index.crcAt(@intCast(i)) };
+    for (entries, 0..) |*e, i| e.* = .{ .oid = index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)), .crc = index.crcAt(@intCast(i)).? };
     // The entry at the pack's first offset, said to be 4 GiB further on:
     // a 64-bit offset in a pack far smaller.
     for (entries) |*e| if (e.offset == 12) {
@@ -4414,6 +4429,39 @@ test "an index offset past its pack is refused by verify, not read as another en
     defer db.deinit(io);
     try std.testing.expectEqual(@as(usize, 1), db.packCount());
     try std.testing.expectError(error.TruncatedPack, db.verify(io));
+}
+
+test "a pack with a version 1 index reads and verifies, as git's does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..4) |i| {
+        const content = try gpa.print("file {d}\n", .{i});
+        defer gpa.free(content);
+        try repo.writeFile(io, "f", content);
+        try repo.exec(io, &.{ "add", "f" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", "c" });
+    }
+    try repo.exec(io, &.{ "-c", "pack.indexVersion=1", "repack", "-q", "-a", "-d" });
+    const head = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head);
+    const blob = try repo.line(io, &.{ "rev-parse", "HEAD:f" });
+    defer gpa.free(blob);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try Odb.open(gpa, io, git_dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    try std.testing.expectEqual(@as(usize, 1), db.packCount());
+    const found = try db.read(io, try Oid.parse(.sha1, blob));
+    defer gpa.free(found.bytes);
+    try std.testing.expectEqualStrings("file 3\n", found.bytes);
+    const report = try db.verify(io);
+    try std.testing.expectEqual(@as(u32, 12), report.packed_objects);
+    const commit = try db.read(io, try Oid.parse(.sha1, head));
+    defer gpa.free(commit.bytes);
+    try std.testing.expectEqual(object.Type.commit, commit.type);
 }
 
 test "bytes after a loose object's stream are refused, as git refuses them" {
