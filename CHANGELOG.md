@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-15
+
 ### Breaking
 
 - Pins uplink 0.6.0 and cloak 0.6.0, whose types relic's HTTP options carry (`cloak.ClientAuth`, `cloak.Trust.Snapshot`, `uplink.tls.ClientOptions`). cloak stays on uplink's line: relic hands cloak's values to uplink, so both must build one cloak. An RSA client key is no longer tested for primality as it loads (cloak 0.6), only for the agreement of its numbers.
