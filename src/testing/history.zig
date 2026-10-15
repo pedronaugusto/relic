@@ -391,6 +391,33 @@ test "a merge one side stopped is concluded by the other" {
     }.inFormat);
 }
 
+test "MERGE_HEAD names its parents as git's get_merge_parent reads them: any revision, peeled to its commit" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, divergedScript);
+            defer pair.deinit();
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                try gitMayFail(io, r, &.{ "merge", "topic" });
+                try r.writeFile(io, "f", "a\nresolved\nc\n");
+                try r.exec(io, &.{ "add", "f" });
+                // an annotated tag, which the parent is peeled from
+                try r.exec(io, &.{ "tag", "-a", "-m", "tagged", "v-topic", "topic" });
+                try r.writeFile(io, ".git/MERGE_HEAD", "v-topic\n");
+            }
+            try pair.git.exec(io, &.{ "merge", "--continue" });
+            {
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                _ = try merging.conclude(gpa, io, &repo, .{ .who = who });
+            }
+            try expectSameState(&pair, io, &merge_state, &main_logs);
+        }
+    }.inFormat);
+}
+
 test "a merge that would overwrite a local change is refused, and one it does not touch survives" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {

@@ -32,6 +32,7 @@ const program = @import("../process.zig").program;
 const filter = @import("../checkout/filter.zig");
 const ort = @import("../merge/ort.zig");
 const rerere = @import("../merge/rerere.zig");
+const rev_parse = @import("../rev_walk/rev_parse.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("../repo/head.zig");
 const message = @import("../object/message.zig");
@@ -638,9 +639,19 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     try parents.append(arena, head.oid orelse return error.UnbornBranch);
-    var lines = std.mem.tokenizeAny(u8, heads_text, "\r\n");
+    // git's `get_merge_parent` of each line as `strbuf_getline_lf` cuts
+    // it: whatever revision it names, peeled to its commit, and a line
+    // that names none a corrupt `MERGE_HEAD`.
+    var lines = std.mem.splitScalar(u8, heads_text, '\n');
     while (lines.next()) |line| {
-        try parents.append(arena, Oid.parse(repo.objectFormat(), std.mem.trim(u8, line, " \t")) catch return error.MalformedRef);
+        if (line.len == 0 and lines.peek() == null) break;
+        const peeled = try arena.print("{s}^{{commit}}", .{line});
+        const parent = rev_parse.resolve(arena, io, repo, peeled) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.MalformedRef,
+        };
+        try parents.append(arena, parent);
     }
     // `git commit` drops a parent another reaches unless the merge was
     // asked not to fast-forward: an octopus that went past `HEAD`.

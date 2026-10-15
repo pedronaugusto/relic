@@ -307,12 +307,12 @@ test "fuzz: any strategy_opts line splits or is a named failure, and round-trips
     try shakedown.check(std.testing.allocator, {}, fuzzSplit, .{});
 }
 
-test "strategy flags preserve bare aliases and replace explicit algorithms" {
+test "strategy flags replace the whole algorithm, minimal with it, as git's DIFF_WITH_ALG does" {
     var settings: Settings = .{};
     inline for (.{ "patience", "histogram", "diff-algorithm=myers" }) |word| {
         try settings.apply("diff-algorithm=minimal");
         try settings.apply(word);
-        try std.testing.expectEqual(!std.mem.startsWith(u8, word, "diff-algorithm="), settings.minimal);
+        try std.testing.expect(!settings.minimal);
     }
     _ = settings.configureAlgorithm("minimal").?;
     _ = settings.configureAlgorithm("default").?;
