@@ -197,6 +197,10 @@ pub const Log = struct {
     gpa: Allocator,
     bytes: []u8,
     entries: []Entry,
+    /// The lines left out as no entry, which git's reader passes over
+    /// without a word: one damaged line costs `@{n}` its count here too,
+    /// and this says it happened.
+    skipped: u32 = 0,
 
     /// Release the log.
     pub fn deinit(log: *Log) void {
@@ -232,13 +236,17 @@ pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash
     var entries: std.ArrayList(Entry) = .empty;
     errdefer entries.deinit(gpa);
 
+    var skipped: u32 = 0;
     var lines: Lines = .{ .bytes = bytes };
     while (lines.next()) |line| {
         // A line git cannot parse is one it skips, and the log's other entries stand.
-        const entry = parseLine(line, kind) catch continue;
+        const entry = parseLine(line, kind) catch {
+            skipped +|= 1;
+            continue;
+        };
         try entries.append(gpa, entry);
     }
-    return .{ .gpa = gpa, .bytes = bytes, .entries = try entries.toOwnedSlice(gpa) };
+    return .{ .gpa = gpa, .bytes = bytes, .entries = try entries.toOwnedSlice(gpa), .skipped = skipped };
 }
 
 /// Errors from expiring a log.
@@ -445,6 +453,7 @@ test "a malformed line leaves the other entries readable, as git skips it" {
     defer log.deinit();
     try std.testing.expectEqual(@as(usize, 2), log.entries.len);
     try std.testing.expectEqualStrings("second", log.entries[1].message);
+    try std.testing.expectEqual(@as(u32, 1), log.skipped);
 }
 
 test "a log line reads as git's show_one_reflog_ent reads it, and one it skips is skipped" {

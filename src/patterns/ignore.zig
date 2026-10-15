@@ -642,6 +642,9 @@ fn fuzzIgnore(_: void, case: *shakedown_mod.Case) anyerror!void {
     var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
     rules.addText(text, "", "fuzz", 2) catch return;
+    // the same bytes as one pattern given whole, as `clean -e` gives it
+    _ = parsePattern(text, .{});
+    rules.addPatterns(&.{text}, "", "fuzz", 3) catch return;
     _ = rules.match(path, .file);
     _ = rules.matchPath(path, .dir);
 }

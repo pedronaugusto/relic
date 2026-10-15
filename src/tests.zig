@@ -61,6 +61,7 @@ test {
         _ = @import("odb/keep.zig");
         _ = @import("names/ref.zig");
         _ = @import("refs/refs_test.zig");
+        _ = @import("refs/verify_test.zig");
         _ = @import("discover/format.zig");
         _ = @import("discover/gitfile.zig");
         _ = @import("discover/directory.zig");

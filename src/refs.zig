@@ -1,6 +1,7 @@
 //! Public refs namespace. Implementation is in `refs/refs.zig`.
 
 pub const reftable = @import("refs/reftable.zig");
+pub const verify = @import("refs/verify.zig");
 pub const names = @import("names.zig").ref;
 pub const packed_header = @import("refs/refs.zig").packed_header;
 pub const max_symbolic_depth = @import("refs/refs.zig").max_symbolic_depth;
