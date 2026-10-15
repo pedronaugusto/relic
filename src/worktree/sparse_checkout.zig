@@ -881,6 +881,41 @@ test "reapply takes out an excluded file a checkout brought back, as git does" {
     }
 }
 
+test "a pattern file with CRLF lines is read as git reads it, a cone still a cone" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for ([_]struct { mode: []const u8, text: []const u8 }{
+        .{ .mode = "--cone", .text = "/*\r\n!/*/\r\n/E/\r\n!/E/*/\r\n/E/F/\r\n" },
+        .{ .mode = "--no-cone", .text = "/A/\r\n!/A/B/\r\n/top.txt\r\n" },
+    }) |case| {
+        var twin = try Twin.init(setupTree, gpa, io, &.{});
+        defer twin.deinit();
+        for ([_]*testgit.Repo{ &twin.theirs, &twin.ours }) |side| {
+            try side.exec(io, &.{ "sparse-checkout", "set", case.mode, "--", "D" });
+            try side.writeFile(io, ".git/info/sparse-checkout", case.text);
+        }
+        try twin.git(io, &.{ "reapply", case.mode });
+        {
+            var repo = try twin.open(io);
+            defer repo.deinit(io);
+            _ = try reapply(io, &repo, .{ .cone = std.mem.eql(u8, case.mode, "--cone") });
+            // what `list` says is what git's says: the cone's directories
+            var listing = try list(io, &repo);
+            defer listing.deinit();
+            var text: std.ArrayList(u8) = .empty;
+            defer text.deinit(gpa);
+            for (listing.entries) |entry| {
+                try text.appendSlice(gpa, entry);
+                try text.append(gpa, '\n');
+            }
+            const git_list = try twin.theirs.run(io, &.{ "sparse-checkout", "list" });
+            defer gpa.free(git_list);
+            try std.testing.expectEqualStrings(git_list, text.items);
+        }
+        try twin.expectSame(io);
+    }
+}
+
 test "a list is git's list, in both modes" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

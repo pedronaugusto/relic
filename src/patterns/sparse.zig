@@ -336,9 +336,11 @@ fn unescape(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
     return out.items;
 }
 
-/// A pattern line with git's trimming: trailing spaces go, unless the
-/// last of them is escaped with a backslash.
-pub fn trimPattern(line: []const u8) []const u8 {
+/// A pattern file's line, without its newline, as git's
+/// `add_patterns_from_buffer` reads it: a CR before the newline goes, then
+/// trailing spaces, unless the last of them is escaped with a backslash.
+pub fn trimPattern(raw: []const u8) []const u8 {
+    const line = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
     var last_space: ?usize = null;
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
@@ -464,6 +466,8 @@ test "git's trimming keeps an escaped trailing space" {
     try std.testing.expectEqualStrings("a\\ ", trimPattern("a\\ "));
     try std.testing.expectEqualStrings("a\\ ", trimPattern("a\\  "));
     try std.testing.expectEqualStrings("", trimPattern("   "));
+    try std.testing.expectEqualStrings("/src/", trimPattern("/src/\r"));
+    try std.testing.expectEqualStrings("a\r", trimPattern("a\r\r"));
 }
 
 test "fuzz: any pattern file is a cone or not, and any path is answered" {
