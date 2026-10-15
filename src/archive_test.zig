@@ -292,3 +292,37 @@ test "a tree deeper than sixty-four directories, and a zip of more entries than 
     try std.testing.expectEqual(theirs.len, mine.len);
     try std.testing.expect(std.mem.eql(u8, theirs, mine));
 }
+
+test "a zip marks an entry text or binary by its diff driver, as git's entry_is_binary does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.isolated.?.put("TZ", "UTC");
+    try git.writeFile(io, "set.txt", "text\x00with a NUL\n");
+    try git.writeFile(io, "unset.txt", "plain text\n");
+    try git.writeFile(io, "named-text.bin", "\x00\x01 binary bytes\n");
+    try git.writeFile(io, "named-binary.txt", "plain text\n");
+    try git.writeFile(io, "named-unset.bin", "\x00 bytes decide\n");
+    try git.writeFile(io, "unknown.bin", "\x00 the default driver decides\n");
+    try git.writeFile(io, "builtin.c", "int x;\n");
+    try git.writeFile(io, "plain.txt", "no attribute\n");
+    try git.writeFile(io, ".gitattributes", "set.txt diff\nunset.txt -diff\nnamed-text.bin diff=astext\nnamed-binary.txt diff=asbinary\nnamed-unset.bin diff=nobinary\nunknown.bin diff=nosuchdriver\nbuiltin.c diff=cpp\nlink -diff\n");
+    try git.exec(io, &.{ "config", "diff.astext.binary", "false" });
+    try git.exec(io, &.{ "config", "diff.asbinary.binary", "true" });
+    try git.exec(io, &.{ "config", "diff.nobinary.textconv", "cat" });
+    if (builtin.target.os.tag != .windows) try git.dir.symLink(io, "plain.txt", "link", .{});
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "drivers" });
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    {
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "HEAD" }, head, .{ .format = .zip, .level = 0 });
+    }
+    // the driver named `default` is the one a path with no driver gets
+    try git.exec(io, &.{ "config", "diff.default.binary", "true" });
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "HEAD" }, head, .{ .format = .zip, .level = 0 });
+}

@@ -895,34 +895,24 @@ fn peelToTree(io: Io, repo: *Repository, oid: Oid) Error!Oid {
     return error.NotATree;
 }
 
-fn isBinaryContent(bytes: []const u8) bool {
-    const n = @min(bytes.len, 8000);
-    return std.mem.findScalar(u8, bytes[0..n], 0) != null;
-}
-
 /// What the attributes say of each item: binary or not by `diff`, and
 /// under `-p` or `-W` the driver `diff` names, whose rules are compiled
 /// once each into `rules`.
 fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, functions: bool, rules: *std.array_hash_map.String(*user_diff.Rule)) Error!void {
     const config = repo.configuration();
     for (items) |*item| {
-        var driver: ?[]const u8 = null;
+        var state: ?attributes.State = null;
         if (attrs) |at| {
             if (repo.workDirectory()) |w| try at.enter(io, w, item.path);
-            const applied = try at.lookup(a, item.path, .file);
-            if (applied.get("diff")) |state| switch (state) {
-                .unset => item.binary = true,
-                .set => item.binary = false,
-                .value => |v| driver = v,
-                .unspecified => {},
-            };
+            state = (try at.lookup(a, item.path, .file)).get("diff");
         }
+        const driver = user_diff.Driver.of(config, state);
+        item.binary = driver.says(config);
         if (!functions) continue;
-        // a name no driver has, and none at all, are git's default
-        const key = driver orelse "";
+        const key = driver.name() orelse "";
         item.rule = rules.get(key) orelse blk: {
             const rule = try a.create(user_diff.Rule);
-            rule.* = try user_diff.Rule.init(gpa, config, driver);
+            rule.* = try user_diff.Rule.init(gpa, config, driver.name());
             errdefer rule.deinit();
             try rules.put(a, try a.dupe(u8, key), rule);
             break :blk rule;
@@ -1036,7 +1026,7 @@ const Batch = struct {
             try batch.contents.append(a, content);
             var bin = false;
             if (content) |c| {
-                bin = item.binary orelse isBinaryContent(c);
+                bin = item.binary orelse attributes.isBinaryForDiff(c);
             }
             try batch.binaries.append(a, bin);
         }

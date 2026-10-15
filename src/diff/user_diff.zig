@@ -11,6 +11,7 @@ const Allocator = std.mem.Allocator;
 
 const ere = @import("../text.zig").ere;
 const config_mod = @import("../config/config.zig");
+const attributes = @import("../patterns.zig").attributes;
 
 /// Errors from reading a driver's patterns.
 pub const Error = error{
@@ -18,6 +19,72 @@ pub const Error = error{
     /// both of which git dies on.
     InvalidFunctionPattern,
 } || Allocator.Error;
+
+/// The driver userdiff's lookup gives a path by its `diff` attribute
+/// (`userdiff_find_by_path`, then `default` where it finds none): `diff`
+/// set is git's text driver, unset its binary one; a name is that driver
+/// when it is built in or configured; anything else, and no attribute, is
+/// the driver named `default`, which the configuration shapes as any other.
+pub const Driver = union(enum) {
+    text,
+    binary,
+    named: []const u8,
+
+    /// The driver for the `diff` attribute's `state`.
+    pub fn of(config: ?*const config_mod.Config, state: ?attributes.State) Driver {
+        const s = state orelse return .{ .named = "default" };
+        return switch (s) {
+            .set => .text,
+            .unset => .binary,
+            .unspecified => .{ .named = "default" },
+            .value => |driver| if (exists(config, driver)) .{ .named = driver } else .{ .named = "default" },
+        };
+    }
+
+    /// `driver->binary`: whether the driver says, or `null` for the bytes
+    /// to decide; no configuration is an empty one. git dies on a
+    /// `diff.<name>.binary` that is no boolean; here it decides nothing.
+    pub fn says(d: Driver, config: ?*const config_mod.Config) ?bool {
+        switch (d) {
+            .text => return false,
+            .binary => return true,
+            .named => |driver| {
+                var key_buf: [512]u8 = undefined;
+                const c = config orelse return null;
+                const key = std.mem.print(&key_buf, "diff.{s}.binary", .{driver}) catch return null;
+                if (!c.has(key)) return null;
+                return c.getBool(key, false) catch null;
+            },
+        }
+    }
+
+    /// Whether `bytes` at a path with this driver are binary, as
+    /// `diff_filespec_is_binary`, `grep_source_is_binary` and the zip
+    /// archive's `entry_is_binary` decide.
+    pub fn isBinary(d: Driver, config: ?*const config_mod.Config, bytes: []const u8) bool {
+        return d.says(config) orelse attributes.isBinaryForDiff(bytes);
+    }
+
+    /// The name `Rule.init` takes: the text and binary drivers have no
+    /// function lines of their own.
+    pub fn name(d: Driver) ?[]const u8 {
+        return switch (d) {
+            .named => |n| n,
+            .text, .binary => null,
+        };
+    }
+
+    /// A driver of that name: built in, or any `diff.<name>.<key>` set,
+    /// as `userdiff_config` makes one for any key.
+    fn exists(config: ?*const config_mod.Config, driver: []const u8) bool {
+        for (builtins) |b| if (std.mem.eql(u8, b.name, driver)) return true;
+        const c = config orelse return false;
+        for (c.entries.items) |entry| {
+            if (std.mem.eql(u8, entry.section, "diff") and entry.has_subsection and std.mem.eql(u8, entry.subsection, driver)) return true;
+        }
+        return false;
+    }
+};
 
 const Builtin = struct { name: []const u8, pattern: []const u8, icase: bool = false };
 
@@ -64,8 +131,8 @@ pub const Rule = struct {
 
     const Reg = struct { re: ere.Regex, negate: bool };
 
-    /// The rule for the driver the `diff` attribute names, or git's
-    /// default for `null` or a name no driver has.
+    /// The rule for the driver `Driver.name` gives, or git's default lines
+    /// for `null` and for a driver with no pattern.
     pub fn init(gpa: Allocator, config: *const config_mod.Config, driver: ?[]const u8) Self.Error!Rule {
         var rule: Rule = .{ .arena = .init(gpa), .regs = &.{} };
         errdefer rule.deinit();

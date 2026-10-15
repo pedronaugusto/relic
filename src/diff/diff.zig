@@ -21,6 +21,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const attributes = @import("../patterns.zig").attributes;
+const user_diff = @import("user_diff.zig");
 const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;
@@ -525,10 +526,11 @@ pub fn isBinary(bytes: []const u8) bool {
 }
 
 /// Whether a path's contents diff as binary, as git's
-/// `diff_filespec_is_binary` decides it: the `diff` attribute first -- set
-/// is text, unset is binary, a driver's name is that driver's
-/// `diff.<driver>.binary` when it has one -- and `isBinary` of the bytes
-/// after. The zero value has no attributes and decides by the bytes alone.
+/// `diff_filespec_is_binary` decides it: the driver the `diff` attribute
+/// gives (`user_diff.Driver`: set is text, unset is binary, a driver says
+/// by `diff.<driver>.binary`, and no driver is `default`'s), and `isBinary`
+/// of the bytes where the driver does not say. The zero value has no
+/// attributes or configuration and decides by the bytes alone.
 pub const BinaryRule = struct {
     attrs: ?*attributes.Attrs = null,
     /// The working tree whose `.gitattributes` are read on the way down to
@@ -539,26 +541,12 @@ pub const BinaryRule = struct {
 
     /// Whether `path`, holding `bytes`, is binary. `a` holds the lookup.
     pub fn isBinary(rule: BinaryRule, a: Allocator, io: Io, path: []const u8, bytes: []const u8) attributes.Error!bool {
+        var state: ?attributes.State = null;
         if (rule.attrs) |attrs| {
             if (rule.work_dir) |wt| try attrs.enter(io, wt, path);
-            const applied = try attrs.lookup(a, path, .file);
-            if (applied.get("diff")) |state| switch (state) {
-                .unset => return true,
-                .set => return false,
-                .value => |driver| if (rule.config) |config| {
-                    var key_buf: [512]u8 = undefined;
-                    if (std.mem.print(&key_buf, "diff.{s}.binary", .{driver})) |key| {
-                        if (config.has(key)) {
-                            // git dies on a value that is not a boolean;
-                            // here it decides nothing.
-                            if (config.getBool(key, false)) |binary| return binary else |_| {}
-                        }
-                    } else |_| {}
-                },
-                .unspecified => {},
-            };
+            state = (try attrs.lookup(a, path, .file)).get("diff");
         }
-        return attributes.isBinaryForDiff(bytes);
+        return user_diff.Driver.of(rule.config, state).isBinary(rule.config, bytes);
     }
 };
 

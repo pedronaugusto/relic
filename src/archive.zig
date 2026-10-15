@@ -32,6 +32,7 @@ const repo_mod = @import("repo/repo.zig");
 const config_mod = @import("config/config.zig");
 const worktree = @import("checkout/checkout.zig");
 const attributes = @import("patterns.zig").attributes;
+const user_diff = @import("diff/user_diff.zig");
 const convert = @import("checkout/convert.zig");
 const pathspec_mod = @import("patterns.zig").pathspec;
 const pretty = @import("pretty/pretty.zig");
@@ -649,23 +650,16 @@ const Walk = struct {
                     if (applied.isTrue("export-subst")) content = try formatSubst(wk, c, content);
                 }
             }
+            // `entry_is_binary`: the `diff` driver, a link's too, then the bytes
             var is_binary = false;
-            if (wk.format == .zip and entry.mode != .symlink) {
-                is_binary = if (applied.get("diff")) |state| switch (state) {
-                    .unset => true,
-                    .set => false,
-                    else => isBinary(content),
-                } else isBinary(content);
-            } else if (wk.format == .zip) is_binary = isBinary(content);
+            if (wk.format == .zip) {
+                const config = wk.repo.configuration();
+                is_binary = user_diff.Driver.of(config, applied.get("diff")).isBinary(config, content);
+            }
             try wk.emit(entry.oid, out_path, mode, content, is_binary);
         }
     }
 };
-
-fn isBinary(bytes: []const u8) bool {
-    const n = @min(bytes.len, 8000);
-    return std.mem.findScalar(u8, bytes[0..n], 0) != null;
-}
 
 /// Whether `format` has a placeholder `%<lead><letter>`, after any `+`,
 /// `-` or ` ` modifier, with `lead` one of `leads` or nothing when empty.
