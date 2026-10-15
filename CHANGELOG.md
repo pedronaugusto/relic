@@ -19,7 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- A zip archive marks an entry text or binary by its `diff` driver as git's `entry_is_binary` does: `diff.<driver>.binary`, a link by its attributes too, and a path with no driver or an unknown one by the `default` driver's configuration. `diff`, `grep` and `range-diff` take the same driver lookup (`diff.default.binary`, `diff.default.xfuncname`).
+- A zip archive marks an entry text or binary by its `diff` driver as git's `entry_is_binary` does: `diff.<driver>.binary`, a link by its attributes too, and a path with no driver or an unknown one by the `default` driver's configuration. `diff`, `grep` and `range-diff` take the same driver lookup for binary files (`diff.default.binary`), and `grep -p` and `-W` the `default` driver's `xfuncname`.
 - `clean` adds each `-e` pattern as given, git's `add_pattern`: `#` and trailing spaces are part of it (sweep 0.2.4's `gitignore.parsePattern`).
 - A sparse-checkout file with CRLF lines is read as a cone in cone mode, as git reads it.
 - `-X patience` and `-X histogram` clear `diff-algorithm=minimal`, as git's `DIFF_WITH_ALG` replaces the whole algorithm.
