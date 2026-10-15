@@ -1037,7 +1037,7 @@ const Writer = struct {
         const skip = o.header_off + 4;
         var compressed: Io.Writer.Allocating = try .initCapacity(w.gpa, 64 + o.next);
         defer compressed.deinit();
-        var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = o.next - skip });
+        var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = .fromRaw(o.next - skip) });
         defer state.deinit();
         const output = compressed.writer.writableSliceGreedy(warp.Compressor.bound(o.next - skip, .{})) catch return error.OutOfMemory;
         const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // unreachable: bound reserves the complete stream

@@ -356,7 +356,7 @@ const Zip = struct {
 };
 
 fn deflateRaw(gpa: Allocator, data: []const u8, level: ?u4) Allocator.Error![]u8 {
-    var compress = try warp.Compressor.init(gpa, .{ .level = level orelse 6, .max_input = data.len });
+    var compress = try warp.Compressor.init(gpa, .{ .level = level orelse 6, .max_input = .fromRaw(data.len) });
     defer compress.deinit();
     const frame: warp.Compressor.Frame = .{ .container = .raw };
     const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, frame));

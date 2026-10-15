@@ -18,8 +18,8 @@
         },
 
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.6.0#b4b0917f64908d3a2f981b6e6f0a9c6318ab3317",
-            .hash = "uplink-0.6.0-0eVSJlXUEwAi6DjJoEMaqmiLe8IgXupobEo-gtLK95Qw",
+            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.7.0#c0b2a89d60d33389660b02c3b3fbc1a536d4024f",
+            .hash = "uplink-0.7.0-0eVSJv_DFAAU1VFkLWo8-sa1Quq2kKd1VrYWA2rG7dRB",
             .lazy = true,
         },
 
@@ -29,13 +29,13 @@
         },
 
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.3.1#943b5188d31dacdd2a2d8cef4f6312e85a76d89a",
-            .hash = "warp-0.3.1-JASxFdFEEQDaCNoyxHxZKBAO9tlBpaFG_1p_tu2Udfmi",
+            .url = "git+https://github.com/pedronaugusto/warp?ref=v0.4.0#874a05a5cd94e9a76001cef2420cb8213464abf1",
+            .hash = "warp-0.4.0-JASxFYVYEQCFzy2g8yp2DD60kAUM687eHI6yIp8dW6uK",
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.6.0#e6e15f01e9e7281afa74233d4d96b4bce979a116",
-            .hash = "cloak-0.6.0-9onwcRNKEgMTQePo6o1j-jeXFPNeodqPnVCN0FeUzSVX",
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.10.3#3076a0bcb90dc18e583eaa3f64ddc4222a069059",
+            .hash = "cloak-0.10.3-9onwcToQHQP9cHZufwOpnqyjjv8rR9-KR8Jf117qGFfo",
             .lazy = true,
         },
 

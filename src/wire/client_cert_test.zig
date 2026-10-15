@@ -99,15 +99,6 @@ fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?cloak.ClientAut
     return res.collect(gpa, io, .limited(1 << 20));
 }
 
-/// What relic answers a server that asks for a certificate with, where
-/// cloak cannot: in TLS 1.2 an Ed25519 key signs the whole handshake, which
-/// cloak 0.4 does not keep, so it answers with no certificate and the server
-/// refuses (a gap on cloak's page).
-fn refusal(version: []const u8, kind: []const u8) ?anyerror {
-    if (std.mem.eql(u8, version, "-tls1_2") and std.mem.eql(u8, kind, "ed25519")) return error.ClientCertificateRejected;
-    return null;
-}
-
 test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 and TLS 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
     const gpa = testing.allocator;
     const io = testing.io;
@@ -138,10 +129,6 @@ test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 an
                 defer gpa.free(key);
                 const auth = try client_cert.load(gpa, io, .{ .cert = cert, .key = key }, .{ .arena = arena, .passphrase = if (encrypted) passphrase else null });
                 defer auth.deinit();
-                if (refusal(version, kind)) |refused| {
-                    try testing.expectError(refused, relicGet(gpa, io, pki, server.port, auth));
-                    continue;
-                }
                 const page = try relicGet(gpa, io, pki, server.port, auth);
                 defer gpa.free(page);
                 try testing.expect(std.mem.find(u8, page, protocol) != null);

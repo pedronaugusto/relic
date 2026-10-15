@@ -966,7 +966,7 @@ const Http = struct {
     }
 
     fn gzip(arena: Allocator, bytes: []const u8) Allocator.Error![]const u8 {
-        var compress = try warp.Compressor.init(arena, .{ .level = 9, .max_input = bytes.len });
+        var compress = try warp.Compressor.init(arena, .{ .level = 9, .max_input = .fromRaw(bytes.len) });
         defer compress.deinit();
         const frame: warp.Compressor.Frame = .{ .container = .gzip };
         const out = try arena.alloc(u8, warp.Compressor.bound(bytes.len, frame));

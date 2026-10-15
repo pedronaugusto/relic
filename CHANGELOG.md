@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Pins uplink 0.7.0, cloak 0.10.3 and warp 0.4.0, whose types relic's HTTP options carry (`cloak.ClientAuth`, `cloak.Trust.Snapshot`, `uplink.tls.ClientOptions`). A TLS 1.2 server that asks for an Ed25519 client certificate now gets one (cloak 0.7.1).
+- `text.ere` reads a pattern as git's `compat/regex` (glibc's) reads it, where it read some as literals: an extended expression's `{` must open a whole interval after an operand (`a{1`, `a{x}`, `a{}`, `{1}` and `^{` are refused), no repetition may follow an anchor or word boundary in an extended expression (`^*`, `$+`, `\b?`), a basic expression takes no `*` or `\{` straight after a repetition (`a**`) and keeps `*` after an anchor as itself, and a bracket refuses a range from or to a class or equivalence class and a `-` after a range anywhere but last (`[[:alpha:]-z]`, `[a-z-9]`); a range may end at a collating symbol (`[a-[.z.]]`). `git grep`, `diff`'s function patterns and `:/` searches see the same.
+- `index.Index` reads an entry with any mode, as git's `do_read_index` does, and writes it back as it was spelled while the entry keeps that mode (`Entry.raw_mode`, `Entry.diskMode`); `Error.InvalidMode` is gone.
+
+### Added
+
+- `refs.verify.check`: git's `refs verify` over one worktree's store, findings named by `fsck.<msg-id>` at the levels `fsck.Rules` give: loose refs (`badRefContent`, `refMissingNewline`, `trailingRefContent`, `badRefName`, `badRefFiletype`, `symlinkRef`, `badRefOid`, `badHeadTarget`, `badReferentName`, `symrefTargetIsNotARef`), root refs as git walks them, `packed-refs` (header, entries, peeled lines, newline, order) and reftable table names and refs, a linked worktree's under `worktrees/<id>/`.
+- `refs.Log.skipped`: how many reflog lines git's reader would pass over.
+
+### Fixed
+
+- A zip archive marks an entry text or binary by its `diff` driver as git's `entry_is_binary` does: `diff.<driver>.binary`, a link by its attributes too, and a path with no driver or an unknown one by the `default` driver's configuration. `diff`, `grep` and `range-diff` take the same driver lookup (`diff.default.binary`, `diff.default.xfuncname`).
+- `clean` adds each `-e` pattern as given, git's `add_pattern`: `#` and trailing spaces are part of it (sweep 0.2.4's `gitignore.parsePattern`).
+- A sparse-checkout file with CRLF lines is read as a cone in cone mode, as git reads it.
+- `-X patience` and `-X histogram` clear `diff-algorithm=minimal`, as git's `DIFF_WITH_ALG` replaces the whole algorithm.
+- An empty `trailer.separators` joins a trailer's key to its value with the NUL git writes, where relic read past the end.
+- A merge concluded from `MERGE_HEAD` takes each line as git's `get_merge_parent` takes it: any revision, peeled to its commit.
+
+### Changed
+
+- Pins sweep 0.2.4.
+
 ## [0.10.0] - 2026-10-15
 
 ### Breaking

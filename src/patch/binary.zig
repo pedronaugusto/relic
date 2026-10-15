@@ -129,7 +129,7 @@ pub fn inflate(gpa: Allocator, data: []const u8, size: usize) Self.InflateError!
 /// Deflate `data` as one zlib stream at zlib's level 1, which is
 /// `core.compression`'s default and what git deflates a hunk with.
 pub fn deflate(gpa: Allocator, data: []const u8) Allocator.Error![]u8 {
-    var compress = try warp.Compressor.init(gpa, .{ .level = 1, .max_input = data.len });
+    var compress = try warp.Compressor.init(gpa, .{ .level = 1, .max_input = .fromRaw(data.len) });
     defer compress.deinit();
     const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, .{}));
     errdefer gpa.free(out);
