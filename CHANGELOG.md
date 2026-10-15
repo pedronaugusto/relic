@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-15
+
 ### Breaking
 
 - Pins uplink 0.7.0, cloak 0.10.3 and warp 0.4.0, whose types relic's HTTP options carry (`cloak.ClientAuth`, `cloak.Trust.Snapshot`, `uplink.tls.ClientOptions`). A TLS 1.2 server that asks for an Ed25519 client certificate now gets one (cloak 0.7.1).
