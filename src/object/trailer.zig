@@ -615,7 +615,9 @@ fn formatItems(gpa: Allocator, settings: Settings, options: Options, items: []co
                 } else {
                     const c = lastNonSpace(token);
                     if (c != 0 and std.mem.findScalar(u8, settings.separators, c) == null) {
-                        try out.append(gpa, settings.separators[0]);
+                        // git writes `separators[0]` with `%c`: an empty
+                        // `trailer.separators` gives its terminating NUL
+                        try out.append(gpa, if (settings.separators.len > 0) settings.separators[0] else 0);
                         try out.append(gpa, ' ');
                     }
                 }

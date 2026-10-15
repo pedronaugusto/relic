@@ -189,6 +189,9 @@ test "every trailer.* rule is applied as git applies it" {
         &.{ .{ "trailer.fix.cmd", echo_cmd }, .{ "trailer.fix.key", "Fixes" } },
         &.{ .{ "trailer.ref.command", "echo \"ref of $ARG\"" }, .{ "trailer.ref.ifExists", "replace" } },
         &.{ .{ "trailer.ifexists", "addIfDifferentNeighbor" }, .{ "trailer.separators", "=" } },
+        // no separator at all: git joins a token to its value with the
+        // NUL that ends the empty string
+        &.{ .{ "trailer.separators", "" }, .{ "trailer.ack.key", "Acked-by" } },
     };
     // the inputs and arguments a rule can change, so the run stays short
     // where starting git is slow

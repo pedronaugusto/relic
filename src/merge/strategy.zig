@@ -76,9 +76,13 @@ pub const Settings = struct {
         } else if (std.mem.eql(u8, word, "theirs")) {
             s.resolve = .theirs;
         } else if (std.mem.eql(u8, word, "patience")) {
+            // git's `DIFF_WITH_ALG` replaces the whole algorithm mask,
+            // `minimal` with it
             s.algorithm = .patience;
+            s.minimal = false;
         } else if (std.mem.eql(u8, word, "histogram")) {
             s.algorithm = .histogram;
+            s.minimal = false;
         } else if (std.mem.startsWith(u8, word, "diff-algorithm=")) {
             const diff = LineDiff.parse(word["diff-algorithm=".len..]) orelse return error.UnknownStrategyOption;
             s.algorithm = diff.algorithm;
@@ -217,13 +221,16 @@ test "strategy options set what git's parse_merge_opt sets, the later word winni
     try std.testing.expectEqual(blob_merge.Resolve.theirs, s.resolve);
     try std.testing.expectEqual(parallax.Algorithm.myers, s.algorithm);
     try std.testing.expect(s.minimal);
-    // `patience` keeps `minimal`; `diff-algorithm=` clears it.
+    // `patience` and `histogram` replace the algorithm mask, `minimal`
+    // with it (git's `DIFF_WITH_ALG`), as `diff-algorithm=` does.
     try s.apply("patience");
     try std.testing.expectEqual(parallax.Algorithm.patience, s.algorithm);
-    try std.testing.expect(s.minimal);
+    try std.testing.expect(!s.minimal);
+    try s.apply("diff-algorithm=minimal");
     try s.apply("histogram");
     try std.testing.expectEqual(parallax.Algorithm.histogram, s.algorithm);
-    try std.testing.expect(s.minimal);
+    try std.testing.expect(!s.minimal);
+    try s.apply("diff-algorithm=minimal");
     try s.apply("diff-algorithm=Histogram");
     try std.testing.expect(!s.minimal);
     try std.testing.expectEqual(parallax.Algorithm.histogram, s.algorithm);
