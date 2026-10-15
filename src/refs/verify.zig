@@ -56,6 +56,8 @@ pub const Finding = struct {
 /// Everything found, in the order git checks: the loose refs by name, the
 /// root refs, then `packed-refs`, or the reftable stack's tables and refs.
 pub const Report = struct {
+    pub const Error = ErrorNamespace.Error;
+
     arena: std.heap.ArenaAllocator,
     findings: []const Finding,
 

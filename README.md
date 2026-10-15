@@ -610,6 +610,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `refs.reftable` | Module within `refs`. |
 | `refs.reftable.table` | The reftable format: one table read and written. |
 | `refs.reftable.stack` | The stack of tables `tables.list` names: the ref store. |
+| `refs.verify` | git's `refs verify`: what is wrong with the refs themselves, by `fsck.<msg-id>`. |
 | `refs.names` | What a ref may be named: `checkFormat` (git's `check_refname_format`, with its one-level and pattern flags), `isSafe` (what a deletion may name), the root, special and per-worktree classes, `parseWorktreeRef` for `main-worktree/` and `worktrees/<id>/`, and every root ref by name (`Root`, `Special`). |
 | `config` | `Config.open`, `get`, `all`, `getBool`, `getInt`, `getPath`, `subsections`, `origin`, `set`, `unset`, `renderWritable`. Lossless: setting a value rewrites one line; a repository's files are written through `Repository.writeConfig`. `include.path` and `includeIf` with `gitdir:`, `gitdir/i:`, `onbranch:` and `hasconfig:remote.*.url:`. |
 | `config.user` | Where the person's git reads its configuration from. |

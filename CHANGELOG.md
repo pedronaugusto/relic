@@ -28,7 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pins sweep 0.2.4.
+- Pins sweep 0.2.4; preflight 0.6.0 for development.
 
 ## [0.10.0] - 2026-10-15
 

@@ -32,6 +32,7 @@
 //! | `refs.reftable` | Module within `refs`. |
 //! | `refs.reftable.table` | The reftable format: one table read and written. |
 //! | `refs.reftable.stack` | The stack of tables `tables.list` names: the ref store. |
+//! | `refs.verify` | git's `refs verify`: what is wrong with the refs themselves, by `fsck.<msg-id>`. |
 //! | `refs.names` | Module within `refs`. |
 //! | `config` | Public concern. |
 //! | `config.user` | Module within `config`. |
