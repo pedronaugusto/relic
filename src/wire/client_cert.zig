@@ -84,8 +84,7 @@ pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Err
         else => return error.SslClientKeyUnreadable,
     } else cert_bytes;
     if (key_der and std.mem.find(u8, key_bytes, "-----BEGIN ") != null) return error.SslClientKeyUnreadable;
-    // An RSA key's primes are checked with witnesses drawn from `io`.
-    const key = cloak.PrivateKey.parse(gpa, key_bytes, .{ .passphrase = options.passphrase, .entropy = .fromIo(&io) }) catch |err| return switch (err) {
+    const key = cloak.PrivateKey.parse(gpa, key_bytes, .{ .passphrase = options.passphrase }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.PasswordRequired => error.SslClientKeyPassphraseRequired,
         error.BadPassword => error.SslClientKeyPassphraseWrong,

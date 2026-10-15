@@ -1211,7 +1211,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
         fn terminate(task_io: Io, raw: *anyopaque, child: *Child) void {
             const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
             const tracked = state.child != null and state.child.?.processId() == child.processId();
-            _ = child.killWait(task_io, .zero) catch return;
+            _ = child.killWait(task_io, .fromRaw(0)) catch return;
             if (tracked) state.reaped = true;
         }
 

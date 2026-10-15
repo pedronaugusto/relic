@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Pins uplink 0.6.0 and cloak 0.6.0, whose types relic's HTTP options carry (`cloak.ClientAuth`, `cloak.Trust.Snapshot`, `uplink.tls.ClientOptions`). cloak stays on uplink's line: relic hands cloak's values to uplink, so both must build one cloak. An RSA client key is no longer tested for primality as it loads (cloak 0.6), only for the agreement of its numbers.
+
+### Changed
+
+- Pins conduit 0.8.1 (its spans are `conduit.Duration`), strand 0.11.0, airlock 0.3.5, sweep 0.2.3 and parallax 0.2.4; preflight 0.5.6 and shakedown 0.4.3 for development. warp stays 0.3.1, uplink's line, until uplink moves.
+
 ## [0.9.0] - 2026-10-14
 
 ### Breaking

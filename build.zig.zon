@@ -3,29 +3,29 @@
     .version = "0.9.0",
     .dependencies = .{
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.7.1#e796d0b16159144c66513ab27b687b430444b45d",
-            .hash = "conduit-0.7.1-4rIA7-YQFAATySoRAxkMY8Z1Fe64Xe1CYDIeF3yI_l5y",
+            .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.8.1#4fc94bc106233964cce2af256d5eeb08a016870e",
+            .hash = "conduit-0.8.1-4rIA76QmFAD9THFjKQIWVQ6OeGYupdJKyKD8f96sHgC-",
         },
 
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep?ref=v0.2.2#08dda4f7e3d3fbb69a45be831e02fc435c700bc3",
-            .hash = "sweep-0.2.2-6ErwaaDaOwB5irwDSYWvNT3LP8JS6Hq3HU55qNh8c6nE",
+            .url = "git+https://github.com/pedronaugusto/sweep?ref=v0.2.3#ec9a419014f9487c3d46b6b03bc52cb18633f1ff",
+            .hash = "sweep-0.2.3-6ErwadvaOwAknAcqbByfIcLMa8lPkrDy-UeHgnCZhGlF",
         },
 
         .parallax = .{
-            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.3#405f4ba1f8ec4876e4f698fa4f2408ccf148112d",
-            .hash = "parallax-0.2.3-lz9BrxFdBgBa1e-bFu930edNT8j3EeSeEsrDMC4eYZzD",
+            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.4#1b2466e7e482e8a0b76e98800adebaace2f8feab",
+            .hash = "parallax-0.2.4-lz9Br4ljBgCZgvJjJH_ElFiKEn3hr0VmW-dk5E-PxHvF",
         },
 
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.4.1#9cfce4197527659ade72f0f6c332e9537c5a6e4e",
-            .hash = "uplink-0.4.1-0eVSJiJ0EwAhXkbTzsYbOx8bIDqBuJpCW7GYyX5TqYby",
+            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.6.0#b4b0917f64908d3a2f981b6e6f0a9c6318ab3317",
+            .hash = "uplink-0.6.0-0eVSJlXUEwAi6DjJoEMaqmiLe8IgXupobEo-gtLK95Qw",
             .lazy = true,
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.3#280cc4dcbec26c23693c654b57a7ea5ff5dec446",
-            .hash = "airlock-0.3.3-rfvu6CH2BQDWTME6f1H9XSu-WvQv1ny1678JE6v6EODU",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.5#110a80319449523ebf71b28da0ea001bd8e66f54",
+            .hash = "airlock-0.3.5-rfvu6Jf2BQCDxSnzkPb84Cay4j7ZvQFmhTyfGQJh-1O3",
         },
 
         .warp = .{
@@ -34,14 +34,14 @@
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.4.0#6e2ffc0b4502eba11872b83473d7d2a15485b284",
-            .hash = "cloak-0.4.0-9onwceYJEgM-HB0Dan0UMwcDTVmOcvB7mo6XrfEu2_X_",
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.6.0#e6e15f01e9e7281afa74233d4d96b4bce979a116",
+            .hash = "cloak-0.6.0-9onwcRNKEgMTQePo6o1j-jeXFPNeodqPnVCN0FeUzSVX",
             .lazy = true,
         },
 
         .strand = .{
-            .url = "git+https://github.com/pedronaugusto/strand?ref=v0.10.2#bfb743a5f1e045fdaa66a04ca649285c68f40a93",
-            .hash = "strand-0.10.2-8LNWVoUlIQCRhFQSNYX25kpJibHM-amksHGDZayXper0",
+            .url = "git+https://github.com/pedronaugusto/strand?ref=v0.11.0#c023a903326320fad7a3f378f0a728dac92ca4fb",
+            .hash = "strand-0.11.0-8LNWVreyJQAlCOezHxNsI6U2bR6x7lv4p2PtMuLMtMOw",
             .lazy = true,
         },
     },
@@ -57,13 +57,13 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.5.2#956e99fd1ef1053e025789c6305d0274437e1b42",
-            .hash = "preflight-0.5.2-LX1ZwoR8DwDBYjnTxrKs3busuIXdTAlhvAIiD3Jc9Dbb",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.5.6#7d5f97b670c7f777392f180187dbf079efc59910",
+            .hash = "preflight-0.5.6-LX1ZwlDqDwBqvy5JbO7G7U-lhZRhdEJLquePX7jFF2Ht",
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.2#93217f8d5c29d3f72b94da9cf961df321bba8430",
-            .hash = "shakedown-0.4.2-BR8U4-oKFgD-vju9MmZmggQ2e43dhqBS6KhKONWGXV62",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.3#13d249434d23c0a744766b42217546863c41bc07",
+            .hash = "shakedown-0.4.3-BR8U40sSFgAW7sXQ4fi_WxDVNqJ9h4LfpjAwFKsEB-4N",
         },
     },
 }

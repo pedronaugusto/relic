@@ -191,7 +191,7 @@ pub const Running = struct {
             }
         }
         // glint-ignore: Z026 -- killing cannot fail its caller; a child already gone has nothing left to reap
-        _ = running.child.killWait(io, .zero) catch {};
+        _ = running.child.killWait(io, .fromRaw(0)) catch {};
     }
 
     /// Stop it if it is still running and release everything.
@@ -389,7 +389,7 @@ const SpawnHooks = struct {
         const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // safe: the test hands the hook a *SpawnHooks as its context
         self.ended = true;
         // glint-ignore: Z026 -- termination cannot fail its caller; a child already gone has nothing left to reap
-        _ = child.killWait(io, .zero) catch {};
+        _ = child.killWait(io, .fromRaw(0)) catch {};
     }
 };
 
