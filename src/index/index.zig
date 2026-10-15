@@ -56,8 +56,6 @@ pub const ReadError = error{
     /// not end in `/` or that is not at stage 0 -- or a path ending in `/`
     /// that is not a directory entry.
     InvalidSparseDirectory,
-    /// An entry's mode was not one git writes.
-    InvalidMode,
     /// A path that is empty, absolute, or holds a component a working tree
     /// must never be asked to create.
     InvalidEntryPath,
@@ -103,6 +101,12 @@ pub const Entry = struct {
     path: []const u8,
     oid: Oid,
     mode: object.Mode,
+    /// The mode as the file spelled it, where that is not `mode.raw()`:
+    /// git reads an entry's mode as it is (`create_from_disk`) and writes
+    /// it back unchanged, where relic takes the mode git's consumers take
+    /// (`Entry.modeOf`). Written back only while `mode` is still the one it
+    /// spells.
+    raw_mode: ?u32 = null,
     /// 0 for a merged entry; 1, 2 and 3 are a conflict's stages: the
     /// base's version, ours and theirs, as a merge, cherry-pick, revert or
     /// rebase that stops leaves them (`three_way.zig`).
@@ -121,6 +125,20 @@ pub const Entry = struct {
     /// without it. `worktree.fsmonitor.refresh` decides when it is believed.
     fsmonitor_valid: bool = false,
     stat: fs.Stat = .none,
+
+    /// The mode an index entry's raw bits are taken as: the spellings
+    /// `Mode.fromRaw` knows, else git's `canon_mode`. No value is refused,
+    /// as git's `do_read_index` refuses none.
+    pub fn modeOf(raw: u32) object.Mode {
+        return object.Mode.fromRaw(raw) catch object.Mode.canonical(raw);
+    }
+
+    /// The mode bits the entry is written with: its spelling as read while
+    /// it still names `mode`, else `mode` itself.
+    pub fn diskMode(e: Entry) u32 {
+        const raw = e.raw_mode orelse return e.mode.raw();
+        return if (modeOf(raw) == e.mode) raw else e.mode.raw();
+    }
 
     /// Whether the entry needs the version 3 extended flag word.
     pub fn needsExtendedFlags(e: Entry) bool {
@@ -1165,7 +1183,7 @@ pub const Index = struct {
         // extensions have been read.
 
         const mode_raw = std.mem.readInt(u32, b[24..28], .big);
-        const mode = object.Mode.fromRaw(mode_raw) catch return error.InvalidMode;
+        const mode = Entry.modeOf(mode_raw);
 
         return .{
             .entry = .{
@@ -1173,6 +1191,7 @@ pub const Index = struct {
                 // unreachable: the slice is cut to the format's raw length
                 .oid = Oid.fromRaw(kind, b[40..][0..raw_len]) catch unreachable,
                 .mode = mode,
+                .raw_mode = if (mode_raw == mode.raw()) null else mode_raw,
                 .stage = @truncate((flags >> 12) & 3),
                 .assume_valid = flags & 0x8000 != 0,
                 .skip_worktree = skip_worktree,
@@ -1620,7 +1639,7 @@ pub const Index = struct {
         std.mem.writeInt(u32, fixed[12..16], stat.mtime_nsec, .big);
         std.mem.writeInt(u32, fixed[16..20], stat.dev, .big);
         std.mem.writeInt(u32, fixed[20..24], stat.ino, .big);
-        std.mem.writeInt(u32, fixed[24..28], entry.mode.raw(), .big);
+        std.mem.writeInt(u32, fixed[24..28], entry.diskMode(), .big);
         std.mem.writeInt(u32, fixed[28..32], stat.uid, .big);
         std.mem.writeInt(u32, fixed[32..36], stat.gid, .big);
         std.mem.writeInt(u32, fixed[36..40], stat.size, .big);
@@ -2459,6 +2478,39 @@ test "an entry's extended flags are read in any version, and a bit git does not 
     hasher.update(bytes[0 .. bytes.len - 20]);
     @memcpy(bytes[bytes.len - 20 ..], hasher.final().raw());
     try std.testing.expectError(error.UnknownEntryFlags, Index.parse(gpa, .sha1, bytes));
+}
+
+test "an entry's mode is read as git reads it, any bits, and written back as it was spelled" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    const oid = try Oid.parse(.sha1, "1111111111111111111111111111111111111111");
+    try index.add(.{ .path = "a", .oid = oid, .mode = .file });
+    try index.add(.{ .path = "b", .oid = oid, .mode = .symlink });
+    try index.add(.{ .path = "c", .oid = oid, .mode = .file });
+    const bytes = try index.toBytes(.{});
+    defer gpa.free(bytes);
+    // Spellings no git writes, which another tool's index may hold: a group-
+    // writable file, a link with permission bits, and a device.
+    const entry_len = 62 + 2; // the fixed part and a one-byte name, padded to eight
+    for ([_]u32{ 0o100664, 0o120777, 0o060644 }, 0..) |raw, i| std.mem.writeInt(u32, bytes[12 + i * entry_len + 24 ..][0..4], raw, .big);
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(bytes[0 .. bytes.len - 20]);
+    @memcpy(bytes[bytes.len - 20 ..], hasher.final().raw());
+    var read = try Index.parse(gpa, .sha1, bytes);
+    defer read.deinit();
+    try std.testing.expectEqual(object.Mode.file, read.entries.items[0].mode);
+    try std.testing.expectEqual(object.Mode.symlink, read.entries.items[1].mode);
+    try std.testing.expectEqual(object.Mode.gitlink, read.entries.items[2].mode);
+    // unchanged, each is written back as it was spelled
+    const again = try read.toBytes(.{});
+    defer gpa.free(again);
+    try std.testing.expectEqualSlices(u8, bytes, again);
+    // a mode changed here is written as itself
+    read.entries.items[0].mode = .exec;
+    const changed = try read.toBytes(.{});
+    defer gpa.free(changed);
+    try std.testing.expectEqual(@as(u32, 0o100755), std.mem.readInt(u32, changed[12 + 24 ..][0..4], .big));
 }
 
 test "fuzz: any bytes are an index or a named error" {
