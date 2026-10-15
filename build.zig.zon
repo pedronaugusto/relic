@@ -8,8 +8,8 @@
         },
 
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep?ref=v0.2.3#ec9a419014f9487c3d46b6b03bc52cb18633f1ff",
-            .hash = "sweep-0.2.3-6ErwadvaOwAknAcqbByfIcLMa8lPkrDy-UeHgnCZhGlF",
+            .url = "git+https://github.com/pedronaugusto/sweep?ref=v0.2.4#5dc6f912853137461679e854f80765a53d776353",
+            .hash = "sweep-0.2.4-6ErwaVfgOwD_ZfFp4Td4ucTrArEDqRix8rRVPqlLDmOf",
         },
 
         .parallax = .{

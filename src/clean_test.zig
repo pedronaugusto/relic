@@ -44,6 +44,8 @@ fn fixture(io: Io, git: *testgit.Repo) !void {
     try git.writeFile(io, "holder/inner/f", "in a repository inside an untracked directory\n");
     try git.exec(io, &.{ "init", "-q", "holder/inner" });
     if (builtin.target.os.tag != .windows) try git.dir.symLink(io, "README", "link", .{});
+    try git.writeFile(io, "#notes", "a name a comment line would hide\n");
+    if (builtin.target.os.tag != .windows) try git.writeFile(io, "trail  ", "a name with trailing spaces\n");
 }
 
 /// Every path under `dir`, directories with a trailing `/`, sorted. A
@@ -165,6 +167,9 @@ test "clean leaves a repository inside the working tree unless forced twice, and
     try compare(gpa, io, &.{ "-f", "-d", "-e", "!*.o" }, .{ .force = .yes, .directories = true, .excludes = &.{"!*.o"} });
     try compare(gpa, io, &.{ "-f", "-x", "-e", "new.txt" }, .{ .force = .yes, .ignored = .too, .excludes = &.{"new.txt"} });
     try compare(gpa, io, &.{ "-f", "-X", "-e", "*.txt" }, .{ .force = .yes, .ignored = .only, .excludes = &.{"*.txt"} });
+    // a pattern from -e is taken as given: `#` and trailing spaces are its own
+    try compare(gpa, io, &.{ "-f", "-e", "#notes" }, .{ .force = .yes, .excludes = &.{"#notes"} });
+    if (builtin.target.os.tag != .windows) try compare(gpa, io, &.{ "-f", "-e", "trail  " }, .{ .force = .yes, .excludes = &.{"trail  "} });
 }
 
 test "clean with pathspecs takes only what they name, directories included" {

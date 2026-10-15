@@ -168,21 +168,53 @@ pub const Rules = struct {
     /// `text`, `base` and `source` must outlive the rules; text read by
     /// `addDirectory` is held in the rules' own arena.
     pub fn addText(rules: *Rules, text: []const u8, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        try rules.addLevel(.{ .lines = &lines }, base, source, depth);
+    }
+
+    /// Add a level of patterns as given, each with none of a file's line
+    /// grammar (git's `add_pattern`, as `git clean -e` adds them): `#` and
+    /// trailing spaces are part of the pattern.
+    ///
+    /// `patterns`, `base` and `source` must outlive the rules.
+    pub fn addPatterns(rules: *Rules, patterns: []const []const u8, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
+        try rules.addLevel(.{ .patterns = patterns }, base, source, depth);
+    }
+
+    const Items = union(enum) {
+        lines: *std.mem.SplitIterator(u8, .scalar),
+        patterns: []const []const u8,
+
+        fn next(items: *Items, at: *usize) ?Pattern {
+            while (true) {
+                at.* += 1;
+                const options: LineOptions = .{ .line = @intCast(at.*) };
+                switch (items.*) {
+                    .lines => |lines| {
+                        var line = lines.next() orelse return null;
+                        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+                        return parseLine(line, options) orelse continue;
+                    },
+                    .patterns => |all| {
+                        if (at.* > all.len) return null;
+                        return parsePattern(all[at.* - 1], options) orelse continue;
+                    },
+                }
+            }
+        }
+    };
+
+    fn addLevel(rules: *Rules, items_in: Items, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
         const a = rules.arena.allocator();
+        var items = items_in;
         var patterns: std.ArrayList(Pattern) = .empty;
         var builder: sets.Builder = try .init(rules.gpa);
         defer builder.deinit();
-        var line_number: u32 = 0;
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        while (lines.next()) |raw_line| {
-            line_number += 1;
-            var line = raw_line;
-            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            const pattern = parseLine(line, .{
-                .base = base,
-                .source = source,
-                .line = line_number,
-            }) orelse continue;
+        var at: usize = 0;
+        while (items.next(&at)) |read| {
+            var pattern = read;
+            pattern.base = base;
+            pattern.source = source;
             if (!try sets.add(&builder, pattern.glob, pattern.anchored, pattern.dir_only, rules.case_fold)) continue;
             try patterns.append(a, pattern);
         }
@@ -377,13 +409,23 @@ pub const LineOptions = struct {
 /// comment, or a line that leaves no pattern;
 /// `line`, `base` and `source` are borrowed.
 pub fn parseLine(line: []const u8, options: LineOptions) ?Pattern {
-    const parsed = sweep.gitignore.parseLine(line) orelse return null;
+    return fromSweep(line, sweep.gitignore.parseLine(line) orelse return null, options);
+}
+
+/// Read one pattern as given, with none of a file's line grammar
+/// (`sweep.gitignore.parsePattern`, git's `parse_path_pattern`): `null`
+/// when it leaves no pattern; `text` and the options are borrowed.
+pub fn parsePattern(text: []const u8, options: LineOptions) ?Pattern {
+    return fromSweep(text, sweep.gitignore.parsePattern(text) orelse return null, options);
+}
+
+fn fromSweep(text: []const u8, parsed: sweep.gitignore.Line, options: LineOptions) Pattern {
     // A glob holding a `/` anywhere but at its end is matched against the
     // whole path below the file's directory, with `WM_PATHNAME`; any other
     // against the name alone, without it, as git's `match_basename` does.
     const anchored = !parsed.entry.options.anywhere;
     return .{
-        .text = line,
+        .text = text,
         .glob = parsed.pattern,
         .base = options.base,
         .source = options.source,
