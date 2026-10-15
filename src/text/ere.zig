@@ -685,46 +685,17 @@ const RParser = struct {
         const branch_start = p.at;
         while (p.at < p.text.len) {
             if (p.atBar() or p.atClose(depth)) break;
-            const atom_start = p.at;
             var atom = try p.parseAtom(depth, p.at == branch_start);
-            // quantifiers
-            while (p.at < p.text.len) {
-                var min: u32 = undefined;
-                var max: ?u32 = undefined;
-                const c = p.text[p.at];
-                if (c == '*') {
-                    // a basic expression's leading star is itself
-                    min = 0;
-                    max = null;
-                    p.at += 1;
-                } else if (!p.isBasic() and (c == '+' or c == '?')) {
-                    min = if (c == '+') 1 else 0;
-                    max = if (c == '+') null else 1;
-                    p.at += 1;
-                } else if (p.isBasic() and c == '\\' and (p.peek(1) == '+' or p.peek(1) == '?')) {
-                    min = if (p.peek(1) == '+') 1 else 0;
-                    max = if (p.peek(1) == '+') null else 1;
-                    p.at += 2;
-                } else if ((!p.isBasic() and c == '{') or (p.isBasic() and c == '\\' and p.peek(1) == '{')) {
-                    const save = p.at;
-                    p.at += if (p.isBasic()) 2 else 1;
-                    const interval = p.parseInterval() catch |err| {
-                        if (!p.isBasic() and err == error.NotInterval) {
-                            // an extended `{` that is no interval is itself
-                            p.at = save;
-                            break;
-                        }
-                        return switch (err) {
-                            error.NotInterval => error.InvalidPattern,
-                            else => |e| e,
-                        };
-                    };
-                    min = interval.min;
-                    max = interval.max;
-                } else break;
-                atom = try p.node(.{ .repeat = .{ .node = atom, .min = min, .max = max } });
+            // glibc's `parse_expression` returns after an anchor: what follows
+            // starts an expression of its own, so a repetition there is a
+            // basic expression's byte and an extended expression's error.
+            if (!isAnchor(atom)) {
+                while (try p.repetition()) |rep| {
+                    atom = try p.node(.{ .repeat = .{ .node = atom, .min = rep.min, .max = rep.max } });
+                    // a basic expression takes no `*` or `\{` right after a repetition
+                    if (p.isBasic() and (p.peek(0) == '*' or (p.peek(0) == '\\' and p.peek(1) == '{'))) return error.InvalidPattern;
+                }
             }
-            _ = atom_start;
             try items.append(p.a, atom);
         }
         if (items.items.len == 0) return p.node(.empty);
@@ -732,28 +703,99 @@ const RParser = struct {
         return p.node(.{ .concat = items.items });
     }
 
-    const IntervalError = Error || error{NotInterval};
+    fn isAnchor(n: *const RNode) bool {
+        return switch (n.*) {
+            .bol, .eol, .word_boundary, .not_word_boundary, .word_start, .word_end => true,
+            else => false,
+        };
+    }
 
-    fn parseInterval(p: *RParser) IntervalError!struct { min: u32, max: ?u32 } {
-        const close_text: []const u8 = if (p.isBasic()) "\\}" else "}";
-        const close = std.mem.findPos(u8, p.text, p.at, close_text) orelse return error.NotInterval;
-        const inside = p.text[p.at..close];
-        var min: u32 = undefined;
-        var max: ?u32 = undefined;
-        if (std.mem.findScalar(u8, inside, ',')) |comma| {
-            for (inside[0..comma]) |digit| if (!std.ascii.isDigit(digit)) return error.NotInterval;
-            for (inside[comma + 1 ..]) |digit| if (!std.ascii.isDigit(digit)) return error.NotInterval;
-            min = if (comma == 0) 0 else std.fmt.parseUnsigned(u32, inside[0..comma], 10) catch return error.InvalidPattern;
-            max = if (comma + 1 == inside.len) null else std.fmt.parseUnsigned(u32, inside[comma + 1 ..], 10) catch return error.InvalidPattern;
-        } else {
-            if (inside.len == 0) return error.NotInterval;
-            for (inside) |digit| if (!std.ascii.isDigit(digit)) return error.NotInterval;
-            min = std.fmt.parseUnsigned(u32, inside, 10) catch return error.InvalidPattern;
-            max = min;
+    const Repetition = struct { min: u32, max: ?u32 };
+
+    /// The repetition operator at `p.at`, consumed, or `null` for none.
+    fn repetition(p: *RParser) Error!?Repetition {
+        if (p.at >= p.text.len) return null;
+        const c = p.text[p.at];
+        if (c == '*') {
+            p.at += 1;
+            return .{ .min = 0, .max = null };
         }
+        if (!p.isBasic() and (c == '+' or c == '?')) {
+            p.at += 1;
+            return if (c == '+') .{ .min = 1, .max = null } else .{ .min = 0, .max = 1 };
+        }
+        if (p.isBasic() and c == '\\' and (p.peek(1) == '+' or p.peek(1) == '?')) {
+            p.at += 2;
+            return if (p.text[p.at - 1] == '+') .{ .min = 1, .max = null } else .{ .min = 0, .max = 1 };
+        }
+        if ((!p.isBasic() and c == '{') or (p.isBasic() and c == '\\' and p.peek(1) == '{')) {
+            p.at += if (p.isBasic()) 2 else 1;
+            return try p.parseInterval();
+        }
+        return null;
+    }
+
+    /// glibc's `RE_DUP_MAX`: the largest count an interval may give.
+    const max_count = 0x7fff;
+
+    /// What ended a number in an interval: its closing brace, a comma, or
+    /// the end of the pattern.
+    const IntervalStop = enum { close, comma, end };
+
+    /// `fetch_number`: the decimal number up to the next comma or closing
+    /// brace, `none` for no digits, `invalid` for anything else in the way
+    /// or a count past `max_count`.
+    fn fetchNumber(p: *RParser) struct { value: union(enum) { none, invalid, count: u32 }, stop: IntervalStop } {
+        var value: ?u32 = null;
+        var invalid = false;
+        while (true) {
+            if (p.at >= p.text.len) return .{ .value = .invalid, .stop = .end };
+            const c = p.text[p.at];
+            if (c == '\\' and p.at + 1 < p.text.len) {
+                const e = p.text[p.at + 1];
+                p.at += 2;
+                if (p.isBasic() and e == '}') return .{ .value = if (invalid) .invalid else if (value) |v| .{ .count = v } else .none, .stop = .close };
+                // an escaped comma still ends the number, as glibc compares the byte alone
+                if (e == ',') return .{ .value = if (invalid) .invalid else if (value) |v| .{ .count = v } else .none, .stop = .comma };
+                invalid = true;
+                continue;
+            }
+            p.at += 1;
+            if (!p.isBasic() and c == '}') return .{ .value = if (invalid) .invalid else if (value) |v| .{ .count = v } else .none, .stop = .close };
+            if (c == ',') return .{ .value = if (invalid) .invalid else if (value) |v| .{ .count = v } else .none, .stop = .comma };
+            if (invalid or !std.ascii.isDigit(c)) {
+                invalid = true;
+                continue;
+            }
+            const next = (value orelse 0) * 10 + (c - '0');
+            if (next > max_count) invalid = true else value = next;
+        }
+    }
+
+    /// `parse_dup_op` for an interval, after its opening brace: `{n}`,
+    /// `{n,}`, `{,m}`, `{n,m}` and `{,}`; anything else is an error, as
+    /// POSIX syntax has no `RE_INVALID_INTERVAL_ORD`.
+    fn parseInterval(p: *RParser) Error!Repetition {
+        const first = p.fetchNumber();
+        const min: u32 = switch (first.value) {
+            .count => |n| n,
+            // `{,m}` is `{0,m}`; `{}` is no interval
+            .none => if (first.stop == .comma) 0 else return error.InvalidPattern,
+            .invalid => return error.InvalidPattern,
+        };
+        switch (first.stop) {
+            .close => return .{ .min = min, .max = min },
+            .end => return error.InvalidPattern,
+            .comma => {},
+        }
+        const second = p.fetchNumber();
+        if (second.stop != .close) return error.InvalidPattern;
+        const max: ?u32 = switch (second.value) {
+            .count => |n| n,
+            .none => null,
+            .invalid => return error.InvalidPattern,
+        };
         if (max) |m| if (m < min) return error.InvalidPattern;
-        if (min > 0x7fff or (max orelse 0) > 0x7fff) return error.InvalidPattern;
-        p.at = close + close_text.len;
         return .{ .min = min, .max = max };
     }
 
@@ -806,8 +848,10 @@ const RParser = struct {
                 }
                 return p.node(.eol);
             },
+            // A repetition operator where an expression starts: a basic
+            // expression's `*` is itself, an extended expression's an error.
             '*' => {
-                if (basic and branch_start) {
+                if (basic) {
                     p.at += 1;
                     return p.literal('*');
                 }
@@ -842,6 +886,7 @@ const RParser = struct {
                 return p.literal(c);
             },
             '{' => {
+                if (!basic) return error.InvalidPattern;
                 p.at += 1;
                 return p.literal('{');
             },
@@ -887,6 +932,70 @@ const RParser = struct {
         }
     }
 
+    /// One element of a bracket expression, as glibc's
+    /// `parse_bracket_element` reads it.
+    const BracketElement = union(enum) {
+        byte: u8,
+        /// `[.x.]`, a collating symbol: one byte, or a name no locale here has.
+        collating: []const u8,
+        /// `[=x=]`, an equivalence class.
+        equivalence: []const u8,
+        /// `[:name:]`, a character class.
+        class: []const u8,
+
+        /// The byte a range may start or end at, or why none.
+        fn rangeByte(e: BracketElement) Error!u8 {
+            return switch (e) {
+                .byte => |b| b,
+                .collating => |name| if (name.len == 1) name[0] else error.InvalidPattern,
+                .equivalence, .class => error.InvalidPattern,
+            };
+        }
+    };
+
+    /// glibc's `BRACKET_NAME_BUF_SIZE`: a class, symbol or equivalence name
+    /// this long or longer is an unmatched bracket.
+    const max_bracket_name = 32;
+
+    /// `peek_token_bracket` and `parse_bracket_element`: the element at
+    /// `p.at`, which must be inside the bracket. A `-` that does not end
+    /// the bracket is a range indicator, and only where `accept_hyphen`
+    /// (the first element, or a range's end) may it be a byte.
+    fn bracketElement(p: *RParser, accept_hyphen: bool) Error!BracketElement {
+        const c = p.text[p.at];
+        if (c == '[' and p.at + 1 < p.text.len) {
+            const kind = p.text[p.at + 1];
+            if (kind == '.' or kind == '=' or kind == ':') {
+                // `parse_bracket_symbol`: the name runs to `kind` followed by `]`
+                p.at += 2;
+                const name_start = p.at;
+                while (true) {
+                    if (p.at >= p.text.len) return error.InvalidPattern;
+                    if (p.at - name_start >= max_bracket_name) return error.InvalidPattern;
+                    const ch = p.text[p.at];
+                    p.at += 1;
+                    if (p.at >= p.text.len) return error.InvalidPattern;
+                    if (ch == kind and p.text[p.at] == ']') break;
+                }
+                const name = p.text[name_start .. p.at - 1];
+                p.at += 1;
+                return switch (kind) {
+                    '.' => .{ .collating = name },
+                    '=' => .{ .equivalence = name },
+                    else => .{ .class = name },
+                };
+            }
+        }
+        p.at += 1;
+        if (c == '-' and !accept_hyphen) {
+            // a `-` anywhere but before the closing bracket is no element
+            if (p.at >= p.text.len or p.text[p.at] != ']') return error.InvalidPattern;
+        }
+        return .{ .byte = c };
+    }
+
+    /// `parse_bracket_exp` without a locale: bytes, ranges by byte value,
+    /// the POSIX classes, and symbols and equivalence classes of one byte.
     fn bracket(p: *RParser) Error!*const [256]bool {
         const set = try p.a.create([256]bool);
         set.* = @splat(false);
@@ -896,40 +1005,43 @@ const RParser = struct {
             negate = true;
             p.at += 1;
         }
+        if (p.at >= p.text.len) return error.InvalidPattern;
         var first = true;
         while (true) {
             if (p.at >= p.text.len) return error.InvalidPattern;
-            const c = p.text[p.at];
-            if (c == ']' and !first) {
+            // the first `]` is a byte of the bracket
+            if (p.text[p.at] == ']' and !first) {
                 p.at += 1;
                 break;
             }
+            const start = try p.bracketElement(first);
             first = false;
-            if (c == '[' and p.at + 1 < p.text.len and (p.text[p.at + 1] == ':' or p.text[p.at + 1] == '=' or p.text[p.at + 1] == '.')) {
-                const kind = p.text[p.at + 1];
-                const closing = [2]u8{ kind, ']' };
-                const close = std.mem.findPos(u8, p.text, p.at + 2, &closing) orelse return error.InvalidPattern;
-                const name = p.text[p.at + 2 .. close];
-                if (kind == ':') {
-                    for (0..256) |b| {
-                        if (inClass(name, @intCast(b)) orelse return error.InvalidPattern) set[b] = true;
-                    }
-                } else {
-                    // an equivalence class or a collating symbol of one
-                    // byte is that byte
-                    if (name.len != 1) return error.InvalidPattern;
-                    set[name[0]] = true;
-                }
-                p.at = close + 2;
+            if (p.at >= p.text.len) return error.InvalidPattern;
+            const ranged = switch (start) {
+                .class, .equivalence => false,
+                // a `-` before the closing bracket is a byte of its own
+                else => p.text[p.at] == '-' and p.at + 1 < p.text.len and p.text[p.at + 1] != ']',
+            };
+            if (ranged) {
+                p.at += 1;
+                const end = try p.bracketElement(true);
+                const lo = try start.rangeByte();
+                const hi = try end.rangeByte();
+                if (hi < lo) return error.InvalidPattern;
+                for (lo..@as(usize, hi) + 1) |b| set[b] = true;
                 continue;
             }
-            p.at += 1;
-            if (p.at + 1 < p.text.len and p.text[p.at] == '-' and p.text[p.at + 1] != ']') {
-                const hi = p.text[p.at + 1];
-                if (hi < c) return error.InvalidPattern;
-                for (c..@as(usize, hi) + 1) |b| set[b] = true;
-                p.at += 2;
-            } else set[c] = true;
+            switch (start) {
+                .byte => |b| set[b] = true,
+                // without a locale's collation, a name of one byte is that byte
+                .collating, .equivalence => |name| {
+                    if (name.len != 1) return error.InvalidPattern;
+                    set[name[0]] = true;
+                },
+                .class => |name| for (0..256) |b| {
+                    if (inClass(name, @intCast(b)) orelse return error.InvalidPattern) set[b] = true;
+                },
+            }
         }
         if (p.flags.icase) {
             for (0..256) |b| {
@@ -1217,14 +1329,41 @@ test "ERE adapters reject reversed and oversized intervals" {
             try testing.expect(false);
         } else |err| try testing.expectEqual(error.InvalidPattern, err);
     }
-    for ([_][]const u8{ "a{word}", "a{2", "a{1,2,3}" }) |literal| {
-        var p = try Pattern.compile(testing.allocator, literal);
-        defer p.deinit();
-        try testing.expect(try p.search(testing.allocator, literal));
-        var r = try Regex.compile(testing.allocator, literal, .{});
-        defer r.deinit();
-        const found = (try r.find(testing.allocator, literal, false)).?;
-        try testing.expectEqual(@as(usize, 0), found.start);
-        try testing.expectEqual(literal.len, found.end);
+}
+
+test "patterns compile or are refused as git's compat/regex reads them" {
+    const Case = struct { []const u8, Syntax, bool };
+    for ([_]Case{
+        // a brace after an operand opens an interval, which must be whole
+        .{ "a{word}", .extended, false },       .{ "a{2", .extended, false },           .{ "a{1,2,3}", .extended, false },
+        .{ "a{}", .extended, false },           .{ "a{0x10}", .extended, false },       .{ "a{1_0}", .extended, false },
+        .{ "a{", .extended, false },            .{ "a{,}", .extended, true },           .{ "a{,2}", .extended, true },
+        .{ "a{32767}", .extended, true },       .{ "a{1\\,2}", .extended, true },       .{ "x{1}{2}", .extended, true },
+        // a repetition where an expression starts, after an anchor too
+        .{ "{1}a", .extended, false },          .{ "{x", .extended, false },            .{ "^*", .extended, false },
+        .{ "$+", .extended, false },            .{ "\\b?", .extended, false },          .{ "a|{1}", .extended, false },
+        .{ "^*", .basic, true },                .{ "\\>*", .basic, true },              .{ "\\{1\\}", .basic, false },
+        // a basic expression takes no second `*` or interval after a repetition
+        .{ "a**", .basic, false },              .{ "a*\\{2\\}", .basic, false },        .{ "a**", .extended, true },
+        .{ "a\\{1", .basic, false },            .{ "a{word}", .basic, true },           .{ "a\\{1\\}\\+", .basic, true },
+        // brackets: no range from or to a class, no `-` after a range but last
+        .{ "[[:alpha:]-z]", .extended, false }, .{ "[a-[:alpha:]]", .extended, false }, .{ "[a-z-9]", .extended, false },
+        .{ "[a-z-]", .extended, true },         .{ "[--z]", .extended, true },          .{ "[%--]", .extended, true },
+        .{ "[[.a.]-z]", .extended, true },      .{ "[a-[.z.]]", .extended, true },      .{ "[[.ab.]]", .extended, false },
+        .{ "[[.space.]]", .extended, false },   .{ "[[=a=]-z]", .extended, false },     .{ "[[:foo:]]", .extended, false },
+        // what stays as git has it
+        .{ "a)", .extended, true },             .{ ")", .extended, true },              .{ "()", .extended, true },
+        .{ "\\1", .extended, false },           .{ "(a)\\1", .extended, true },         .{ "a||b", .extended, true },
+    }) |case| {
+        if (Regex.compile(testing.allocator, case[0], .{ .syntax = case[1] })) |compiled| {
+            var r = compiled;
+            r.deinit();
+            if (!case[2]) std.debug.print("{s} ({t}) compiled\n", .{ case[0], case[1] });
+            try testing.expect(case[2]);
+        } else |err| {
+            if (case[2]) std.debug.print("{s} ({t}) refused\n", .{ case[0], case[1] });
+            try testing.expectEqual(error.InvalidPattern, err);
+            try testing.expect(!case[2]);
+        }
     }
 }

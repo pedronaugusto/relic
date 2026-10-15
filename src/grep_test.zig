@@ -345,3 +345,58 @@ test "random basic and extended expressions match where git grep's matcher match
         try compare(gpa, io, &git, &repo, &.{ flag, "-c", "-w", "-i", "-e", pattern.items }, .{ .patterns = &.{pattern.items}, .syntax = syntax, .show = .count, .word = true, .ignore_case = true });
     }
 }
+
+/// Pieces of patterns git's regex reads in more than one way: braces,
+/// brackets, anchors and repetitions where they may or may not stand.
+const soup = [_][]const u8{
+    "a",         "b",         "x",     "-",     "{",       "}",        ",",   "1",   "0",   "[",
+    "]",         "[^",        "^",     "$",     "(",       ")",        "|",   "*",   "+",   "?",
+    ".",         "\\",        "\\(",   "\\)",   "\\{",     "\\}",      "\\|", "\\+", "\\?", "\\1",
+    "[:alpha:]", "[:digit:]", "[=a=]", "[.a.]", "[.-.]",   "[:",       ":]",  "\\w", "\\b", "\\<",
+    "\\>",       "{1}",       "{,2}",  "{1,}",  "\\{1\\}", "\\{,2\\}", "\\,", "_",   " ",   "[.ab.]",
+};
+
+test "patterns made of braces, brackets, anchors and repetitions compile and match where git's own regex does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "lines.txt", "abc\na{,2}\nfoo_bar\na)b\n{x\n+y\n*z\n?q\nxx\naab-ab\na{1}b\nzz a-z\n:]\n[ab]\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "lines" });
+    // relic reads patterns as git's compat/regex does, which glibc shares and
+    // git for Windows builds; a git on another platform's regex (macOS's,
+    // which refuses `a**`) has nothing to say here.
+    {
+        var probe = try git.capture(io, &.{ "grep", "-E", "-e", "a**" });
+        defer probe.deinit(gpa);
+        if (probe.code > 1) return error.SkipZigTest;
+    }
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var prng: std.Random.DefaultPrng = .init(0x50a9);
+    const random = prng.random();
+    var pattern: std.ArrayList(u8) = .empty;
+    defer pattern.deinit(gpa);
+    for (0..testgit.corpusCases(400)) |i| {
+        const extended = i % 2 == 0;
+        pattern.clearRetainingCapacity();
+        for (0..1 + random.uintLessThan(usize, 7)) |_| try pattern.appendSlice(gpa, soup[random.uintLessThan(usize, soup.len)]);
+        const flag: []const u8 = if (extended) "-E" else "-G";
+        var c = try git.capture(io, &.{ "grep", flag, "-o", "-n", "--column", "-e", pattern.items });
+        defer c.deinit(gpa);
+        var out: Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        const options: grep_mod.Options = .{ .patterns = &.{pattern.items}, .syntax = if (extended) .extended else .basic, .only_matching = true, .line_number = true, .column = true };
+        if (grep_mod.grep(gpa, io, &repo, options, &out.writer)) |outcome| {
+            if (c.code > 1) std.debug.print("git refused {s} {s}: {s}\n", .{ flag, pattern.items, c.stderr });
+            try std.testing.expect(c.code <= 1);
+            try std.testing.expectEqualStrings(c.stdout, out.written());
+            try std.testing.expectEqual(c.code == 0, outcome.matched);
+        } else |err| {
+            if (c.code != 128) std.debug.print("relic refused {s} {s} ({t}); git: exit {d}\n", .{ flag, pattern.items, err, c.code });
+            try std.testing.expectEqual(error.InvalidPattern, err);
+            try std.testing.expectEqual(@as(u8, 128), c.code);
+        }
+    }
+}
