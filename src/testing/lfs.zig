@@ -41,9 +41,6 @@ pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
     try testgit.keepSystemVariables(gpa, &map);
     try map.put("HOME", home);
     try map.put("XDG_CONFIG_HOME", home);
-    // the home sits in the test's directory, beside its repositories; git
-    // looks for none above that directory, where the suite's own checkout is
-    try testgit.noRepositoryAbove(&map, home);
     // Where git-lfs, and relic after it, make the directory for an ssh
     // control socket, which git-lfs never removes: the test's own.
     try map.put("XDG_RUNTIME_DIR", home);

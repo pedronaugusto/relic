@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const repo_mod = @import("../repo/repo.zig");
+const testgit = @import("../testing/git.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfstransfer = @import("transfer.zig");
@@ -38,6 +39,8 @@ const Fixture = struct {
         defer gpa.free(home);
         var env = try testlfs.environ(gpa, home);
         errdefer env.deinit();
+        // git runs in the test's directory, inside the suite's checkout
+        try testgit.noRepositoryAbove(&env, root);
         try testlfs.requireGitLfs(gpa, io, &env);
         return .{ .gpa = gpa, .io = io, .tmp = tmp, .root = root, .env = env };
     }
