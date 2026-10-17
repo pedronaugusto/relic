@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-17
+
 ### Breaking
 
 - Git LFS answers are read into git-lfs's own shapes, with Go's zero values for what is missing: `lfs.transfer.BatchResponse.transfer` and `hash_algo` are strings; `BatchObject.size` is an `i64`, `actions` and `_links` an `ActionSet` (an action by name, as Go's `map[string]*Action`; `Actions` is gone), and it gains `name` and `path`; an `Action`'s fields have defaults, `header` is an `lfs.api.HeaderMap`, `expires_at` a Go time and `expires_in` an `i64`. `lfs.locks.Lock.locked_at` and `Table.Entry.locked_at` are a Go time, zero for none. `lfs.api.SshAuth.expires_at` and `lfs.custom.Action.expires_at` are a Go time; `expiresWithin` takes one, and takes `in` to nanoseconds as Go multiplies. `lfs.api.json_policy` is gone; `parseJson` takes where the JSON came from (`JsonFrom`: an HTTP body, the first value read and the rest left, or a program's answer, whole), and `headersOf` a `HeaderMap`. `lfs.custom.writeRequest` and an agent's transfer fail with `UnwritableTime` for an expiry Go refuses to write, and the object fails as git-lfs's does.
