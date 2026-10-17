@@ -68,6 +68,7 @@ test {
         _ = @import("codec/ewah.zig");
         _ = @import("text/ere.zig");
         _ = @import("text/percent.zig");
+        _ = @import("text/urlmatch.zig");
         _ = @import("text/decimal.zig");
         _ = @import("text/ctype.zig");
         _ = @import("text/quote.zig");
@@ -134,6 +135,7 @@ test {
         _ = @import("wire/hidden_test.zig");
         _ = @import("wire/promisors.zig");
         _ = @import("wire/promisors_test.zig");
+        _ = @import("wire/url_test.zig");
         _ = @import("testing/shared.zig");
         _ = @import("repo/ident_test.zig");
     }
@@ -160,6 +162,7 @@ test {
     _ = @import("text/c_quote.zig");
     _ = @import("text/glob.zig");
     _ = @import("text/glob_test.zig");
+    _ = @import("text/urlmatch_test.zig");
     _ = @import("diff/patch_id.zig");
     _ = @import("diff/similarity.zig");
     _ = @import("checkout/filter.zig");

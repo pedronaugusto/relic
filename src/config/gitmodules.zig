@@ -24,8 +24,8 @@ const testgit = @import("../testing/git.zig");
 const Self = @This();
 
 const std = @import("std");
-const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
+const urlmatch = @import("../text.zig").urlmatch;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -317,7 +317,7 @@ fn startsWithDotDotSlash(s: []const u8, cross_platform: bool) bool {
 /// not survive normalisation (a bad `%` escape, no host, a port that is not
 /// one, a `..` above the root) or when it decodes to a newline. Anything
 /// else is left to the transport that reads it.
-pub fn checkUrl(url: []const u8) bool {
+pub fn checkUrl(gpa: Allocator, url: []const u8) Allocator.Error!bool {
     if (looksLikeOption(url)) return false;
     // A `git://` URL is checked as a relative one is: it may be appended to
     // an http URL and decoded there.
@@ -336,7 +336,7 @@ pub fn checkUrl(url: []const u8) bool {
         if (climbs > 0 and rest.len > 0 and (rest[0] == ':' or rest[0] == '/')) return false;
         return true;
     }
-    if (curlUrl(url)) |curl| return curlUrlIsSafe(curl);
+    if (curlUrl(url)) |curl| return curlUrlIsSafe(gpa, curl);
     return true;
 }
 
@@ -362,63 +362,17 @@ fn decodesToNewline(url: []const u8) bool {
     return false;
 }
 
-/// The parts of git's `url_normalize` that decide whether it fails, then
-/// the newline check on what it would produce.
-fn curlUrlIsSafe(url: []const u8) bool {
-    if (std.mem.findScalar(u8, url, '\n') != null) return false;
-    // Every `%` must begin a two-digit escape.
-    var i: usize = 0;
-    while (i < url.len) : (i += 1) {
-        if (url[i] != '%') continue;
-        const byte = percent.escapeAt(url, i) orelse return false;
-        if (byte == '\n') return false;
-        i += 2;
-    }
-    // A scheme, then `://`.
-    const colon = std.mem.find(u8, url, "://") orelse return false;
-    if (colon == 0 or !std.ascii.isAlphabetic(url[0])) return false;
-    for (url[0..colon]) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
-    }
-    const after = url[colon + 3 ..];
-    const authority_end = std.mem.findAny(u8, after, "/?#") orelse after.len;
-    var authority = after[0..authority_end];
-    if (std.mem.findScalarLast(u8, authority, '@')) |at| authority = authority[at + 1 ..];
-    // The host, then an optional port.
-    var host = authority;
-    if (host.len > 0 and host[0] == '[') {
-        const close = std.mem.findScalar(u8, host, ']') orelse return false;
-        const port_part = host[close + 1 ..];
-        host = host[0 .. close + 1];
-        if (port_part.len > 0 and !validPort(port_part)) return false;
-    } else if (std.mem.findScalarLast(u8, host, ':')) |port_at| {
-        if (!validPort(host[port_at..])) return false;
-        host = host[0..port_at];
-    }
-    if (host.len == 0) return false;
-    // A `..` segment may not climb above the root.
-    var depth: usize = 0;
-    const path_end = std.mem.findAny(u8, after[authority_end..], "?#") orelse after.len - authority_end;
-    var segments = std.mem.splitScalar(u8, after[authority_end..][0..path_end], '/');
-    _ = segments.next();
-    while (segments.next()) |segment| {
-        if (std.mem.eql(u8, segment, "..")) {
-            if (depth == 0) return false;
-            depth -= 1;
-        } else if (!std.mem.eql(u8, segment, ".")) {
-            depth += 1;
-        }
-    }
-    return true;
-}
-
-/// `:<digits>`, naming a port from 1 to 65535, or a bare `:` that names
-/// none.
-fn validPort(text: []const u8) bool {
-    std.debug.assert(text[0] == ':');
-    if (text.len == 1) return true;
-    const port = decimal.digits(u32, text[1..]) orelse return false;
-    return port >= 1 and port <= 65535;
+/// git's check of a URL curl is given: it normalizes as `url_normalize`
+/// normalizes it, and what that gives decodes to no newline. A
+/// normalized URL keeps an escape only where one is needed, so it decodes
+/// to a newline exactly when the URL holds one, raw or escaped.
+fn curlUrlIsSafe(gpa: Allocator, url: []const u8) Allocator.Error!bool {
+    var info = urlmatch.normalize(gpa, url, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer info.deinit(gpa);
+    return !decodesToNewline(info.url);
 }
 
 /// Errors from resolving a relative url.
@@ -634,7 +588,7 @@ test "names and urls: this refuses exactly what git fsck refuses" {
         ".git", "x/.git", "a:b",      "..a",  "a..",  "a/..b", "sub",
     };
     for (names) |name| {
-        try expectFsckAgrees(name, "u", checkName(name) and checkUrl("u"));
+        try expectFsckAgrees(name, "u", checkName(name) and try checkUrl(testing.allocator, "u"));
     }
     const urls = [_][]const u8{
         "-u",             "./-u",              "http://h/%0a",       "../../../:x",
@@ -647,7 +601,7 @@ test "names and urls: this refuses exactly what git fsck refuses" {
         "./a%0",          "./a%0a%00",
     };
     for (urls) |url| {
-        try expectFsckAgrees("n", url, checkUrl(url));
+        try expectFsckAgrees("n", url, try checkUrl(testing.allocator, url));
     }
 }
 
@@ -750,7 +704,7 @@ fn fuzzGitmodules(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [2048]u8 = undefined;
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
-    _ = checkUrl(input);
+    _ = try checkUrl(gpa, input);
     _ = checkName(input);
     if (isRelativeUrl(input)) {
         if (resolveUrl(gpa, "https://example.com/a/b", input, "../")) |resolved| {

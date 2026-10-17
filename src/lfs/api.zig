@@ -2012,7 +2012,7 @@ pub const Client = struct {
     fn transportFor(c: *Client, scratch: Allocator, io: Io, request_url: []const u8, decompress: bool) ErrorNamespace.Error!*uplink.Client {
         const url = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", io, .{stripQuery(request_url)}, error.MalformedUrl);
         const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
-        const settings = http_settings.resolve(scratch, c.settings.config, environ, url) catch |err| switch (err) {
+        const settings = http_settings.resolve(scratch, io, url, .{ .config = c.settings.config, .environ = environ }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidHttpSetting => return c.fail("an http.* setting for {s} does not parse", io, .{stripQuery(request_url)}, error.InvalidHttpSetting),
             error.HttpUnavailable => return error.HttpUnavailable,

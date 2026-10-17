@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `wire.url.Url.parse` reads an address as git's `transport_get`, `parse_connect_url` and `get_host_and_port` do, held to `git ls-remote` and `git fetch-pack --diag-url` over a listed and a random corpus: a scheme is matched exactly (`SSH://` and `HTTPS://` name the helpers `git-remote-SSH` and `git-remote-HTTPS`); a helper's name or a URL's scheme may begin with a digit (`1foo://`, `2x::`), and `::addr` names the helper `git-remote-`; `rsync:` is refused rather than handed to a helper; a `://` after anything that is no scheme git connects to is refused (`./dir/ssh://host/repo`); an ssh port is what `strtol` reads (`+22`, ` 22`, `-0`), and anything else after the colon stays in the host as ssh is given it (`host:abc`, `host:65536`); an ssh user is split from the host at its last `@` only, with no password; the scp-like form takes an empty path (`host:`) and git's `~` rule (`host:a~b` reaches `~b`); an http URL's authority ends at the first `/`, `?` or `#` and its user at the first `@`, as curl and `credential_from_url` read it. relic still reaches a local directory whose name begins `[...]` as named, where `git fetch` drops that part (`git clone` does not).
+- `config.gitmodules.checkUrl` takes an allocator: a URL curl is given is checked by normalizing it as git does.
+- `wire.http_settings.resolve` takes an `Io`, the URL, and its `Sources` (configuration, environment, remote name), and `resolveForRemote` is gone into it: a path setting marked `:(optional)` is dropped when no file is there, as `git_config_pathname` drops it.
+
+### Added
+
+- `text.urlmatch`: git's `url_normalize`, `match_urls` and `cmp_matches`, held to `git config --get-urlmatch`.
+
+### Fixed
+
+- `http.<url>.*` settings match as git's urlmatch matches them: the URL and each pattern normalized (case, escapes, default and zero-padded ports, `.` and `..`), the longer host winning, then the longer path, then a named user (relic preferred an exact host over a wildcard, which git does not); a URL git cannot normalize takes only the settings written without one.
+- `http.*` values are read as git's `http_options` reads them: a bare string or path setting, `extraHeader`, `curloptResolve` or `proactiveAuth` is refused, as git dies on it; a number must be an `int`, a boolean one of git's spellings or an `int`, for the settings relic does not use as well; path settings (`sslCert`, `sslKey`, `sslCAInfo`, `sslCAPath`) are interpolated where they are read and the environment's (`GIT_SSL_CERT` and the rest) are used as they are; `http.postBuffer` below 65520 bytes is 65520, with no upper bound (relic clamped to 1 KiB-1 GiB).
+- `transfer.credentialsInUrl` finds a password as git's `url_normalize` does, in a URL of any scheme, and names the normalized URL in its warning; a value other than `allow`, `warn` and `die` is refused whatever the URL.
+- An ssh target is refused as an option when the `user@host` ssh is given begins with `-`, as git checks it (relic checked the user and the host apart).
+- A boolean setting written as a number must fit an `int`, as `git_parse_maybe_bool` reads it.
+
 ## [0.12.0] - 2026-10-17
 
 ### Breaking

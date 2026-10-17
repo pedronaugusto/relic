@@ -25,6 +25,7 @@ const Proxy = http_settings.Proxy;
 // The modules relic's API puts under this one, as `relic.transport.<name>`.
 
 const url = @import("../wire.zig").url;
+const urlmatch = @import("../text.zig").urlmatch;
 
 const fetch_pack = @import("../wire.zig").fetch_pack;
 
@@ -140,14 +141,25 @@ pub const Options = struct {
 /// which ends up in configuration files and process listings, is let
 /// through (`allow`, the default), warned of (`warn`) or refused (`die`,
 /// and any value git would die on).
-fn checkCredentialsInUrl(gpa: Allocator, text: []const u8, parsed: url.Url, options: Options) Error!void {
-    const password = parsed.password orelse return;
+///
+/// A password is what git's `url_normalize` finds in the URL, of any
+/// scheme, and the URL named in the warning is the normalized one, as git
+/// names it; a URL that does not normalize carries none.
+fn checkCredentialsInUrl(gpa: Allocator, text: []const u8, options: Options) Error!void {
     const config = options.config orelse return;
     const value = config.get("transfer.credentialsinurl") orelse return;
     if (std.mem.eql(u8, value, "allow")) return;
-    if (!std.mem.eql(u8, value, "warn")) return error.CredentialsInUrl;
-    const at = @intFromPtr(password.ptr) - @intFromPtr(text.ptr); // safe: `Url.parse` sliced `password` out of `text`
-    const redacted = try gpa.print("{s}<redacted>{s}", .{ text[0..at], text[at + password.len ..] });
+    const warn = std.mem.eql(u8, value, "warn");
+    // git dies on any other value, whatever the URL.
+    if (!warn and !std.mem.eql(u8, value, "die")) return error.CredentialsInUrl;
+    var info = urlmatch.normalize(gpa, text, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return,
+    };
+    defer info.deinit(gpa);
+    const password = info.password orelse return;
+    if (!warn) return error.CredentialsInUrl;
+    const redacted = try gpa.print("{s}<redacted>{s}", .{ info.url[0..password.off], info.url[password.off + password.len ..] });
     defer gpa.free(redacted);
     try warning.note(options.warnings, .{ .credentials_in_url = redacted });
 }
@@ -260,7 +272,7 @@ pub const Session = struct {
         // Every transport is checked, as git's `transport_get` checks it,
         // a bundle on this machine as `file`.
         try checkAllowed(options, policy.nameOf(parsed.scheme));
-        try checkCredentialsInUrl(gpa, remote_url, parsed, options);
+        try checkCredentialsInUrl(gpa, remote_url, options);
         if (parsed.scheme == .local and service == .upload_pack) bundled: {
             // `url_is_local_not_ssh && is_file && is_bundle`: a path to a
             // bundle is fetched from as one; a `file://` URL never is.

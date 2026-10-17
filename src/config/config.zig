@@ -1487,7 +1487,9 @@ pub fn parseBool(raw: []const u8) Self.ValueError!bool {
     for (falsy) |f| {
         if (std.ascii.eqlIgnoreCase(raw, f)) return false;
     }
+    // `git_parse_int`: an `int`, or no boolean at all.
     const n = parseInteger(raw) catch return error.NotABoolean;
+    _ = std.math.cast(i32, n) orelse return error.NotABoolean;
     return n != 0;
 }
 

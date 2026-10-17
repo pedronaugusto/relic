@@ -28,6 +28,8 @@ const Environ = std.process.Environ;
 
 const config_mod = @import("../config/config.zig");
 const url_mod = @import("url.zig");
+const urlmatch = @import("../text.zig").urlmatch;
+const Io = std.Io;
 const uplink = @import("uplink");
 const shakedown = @import("shakedown");
 /// Whether relic was built with HTTP: the `http` build option.
@@ -76,62 +78,131 @@ pub const Settings = struct {
     ca_info_from: ?[]const u8 = null,
     ssl_verify_from: ?[]const u8 = null,
 
-    /// Take `http.<name>`'s `value`, from `origin`; `bare` when it is
-    /// written without `=`, which a boolean reads as true.
+    /// Take `http.<name>`'s `value` (`null` when it is written without
+    /// `=`), from `origin`, as git's `http_options` takes it: a boolean
+    /// bare is true and otherwise one of git's spellings, a string or a
+    /// path must have a value, a path is interpolated (`~`, `~user`) and
+    /// one marked `:(optional)` is dropped when no file is there, a number
+    /// is an `int`. Every value git dies on is `error.InvalidHttpSetting`,
+    /// for the settings relic does not use as well.
     fn take(
         settings: *Settings,
         arena: Allocator,
+        io: Io,
+        home: ?[]const u8,
         name: []const u8,
-        value: []const u8,
-        bare: bool,
+        value: ?[]const u8,
         origin: []const u8,
         headers: *std.ArrayList([]const u8),
     ) Error!void {
+        const Kind = enum { boolean, integer, string, path };
+        const kinds = [_]struct { []const u8, Kind }{
+            .{ "version", .string },                        .{ "sslverify", .boolean },
+            .{ "sslcipherlist", .string },                  .{ "sslversion", .string },
+            .{ "sslcert", .path },                          .{ "sslcerttype", .string },
+            .{ "sslkey", .path },                           .{ "sslkeytype", .string },
+            .{ "sslcapath", .path },                        .{ "sslcainfo", .path },
+            .{ "sslcertpasswordprotected", .boolean },      .{ "ssltry", .boolean },
+            .{ "schannelcheckrevoke", .boolean },           .{ "schannelusesslcainfo", .boolean },
+            .{ "minsessions", .integer },                   .{ "maxrequests", .integer },
+            .{ "lowspeedlimit", .integer },                 .{ "lowspeedtime", .integer },
+            .{ "noepsv", .boolean },                        .{ "proxy", .string },
+            .{ "proxyauthmethod", .string },                .{ "proxysslcert", .string },
+            .{ "proxysslkey", .string },                    .{ "proxysslcainfo", .string },
+            .{ "proxysslcertpasswordprotected", .boolean }, .{ "cookiefile", .path },
+            .{ "savecookies", .boolean },                   .{ "useragent", .string },
+            .{ "delegation", .string },                     .{ "pinnedpubkey", .path },
+            .{ "keepaliveidle", .integer },                 .{ "keepaliveinterval", .integer },
+            .{ "keepalivecount", .integer },                .{ "retryafter", .integer },
+            .{ "maxretries", .integer },                    .{ "maxretrytime", .integer },
+        };
+        var kind: ?Kind = null;
+        for (kinds) |entry| {
+            if (std.mem.eql(u8, name, entry[0])) kind = entry[1];
+        }
+        var flag = false;
+        var text: ?[]const u8 = null;
+        if (kind) |k| switch (k) {
+            .boolean => flag = if (value) |v| config_mod.parseBool(v) catch return error.InvalidHttpSetting else true,
+            .integer => {
+                const n = config_mod.parseInteger(value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
+                _ = std.math.cast(i32, n) orelse return error.InvalidHttpSetting;
+            },
+            .string => text = value orelse return error.InvalidHttpSetting,
+            .path => text = try pathValue(arena, io, home, value orelse return error.InvalidHttpSetting),
+        };
+
         if (std.mem.eql(u8, name, "proxy")) {
-            settings.proxy = value;
+            settings.proxy = text;
         } else if (std.mem.eql(u8, name, "sslverify")) {
-            settings.ssl_verify = if (bare) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
+            settings.ssl_verify = flag;
             settings.ssl_verify_from = origin;
         } else if (std.mem.eql(u8, name, "sslcainfo")) {
-            settings.ca_info = value;
+            settings.ca_info = text;
             settings.ca_info_from = origin;
         } else if (std.mem.eql(u8, name, "sslcapath")) {
-            settings.ca_path = value;
+            settings.ca_path = text;
         } else if (std.mem.eql(u8, name, "sslcert")) {
-            settings.ssl_cert = value;
+            settings.ssl_cert = text;
         } else if (std.mem.eql(u8, name, "sslkey")) {
-            settings.ssl_key = value;
+            settings.ssl_key = text;
         } else if (std.mem.eql(u8, name, "sslcerttype")) {
-            settings.ssl_cert_type = value;
+            settings.ssl_cert_type = text;
         } else if (std.mem.eql(u8, name, "sslkeytype")) {
-            settings.ssl_key_type = value;
+            settings.ssl_key_type = text;
         } else if (std.mem.eql(u8, name, "proxysslcert")) {
-            settings.proxy_ssl_cert = value;
+            settings.proxy_ssl_cert = text;
         } else if (std.mem.eql(u8, name, "proxysslkey")) {
-            settings.proxy_ssl_key = value;
+            settings.proxy_ssl_key = text;
         } else if (std.mem.eql(u8, name, "proxysslcainfo")) {
-            settings.proxy_ssl_ca_info = value;
+            settings.proxy_ssl_ca_info = text;
         } else if (std.mem.eql(u8, name, "proxysslcertpasswordprotected")) {
-            settings.proxy_ssl_cert_password_protected = if (bare) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
+            settings.proxy_ssl_cert_password_protected = flag;
         } else if (std.mem.eql(u8, name, "extraheader")) {
-            if (value.len == 0) headers.clearRetainingCapacity() else try headers.append(arena, value);
+            const header = value orelse return error.InvalidHttpSetting;
+            if (header.len == 0) headers.clearRetainingCapacity() else try headers.append(arena, header);
+        } else if (std.mem.eql(u8, name, "curloptresolve") or std.mem.eql(u8, name, "proactiveauth")) {
+            if (value == null) return error.InvalidHttpSetting;
+        } else if (std.mem.eql(u8, name, "emptyauth")) {
+            if (value == null or !std.mem.eql(u8, value.?, "auto")) {
+                if (value) |v| _ = config_mod.parseBool(v) catch return error.InvalidHttpSetting;
+            }
         } else if (std.mem.eql(u8, name, "postbuffer")) {
-            const n = config_mod.parseInteger(value) catch return error.InvalidHttpSetting;
-            settings.post_buffer = @intCast(std.math.clamp(n, 1024, 1 << 30));
+            // `git_config_ssize_t`; below git's largest packet, that size.
+            const n = config_mod.parseInteger(value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
+            settings.post_buffer = @intCast(@max(n, large_packet_max));
         } else if (std.mem.eql(u8, name, "useragent")) {
-            settings.user_agent = value;
+            settings.user_agent = text;
         } else if (std.mem.eql(u8, name, "proxyauthmethod")) {
-            settings.proxy_auth_method = value;
+            settings.proxy_auth_method = text.?;
         } else if (std.mem.eql(u8, name, "followredirects")) {
-            settings.follow_redirects = if (std.mem.eql(u8, value, "initial"))
+            settings.follow_redirects = if (value != null and std.mem.eql(u8, value.?, "initial"))
                 .initial
-            else if (bare or (config_mod.parseBool(value) catch return error.InvalidHttpSetting))
+            else if (value == null or (config_mod.parseBool(value.?) catch return error.InvalidHttpSetting))
                 .always
             else
                 .never;
         } else if (std.mem.eql(u8, name, "sslcertpasswordprotected")) {
-            settings.ssl_cert_password_protected = if (bare) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
+            settings.ssl_cert_password_protected = flag;
         }
+    }
+
+    /// git's `git_config_pathname`: `:(optional)` and a file that is not
+    /// there is no value; `~` is `home`, `~user` that user's; a path that
+    /// cannot be expanded is a setting git dies on.
+    fn pathValue(arena: Allocator, io: Io, home: ?[]const u8, raw: []const u8) Error!?[]const u8 {
+        const optional = std.mem.startsWith(u8, raw, ":(optional)");
+        const path = config_mod.interpolatePath(arena, if (optional) raw[":(optional)".len..] else raw, home) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.UnexpandablePath => error.InvalidHttpSetting,
+        };
+        if (optional) {
+            std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => return null,
+                else => {},
+            };
+        }
+        return path;
     }
 
     /// What the environment says over the configuration, as git reads it:
@@ -182,6 +253,9 @@ pub const FollowRedirects = enum {
     always,
 };
 
+/// git's `LARGE_PACKET_MAX`, the least `http.postBuffer` git keeps.
+const large_packet_max = 65520;
+
 /// Errors from reading the settings.
 pub const Error = error{
     /// A value that does not parse: a `http.sslVerify` that is not a
@@ -213,36 +287,56 @@ pub fn chooseProxy(s: *Settings, choice: Proxy) void {
     }
 }
 
-/// The settings for `url`, from `config` and `environ`. Every slice is in
-/// `arena`, or borrowed from `config` or `environ`.
-pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url) Self.Error!Settings {
-    return resolveForRemote(arena, config, environ, url, null);
-}
+/// Where the settings for a URL come from.
+pub const Sources = struct {
+    config: ?*const config_mod.Config = null,
+    environ: ?*const Environ.Map = null,
+    /// The remote the URL is a named remote's: its `remote.<name>.proxy`
+    /// overrides `http.proxy`, an empty value included; the environment's
+    /// `no_proxy` still applies to it.
+    remote_name: ?[]const u8 = null,
+};
 
-/// A named remote's proxy overrides `http.proxy`, including an empty value.
-/// The environment's `no_proxy` still applies to that proxy.
-pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url, remote_name: ?[]const u8) Self.Error!Settings {
+/// The settings for `url`, from `sources`. Every slice is in `arena`, or
+/// borrowed from the configuration or the environment.
+pub fn resolve(arena: Allocator, io: Io, url: url_mod.Url, sources: Sources) Self.Error!Settings {
+    const config = sources.config;
+    const environ = sources.environ;
+    const remote_name = sources.remote_name;
     if (comptime !http_enabled) return error.HttpUnavailable;
     var s: Settings = .{};
     var headers: std.ArrayList([]const u8) = .empty;
     var proxy_set = false;
     if (config) |c| {
-        var best: std.StringHashMapUnmanaged(Score) = .empty;
+        // A URL git cannot normalize matches no pattern: only the
+        // settings written without one apply.
+        const normalized: ?urlmatch.Info = urlmatch.normalize(arena, url.raw, false) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        };
+        const home = if (environ) |env| env.get("HOME") else null;
+        var best: std.StringHashMapUnmanaged(urlmatch.Match) = .empty;
         for (c.entries.items) |entry| {
             if (!std.ascii.eqlIgnoreCase(entry.section, "http")) continue;
-            const score = if (entry.subsection.len == 0) Score.none else scoreOf(entry.subsection, url) orelse continue;
+            const matched: urlmatch.Match = if (entry.subsection.len == 0) .any else blk: {
+                const have = normalized orelse continue;
+                const pattern = urlmatch.normalize(arena, entry.subsection, true) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => continue,
+                };
+                break :blk urlmatch.match(have, pattern) orelse continue;
+            };
             const name = try std.ascii.allocLowerString(arena, entry.name);
             const gop = try best.getOrPut(arena, name);
-            if (gop.found_existing and score.lessThan(gop.value_ptr.*)) continue;
-            gop.value_ptr.* = score;
-            const raw = entry.value orelse "";
-            const value = try arena.dupe(u8, raw);
+            if (gop.found_existing and matched.order(gop.value_ptr.*) == .lt) continue;
+            gop.value_ptr.* = matched;
+            const value: ?[]const u8 = if (entry.value) |raw| try arena.dupe(u8, raw) else null;
             const origin = if (entry.subsection.len == 0)
                 try arena.print("http.{s}", .{name})
             else
                 try arena.print("http.{s}.{s}", .{ entry.subsection, name });
             if (std.mem.eql(u8, name, "proxy")) proxy_set = true;
-            try s.take(arena, name, value, entry.value == null, origin, &headers);
+            try s.take(arena, io, home, name, value, origin, &headers);
         }
     }
     s.extra_headers = headers.items;
@@ -259,62 +353,6 @@ pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, env
         if (p.len == 0) s.proxy = null;
     }
     return s;
-}
-
-/// How closely a pattern matched: git's `urlmatch` ordering.
-const Score = struct {
-    matched: bool,
-    exact_host: bool = false,
-    host_len: usize = 0,
-    path_len: usize = 0,
-    user: bool = false,
-
-    const none: Score = .{ .matched = false };
-
-    fn lessThan(a: Score, b: Score) bool {
-        if (a.matched != b.matched) return !a.matched;
-        if (a.exact_host != b.exact_host) return !a.exact_host;
-        if (a.host_len != b.host_len) return a.host_len < b.host_len;
-        if (a.path_len != b.path_len) return a.path_len < b.path_len;
-        if (a.user != b.user) return !a.user;
-        return false;
-    }
-};
-
-/// How `pattern` matches `url`, or `null` when it does not.
-fn scoreOf(pattern: []const u8, url: url_mod.Url) ?Score {
-    const parsed = url_mod.Url.parse(pattern) catch return null;
-    if (parsed.scheme != url.scheme) return null;
-    var score: Score = .{ .matched = true };
-    if (parsed.user) |user| {
-        const theirs = url.user orelse return null;
-        if (!std.mem.eql(u8, user, theirs)) return null;
-        score.user = true;
-    }
-    var p = std.mem.splitScalar(u8, parsed.host, '.');
-    var h = std.mem.splitScalar(u8, url.host, '.');
-    score.exact_host = true;
-    while (true) {
-        const a = p.next();
-        const b = h.next();
-        if (a == null and b == null) break;
-        if (a == null or b == null) return null;
-        if (std.mem.eql(u8, a.?, "*")) {
-            score.exact_host = false;
-            continue;
-        }
-        if (!std.ascii.eqlIgnoreCase(a.?, b.?)) return null;
-    }
-    score.host_len = parsed.host.len;
-    const default_port: u16 = if (url.scheme == .https) 443 else 80;
-    if ((parsed.port orelse default_port) != (url.port orelse default_port)) return null;
-    const want = std.mem.trimEnd(u8, parsed.path, "/");
-    if (want.len != 0) {
-        if (!std.mem.startsWith(u8, url.path, want)) return null;
-        if (url.path.len != want.len and url.path[want.len] != '/') return null;
-    }
-    score.path_len = want.len;
-    return score;
 }
 
 const testing = std.testing;
@@ -341,17 +379,17 @@ test "the closest http.<url> section wins, and a looser one after it does not" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const team = try resolve(arena, &config, null, try url_mod.Url.parse("https://git.example.com/team/repo.git"));
+    const team = try resolve(arena, testing.io, try url_mod.Url.parse("https://git.example.com/team/repo.git"), .{ .config = &config });
     try testing.expectEqualStrings("http://team:3128", team.proxy.?);
     try testing.expectEqualStrings("/etc/team-ca.pem", team.ca_info.?);
     try testing.expectEqualStrings("http.https://git.example.com/team.sslcainfo", team.ca_info_from.?);
     try testing.expectEqual(@as(usize, 2), team.extra_headers.len);
 
-    const elsewhere = try resolve(arena, &config, null, try url_mod.Url.parse("https://git.example.com/solo/repo.git"));
+    const elsewhere = try resolve(arena, testing.io, try url_mod.Url.parse("https://git.example.com/solo/repo.git"), .{ .config = &config });
     try testing.expectEqualStrings("http://host:3128", elsewhere.proxy.?);
     try testing.expect(elsewhere.ca_info == null);
 
-    const wild = try resolve(arena, &config, null, try url_mod.Url.parse("https://ci.example.com/repo.git"));
+    const wild = try resolve(arena, testing.io, try url_mod.Url.parse("https://ci.example.com/repo.git"), .{ .config = &config });
     try testing.expectEqualStrings("http://wild:3128", wild.proxy.?);
     try testing.expectEqual(@as(usize, 1), wild.extra_headers.len);
 }
@@ -372,11 +410,11 @@ test "http.followRedirects is read as git reads it: initial, a boolean, scoped b
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    try testing.expectEqual(FollowRedirects.initial, (try resolve(arena, null, null, try url_mod.Url.parse("https://a.example.com/r"))).follow_redirects);
-    try testing.expectEqual(FollowRedirects.always, (try resolve(arena, &config, null, try url_mod.Url.parse("https://a.example.com/r"))).follow_redirects);
-    try testing.expectEqual(FollowRedirects.never, (try resolve(arena, &config, null, try url_mod.Url.parse("https://git.example.com/r"))).follow_redirects);
-    try testing.expectEqual(FollowRedirects.initial, (try resolve(arena, &config, null, try url_mod.Url.parse("https://initial.example.com/r"))).follow_redirects);
-    try testing.expectError(error.InvalidHttpSetting, resolve(arena, &config, null, try url_mod.Url.parse("https://bad.example.com/r")));
+    try testing.expectEqual(FollowRedirects.initial, (try resolve(arena, testing.io, try url_mod.Url.parse("https://a.example.com/r"), .{})).follow_redirects);
+    try testing.expectEqual(FollowRedirects.always, (try resolve(arena, testing.io, try url_mod.Url.parse("https://a.example.com/r"), .{ .config = &config })).follow_redirects);
+    try testing.expectEqual(FollowRedirects.never, (try resolve(arena, testing.io, try url_mod.Url.parse("https://git.example.com/r"), .{ .config = &config })).follow_redirects);
+    try testing.expectEqual(FollowRedirects.initial, (try resolve(arena, testing.io, try url_mod.Url.parse("https://initial.example.com/r"), .{ .config = &config })).follow_redirects);
+    try testing.expectError(error.InvalidHttpSetting, resolve(arena, testing.io, try url_mod.Url.parse("https://bad.example.com/r"), .{ .config = &config }));
 }
 
 test "the environment overrides the files, and no_proxy names hosts as curl reads it" {
@@ -396,7 +434,7 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const plain = try resolve(arena, &config, &env, try url_mod.Url.parse("http://git.example.com/r.git"));
+    const plain = try resolve(arena, testing.io, try url_mod.Url.parse("http://git.example.com/r.git"), .{ .config = &config, .environ = &env });
     try testing.expectEqualStrings("/etc/from-env.pem", plain.ca_info.?);
     // curl ignores an upper-case HTTP_PROXY, and so git does. On Windows a
     // variable's name has no case: `http_proxy` is the variable set as
@@ -406,9 +444,9 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
     } else {
         try testing.expect(plain.proxy == null);
     }
-    const secure = try resolve(arena, &config, &env, try url_mod.Url.parse("https://git.example.com/r.git"));
+    const secure = try resolve(arena, testing.io, try url_mod.Url.parse("https://git.example.com/r.git"), .{ .config = &config, .environ = &env });
     try testing.expectEqualStrings("http://secure:3128", secure.proxy.?);
-    const inside = try resolve(arena, &config, &env, try url_mod.Url.parse("https://git.internal.example.com/r.git"));
+    const inside = try resolve(arena, testing.io, try url_mod.Url.parse("https://git.internal.example.com/r.git"), .{ .config = &config, .environ = &env });
     try testing.expect(inside.proxy == null);
 }
 
@@ -422,7 +460,7 @@ test "HTTP settings preserve allocation resource failures" {
 fn allocationSettings(gpa: Allocator, config: *const config_mod.Config) !void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const settings = try resolve(arena.allocator(), config, null, try url_mod.Url.parse("https://example.com/repo"));
+    const settings = try resolve(arena.allocator(), testing.io, try url_mod.Url.parse("https://example.com/repo"), .{ .config = config });
     try testing.expectEqualStrings("http://proxy:3128", settings.proxy.?);
 }
 
@@ -435,12 +473,12 @@ test "a remote's SOCKS proxy overrides http.proxy and remains subject to no_prox
     defer env.deinit();
     try env.put("all_proxy", "socks4a://environment");
     const url = try url_mod.Url.parse("https://git.example.com/repo.git");
-    const named = try resolveForRemote(arena.allocator(), &config, &env, url, "origin");
+    const named = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
     try testing.expectEqualStrings("socks5h://specific", named.proxy.?);
-    const direct = try resolveForRemote(arena.allocator(), &config, &env, url, "direct");
+    const direct = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "direct" });
     try testing.expect(direct.proxy == null);
     try env.put("no_proxy", ".example.com");
-    const bypassed = try resolveForRemote(arena.allocator(), &config, &env, url, "origin");
+    const bypassed = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
     try testing.expect(bypassed.proxy == null);
 }
 
@@ -453,14 +491,14 @@ test "a proxy the caller chooses stands over the configuration, the environment 
     defer env.deinit();
     try env.put("no_proxy", ".example.com");
     const url = try url_mod.Url.parse("https://git.example.com/repo.git");
-    var s = try resolveForRemote(arena.allocator(), &config, &env, url, "origin");
+    var s = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
     chooseProxy(&s, .auto);
     try testing.expect(s.proxy == null);
     chooseProxy(&s, .{ .url = "http://chosen:8080" });
     try testing.expectEqualStrings("http://chosen:8080", s.proxy.?);
     chooseProxy(&s, .none);
     try testing.expect(s.proxy == null);
-    var t = try resolveForRemote(arena.allocator(), &config, null, url, "origin");
+    var t = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = null, .remote_name = "origin" });
     try testing.expectEqualStrings("socks5h://specific", t.proxy.?);
     chooseProxy(&t, .none);
     try testing.expect(t.proxy == null);

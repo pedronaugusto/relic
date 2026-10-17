@@ -377,7 +377,7 @@ fn moduleUrl(
     refusal: ?*Refusal,
 ) Error![]const u8 {
     const url = module.url orelse return refuse(refusal, display, "", error.MissingUrl);
-    if (!gitmodules.checkUrl(url)) return refuse(refusal, display, url, error.DisallowedUrl);
+    if (!try gitmodules.checkUrl(arena, url)) return refuse(refusal, display, url, error.DisallowedUrl);
     if (!gitmodules.isRelativeUrl(url)) return url;
     const base = try superprojectUrl(arena, io, repo);
     return gitmodules.resolveUrl(arena, base, url, up_path) catch |err| switch (err) {
@@ -1465,7 +1465,7 @@ fn populate(
             dir.close(io);
         } else |_| {}
         const transport = options.transport orelse return refuse(options.refusal, display, url, error.NotCloned);
-        if (!gitmodules.checkUrl(url)) return refuse(options.refusal, display, url, error.DisallowedUrl);
+        if (!try gitmodules.checkUrl(gpa, url)) return refuse(options.refusal, display, url, error.DisallowedUrl);
         // git's `clone_submodule` under `--init`: a path that is there and
         // is not an empty directory is not cloned into.
         if (options.init and !try emptyOrAbsent(io, wt, path)) return refuse(options.refusal, display, url, error.DirectoryNotEmpty);

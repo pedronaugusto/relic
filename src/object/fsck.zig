@@ -1038,7 +1038,7 @@ pub fn checkBlob(gpa: Allocator, rules: *const Rules, inputs: BlobInputs, option
                 const value: ?[]const u8 = entry.value;
                 if (!gitmodules.checkName(name)) _ = try r.report(.gitmodules_name, name);
                 if (value) |v| {
-                    if (std.mem.eql(u8, entry.name, "url") and !gitmodules.checkUrl(v)) _ = try r.report(.gitmodules_url, v);
+                    if (std.mem.eql(u8, entry.name, "url") and !try gitmodules.checkUrl(gpa, v)) _ = try r.report(.gitmodules_url, v);
                     if (std.mem.eql(u8, entry.name, "path") and v.len != 0 and v[0] == '-') _ = try r.report(.gitmodules_path, v);
                     if (std.mem.eql(u8, entry.name, "update") and v.len != 0 and v[0] == '!') _ = try r.report(.gitmodules_update, v);
                 }

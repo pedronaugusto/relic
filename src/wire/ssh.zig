@@ -121,12 +121,11 @@ pub fn connect(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    if (url.host.len != 0 and url.host[0] == '-') return error.SuspiciousHostname;
-    if (url.user) |user| {
-        if (user.len != 0 and user[0] == '-') return error.SuspiciousHostname;
-    }
-    if (url.path.len != 0 and url.path[0] == '-') return error.SuspiciousPathname;
+    // git's `looks_like_command_line_option` on the target as ssh is
+    // given it, `user@host`.
     const host = if (url.user) |user| try arena.print("{s}@{s}", .{ user, url.host }) else url.host;
+    if (host.len != 0 and host[0] == '-') return error.SuspiciousHostname;
+    if (url.path.len != 0 and url.path[0] == '-') return error.SuspiciousPathname;
     var port_buf: [8]u8 = undefined;
     // unreachable: a u16 is at most five digits
     const port: ?[]const u8 = if (url.port) |p| std.mem.print(&port_buf, "{d}", .{p}) catch unreachable else null;

@@ -308,20 +308,14 @@ const Http = struct {
         h.base_path = path;
 
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
-        var settings = try http_settings.resolveForRemote(arena, h.options.config, environ, url, h.options.remote_name);
+        var settings = try http_settings.resolve(arena, h.io, url, .{ .config = h.options.config, .environ = environ, .remote_name = h.options.remote_name });
         http_settings.chooseProxy(&settings, h.options.proxy);
         var tls_options: uplink.tls.ClientOptions = .{};
         if (url.scheme == .https) {
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{
-                    .cert = expandHome(arena, cert, environ) catch |err| return switch (err) {
-                        error.UnexpandablePath => h.fail(error.InvalidHttpSetting, "http.sslCert"),
-                        error.OutOfMemory => error.OutOfMemory,
-                    },
-                    .key = if (settings.ssl_key) |k| expandHome(arena, k, environ) catch |err| return switch (err) {
-                        error.UnexpandablePath => h.fail(error.InvalidHttpSetting, "http.sslKey"),
-                        error.OutOfMemory => error.OutOfMemory,
-                    } else null,
+                    .cert = cert,
+                    .key = settings.ssl_key,
                     .cert_format = client_cert.Format.parse(settings.ssl_cert_type) catch return h.fail(error.SslCertTypeUnsupported, "http.sslCertType"),
                     .key_format = client_cert.Format.parse(settings.ssl_key_type) catch return h.fail(error.SslCertTypeUnsupported, "http.sslKeyType"),
                 }, settings.ssl_cert_password_protected, &h.cert_credentials);
@@ -331,7 +325,7 @@ const Http = struct {
                 tls_options.verify = .none;
                 try warning.note(h.options.warnings, .{ .ssl_verify_disabled = settings.ssl_verify_from orelse "http.sslVerify" });
             } else if (settings.ca_info != null or settings.ca_path != null) {
-                try h.trustAuthorities(settings, environ);
+                try h.trustAuthorities(settings);
                 tls_options.trust = h.trust;
             }
         }
@@ -448,18 +442,10 @@ const Http = struct {
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
     /// `http.sslCAPath` besides them, as curl does for git.
-    fn trustAuthorities(h: *Http, settings: http_settings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
-        const arena = h.arena.allocator();
-        const sources: authorities.Sources = .{
-            .ca_info = if (settings.ca_info) |raw| expandHome(arena, raw, environ) catch |err| return switch (err) {
-                error.UnexpandablePath => h.fail(error.SslCertificateUnreadable, settings.ca_info_from orelse "http.sslCAInfo"),
-                error.OutOfMemory => error.OutOfMemory,
-            } else null,
-            .ca_path = if (settings.ca_path) |raw| expandHome(arena, raw, environ) catch |err| return switch (err) {
-                error.UnexpandablePath => h.fail(error.SslCertificateUnreadable, "http.sslCAPath"),
-                error.OutOfMemory => error.OutOfMemory,
-            } else null,
-        };
+    fn trustAuthorities(h: *Http, settings: http_settings.Settings) Error!void {
+        // Configured paths come interpolated, as git's `git_config_pathname`
+        // gives them; the environment's are used as they are.
+        const sources: authorities.Sources = .{ .ca_info = settings.ca_info, .ca_path = settings.ca_path };
         var failed: authorities.Failed = undefined;
         h.trust = authorities.load(h.gpa, h.io, sources, &failed) catch |err| return switch (err) {
             error.SslCertificateUnreadable => h.fail(error.SslCertificateUnreadable, switch (failed) {
@@ -469,12 +455,6 @@ const Http = struct {
             }),
             else => |e| e,
         };
-    }
-
-    /// A path setting as git reads it, `~` the `HOME` of `environ`.
-    fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) config_mod.PathError![]const u8 {
-        const env = environ orelse return path;
-        return config_mod.interpolatePath(arena, path, env.get("HOME"));
     }
 
     /// The proxy, and its credential: the user and password its URL
