@@ -349,7 +349,7 @@ pub const Remote = struct {
                 }
             }
             if (reason != null) refused = true;
-            try refs.append(arena, .{ .name = name, .ok = reason == null, .message = reason });
+            try refs.append(arena, .{ .name = name, .status = if (reason == null) .ok else .rejected, .message = reason });
         }
 
         try r.commitCommands(io, commands, refs.items, refused, options);
@@ -369,8 +369,8 @@ pub const Remote = struct {
         if (options.atomic) {
             if (refused) {
                 for (refs) |*ref| {
-                    if (ref.ok) {
-                        ref.ok = false;
+                    if (ref.ok()) {
+                        ref.status = .rejected;
                         ref.message = "atomic transaction failed";
                     }
                 }
@@ -381,20 +381,20 @@ pub const Remote = struct {
                 if (tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() })) |_| {} else |err| {
                     if (err == error.Canceled) return error.Canceled;
                     for (refs) |*ref| {
-                        ref.ok = false;
+                        ref.status = .rejected;
                         ref.message = "failed to update ref";
                     }
                 }
             }
         } else {
             for (commands, refs) |command, *ref| {
-                if (!ref.ok) continue;
+                if (!ref.ok()) continue;
                 var tx = r.repo.beginRefs();
                 defer tx.deinit(io);
                 try stage(&tx, command);
                 tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() }) catch |err| {
                     if (err == error.Canceled) return error.Canceled;
-                    ref.ok = false;
+                    ref.status = .rejected;
                     ref.message = "failed to update ref";
                 };
             }

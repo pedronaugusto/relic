@@ -26,7 +26,7 @@ const Push = struct {
             .atomic = atomic,
         });
         defer report.deinit();
-        push.accepted = report.refs.len == 1 and report.refs[0].ok;
+        push.accepted = report.refs.len == 1 and report.refs[0].ok();
     }
 };
 

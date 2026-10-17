@@ -175,8 +175,13 @@ pub const RefResult = struct {
     status: Status,
     /// Whether an update that would otherwise be refused was forced.
     forced: bool = false,
-    /// The remote's reason, for `rejected_by_remote`.
+    /// The remote's reason, for `rejected_by_remote`, or what it added to
+    /// an update it took.
     message: ?[]const u8 = null,
+    /// What the remote said each update it took became, when it said more
+    /// than the ref: a `proc-receive` hook's or a remote helper's `option`
+    /// lines, each a line of its own in git's report.
+    updates: []const send_pack.RefReport.Update = &.{},
 
     /// What became of the update.
     pub const Status = enum {
@@ -197,6 +202,16 @@ pub const RefResult = struct {
         rejected_stale,
         /// Sent and refused by the remote; `message` says why.
         rejected_by_remote,
+        /// Not sent: the remote's ref moved since it was last fetched, and
+        /// the push asked for it to include what it holds (a remote
+        /// helper's `remote ref updated since checkout`).
+        rejected_remote_updated,
+        /// Sent, and the remote did not say what became of it: git's
+        /// "remote failed to report status".
+        unreported,
+        /// A remote helper had nothing to match it to: git's `[no match]`,
+        /// which is no failure.
+        no_match,
         /// Not applied: the push was atomic and another ref was refused.
         atomic_failed,
         /// Worked out and not sent, for a dry run.
@@ -206,7 +221,7 @@ pub const RefResult = struct {
     /// Whether this ref was refused.
     pub fn rejected(r: RefResult) bool {
         return switch (r.status) {
-            .ok, .up_to_date, .not_sent => false,
+            .ok, .up_to_date, .not_sent, .no_match => false,
             else => true,
         };
     }
@@ -481,12 +496,35 @@ fn send(
             r.message = outcome.unpack_message;
             continue;
         }
-        if (report.find(r.remote_ref)) |said| {
-            if (!said.ok) {
-                r.status = .rejected_by_remote;
-                if (said.message) |m| r.message = try arena.dupe(u8, m);
+        // A ref the remote says nothing of failed, as git's send-pack
+        // has it; a remote helper reports such a ref itself, as `no match`.
+        const said = report.find(r.remote_ref) orelse {
+            r.status = .unreported;
+            continue;
+        };
+        if (said.message) |m| r.message = try arena.dupe(u8, m);
+        if (said.forced) r.forced = true;
+        if (said.updates.len != 0) {
+            const updates = try arena.alloc(send_pack.RefReport.Update, said.updates.len);
+            for (said.updates, updates) |from, *to| {
+                to.* = from;
+                if (from.refname) |n| to.refname = try arena.dupe(u8, n);
             }
+            r.updates = updates;
         }
+        r.status = switch (said.status) {
+            .ok => .ok,
+            .rejected => .rejected_by_remote,
+            .up_to_date => .up_to_date,
+            .no_match => .no_match,
+            .rejected_non_fast_forward => .rejected_non_fast_forward,
+            .rejected_already_exists => .rejected_already_exists,
+            .rejected_fetch_first => .rejected_fetch_first,
+            .rejected_needs_force => .rejected_needs_force,
+            .rejected_stale => .rejected_stale,
+            .rejected_remote_updated => .rejected_remote_updated,
+            .expecting_report => .unreported,
+        };
     }
 }
 

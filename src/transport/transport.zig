@@ -380,6 +380,7 @@ pub const Session = struct {
             .git_dir = git_dir,
             .progress = options.progress != null,
             .object_format = kind orelse .sha1,
+            .warnings = options.warnings,
         });
         errdefer h.deinit(io);
         if (try h.connect(service, options.service_program)) {

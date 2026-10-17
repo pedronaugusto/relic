@@ -12,6 +12,14 @@
 //! - `git-remote-testfetch` has `fetch` and `push`: the objects fetched are
 //!   packed by the remote's `git pack-objects` and indexed here by `git
 //!   index-pack`; a push is `git push` from here to there.
+//! - `git-remote-testscript` reaches nothing: it answers each command with
+//!   the bytes `RELIC_HELPER_SCRIPT` names for it, so that what a client
+//!   makes of an answer, however malformed, can be compared. The script is
+//!   blocks, each a `== <command>` line and the answer, byte for byte, up
+//!   to the next such line: `capabilities`, `list`, `connect`, `push` (for
+//!   a batch of pushes), and `option <name>` or `option` (for any other).
+//!   An answer that does not end in a newline is the helper's last: it
+//!   exits once it has written it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -239,6 +247,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 3) return error.MissingArguments;
     var base = std.Io.Dir.path.basename(args[0]);
     if (std.mem.endsWith(u8, base, ".exe")) base = base[0 .. base.len - 4];
+    if (std.mem.eql(u8, base, "git-remote-testscript")) return scripted(gpa, io, init.environ_map);
 
     // The gits this runs are pointed at their repository by name, never by
     // the variables that point at this one.
@@ -315,4 +324,63 @@ fn readStream(h: *Helper, buf: *std.ArrayList(u8)) ![]u8 {
         }
     }
     return stream.toOwnedSlice(h.gpa);
+}
+
+/// `git-remote-testscript`: each command answered from the script.
+fn scripted(gpa: Allocator, io: Io, environ: *const std.process.Environ.Map) !void {
+    const path = environ.get("RELIC_HELPER_SCRIPT") orelse return error.NoScript;
+    const script = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
+    var in_buf: [64 * 1024]u8 = undefined;
+    var in = Io.File.stdin().readerStreaming(io, &in_buf);
+    var out_buf: [64 * 1024]u8 = undefined;
+    var out = Io.File.stdout().writerStreaming(io, &out_buf);
+    var line: Io.Writer.Allocating = .init(gpa);
+    var pushing = false;
+    while (true) {
+        line.clearRetainingCapacity();
+        _ = try in.interface.streamDelimiterEnding(&line.writer, '\n');
+        if (in.interface.bufferedLen() == 0 and line.written().len == 0) return;
+        if (in.interface.bufferedLen() != 0) in.interface.toss(1);
+        const text = line.written();
+        const key: []const u8 = if (text.len == 0) blk: {
+            if (!pushing) return;
+            pushing = false;
+            break :blk "push";
+        } else if (std.mem.startsWith(u8, text, "push ")) {
+            pushing = true;
+            continue;
+        } else if (std.mem.startsWith(u8, text, "option ")) blk: {
+            const rest = text["option ".len..];
+            const name = rest[0 .. std.mem.findScalar(u8, rest, ' ') orelse rest.len];
+            const specific = try gpa.print("option {s}", .{name});
+            break :blk if (block(script, specific) != null) specific else "option";
+        } else if (std.mem.startsWith(u8, text, "list")) "list" else if (std.mem.startsWith(u8, text, "connect ")) "connect" else text;
+        const answer = block(script, key) orelse return error.NotInScript;
+        try out.interface.writeAll(answer);
+        try out.interface.flush();
+        // An answer cut off before its newline is the helper's last.
+        if (answer.len == 0 or answer[answer.len - 1] != '\n') return;
+    }
+}
+
+/// The answer the script gives `key`: the bytes after its `== <key>` line
+/// up to the next `== ` line.
+fn block(script: []const u8, key: []const u8) ?[]const u8 {
+    var at: usize = 0;
+    while (std.mem.findPos(u8, script, at, "== ")) |start| {
+        if (start != 0 and script[start - 1] != '\n') {
+            at = start + 3;
+            continue;
+        }
+        const eol = std.mem.findScalarPos(u8, script, start, '\n') orelse return null;
+        const body = eol + 1;
+        var end = body;
+        while (std.mem.findPos(u8, script, end, "\n== ")) |next| {
+            end = next + 1;
+            break;
+        } else end = script.len;
+        if (std.mem.eql(u8, script[start + 3 .. eol], key)) return script[body..end];
+        at = eol;
+    }
+    return null;
 }

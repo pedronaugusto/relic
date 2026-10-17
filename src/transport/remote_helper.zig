@@ -38,6 +38,7 @@ const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const program = @import("../process.zig").program;
 const c_quote = @import("../text.zig").c_quote;
+const percent = @import("../text.zig").percent;
 const fast_import = @import("../fast/importer.zig");
 const fast_export = @import("../fast/exporter.zig");
 const connection = @import("../wire.zig").connection;
@@ -46,6 +47,7 @@ const refspec_mod = @import("../wire.zig").refspec;
 const send_pack = @import("../wire.zig").send_pack;
 const fetch_pack = @import("../wire.zig").fetch_pack;
 const url_mod = @import("../wire.zig").url;
+const warning = @import("../report.zig").warning;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -79,6 +81,9 @@ pub const Error = error{
     HelperOptionUnsupported,
     /// `:object-format` names a hash this does not have.
     UnsupportedObjectFormat,
+    /// `list` marked a ref `unchanged` that this repository does not have:
+    /// git's "could not read ref".
+    UnchangedRefMissing,
     /// A ref an import should have written is not there: git's "could not
     /// read ref".
     ImportedRefMissing,
@@ -139,6 +144,8 @@ pub const OpenOptions = struct {
     /// The repository's object format, SHA-1 outside one: what the
     /// helper's `refspec` capabilities' object names are read for.
     object_format: hash.Kind = .sha1,
+    /// Where what git warns of in the helper's answers goes.
+    warnings: ?*warning.Warnings = null,
 };
 
 /// One ref to fetch, by the name the helper listed it under.
@@ -211,12 +218,13 @@ pub const Helper = struct {
     /// The `.keep` files a `fetch` named, removed at the end.
     locks: std.ArrayList([]const u8) = .empty,
     line: Io.Writer.Allocating,
+    warnings: ?*warning.Warnings = null,
 
     /// Start the helper `spec` names and read its capabilities.
     pub fn open(gpa: Allocator, io: Io, spec: Spec, options: OpenOptions) Self.Error!*Helper {
         const h = try gpa.create(Helper);
         errdefer gpa.destroy(h);
-        h.* = .{ .gpa = gpa, .io = io, .arena_state = .init(gpa), .name = "", .conn = null, .line = .init(gpa), .object_format = options.object_format };
+        h.* = .{ .gpa = gpa, .io = io, .arena_state = .init(gpa), .name = "", .conn = null, .line = .init(gpa), .object_format = options.object_format, .warnings = options.warnings };
         errdefer {
             h.line.deinit();
             h.arena_state.deinit();
@@ -293,8 +301,11 @@ pub const Helper = struct {
         w.flush() catch return conn.failure();
     }
 
-    /// The helper's next line, without its line ending. At the end of its
-    /// output, `error.HelperAborted`, with what it said as the message.
+    /// The helper's next line as git's `recvline` reads it: without its
+    /// newline and one carriage return before it, a last line with no
+    /// newline as it stands, and as a C string, to its first NUL. At the
+    /// end of its output, `error.HelperAborted`, with what it said as the
+    /// message.
     fn readLine(h: *Helper) ErrorNamespace.Error![]const u8 {
         const conn = h.conn.?;
         const r = try conn.advertisement();
@@ -303,9 +314,23 @@ pub const Helper = struct {
             error.WriteFailed => return error.OutOfMemory,
             error.ReadFailed => return conn.failure(),
         };
-        if (r.bufferedLen() == 0) return h.aborted();
-        r.toss(1);
-        return std.mem.trimEnd(u8, h.line.written(), "\r");
+        var line = h.line.written();
+        if (r.bufferedLen() == 0) {
+            if (line.len == 0) return h.aborted();
+        } else {
+            r.toss(1);
+            if (line.len != 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        }
+        return line[0 .. std.mem.findScalar(u8, line, 0) orelse line.len];
+    }
+
+    /// Keep what git would print as `warning:`.
+    fn warn(h: *Helper, comptime format: []const u8, args: anytype) Allocator.Error!void {
+        if (h.warnings == null) return;
+        var buf: Io.Writer.Allocating = .init(h.gpa);
+        defer buf.deinit();
+        buf.writer.print(format, args) catch return error.OutOfMemory;
+        try warning.note(h.warnings, .{ .remote_helper = buf.written() });
     }
 
     fn aborted(h: *Helper) ErrorNamespace.Error {
@@ -357,6 +382,9 @@ pub const Helper = struct {
                 h.caps.object_format = true;
             } else if (mandatory) return error.UnknownMandatoryCapability;
         }
+        if (h.refspecs.items.len == 0 and (h.caps.import or h.caps.bidi_import or h.caps.@"export")) {
+            try h.warn("this remote helper should implement refspec capability", .{});
+        }
     }
 
     /// How `option` writes its value: as given, or as a C-quoted string.
@@ -380,6 +408,7 @@ pub const Helper = struct {
         const answer = try h.readLine();
         if (std.mem.eql(u8, answer, "ok")) return .ok;
         if (std.mem.startsWith(u8, answer, "error")) return .refused;
+        if (!std.mem.eql(u8, answer, "unsupported")) try h.warn("{s} unexpectedly said: '{s}'", .{ h.name, answer });
         return .unsupported;
     }
 
@@ -397,7 +426,12 @@ pub const Helper = struct {
     pub fn connect(h: *Helper, service: connection.Service, service_program: ?[]const u8) Self.Error!bool {
         if (!h.caps.connect) return false;
         if (service_program) |p| if (!std.mem.eql(u8, p, service.name())) {
-            _ = try h.option("servpath", p, .quoted);
+            // Fire and forget, as git sets it: a refusal is only a warning.
+            switch (try h.option("servpath", p, .quoted)) {
+                .ok => {},
+                .unsupported => try h.warn("setting remote service path not supported by protocol", .{}),
+                .refused => try h.warn("invalid remote service path", .{}),
+            }
         };
         var buf: [64]u8 = undefined;
         // unreachable: the longer service name, git-receive-pack, makes 25 bytes
@@ -438,15 +472,18 @@ pub const Helper = struct {
             var ref: protocol.RemoteRef = .{ .name = name, .oid = Oid.zero(h.kind) };
             if (value.len > 0 and value[0] == '@') {
                 ref.symref_target = try a.dupe(u8, value[1..]);
-            } else if (!std.mem.eql(u8, value, "?")) {
-                ref.oid = Oid.parse(h.kind, value) catch return error.HelperProtocolError;
+            } else if (value.len == 0 or value[0] != '?') {
+                // git's `get_oid_hex_algop`, whose failure it passes over,
+                // keeping the bytes it read before it.
+                ref.oid = oidAsRead(h.kind, value);
             }
             if (eon) |e| if (hasAttribute(rest[e + 1 ..], "unchanged")) {
                 try h.unchanged.put(h.gpa, try h.arena_state.allocator().dupe(u8, name), {});
-                if (repo) |r| if (try r.refStore().resolve(gpa, h.io, name)) |resolved| {
+                if (repo) |r| {
+                    const resolved = try r.refStore().resolve(gpa, h.io, name) orelse return error.UnchangedRefMissing;
                     gpa.free(resolved.name);
                     ref.oid = resolved.oid;
-                };
+                }
             };
             try refs.append(a, ref);
         }
@@ -605,7 +642,7 @@ pub const Helper = struct {
         try h.commonPushOptions(options);
         w.writeByte('\n') catch return error.OutOfMemory;
         try h.send(buf.written());
-        return h.readStatus(gpa);
+        return h.readStatus(gpa, commands);
     }
 
     fn pushWithExport(h: *Helper, gpa: Allocator, repo: *Repository, commands: []const PushCommand, options: PushOptions) ErrorNamespace.Error!send_pack.Report {
@@ -658,74 +695,203 @@ pub const Helper = struct {
             else => |e| return e,
         };
         w.flush() catch return conn.failure();
-        var report = try h.readStatus(gpa);
+        var report = try h.readStatus(gpa, commands);
         errdefer report.deinit();
         // glint-ignore: Z026 -- the marks are an optimisation for the next push, as git's are: kept when they can be, and the push stands either way
         if (export_tmp) |tmp| Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), h.export_marks.?, h.io) catch {};
         return report;
     }
 
-    /// The `ok <ref>` and `error <ref> <why>` lines up to a blank one:
-    /// git's `push_update_refs_status`.
-    fn readStatus(h: *Helper, gpa: Allocator) ErrorNamespace.Error!send_pack.Report {
+    /// The `ok <ref>` and `error <ref> <why>` lines up to a blank one, as
+    /// git's `push_update_ref_status` reads them: a reason git knows is the
+    /// state it names (`up to date`, `non-fast forward`, `no match` …,
+    /// `forced update` a forced `ok`), any other one the message; `option`
+    /// lines after an `ok` say what each update was; a ref nobody pushed
+    /// or listed is warned of and passed over, and a ref pushed and not
+    /// reported is `no match`, as git reports it.
+    fn readStatus(h: *Helper, gpa: Allocator, commands: []const PushCommand) ErrorNamespace.Error!send_pack.Report {
         var report: send_pack.Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
         errdefer report.arena.deinit();
         const a = report.arena.allocator();
         var refs: std.ArrayList(send_pack.RefReport) = .empty;
+        var updates: std.ArrayList(std.ArrayList(send_pack.RefReport.Update)) = .empty;
+        // The ref the last status line was about, whether its `ok` opens an
+        // update for the `option` lines after it, and whether one is open:
+        // git's `hint`, `new_report` and `report`.
+        var hint: ?usize = null;
+        var new_update = false;
+        var update_open = false;
         while (true) {
             const line = try h.readLine();
             if (line.len == 0) break;
-            // `option` lines say more of the ref before them; the report
-            // has no place for it.
-            if (std.mem.startsWith(u8, line, "option ")) continue;
-            var ok: bool = undefined;
+            if (std.mem.startsWith(u8, line, "option ")) {
+                const at = hint orelse return error.HelperProtocolError;
+                if (!new_update and !update_open) return error.HelperProtocolError;
+                if (new_update) {
+                    try updates.items[at].append(a, .{});
+                    new_update = false;
+                    update_open = true;
+                }
+                try takeOption(a, &updates.items[at], line["option ".len..], h.kind);
+                continue;
+            }
+            new_update = false;
+            update_open = false;
+            var status: send_pack.RefReport.Status = undefined;
             var rest: []const u8 = undefined;
             if (std.mem.startsWith(u8, line, "ok ")) {
-                ok = true;
+                status = .ok;
                 rest = line["ok ".len..];
             } else if (std.mem.startsWith(u8, line, "error ")) {
-                ok = false;
+                status = .rejected;
                 rest = line["error ".len..];
             } else return error.HelperProtocolError;
             const space = std.mem.findScalar(u8, rest, ' ');
-            const name = try a.dupe(u8, rest[0 .. space orelse rest.len]);
+            const name = rest[0 .. space orelse rest.len];
             var message: ?[]const u8 = null;
-            if (space) |s| {
-                const why = rest[s + 1 ..];
-                message = if (try c_quote.unquote(a, why)) |u| u.name else try a.dupe(u8, why);
+            var forced = false;
+            if (space) |sp| {
+                const why = rest[sp + 1 ..];
+                // `unquote_c_style`, whatever follows the closing quote.
+                const text = if (try c_quote.unquote(a, why)) |u| u.name else try a.dupe(u8, why);
+                if (statusNamed(text)) |named| {
+                    status = named;
+                } else if (std.mem.eql(u8, text, "forced update")) {
+                    forced = true;
+                } else message = text;
             }
-            // The words git takes as a state rather than a reason.
-            if (message) |m| {
-                if (std.mem.eql(u8, m, "up to date") or std.mem.eql(u8, m, "forced update")) {
-                    ok = true;
-                    message = null;
+            hint = indexOf(refs.items, name);
+            if (hint == null) {
+                if (!knownRef(h.listed, commands, name)) {
+                    try h.warn("helper reported unexpected status of {s}", .{name});
+                    continue;
                 }
+                try refs.append(a, .{ .name = try a.dupe(u8, name), .status = .no_match });
+                try updates.append(a, .empty);
+                hint = refs.items.len - 1;
+            } else if (status == .no_match and refs.items[hint.?].status != .no_match) {
+                // A ref already settled keeps its state over `no match`.
+                continue;
             }
-            try refs.append(a, .{ .name = name, .ok = ok, .message = message });
+            const ref = &refs.items[hint.?];
+            ref.status = status;
+            ref.forced = ref.forced or forced;
+            ref.message = message;
+            new_update = status == .ok;
         }
+        // A ref pushed and never reported is git's `[no match]`.
+        for (commands) |c| if (indexOf(refs.items, c.dst) == null) {
+            try refs.append(a, .{ .name = try a.dupe(u8, c.dst), .status = .no_match });
+            try updates.append(a, .empty);
+        };
+        for (refs.items, updates.items) |*ref, made| ref.updates = made.items;
         report.refs = refs.items;
         return report;
     }
 
-    /// What the helper took moves its private ref, as git moves it.
+    /// What the helper took moves its private ref, as git moves it: by
+    /// each update an `option` named, or by the ref itself.
     fn updatePrivate(h: *Helper, repo: *Repository, commands: []const PushCommand, report: *const send_pack.Report, who: ?object.Signature) ErrorNamespace.Error!void {
         if (h.refspecs.items.len == 0 or h.caps.no_private_update) return;
         for (commands) |c| {
             const said = report.find(c.dst) orelse continue;
-            if (!said.ok) continue;
-            const private = try h.privateName(c.dst) orelse continue;
-            defer h.gpa.free(private);
-            var tx = repo.beginRefs();
-            defer tx.deinit(h.io);
-            if (c.new.isZero()) {
-                const there = try repo.refStore().resolve(h.gpa, h.io, private) orelse continue;
-                h.gpa.free(there.name);
-                try tx.delete(private, .any);
-            } else try tx.update(private, .{ .direct = c.new }, .any);
-            try tx.commit(h.io, if (who) |sig| .{ .who = sig, .message = "update by helper", .policy = repo.reflogPolicy() } else null);
+            if (said.status != .ok) continue;
+            if (said.updates.len == 0) {
+                try h.movePrivate(repo, c.dst, c.new, who);
+            } else for (said.updates) |u| {
+                try h.movePrivate(repo, u.refname orelse c.dst, u.new orelse c.new, who);
+            }
         }
     }
+
+    fn movePrivate(h: *Helper, repo: *Repository, name: []const u8, new: Oid, who: ?object.Signature) ErrorNamespace.Error!void {
+        const private = try h.privateName(name) orelse return;
+        defer h.gpa.free(private);
+        var tx = repo.beginRefs();
+        defer tx.deinit(h.io);
+        if (new.isZero()) {
+            const there = try repo.refStore().resolve(h.gpa, h.io, private) orelse return;
+            h.gpa.free(there.name);
+            try tx.delete(private, .any);
+        } else try tx.update(private, .{ .direct = new }, .any);
+        try tx.commit(h.io, if (who) |sig| .{ .who = sig, .message = "update by helper", .policy = repo.reflogPolicy() } else null);
+    }
 };
+
+/// The state git's `push_update_ref_status` reads a reason as, or `null`
+/// for a reason that is only words.
+fn statusNamed(text: []const u8) ?send_pack.RefReport.Status {
+    const names = [_]struct { []const u8, send_pack.RefReport.Status }{
+        .{ "no match", .no_match },
+        .{ "up to date", .up_to_date },
+        .{ "non-fast forward", .rejected_non_fast_forward },
+        .{ "already exists", .rejected_already_exists },
+        .{ "fetch first", .rejected_fetch_first },
+        .{ "needs force", .rejected_needs_force },
+        .{ "stale info", .rejected_stale },
+        .{ "remote ref updated since checkout", .rejected_remote_updated },
+        .{ "expecting report", .expecting_report },
+    };
+    for (names) |entry| if (std.mem.eql(u8, text, entry[0])) return entry[1];
+    return null;
+}
+
+/// One `option <key> <value>` after an `ok`: `refname`, `old-oid`,
+/// `new-oid` (taken only when it is an object name) or `forced-update`;
+/// any other key is passed over.
+fn takeOption(a: Allocator, list: *std.ArrayList(send_pack.RefReport.Update), text: []const u8, kind: hash.Kind) Allocator.Error!void {
+    const update = &list.items[list.items.len - 1];
+    const space = std.mem.findScalar(u8, text, ' ');
+    const key = text[0 .. space orelse text.len];
+    const value: ?[]const u8 = if (space) |sp| text[sp + 1 ..] else null;
+    if (std.mem.eql(u8, key, "refname")) {
+        update.refname = if (value) |v| try a.dupe(u8, v) else null;
+    } else if (std.mem.eql(u8, key, "old-oid")) {
+        if (value) |v| if (oidPrefix(kind, v)) |oid| {
+            update.old = oid;
+        };
+    } else if (std.mem.eql(u8, key, "new-oid")) {
+        if (value) |v| if (oidPrefix(kind, v)) |oid| {
+            update.new = oid;
+        };
+    } else if (std.mem.eql(u8, key, "forced-update")) update.forced = true;
+}
+
+fn indexOf(refs: []const send_pack.RefReport, name: []const u8) ?usize {
+    for (refs, 0..) |r, i| if (std.mem.eql(u8, r.name, name)) return i;
+    return null;
+}
+
+/// Whether git would have the ref among its remote refs: listed, or pushed.
+fn knownRef(listed: []const protocol.RemoteRef, commands: []const PushCommand, name: []const u8) bool {
+    for (listed) |r| if (std.mem.eql(u8, r.name, name)) return true;
+    for (commands) |c| if (std.mem.eql(u8, c.dst, name)) return true;
+    return false;
+}
+
+/// git's `get_oid_hex_algop`: the object name the first hex digits of
+/// `text` spell, at the hash's length and in either case, whatever
+/// follows them; `null` when they do not.
+fn oidPrefix(kind: hash.Kind, text: []const u8) ?Oid {
+    var oid: Oid = .zero(kind);
+    return if (readHex(&oid, text)) oid else null;
+}
+
+/// What `get_oid_hex_algop` leaves in an object name it fails to read: the
+/// bytes before the first pair that is not two hex digits, zero after.
+fn oidAsRead(kind: hash.Kind, text: []const u8) Oid {
+    var oid: Oid = .zero(kind);
+    _ = readHex(&oid, text);
+    return oid;
+}
+
+fn readHex(oid: *Oid, text: []const u8) bool {
+    for (0..oid.kind.rawLen()) |i| {
+        if (text.len < i * 2 + 2) return false;
+        oid.bytes[i] = percent.hexPair(text[i * 2], text[i * 2 + 1]) orelse return false;
+    }
+    return true;
+}
 
 /// Whether the space-separated `attrs` hold `attr`.
 fn hasAttribute(attrs: []const u8, attr: []const u8) bool {

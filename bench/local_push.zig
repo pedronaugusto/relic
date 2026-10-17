@@ -23,7 +23,7 @@ const Context = struct {
                 .atomic = true,
             });
             defer report.deinit();
-            if (report.refs.len != 1 or !report.refs[0].ok) return error.PushRefused;
+            if (report.refs.len != 1 or !report.refs[0].ok()) return error.PushRefused;
             c.command.old = c.command.new;
             c.checksum +%= report.refs.len;
         }

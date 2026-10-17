@@ -54,6 +54,8 @@ pub const Warning = union(enum) {
     /// A remote URL carries a password, and `transfer.credentialsInUrl`
     /// is `warn`: the URL, its password replaced by `<redacted>`.
     credentials_in_url: []const u8,
+    /// What git warns of in a remote helper's answers: the text.
+    remote_helper: []const u8,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -72,6 +74,7 @@ pub const Warning = union(enum) {
             .promisor => |text| text,
             .promisor_stored => |s| arena.print("Storing new {s} from server for remote '{s}'.\n    '{s}' -> '{s}'", .{ s.field, s.remote, s.old, s.new }),
             .credentials_in_url => |redacted| arena.print("URL '{s}' uses plaintext credentials", .{redacted}),
+            .remote_helper => |text| text,
         };
     }
 };
@@ -111,6 +114,7 @@ pub const Warnings = struct {
             .promisor => |t| .{ .promisor = try a.dupe(u8, t) },
             .promisor_stored => |s| .{ .promisor_stored = .{ .field = try a.dupe(u8, s.field), .remote = try a.dupe(u8, s.remote), .old = try a.dupe(u8, s.old), .new = try a.dupe(u8, s.new) } },
             .credentials_in_url => |t| .{ .credentials_in_url = try a.dupe(u8, t) },
+            .remote_helper => |t| .{ .remote_helper = try a.dupe(u8, t) },
         };
         try w.items.append(a, owned);
     }

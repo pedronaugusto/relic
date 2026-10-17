@@ -74,9 +74,47 @@ pub const Request = struct {
 /// What the server said about one ref.
 pub const RefReport = struct {
     name: []const u8,
-    ok: bool,
-    /// The reason an `ng` gave.
+    status: Status,
+    /// The reason an `ng` or a remote helper's `error` gave, or what its
+    /// `ok` added, when it is none of the words git reads as a status.
     message: ?[]const u8 = null,
+    /// A remote helper's `forced update`.
+    forced: bool = false,
+    /// What a remote helper's `option` lines after its `ok` said each
+    /// update was, in order: what moved its private ref.
+    updates: []const Update = &.{},
+
+    /// What became of the ref.
+    pub const Status = enum {
+        /// `ok`.
+        ok,
+        /// `ng`, or a remote helper's `error`: `message` says why.
+        rejected,
+        // A remote helper's reason, which git reads as the state it names.
+        up_to_date,
+        no_match,
+        rejected_non_fast_forward,
+        rejected_already_exists,
+        rejected_fetch_first,
+        rejected_needs_force,
+        rejected_stale,
+        rejected_remote_updated,
+        expecting_report,
+    };
+
+    /// One update an `ok` stood for: report-status-v2's `option refname`,
+    /// `old-oid`, `new-oid` and `forced-update`.
+    pub const Update = struct {
+        refname: ?[]const u8 = null,
+        old: ?Oid = null,
+        new: ?Oid = null,
+        forced: bool = false,
+    };
+
+    /// Whether the ref was taken.
+    pub fn ok(r: RefReport) bool {
+        return r.status == .ok;
+    }
 };
 
 /// The server's answer.
@@ -230,13 +268,13 @@ fn readReport(gpa: Allocator, report: *Report, r: *Io.Reader) ReportError!void {
             continue;
         }
         if (std.mem.startsWith(u8, line, "ok ")) {
-            try refs.append(arena, .{ .name = try arena.dupe(u8, line[3..]), .ok = true });
+            try refs.append(arena, .{ .name = try arena.dupe(u8, line[3..]), .status = .ok });
         } else if (std.mem.startsWith(u8, line, "ng ")) {
             const rest = line[3..];
             const space = std.mem.findScalar(u8, rest, ' ');
             try refs.append(arena, .{
                 .name = try arena.dupe(u8, rest[0 .. space orelse rest.len]),
-                .ok = false,
+                .status = .rejected,
                 .message = if (space) |s| try arena.dupe(u8, rest[s + 1 ..]) else null,
             });
         } else if (std.mem.startsWith(u8, line, "option ")) {
@@ -283,7 +321,7 @@ test "a report reads its refs, their reasons and a failed unpack" {
     var report: Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
     defer report.deinit();
     try readReport(gpa, &report, &in.interface);
-    try testing.expect(report.find("refs/heads/main").?.ok);
+    try testing.expect(report.find("refs/heads/main").?.ok());
     try testing.expectEqualStrings("non-fast-forward", report.find("refs/heads/side").?.message.?);
 }
 
