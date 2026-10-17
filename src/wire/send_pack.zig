@@ -109,6 +109,33 @@ pub const RefReport = struct {
         old: ?Oid = null,
         new: ?Oid = null,
         forced: bool = false,
+
+        /// Take one `option <key> [<value>]` line's `<key> [<value>]`, as
+        /// git's `receive_status` and the remote helper's reader take it:
+        /// an object name is the first hex digits at `kind`'s length, what
+        /// follows them passed over, and one that is not there leaves the
+        /// field as it was; an unknown key is passed over. The name lives
+        /// in `a`.
+        pub fn take(update: *Update, a: Allocator, text: []const u8, kind: hash.Kind) Allocator.Error!void {
+            const space = std.mem.findScalar(u8, text, ' ');
+            const key = text[0 .. space orelse text.len];
+            const value: ?[]const u8 = if (space) |sp| text[sp + 1 ..] else null;
+            if (std.mem.eql(u8, key, "refname")) {
+                update.refname = if (value) |v| try a.dupe(u8, v) else null;
+            } else if (std.mem.eql(u8, key, "old-oid")) {
+                if (oidAtStart(kind, value)) |oid| update.old = oid;
+            } else if (std.mem.eql(u8, key, "new-oid")) {
+                if (oidAtStart(kind, value)) |oid| update.new = oid;
+            } else if (std.mem.eql(u8, key, "forced-update")) update.forced = true;
+        }
+
+        /// git's `parse_oid_hex_algop`: the object name the first hex
+        /// digits spell, in either case, whatever follows.
+        fn oidAtStart(kind: hash.Kind, text: ?[]const u8) ?Oid {
+            const t = text orelse return null;
+            if (t.len < kind.hexLen()) return null;
+            return Oid.parse(kind, t[0..kind.hexLen()]) catch null;
+        }
     };
 
     /// Whether the ref was taken.
@@ -127,6 +154,11 @@ pub const Report = struct {
     /// The reason when it was not.
     unpack_message: ?[]const u8,
     refs: []const RefReport,
+    /// The report had an `option` line with no `ok` before it, which git
+    /// reports ("'option' without a matching 'ok/ng' directive") and reads
+    /// on past: what the rest said is kept, and the push fails as git's
+    /// does.
+    stray_option: bool = false,
 
     /// Release everything.
     pub fn deinit(report: *Report) void {
@@ -191,11 +223,11 @@ pub fn send(
         const buffer = try gpa.alloc(u8, pkt_line.max_line + 4);
         defer gpa.free(buffer);
         var demux: side_band.Demux = .init(in, buffer, request.progress);
-        readReport(gpa, &report, &demux.interface) catch |err| return mapBand(conn, &demux, err);
+        readReport(gpa, &report, &demux.interface, .{ .commands = request.commands, .kind = adv.kind }) catch |err| return mapBand(conn, &demux, err);
         // Whatever follows on the side-band — progress — runs to its flush.
         _ = demux.interface.discardRemaining() catch |err| return mapBand(conn, &demux, err);
     } else {
-        readReport(gpa, &report, in) catch |err| switch (err) {
+        readReport(gpa, &report, in, .{ .commands = request.commands, .kind = adv.kind }) catch |err| switch (err) {
             error.ReadFailed => return conn.failure(),
             error.EndOfStream => return error.RemoteHungUp,
             else => |e| return e,
@@ -241,10 +273,24 @@ fn writeCommands(
 
 const ReportError = error{ ProtocolError, ReadFailed, EndOfStream } || Allocator.Error;
 
-fn readReport(gpa: Allocator, report: *Report, r: *Io.Reader) ReportError!void {
+/// What a report is read against: the commands sent, whose refs alone it
+/// may speak of, and the object format its names are in.
+const Against = struct { commands: []const Command, kind: hash.Kind };
+
+/// git's `receive_status`: `unpack`, then an `ok` or `ng` per ref, each
+/// line about a ref sent (another is passed over, as git warns of it), a
+/// ref said twice keeping the last word; and after an `ok`, report-status-v2's
+/// `option` lines, each run of them one update of that ref.
+fn readReport(gpa: Allocator, report: *Report, r: *Io.Reader, against: Against) ReportError!void {
     _ = gpa;
     const arena = report.arena.allocator();
     var refs: std.ArrayList(RefReport) = .empty;
+    var updates: std.ArrayList(std.ArrayList(RefReport.Update)) = .empty;
+    // git's `hint`, `new_report` and `report`: the ref the last status was
+    // about, whether its `ok` opens an update, and whether one is open.
+    var hint: ?usize = null;
+    var new_update = false;
+    var update_open = false;
     var first = true;
     while (true) {
         const packet = pkt_line.read(r) catch |err| switch (err) {
@@ -267,22 +313,49 @@ fn readReport(gpa: Allocator, report: *Report, r: *Io.Reader) ReportError!void {
             }
             continue;
         }
-        if (std.mem.startsWith(u8, line, "ok ")) {
-            try refs.append(arena, .{ .name = try arena.dupe(u8, line[3..]), .status = .ok });
-        } else if (std.mem.startsWith(u8, line, "ng ")) {
-            const rest = line[3..];
-            const space = std.mem.findScalar(u8, rest, ' ');
-            try refs.append(arena, .{
-                .name = try arena.dupe(u8, rest[0 .. space orelse rest.len]),
-                .status = .rejected,
-                .message = if (space) |s| try arena.dupe(u8, rest[s + 1 ..]) else null,
-            });
-        } else if (std.mem.startsWith(u8, line, "option ")) {
-            // report-status-v2 says more about the ref before it — what a
-            // `proc-receive` hook made of it — which this side does not use.
-        } else return error.ProtocolError;
+        const space = std.mem.findScalar(u8, line, ' ') orelse return error.ProtocolError;
+        const head = line[0..space];
+        const rest = line[space + 1 ..];
+        if (std.mem.eql(u8, head, "option")) {
+            const at = hint orelse {
+                report.stray_option = true;
+                continue;
+            };
+            if (!new_update and !update_open) {
+                report.stray_option = true;
+                continue;
+            }
+            if (new_update) {
+                try updates.items[at].append(arena, .{});
+                new_update = false;
+                update_open = true;
+            }
+            try updates.items[at].items[updates.items[at].items.len - 1].take(arena, rest, against.kind);
+            continue;
+        }
+        new_update = false;
+        update_open = false;
+        const ok = std.mem.eql(u8, head, "ok");
+        if (!ok and !std.mem.eql(u8, head, "ng")) return error.ProtocolError;
+        const name_end = std.mem.findScalar(u8, rest, ' ');
+        const name = rest[0 .. name_end orelse rest.len];
+        const said: ?[]const u8 = if (name_end) |e| rest[e + 1 ..] else null;
+        hint = for (refs.items, 0..) |ref, i| {
+            if (std.mem.eql(u8, ref.name, name)) break i;
+        } else for (against.commands) |command| {
+            if (!std.mem.eql(u8, command.name, name)) continue;
+            try refs.append(arena, .{ .name = try arena.dupe(u8, name), .status = .expecting_report });
+            try updates.append(arena, .empty);
+            break refs.items.len - 1;
+        } else null;
+        const ref = &refs.items[hint orelse continue];
+        ref.status = if (ok) .ok else .rejected;
+        // An `ng` with no reason is git's `failed`.
+        ref.message = if (said) |text| try arena.dupe(u8, text) else if (ok) null else "failed";
+        new_update = ok;
     }
     if (first) return error.ProtocolError;
+    for (refs.items, updates.items) |*ref, made| ref.updates = made.items;
     report.refs = refs.items;
 }
 
@@ -320,7 +393,12 @@ test "a report reads its refs, their reasons and a failed unpack" {
     var in = fixed.limited(.unlimited, &buffer);
     var report: Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
     defer report.deinit();
-    try readReport(gpa, &report, &in.interface);
+    const commands = [_]Command{
+        .{ .name = "refs/heads/main", .old = .zero(.sha1), .new = .zero(.sha1) },
+        .{ .name = "refs/heads/side", .old = .zero(.sha1), .new = .zero(.sha1) },
+    };
+    try readReport(gpa, &report, &in.interface, .{ .commands = &commands, .kind = .sha1 });
+    try testing.expect(report.stray_option);
     try testing.expect(report.find("refs/heads/main").?.ok());
     try testing.expectEqualStrings("non-fast-forward", report.find("refs/heads/side").?.message.?);
 }
@@ -338,5 +416,6 @@ fn fuzzReport(_: void, case: *shakedown.Case) anyerror!void {
     var in = fixed.limited(.unlimited, &buffer);
     var report: Report = .{ .arena = .init(testing.allocator), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
     defer report.deinit();
-    readReport(testing.allocator, &report, &in.interface) catch return;
+    const commands = [_]Command{.{ .name = "refs/heads/main", .old = .zero(.sha1), .new = .zero(.sha1) }};
+    readReport(testing.allocator, &report, &in.interface, .{ .commands = &commands, .kind = .sha1 }) catch return;
 }

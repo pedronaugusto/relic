@@ -732,7 +732,8 @@ pub const Helper = struct {
                     new_update = false;
                     update_open = true;
                 }
-                try takeOption(a, &updates.items[at], line["option ".len..], h.kind);
+                const made = &updates.items[at];
+                try made.items[made.items.len - 1].take(a, line["option ".len..], h.kind);
                 continue;
             }
             new_update = false;
@@ -839,24 +840,6 @@ fn statusNamed(text: []const u8) ?send_pack.RefReport.Status {
 /// One `option <key> <value>` after an `ok`: `refname`, `old-oid`,
 /// `new-oid` (taken only when it is an object name) or `forced-update`;
 /// any other key is passed over.
-fn takeOption(a: Allocator, list: *std.ArrayList(send_pack.RefReport.Update), text: []const u8, kind: hash.Kind) Allocator.Error!void {
-    const update = &list.items[list.items.len - 1];
-    const space = std.mem.findScalar(u8, text, ' ');
-    const key = text[0 .. space orelse text.len];
-    const value: ?[]const u8 = if (space) |sp| text[sp + 1 ..] else null;
-    if (std.mem.eql(u8, key, "refname")) {
-        update.refname = if (value) |v| try a.dupe(u8, v) else null;
-    } else if (std.mem.eql(u8, key, "old-oid")) {
-        if (value) |v| if (oidPrefix(kind, v)) |oid| {
-            update.old = oid;
-        };
-    } else if (std.mem.eql(u8, key, "new-oid")) {
-        if (value) |v| if (oidPrefix(kind, v)) |oid| {
-            update.new = oid;
-        };
-    } else if (std.mem.eql(u8, key, "forced-update")) update.forced = true;
-}
-
 fn indexOf(refs: []const send_pack.RefReport, name: []const u8) ?usize {
     for (refs, 0..) |r, i| if (std.mem.eql(u8, r.name, name)) return i;
     return null;
@@ -867,14 +850,6 @@ fn knownRef(listed: []const protocol.RemoteRef, commands: []const PushCommand, n
     for (listed) |r| if (std.mem.eql(u8, r.name, name)) return true;
     for (commands) |c| if (std.mem.eql(u8, c.dst, name)) return true;
     return false;
-}
-
-/// git's `get_oid_hex_algop`: the object name the first hex digits of
-/// `text` spell, at the hash's length and in either case, whatever
-/// follows them; `null` when they do not.
-fn oidPrefix(kind: hash.Kind, text: []const u8) ?Oid {
-    var oid: Oid = .zero(kind);
-    return if (readHex(&oid, text)) oid else null;
 }
 
 /// What `get_oid_hex_algop` leaves in an object name it fails to read: the

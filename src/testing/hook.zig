@@ -73,6 +73,7 @@ const actions: std.StaticStringMap(Action) = .initComptime(.{
     .{ "text", text },
     .{ "status", status },
     .{ "reject", reject },
+    .{ "proc_receive", procReceive },
     .{ "arg", arg },
     .{ "args_stdin", argsStdin },
     .{ "record_stdin", recordStdin },
@@ -106,6 +107,49 @@ fn reject(h: *const Hook) !u8 {
     }
     try h.stderr.writeByte('\n');
     return code;
+}
+
+/// git's `proc-receive` hook, as git's own test hook speaks it: the
+/// version and the commands read, each up to a flush; then the data's lines
+/// sent back as the report, `{old}` and `{new}` in them the first command's
+/// values, and a flush.
+fn procReceive(h: *const Hook) !u8 {
+    var stdin_buf: [65536]u8 = undefined;
+    var stdin = Io.File.stdin().readerStreaming(h.io, &stdin_buf);
+    const in = &stdin.interface;
+    while (try readPacket(in)) |_| {}
+    try writePacket(h.stdout, "version=1\n");
+    try h.stdout.writeAll("0000");
+    try h.stdout.flush();
+    var first: ?[]const u8 = null;
+    while (try readPacket(in)) |line| {
+        if (first == null) first = try h.arena.dupe(u8, line);
+    }
+    var fields = std.mem.splitScalar(u8, std.mem.trimEnd(u8, first orelse return error.InvalidFixture, "\n"), ' ');
+    const old = fields.next() orelse return error.InvalidFixture;
+    const new = fields.next() orelse return error.InvalidFixture;
+    var lines = std.mem.splitScalar(u8, h.data, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const with_old = try std.mem.replaceOwned(u8, h.arena, line, "{old}", old);
+        const with_new = try std.mem.replaceOwned(u8, h.arena, with_old, "{new}", new);
+        try writePacket(h.stdout, try h.arena.print("{s}\n", .{with_new}));
+    }
+    try h.stdout.writeAll("0000");
+    return 0;
+}
+
+fn readPacket(in: *Io.Reader) !?[]const u8 {
+    const header = try in.takeArray(4);
+    const len = try std.fmt.parseUnsigned(u16, header, 16);
+    if (len == 0) return null;
+    if (len < 4) return error.InvalidPacket;
+    return try in.take(len - 4);
+}
+
+fn writePacket(out: *Io.Writer, data: []const u8) !void {
+    try out.print("{x:0>4}", .{data.len + 4});
+    try out.writeAll(data);
 }
 
 /// Say the data and the first argument.

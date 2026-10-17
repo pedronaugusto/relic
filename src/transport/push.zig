@@ -237,6 +237,10 @@ pub const Outcome = struct {
     unpack_ok: bool = true,
     /// Why it did not.
     unpack_message: ?[]const u8 = null,
+    /// A remote's report had an `option` line with no `ok` before it, which
+    /// git reports and fails the push for, keeping what the rest said
+    /// (`send_pack.Report.stray_option`).
+    stray_option: bool = false,
 
     /// Release everything.
     pub fn deinit(outcome: *Outcome) void {
@@ -246,7 +250,7 @@ pub const Outcome = struct {
 
     /// Whether any ref was refused — git's exit status of 1.
     pub fn anyRejected(outcome: *const Outcome) bool {
-        if (!outcome.unpack_ok) return true;
+        if (!outcome.unpack_ok or outcome.stray_option) return true;
         for (outcome.refs) |r| {
             if (r.rejected()) return true;
         }
@@ -489,6 +493,7 @@ fn send(
         outcome.unpack_ok = false;
         if (report.unpack_message) |m| outcome.unpack_message = try arena.dupe(u8, m);
     }
+    if (report.stray_option) outcome.stray_option = true;
     for (results) |*r| {
         if (r.status != .ok) continue;
         if (!report.unpack_ok) {
@@ -783,7 +788,20 @@ fn trackingValue(gpa: Allocator, io: Io, repo: *Repository, remote: *const remot
     return resolved.oid;
 }
 
+/// git's `transport_update_tracking_ref`: the remote-tracking ref of the
+/// ref pushed, or of each update the remote said it became, to the value
+/// it said (a zero one deletes it).
 fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, result: RefResult, who: object.Signature) Error!void {
+    if (result.updates.len == 0) return updateOneTracking(gpa, io, repo, remote, .{ .remote_ref = result.remote_ref, .new = result.new }, who);
+    for (result.updates) |u| {
+        try updateOneTracking(gpa, io, repo, remote, .{ .remote_ref = u.refname orelse result.remote_ref, .new = u.new orelse result.new }, who);
+    }
+}
+
+/// A remote ref and the value it now has.
+const Moved = struct { remote_ref: []const u8, new: Oid };
+
+fn updateOneTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, result: Moved, who: object.Signature) Error!void {
     const name = (try remote.trackingRef(gpa, result.remote_ref)) orelse return;
     defer gpa.free(name);
     const current = try repo.refStore().resolve(gpa, io, name);
@@ -1144,6 +1162,45 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
         });
         defer outcome.deinit();
         for (outcome.refs) |r| try testing.expectEqual(RefResult.Status.ok, r.status);
+    }
+}
+
+test "a proc-receive hook's report-status-v2 options move the remote-tracking refs they name, as git's push moves them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const reports = [_][]const u8{
+        // One update, renamed and given its value.
+        "ok refs/for/main\noption refname refs/heads/topic\noption new-oid {new}\noption forced-update\n",
+        // Two updates of one command, the second to the old value: zero, a
+        // deletion of what tracks it.
+        "ok refs/for/main\noption refname refs/heads/main\noption old-oid {old}\noption new-oid {new}\nok refs/for/main\noption refname refs/heads/feature\noption new-oid {old}\n",
+        // An `ok` with no options is the ref itself.
+        "ok refs/for/main\n",
+        "ng refs/for/main not today\n",
+    };
+    for (reports) |answer| {
+        var twins = try PushTwins.init(gpa, io);
+        defer twins.deinit();
+        const fake = try testremote.fakeSsh(gpa, io, twins.root.dir);
+        defer gpa.free(fake);
+        const ssh_path = try gpa.dupe(u8, twins.root_path);
+        defer gpa.free(ssh_path);
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+        for ([_][2][]const u8{ .{ "work-git", "remote-git.git" }, .{ "work-relic", "remote-relic.git" } }) |pair| {
+            var work = try twins.root.dir.openDir(io, pair[0], .{});
+            defer work.close(io);
+            var remote_dir = try twins.root.dir.openDir(io, pair[1], .{});
+            defer remote_dir.close(io);
+            try twins.git(remote_dir, &.{ "config", "receive.procReceiveRefs", "refs/for" });
+            try testgit.fixtureHook(gpa, io, remote_dir, "hooks/proc-receive", "proc_receive", answer);
+            const url = try gpa.print("ssh://example.invalid{s}{s}/{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path, pair[1] });
+            defer gpa.free(url);
+            try twins.git(work, &.{ "remote", "set-url", "origin", url });
+            try twins.git(work, &.{ "config", "core.sshCommand", fake });
+        }
+        errdefer std.debug.print("{s}\n", .{answer});
+        var outcome = try twins.pushBoth(&.{ "origin", "main:refs/for/main" }, .{ .who = test_who, .refspecs = &.{"main:refs/for/main"} });
+        defer outcome.deinit();
     }
 }
 
