@@ -342,7 +342,9 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         any = true;
         w.print("\tallow-rerere-auto = {s}\n", .{if (on) "true" else "false"}) catch return error.OutOfMemory;
     }
-    if (options.cleanup) |mode| {
+    // git keeps `commit.cleanup` here as it keeps `--cleanup`: both are
+    // its explicit cleanup.
+    if (options.cleanup orelse try message.sequencerCleanup(repo.configuration())) |mode| {
         if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
         any = true;
         w.print("\tdefault-msg-cleanup = {s}\n", .{@tagName(mode)}) catch return error.OutOfMemory;
@@ -609,17 +611,16 @@ fn mainlineParent(parents: []const Oid, mainline: ?u32) Error!?Oid {
 /// and in the run.
 fn noteConflicts(r: *Replay, msg: *std.ArrayList(u8), conflicts: []const three_way.Conflict) Error!void {
     const arena = r.arena;
-    try msg.append(arena, '\n');
-    try msg.appendSlice(arena, r.comment);
-    try msg.appendSlice(arena, " Conflicts:\n");
-    for (conflicts) |conflict| {
-        try msg.appendSlice(arena, r.comment);
-        try msg.append(arena, '\t');
-        try msg.appendSlice(arena, conflict.path);
-        try msg.append(arena, '\n');
-    }
     const copied = try arena.dupe(three_way.Conflict, conflicts);
-    for (copied) |*c| c.path = try arena.dupe(u8, c.path);
+    const paths = try arena.alloc([]const u8, conflicts.len);
+    for (copied, paths) |*c, *path| {
+        c.path = try arena.dupe(u8, c.path);
+        path.* = c.path;
+    }
+    // Under the scissors line when the cleanup git's opts hold is
+    // `scissors`, from `--cleanup` or `commit.cleanup`.
+    const mode = r.options.cleanup orelse try message.sequencerCleanup(r.repo.configuration()) orelse .verbatim;
+    try message.appendConflictsHint(arena, msg, paths, r.comment, mode);
     r.conflicts = copied;
 }
 
@@ -659,8 +660,10 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         return .empty;
     }
 
-    const cleanup: message.Cleanup = r.options.cleanup orelse
-        if (r.options.signoff or r.options.record_origin) .whitespace else try message.sequencerCleanup(repo.configuration());
+    // `--cleanup`, from the `opts` file too, then `commit.cleanup`: either
+    // is git's explicit cleanup, which `-x` and `--signoff` follow.
+    const cleanup = r.options.cleanup orelse try message.sequencerCleanup(repo.configuration()) orelse
+        message.sequencerDefault(r.options.signoff or r.options.record_origin);
     // `try_to_commit`: `prepare-commit-msg` sees the message before it is
     // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
@@ -670,7 +673,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
         text = (try state_file.read(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
     }
-    const cleaned = try message.cleanup(arena, text, cleanup, r.comment);
+    const cleaned = try message.cleanup(arena, text, message.uncut(cleanup), r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
     const made = try repo.writeCommit(io, .{
         .tree = tree,

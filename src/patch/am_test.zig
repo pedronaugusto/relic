@@ -311,6 +311,45 @@ test "a session git am started with -C in any of git's integer spellings is fini
     }
 }
 
+test "a session git am started with -p in any of git's spellings is finished by relic, and one git refuses is refused" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
+    defer gpa.free(mbox);
+    // `git apply`'s `-p` is `strtol_i` of the whole word, not negative.
+    const spellings = [_]struct { word: []const u8, ok: bool }{
+        .{ .word = "-p1", .ok = true },    .{ .word = "-p+1", .ok = true },          .{ .word = "-p 1", .ok = true },
+        .{ .word = "-p01", .ok = true },   .{ .word = "-p-1", .ok = false },         .{ .word = "-p1x", .ok = false },
+        .{ .word = "-p0x1", .ok = false }, .{ .word = "-p2147483648", .ok = false }, .{ .word = "-p", .ok = false },
+    };
+    for (spellings) |spelling| {
+        var p = try Pair.init(gpa, io, .files);
+        defer p.deinit();
+        try setupPair(&p, io);
+        try p.write(io, "other.txt", "alpha\nbeta\nGamma-ours\n");
+        try p.both(io, &.{ "commit", "-q", "-a", "-m", "ours" });
+        errdefer std.debug.print("{s}\n", .{spelling.word});
+        if (spelling.word.len == 2) {
+            // git's parser takes no empty argument; the word is written by
+            // hand into a session git stopped before its first patch.
+            try std.testing.expect(try gitAm(gpa, io, &p, &.{"-p1x"}, mbox) != 0);
+            try p.write(io, ".git/rebase-apply/apply-opt", " '-p'\n");
+        } else try std.testing.expect(try gitAm(gpa, io, &p, &.{spelling.word}, mbox) != 0);
+        try p.write(io, "other.txt", "alpha\nbeta\nGAMMA\n");
+        try p.write(io, "base.txt", "one\nTWO\nthree\nfour\nfive\nsix\nseven\nEIGHT\n");
+        try p.git.exec(io, &.{ "add", "-A" });
+        var git_side = try Repository.open(gpa, io, p.git.dir, .{});
+        defer git_side.deinit(io);
+        if (!spelling.ok) {
+            try std.testing.expectError(error.UnsupportedApplyOption, am.proceed(gpa, io, &git_side, .{ .committer = committer }));
+            continue;
+        }
+        var done = try am.proceed(gpa, io, &git_side, .{ .committer = committer });
+        defer done.deinit();
+        try std.testing.expect(done.stopped == null);
+    }
+}
+
 test "the three-way fallback leaves git's conflict, and skip and abort put things back as git's do" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {

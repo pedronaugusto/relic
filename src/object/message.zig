@@ -29,14 +29,15 @@ pub const Cleanup = enum {
     /// `whitespace`, and also every line beginning with the comment
     /// string.
     strip,
+    /// `whitespace` after cutting the message at the scissors line, as
+    /// `git commit` cleans a message an editor showed.
+    scissors,
 
-    /// The mode a `commit.cleanup` value names, or `null`. `scissors`
-    /// cleans as `whitespace` does wherever no cut line is involved, which
-    /// is everywhere a message is not edited.
+    /// The mode a `commit.cleanup` value names, or `null`.
     pub fn parse(text: []const u8) ?Cleanup {
         if (std.mem.eql(u8, text, "verbatim")) return .verbatim;
         if (std.mem.eql(u8, text, "whitespace")) return .whitespace;
-        if (std.mem.eql(u8, text, "scissors")) return .whitespace;
+        if (std.mem.eql(u8, text, "scissors")) return .scissors;
         if (std.mem.eql(u8, text, "strip")) return .strip;
         return null;
     }
@@ -44,13 +45,14 @@ pub const Cleanup = enum {
 
 /// git's `get_cleanup_mode`, which `git commit` and `git merge` read
 /// `commit.cleanup` (or `--cleanup`) with: unset and `default` are `strip`
-/// when an editor runs and `whitespace` when none does; `scissors` cleans
-/// as `whitespace` does wherever no cut line is involved; any other value is
-/// refused, as git dies on it. `null` is unset.
+/// when an editor runs and `whitespace` when none does; `scissors` is
+/// `whitespace` when none does; any other value is refused, as git dies on
+/// it. `null` is unset.
 pub fn cleanupMode(text: ?[]const u8, editor: bool) error{InvalidCleanupMode}!Cleanup {
     const t = text orelse return if (editor) .strip else .whitespace;
     if (std.mem.eql(u8, t, "default")) return if (editor) .strip else .whitespace;
-    return Cleanup.parse(t) orelse error.InvalidCleanupMode;
+    const mode = Cleanup.parse(t) orelse return error.InvalidCleanupMode;
+    return if (mode == .scissors and !editor) .whitespace else mode;
 }
 
 /// `commit.cleanup` as `git commit` and `git merge` keep it: the last
@@ -70,14 +72,28 @@ pub fn commitCleanup(config: *const config_mod.Config) error{InvalidCleanupMode}
 
 /// `commit.cleanup` as git's sequencer reads it for a pick, a revert or a
 /// rebase: each value it knows replaces the one before, one it does not
-/// is passed over with a warning, and none leaves the message as it is;
-/// a bare name with no value is refused, as git's `config_error_nonbool`
-/// dies.
-pub fn sequencerCleanup(config: *const config_mod.Config) error{InvalidCleanupMode}!Cleanup {
-    var mode: Cleanup = .verbatim;
+/// is passed over with a warning; a bare name with no value is refused, as
+/// git's `config_error_nonbool` dies. `null` when no value named a mode:
+/// then the message is left as it is, or with `-x` or `--signoff` cleaned
+/// of whitespace (`sequencerDefault`); a mode set here is git's explicit
+/// cleanup, which those two follow too.
+pub fn sequencerCleanup(config: *const config_mod.Config) error{InvalidCleanupMode}!?Cleanup {
+    var mode: ?Cleanup = null;
     var it = config.iterate(&.{"commit.cleanup"});
     while (it.next()) |entry| mode = Cleanup.parse(entry.value orelse return error.InvalidCleanupMode) orelse mode;
     return mode;
+}
+
+/// The cleanup git's `try_to_commit` gives a message `mode` was asked for:
+/// it cuts nothing, so `scissors` is `whitespace` there.
+pub fn uncut(mode: Cleanup) Cleanup {
+    return if (mode == .scissors) .whitespace else mode;
+}
+
+/// How git's `try_to_commit` cleans a message no cleanup was set for:
+/// whitespace with `-x` or `--signoff`, else not at all.
+pub fn sequencerDefault(trailers_added: bool) Cleanup {
+    return if (trailers_added) .whitespace else .verbatim;
 }
 
 /// The comment string: `core.commentChar` and `core.commentString`, which
@@ -146,9 +162,45 @@ pub const Comment = union(enum) {
     }
 };
 
-/// The line `git commit -v` puts above the diff, after the comment string
-/// and a space.
-pub const cut_line = "------------------------ >8 ------------------------";
+/// The scissors line, after the comment string and a space.
+pub const cut_line = trailer.cut_line;
+
+/// `strbuf_add_commented_lines`: each line of `text` after the comment
+/// string, a space between them unless the line is empty or starts with a
+/// tab, and `out` ended with a newline.
+pub fn appendCommented(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8, comment: []const u8) Allocator.Error!void {
+    var at: usize = 0;
+    while (at < text.len) {
+        const next = if (std.mem.findScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
+        try out.appendSlice(gpa, comment);
+        if (text[at] != '\n' and text[at] != '\t') try out.append(gpa, ' ');
+        try out.appendSlice(gpa, text[at..next]);
+        at = next;
+    }
+    if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
+}
+
+/// git's `append_conflicts_hint`: the `Conflicts:` list a stopped merge,
+/// pick or revert leaves under its message, each path once, commented;
+/// under the scissors line when the cleanup is `scissors`, so that an
+/// editor's cleanup cuts it off.
+pub fn appendConflictsHint(gpa: Allocator, out: *std.ArrayList(u8), paths: []const []const u8, comment: []const u8, mode: Cleanup) Allocator.Error!void {
+    if (mode == .scissors) {
+        try out.append(gpa, '\n');
+        try appendCommented(gpa, out, cut_line ++ "\n", comment);
+        try appendCommented(gpa, out, "Do not modify or remove the line above.\nEverything below it will be ignored.", comment);
+        try out.appendSlice(gpa, comment);
+    }
+    try out.append(gpa, '\n');
+    try appendCommented(gpa, out, "Conflicts:\n", comment);
+    for (paths) |path| {
+        // `strbuf_commented_addf` of `\t<path>\n`: the tab is the line's
+        // own, so no space follows the comment string.
+        const line = try std.mem.concat(gpa, u8, &.{ "\t", path, "\n" });
+        defer gpa.free(line);
+        try appendCommented(gpa, out, line, comment);
+    }
+}
 
 /// The prefix of the line `-x` adds.
 pub const cherry_picked_prefix = "(cherry picked from commit ";
@@ -188,6 +240,7 @@ pub fn cleanup(gpa: Allocator, text: []const u8, mode: Cleanup, comment: []const
     return switch (mode) {
         .verbatim => gpa.dupe(u8, text),
         .whitespace => stripSpace(gpa, text, null),
+        .scissors => stripSpace(gpa, text[0..trailer.locateEnd(text, comment, text.len)], null),
         .strip => stripSpace(gpa, text, comment),
     };
 }

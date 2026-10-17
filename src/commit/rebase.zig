@@ -806,8 +806,10 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
         if (item.command != .comment) count += 1;
     }
     const revisions = try r.arena.print("{s}..{s}", .{ try r.short(upstream), try r.short(orig_head) });
-    todo.writeHelp(&out.writer, count, revisions, try r.short(onto), r.comment) catch return error.OutOfMemory;
-    return out.toOwnedSlice() catch error.OutOfMemory;
+    var sheet = out.toArrayList();
+    errdefer sheet.deinit(gpa);
+    try todo.appendHelp(gpa, &sheet, .{ .command_count = count, .revisions = revisions, .onto = try r.short(onto), .comment = r.comment });
+    return sheet.toOwnedSlice(gpa);
 }
 
 /// Rebase the current branch, or `options.branch`, onto `upstream` (or
@@ -1513,7 +1515,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
     // `try_to_commit` cleans nothing but whitespace, and that only with a
     // sign-off, unless `commit.cleanup` says otherwise; an edited message
     // is cleaned of comments as an editor's is.
-    const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else try message.sequencerCleanup(repo.configuration());
+    const cleanup = message.uncut(try message.sequencerCleanup(repo.configuration()) orelse message.sequencerDefault(r.options.signoff));
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     // An edited message is `git commit -n -e`'s: its hooks see the author
     // and the editor the person has.
@@ -1604,17 +1606,15 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
 /// and in the run.
 fn noteConflicts(r: *Run, conflicts: []const three_way.Conflict) Error!void {
     const arena = r.arena;
-    try r.msg.append(arena, '\n');
-    try r.msg.appendSlice(arena, r.comment);
-    try r.msg.appendSlice(arena, " Conflicts:\n");
-    for (conflicts) |conflict| {
-        try r.msg.appendSlice(arena, r.comment);
-        try r.msg.append(arena, '\t');
-        try r.msg.appendSlice(arena, conflict.path);
-        try r.msg.append(arena, '\n');
-    }
     const copied = try arena.dupe(three_way.Conflict, conflicts);
-    for (copied) |*c| c.path = try arena.dupe(u8, c.path);
+    const paths = try arena.alloc([]const u8, conflicts.len);
+    for (copied, paths) |*c, *slot| {
+        c.path = try arena.dupe(u8, c.path);
+        slot.* = c.path;
+    }
+    // Under the scissors line when `commit.cleanup` is `scissors`.
+    const mode = try message.sequencerCleanup(r.repo.configuration()) orelse .verbatim;
+    try message.appendConflictsHint(arena, &r.msg, paths, r.comment, mode);
     r.conflicts = copied;
 }
 
@@ -1639,16 +1639,25 @@ fn firstLine(text: []const u8) []const u8 {
 }
 
 /// A message a person would have edited: what the caller's `Messages` make
-/// of it, or the proposal as an editor left untouched leaves it, cleaned of
-/// comments either way.
+/// of it, or the proposal as an editor left untouched leaves it, cleaned as
+/// `git commit` cleans after an editor (`editedCleanup`). git's proposal
+/// also carries its status comments, which a `verbatim` or `whitespace`
+/// cleanup keeps; relic's has none.
 fn edited(r: *Run, kind: MessageKind, proposed: []const u8) Error![]const u8 {
     var text = proposed;
     if (r.options.messages) |m| {
         if (m.editFn(m.context, kind, proposed)) |given| text = given;
     }
-    const cleaned = try message.cleanup(r.arena, text, .strip, r.comment);
+    const cleaned = try message.cleanup(r.arena, text, try editedCleanup(r), r.comment);
     if (cleaned.len == 0) return error.EmptyMessage;
     return cleaned;
+}
+
+/// How `git commit -e`, which git's sequencer runs for a message a person
+/// edits, cleans it: `commit.cleanup` read for an editor, `strip` by
+/// default.
+fn editedCleanup(r: *Run) Error!message.Cleanup {
+    return message.cleanupMode(try message.cleanupSetting(r.repo.configuration()), true);
 }
 
 /// `reword`: amend `HEAD` with the message a person makes of it.
@@ -1674,7 +1683,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
         try state_file.write(r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG", text);
         _ = try runner.commitMsg(r.io, e, file);
         const back = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
-        text = try message.cleanup(r.arena, back, .strip, r.comment);
+        text = try message.cleanup(r.arena, back, try editedCleanup(r), r.comment);
     }
     const made = try r.repo.writeCommit(r.io, .{
         .tree = current.commit.tree,
@@ -1711,15 +1720,7 @@ fn seenSquash(r: *Run) bool {
 
 /// `strbuf_add_commented_lines`, into a list.
 fn addCommented(r: *Run, out: *std.ArrayList(u8), text: []const u8) Error!void {
-    var at: usize = 0;
-    while (at < text.len) {
-        const next = if (std.mem.findScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
-        try out.appendSlice(r.arena, r.comment);
-        if (text[at] != '\n' and text[at] != '\t') try out.append(r.arena, ' ');
-        try out.appendSlice(r.arena, text[at..next]);
-        at = next;
-    }
-    if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(r.arena, '\n');
+    try message.appendCommented(r.arena, out, text, r.comment);
 }
 
 /// `add_commented_lines`: lines already commented are copied as they are,
@@ -2260,7 +2261,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         return finishOutcome(r, .stopped, .conflict, item.commit);
     }
 
-    var text: []const u8 = try message.cleanup(r.arena, r.msg.items, if (r.options.signoff) .whitespace else try message.sequencerCleanup(repo.configuration()), r.comment);
+    var text: []const u8 = try message.cleanup(r.arena, r.msg.items, message.uncut(try message.sequencerCleanup(repo.configuration()) orelse message.sequencerDefault(r.options.signoff)), r.comment);
     if (item.edit_message) text = try edited(r, .merge, text);
     const made = try repo.writeCommit(io, .{
         .tree = outcome.tree.?,

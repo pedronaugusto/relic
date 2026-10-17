@@ -616,6 +616,7 @@ test "a signed-off merge with its own message, and one stopped before committing
 //=========================================================================
 
 const sequencer = @import("../commit/sequencer.zig");
+const message_mod = @import("../object/message.zig");
 
 const pick_state = [_][]const u8{
     "sequencer/todo",   "sequencer/head", "sequencer/abort-safety", "sequencer/opts",
@@ -884,6 +885,75 @@ test "picked messages take -x and sign-off lines by git's trailer rules" {
             try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "log", "--format=%H%n%B", "main~8..main" });
         }
     }.inFormat);
+}
+
+/// Picks whose messages a cleanup changes: comment lines, trailing
+/// whitespace and blank lines, then one that conflicts with `main`.
+fn cleanupScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try repo.writeFile(io, "f", "a\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    const messages = [_][]const u8{ "subject  \n\n# a comment\nbody  \n\n\n", "\n\nsecond\n#also\n; semicolon\n", "conflicting\n# kept?\n" };
+    for (messages, 0..) |msg, i| {
+        if (i == messages.len - 1) {
+            try repo.writeFile(io, "f", "side\n");
+        } else {
+            var name_buf: [16]u8 = undefined;
+            try repo.writeFile(io, try std.mem.print(&name_buf, "s{d}", .{i}), "s\n");
+        }
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "--cleanup=verbatim", "-m", msg });
+    }
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "f", "main\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "main change" });
+    try repo.exec(io, &.{ "tag", "start" });
+}
+
+test "-x and --signoff clean a picked message as commit.cleanup or --cleanup says, as git's explicit cleanup" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, .files, cleanupScript);
+    defer pair.deinit();
+    const settings = [_][]const []const u8{ &.{}, &.{"strip"}, &.{"verbatim"}, &.{"whitespace"}, &.{"scissors"}, &.{"tidy"}, &.{ "strip", "tidy" } };
+    const flag_sets = [_]struct { x: bool, s: bool }{ .{ .x = true, .s = false }, .{ .x = false, .s = true }, .{ .x = true, .s = true }, .{ .x = false, .s = false } };
+    const given = [_]?[]const u8{ null, "strip", "scissors" };
+    for (settings) |setting| for (flag_sets) |flags| for (given) |cleanup| {
+        if (cleanup != null and setting.len != 0) continue;
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try gitMayFail(io, r, &.{ "cherry-pick", "--abort" });
+            try r.exec(io, &.{ "reset", "-q", "--hard", "start" });
+            try gitMayFail(io, r, &.{ "config", "--unset-all", "commit.cleanup" });
+            for (setting) |value| try r.exec(io, &.{ "config", "--add", "commit.cleanup", value });
+        }
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.append(gpa, "cherry-pick");
+        if (flags.x) try argv.append(gpa, "-x");
+        if (flags.s) try argv.append(gpa, "-s");
+        var cleanup_arg: [32]u8 = undefined;
+        if (cleanup) |c| try argv.append(gpa, try std.mem.print(&cleanup_arg, "--cleanup={s}", .{c}));
+        try argv.append(gpa, "main..side");
+        try gitMayFail(io, &pair.git, argv.items);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const commits = try revList(gpa, io, &pair.ours, "main..side");
+            defer gpa.free(commits);
+            var outcome = try sequencer.pick(gpa, io, &repo, commits, .{
+                .who = who,
+                .record_origin = flags.x,
+                .signoff = flags.s,
+                .cleanup = if (cleanup) |c| message_mod.Cleanup.parse(c).? else null,
+            });
+            defer outcome.deinit();
+            try std.testing.expectEqual(sequencer.Stop.conflict, outcome.stopped.?);
+        }
+        errdefer std.debug.print("commit.cleanup {any}, -x {any}, -s {any}, --cleanup {any}\n", .{ setting, flags.x, flags.s, cleanup });
+        try expectSameState(&pair, io, &pick_state, &main_logs);
+    };
 }
 
 test "a pick that becomes empty stops, and is dropped or kept when asked, as git's is" {
@@ -1703,6 +1773,51 @@ test "commits already upstream are left out by patch id, text, binary and mode a
             try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
         }
     }.inFormat);
+}
+
+test "a rebase cleans picked messages as commit.cleanup says, --signoff following it, and lists conflicts as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireRebase250(io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, .files, cleanupScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "side0", "side" });
+    // Not `verbatim` or `whitespace`: the message `git rebase --continue`
+    // commits went through an editor, and git's proposal to it carries
+    // status comments those keep, which relic's proposal has none of.
+    const settings = [_][]const []const u8{ &.{}, &.{"strip"}, &.{"scissors"}, &.{ "tidy", "strip" } };
+    for (settings) |setting| for ([_]bool{ false, true }) |signoff| {
+        errdefer std.debug.print("commit.cleanup {any}, --signoff {any}\n", .{ setting, signoff });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try gitMayFail(io, r, &.{ "rebase", "--abort" });
+            try r.exec(io, &.{ "checkout", "-q", "-B", "side", "side0" });
+            try gitMayFail(io, r, &.{ "config", "--unset-all", "commit.cleanup" });
+            for (setting) |value| try r.exec(io, &.{ "config", "--add", "commit.cleanup", value });
+        }
+        try gitMayFail(io, &pair.git, if (signoff) &.{ "rebase", "--signoff", "main" } else &.{ "rebase", "main" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .signoff = signoff });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Stop.conflict, outcome.stopped.?);
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.writeFile(io, "f", "resolved\n");
+            try r.exec(io, &.{ "add", "f" });
+        }
+        try pair.git.exec(io, &.{ "rebase", "--continue" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+    };
 }
 
 test "a rebase stopped on one side is skipped and aborted by the other" {

@@ -315,20 +315,22 @@ fn isBlankLine(line: []const u8) bool {
 
 const generated_prefixes = [_][]const u8{ "Signed-off-by: ", "(cherry picked from commit " };
 
-/// The line `git commit -v` cuts a message at, after the comment string
-/// and a space.
-const cut_line = "------------------------ >8 ------------------------";
+/// The scissors line an edited message is cut at (`git commit -v`, the
+/// `scissors` cleanup), after the comment string and a space.
+pub const cut_line = "------------------------ >8 ------------------------";
 
-/// git's `wt_status_locate_end`: where a scissors line cuts the message.
-fn locateEnd(s: []const u8, comment: []const u8, len_in: usize) usize {
-    var len = len_in;
-    var pattern_buf: [256]u8 = undefined;
-    const pattern = std.mem.print(&pattern_buf, "\n{s} {s}", .{ comment, cut_line }) catch return len;
-    if (std.mem.startsWith(u8, s, pattern[1..])) {
-        len = 0;
-    } else if (std.mem.find(u8, s, pattern)) |p| {
-        const newlen = p + 1;
-        if (newlen < len) len = newlen;
+/// git's `wt_status_locate_end`: where the first whole scissors line --
+/// the comment string, a space, `cut_line` and a newline -- cuts
+/// `s[0..len]`, or `len`.
+pub fn locateEnd(s: []const u8, comment: []const u8, len: usize) usize {
+    const rest = " " ++ cut_line ++ "\n";
+    var from: usize = 0;
+    while (std.mem.findPos(u8, s, from, rest)) |at| : (from = at + 1) {
+        if (at < comment.len) continue;
+        const start = at - comment.len;
+        if (!std.mem.eql(u8, s[start..at], comment)) continue;
+        if (start == 0) return 0;
+        if (s[start - 1] == '\n') return @min(start, len);
     }
     return len;
 }

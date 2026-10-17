@@ -335,6 +335,7 @@ fn clean(arena: Allocator, text: []const u8, cleanup: message.Cleanup, comment: 
     return switch (cleanup) {
         .verbatim => text,
         .whitespace => message.stripSpace(arena, text, null),
+        .scissors => message.cleanup(arena, text, .scissors, comment),
         .strip => message.stripSpace(arena, text, comment),
     };
 }

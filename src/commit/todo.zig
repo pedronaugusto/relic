@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const hash = @import("../hash/hash.zig");
+const message = @import("../object/message.zig");
 const ref_names = @import("../names.zig").ref;
 
 const Oid = hash.Oid;
@@ -384,11 +385,12 @@ pub fn toBytes(gpa: Allocator, items: []const Item, options: FormatOptions) Allo
 }
 
 /// The help git writes after the instructions of a sheet a person is given
-/// to edit, with the `Rebase <range> onto <onto> (<n> commands)` line first.
-pub fn writeHelp(w: *std.Io.Writer, command_count: usize, revisions: []const u8, onto: []const u8, comment: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('\n');
-    try w.print("{s} Rebase {s} onto {s} ({d} command{s})\n", .{
-        comment, revisions, onto, command_count, if (command_count == 1) "" else "s",
+/// to edit, with the `Rebase <range> onto <onto> (<n> commands)` line first,
+/// commented as `strbuf_add_commented_lines` comments it.
+pub fn appendHelp(gpa: Allocator, out: *std.ArrayList(u8), sheet: Sheet) Allocator.Error!void {
+    try out.append(gpa, '\n');
+    try out.print(gpa, "{s} Rebase {s} onto {s} ({d} command{s})\n", .{
+        sheet.comment, sheet.revisions, sheet.onto, sheet.command_count, if (sheet.command_count == 1) "" else "s",
     });
     const help =
         \\
@@ -422,23 +424,17 @@ pub fn writeHelp(w: *std.Io.Writer, command_count: usize, revisions: []const u8,
         \\
         \\
     ;
-    try writeCommented(w, help, comment);
+    try message.appendCommented(gpa, out, help, sheet.comment);
 }
 
-/// `strbuf_add_commented_lines`: each line after the comment string, a
-/// space between them unless the line is empty or starts with a tab.
-pub fn writeCommented(w: *std.Io.Writer, text: []const u8, comment: []const u8) std.Io.Writer.Error!void {
-    var at: usize = 0;
-    while (at < text.len) {
-        const nl = std.mem.findScalarPos(u8, text, at, '\n');
-        const line = text[at .. nl orelse text.len];
-        at = if (nl) |n| n + 1 else text.len;
-        try w.writeAll(comment);
-        if (line.len != 0 and line[0] != '\t') try w.writeByte(' ');
-        try w.writeAll(line);
-        try w.writeByte('\n');
-    }
-}
+/// What the help's first line names.
+pub const Sheet = struct {
+    command_count: usize,
+    /// `<upstream>..<orig-head>`, shortened.
+    revisions: []const u8,
+    onto: []const u8,
+    comment: []const u8,
+};
 
 //=========================================================================
 // Tests

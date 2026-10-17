@@ -361,7 +361,10 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
             // the `-C<n>` `git am` passes it.
             o.min_context = @intCast(config_mod.parseNonNegative(w[2..], std.math.maxInt(u32)) catch return error.UnsupportedApplyOption);
         } else if (std.mem.startsWith(u8, w, "-p")) {
-            o.strip = decimal.whole(usize, w[2..], 10) orelse return error.UnsupportedApplyOption;
+            // `strtol_i` of the rest, as `git apply` reads `-p<n>`, and not
+            // negative.
+            const strip = decimal.whole(c_int, w[2..], 10) orelse return error.UnsupportedApplyOption;
+            o.strip = std.math.cast(usize, strip) orelse return error.UnsupportedApplyOption;
         } else if (std.mem.eql(u8, w, "--reject")) {
             o.reject = true;
         } else return error.UnsupportedApplyOption;

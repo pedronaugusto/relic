@@ -313,7 +313,11 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     // git's `cmd_merge` reads `commit.cleanup` before it merges anything,
     // and dies there on a mode it does not know.
     var options = given;
-    options.cleanup = given.cleanup orelse try message.cleanupMode(try message.cleanupSetting(repo.configuration()), false);
+    const cleanup_setting = try message.cleanupSetting(repo.configuration());
+    options.cleanup = given.cleanup orelse try message.cleanupMode(cleanup_setting, false);
+    // The conflicts list is written as for an editor, whether one runs or
+    // not, as git's `suggest_conflicts` writes it.
+    const hint_cleanup = given.cleanup orelse try message.cleanupMode(cleanup_setting, true);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -358,7 +362,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const already_merged = settings.log != 0 and targets.len == 1 and
         try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = reduced.heads[0].oid, .descendant = ours }, .{});
     const merge_message = if (reduced.heads.len == 0 or already_merged) "" else try mergeMessage(arena, io, repo, .{ .targets = reduced.heads, .head = head, .given = options.message, .settings = settings });
-    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &locked_index, .{ .head = head, .reduced = reduced, .reflog_action = reflog_action, .fast_forward = fast_forward, .message = merge_message }, options);
+    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &locked_index, .{ .head = head, .reduced = reduced, .reflog_action = reflog_action, .fast_forward = fast_forward, .message = merge_message, .hint_cleanup = hint_cleanup }, options);
 
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
@@ -410,6 +414,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         .parents = &.{ ours, target.oid },
         .merged = &.{target.oid},
         .message = merge_message,
+        .hint_cleanup = hint_cleanup,
         .reflog_action = reflog_action,
         .strategy = "ort",
         .fast_forward = fast_forward,
@@ -469,6 +474,7 @@ const Octopus = struct {
     reflog_action: []const u8,
     fast_forward: FastForward,
     message: []const u8,
+    hint_cleanup: message.Cleanup,
 };
 
 /// `git merge` with two or more commits left to merge: the octopus.
@@ -516,6 +522,7 @@ fn octopus(
         .parents = parents.items,
         .merged = heads,
         .message = asked.message,
+        .hint_cleanup = asked.hint_cleanup,
         .reflog_action = reflog_action,
         .strategy = "octopus",
         .fast_forward = fast_forward,
@@ -548,6 +555,9 @@ const Made = struct {
     /// The message `git merge` makes: `-m`'s, or `fmt-merge-msg`'s title,
     /// with `merge.log`'s list after either.
     message: []const u8,
+    /// The cleanup the conflicts list is written for: `scissors` puts it
+    /// under the scissors line.
+    hint_cleanup: message.Cleanup,
     reflog_action: []const u8,
     /// The strategy the reflog names.
     strategy: []const u8,
@@ -623,15 +633,9 @@ fn commitOrStop(
     // `MERGE_MSG` ends the message with a newline whatever it ended with.
     try msg.append(arena, '\n');
     if (!outcome.isClean()) {
-        try msg.append(arena, '\n');
-        try msg.appendSlice(arena, comment);
-        try msg.appendSlice(arena, " Conflicts:\n");
-        for (conflicts) |conflict| {
-            try msg.appendSlice(arena, comment);
-            try msg.append(arena, '\t');
-            try msg.appendSlice(arena, conflict.path);
-            try msg.append(arena, '\n');
-        }
+        const paths = try arena.alloc([]const u8, conflicts.len);
+        for (conflicts, paths) |conflict, *path| path.* = conflict.path;
+        try message.appendConflictsHint(arena, &msg, paths, comment, made.hint_cleanup);
     }
     try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
     try state_file.write(io, repo.gitDirectory(), "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
@@ -653,11 +657,12 @@ pub const ConcludeOptions = struct {
     author: ?object.Signature = null,
     /// The message, in place of `MERGE_MSG`.
     message: ?[]const u8 = null,
-    /// How the message is cleaned. `strip`, which drops the `# Conflicts:`
-    /// list, is what `git commit` does when a person has seen the message in
-    /// an editor; `git commit --no-edit` keeps comments and cleans only
-    /// whitespace.
-    cleanup: message.Cleanup = .strip,
+    /// How the message is cleaned: `--cleanup`. `null` is what `git commit`
+    /// does when a person has seen the message in an editor, `commit.cleanup`
+    /// read for one: `strip` by default, which drops the `# Conflicts:` list,
+    /// or `scissors`, which cuts it off. `git commit --no-edit` keeps
+    /// comments and cleans only whitespace.
+    cleanup: ?message.Cleanup = null,
     /// The hooks to run, or `null` for none: `git commit`'s `pre-commit`,
     /// `prepare-commit-msg` with `merge`, `commit-msg` and `post-commit`.
     hooks: ?*hooks_mod.Runner = null,
@@ -719,9 +724,10 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     // `git commit`'s `prepare_to_commit`: an `auto` comment character is
     // chosen against the message as given, whitespace cleaned, before the
     // hook sees it.
-    const comment = try (try message.Comment.read(repo.configuration())).forMessage(if (options.cleanup == .verbatim) given else try message.stripSpace(arena, given, null));
+    const cleanup_mode = options.cleanup orelse try message.cleanupMode(try message.cleanupSetting(repo.configuration()), true);
+    const comment = try (try message.Comment.read(repo.configuration())).forMessage(if (cleanup_mode == .verbatim) given else try message.stripSpace(arena, given, null));
     const raw = try h.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
-    const cleaned = try message.cleanup(arena, raw, options.cleanup, comment);
+    const cleaned = try message.cleanup(arena, raw, cleanup_mode, comment);
     if (cleaned.len == 0) return error.EmptyMessage;
     const commit = try repo.writeCommit(io, .{
         .tree = tree,
