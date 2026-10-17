@@ -4,7 +4,7 @@
 //! and Windows target) than where it is unsigned (Linux on ARM, RISC-V,
 //! PowerPC), just as git's own filters do.
 const std = @import("std");
-const builtin = @import("builtin");
+const ctype = @import("../../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 
 /// Settings stored at the start of the commit-graph's BDAT chunk.
@@ -15,11 +15,8 @@ pub const Settings = struct {
     max_changed_paths: usize = 512,
 };
 
-/// Whether git's `char` is signed where relic runs.
-const char_signed = (builtin.target.cCharSignedness() orelse .signed) == .signed;
-
 fn byte(c: u8, version: u32) u32 {
-    if (version == 1 and char_signed) return @bitCast(@as(i32, @as(i8, @bitCast(c))));
+    if (version == 1) return @bitCast(@as(i32, ctype.asChar(c)));
     return c;
 }
 

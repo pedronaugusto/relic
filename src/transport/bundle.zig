@@ -143,12 +143,13 @@ pub const Header = struct {
                     else
                         return error.UnknownBundleCapability;
                 } else if (std.mem.startsWith(u8, capability, "filter=")) {
+                    // A second `@filter=` joins the first in a `combine:`,
+                    // as git's `parse_list_objects_filter` joins them.
                     const spec = capability["filter=".len..];
-                    _ = filter_spec.parse(a, spec) catch |err| switch (err) {
+                    h.filter = filterJoined(a, h.filter, spec) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.InvalidFilter => return error.InvalidFilter,
                     };
-                    h.filter = try a.dupe(u8, spec);
                 } else return error.UnknownBundleCapability;
                 continue;
             }
@@ -224,6 +225,14 @@ pub const Header = struct {
         if (h.filter) |f| try w.print("The bundle uses this filter: {s}\n", .{f});
     }
 };
+
+/// The bundle's filter once `spec` is read: `spec` itself, or joined to
+/// the one before it.
+fn filterJoined(a: Allocator, before: ?[]const u8, spec: []const u8) filter_spec.Error![]const u8 {
+    if (before) |first| return filter_spec.join(a, first, spec);
+    _ = try filter_spec.parse(a, spec);
+    return a.dupe(u8, spec);
+}
 
 /// Read one line, its newline kept, into `line`: `false` at the end of the
 /// stream with nothing read.

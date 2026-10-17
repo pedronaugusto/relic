@@ -20,6 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A helper is handed what `credential_write` writes: the password with `get` too, the capabilities with `store` and `erase` only when a helper announced them, `continue=1` with the state capability, and the state answered at the last question rather than the one before; an expired credential loses its token as well as its password.
 - A refused credential keeps its authtype and state, and loses its username, refresh token and expiry, as `credential_reject` leaves them; a credential is stored once.
 - `credential.interactive` is read as `credential_getpass` reads it, only the plain key: false as a boolean, or `never`. A prompt names the path when it is kept.
+- A `combine:` filter's part refuses every byte up to a space, control bytes among them, and bytes past ASCII where C's `char` is signed, as git's `has_reserved_character` compares them; `%00` stays as written, as `url_percent_decode` leaves it (relic decoded it to a NUL).
+- A bundle's second `@filter=` joins the first in a `combine:`, encoded as git's `parse_list_objects_filter` encodes it (relic kept the last); `wire.filter_spec.join` adds a filter the same way.
 - An LFS credential is asked for with git-lfs's parts: the scheme in lower case, the host as written, a username only when there is one, and the path only under `credential.<url>.useHttpPath`.
 
 ## [0.13.0] - 2026-10-17

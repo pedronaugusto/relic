@@ -7,7 +7,10 @@
 //! The numbers are read as git's `git_parse_ulong` reads them: white space
 //! and a `+` may come first, `0x` makes hexadecimal and a leading `0`
 //! octal, and `k`, `m` or `g` in either case may follow; a `-` anywhere is
-//! refused. A `combine:`'s empty parts are passed over, as git passes them;
+//! refused. A `combine:` part refuses the characters git reserves, control
+//! bytes, and bytes past ASCII where C's `char` is signed, as git's
+//! comparison of a `char` does; `%00` stays as written. Its empty parts
+//! are passed over, as git passes them;
 //! one with no part at all is refused. `sparse:path=`, whose support git
 //! dropped, is refused, as git refuses it.
 
@@ -65,9 +68,12 @@ pub fn parse(arena: Allocator, text: []const u8) Self.Error!Spec {
         var it = std.mem.splitScalar(u8, rest, '+');
         while (it.next()) |encoded| {
             if (encoded.len == 0) continue;
-            // A character git reserves is written as `%XX`.
+            // A character git reserves is written as `%XX`: its
+            // `has_reserved_character` refuses everything up to a space,
+            // control bytes and every byte past ASCII where `char` is
+            // signed among them.
             for (encoded) |c| {
-                if (std.mem.findScalar(u8, reserved, c) != null or ctype.isSpace(c)) return error.InvalidFilter;
+                if (ctype.asChar(c) <= ' ' or std.mem.findScalar(u8, reserved, c) != null) return error.InvalidFilter;
             }
             try parts.append(arena, try parse(arena, try percentDecode(arena, encoded)));
         }
@@ -86,6 +92,37 @@ pub fn sendForm(arena: Allocator, text: []const u8) Self.Error![]const u8 {
         .blob_limit => |n| arena.print("blob:limit={d}", .{n}),
         else => text,
     };
+}
+
+/// `spec` with `next` added, as git's `parse_list_objects_filter` adds a
+/// filter given again (a second `--filter`, a bundle's second `@filter=`):
+/// a `combine:` of the two, each part percent-encoded where git's
+/// `allow_unencoded` says, or `spec` with `next` appended when it is a
+/// `combine:` already. `next` must read; the result is `arena`'s.
+pub fn join(arena: Allocator, spec: []const u8, next: []const u8) Self.Error![]const u8 {
+    _ = try parse(arena, next);
+    const first = try parse(arena, spec);
+    var out: std.ArrayList(u8) = .empty;
+    if (first == .combine) {
+        try out.appendSlice(arena, spec);
+    } else {
+        try out.appendSlice(arena, "combine:");
+        try appendEncoded(arena, &out, spec);
+    }
+    try out.append(arena, '+');
+    try appendEncoded(arena, &out, next);
+    return out.items;
+}
+
+/// git's `strbuf_addstr_urlencode` with `allow_unencoded`: `%xx` in lower
+/// case for a reserved character, `%`, `+`, and anything up to a space as
+/// C's `char` compares it.
+fn appendEncoded(arena: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
+    for (text) |c| {
+        if (ctype.asChar(c) <= ' ' or c == '%' or c == '+' or std.mem.findScalar(u8, reserved, c) != null) {
+            try out.print(arena, "%{x:0>2}", .{c});
+        } else try out.append(arena, c);
+    }
 }
 
 /// The characters a `combine:` part may not hold unencoded: git's
@@ -137,10 +174,10 @@ fn isCSpace(c: u8) bool {
 }
 
 /// git's `url_percent_decode`: `%XX` is the byte, and a `%` not followed by
-/// two hexadecimal digits is itself.
+/// two hexadecimal digits, or `%00`, is itself.
 fn percentDecode(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
     if (std.mem.findScalar(u8, text, '%') == null) return text;
-    return percent.decode(arena, text, .decode);
+    return percent.decode(arena, text, .literal);
 }
 
 const testing = std.testing;
@@ -154,7 +191,8 @@ test "a filter is read, and refused, where git's own reading reads and refuses i
     var repo = try testremote.historyRepo(gpa, io, 1);
     defer repo.deinit();
     try repo.writeFile(io, "sparse-spec", "/a\n");
-    try repo.exec(io, &.{ "add", "sparse-spec" });
+    try repo.writeFile(io, "\xc3\xa9", "/a\n");
+    try repo.exec(io, &.{ "add", "sparse-spec", "\xc3\xa9" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "spec" });
     var env = try testremote.environ(gpa);
     defer env.deinit();
@@ -162,21 +200,25 @@ test "a filter is read, and refused, where git's own reading reads and refuses i
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     for ([_][]const u8{
-        "blob:none",                       "blob:none ",                                      "blob:limit=1k",
-        "blob:limit=1K",                   "blob:limit=+5",                                   "blob:limit=",
-        "blob:limit=18446744073709551615", "blob:limit=17179869184g",                         "blob:limit=4g",
-        "blob:limit=4294967295",           "tree:4294967296",                                 "tree:0",
-        "tree:1k",                         "tree:0x10",                                       "tree:010",
-        "tree: 1",                         "tree:\t1",                                        "tree:+1",
-        "tree:-1",                         "tree:1 ",                                         "tree:1kb",
-        "tree:",                           "tree:99999999999999999999",                       "object:type=blob",
-        "object:type=tag",                 "object:type=file",                                "object:type=",
-        "sparse:oid=HEAD:sparse-spec",     "sparse:path=x",                                   "combine:",
-        "combine:blob:none+tree:1",        "combine:blob:none",                               "combine:blob:none+",
-        "combine:+blob:none",              "combine:blob:none++tree:1",                       "combine:combine:blob:none+tree:1",
-        "combine:blob%3anone+tree%3A1",    "combine:blob:none+combine%3Atree:1%2Bblob:none",  "combine:blob:none+tree:1%",
-        "combine:%zz",                     "combine:blob:none+sparse:oid=HEAD%3asparse-spec", "combine:blob:none+sparse:oid=HEAD~1",
-        "combine:blob:none +tree:1",       "combine:tree:1%0",                                "nothing",
+        "blob:none",                        "blob:none ",                                      "blob:limit=1k",
+        "blob:limit=1K",                    "blob:limit=+5",                                   "blob:limit=",
+        "blob:limit=18446744073709551615",  "blob:limit=17179869184g",                         "blob:limit=4g",
+        "blob:limit=4294967295",            "tree:4294967296",                                 "tree:0",
+        "tree:1k",                          "tree:0x10",                                       "tree:010",
+        "tree: 1",                          "tree:\t1",                                        "tree:+1",
+        "tree:-1",                          "tree:1 ",                                         "tree:1kb",
+        "tree:",                            "tree:99999999999999999999",                       "object:type=blob",
+        "object:type=tag",                  "object:type=file",                                "object:type=",
+        "sparse:oid=HEAD:sparse-spec",      "sparse:path=x",                                   "combine:",
+        "combine:blob:none+tree:1",         "combine:blob:none",                               "combine:blob:none+",
+        "combine:+blob:none",               "combine:blob:none++tree:1",                       "combine:combine:blob:none+tree:1",
+        "combine:blob%3anone+tree%3A1",     "combine:blob:none+combine%3Atree:1%2Bblob:none",  "combine:blob:none+tree:1%",
+        "combine:%zz",                      "combine:blob:none+sparse:oid=HEAD%3asparse-spec", "combine:blob:none+sparse:oid=HEAD~1",
+        "combine:blob:none +tree:1",        "combine:tree:1%0",                                "nothing",
+        "combine:blob:none%00",             "combine:blob%3anone%00+tree:1",                   "combine:tree:1\x01",
+        "combine:tree:1+blob:none\x7f",     "sparse:oid=HEAD:\xc3\xa9",                        "combine:sparse:oid=HEAD:\xc3\xa9",
+        "combine:sparse:oid=HEAD%3a%c3%a9", "combine:blob:none+\x1f",                          "auto",
+        "combine:auto",
     }) |text| {
         // How git reads these is 2.54's: an older git refuses a combine:
         // with an empty last part, which 2.54 reads.

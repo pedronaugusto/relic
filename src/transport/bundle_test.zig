@@ -227,6 +227,50 @@ test "a bundle filtered by sparse:oid= holds the objects git's holds" {
     try std.testing.expectError(error.SparseBlobMissing, create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "x.bundle" }, .{ .include = &.{"main"}, .filter = "sparse:oid=main:nothing" }));
 }
 
+test "a bundle's repeated @filter= lines are one combine: filter, as git verifies it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // `bundle verify` names the filter from 2.40.
+    if (!try testgit.gitAtLeast(gpa, io, 2, 40)) return error.SkipZigTest;
+    var env = try testgit.datedEnv(gpa, 1_700_000_000);
+    defer env.deinit();
+    var src = try history(gpa, io, &env);
+    defer src.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(tmp_path);
+    const made = try gpa.print("{s}/made.bundle", .{tmp_path});
+    defer gpa.free(made);
+    try src.exec(io, &.{ "bundle", "create", "-q", made, "--filter=blob:limit=1k", "main" });
+    const bytes = try tmp.dir.readFileAlloc(io, "made.bundle", gpa, .unlimited);
+    defer gpa.free(bytes);
+    const filter_line = "@filter=blob:limit=1024\n";
+    const at = std.mem.find(u8, bytes, filter_line).?;
+    for ([_][]const u8{
+        "@filter=tree:1\n",
+        "@filter=sparse:oid=main:a b+c\n@filter=object:type=blob\n",
+        "@filter=combine:tree:2+blob:none\n",
+    }) |more| {
+        for ([_]bool{ false, true }) |combined_first| {
+            const first = if (combined_first) "@filter=combine:blob:limit=1k+tree:3\n" else filter_line;
+            const rewritten = try std.mem.concat(gpa, u8, &.{ bytes[0..at], first, more, bytes[at + filter_line.len ..] });
+            defer gpa.free(rewritten);
+            try tmp.dir.writeFile(io, .{ .sub_path = "joined.bundle", .data = rewritten });
+            const path = try gpa.print("{s}/joined.bundle", .{tmp_path});
+            defer gpa.free(path);
+            const summary = try src.run(io, &.{ "bundle", "verify", path });
+            defer gpa.free(summary);
+            var f = try File.open(gpa, io, tmp.dir, "joined.bundle");
+            defer f.deinit(io);
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try f.header.writeSummary(&out.writer);
+            try std.testing.expectEqualStrings(summary, out.written());
+        }
+    }
+}
+
 test "git's bundles are read, verified, listed, unbundled and fetched from as git does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
