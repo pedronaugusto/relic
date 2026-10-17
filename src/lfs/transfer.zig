@@ -67,6 +67,7 @@ const lfsapi = @import("api.zig");
 const object_walk = @import("../walk/object/walk.zig");
 const progress_mod = @import("../report.zig").progress;
 const time_text = @import("time_text.zig");
+const strand = @import("strand");
 const lfsssh = @import("ssh.zig");
 const custom = @import("custom.zig");
 const remote_mod = @import("../wire.zig").remote;
@@ -249,37 +250,34 @@ const Limits = struct {
 // The batch API's JSON
 //=====================================================================
 
-/// A batch answer, read.
+/// A batch answer, read as git-lfs's Go reads it (`tq.BatchResponse`), its
+/// objects checked: none of them `null`.
 pub const BatchResponse = struct {
-    transfer: ?[]const u8 = null,
+    transfer: []const u8 = "",
     objects: []const BatchObject = &.{},
-    hash_algo: ?[]const u8 = null,
-    pub const strand = lfsapi.json_policy;
+    hash_algo: []const u8 = "",
 };
 
-/// One object of a batch answer.
+/// One object of a batch answer (`tq.Transfer`).
 pub const BatchObject = struct {
+    /// Read as git-lfs reads it; nothing uses it.
+    name: []const u8 = "",
     oid: []const u8 = "",
-    size: u64 = 0,
+    size: i64 = 0,
     authenticated: bool = false,
-    actions: ?Actions = null,
+    actions: ActionSet = .{ .items = &.{} },
     /// What the API called `actions` before it was renamed; git-lfs still
     /// reads it.
-    _links: ?Actions = null,
+    _links: ActionSet = .{ .items = &.{} },
     @"error": ?ObjectError = null,
-    pub const strand = lfsapi.json_policy;
+    /// Read as git-lfs reads it; nothing uses it.
+    path: []const u8 = "",
 
-    /// The action named `rel`, from `actions` or else `_links`.
+    /// The action named `rel`, from `actions` or else `_links`, as git-lfs's
+    /// `Transfer.Rel` finds it.
     pub fn action(o: *const BatchObject, rel: Rel) ?Action {
         inline for (.{ o.actions, o._links }) |set| {
-            if (set) |s| {
-                const found = switch (rel) {
-                    .download => s.download,
-                    .upload => s.upload,
-                    .verify => s.verify,
-                };
-                if (found) |a| return a;
-            }
+            for (set.items) |kv| if (std.mem.eql(u8, kv.key, @tagName(rel))) return kv.value;
         }
         return null;
     }
@@ -288,35 +286,31 @@ pub const BatchObject = struct {
 /// The actions an object may carry.
 pub const Rel = enum { download, upload, verify };
 
-/// An object's actions.
-pub const Actions = struct {
-    download: ?Action = null,
-    upload: ?Action = null,
-    verify: ?Action = null,
-    pub const strand = lfsapi.json_policy;
-};
+/// An object's actions by name, as Go's `map[string]*Action` holds them.
+/// `parseBatch` refuses one that is `null`, which git-lfs would dereference.
+pub const ActionSet = strand.core.Pairs([]const u8, ?Action);
 
-/// One action: where to go, and what to say when there.
+/// One action: where to go, and what to say when there (`tq.Action`).
 pub const Action = struct {
-    href: []const u8,
-    header: ?lfsapi.HeaderMap = null,
-    /// When the action stops working, as RFC 3339 text, or how many seconds
-    /// after the answer. With `lfsapi.Options.now`, an action that expires
-    /// within five seconds of it is not used, and the object gets a fresh
-    /// batch, as git-lfs does; without it, a refused action gets one.
-    expires_at: ?[]const u8 = null,
-    expires_in: ?i64 = null,
+    href: []const u8 = "",
+    header: lfsapi.HeaderMap = .{ .items = &.{} },
+    /// When the action stops working, or how many seconds after the answer.
+    /// With `lfsapi.Options.now`, an action that expires within five
+    /// seconds of it is not used, and the object gets a fresh batch, as
+    /// git-lfs does; without it, a refused action gets one.
+    expires_at: time_text.GoTime = .{},
+    expires_in: i64 = 0,
     /// Over git-lfs's pure-ssh protocol: what the server named the object
-    /// and the transfer by, handed back with each request for it.
+    /// and the transfer by, handed back with each request for it. Never
+    /// read from JSON, as git-lfs's `json:"-"`.
     id: ?[]const u8 = null,
     token: ?[]const u8 = null,
-    pub const strand = lfsapi.json_policy;
+    pub const strand = .{ .fields = .{ .id = .{ .skip_decode = true }, .token = .{ .skip_decode = true } } };
 
     /// Whether the action, answered at `now`, expires within five seconds
     /// of it.
     pub fn expiredAt(a: Action, now: Io.Timestamp) bool {
-        const at = if (a.expires_at) |t| time_text.parseRfc3339(t) else null;
-        return lfsapi.expiresWithin(now, a.expires_in orelse 0, at, 5);
+        return lfsapi.expiresWithin(now, a.expires_in, a.expires_at, 5);
     }
 
     /// Errors from `headers`.
@@ -332,7 +326,6 @@ pub const Action = struct {
 pub const ObjectError = struct {
     code: i64 = 0,
     message: []const u8 = "",
-    pub const strand = lfsapi.json_policy;
 };
 
 /// Errors from `parseBatch`.
@@ -342,14 +335,25 @@ pub const ParseBatchError = Allocator.Error || error{MalformedResponse};
 /// does not parse, whose objects are not named by a SHA-256, or that names
 /// another hash algorithm, is `error.MalformedResponse`.
 pub fn parseBatch(arena: Allocator, bytes: []const u8) ParseBatchError!BatchResponse {
-    const parsed = try lfsapi.parseJson(BatchResponse, arena, bytes);
-    if (parsed.hash_algo) |algo| {
-        if (algo.len != 0 and !std.mem.eql(u8, algo, "sha256")) return error.MalformedResponse;
-    }
-    for (parsed.objects) |o| {
+    // The answer as Go holds it: `[]*Transfer`, whose elements may be nil.
+    const Json = struct {
+        transfer: []const u8 = "",
+        objects: []const ?BatchObject = &.{},
+        hash_algo: []const u8 = "",
+    };
+    const parsed = try lfsapi.parseJson(Json, arena, bytes, .http);
+    if (parsed.hash_algo.len != 0 and !std.mem.eql(u8, parsed.hash_algo, "sha256")) return error.MalformedResponse;
+    const objects = try arena.alloc(BatchObject, parsed.objects.len);
+    for (parsed.objects, objects) |entry, *to| {
+        // A `null` object or action is one git-lfs would dereference.
+        const o = entry orelse return error.MalformedResponse;
         if (!isOid(o.oid)) return error.MalformedResponse;
+        for ([_]ActionSet{ o.actions, o._links }) |set| for (set.items) |kv| {
+            if (kv.value == null) return error.MalformedResponse;
+        };
+        to.* = o;
     }
-    return parsed;
+    return .{ .transfer = parsed.transfer, .objects = objects, .hash_algo = parsed.hash_algo };
 }
 
 fn isOid(text: []const u8) bool {
@@ -759,7 +763,8 @@ fn batchChunk(
         else => |e| return e,
     };
     var by_custom = false;
-    if (answer.transfer) |t| {
+    {
+        const t = answer.transfer;
         if (state.ssh == null and t.len != 0 and !std.mem.eql(u8, t, "basic")) {
             const adapter = custom.find(adapters, t, operation) orelse return error.LfsTransferUnsupported;
             if (chosen.*) |c| if (!std.mem.eql(u8, c.name, adapter.name)) return error.LfsTransferUnsupported;
@@ -916,8 +921,8 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
     var request_action: ?custom.Action = null;
     if (action) |a| {
         var headers: std.ArrayList(custom.Action.Header) = .empty;
-        if (a.header) |map| for (map.items) |kv| try headers.append(scratch, .{ .name = kv.key, .value = kv.value });
-        request_action = .{ .href = a.href, .header = headers.items, .expires_at = a.expires_at, .expires_in = a.expires_in orelse 0 };
+        for (a.header.items) |kv| try headers.append(scratch, .{ .name = kv.key, .value = kv.value });
+        request_action = .{ .href = a.href, .header = headers.items, .expires_at = a.expires_at, .expires_in = a.expires_in };
     }
     const Progress = struct {
         pub const Self = @This();
@@ -927,13 +932,18 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
             p.state.say(.{ .bytes = n });
         }
     };
-    const ended = try state.agents[worker].transfer(io, .{
+    const ended = state.agents[worker].transfer(io, .{
         .operation = state.operation,
         .oid = &r.oid,
         .size = r.size,
         .path = upload_path,
         .action = request_action,
-    }, Progress{ .state = state });
+    }, Progress{ .state = state }) catch |err| switch (err) {
+        // The object fails as git-lfs's does when it cannot marshal the
+        // request, with Go's words.
+        error.UnwritableTime => return .{ .fail = "json: error calling MarshalJSON for type *time.Time: timezone hour outside of range [0,23]" },
+        else => |e| return e,
+    };
     switch (ended) {
         .failed => |f| return .{ .fail = try state.arena.print("[{d}] {s}", .{ f.code, f.message }) },
         .done => |path| {
@@ -1163,16 +1173,14 @@ fn copyAction(state: *Run, a: Action) Error!Action {
     defer state.arena_mutex.unlock(state.io());
     var out: Action = .{
         .href = try state.arena.dupe(u8, a.href),
-        .expires_at = if (a.expires_at) |t| try state.arena.dupe(u8, t) else null,
+        .expires_at = a.expires_at,
         .expires_in = a.expires_in,
         .id = if (a.id) |v| try state.arena.dupe(u8, v) else null,
         .token = if (a.token) |v| try state.arena.dupe(u8, v) else null,
     };
-    if (a.header) |map| {
-        const copy = try state.arena.alloc(@TypeOf(map.items[0]), map.items.len);
-        for (map.items, copy) |kv, *to| to.* = .{ .key = try state.arena.dupe(u8, kv.key), .value = try state.arena.dupe(u8, kv.value) };
-        out.header = .{ .items = copy };
-    }
+    const copy = try state.arena.alloc(@TypeOf(a.header.items[0]), a.header.items.len);
+    for (a.header.items, copy) |kv, *to| to.* = .{ .key = try state.arena.dupe(u8, kv.key), .value = try state.arena.dupe(u8, kv.value) };
+    out.header = .{ .items = copy };
     return out;
 }
 
@@ -1646,7 +1654,7 @@ fn batchRequest(
             server.client.noteStatus(io, ex, "batch");
             return error.LfsBatchFailed;
         }
-        const bytes = try ex.readAll(io, 64 << 20);
+        const bytes = try ex.readJson(io, 64 << 20);
         const response = try parseBatch(a, bytes);
         if (own) return .{ .arena = arena_state, .response = response };
         return response;
@@ -1702,21 +1710,24 @@ pub fn parseSshBatch(a: Allocator, lines: []const []const u8) ParseSshBatchError
         }
     }.less);
     var out: std.ArrayList(BatchObject) = .empty;
+    const Entry = @typeInfo(@FieldType(ActionSet, "items")).pointer.child;
+    var actions: std.ArrayList(Entry) = .empty;
     for (sorted) |line| {
         var fields: std.ArrayList([]const u8) = .empty;
         var it = std.mem.splitScalar(u8, line, ' ');
         while (it.next()) |f| try fields.append(a, f);
         if (fields.items.len < 3) return error.MalformedResponse;
         const oid = fields.items[0];
-        const size = decimal.goInt(u64, fields.items[1]) orelse return error.MalformedResponse;
+        const size = decimal.goInt(i64, fields.items[1]) orelse return error.MalformedResponse;
         if (out.items.len == 0 or !std.mem.eql(u8, out.items[out.items.len - 1].oid, oid)) {
-            try out.append(a, .{ .oid = oid, .size = size, .actions = .{} });
+            actions = .empty;
+            try out.append(a, .{ .oid = oid, .size = size });
         }
         const obj = &out.items[out.items.len - 1];
         obj.size = size;
         const name = fields.items[2];
         if (std.mem.eql(u8, name, "noop")) continue;
-        var action: Action = .{ .href = "" };
+        var action: Action = .{};
         for (fields.items[3..]) |kv| {
             if (std.mem.startsWith(u8, kv, "id=")) {
                 action.id = kv[3..];
@@ -1725,17 +1736,17 @@ pub fn parseSshBatch(a: Allocator, lines: []const []const u8) ParseSshBatchError
             } else if (std.mem.startsWith(u8, kv, "expires-in=")) {
                 action.expires_in = decimal.goInt(i64, kv[11..]) orelse return error.MalformedResponse;
             } else if (std.mem.startsWith(u8, kv, "expires-at=")) {
-                if (time_text.parseRfc3339(kv[11..]) == null) return error.MalformedResponse;
-                action.expires_at = kv[11..];
+                action.expires_at = time_text.GoTime.parse(kv[11..]) orelse return error.MalformedResponse;
             }
         }
-        if (std.mem.eql(u8, name, "download")) {
-            obj.actions.?.download = action;
-        } else if (std.mem.eql(u8, name, "upload")) {
-            obj.actions.?.upload = action;
-        } else if (std.mem.eql(u8, name, "verify")) {
-            obj.actions.?.verify = action;
-        }
+        // As git-lfs sets `Actions[name]`: a later line for a name replaces it.
+        for (actions.items) |*e| {
+            if (std.mem.eql(u8, e.key, name)) {
+                e.value = action;
+                break;
+            }
+        } else try actions.append(a, .{ .key = name, .value = action });
+        obj.actions = .{ .items = actions.items };
     }
     return .{ .transfer = "ssh", .objects = out.items, .hash_algo = "sha256" };
 }
@@ -2550,7 +2561,7 @@ test "an ssh batch answer's lines become the objects and actions git-lfs reads f
     const dl = got.objects[0].action(.download).?;
     try testing.expectEqualStrings("x", dl.id.?);
     try testing.expectEqualStrings("y", dl.token.?);
-    try testing.expectEqual(@as(?i64, 60), dl.expires_in);
+    try testing.expectEqual(@as(i64, 60), dl.expires_in);
     try testing.expect(got.objects[0].action(.verify) != null);
     try testing.expect(got.objects[1].action(.download) == null);
     try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{"short line"}));

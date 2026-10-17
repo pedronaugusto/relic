@@ -153,7 +153,8 @@ pub const Scan = struct {
                     if (b.cursor >= b.buffer.len) return error.Unexpected;
                     const parsed = parseEntry(b.buffer[b.cursor..]) orelse return error.Unexpected;
                     // `parseEntry` takes no entry longer than what is left.
-                    assert(parsed.length != 0 and parsed.length <= b.buffer.len - b.cursor);
+                    assert(parsed.length != 0);
+                    assert(parsed.length <= b.buffer.len - b.cursor);
                     b.cursor += parsed.length;
                     b.count -= 1;
                     if (std.mem.eql(u8, parsed.name, ".") or std.mem.eql(u8, parsed.name, "..")) continue;

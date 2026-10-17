@@ -318,6 +318,9 @@ pub fn dev(b: *std.Build, tools: type) void {
 
     preflight.addCi(b, p, .{
         .tests = test_step,
+        // The comparisons with git run on the riscv64 machine too, with
+        // Alpine's git.
+        .vm_packages = &.{"git"},
         .bench = .{
             .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-rows", .source = "bench/rows.zig" } },
             .imports = benchImports,

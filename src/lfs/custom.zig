@@ -30,6 +30,7 @@ const config_mod = @import("../config/config.zig");
 const program = @import("../process.zig").program;
 const connection = @import("../wire.zig").connection;
 const lfsapi = @import("api.zig");
+const time_text = @import("time_text.zig");
 
 /// Errors from an adapter's process.
 pub const Error = error{
@@ -40,6 +41,9 @@ pub const Error = error{
     /// The process answered `init` with an error: git-lfs's "error
     /// initializing custom adapter". `Agent.message` holds it.
     LfsAdapterInitFailed,
+    /// An action's `expires_at` Go refuses to write, an offset of a day or
+    /// more: git-lfs cannot marshal the request, and the object fails.
+    UnwritableTime,
     /// relic was built without HTTP, and with it Git LFS: its `http` build
     /// option is off.
     HttpUnavailable,
@@ -154,8 +158,8 @@ pub const Action = struct {
     href: []const u8,
     /// Sorted by name when written, as Go writes a map.
     header: []const Header = &.{},
-    /// As the server gave it; Go writes its zero time when there was none.
-    expires_at: ?[]const u8 = null,
+    /// As the server gave it; Go's zero time when there was none.
+    expires_at: time_text.GoTime = .{},
     expires_in: i64 = 0,
 
     pub const Header = struct { name: []const u8, value: []const u8 };
@@ -241,7 +245,10 @@ pub const Agent = struct {
         if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
         var msg: Io.Writer.Allocating = .init(a.gpa);
         defer msg.deinit();
-        writeRequest(&msg.writer, request) catch return error.OutOfMemory;
+        writeRequest(&msg.writer, request) catch |err| return switch (err) {
+            error.UnwritableTime => error.UnwritableTime,
+            error.WriteFailed => error.OutOfMemory,
+        };
         try a.send(io, msg.written());
         while (true) {
             const answer = try a.receive(io);
@@ -278,20 +285,6 @@ pub const Agent = struct {
         w.flush() catch return a.conn.failure();
     }
 
-    const Answer = struct {
-        event: []const u8 = "",
-        @"error": ?struct {
-            code: i64 = 0,
-            message: []const u8 = "",
-            pub const strand = lfsapi.json_policy;
-        } = null,
-        oid: []const u8 = "",
-        path: []const u8 = "",
-        bytesSoFar: i64 = 0,
-        bytesSinceLast: i64 = 0,
-        pub const strand = lfsapi.json_policy;
-    };
-
     fn receive(a: *Agent, io: Io) ErrorNamespace.Error!Answer {
         const r = (try connection.Process.streams(a.conn, io)).reader;
         a.line.clearRetainingCapacity();
@@ -306,16 +299,34 @@ pub const Agent = struct {
             return error.LfsAdapterProtocolError;
         }
         r.toss(1);
-        return lfsapi.parseJson(Answer, a.arena_state.allocator(), a.line.written()) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.MalformedResponse => return error.LfsAdapterProtocolError,
-        };
+        return parseAnswer(a.arena_state.allocator(), a.line.written());
     }
 };
 
+/// A line an adapter answers with, as git-lfs's
+/// `customAdapterResponseMessage`.
+pub const Answer = struct {
+    event: []const u8 = "",
+    @"error": ?struct { code: i64 = 0, message: []const u8 = "" } = null,
+    oid: []const u8 = "",
+    path: []const u8 = "",
+    bytesSoFar: i64 = 0,
+    bytesSinceLast: i64 = 0,
+};
+
+/// An answer line read as git-lfs reads one, with `json.Unmarshal`; one it
+/// cannot read is `error.LfsAdapterProtocolError`. Strings point into
+/// `arena`.
+pub fn parseAnswer(arena: std.mem.Allocator, line: []const u8) error{ OutOfMemory, LfsAdapterProtocolError }!Answer {
+    return lfsapi.parseJson(Answer, arena, line, .program) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.MalformedResponse => error.LfsAdapterProtocolError,
+    };
+}
+
 /// A transfer request as git-lfs's `customAdapterTransferRequest` is
 /// marshalled: `event`, `oid`, `size`, `path` when there is one, `action`.
-pub fn writeRequest(w: *Io.Writer, request: Request) Io.Writer.Error!void {
+pub fn writeRequest(w: *Io.Writer, request: Request) (Io.Writer.Error || error{UnwritableTime})!void {
     try w.writeAll("{\"event\":");
     try writeString(w, @tagName(request.operation));
     try w.writeAll(",\"oid\":");
@@ -331,25 +342,27 @@ pub fn writeRequest(w: *Io.Writer, request: Request) Io.Writer.Error!void {
         try writeString(w, a.href);
         if (a.header.len != 0) {
             try w.writeAll(",\"header\":{");
-            // Go writes a map's keys in order.
-            var order: [64]usize = undefined;
-            const n = @min(a.header.len, order.len);
-            for (0..n) |i| order[i] = i;
-            std.mem.sort(usize, order[0..n], a.header, struct {
-                fn lessThan(headers: []const Action.Header, x: usize, y: usize) bool {
-                    return std.mem.order(u8, headers[x].name, headers[y].name) == .lt;
+            // Go writes a map's keys in order: each name after the last
+            // written, the least of them, with no storage of its own.
+            var last: ?[]const u8 = null;
+            for (0..a.header.len) |k| {
+                var next: ?usize = null;
+                for (a.header, 0..) |h, i| {
+                    if (last) |l| if (std.mem.order(u8, h.name, l) != .gt) continue;
+                    if (next == null or std.mem.order(u8, h.name, a.header[next.?].name) == .lt) next = i;
                 }
-            }.lessThan);
-            for (order[0..n], 0..) |i, k| {
+                const i = next orelse break;
                 if (k != 0) try w.writeByte(',');
                 try writeString(w, a.header[i].name);
                 try w.writeByte(':');
                 try writeString(w, a.header[i].value);
+                last = a.header[i].name;
             }
             try w.writeByte('}');
         }
-        try w.writeAll(",\"expires_at\":");
-        try writeString(w, a.expires_at orelse "0001-01-01T00:00:00Z");
+        try w.writeAll(",\"expires_at\":\"");
+        try a.expires_at.format(w);
+        try w.writeByte('"');
         if (a.expires_in != 0) try w.print(",\"expires_in\":{d}", .{a.expires_in});
         try w.writeByte('}');
     } else try w.writeAll("null");
@@ -418,6 +431,12 @@ test "messages are written as git-lfs's Go writes them" {
     out.clearRetainingCapacity();
     try writeRequest(&out.writer, .{ .operation = .download, .oid = "cd", .size = 0 });
     try std.testing.expectEqualStrings("{\"event\":\"download\",\"oid\":\"cd\",\"size\":0,\"action\":null}\n", out.written());
+    out.clearRetainingCapacity();
+    // An expiry in the offset it was given; one of a day or more Go refuses.
+    try writeRequest(&out.writer, .{ .operation = .download, .oid = "cd", .size = 0, .action = .{ .href = "h", .expires_at = time_text.GoTime.parse("2026-10-17T10:00:00.5-03:30").? } });
+    try std.testing.expectEqualStrings("{\"event\":\"download\",\"oid\":\"cd\",\"size\":0,\"action\":{\"href\":\"h\",\"expires_at\":\"2026-10-17T10:00:00.5-03:30\"}}\n", out.written());
+    out.clearRetainingCapacity();
+    try std.testing.expectError(error.UnwritableTime, writeRequest(&out.writer, .{ .operation = .download, .oid = "cd", .size = 0, .action = .{ .href = "h", .expires_at = time_text.GoTime.parse("2026-10-17T10:00:00+24:00").? } }));
     out.clearRetainingCapacity();
     try writeString(&out.writer, "a\x01\x08\xff\u{2028}é");
     try std.testing.expectEqualStrings("\"a\\u0001\\b\\ufffd\\u2028é\"", out.written());

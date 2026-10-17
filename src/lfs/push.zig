@@ -224,7 +224,7 @@ fn copyLock(a: Allocator, l: lfslocks.Lock) Allocator.Error!lfslocks.Lock {
         .id = try a.dupe(u8, l.id),
         .path = try a.dupe(u8, l.path),
         .owner = if (l.owner) |o| try a.dupe(u8, o) else null,
-        .locked_at = if (l.locked_at) |t| try a.dupe(u8, t) else null,
+        .locked_at = l.locked_at,
     };
 }
 

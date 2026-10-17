@@ -37,6 +37,7 @@ const fs = @import("../fs/fs.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfsssh = @import("ssh.zig");
+const time_text = @import("time_text.zig");
 const index_mod = @import("../index/index.zig");
 
 const Repository = repo_mod.Repository;
@@ -69,24 +70,20 @@ pub const Lock = struct {
     path: []const u8,
     /// Who holds it, as the server names them.
     owner: ?[]const u8 = null,
-    /// When it was taken, as the server wrote the time.
-    locked_at: ?[]const u8 = null,
+    /// When it was taken; Go's zero time when the server gave none.
+    locked_at: time_text.GoTime = .{},
 };
 
 //=====================================================================
 // The API's JSON
 //=====================================================================
 
+/// A lock as git-lfs's Go reads one (`locking.Lock`, its owner a `*User`).
 const LockJson = struct {
     id: []const u8 = "",
     path: []const u8 = "",
-    owner: ?struct {
-        name: []const u8 = "",
-        pub const strand = lfsapi.json_policy;
-    } = null,
-    locked_at: ?[]const u8 = null,
-
-    pub const strand = lfsapi.json_policy;
+    owner: ?struct { name: []const u8 = "" } = null,
+    locked_at: time_text.GoTime = .{},
 
     fn toLock(j: LockJson) Lock {
         return .{ .id = j.id, .path = j.path, .owner = if (j.owner) |o| o.name else null, .locked_at = j.locked_at };
@@ -97,7 +94,6 @@ const LockJson = struct {
 pub const LockAnswer = struct {
     lock: ?Lock = null,
     message: ?[]const u8 = null,
-    pub const strand = lfsapi.json_policy;
 };
 
 /// One page of a listing.
@@ -115,8 +111,10 @@ pub const VerifyPage = struct {
     message: ?[]const u8 = null,
 };
 
+/// An answer, or a cache file, read as git-lfs's `json.Decoder` reads either:
+/// the first value, what follows it left.
 fn parseJson(comptime T: type, arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!T {
-    return lfsapi.parseJson(T, arena, bytes);
+    return lfsapi.parseJson(T, arena, bytes, .http);
 }
 
 fn toLocks(arena: Allocator, raw: []const LockJson) (Allocator.Error || error{MalformedResponse})![]const Lock {
@@ -135,15 +133,19 @@ pub const ParseLockAnswerError = Allocator.Error || error{MalformedResponse};
 pub fn parseLockAnswer(arena: Allocator, bytes: []const u8) ParseLockAnswerError!LockAnswer {
     const Raw = struct {
         lock: ?LockJson = null,
-        message: ?[]const u8 = null,
-        pub const strand = lfsapi.json_policy;
+        message: []const u8 = "",
+        // Read as git-lfs reads them, though nothing uses them: a value of
+        // another kind refuses the answer, as it does git-lfs's.
+        documentation_url: []const u8 = "",
+        request_id: []const u8 = "",
     };
     const raw = try parseJson(Raw, arena, bytes);
+    const message: ?[]const u8 = if (raw.message.len != 0) raw.message else null;
     if (raw.lock) |l| {
         if (l.id.len == 0) return error.MalformedResponse;
-        return .{ .lock = l.toLock(), .message = raw.message };
+        return .{ .lock = l.toLock(), .message = message };
     }
-    return .{ .message = raw.message };
+    return .{ .message = message };
 }
 
 /// Errors from `parseListPage`.
@@ -157,13 +159,16 @@ pub fn parseListPage(arena: Allocator, bytes: []const u8) ParseListPageError!Lis
         return .{ .locks = try toLocks(arena, try parseJson([]const LockJson, arena, trimmed)) };
     }
     const Raw = struct {
-        locks: ?[]const LockJson = null,
-        next_cursor: ?[]const u8 = null,
-        message: ?[]const u8 = null,
-        pub const strand = lfsapi.json_policy;
+        locks: []const LockJson = &.{},
+        next_cursor: []const u8 = "",
+        message: []const u8 = "",
+        // Read as git-lfs reads them, though nothing uses them: a value of
+        // another kind refuses the answer, as it does git-lfs's.
+        documentation_url: []const u8 = "",
+        request_id: []const u8 = "",
     };
     const raw = try parseJson(Raw, arena, bytes);
-    return .{ .locks = try toLocks(arena, raw.locks orelse &.{}), .next_cursor = raw.next_cursor, .message = raw.message };
+    return .{ .locks = try toLocks(arena, raw.locks), .next_cursor = nonEmpty(raw.next_cursor), .message = nonEmpty(raw.message) };
 }
 
 /// Errors from `parseVerifyPage`.
@@ -172,22 +177,33 @@ pub const ParseVerifyPageError = Allocator.Error || error{MalformedResponse};
 /// Read a page of `POST /locks/verify`, or the `verifiable` cache.
 pub fn parseVerifyPage(arena: Allocator, bytes: []const u8) ParseVerifyPageError!VerifyPage {
     const Raw = struct {
-        ours: ?[]const LockJson = null,
-        theirs: ?[]const LockJson = null,
-        next_cursor: ?[]const u8 = null,
-        message: ?[]const u8 = null,
-        pub const strand = lfsapi.json_policy;
+        ours: []const LockJson = &.{},
+        theirs: []const LockJson = &.{},
+        next_cursor: []const u8 = "",
+        message: []const u8 = "",
+        // Read as git-lfs reads them, though nothing uses them: a value of
+        // another kind refuses the answer, as it does git-lfs's.
+        documentation_url: []const u8 = "",
+        request_id: []const u8 = "",
     };
     const raw = try parseJson(Raw, arena, bytes);
     return .{
-        .ours = try toLocks(arena, raw.ours orelse &.{}),
-        .theirs = try toLocks(arena, raw.theirs orelse &.{}),
-        .next_cursor = raw.next_cursor,
-        .message = raw.message,
+        .ours = try toLocks(arena, raw.ours),
+        .theirs = try toLocks(arena, raw.theirs),
+        .next_cursor = nonEmpty(raw.next_cursor),
+        .message = nonEmpty(raw.message),
     };
 }
 
-fn writeLock(s: *std.json.Stringify, l: Lock) Io.Writer.Error!void {
+/// A Go string git-lfs tests against `""`, as an optional.
+fn nonEmpty(text: []const u8) ?[]const u8 {
+    return if (text.len != 0) text else null;
+}
+
+/// Errors from writing a lock as git-lfs's `json.Encoder` writes one.
+const WriteLockError = Io.Writer.Error || error{UnwritableTime};
+
+fn writeLock(s: *std.json.Stringify, l: Lock) WriteLockError!void {
     try s.beginObject();
     try s.objectField("id");
     try s.write(l.id);
@@ -201,11 +217,40 @@ fn writeLock(s: *std.json.Stringify, l: Lock) Io.Writer.Error!void {
         try s.endObject();
     }
     try s.objectField("locked_at");
-    try s.write(l.locked_at orelse "0001-01-01T00:00:00Z");
+    var buf: [48]u8 = undefined;
+    var at: Io.Writer = .fixed(&buf);
+    l.locked_at.format(&at) catch |err| return switch (err) {
+        error.UnwritableTime => error.UnwritableTime,
+        // unreachable: the longest time Go writes is 35 bytes.
+        error.WriteFailed => unreachable,
+    };
+    try s.write(at.buffered());
     try s.endObject();
 }
 
-fn writeLockArray(s: *std.json.Stringify, locks: []const Lock) Io.Writer.Error!void {
+fn writeVerifiable(s: *std.json.Stringify, ours: []const Lock, theirs: []const Lock) WriteLockError!void {
+    try s.beginObject();
+    try s.objectField("ours");
+    try writeLockArray(s, ours);
+    try s.objectField("theirs");
+    try writeLockArray(s, theirs);
+    try s.endObject();
+}
+
+/// What a cache file holds once `wrote` has written its value: the value and
+/// a line break, as `json.Encoder.Encode` ends one; or nothing, as git-lfs's
+/// file is left when Go refuses to write a time in it, which then reads as
+/// no cache.
+fn encoded(out: *Io.Writer.Allocating, wrote: WriteLockError!void) Io.Writer.Error![]const u8 {
+    wrote catch |err| switch (err) {
+        error.UnwritableTime => return "",
+        error.WriteFailed => return error.WriteFailed,
+    };
+    try out.writer.writeByte('\n');
+    return out.written();
+}
+
+fn writeLockArray(s: *std.json.Stringify, locks: []const Lock) WriteLockError!void {
     try s.beginArray();
     for (locks) |l| try writeLock(s, l);
     try s.endArray();
@@ -315,7 +360,7 @@ pub fn lock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
         return error.LockingUnsupported;
     }
     if (status == .unauthorized or status == .forbidden) return server.client.failStatus(io, ex, "lock");
-    const answer = try parseLockAnswer(arena, try ex.readAll(io, 1 << 20));
+    const answer = try parseLockAnswer(arena, try ex.readJson(io, 1 << 20));
     if (status == .conflict) {
         if (answer.lock) |held| return .{ .held = held };
         return error.LockRefused;
@@ -387,7 +432,7 @@ fn unlockAsked(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Reposito
         .unauthorized => return server.client.failStatus(io, ex, "unlock"),
         else => {},
     }
-    const answer = try parseLockAnswer(arena, try ex.readAll(io, 1 << 20));
+    const answer = try parseLockAnswer(arena, try ex.readJson(io, 1 << 20));
     if (answer.message) |m| {
         if (answer.lock == null or status.class() != .success) {
             server.client.noteStatus(io, ex, m);
@@ -509,7 +554,7 @@ pub fn list(io: Io, server: *lfsapi.Server, repo: *Repository, filter: Filter, o
             return error.LockingUnsupported;
         }
         if (status != .ok) return server.client.failStatus(io, ex, "locks");
-        const page = try parseListPage(arena, try ex.readAll(io, 64 << 20));
+        const page = try parseListPage(arena, try ex.readJson(io, 64 << 20));
         if (page.message) |m| {
             server.client.noteStatus(io, ex, m);
             return error.LockRefused;
@@ -575,7 +620,7 @@ pub fn verify(io: Io, server: *lfsapi.Server, repo: *Repository, options: Option
             return error.LockingUnsupported;
         }
         if (status != .ok) return server.client.failStatus(io, ex, "locks/verify");
-        const page = try parseVerifyPage(arena, try ex.readAll(io, 64 << 20));
+        const page = try parseVerifyPage(arena, try ex.readJson(io, 64 << 20));
         if (page.message) |m| {
             server.client.noteStatus(io, ex, m);
             return error.LockRefused;
@@ -626,7 +671,8 @@ fn sshLockOf(arena: Allocator, status: lfsssh.Status) Error!Lock {
     const path = status.arg("path") orelse return error.MalformedResponse;
     const at = status.arg("locked-at") orelse return error.MalformedResponse;
     const owner = status.arg("ownername") orelse return error.MalformedResponse;
-    return .{ .id = try arena.dupe(u8, id), .path = try arena.dupe(u8, path), .owner = try arena.dupe(u8, owner), .locked_at = try arena.dupe(u8, at) };
+    const locked_at = time_text.GoTime.parse(at) orelse return error.MalformedResponse;
+    return .{ .id = try arena.dupe(u8, id), .path = try arena.dupe(u8, path), .owner = try arena.dupe(u8, owner), .locked_at = locked_at };
 }
 
 fn sshLock(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, path: []const u8, ref: ?[]const u8) Error!Acquired {
@@ -738,7 +784,7 @@ pub fn parseSshLocks(arena: Allocator, lines: []const []const u8) ParseSshLocksE
         } else if (std.mem.eql(u8, cmd, "ownername")) {
             last.lock.owner = value;
         } else if (std.mem.eql(u8, cmd, "locked-at")) {
-            last.lock.locked_at = value;
+            last.lock.locked_at = time_text.GoTime.parse(value) orelse return error.MalformedResponse;
         } else if (std.mem.eql(u8, cmd, "owner")) {
             last.who = if (std.mem.eql(u8, value, "ours")) .ours else if (std.mem.eql(u8, value, "theirs")) .theirs else .unknown;
         }
@@ -748,7 +794,7 @@ pub fn parseSshLocks(arena: Allocator, lines: []const []const u8) ParseSshLocksE
 }
 
 fn sshComplete(l: SshListed) error{MalformedResponse}!void {
-    if (l.lock.path.len == 0 or l.lock.owner == null or l.lock.locked_at == null) return error.MalformedResponse;
+    if (l.lock.path.len == 0 or l.lock.owner == null or l.lock.locked_at.isZero()) return error.MalformedResponse;
 }
 
 fn percentEncode(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
@@ -847,21 +893,14 @@ pub const Cache = struct {
         if (c.have_remote) {
             var out: Io.Writer.Allocating = .init(a);
             var s: std.json.Stringify = .{ .writer = &out.writer };
-            writeLockArray(&s, c.remote) catch return error.OutOfMemory;
-            out.writer.writeByte('\n') catch return error.OutOfMemory;
-            try fs.atomicWrite(io, dir, "remote", out.written(), .{ .prefix = ".relic-locks-", .sync = .none });
+            const written = encoded(&out, writeLockArray(&s, c.remote)) catch return error.OutOfMemory;
+            try fs.atomicWrite(io, dir, "remote", written, .{ .prefix = ".relic-locks-", .sync = .none });
         }
         if (c.have_verifiable) {
             var out: Io.Writer.Allocating = .init(a);
             var s: std.json.Stringify = .{ .writer = &out.writer };
-            s.beginObject() catch return error.OutOfMemory;
-            s.objectField("ours") catch return error.OutOfMemory;
-            writeLockArray(&s, c.ours) catch return error.OutOfMemory;
-            s.objectField("theirs") catch return error.OutOfMemory;
-            writeLockArray(&s, c.theirs) catch return error.OutOfMemory;
-            s.endObject() catch return error.OutOfMemory;
-            out.writer.writeByte('\n') catch return error.OutOfMemory;
-            try fs.atomicWrite(io, dir, "verifiable", out.written(), .{ .prefix = ".relic-locks-", .sync = .none });
+            const written = encoded(&out, writeVerifiable(&s, c.ours, c.theirs)) catch return error.OutOfMemory;
+            try fs.atomicWrite(io, dir, "verifiable", written, .{ .prefix = ".relic-locks-", .sync = .none });
         }
     }
 };
@@ -878,7 +917,7 @@ pub const Table = struct {
     pub const Entry = struct {
         id: []const u8,
         owner: ?[]const u8,
-        locked_at: ?[]const u8,
+        locked_at: time_text.GoTime,
         /// Whether the server said the lock is the person's; `null` when
         /// the table came from a listing that does not say.
         ours: ?bool,
@@ -916,7 +955,7 @@ pub const Table = struct {
         try t.entries.put(a, try a.dupe(u8, l.path), .{
             .id = try a.dupe(u8, l.id),
             .owner = if (l.owner) |o| try a.dupe(u8, o) else null,
-            .locked_at = if (l.locked_at) |at| try a.dupe(u8, at) else null,
+            .locked_at = l.locked_at,
             .ours = ours,
         });
     }
@@ -1044,12 +1083,19 @@ test "the locking API's answers and git-lfs's cache files are read" {
     const a = arena_state.allocator();
     const created = try parseLockAnswer(a, "{\"lock\":{\"id\":\"7\",\"path\":\"a.bin\",\"owner\":{\"name\":\"Ada\"},\"locked_at\":\"2016-05-17T15:49:06+00:00\"}}");
     try testing.expectEqualStrings("Ada", created.lock.?.owner.?);
+    try testing.expectEqual(@as(i64, 1463500146), created.lock.?.locked_at.unix);
     const refused = try parseLockAnswer(a, "{\"message\":\"no\"}");
     try testing.expect(refused.lock == null);
-    // A member given twice is its last, as git-lfs reads it.
-    const twice = try parseLockAnswer(a, "{\"message\":\"first\",\"lock\":{\"id\":\"1\",\"path\":\"x\"},\"message\":\"last\",\"lock\":{\"id\":\"2\",\"path\":\"y\"}}");
+    // A member given twice is read into what the first left, as git-lfs's
+    // Go reads it.
+    const twice = try parseLockAnswer(a, "{\"message\":\"first\",\"lock\":{\"id\":\"1\",\"path\":\"x\"},\"message\":\"last\",\"LOCK\":{\"path\":\"y\",\"locked_at\":null}}");
     try testing.expectEqualStrings("last", twice.message.?);
-    try testing.expectEqualStrings("2", twice.lock.?.id);
+    try testing.expectEqualStrings("1", twice.lock.?.id);
+    try testing.expectEqualStrings("y", twice.lock.?.path);
+    try testing.expect(twice.lock.?.locked_at.isZero());
+    // A time Go cannot read, or a value of another kind, is no answer.
+    try testing.expectError(error.MalformedResponse, parseLockAnswer(a, "{\"lock\":{\"id\":\"1\",\"locked_at\":\"yesterday\"}}"));
+    try testing.expectError(error.MalformedResponse, parseLockAnswer(a, "{\"lock\":{\"id\":\"1\",\"locked_at\":0}}"));
     const page = try parseListPage(a, "{\"locks\":[{\"id\":\"1\",\"path\":\"x\"}],\"next_cursor\":\"2\"}");
     try testing.expectEqualStrings("2", page.next_cursor.?);
     const cached = try parseListPage(a, "[{\"id\":\"1\",\"path\":\"x\",\"owner\":{\"name\":\"b\"},\"locked_at\":\"2026-09-24T10:01:00Z\"}]\n");
@@ -1064,8 +1110,14 @@ test "a lock is written to the cache as git-lfs writes it" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var s: std.json.Stringify = .{ .writer = &out.writer };
-    try writeLockArray(&s, &.{.{ .id = "1", .path = "x.bin", .owner = "ada", .locked_at = "2026-09-24T10:01:00Z" }});
+    try writeLockArray(&s, &.{.{ .id = "1", .path = "x.bin", .owner = "ada", .locked_at = time_text.GoTime.parse("2026-09-24T10:01:00Z").? }});
     try testing.expectEqualStrings("[{\"id\":\"1\",\"path\":\"x.bin\",\"owner\":{\"name\":\"ada\"},\"locked_at\":\"2026-09-24T10:01:00Z\"}]", out.written());
+    // A time Go refuses to write leaves the file empty, as git-lfs's is.
+    var refused: Io.Writer.Allocating = .init(testing.allocator);
+    defer refused.deinit();
+    var r: std.json.Stringify = .{ .writer = &refused.writer };
+    const late = time_text.GoTime.parse("2006-01-02T15:04:05+24:00").?;
+    try testing.expectEqualStrings("", try encoded(&refused, writeLockArray(&r, &.{.{ .id = "1", .path = "x", .locked_at = late }})));
 }
 
 test "a lock path is inside the tree" {

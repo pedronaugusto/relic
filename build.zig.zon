@@ -40,8 +40,8 @@
         },
 
         .strand = .{
-            .url = "git+https://github.com/pedronaugusto/strand?ref=v0.11.0#c023a903326320fad7a3f378f0a728dac92ca4fb",
-            .hash = "strand-0.11.0-8LNWVreyJQAlCOezHxNsI6U2bR6x7lv4p2PtMuLMtMOw",
+            .url = "git+https://github.com/pedronaugusto/strand?ref=v0.12.0#fb2c3344cc7b1c3a9bf9b4bd1cb2ebea242800a6",
+            .hash = "strand-0.12.0-8LNWVk0HJwB_gbCb-JFzP2A74Y3x01meSYw69w8W1Qg3",
             .lazy = true,
         },
     },
@@ -57,8 +57,8 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.6.3#1c3bddc8c1d82d2eba04a3e67af6c3af18b16344",
-            .hash = "preflight-0.6.3-LX1ZwrzeEADGGrJFgOpe3yb8nrGhhevtGTJckqGILzXn",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.8.2#f80587c0f2d1c5a730a47f27fddad460a7280f70",
+            .hash = "preflight-0.8.2-LX1Zwp1dEQDeEjQ-rCUXGbT-gHXPdSHuHPchLuXMpfij",
         },
 
         .shakedown = .{

@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Git LFS answers are read into git-lfs's own shapes, with Go's zero values for what is missing: `lfs.transfer.BatchResponse.transfer` and `hash_algo` are strings; `BatchObject.size` is an `i64`, `actions` and `_links` an `ActionSet` (an action by name, as Go's `map[string]*Action`; `Actions` is gone), and it gains `name` and `path`; an `Action`'s fields have defaults, `header` is an `lfs.api.HeaderMap`, `expires_at` a Go time and `expires_in` an `i64`. `lfs.locks.Lock.locked_at` and `Table.Entry.locked_at` are a Go time, zero for none. `lfs.api.SshAuth.expires_at` and `lfs.custom.Action.expires_at` are a Go time; `expiresWithin` takes one, and takes `in` to nanoseconds as Go multiplies. `lfs.api.json_policy` is gone; `parseJson` takes where the JSON came from (`JsonFrom`: an HTTP body, the first value read and the rest left, or a program's answer, whole), and `headersOf` a `HeaderMap`. `lfs.custom.writeRequest` and an agent's transfer fail with `UnwritableTime` for an expiry Go refuses to write, and the object fails as git-lfs's does.
+
+- `lfs.netrc.Machine.name` is a string, empty for the `default` entry (`isDefault`), as go-netrc holds it: a `machine` with no name at the end of the file is one too.
+
+### Added
+
+- `lfs.api.go_json`: the reading choices of strand 0.12.0 that read JSON as git-lfs's Go reads it, which every LFS answer is read with. A corpus of 600 random answers of each kind relic reads (batch, lock, lock list and verify list, ssh authentication, custom adapter) holds relic to Go 1.27 reading them into git-lfs 3.8.0's types.
+- `lfs.api.Exchange.readJson`: an answer's body only under git-lfs's JSON media types.
+- `lfs.custom.Answer` and `parseAnswer`: an adapter's answer line, read as git-lfs reads it.
+
+### Fixed
+
+- A batch or lock answer under a `Content-Type` other than `application/vnd.git-lfs+json` or `application/json` (parameters after `;`) is refused with git-lfs's "Expected JSON type" (relic read it); an error body is read for its message only under them.
+- A member given twice is read into what the first left, as Go reads it (relic took the last); a member's name matches its field exactly, then by case folding; `null` keeps a value and empties a list or a map; an integer is one only as written (`1.0` and `1e2` are refused, and `-0` for a size); a byte that is not UTF-8 and a lone surrogate escape read as U+FFFD; what follows an HTTP body's value is left, as Go's `json.Decoder` leaves it.
+- Times are read as Go's `time.Parse(time.RFC3339)` reads them (a one-digit hour, a `,` before the fraction, its first nine digits, offsets to 24:00 and 60 minutes) and written as Go's `MarshalJSON` writes them, in their own offset; an ssh lock's `locked-at` is read so too (relic kept the text), and a listed lock with no time is incomplete, as git-lfs's `lockDataIsIncomplete` has it. A lock cache with a time Go cannot write is left empty, as git-lfs's file is.
+- A custom adapter is sent every header of an action, sorted (relic wrote at most 64).
+- `.netrc` is read as git-lfs's go-netrc reads it, held to it over 400 random files: tokens cut at Unicode's white space by Go's `bufio.Scanner`, through its growing buffer (white space at its end a token of its own, a token past 64 KiB refusing the file); no quotes or escapes (relic read `"…"` with `\`); a keyword's value is the next token whatever it is, a comment line among them, and empty at the end; a macro's keywords read as keywords (relic passed the body over); any other word passed over (relic refused the file); a second `default`, a `machine` after it, or a field given twice refuse the file. An entry is looked up by the host git-lfs's `getNetrcHostname` takes from the URL (Go's `SplitHostPort` where there is a `:`, brackets gone, no `.netrc` where it refuses) and the URL's user decoded (relic compared `%40` as written).
+
+### Changed
+
+- Pins strand 0.12.0. For development: preflight 0.8.2, whose riscv64 machine now carries git (`vm_packages`), so the comparisons with git run there instead of skipping.
+
 ## [0.14.0] - 2026-10-17
 
 ### Breaking

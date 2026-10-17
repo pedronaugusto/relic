@@ -102,6 +102,7 @@ test {
         _ = @import("testing/lfs.zig");
         _ = @import("lfs/transfer_test.zig");
         _ = @import("lfs/locks_test.zig");
+        _ = @import("lfs/json_test.zig");
         _ = @import("lfs/push_test.zig");
         _ = @import("lfs/ssh_test.zig");
         _ = @import("wire/auth_test.zig");

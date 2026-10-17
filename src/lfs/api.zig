@@ -75,17 +75,38 @@ const decimal = @import("../text.zig").decimal;
 const gitdate = @import("../text.zig").date;
 const percent = @import("../text.zig").percent;
 const warp = @import("warp");
+test "a URL's host is looked up in .netrc as git-lfs's getNetrcHostname takes it" {
+    const cases = [_]struct { []const u8, ?[]const u8 }{
+        .{ "h", "h" },
+        .{ "h:8080", "h" },
+        .{ "h:", "h" },
+        .{ "[::1]:80", "::1" },
+        .{ "[::1]", null },
+        .{ "a:b:c", null },
+        .{ "[::1]x:80", null },
+        .{ "h]:80", null },
+        .{ "[a[b]:80", null },
+    };
+    for (cases) |case| {
+        const got = netrcHost(case[0]);
+        if (case[1]) |want| try std.testing.expectEqualStrings(want, got.?) else try std.testing.expect(got == null);
+    }
+}
+
 test "a server's JSON is read as git-lfs reads it, within limits" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // Unknown members ignored, a member given twice its last, a header name
-    // given twice its last value.
-    const auth = try parseAuthenticate(arena, "{\"href\":\"a\",\"extra\":[1,{}],\"href\":\"b\",\"header\":{\"X\":\"1\",\"Y\":\"2\",\"X\":\"3\"}}");
+    // Unknown members ignored, a member given twice read into what the
+    // first left, a header name given twice its last value, as a Go map
+    // holds it.
+    const auth = try parseAuthenticate(arena, "{\"href\":\"a\",\"extra\":[1,{}],\"href\":\"b\",\"header\":{\"X\":\"1\",\"Y\":\"2\",\"X\":\"3\"},\"HEADER\":{\"Z\":\"4\"}}");
     try std.testing.expectEqualStrings("b", auth.href.?);
-    try std.testing.expectEqual(@as(usize, 2), auth.headers.len);
-    try std.testing.expectEqualStrings("Y", auth.headers[0].name);
-    try std.testing.expectEqualStrings("3", auth.headers[1].value);
+    try std.testing.expectEqual(@as(usize, 3), auth.headers.len);
+    for (auth.headers) |h| {
+        const want: []const u8 = if (std.mem.eql(u8, h.name, "X")) "3" else if (std.mem.eql(u8, h.name, "Y")) "2" else "4";
+        try std.testing.expectEqualStrings(want, h.value);
+    }
     // A hostile nesting is refused, not followed.
     var nested: std.ArrayList(u8) = .empty;
     try nested.appendSlice(arena, "{\"extra\":");
@@ -839,6 +860,30 @@ fn localFileUrl(arena: Allocator, path: []const u8) Allocator.Error![]const u8 {
     return arena.print("file://{s}", .{slashed});
 }
 
+/// The host git-lfs looks a URL's `host[:port]` up in `.netrc` by: the
+/// whole when it has no `:`, else the host Go's `net.SplitHostPort` takes
+/// from it, brackets gone; `null` where that refuses it (`[::1]` with no
+/// port, `a:b:c`), and git-lfs then uses no `.netrc`.
+pub fn netrcHost(authority: []const u8) ?[]const u8 {
+    const colon = std.mem.findScalarLast(u8, authority, ':') orelse return authority;
+    var host: []const u8 = undefined;
+    var after_open: usize = 0;
+    var after_close: usize = 0;
+    if (authority[0] == '[') {
+        const close = std.mem.findScalar(u8, authority, ']') orelse return null;
+        if (close + 1 != colon) return null;
+        host = authority[1..close];
+        after_open = 1;
+        after_close = close + 1;
+    } else {
+        host = authority[0..colon];
+        if (std.mem.findScalar(u8, host, ':') != null) return null;
+    }
+    if (std.mem.findScalar(u8, authority[after_open..], '[') != null) return null;
+    if (std.mem.findScalar(u8, authority[after_close..], ']') != null) return null;
+    return host;
+}
+
 fn percentDecode(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     if (std.mem.findScalar(u8, text, '%') == null) return text;
     return percent.decode(a, text, .decode);
@@ -853,11 +898,12 @@ fn percentDecode(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
 pub const SshAuth = struct {
     href: ?[]const u8 = null,
     headers: []const http.Header = &.{},
-    /// `expires_in`, in seconds, when not zero; else `lfs.defaulttokenttl`
-    /// when the answer gives no expiry at all.
+    /// `expires_in` as git-lfs reads it, a `time.Duration` it then takes
+    /// as seconds; else `lfs.defaulttokenttl` when the answer gives no
+    /// expiry at all.
     expires_in: i64 = 0,
-    /// `expires_at`, in seconds since the epoch.
-    expires_at: ?i64 = null,
+    /// `expires_at`; Go's zero time for none.
+    expires_at: time_text.GoTime = .{},
 
     /// Whether the answer, given at `now`, expires within five seconds of
     /// it, as git-lfs's cache asks before it reuses one.
@@ -867,13 +913,14 @@ pub const SshAuth = struct {
 };
 
 /// git-lfs's `IsExpiredAtOrIn` with the start and the check both at `now`:
-/// an `in` that is not zero wins over `at`, and neither is no expiry. The
-/// server's `in` and `at` are in seconds, as it writes them.
-pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: ?i64, margin_s: i64) bool {
-    const now = now_at.toSeconds();
-    if (in_s != 0) return now + in_s < now + margin_s;
-    const when = at orelse return false;
-    return when < now + margin_s;
+/// `in` is seconds, taken to a `time.Duration` as Go multiplies, wrapping;
+/// one that is not zero wins over `at`, and neither (`at` Go's zero time) is
+/// no expiry.
+pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: time_text.GoTime, margin_s: i64) bool {
+    const in_ns = in_s *% std.time.ns_per_s;
+    if (in_ns != 0) return in_ns < margin_s * std.time.ns_per_s;
+    if (at.isZero()) return false;
+    return at.nanoseconds() < @as(i128, now_at.nanoseconds) + margin_s * std.time.ns_per_s;
 }
 
 /// The program git-lfs runs to reach an ssh remote and the arguments it
@@ -1026,21 +1073,49 @@ const authenticate_missing = [_][]const u8{
     "command not found: git-lfs-authenticate",
 };
 
-/// How git-lfs reads a server's JSON, for a type to declare as
-/// `pub const strand = json_policy`: a member given twice is its last.
-/// `parseJson` ignores members a type does not name for every type.
-pub const json_policy = .{ .duplicates = .last };
+/// How a JSON answer is read: as git-lfs's `lfshttp.DecodeJSON` reads an
+/// HTTP body, the first value with whatever follows it left, or as
+/// `json.Unmarshal` reads a program's answer, alone.
+pub const JsonFrom = enum { http, program };
 
-/// A server's JSON as git-lfs reads it, within strand's limits: members the
-/// type does not name are ignored, and one given twice is its last in a type
-/// that declares `json_policy`. The text is copied into `arena`, which the
-/// result's strings point into.
-pub fn parseJson(comptime T: type, arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!T {
+/// How git-lfs's Go reads JSON into a Go type (`encoding/json`): unknown
+/// members passed over, a member given again merged into what the first
+/// left, names matched exactly and then by case folding, `null` keeping a
+/// value, integers only as written, and text that is not Unicode as U+FFFD.
+pub const go_json: strand.json.ParseOptions = .{
+    .ignore_unknown_fields = true,
+    .duplicates = .merge,
+    .names = .fold_case,
+    .nulls = .keep,
+    .integers = .digits,
+    .invalid_unicode = .replace,
+};
+
+/// A JSON answer read into `T` as git-lfs's Go reads it into the matching Go
+/// type (`go_json`): an HTTP body as `lfshttp.DecodeJSON` reads it, the first
+/// value with whatever follows it left, or a program's answer as
+/// `json.Unmarshal` reads it, alone. The text is copied into `arena`, which
+/// the result's strings point into.
+pub fn parseJson(comptime T: type, arena: Allocator, bytes: []const u8, from: JsonFrom) (Allocator.Error || error{MalformedResponse})!T {
     const owned = try arena.dupe(u8, bytes);
-    return strand.json.parseLeaky(T, arena, owned, .{ .ignore_unknown_fields = true, .reject_duplicates = false }) catch |err| switch (err) {
+    const read = switch (from) {
+        .http => if (strand.json.parsePrefixLeaky(T, arena, owned, go_json)) |prefix| prefix.value else |err| err,
+        .program => strand.json.parseLeaky(T, arena, owned, go_json),
+    };
+    return read catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.MalformedResponse,
     };
+}
+
+/// Whether an HTTP answer's `Content-Type` is one git-lfs reads as JSON:
+/// `application/vnd.git-lfs+json` or `application/json`, with parameters
+/// after a `;` or none, as written (`lfshttp.DecodeJSON`).
+pub fn isJsonType(content_type: []const u8) bool {
+    inline for (.{ media_type, "application/json" }) |t| {
+        if (std.mem.startsWith(u8, content_type, t) and (content_type.len == t.len or content_type[t.len] == ';')) return true;
+    }
+    return false;
 }
 
 /// A server's `header` object: names and values, in its order.
@@ -1048,41 +1123,34 @@ pub const HeaderMap = strand.core.Pairs([]const u8, []const u8);
 
 /// The headers `map` names, checked, in `arena`. A name given twice is its
 /// last value, as git-lfs reads the object.
-pub fn headersOf(arena: Allocator, map: ?HeaderMap) (Allocator.Error || error{InvalidHttpHeader})![]const http.Header {
-    const items = (map orelse return &.{}).items;
-    var out: std.ArrayList(http.Header) = .empty;
-    for (items, 0..) |kv, i| {
-        const later = for (items[i + 1 ..]) |next| {
-            if (std.mem.eql(u8, next.key, kv.key)) break true;
-        } else false;
-        if (later) continue;
+pub fn headersOf(arena: Allocator, map: HeaderMap) (Allocator.Error || error{InvalidHttpHeader})![]const http.Header {
+    const out = try arena.alloc(http.Header, map.items.len);
+    for (map.items, out) |kv, *to| {
         try checkHeader(kv.key, kv.value);
-        try out.append(arena, .{ .name = kv.key, .value = kv.value });
+        to.* = .{ .name = kv.key, .value = kv.value };
     }
-    return out.items;
+    return out;
 }
 
 /// A server's reason for a refusal.
 const Reason = struct {
-    message: ?[]const u8 = null,
-    pub const strand = json_policy;
+    message: []const u8 = "",
 };
 
 /// `git-lfs-authenticate`'s answer, read.
 pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Self.Error!SshAuth {
     const Answer = struct {
-        href: ?[]const u8 = null,
-        header: ?HeaderMap = null,
-        expires_in: ?i64 = null,
-        expires_at: ?[]const u8 = null,
-        pub const strand = json_policy;
+        href: []const u8 = "",
+        header: HeaderMap = .{ .items = &.{} },
+        expires_in: i64 = 0,
+        expires_at: time_text.GoTime = .{},
     };
-    const parsed = try parseJson(Answer, arena, bytes);
+    const parsed = try parseJson(Answer, arena, bytes, .program);
     return .{
-        .href = parsed.href,
+        .href = if (parsed.href.len != 0) parsed.href else null,
         .headers = try headersOf(arena, parsed.header),
-        .expires_in = parsed.expires_in orelse 0,
-        .expires_at = if (parsed.expires_at) |t| time_text.parseRfc3339(t) else null,
+        .expires_in = parsed.expires_in,
+        .expires_at = parsed.expires_at,
     };
 }
 
@@ -1229,15 +1297,19 @@ pub const Client = struct {
     }
 
     /// The `Authorization` a netrc entry gives for `url`'s host, unless the
-    /// server refused it already.
+    /// server refused it already: git-lfs's netrc helper, which asks for the
+    /// host as its `getNetrcHostname` reads the URL's (`netrcHost`) and the
+    /// URL's user, decoded.
     fn netrcAuth(c: *Client, a: Allocator, url: []const u8) Allocator.Error!?struct { header: []const u8, host: []const u8 } {
         const n = &(c.netrc orelse return null);
         const parts = UrlParts.parse(url) orelse return null;
+        const host = netrcHost(parts.authority) orelse return null;
         for (c.netrc_refused.items) |h| {
-            if (std.mem.eql(u8, h, parts.host)) return null;
+            if (std.mem.eql(u8, h, host)) return null;
         }
-        const m = n.find(parts.host, parts.user) orelse return null;
-        return .{ .header = try basicHeader(a, m.login, m.password), .host = parts.host };
+        const user = if (parts.user) |u| try percentDecode(a, u) else null;
+        const m = n.find(host, user) orelse return null;
+        return .{ .header = try basicHeader(a, m.login, m.password), .host = host };
     }
 
     /// Release everything, forgetting every credential.
@@ -1386,7 +1458,7 @@ pub const Client = struct {
             defer outcome.deinit(c.gpa);
             if (outcome.succeeded()) {
                 var auth = try parseAuthenticate(arena, try arena.dupe(u8, outcome.stdout));
-                if (auth.expires_in == 0 and auth.expires_at == null) {
+                if (auth.expires_in == 0 and auth.expires_at.isZero()) {
                     auth.expires_in = @max(0, c.settings.getInt("lfs.defaulttokenttl", 0));
                 }
                 c.ssh_auth[i] = auth;
@@ -2314,15 +2386,15 @@ pub const Client = struct {
     fn noteStatusText(c: *Client, io: Io, ex: *Exchange, what: []const u8) []const u8 {
         const status = ex.status();
         const body = ex.readAll(io, 64 * 1024) catch "";
-        const reason = parseJson(Reason, ex.arena.allocator(), body) catch Reason{};
+        const reason = if (isJsonType(ex.header("content-type") orelse "")) parseJson(Reason, ex.arena.allocator(), body, .http) catch Reason{} else Reason{};
         var buf: [512]u8 = undefined;
         c.setMessage(io, std.mem.print(&buf, "{s}: HTTP {d}{s}{s}", .{
             what,
             @backingInt(status),
-            if (reason.message != null) ": " else "",
-            reason.message orelse "",
+            if (reason.message.len != 0) ": " else "",
+            reason.message,
         }) catch what);
-        return reason.message orelse "";
+        return reason.message;
     }
 };
 
@@ -2416,9 +2488,9 @@ pub const Exchange = struct {
         const content_type = ex.header("content-type") orelse return "";
         const body = ex.readAll(io, 4096) catch return "";
         if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body) catch "";
-        if (std.ascii.findIgnoreCase(content_type, "json") == null) return "";
-        const reason = parseJson(Reason, a, body) catch return "";
-        return reason.message orelse "";
+        if (!isJsonType(content_type)) return "";
+        const reason = parseJson(Reason, a, body, .http) catch return "";
+        return reason.message;
     }
 
     fn authenticateOffers(ex: *const Exchange) Offers {
@@ -2481,6 +2553,21 @@ pub const Exchange = struct {
     }
 
     /// The whole body, up to `limit` bytes, owned by the exchange.
+    /// The body, as JSON, as git-lfs's `lfshttp.DecodeJSON` takes an
+    /// answer: only under a `Content-Type` of `application/vnd.git-lfs+json`
+    /// or `application/json` (`isJsonType`). Any other is
+    /// `error.MalformedResponse`, with git-lfs's "Expected JSON type" as the
+    /// client's message.
+    pub fn readJson(ex: *Exchange, io: Io, limit: usize) Self.Error![]const u8 {
+        const content_type = ex.header("content-type") orelse "";
+        if (!isJsonType(content_type)) {
+            var buf: [512]u8 = undefined;
+            ex.client.setMessage(io, std.mem.print(&buf, "Expected JSON type, got: \"{f}\"", .{std.zig.fmtString(content_type)}) catch "Expected JSON type");
+            return error.MalformedResponse;
+        }
+        return ex.readAll(io, limit);
+    }
+
     pub fn readAll(ex: *Exchange, io: Io, limit: usize) Self.Error![]const u8 {
         const r = try ex.reader(io);
         return r.allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
@@ -2999,11 +3086,17 @@ test "Retry-After is a number of seconds, or a date counted from the time the ca
     try testing.expectEqual(@as(i64, 0), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", at(784111777 + 60)).?.toSeconds());
     try testing.expectEqual(@as(?Io.Duration, null), parseRetryAfter("soon", .zero));
     // An expiry wins by `in` over `at`, and five seconds' margin is kept.
-    try testing.expect(expiresWithin(at(1000), 4, null, 5));
-    try testing.expect(!expiresWithin(at(1000), 5, 0, 5));
-    try testing.expect(expiresWithin(at(1000), 0, 1004, 5));
-    try testing.expect(!expiresWithin(at(1000), 0, 1005, 5));
-    try testing.expect(!expiresWithin(at(1000), 0, null, 5));
+    try testing.expect(expiresWithin(at(1000), 4, .{}, 5));
+    try testing.expect(!expiresWithin(at(1000), 5, .{ .unix = 0 }, 5));
+    try testing.expect(expiresWithin(at(1000), 0, .{ .unix = 1004 }, 5));
+    try testing.expect(!expiresWithin(at(1000), 0, .{ .unix = 1005 }, 5));
+    try testing.expect(expiresWithin(at(1000), 0, .{ .unix = 1004, .nanos = 999_999_999 }, 5));
+    try testing.expect(!expiresWithin(at(1000), 0, .{}, 5));
+    // Seconds taken to nanoseconds wrap as Go's multiplication does:
+    // 2^55 seconds is no time at all, so `at` decides; 2^63 / 10^9 + 1
+    // seconds wraps negative, which has expired.
+    try testing.expect(!expiresWithin(at(1000), 1 << 55, .{}, 5));
+    try testing.expect(expiresWithin(at(1000), 9_223_372_037, .{}, 5));
 }
 
 test "LFS proxy parsing preserves allocation resource failures" {
