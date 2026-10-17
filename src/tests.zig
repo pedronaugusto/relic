@@ -191,6 +191,7 @@ test {
     _ = @import("refs/reftable/stack/transaction.zig");
     _ = @import("refs/reftable/stack/cache.zig");
     _ = @import("repo/safe.zig");
+    _ = @import("repo/state.zig");
     _ = @import("report/progress.zig");
     _ = @import("report/warning.zig");
     _ = @import("transport/clone.zig");

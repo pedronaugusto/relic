@@ -475,10 +475,10 @@ fn reload(s: *Session) Error!void {
     s.author_email = null;
     s.author_date = null;
     if (try s.read("author-script")) |script| {
-        const parsed = try parseAuthorScript(s.a, script);
-        s.author_name = parsed[0];
-        s.author_email = parsed[1];
-        s.author_date = parsed[2];
+        const parsed = try state_file.AuthorScript.parse(s.a, script);
+        s.author_name = parsed.name;
+        s.author_email = parsed.email;
+        s.author_date = parsed.date;
     }
     s.msg = try s.read("final-commit");
     s.three_way = std.mem.eql(u8, try s.readTrim("threeway"), "t");
@@ -493,23 +493,6 @@ fn reload(s: *Session) Error!void {
     const qcr = try s.readTrim("quoted-cr");
     s.quoted_cr = if (qcr.len == 0) null else std.meta.stringToEnum(mailinfo.QuotedCr, qcr) orelse return error.MalformedState;
     s.apply_opt = (try quote.sqDequoteWords(s.a, try s.readTrim("apply-opt"))) orelse return error.MalformedState;
-}
-
-/// `parse_key_value_squoted` over `author-script`.
-fn parseAuthorScript(a: Allocator, text: []const u8) Error![3][]const u8 {
-    var out: [3]?[]const u8 = .{ null, null, null };
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        const eq = std.mem.findScalar(u8, line, '=') orelse return error.MalformedState;
-        const key = line[0..eq];
-        const words = (try quote.sqDequoteWords(a, line[eq + 1 ..])) orelse return error.MalformedState;
-        if (words.len != 1) return error.MalformedState;
-        const slot: usize = if (std.mem.eql(u8, key, "GIT_AUTHOR_NAME")) 0 else if (std.mem.eql(u8, key, "GIT_AUTHOR_EMAIL")) 1 else if (std.mem.eql(u8, key, "GIT_AUTHOR_DATE")) 2 else return error.MalformedState;
-        if (out[slot] != null) return error.MalformedState;
-        out[slot] = words[0];
-    }
-    return .{ out[0] orelse return error.MalformedState, out[1] orelse return error.MalformedState, out[2] orelse return error.MalformedState };
 }
 
 //=========================================================================

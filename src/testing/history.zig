@@ -1216,6 +1216,49 @@ test "a rebase that stops on a conflict leaves git's state, and either side fini
     }.inFormat);
 }
 
+test "a stopped rebase's author-script is read as git reads it: its date in any form parse_date takes, and a malformed one refused" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireRebase250(io);
+    const Case = struct { script: []const u8, ok: bool };
+    const cases = [_]Case{
+        .{ .script = "GIT_AUTHOR_NAME='Some O'\\''Ne'\nGIT_AUTHOR_EMAIL='some@example.com'\nGIT_AUTHOR_DATE='Tue, 14 Nov 2023 22:13:20 +0100'\n", .ok = true },
+        .{ .script = "GIT_AUTHOR_DATE='@1600000000 -0230'\nGIT_AUTHOR_EMAIL='e@example.com'\nGIT_AUTHOR_NAME='E'", .ok = true },
+        .{ .script = "GIT_AUTHOR_NAME='A'\n\nGIT_AUTHOR_EMAIL='a@example.com'\nGIT_AUTHOR_DATE='@1 +0000'\n", .ok = false },
+        .{ .script = "GIT_AUTHOR_NAME='A'\nGIT_AUTHOR_NAME='B'\nGIT_AUTHOR_EMAIL='a@example.com'\nGIT_AUTHOR_DATE='@1 +0000'\n", .ok = false },
+    };
+    for (cases) |case| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, divergedScript);
+        defer pair.deinit();
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "checkout", "-q", "topic" });
+            try gitMayFail(io, r, &.{ "rebase", "main" });
+            try r.writeFile(io, ".git/rebase-merge/author-script", case.script);
+            try r.writeFile(io, "f", "a\nresolved\nc\n");
+            try r.exec(io, &.{ "add", "f" });
+        }
+        errdefer std.debug.print("{s}\n", .{case.script});
+        if (case.ok) {
+            try pair.git.exec(io, &.{ "rebase", "--continue" });
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+        } else {
+            pair.git.report_failures = false;
+            var theirs = try pair.git.capture(io, &.{ "rebase", "--continue" });
+            defer theirs.deinit(gpa);
+            try std.testing.expect(theirs.code != 0);
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            try std.testing.expectError(error.MalformedState, rebase.proceed(gpa, io, &repo, .{ .who = who }));
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+    }
+}
+
 test "a clean rebase, an up-to-date one, and one onto another base land where git's do" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {

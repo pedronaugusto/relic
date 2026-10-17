@@ -32,6 +32,7 @@ const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
+const gitdate = @import("../text.zig").date;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -69,6 +70,9 @@ const Repository = repo_mod.Repository;
 
 /// Errors from a rebase.
 pub const Error = error{
+    /// `author-script` holds a date git's `parse_date` does not read,
+    /// which `git commit` dies on.
+    InvalidDate,
     /// `merge.conflictStyle` is bare or names a style git does not know,
     /// which git dies on.
     InvalidConflictStyle,
@@ -1213,45 +1217,6 @@ fn appendQuoted(arena: Allocator, out: *std.ArrayList(u8), text: []const u8) All
     for (text) |c| {
         if (c == '\'') try out.appendSlice(arena, "'\\''") else try out.append(arena, c);
     }
-}
-
-/// Errors from `parseAuthorScript`.
-pub const ParseAuthorScriptError = error{MalformedState};
-
-/// Read `author-script` back: the three variables, single-quoted, as git
-/// and this write them. `null` when the file is not there.
-pub fn parseAuthorScript(text: []const u8, buf: []u8) ParseAuthorScriptError!object.Signature {
-    var name: ?[]const u8 = null;
-    var email: ?[]const u8 = null;
-    var date: ?[]const u8 = null;
-    var used: usize = 0;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        const eq = std.mem.findScalar(u8, line, '=') orelse return error.MalformedState;
-        const key = line[0..eq];
-        // In the caller's buffer: `sq_dequote` keeps the word where it was.
-        var fixed: std.heap.FixedBufferAllocator = .init(buf[used..]);
-        const value = (quote.sqDequote(fixed.allocator(), line[eq + 1 ..]) catch return error.MalformedState) orelse return error.MalformedState;
-        used += fixed.end_index;
-        if (std.mem.eql(u8, key, "GIT_AUTHOR_NAME")) {
-            name = value;
-        } else if (std.mem.eql(u8, key, "GIT_AUTHOR_EMAIL")) {
-            email = value;
-        } else if (std.mem.eql(u8, key, "GIT_AUTHOR_DATE")) {
-            date = value;
-        } else return error.MalformedState;
-    }
-    const d = date orelse return error.MalformedState;
-    if (d.len < 2 or d[0] != '@') return error.MalformedState;
-    const space = std.mem.findScalar(u8, d, ' ') orelse return error.MalformedState;
-    const secs = decimal.digits(i64, d[1..space]) orelse return error.MalformedState;
-    const zone = d[space + 1 ..];
-    if (zone.len != 5 or (zone[0] != '+' and zone[0] != '-')) return error.MalformedState;
-    const hours = decimal.digits(i16, zone[1..3]) orelse return error.MalformedState;
-    const minutes = decimal.digits(i16, zone[3..5]) orelse return error.MalformedState;
-    const offset = (hours * 60 + minutes) * @as(i16, if (zone[0] == '-') -1 else 1);
-    return .{ .name = name orelse return error.MalformedState, .email = email orelse return error.MalformedState, .when_secs = secs, .offset_minutes = offset };
 }
 
 //=========================================================================
@@ -2551,11 +2516,14 @@ fn commitStagedChanges(r: *Run) Error!void {
     }
     // The author the stop recorded; an amend keeps the one it amends.
     var author = r.options.who;
-    var name_buf: [4096]u8 = undefined;
     if (amend) {
         author = (try readSource(r, head_oid)).commit.author;
     } else if (try r.readState("author-script")) |script| {
-        author = parseAuthorScript(script, &name_buf) catch return error.MalformedState;
+        // `git commit` with the script's variables in its environment:
+        // the date as `parse_date` reads it, whatever git wrote there.
+        const recorded = try state_file.AuthorScript.parse(r.arena, script);
+        const when = gitdate.parse(recorded.date, .{ .now = gitdate.timestamp(r.options.who.when_secs), .local_offset_minutes = r.options.who.offset_minutes }) orelse return error.InvalidDate;
+        author = .{ .name = recorded.name, .email = recorded.email, .when_secs = when.secs, .offset_minutes = @intCast(when.offset_minutes) };
     } else return error.StagedWithoutMessage;
     const proposed = (try r.readState("message")).?;
     // `git commit -n -e -F message`: only the message hooks around it, an
@@ -2653,33 +2621,6 @@ pub fn quit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
 //=========================================================================
 // Tests
 //=========================================================================
-
-test "an author script reads back what git writes, quotes and all" {
-    var buf: [256]u8 = undefined;
-    const sig = try parseAuthorScript(
-        "GIT_AUTHOR_NAME='O'\\''Brien'\nGIT_AUTHOR_EMAIL='o@example.com'\nGIT_AUTHOR_DATE='@1700000000 -0130'\n",
-        &buf,
-    );
-    try std.testing.expectEqualStrings("O'Brien", sig.name);
-    try std.testing.expectEqualStrings("o@example.com", sig.email);
-    try std.testing.expectEqual(@as(i64, 1700000000), sig.when_secs);
-    try std.testing.expectEqual(@as(i16, -90), sig.offset_minutes);
-    try std.testing.expectError(error.MalformedState, parseAuthorScript("GIT_AUTHOR_NAME=unquoted\n", &buf));
-}
-
-test "fuzz: any bytes are an author script or a named error" {
-    try shakedown.check(std.testing.allocator, {}, fuzzAuthorScript, .{});
-}
-
-fn fuzzAuthorScript(_: void, case: *shakedown.Case) anyerror!void {
-    var input: [256]u8 = undefined;
-    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
-    case.source.bytes(text);
-    var buf: [512]u8 = undefined;
-    _ = parseAuthorScript(text, &buf) catch |err| switch (err) {
-        error.MalformedState => return,
-    };
-}
 
 test "fuzz: any bytes are an update-refs file or a named error" {
     try shakedown.check(std.testing.allocator, {}, fuzzUpdateRefs, .{});
