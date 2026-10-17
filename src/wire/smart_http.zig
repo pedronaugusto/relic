@@ -515,6 +515,8 @@ const Http = struct {
             error.CredentialHelperQuit => error.CredentialHelperQuit,
             error.CredentialsUnavailable => error.CredentialsUnavailable,
             error.CredentialValueUnsafe => error.CredentialValueUnsafe,
+            error.InvalidCredentialSetting => error.InvalidCredentialSetting,
+            error.InvalidCredentialAnswer => error.InvalidCredentialAnswer,
             else => h.fail(error.ProxyAuthenticationFailed, @errorName(err)),
         };
     }
@@ -648,6 +650,7 @@ const Http = struct {
     fn get(h: *Http, suffix: []const u8) Error!*uplink.Response {
         var path = try h.pathFor(suffix);
         var redirects: u8 = 0;
+        var reauths: u8 = 0;
         while (true) {
             h.endRequest();
             const authorization = h.credentials.authorization();
@@ -674,9 +677,17 @@ const Http = struct {
                 try h.keepChallenges(&res.headers);
                 const said = try h.serverText(res);
                 if (authorization != null) {
-                    h.credentials.reject(h.io, h.credentialOptions()) catch |err| return h.authFailed(err, .refused, 401, said);
-                    return h.authFailed(error.AuthenticationFailed, .refused, 401, said);
+                    // A conversation a helper said goes on (`continue=1`)
+                    // asks it again; any other credential is refused.
+                    if (!h.credentials.multistage) {
+                        h.credentials.reject(h.io, h.credentialOptions()) catch |err| return h.authFailed(err, .refused, 401, said);
+                        return h.authFailed(error.AuthenticationFailed, .refused, 401, said);
+                    }
+                    h.credentials.nextRound();
                 }
+                // git's `http_request_recoverable`: three requests at most.
+                reauths += 1;
+                if (reauths > 2) return h.authFailed(error.AuthenticationFailed, .refused, 401, said);
                 const filled = h.credentials.fill(h.io, h.credentialOptions()) catch |err| {
                     return h.authFailed(err, switch (err) {
                         error.CredentialHelperQuit => .helper_quit,
@@ -783,8 +794,9 @@ const Http = struct {
             error.Canceled => error.Canceled,
             error.CredentialHelperQuit => error.CredentialHelperQuit,
             error.CredentialsUnavailable => error.CredentialsUnavailable,
-            error.CredentialMultistageUnsupported => error.CredentialMultistageUnsupported,
             error.CredentialValueUnsafe => error.CredentialValueUnsafe,
+            error.InvalidCredentialSetting => error.InvalidCredentialSetting,
+            error.InvalidCredentialAnswer => error.InvalidCredentialAnswer,
             error.ProgramsNotGranted => error.ProgramsNotGranted,
             error.AuthenticationFailed => error.AuthenticationFailed,
             else => error.AuthenticationFailed,

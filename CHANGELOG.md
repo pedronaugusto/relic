@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `wire.credential.Session` is git's `struct credential`, held to `git credential fill` over a listed and a random corpus of URLs, `credential.*` settings and helper answers (what each helper and the person are asked, what fill prints, where git dies): its parts are read from the URL as `credential_from_url` reads them (the host with its port and brackets, the user, password, host and path decoded, a `%00` kept as written, the path without the slashes at either end, an empty user not the URL's); the `credential.*` settings are read once for a credential, every matching `credential.<url>.*` in order by git's urlmatch against the percent-encoded credential, and a pattern git cannot normalize compared part by part (`match_partial_url`); the path is dropped after them unless `useHttpPath`. `credential.urlMatches` is gone; `cert_path` is `Session.origin`, and `Session.forParts` names the parts as git-lfs hands them to `git credential fill`. New errors `InvalidCredentialSetting` (a bare `credential.*`, or a `useHttpPath`, `sanitizePrompt` or `protectProtocol` that is not a boolean) and `InvalidCredentialAnswer` (`quit`, `continue` or `ephemeral` not a boolean, a `url` git cannot read); `CredentialMultistageUnsupported` is gone.
+
+### Added
+
+- A helper's `continue=1` is a conversation of more than one round, as git and git-lfs hold one: a 401 to its credential asks the helper again, with the server's challenges and the state it answered with, where any other credential is erased; over smart HTTP three requests at most, as git's `http_request_recoverable`.
+
+### Fixed
+
+- A helper's answer is read as `credential_read` reads it: a line with no `=` ends it, keeping what came before; a line ends at a newline with one carriage return before it, and a key or value at a NUL; `protocol`, `host`, `path`, `wwwauth[]` and `url` are taken (`url` starts the credential over with no helper left to ask); `password_expiry_utc` as `strtoumax` reads it, a negative number wrapping; what a helper that fails wrote is still taken.
+- A helper is handed what `credential_write` writes: the password with `get` too, the capabilities with `store` and `erase` only when a helper announced them, `continue=1` with the state capability, and the state answered at the last question rather than the one before; an expired credential loses its token as well as its password.
+- A refused credential keeps its authtype and state, and loses its username, refresh token and expiry, as `credential_reject` leaves them; a credential is stored once.
+- `credential.interactive` is read as `credential_getpass` reads it, only the plain key: false as a boolean, or `never`. A prompt names the path when it is kept.
+- An LFS credential is asked for with git-lfs's parts: the scheme in lower case, the host as written, a username only when there is one, and the path only under `credential.<url>.useHttpPath`.
+
 ## [0.13.0] - 2026-10-17
 
 ### Breaking

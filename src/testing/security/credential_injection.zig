@@ -80,14 +80,12 @@ test "CVE-2020-5260, t0300-credentials 'url parser rejects embedded newlines': n
         try std.testing.expectError(error.CredentialValueUnsafe, asked.result);
         try std.testing.expectEqual(null, asked.sent);
     }
-    // git's own vector puts the line break after a `?` in the host part,
-    // which relic keeps encoded: the helper is asked for that one host, on
-    // one line, and for no other.
+    // git's own vector puts the line break after a `?`, which ends the
+    // host and begins the path; the path is decoded too, and refused.
     var asked = try fill(gpa, io, "https://one.example.com?%0ahost=two.example.com/", "");
     defer asked.deinit();
-    try std.testing.expect(asked.sent != null);
-    try std.testing.expectEqual(@as(usize, 1), asked.lines("host="));
-    try std.testing.expectEqual(@as(usize, 0), asked.lines("host=two.example.com"));
+    try std.testing.expectError(error.CredentialValueUnsafe, asked.result);
+    try std.testing.expectEqual(null, asked.sent);
 }
 
 test "CVE-2020-11008, t0300-credentials 'credential system refuses to work with missing host': a URL with no host or no scheme describes no credential" {
@@ -121,10 +119,13 @@ test "CVE-2024-52006, t0300-credentials 'url parser rejects embedded carriage re
     try std.testing.expect(allowed.sent != null);
     try std.testing.expect(std.mem.find(u8, allowed.sent.?, "username=u\r\n") != null);
 
-    // A host is never decoded into a request, so git's vector there
-    // reaches a helper with no carriage return in it at all.
-    var host = try fill(gpa, io, "https://example%0d.com/r.git", "");
+    // The host is decoded as git decodes it: its carriage return is
+    // refused the same way, and handed over under the same setting.
+    var host = try fill(gpa, io, "https://example.com%0d/", "");
     defer host.deinit();
-    try std.testing.expect(host.sent != null);
-    try std.testing.expect(std.mem.findScalar(u8, host.sent.?, '\r') == null);
+    try std.testing.expectError(error.CredentialValueUnsafe, host.result);
+    try std.testing.expectEqual(null, host.sent);
+    var host_allowed = try fill(gpa, io, "https://example.com%0d/", "\tprotectProtocol = false\n");
+    defer host_allowed.deinit();
+    try std.testing.expect(std.mem.find(u8, host_allowed.sent.?, "host=example.com\r\n") != null);
 }

@@ -1538,13 +1538,34 @@ pub const Client = struct {
         for (c.credentials.items) |cred| {
             if (std.mem.eql(u8, credentialKey(cred.url), key)) return cred;
         }
-        const owned_url = try c.arena.allocator().dupe(u8, url);
+        const arena = c.arena.allocator();
+        const owned_url = try arena.dupe(u8, url);
         const parsed = url_mod.Url.parse(owned_url) catch return error.MalformedUrl;
+        const parts = try c.credentialParts(arena, owned_url);
         const cred = try c.gpa.create(Cred);
         errdefer c.gpa.destroy(cred);
-        cred.* = .{ .url = owned_url, .session = .{ .gpa = c.gpa, .url = parsed } };
+        cred.* = .{ .url = owned_url, .session = .forParts(c.gpa, parsed, parts) };
         try c.credentials.append(c.gpa, cred);
         return cred;
+    }
+
+    /// What git-lfs hands `git credential fill` for `url`, as its
+    /// `GetCredentialHelper` builds it from Go's `net/url`: the scheme in
+    /// lower case, the host with its port as written, the username when
+    /// there is one, and the path without its first slash only when
+    /// `credential.<url>.useHttpPath` says so.
+    fn credentialParts(c: *const Client, arena: Allocator, url: []const u8) ErrorNamespace.Error!credential.Parts {
+        const split = UrlParts.parse(url) orelse return error.MalformedUrl;
+        const path = try percentDecode(arena, split.path);
+        const raw_url = try arena.print("{s}://{s}{s}", .{ split.scheme, split.authority, split.path });
+        const use_path = gitLfsBool(try c.settings.urlGet(arena, "credential", raw_url, "usehttppath"), false);
+        const user: ?[]const u8 = if (split.user) |u| try percentDecode(arena, u) else null;
+        return .{
+            .protocol = try std.ascii.allocLowerString(arena, split.scheme),
+            .host = try percentDecode(arena, split.authority),
+            .path = if (use_path) (if (std.mem.startsWith(u8, path, "/")) path[1..] else path) else null,
+            .username = if (user != null and user.?.len != 0) user else null,
+        };
     }
 
     fn credentialOptions(c: *const Client) credential.Options {
@@ -1814,7 +1835,9 @@ pub const Client = struct {
         defer c.mutex.unlock(io);
         if (attempt.cred) |cr| {
             cr.approved = false;
-            try cr.session.reject(io, c.credentialOptions());
+            // git-lfs asks a helper that said `continue=1` again, and
+            // rejects any other credential.
+            if (cr.session.multistage) cr.session.nextRound() else try cr.session.reject(io, c.credentialOptions());
         }
         if (attempt.netrc_host) |h| {
             try c.netrc_refused.append(c.gpa, try c.arena.allocator().dupe(u8, h));

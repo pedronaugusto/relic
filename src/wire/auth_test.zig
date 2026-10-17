@@ -597,6 +597,65 @@ test "a helper's bearer token is sent as git sends it, and handed back with its 
     try testing.expect(std.mem.find(u8, ours, "state[]=helper:one") != null);
 }
 
+test "a helper that says continue=1 is asked again with its state and the server's challenge, as git asks it, three requests at most" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 46);
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, &root, "repo.git");
+    // The server takes only a token the helper never reaches.
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{
+        .basic_auth = .{ .user = "nobody", .password = "unused" },
+        .bearer = "FINAL",
+    });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    const helper = try person.standIn(io, "helper",
+        \\capability[]=authtype
+        \\capability[]=state
+        \\authtype=Bearer
+        \\credential=ROUND
+        \\state[]=helper:round
+        \\continue=1
+        \\
+    );
+    defer gpa.free(helper);
+    const global = try gpa.print("[credential]\n\thelper = {s}\n", .{helper});
+    defer gpa.free(global);
+    try person.writeGlobal(io, global);
+
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    try person.clearLogs(io, &.{"helper"});
+    var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+    defer theirs_outcome.deinit(gpa);
+    try testing.expect(!theirs_outcome.succeeded());
+    const theirs = try person.log(io, "helper");
+    defer gpa.free(theirs);
+    try person.clearLogs(io, &.{"helper"});
+    var locations: user_config.Locations = undefined;
+    var repo = try person.open(io, by_relic.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+    try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } }));
+    const ours = try person.log(io, "helper");
+    defer gpa.free(ours);
+    try testing.expectEqualStrings(theirs, ours);
+    // Asked twice, the second time with the round's authtype and state;
+    // nothing was erased.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, ours, "== get"));
+    try testing.expect(std.mem.find(u8, ours, "authtype=Bearer\n") != null);
+    try testing.expect(std.mem.find(u8, ours, "state[]=helper:round\n") != null);
+    try testing.expect(std.mem.find(u8, ours, "== erase") == null);
+}
+
 test "a helper's password past its password_expiry_utc is passed over for the next helper's, and not stored, as git passes it over" {
     const gpa = testing.allocator;
     const io = testing.io;
