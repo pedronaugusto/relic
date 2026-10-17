@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-17
+
 ### Breaking
 
 - `wire.url.Url.parse` reads an address as git's `transport_get`, `parse_connect_url` and `get_host_and_port` do, held to `git ls-remote` and `git fetch-pack --diag-url` over a listed and a random corpus: a scheme is matched exactly (`SSH://` and `HTTPS://` name the helpers `git-remote-SSH` and `git-remote-HTTPS`); a helper's name or a URL's scheme may begin with a digit (`1foo://`, `2x::`), and `::addr` names the helper `git-remote-`; `rsync:` is refused rather than handed to a helper; a `://` after anything that is no scheme git connects to is refused (`./dir/ssh://host/repo`); an ssh port is what `strtol` reads (`+22`, ` 22`, `-0`), and anything else after the colon stays in the host as ssh is given it (`host:abc`, `host:65536`); an ssh user is split from the host at its last `@` only, with no password; the scp-like form takes an empty path (`host:`) and git's `~` rule (`host:a~b` reaches `~b`); an http URL's authority ends at the first `/`, `?` or `#` and its user at the first `@`, as curl and `credential_from_url` read it. relic still reaches a local directory whose name begins `[...]` as named, where `git fetch` drops that part (`git clone` does not).
