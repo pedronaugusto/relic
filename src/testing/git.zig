@@ -324,11 +324,12 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
 }
 
 /// A home for gpg of a test's own, under the build's `gnupg-fixture-root`.
-/// The default is `.zig-cache/gpg`; a long checkout selects a short root
-/// with `zig build test -Dgnupg-fixture-root=/short/path`. Each home has a
-/// random name and private permissions where available, and `deinit`
-/// removes it after its daemons have stopped. The environment `isolate`
-/// supplies carries nothing of the person's.
+/// The default is `/tmp` (`.zig-cache/gpg` on Windows), short from any
+/// checkout: gpg-agent's sockets are made in the home, and a socket path
+/// past 104 bytes (macOS) or 108 (Linux) cannot be bound. Each home is
+/// named `relic-gpg-` and a random suffix, with private permissions where
+/// available, and `deinit` removes it after its daemons have stopped. The
+/// environment `isolate` supplies carries nothing of the person's.
 pub const GnupgHome = struct {
     gpa: Allocator,
     name: []u8,
@@ -337,13 +338,22 @@ pub const GnupgHome = struct {
     pub fn init(gpa: Allocator, io: Io) !GnupgHome {
         var random_bytes: [12]u8 = undefined;
         io.random(&random_bytes);
-        var suffix: [16]u8 = undefined;
-        _ = std.base64.url_safe_no_pad.Encoder.encode(&suffix, &random_bytes);
+        const prefix = "relic-gpg-";
+        var name: [prefix.len + 16]u8 = undefined;
+        @memcpy(name[0..prefix.len], prefix);
+        _ = std.base64.url_safe_no_pad.Encoder.encode(name[prefix.len..], &random_bytes);
         const fixture_root = build_options.gnupg_fixture_root;
-        try Io.Dir.cwd().createDirPath(io, fixture_root);
-        const root = try Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa);
+        // The root is made when missing; one that is there may be a link
+        // (macOS's `/tmp`), which making a path through would refuse.
+        const root = Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa) catch |err| switch (err) {
+            error.FileNotFound => made: {
+                try Io.Dir.cwd().createDirPath(io, fixture_root);
+                break :made try Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa);
+            },
+            else => |e| return e,
+        };
         defer gpa.free(root);
-        const home_path = try std.Io.Dir.path.join(gpa, &.{ root, &suffix });
+        const home_path = try std.Io.Dir.path.join(gpa, &.{ root, &name });
         std.debug.assert(std.Io.Dir.path.isAbsolute(home_path));
         errdefer gpa.free(home_path);
         try Io.Dir.createDirAbsolute(io, home_path, if (builtin.target.os.tag == .windows) .default_dir else .fromMode(0o700));

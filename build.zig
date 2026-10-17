@@ -181,11 +181,15 @@ pub fn dev(b: *std.Build, tools: type) void {
     });
 
     const build_options = b.addOptions();
+    // gpg-agent makes its sockets in its home, and a socket path holds at
+    // most 104 bytes on macOS and 108 on Linux: under a checkout's own
+    // `.zig-cache` a home is past that from a deep enough checkout. `/tmp`
+    // keeps it short from any checkout. Windows' GnuPG has no such socket.
     const gnupg_fixture_root = b.option(
         []const u8,
         "gnupg-fixture-root",
-        "A short directory for private GnuPG test homes (defaults to .zig-cache/gpg)",
-    ) orelse ".zig-cache/gpg";
+        "A short directory for private GnuPG test homes (defaults to /tmp, .zig-cache/gpg on Windows)",
+    ) orelse if (target.result.os.tag == .windows) ".zig-cache/gpg" else "/tmp";
     build_options.addOptionPathUntracked("gnupg_fixture_root", if (std.Io.Dir.path.isAbsolute(gnupg_fixture_root))
         b.graph.cwdRelativePath(gnupg_fixture_root)
     else
