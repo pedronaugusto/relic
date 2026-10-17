@@ -625,7 +625,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
 | `worktree.convert` | Module within `worktree`. |
 | `worktree.encoding` | Module within `worktree`. |
-| `worktree.fsmonitor` | `refresh`, `configured`, `ChangeSource`: the file monitor git asks through `core.fsmonitor` (hook protocol 1 and 2), or a program's own, deciding which files `status` looks at; `FSMN` read and written. |
+| `worktree.fsmonitor` | `refresh`, `configured`, `ChangeSource`: the file monitor git asks through `core.fsmonitor` (its hook, protocol 1 and 2, or its own daemon, `true`, over the daemon's socket or pipe), or a program's own, deciding which files `status` looks at; `FSMN` read and written. |
 | `worktree.filter` | Module within `worktree`. |
 | `worktree.filter.native` | Native content-filter protocol. |
 | `worktree.dir_scan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
@@ -774,7 +774,7 @@ reread the affected refs before retrying.
 - **Ref listings write no colour.** A `%(color:...)` git accepts writes nothing, as git's does when it is not writing to a terminal, and `--column` is not offered.
 - **`info/` is made by `init` with or without a template,** where git makes it only from one. A template's configuration keeps the spelling of a key `init` sets again, where git writes its own.
 - **A root process is root.** git takes a repository owned by the user `sudo` ran it for (`SUDO_UID`) as the current user's; this package reads no environment, so `OpenOptions.ownership` is where a caller says otherwise.
-- **No fsmonitor daemon.** `core.fsmonitor=true`, git's built-in daemon, is `error.FsmonitorDaemonUnsupported`; a hook and a program's own change source are asked as git asks the hook.
+- **git's fsmonitor daemon is asked, never started.** With `core.fsmonitor=true` and no daemon listening, every file is looked at and the index keeps `builtin:fake`, where git starts `git fsmonitor--daemon` first. A daemon git keeps outside the git directory, for a repository on a network volume with `fsmonitor.allowRemote`, is not found, and such a repository is looked at in full.
 - **fast-import does not check signatures, and fast-export does not anonymize.** git's `--signed-commits=*-if-invalid`, `rewrite-submodules-*` and `export-pack-edges` are refused by name; fast-export takes no path limit and no `--reencode=yes`.
 - **No `-s subtree` strategy name.** The `-X subtree` forms are read.
 

@@ -112,7 +112,9 @@ const Pair = struct {
         var locked_index = try repo.lockIndex(io);
         defer locked_index.deinit(io);
         const index = &locked_index.index;
-        const source = (try fsmonitor.configured(repo.configuration(), .{ .environ = &pair.env })).?;
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const source = (try fsmonitor.configured(arena.allocator(), repo.configuration(), repo.gitDirectory(), .{ .environ = &pair.env })).?;
         var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
             .rules = try repo.worktreeRules(),
             .head_tree = try repo.headTree(io),
@@ -358,17 +360,4 @@ test "a program's own change source decides what status looks at" {
     const all = try Run.status(io, &r, &feed, .all);
     defer gpa.free(all);
     try std.testing.expectEqualStrings(" M a\n M b\n", all);
-}
-
-test "git's own daemon is refused by name" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var r = try testgit.Repo.init(gpa, io, &.{});
-    defer r.deinit();
-    try r.exec(io, &.{ "config", "core.fsmonitor", "true" });
-    var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
-    defer repo.deinit(io);
-    var env = try testgit.programEnviron(gpa);
-    defer env.deinit();
-    try std.testing.expectError(error.FsmonitorDaemonUnsupported, fsmonitor.configured(repo.configuration(), .{ .environ = &env }));
 }

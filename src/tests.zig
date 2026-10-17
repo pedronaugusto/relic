@@ -128,6 +128,7 @@ test {
         _ = @import("transport/remote_helper_test.zig");
         _ = @import("lfs/custom_test.zig");
         _ = @import("checkout/fsmonitor_test.zig");
+        _ = @import("checkout/fsmonitor_daemon_test.zig");
         _ = @import("patch/range_diff_test.zig");
         _ = @import("pretty/refs_test.zig");
         _ = @import("object/trailer_test.zig");
