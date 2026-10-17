@@ -20,6 +20,7 @@ const Allocator = std.mem.Allocator;
 
 const config_mod = @import("../config/config.zig");
 const refspec = @import("refspec.zig");
+const hash = @import("../hash/hash.zig");
 
 const Config = config_mod.Config;
 const Refspec = refspec.Refspec;
@@ -85,7 +86,8 @@ pub const Remote = struct {
     /// The remote configured as `name`, or — when there is no `remote.<name>`
     /// with a URL — a remote whose URL is `name` itself, which is how git
     /// reads `git fetch https://example.com/repo.git`.
-    pub fn get(gpa: Allocator, config: *const Config, name: []const u8) Self.Error!Remote {
+    /// Its refspecs are read for `object_format`'s names, the repository's.
+    pub fn get(gpa: Allocator, config: *const Config, object_format: hash.Kind, name: []const u8) Self.Error!Remote {
         var remote: Remote = .{
             .arena = .init(gpa),
             .name = null,
@@ -125,8 +127,8 @@ pub const Remote = struct {
             remote.push_urls = try pushUrlsFor(arena, config, configured);
         }
 
-        remote.fetch = try refspecsOf(arena, config, try key("fetch", arena, name), .fetch, &remote.invalid);
-        remote.push = try refspecsOf(arena, config, try key("push", arena, name), .push, &remote.invalid);
+        remote.fetch = try refspecsOf(arena, config, try key("fetch", arena, name), .fetch, object_format, &remote.invalid);
+        remote.push = try refspecsOf(arena, config, try key("push", arena, name), .push, object_format, &remote.invalid);
 
         if (try valueOf(arena, config, try key("tagopt", arena, name))) |text| {
             if (std.mem.eql(u8, text, "--tags")) remote.tags = .all;
@@ -291,12 +293,13 @@ fn refspecsOf(
     config: *const Config,
     key: []const u8,
     direction: refspec.Direction,
+    object_format: hash.Kind,
     invalid: *?[]const u8,
 ) Error![]const Refspec {
     const values = try valuesOf(arena, config, key);
     var out: std.ArrayList(Refspec) = .empty;
     for (values) |text| {
-        const spec = Refspec.parse(text, direction) catch {
+        const spec = Refspec.parse(text, direction, object_format) catch {
             invalid.* = text;
             return error.InvalidRefspec;
         };
@@ -329,7 +332,7 @@ test "a configured remote carries its URLs, refspecs and tag rule" {
     , .local);
     defer config.deinit();
 
-    var remote = try Remote.get(gpa, &config, "origin");
+    var remote = try Remote.get(gpa, &config, .sha1, "origin");
     defer remote.deinit();
     try testing.expectEqualStrings("origin", remote.name.?);
     try testing.expectEqualStrings("https://example.com/repo.git", remote.urls[0]);
@@ -356,7 +359,7 @@ test "a remote ref is tracked where the first fetch refspec maps it, unless excl
     , .local);
     defer config.deinit();
 
-    var origin = try Remote.get(gpa, &config, "origin");
+    var origin = try Remote.get(gpa, &config, .sha1, "origin");
     defer origin.deinit();
     const main = (try origin.trackingRef(gpa, "refs/heads/main")).?;
     defer gpa.free(main);
@@ -367,7 +370,7 @@ test "a remote ref is tracked where the first fetch refspec maps it, unless excl
     try testing.expect(try origin.trackingRef(gpa, "refs/heads/wip") == null);
     try testing.expect(try origin.trackingRef(gpa, "refs/tags/v1") == null);
 
-    var bare = try Remote.get(gpa, &config, "bare");
+    var bare = try Remote.get(gpa, &config, .sha1, "bare");
     defer bare.deinit();
     try testing.expect(try bare.trackingRef(gpa, "refs/heads/main") == null);
 }
@@ -377,7 +380,7 @@ test "the default fetch refspec tracks every branch under the remote's name" {
     const text = try defaultFetchRefspec(gpa, "origin");
     defer gpa.free(text);
     try testing.expectEqualStrings("+refs/heads/*:refs/remotes/origin/*", text);
-    const spec = try Refspec.parse(text, .fetch);
+    const spec = try Refspec.parse(text, .fetch, .sha1);
     const mapped = (try spec.mapSource(gpa, "refs/heads/topic/one")).?;
     defer gpa.free(mapped);
     try testing.expectEqualStrings("refs/remotes/origin/topic/one", mapped);
@@ -391,7 +394,7 @@ test "a name with no remote behind it is a URL" {
         \\
     , .local);
     defer config.deinit();
-    var remote = try Remote.get(gpa, &config, "gh:org/repo");
+    var remote = try Remote.get(gpa, &config, .sha1, "gh:org/repo");
     defer remote.deinit();
     try testing.expect(remote.name == null);
     try testing.expectEqualStrings("https://mirror.example.com/org/repo", remote.urls[0]);
@@ -407,7 +410,7 @@ test "a remote with a refspec git refuses is refused by name, with the value" {
         \\
     , .local);
     defer config.deinit();
-    try testing.expectError(error.InvalidRefspec, Remote.get(gpa, &config, "bad"));
+    try testing.expectError(error.InvalidRefspec, Remote.get(gpa, &config, .sha1, "bad"));
 }
 
 test "branch settings choose the fetch and push remotes in git's order" {
@@ -460,7 +463,7 @@ test "URL rewriting agrees with git ls-remote --get-url, for fetch and for push"
     defer config.deinit();
 
     for ([_][]const u8{ "a", "b", "c", "d" }) |name| {
-        var remote = try Remote.get(gpa, &config, name);
+        var remote = try Remote.get(gpa, &config, .sha1, name);
         defer remote.deinit();
         const fetch_url = try repo.line(io, &.{ "ls-remote", "--get-url", name });
         defer gpa.free(fetch_url);

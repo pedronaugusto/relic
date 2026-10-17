@@ -273,7 +273,7 @@ pub const Lazy = struct {
                 _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = key, .value = "blob:none" } }}, .{});
             }
         }
-        var remote = try remote_mod.Remote.get(l.gpa, repo.configuration(), name);
+        var remote = try remote_mod.Remote.get(l.gpa, repo.configuration(), repo.objectFormat(), name);
         defer remote.deinit();
         if (remote.urls.len == 0) return error.NotAPartialClone;
         var session = try transport.Session.open(l.gpa, io, remote.urls[0], .{ .service = .upload_pack, .kind = repo.objectFormat() }, .{

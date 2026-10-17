@@ -304,7 +304,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
 
-    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), remote_name);
+    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), repo.objectFormat(), remote_name);
     defer remote.deinit();
 
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
@@ -623,7 +623,7 @@ fn askedRefspecs(
 ) Error!Asked {
     var cli: std.ArrayList(Refspec) = .empty;
     for (refspecs) |text| {
-        try cli.append(arena, Refspec.parse(try arena.dupe(u8, text), .fetch) catch return error.InvalidRefspec);
+        try cli.append(arena, Refspec.parse(try arena.dupe(u8, text), .fetch, repo.objectFormat()) catch return error.InvalidRefspec);
     }
 
     // `pruneTags` is a refspec: fetching every tag is how it knows which
@@ -631,7 +631,7 @@ fn askedRefspecs(
     var configured: std.ArrayList(Refspec) = .empty;
     try configured.appendSlice(arena, remote.fetch);
     if (tags_refspec and remote.name != null) {
-        try configured.append(arena, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch));
+        try configured.append(arena, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch, repo.objectFormat()));
     }
 
     var branch_merge: []const []const u8 = &.{};
@@ -746,7 +746,7 @@ fn refMap(
     }
 
     if (tags == .all) {
-        try fetchMap(arena, &map, remote_refs.refs, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch), false, .not_for_merge);
+        try fetchMap(arena, &map, remote_refs.refs, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch, repo.objectFormat()), false, .not_for_merge);
     } else if (tags == .auto and autotags) {
         try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, local, &map, null);
     }

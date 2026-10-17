@@ -136,6 +136,9 @@ pub const OpenOptions = struct {
     progress: bool = false,
     /// `option verbosity`: git's `-v` count and one.
     verbosity: u8 = 1,
+    /// The repository's object format, SHA-1 outside one: what the
+    /// helper's `refspec` capabilities' object names are read for.
+    object_format: hash.Kind = .sha1,
 };
 
 /// One ref to fetch, by the name the helper listed it under.
@@ -192,6 +195,8 @@ pub const Helper = struct {
     /// once a `connect` has handed them on.
     conn: ?*Connection,
     caps: Capabilities = .{},
+    /// The object format the helper's refspecs are read for.
+    object_format: hash.Kind,
     refspecs: std.ArrayList(Refspec) = .empty,
     import_marks: ?[]const u8 = null,
     export_marks: ?[]const u8 = null,
@@ -211,7 +216,7 @@ pub const Helper = struct {
     pub fn open(gpa: Allocator, io: Io, spec: Spec, options: OpenOptions) Self.Error!*Helper {
         const h = try gpa.create(Helper);
         errdefer gpa.destroy(h);
-        h.* = .{ .gpa = gpa, .io = io, .arena_state = .init(gpa), .name = "", .conn = null, .line = .init(gpa) };
+        h.* = .{ .gpa = gpa, .io = io, .arena_state = .init(gpa), .name = "", .conn = null, .line = .init(gpa), .object_format = options.object_format };
         errdefer {
             h.line.deinit();
             h.arena_state.deinit();
@@ -335,7 +340,7 @@ pub const Helper = struct {
                 h.caps.check_connectivity = true;
             } else if (std.mem.startsWith(u8, cap, "refspec ")) {
                 const text = try arena.dupe(u8, cap["refspec ".len..]);
-                try h.refspecs.append(h.gpa, Refspec.parse(text, .fetch) catch return error.HelperProtocolError);
+                try h.refspecs.append(h.gpa, Refspec.parse(text, .fetch, h.object_format) catch return error.HelperProtocolError);
             } else if (std.mem.eql(u8, cap, "connect")) {
                 h.caps.connect = true;
             } else if (std.mem.eql(u8, cap, "stateless-connect")) {

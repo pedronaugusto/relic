@@ -334,7 +334,7 @@ const Resolver = struct {
         if (b.merge.len == 0) return error.BadRevision;
         const merge = try r.a.dupe(u8, b.merge[0]);
         if (std.mem.eql(u8, remote_name, ".")) return merge;
-        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), remote_name) catch |err| return revisionError(err);
+        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), r.repo.objectFormat(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
         for (remote.fetch) |spec| {
             if (try spec.mapSource(r.a, merge)) |tracking| return tracking;
@@ -361,7 +361,7 @@ const Resolver = struct {
             return up;
         }
         // current, matching, and simple to another remote: the same name.
-        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), remote_name) catch |err| return revisionError(err);
+        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), r.repo.objectFormat(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
         const dest = try r.a.print("refs/heads/{s}", .{branch});
         for (remote.fetch) |spec| {

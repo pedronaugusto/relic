@@ -1930,7 +1930,7 @@ pub const Listing = struct {
         if (branch.merge.len == 0) return null;
         const merge = branch.merge[0];
         if (!std.mem.eql(u8, remote_name, ".")) {
-            var remote = try remote_mod.Remote.get(l.gpa, config, remote_name);
+            var remote = try remote_mod.Remote.get(l.gpa, config, l.repo.objectFormat(), remote_name);
             defer remote.deinit();
             const tracking = (try remote.trackingRef(l.gpa, merge)) orelse return null;
             defer l.gpa.free(tracking);
@@ -1977,7 +1977,7 @@ pub const Listing = struct {
         defer branch.deinit();
         const full = try l.a().print("refs/heads/{s}", .{short});
         const remote_name = l.pushRemoteName(&branch).name;
-        var remote = try remote_mod.Remote.get(l.gpa, config, remote_name);
+        var remote = try remote_mod.Remote.get(l.gpa, config, l.repo.objectFormat(), remote_name);
         defer remote.deinit();
         if (remote.push.len != 0) {
             const dst = (try applyRefspecs(l.a(), remote.push, full)) orelse return null;
@@ -2038,7 +2038,7 @@ pub const Listing = struct {
                     const value = try ar.dupe(u8, branch.merge[0]);
                     return value;
                 }
-                var remote = try remote_mod.Remote.get(l.gpa, l.repo.configuration(), l.pushRemoteName(&branch).name);
+                var remote = try remote_mod.Remote.get(l.gpa, l.repo.configuration(), l.repo.objectFormat(), l.pushRemoteName(&branch).name);
                 defer remote.deinit();
                 if (remote.push.len == 0) return "";
                 const full = try ar.print("refs/heads/{s}", .{short});

@@ -180,7 +180,7 @@ const Exporter = struct {
 
     fn run(ex: *Exporter) Error!void {
         for (ex.options.refspecs) |text| {
-            try ex.refspecs.append(ex.gpa, refspec_mod.Refspec.parse(text, .fetch) catch return error.InvalidRefspec);
+            try ex.refspecs.append(ex.gpa, refspec_mod.Refspec.parse(text, .fetch, ex.repo.objectFormat()) catch return error.InvalidRefspec);
         }
         if (ex.options.use_done_feature) try ex.w.writeAll("feature done\n");
         if (ex.options.import_marks) |path| try ex.importMarks(path);

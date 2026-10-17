@@ -255,12 +255,12 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
 
-    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), remote_name);
+    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), repo.objectFormat(), remote_name);
     defer remote.deinit();
 
     var specs: std.ArrayList(Refspec) = .empty;
     for (options.refspecs) |text| {
-        try specs.append(arena, Refspec.parse(try arena.dupe(u8, text), .push) catch return error.InvalidRefspec);
+        try specs.append(arena, Refspec.parse(try arena.dupe(u8, text), .push, repo.objectFormat()) catch return error.InvalidRefspec);
     }
     if (specs.items.len == 0) {
         for (remote.push) |spec| try specs.append(arena, spec);
@@ -503,14 +503,14 @@ fn defaultRefspecs(
     const mode_text = repo.configuration().get("push.default") orelse "simple";
     if (std.ascii.eqlIgnoreCase(mode_text, "nothing")) return error.NoPushDestination;
     if (std.ascii.eqlIgnoreCase(mode_text, "matching")) {
-        try specs.append(arena, try Refspec.parse(":", .push));
+        try specs.append(arena, try Refspec.parse(":", .push, repo.objectFormat()));
         return;
     }
     const current = (try repo.refStore().currentBranch(gpa, io)) orelse return error.NoPushDestination;
     defer gpa.free(current);
     const branch_ref = try arena.print("refs/heads/{s}", .{current});
     if (std.ascii.eqlIgnoreCase(mode_text, "current")) {
-        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push));
+        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push, repo.objectFormat()));
         return;
     }
     var branch = try remote_mod.Branch.get(gpa, repo.configuration(), current);
@@ -520,14 +520,14 @@ fn defaultRefspecs(
     if (!upstream_mode and !same_remote) {
         // `simple` to a remote that is not the branch's own: the branch of
         // the same name.
-        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push));
+        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push, repo.objectFormat()));
         return;
     }
     if (!same_remote or branch.merge.len != 1) return error.NoPushDestination;
     const upstream = branch.merge[0];
     // `simple` pushes to the upstream only when it has the branch's name.
     if (!upstream_mode and !std.mem.eql(u8, upstream, branch_ref)) return error.NoPushDestination;
-    try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, try arena.dupe(u8, upstream) }), .push));
+    try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, try arena.dupe(u8, upstream) }), .push, repo.objectFormat()));
 }
 
 /// git's `ref_rev_parse_rules`, used to find what a short name names.

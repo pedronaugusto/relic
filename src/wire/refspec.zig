@@ -54,8 +54,11 @@ pub const Refspec = struct {
     /// destination on a fetch means the ref is fetched and not kept.
     dst: ?[]const u8,
 
-    /// Read one refspec, as `direction` reads it.
-    pub fn parse(text: []const u8, direction: Direction) ParseError!Refspec {
+    /// Read one refspec, as `direction` reads it in a repository whose
+    /// object names are `object_format`'s: a source that is one of its full
+    /// names is an object (where git's `get_oid_hex_algop` reads one), and
+    /// one of the other format's length is a ref name like any other.
+    pub fn parse(text: []const u8, direction: Direction, object_format: hash.Kind) ParseError!Refspec {
         var spec: Refspec = .{ .src = "", .dst = null };
         var lhs = text;
         if (lhs.len != 0 and lhs[0] == '+') {
@@ -99,7 +102,7 @@ pub const Refspec = struct {
         const format: ref_names.Flags = .{ .allow_onelevel = true, .pattern = glob };
         if (spec.negative) {
             if (spec.src.len == 0) return error.InvalidRefspec;
-            if (isFullHex(spec.src)) return error.InvalidRefspec;
+            if (isFullHex(spec.src, object_format)) return error.InvalidRefspec;
             if (!ref_names.checkFormat(spec.src, format)) return error.InvalidRefspec;
             return spec;
         }
@@ -108,7 +111,7 @@ pub const Refspec = struct {
             .fetch => {
                 if (spec.src.len == 0) {
                     // Empty means `HEAD`.
-                } else if (isFullHex(spec.src)) {
+                } else if (isFullHex(spec.src, object_format)) {
                     spec.exact_oid = true;
                 } else if (!ref_names.checkFormat(spec.src, format)) {
                     return error.InvalidRefspec;
@@ -210,8 +213,8 @@ fn substitute(gpa: Allocator, pattern: []const u8, middle: []const u8) Allocator
     return std.mem.concat(gpa, u8, &.{ pattern[0..star], middle, pattern[star + 1 ..] });
 }
 
-fn isFullHex(text: []const u8) bool {
-    if (text.len != hash.Kind.sha1.hexLen() and text.len != hash.Kind.sha256.hexLen()) return false;
+fn isFullHex(text: []const u8, object_format: hash.Kind) bool {
+    if (text.len != object_format.hexLen()) return false;
     for (text) |c| {
         if (!std.ascii.isHex(c)) return false;
     }
@@ -221,7 +224,7 @@ fn isFullHex(text: []const u8) bool {
 const testing = std.testing;
 
 test "a fetch refspec reads as git reads it, force and pattern and all" {
-    const spec = try Refspec.parse("+refs/heads/*:refs/remotes/origin/*", .fetch);
+    const spec = try Refspec.parse("+refs/heads/*:refs/remotes/origin/*", .fetch, .sha1);
     try testing.expect(spec.force);
     try testing.expect(spec.pattern);
     try testing.expectEqualStrings("refs/heads/*", spec.src);
@@ -236,19 +239,26 @@ test "a fetch refspec reads as git reads it, force and pattern and all" {
     try testing.expectEqualStrings("refs/heads/main", back);
     try testing.expect(try spec.mapSource(gpa, "refs/tags/v1") == null);
 
-    const at = try Refspec.parse("@:refs/heads/x", .fetch);
+    const at = try Refspec.parse("@:refs/heads/x", .fetch, .sha1);
     try testing.expectEqualStrings("HEAD", at.src);
-    const hex = try Refspec.parse("0123456789012345678901234567890123456789:refs/heads/x", .fetch);
+    const hex = try Refspec.parse("0123456789012345678901234567890123456789:refs/heads/x", .fetch, .sha1);
     try testing.expect(hex.exact_oid);
-    const no_dst = try Refspec.parse("main", .fetch);
+    // a full name of the other format's length is a ref name
+    const long = "0123456789012345678901234567890123456789012345678901234567890123";
+    try testing.expect(!(try Refspec.parse(long ++ ":refs/heads/x", .fetch, .sha1)).exact_oid);
+    try testing.expect((try Refspec.parse(long ++ ":refs/heads/x", .fetch, .sha256)).exact_oid);
+    try testing.expect(!(try Refspec.parse("0123456789012345678901234567890123456789:refs/heads/x", .fetch, .sha256)).exact_oid);
+    _ = try Refspec.parse("^" ++ long, .fetch, .sha1);
+    try testing.expectError(error.InvalidRefspec, Refspec.parse("^" ++ long, .fetch, .sha256));
+    const no_dst = try Refspec.parse("main", .fetch, .sha1);
     try testing.expect(no_dst.dst == null);
-    const empty_dst = try Refspec.parse("main:", .fetch);
+    const empty_dst = try Refspec.parse("main:", .fetch, .sha1);
     try testing.expectEqualStrings("", empty_dst.dst.?);
 }
 
 test "a partial glob matches around its star, and the two sides move together" {
     const gpa = testing.allocator;
-    const spec = try Refspec.parse("refs/heads/feature-*-wip:refs/remotes/o/f-*", .fetch);
+    const spec = try Refspec.parse("refs/heads/feature-*-wip:refs/remotes/o/f-*", .fetch, .sha1);
     const mapped = (try spec.mapSource(gpa, "refs/heads/feature-login-wip")).?;
     defer gpa.free(mapped);
     try testing.expectEqualStrings("refs/remotes/o/f-login", mapped);
@@ -258,9 +268,9 @@ test "a partial glob matches around its star, and the two sides move together" {
 
 test "negative refspecs remove what they match and take nothing" {
     const specs = [_]Refspec{
-        try Refspec.parse("refs/heads/*:refs/remotes/origin/*", .fetch),
-        try Refspec.parse("^refs/heads/secret-*", .fetch),
-        try Refspec.parse("^refs/heads/wip", .fetch),
+        try Refspec.parse("refs/heads/*:refs/remotes/origin/*", .fetch, .sha1),
+        try Refspec.parse("^refs/heads/secret-*", .fetch, .sha1),
+        try Refspec.parse("^refs/heads/wip", .fetch, .sha1),
     };
     try testing.expect(excluded(&specs, "refs/heads/secret-plan"));
     try testing.expect(excluded(&specs, "refs/heads/wip"));
@@ -270,14 +280,14 @@ test "negative refspecs remove what they match and take nothing" {
 }
 
 test "a push refspec deletes with an empty source and matches with a lone colon" {
-    const delete = try Refspec.parse(":refs/heads/gone", .push);
+    const delete = try Refspec.parse(":refs/heads/gone", .push, .sha1);
     try testing.expectEqualStrings("", delete.src);
     try testing.expectEqualStrings("refs/heads/gone", delete.dst.?);
-    const matching = try Refspec.parse(":", .push);
+    const matching = try Refspec.parse(":", .push, .sha1);
     try testing.expect(matching.matching);
-    const forced = try Refspec.parse("+:", .push);
+    const forced = try Refspec.parse("+:", .push, .sha1);
     try testing.expect(forced.matching and forced.force);
-    const expression = try Refspec.parse("HEAD~2:refs/heads/older", .push);
+    const expression = try Refspec.parse("HEAD~2:refs/heads/older", .push, .sha1);
     try testing.expectEqualStrings("HEAD~2", expression.src);
 }
 
@@ -293,14 +303,14 @@ test "what git refuses is refused by name" {
         "refs/heads/a:refs/heads/b.lock",
         "refs/heads/**:refs/remotes/**",
     }) |text| {
-        try testing.expectError(error.InvalidRefspec, Refspec.parse(text, .fetch));
+        try testing.expectError(error.InvalidRefspec, Refspec.parse(text, .fetch, .sha1));
     }
     for ([_][]const u8{
         "refs/heads/main:", // an empty push destination
         "refs/heads/*:refs/heads/x",
         "HEAD~1", // an expression with nowhere named to go
     }) |text| {
-        try testing.expectError(error.InvalidRefspec, Refspec.parse(text, .push));
+        try testing.expectError(error.InvalidRefspec, Refspec.parse(text, .push, .sha1));
     }
 }
 
@@ -314,7 +324,7 @@ fn fuzzParse(_: void, case: *shakedown.Case) anyerror!void {
     case.source.bytes(input);
     const gpa = testing.allocator;
     for ([_]Direction{ .fetch, .push }) |direction| {
-        const spec = Refspec.parse(input, direction) catch |err| switch (err) {
+        const spec = Refspec.parse(input, direction, .sha1) catch |err| switch (err) {
             error.InvalidRefspec => continue,
         };
         // A name a pattern maps onto its destination maps back onto itself:

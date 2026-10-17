@@ -168,7 +168,7 @@ pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, options: UpstreamOpt
         var name: []const u8 = try arena.dupe(u8, merge_name);
         if (!std.mem.eql(u8, remote, ".")) {
             const tracking: ?[]const u8 = for (specs) |text| {
-                const spec = refspec.Refspec.parse(text, .fetch) catch continue;
+                const spec = refspec.Refspec.parse(text, .fetch, repo.objectFormat()) catch continue;
                 if (try spec.mapSource(arena, name)) |mapped| break mapped;
             } else null;
             name = tracking orelse return error.UpstreamNotFetched;
