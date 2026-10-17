@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-17
+
 ### Breaking
 
 - `wire.credential.Session` is git's `struct credential`, held to `git credential fill` over a listed and a random corpus of URLs, `credential.*` settings and helper answers (what each helper and the person are asked, what fill prints, where git dies): its parts are read from the URL as `credential_from_url` reads them (the host with its port and brackets, the user, password, host and path decoded, a `%00` kept as written, the path without the slashes at either end, an empty user not the URL's); the `credential.*` settings are read once for a credential, every matching `credential.<url>.*` in order by git's urlmatch against the percent-encoded credential, and a pattern git cannot normalize compared part by part (`match_partial_url`); the path is dropped after them unless `useHttpPath`. `credential.urlMatches` is gone; `cert_path` is `Session.origin`, and `Session.forParts` names the parts as git-lfs hands them to `git credential fill`. New errors `InvalidCredentialSetting` (a bare `credential.*`, or a `useHttpPath`, `sanitizePrompt` or `protectProtocol` that is not a boolean) and `InvalidCredentialAnswer` (`quit`, `continue` or `ephemeral` not a boolean, a `url` git cannot read); `CredentialMultistageUnsupported` is gone.
@@ -13,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `wire.filter_spec.join`: a filter given again added as git's `parse_list_objects_filter` adds it.
+- `text.ctype.char_signed` and `asChar`: a byte as git's C `char` compares it where relic runs.
 - `report.warning.Warning.remote_helper`: what git warns of in a remote helper's answers (a helper that imports or exports without a `refspec`, an `option` answer git does not know, a refused `servpath`, a status for a ref nobody pushed).
 - A helper's `continue=1` is a conversation of more than one round, as git and git-lfs hold one: a 401 to its credential asks the helper again, with the server's challenges and the state it answered with, where any other credential is erased; over smart HTTP three requests at most, as git's `http_request_recoverable`.
 
@@ -23,7 +27,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A refused credential keeps its authtype and state, and loses its username, refresh token and expiry, as `credential_reject` leaves them; a credential is stored once.
 - `credential.interactive` is read as `credential_getpass` reads it, only the plain key: false as a boolean, or `never`. A prompt names the path when it is kept.
 - A `combine:` filter's part refuses every byte up to a space, control bytes among them, and bytes past ASCII where C's `char` is signed, as git's `has_reserved_character` compares them; `%00` stays as written, as `url_percent_decode` leaves it (relic decoded it to a NUL).
-- A bundle's second `@filter=` joins the first in a `combine:`, encoded as git's `parse_list_objects_filter` encodes it (relic kept the last); `wire.filter_spec.join` adds a filter the same way.
+- A bundle's second `@filter=` joins the first in a `combine:`, encoded as git's `parse_list_objects_filter` encodes it (relic kept the last).
 - A remote helper's answers are read as git's `transport-helper.c` reads them, held to `git ls-remote` and `git push --porcelain` against a scripted helper: a line ends at a newline with one carriage return before it, and at a NUL; a ref list's value is read as `get_oid_hex_algop` reads it, the bytes before a bad digit kept and no failure (relic refused the list), an `unchanged` ref this repository lacks refused (`UnchangedRefMissing`); a push status's reason is the state git names by it, a quoted one unquoted, `forced update` a forced update, `no match` ignored for a ref already settled, an `option` with no `ok` before it refused, and the private ref moved by each `option refname`/`new-oid`.
 - An LFS credential is asked for with git-lfs's parts: the scheme in lower case, the host as written, a username only when there is one, and the path only under `credential.<url>.useHttpPath`.
 
