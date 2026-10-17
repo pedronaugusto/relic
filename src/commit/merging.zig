@@ -42,6 +42,8 @@ const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
 const diagnostic = @import("../report.zig").diagnostic;
 const config = @import("../config/config.zig");
+const ctype = @import("../text.zig").ctype;
+const pretty = @import("../pretty/pretty.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -81,9 +83,12 @@ pub const Error = error{
     /// The name given is an annotated tag. git merges its commit and quotes
     /// the tag's message in the merge commit's; this release does not.
     AnnotatedTag,
-    /// `merge.log` or `merge.branchdesc` asks for a message this release
-    /// does not write.
-    UnsupportedMergeMessage,
+    /// `merge.branchdesc` is neither true nor false, or `merge.suppressDest`
+    /// has no value, which git dies on.
+    InvalidMergeSetting,
+    /// `merge.branchdesc` lists a merged branch whose
+    /// `branch.<name>.description` has no value, which git dies on.
+    InvalidBranchDescription,
     /// No commit was named and `merge.defaultToUpstream` is off.
     NoMergeTarget,
     /// No commit was named and the current branch has no upstream:
@@ -97,7 +102,7 @@ pub const Error = error{
     UnresolvedConflicts,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || three_way.Error || head_mod.Error || rev_walk.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commit_hooks.Error;
+} || three_way.Error || head_mod.Error || rev_walk.Error || pretty.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commit_hooks.Error;
 
 /// When a merge may be a fast-forward: `merge.ff` and `--ff`, `--no-ff`,
 /// `--ff-only`.
@@ -207,7 +212,8 @@ pub const Options = struct {
     fast_forward: ?FastForward = null,
     /// `false` stops before committing even a clean merge: `--no-commit`.
     commit: bool = true,
-    /// The merge commit's message, in place of the one git would write.
+    /// The merge commit's message, in place of the title git would write:
+    /// `-m`. `merge.log`'s list still follows it, as it follows git's.
     message: ?[]const u8 = null,
     /// `--signoff`.
     signoff: bool = false,
@@ -316,8 +322,8 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     if (inProgress(io, repo)) return error.MergeInProgress;
     if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) or
         repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.SequencerInProgress;
-    if (try mergeLogLength(repo.configuration()) != 0) return error.UnsupportedMergeMessage;
-    if (repo.configuration().getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
+    // `git merge` reads `fmt_merge_msg_config`'s settings at its start too.
+    const settings = try MessageSettings.read(arena, repo.configuration());
 
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -345,7 +351,14 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         try action.appendSlice(arena, target.name);
     }
     const reflog_action = action.items;
-    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &locked_index, head, reduced, reflog_action, fast_forward, options);
+    // git makes the message with the targets it merges, before anything
+    // else: a list `merge.log` asks for is read now, and fails now. A single
+    // target `HEAD` already has is no target, as git's `reduce_parents`
+    // leaves it.
+    const already_merged = settings.log != 0 and targets.len == 1 and
+        try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = reduced.heads[0].oid, .descendant = ours }, .{});
+    const merge_message = if (reduced.heads.len == 0 or already_merged) "" else try mergeMessage(arena, io, repo, .{ .targets = reduced.heads, .head = head, .given = options.message, .settings = settings });
+    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &locked_index, .{ .head = head, .reduced = reduced, .reflog_action = reflog_action, .fast_forward = fast_forward, .message = merge_message }, options);
 
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
@@ -396,7 +409,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         .head = head,
         .parents = &.{ ours, target.oid },
         .merged = &.{target.oid},
-        .title = try title(arena, repo, reduced.heads, head),
+        .message = merge_message,
         .reflog_action = reflog_action,
         .strategy = "ort",
         .fast_forward = fast_forward,
@@ -449,6 +462,15 @@ fn reduceHeads(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, oids
     return kept.items;
 }
 
+/// What `octopus` merges, and how.
+const Octopus = struct {
+    head: head_mod.Head,
+    reduced: Reduced,
+    reflog_action: []const u8,
+    fast_forward: FastForward,
+    message: []const u8,
+};
+
 /// `git merge` with two or more commits left to merge: the octopus.
 fn octopus(
     gpa: Allocator,
@@ -456,12 +478,13 @@ fn octopus(
     repo: *Repository,
     arena_instance: *std.heap.ArenaAllocator,
     locked: *Repository.LockedIndex,
-    head: head_mod.Head,
-    reduced: Reduced,
-    reflog_action: []const u8,
-    fast_forward: FastForward,
+    asked: Octopus,
     options: Options,
 ) Error!Outcome {
+    const head = asked.head;
+    const reduced = asked.reduced;
+    const reflog_action = asked.reflog_action;
+    const fast_forward = asked.fast_forward;
     const arena = arena_instance.allocator();
     const index = &locked.index;
     const ours = head.oid.?;
@@ -492,7 +515,7 @@ fn octopus(
         .head = head,
         .parents = parents.items,
         .merged = heads,
-        .title = try title(arena, repo, reduced.heads, head),
+        .message = asked.message,
         .reflog_action = reflog_action,
         .strategy = "octopus",
         .fast_forward = fast_forward,
@@ -522,7 +545,9 @@ const Made = struct {
     parents: []const Oid,
     /// What `MERGE_HEAD` lists.
     merged: []const Oid,
-    title: []const u8,
+    /// The message `git merge` makes: `-m`'s, or `fmt-merge-msg`'s title,
+    /// with `merge.log`'s list after either.
+    message: []const u8,
     reflog_action: []const u8,
     /// The strategy the reflog names.
     strategy: []const u8,
@@ -543,9 +568,8 @@ fn commitOrStop(
     const arena = arena_instance.allocator();
     const comment = (try message.Comment.read(repo.configuration())).text();
     var msg: std.ArrayList(u8) = .empty;
-    // The message as given, byte for byte; git's own title has no newline
-    // at its end.
-    try msg.appendSlice(arena, options.message orelse made.title);
+    // The message as made, byte for byte: no newline at its end.
+    try msg.appendSlice(arena, made.message);
     const conflicts = try arena.dupe(three_way.Conflict, outcome.conflicts);
     for (conflicts) |*c| c.path = try arena.dupe(u8, c.path);
     const messages = try ort.dupeMessages(arena, outcome.messages);
@@ -751,19 +775,133 @@ fn configuredFastForward(repo: *Repository) FastForward {
     return if (on) .allow else .never;
 }
 
-/// How many commits of each merged branch `merge.log` (or its old name
-/// `merge.summary`, whichever was set last) lists in the message, as
-/// `fmt_merge_msg_config` reads each value: true is 20, false or unset
-/// none, a count itself, and a negative count or a value that is neither
-/// refused wherever it is, as git dies on it.
-pub fn mergeLogLength(settings: *const config.Config) error{InvalidMergeLog}!u31 {
-    var length: u31 = 0;
-    var it = settings.iterate(&.{ "merge.log", "merge.summary" });
-    while (it.next()) |entry| length = switch (config.parseBoolOrInt(entry.value) catch return error.InvalidMergeLog) {
-        .boolean => |on| if (on) 20 else 0,
-        .integer => |n| std.math.cast(u31, n) orelse return error.InvalidMergeLog,
+/// What `fmt_merge_msg_config` reads, every value in order, as `git merge`
+/// reads it at its start: a value git dies on is refused wherever it stands.
+pub const MessageSettings = struct {
+    /// How many commits of each merged branch `merge.log` (or its old name
+    /// `merge.summary`, whichever was set last) lists: true is 20, false or
+    /// unset none, a count itself.
+    log: u31 = 0,
+    /// `merge.branchDesc`: a merged local branch's description goes into the
+    /// list, so only with `log`.
+    branch_description: bool = false,
+    /// `merge.suppressDest`'s patterns, an empty value clearing those before
+    /// it; `null` when none was set, which is `main` and `master`.
+    suppress_dest: ?[]const []const u8 = null,
+
+    /// `settings` read; the patterns are borrowed from it and their list
+    /// lives in `arena`.
+    pub fn read(arena: Allocator, settings: *const config.Config) Error!MessageSettings {
+        var out: MessageSettings = .{};
+        var patterns: std.ArrayList([]const u8) = .empty;
+        var suppress_seen = false;
+        var it = settings.iterate(&.{ "merge.log", "merge.summary", "merge.branchdesc", "merge.suppressdest" });
+        while (it.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.name, "branchdesc")) {
+                out.branch_description = if (entry.value) |text| config.parseBool(text) catch return error.InvalidMergeSetting else true;
+            } else if (std.ascii.eqlIgnoreCase(entry.name, "suppressdest")) {
+                const pattern = entry.value orelse return error.InvalidMergeSetting;
+                if (pattern.len == 0) patterns.clearRetainingCapacity() else try patterns.append(arena, pattern);
+                suppress_seen = true;
+            } else out.log = switch (config.parseBoolOrInt(entry.value) catch return error.InvalidMergeLog) {
+                .boolean => |on| if (on) 20 else 0,
+                .integer => |n| std.math.cast(u31, n) orelse return error.InvalidMergeLog,
+            };
+        }
+        if (suppress_seen) out.suppress_dest = patterns.items;
+        return out;
+    }
+};
+
+/// What `mergeMessage` writes about.
+const MessageInputs = struct {
+    /// What is merged, in order, as `reduceParents` left them.
+    targets: []const Target,
+    head: head_mod.Head,
+    /// `-m`'s message, which takes the title's place.
+    given: ?[]const u8,
+    settings: MessageSettings,
+};
+
+/// The message `git merge` commits with when no editor is opened:
+/// `fmt-merge-msg`'s title, or the message given, and with `merge.log` a
+/// list of each target's commits `HEAD` lacks (`shortlog`), without the
+/// newline at the end. Lives in `arena`.
+fn mergeMessage(arena: Allocator, io: Io, repo: *Repository, inputs: MessageInputs) Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    if (inputs.given) |given| {
+        // Without a list, `-m`'s message is taken as it is.
+        if (inputs.settings.log == 0) return given;
+        try out.appendSlice(arena, given);
+    } else {
+        try title(arena, &out, inputs.targets, inputs.head, inputs.settings);
+        try out.append(arena, '\n');
+    }
+    if (inputs.settings.log != 0) {
+        if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(arena, '\n');
+        for (inputs.targets) |target| try shortlog(arena, io, repo, &out, target, inputs);
+    }
+    if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(arena, '\n');
+    // `prepare_merge_message` drops the last byte, the newline.
+    return out.items[0 .. out.items.len - 1];
+}
+
+/// `fmt-merge-msg`'s `shortlog` for one merged commit, with no editor and
+/// so no `credit_people` lines: `* <name>:` (with the count when there are
+/// more than `log`), a local branch's description under `merge.branchDesc`,
+/// and the subjects of the commits it has that `HEAD` lacks in the order
+/// `git log` gives them, merges left out, `log` of them and `...` for the
+/// rest.
+fn shortlog(arena: Allocator, io: Io, repo: *Repository, out: *std.ArrayList(u8), target: Target, inputs: MessageInputs) Error!void {
+    const limit = inputs.settings.log;
+    // The name `handle_line` gives the origin: a ref by its name, a tag
+    // and a commit as the title says them.
+    const name = switch (target.kind) {
+        .branch, .remote_branch => target.name,
+        .tag => try arena.print("tag '{s}'", .{target.name}),
+        .commit => try arena.print("commit '{s}'", .{target.name}),
     };
-    return length;
+    var walk: rev_walk.Walk = .init(repo.allocator(), repo.objectDatabase());
+    defer walk.deinit();
+    try walk.push(target.oid);
+    try walk.hide(inputs.head.oid.?);
+    var subjects: std.ArrayList([]const u8) = .empty;
+    var count: usize = 0;
+    while (try walk.next(io)) |commit| {
+        if (commit.parents.len > 1) continue;
+        count += 1;
+        if (subjects.items.len > limit) continue;
+        var subject: std.ArrayList(u8) = .empty;
+        try pretty.formatCommit(arena, io, .{ .db = repo.objectDatabase(), .oid = commit.oid, .format = "%s" }, &subject, .{});
+        const trimmed = std.mem.trimStart(u8, subject.items, ctype.space);
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try subjects.append(arena, if (trimmed.len == 0) try arena.dupe(u8, commit.oid.hex(&hex)) else trimmed);
+    }
+    if (count > limit)
+        try out.print(arena, "\n* {s}: ({d} commits)\n", .{ name, count })
+    else
+        try out.print(arena, "\n* {s}:\n", .{name});
+    if (target.kind == .branch and inputs.settings.branch_description) try branchDescription(arena, repo, out, target.name);
+    for (subjects.items, 0..) |subject, i| {
+        if (i >= limit) try out.appendSlice(arena, "  ...\n") else try out.print(arena, "  {s}\n", .{subject});
+    }
+}
+
+/// `add_branch_desc`: each line of `branch.<name>.description` after
+/// `  : `, the last ended with a newline.
+fn branchDescription(arena: Allocator, repo: *Repository, out: *std.ArrayList(u8), name: []const u8) Error!void {
+    var last: ?config.Entry = null;
+    var it = repo.configuration().iterate(&.{try arena.print("branch.{s}.description", .{name})});
+    while (it.next()) |entry| last = entry;
+    const entry = last orelse return;
+    const text = entry.value orelse return error.InvalidBranchDescription;
+    var at: usize = 0;
+    while (at < text.len) {
+        const end = if (std.mem.findScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
+        try out.print(arena, "  : {s}", .{text[at..end]});
+        at = end;
+    }
+    if (out.items[out.items.len - 1] != '\n') try out.append(arena, '\n');
 }
 
 /// `git fmt-merge-msg`'s title: `Merge branch 'topic'`, and ` into <branch>`
@@ -772,22 +910,15 @@ pub fn mergeLogLength(settings: *const config.Config) error{InvalidMergeLog}!u31
 /// them: the branches, remote-tracking branches and tags together, in that
 /// order, and each commit on its own, the groups in the order they first
 /// come: `Merge branches 'a' and 'b', tag 'v1'; commit 'abc1234'`.
-fn title(arena: Allocator, repo: *Repository, targets: []const Target, head: head_mod.Head) Error![]const u8 {
+fn title(arena: Allocator, out: *std.ArrayList(u8), targets: []const Target, head: head_mod.Head, settings: MessageSettings) Error!void {
     const current = head.shortName() orelse "HEAD";
     var suppressed = false;
-    const patterns = try repo.configuration().all("merge.suppressdest");
-    defer repo.configuration().gpa.free(patterns);
-    var effective: std.ArrayList([]const u8) = .empty;
-    if (patterns.len == 0) {
-        try effective.appendSlice(arena, &.{ "main", "master" });
-    } else for (patterns) |pattern| {
-        if (pattern.len == 0) effective.clearRetainingCapacity() else try effective.append(arena, pattern);
-    }
-    for (effective.items) |pattern| {
+    const default_patterns: []const []const u8 = &.{ "main", "master" };
+    const patterns = settings.suppress_dest orelse default_patterns;
+    for (patterns) |pattern| {
         if (try glob_mod.matches(arena, pattern, current, .{})) suppressed = true;
     }
 
-    var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(arena, "Merge ");
     var local_done = false;
     for (targets, 0..) |target, i| {
@@ -818,5 +949,4 @@ fn title(arena: Allocator, repo: *Repository, targets: []const Target, head: hea
         }
     }
     if (!suppressed) try out.print(arena, " into {s}", .{current});
-    return out.items;
 }

@@ -1017,6 +1017,150 @@ fn octopusHere(pair: *Pair, io: Io, names: []const []const u8, options: merging.
     return merging.startHeads(pair.gpa, io, &repo, targets[0..names.len], options);
 }
 
+/// Branches for `merge.log` to list: `a` with an empty and a spaced
+/// subject, `b` with a merge inside, `d` tagged `t1` and `r` a
+/// remote-tracking branch, each on its own file.
+fn shortlogScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try repo.writeFile(io, "base", "base\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "a" });
+    for ([_][]const u8{ "a1", "  spaced\n\nbody", "a3 first line\nsecond line" }, 0..) |text, i| {
+        try repo.writeFile(io, "a", text[0 .. 1 + i]);
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", text });
+    }
+    try repo.writeFile(io, "a", "empty\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty-message", "-m", "" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "c", "main" });
+    try repo.writeFile(io, "c", "c\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "c1" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "b", "main" });
+    try repo.writeFile(io, "b", "b\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "b1" });
+    try repo.exec(io, &.{ "merge", "-q", "--no-ff", "--no-edit", "c" });
+    try repo.writeFile(io, "b", "b2\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "b2" });
+    for ([_][]const u8{ "d", "r" }) |name| {
+        try repo.exec(io, &.{ "checkout", "-q", "-b", name, "main" });
+        try repo.writeFile(io, name, name);
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", name });
+    }
+    try repo.exec(io, &.{ "tag", "t1", "d" });
+    try repo.exec(io, &.{ "update-ref", "refs/remotes/origin/r", "r" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.exec(io, &.{ "branch", "-D", "r" });
+    try repo.writeFile(io, "m", "m\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main" });
+    try repo.exec(io, &.{ "tag", "start" });
+}
+
+test "merge.log lists the merged commits as git's fmt-merge-msg does" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, shortlogScript);
+            defer pair.deinit();
+            const d_hex = try pair.git.line(io, &.{ "rev-parse", "--short=12", "d" });
+            defer gpa.free(d_hex);
+
+            const Case = struct { settings: []const [2][]const u8, names: []const []const u8, message: ?[]const u8 = null, no_commit: bool = false };
+            const cases = [_]Case{
+                .{ .settings = &.{.{ "merge.log", "true" }}, .names = &.{"a"} },
+                // A count below the commits: the count shown and `...`.
+                .{ .settings = &.{.{ "merge.log", "2" }}, .names = &.{"a"} },
+                .{ .settings = &.{.{ "merge.summary", "1" }}, .names = &.{"b"} },
+                // `-m`'s message, the list after it.
+                .{ .settings = &.{.{ "merge.log", "5" }}, .names = &.{"b"}, .message = "given\n\nbody" },
+                .{ .settings = &.{.{ "merge.log", "5" }}, .names = &.{"b"}, .message = "" },
+                .{ .settings = &.{.{ "merge.log", "0" }}, .names = &.{"b"}, .message = "given only" },
+                // Descriptions of local branches only, under the list.
+                .{ .settings = &.{ .{ "merge.branchdesc", "true" }, .{ "merge.log", "true" }, .{ "branch.a.description", "first\nsecond" }, .{ "branch.b.description", "one line\n" } }, .names = &.{ "a", "b" } },
+                .{ .settings = &.{ .{ "merge.branchdesc", "" }, .{ "merge.branchdesc", "yes" }, .{ "merge.log", "1" }, .{ "branch.a.description", "" } }, .names = &.{"a"} },
+                // Without the list a description is not read.
+                .{ .settings = &.{ .{ "merge.branchdesc", "true" }, .{ "branch.a.description", "unread" } }, .names = &.{"a"} },
+                // An octopus of every kind, each listed under its name.
+                .{ .settings = &.{.{ "merge.log", "3" }}, .names = &.{ "a", "t1", "origin/r", "b" } },
+                .{ .settings = &.{ .{ "merge.log", "true" }, .{ "merge.suppressDest", "" } }, .names = &.{ "t1", d_hex, "origin/r" } },
+                // Stopped before committing: the list in MERGE_MSG.
+                .{ .settings = &.{.{ "merge.log", "true" }}, .names = &.{"a"}, .no_commit = true },
+            };
+            for (cases) |case| {
+                for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                    try r.exec(io, &.{ "reset", "-q", "--hard", "start" });
+                    for ([_][]const u8{ "merge.log", "merge.summary", "merge.branchdesc", "merge.suppressDest", "branch.a.description", "branch.b.description" }) |key| {
+                        try gitMayFail(io, r, &.{ "config", "--unset-all", key });
+                    }
+                    for (case.settings) |setting| try r.exec(io, &.{ "config", "--add", setting[0], setting[1] });
+                }
+                var argv: std.ArrayList([]const u8) = .empty;
+                defer argv.deinit(gpa);
+                try argv.appendSlice(gpa, &.{ "merge", "-q", "--no-edit", "--no-ff" });
+                if (case.message) |m| try argv.appendSlice(gpa, &.{ "-m", m });
+                if (case.no_commit) try argv.append(gpa, "--no-commit");
+                try argv.appendSlice(gpa, case.names);
+                try pair.git.exec(io, argv.items);
+                var outcome = try octopusHere(&pair, io, case.names, .{
+                    .who = who,
+                    .fast_forward = .never,
+                    .message = case.message,
+                    .commit = !case.no_commit,
+                });
+                defer outcome.deinit();
+                try expectSameState(&pair, io, &merge_state, &main_logs);
+            }
+        }
+    }.inFormat);
+}
+
+test "a merge message setting git dies on refuses every merge" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const Case = struct { settings: []const [2][]const u8, bare: ?[]const u8 = null, err: anyerror };
+    const cases = [_]Case{
+        .{ .settings = &.{.{ "merge.branchdesc", "maybe" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{ .{ "merge.branchdesc", "maybe" }, .{ "merge.branchdesc", "true" } }, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "suppressDest", .err = error.InvalidMergeSetting },
+        // A bare description dies only where it is read: listed, local, last.
+        .{ .settings = &.{ .{ "merge.branchdesc", "true" }, .{ "merge.log", "true" } }, .bare = "description", .err = error.InvalidBranchDescription },
+    };
+    for (cases) |case| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, shortlogScript);
+        defer pair.deinit();
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            for (case.settings) |setting| try r.exec(io, &.{ "config", "--add", setting[0], setting[1] });
+            if (case.bare) |name| {
+                const section: []const u8 = if (std.mem.eql(u8, name, "description")) "[branch \"a\"]" else "[merge]";
+                const config_text = try r.readFile(io, ".git/config");
+                defer gpa.free(config_text);
+                const more = try std.mem.concat(gpa, u8, &.{ config_text, section, "\n\t", name, "\n" });
+                defer gpa.free(more);
+                try r.writeFile(io, ".git/config", more);
+            }
+        }
+        pair.git.report_failures = false;
+        var theirs = try pair.git.capture(io, &.{ "merge", "--no-edit", "a" });
+        defer theirs.deinit(gpa);
+        errdefer std.debug.print("git {d}: {s}\n", .{ theirs.code, theirs.stderr });
+        try std.testing.expect(theirs.code != 0);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "a");
+            try std.testing.expectError(case.err, merging.start(gpa, io, &repo, target, .{ .who = who }));
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+    }
+}
+
 /// The names `merge-one-file`'s temporary files give the markers are
 /// random; the same name in both copies makes the rest comparable.
 fn sameTemporaryNames(pair: *Pair, io: Io, path: []const u8) !void {

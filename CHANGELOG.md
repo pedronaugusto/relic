@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `commit.merging` writes `merge.log`'s list as git's `fmt-merge-msg` writes it with no editor open: under the title or the `-m` message, each merged branch, tag or commit with the subjects of the commits `HEAD` lacks, in `git log`'s order, merges left out, the count and `...` past the length, and under `merge.branchDesc` a local branch's description; held to `git merge` over branches, tags, remote-tracking branches, commits and octopuses. `error.UnsupportedMergeMessage` is gone; `mergeLogLength` is `MessageSettings.read`, which reads `merge.log`, `merge.summary`, `merge.branchDesc` and `merge.suppressDest` as git's callback reads them: `error.InvalidMergeSetting` for a `merge.branchDesc` that is not a boolean or a bare `merge.suppressDest` (relic took a bare one as empty), `error.InvalidBranchDescription` for a bare description the list reads. The message is made before anything is merged, as git makes it.
+
+### Changed
+
+- GnuPG test homes are made under `/tmp` (`.zig-cache/gpg` on Windows), so gpg-agent's sockets fit the socket path limit from any checkout.
+
 ## [0.16.0] - 2026-10-17
 
 ### Breaking
