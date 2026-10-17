@@ -63,6 +63,12 @@ pub const Error = error{
     OperationInProgress,
     /// `commit.cleanup` names no mode git knows.
     InvalidCleanupMode,
+    /// `core.commentChar` or `core.commentString` is one git dies on: no
+    /// value, empty, or holding a line break.
+    InvalidCommentString,
+    /// `core.commentChar` is `auto` and every candidate begins a line of
+    /// the message.
+    NoCommentCharacter,
     /// A `--trailer` that is empty, or has no key before its separator.
     InvalidTrailer,
     /// The message is the template's, unedited but for blank lines and
@@ -157,8 +163,9 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
         if (options.verify) _ = try runner.preCommit(io, env);
     }
 
-    const comment = commentPrefix(repo);
-    const first_message = try prepareMessage(arena, io, repo, request.message, cleanup, comment, options);
+    const prepared = try prepareMessage(arena, io, repo, request.message, cleanup, options);
+    const comment = prepared.comment;
+    const first_message = prepared.message;
     try repo.gitDirectory().writeFile(io, .{ .sub_path = "COMMIT_EDITMSG", .data = first_message });
 
     // `pre-commit` may have staged something, so the index is read now and
@@ -258,8 +265,13 @@ fn validateMessage(arena: Allocator, cleaned: []const u8, cleanup: message.Clean
     }
 }
 
-fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8, cleanup: message.Cleanup, comment: []const u8, options: Options) Error![]const u8 {
-    var first_message = try clean(arena, input, cleanup, comment);
+/// git's `prepare_to_commit`: the message as given, its whitespace cleaned
+/// unless it is kept verbatim, which is what an `auto` comment character is
+/// chosen against, and then the trailers asked for.
+fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8, cleanup: message.Cleanup, options: Options) Error!struct { comment: []const u8, message: []const u8 } {
+    const given = try clean(arena, input, if (cleanup == .verbatim) .verbatim else .whitespace, "");
+    const comment = try (try message.Comment.read(repo.configuration())).forMessage(given);
+    var first_message = given;
     if (options.trailers.len != 0) {
         // git's `validate_trailer_args`, then `amend_file_with_trailers`
         const settings = try message.trailerSettings(arena, repo.configuration());
@@ -270,7 +282,7 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
         }
         first_message = try trailer.amend(arena, io, first_message, .{ .settings = settings, .commands = options.trailer_commands, .trailers = options.trailers });
     }
-    return first_message;
+    return .{ .comment = comment, .message = first_message };
 }
 
 /// What `commit.template` holds: the text git starts a message from when
@@ -317,14 +329,6 @@ fn restIsEmpty(text: []const u8, start: usize) bool {
         i += 1;
     }
     return true;
-}
-
-fn commentPrefix(repo: *Repository) []const u8 {
-    const text = repo.configuration().get("core.commentstring") orelse repo.configuration().get("core.commentchar") orelse return "#";
-    // `auto` picks a character the message does not use, which only matters
-    // to an editor's template; with no template it is `#`.
-    if (text.len == 0 or std.mem.eql(u8, text, "auto")) return "#";
-    return text;
 }
 
 fn clean(arena: Allocator, text: []const u8, cleanup: message.Cleanup, comment: []const u8) Allocator.Error![]const u8 {
@@ -574,6 +578,68 @@ test "an unchanged tree, an empty message and a merge in progress are refused by
 
     try fixture.writeFile(io, ".git/MERGE_HEAD", "0000000000000000000000000000000000000000\n");
     try testing.expectError(error.OperationInProgress, commit(io, &repo, .{ .author = who, .committer = who, .message = "m" }, .{ .allow_empty = true }));
+}
+
+test "the comment string is whichever of core.commentChar and core.commentString was set last, and auto chooses against the message, as git commit does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Case = struct { config: []const [2][]const u8, msg: []const u8 };
+    const cases = [_]Case{
+        .{ .config = &.{ .{ "core.commentString", "//" }, .{ "core.commentChar", ";" } }, .msg = "subject\n;gone\n// kept\n#kept\n" },
+        .{ .config = &.{ .{ "core.commentChar", ";" }, .{ "core.commentString", "//" } }, .msg = "subject\n;kept\n// gone\n" },
+        // `#` and `;` begin lines, so `@` is the comment and nothing goes.
+        .{ .config = &.{.{ "core.commentChar", "auto" }}, .msg = "subject\n#one\n;two\n@three\n" },
+        // `#` inside a line only, then at the start of one.
+        .{ .config = &.{.{ "core.commentChar", "auto" }}, .msg = "subject with # inside\n\nbody\n" },
+        .{ .config = &.{.{ "core.commentChar", "auto" }}, .msg = "#subject\n\n;body\n#gone or not\n" },
+        // A `#` only in the comments at the end does not count.
+        .{ .config = &.{.{ "core.commentChar", "AUTO" }}, .msg = "subject\n\n#trailing comment\n" },
+        .{ .config = &.{.{ "core.commentChar", "auto" }}, .msg = "\r#subject\r\n;x\n" },
+    };
+    for (cases) |case| {
+        var twin = try Twin.init(gpa, io);
+        defer twin.deinit();
+        twin.bind();
+        try twin.both(io, &.{ "config", "commit.cleanup", "strip" });
+        for (case.config) |kv| try twin.both(io, &.{ "config", kv[0], kv[1] });
+        try twin.gitCommit(io, &.{ "--allow-empty", "--allow-empty-message", "-m", case.msg });
+        _ = try twin.relicCommit(gpa, io, case.msg, .{ .allow_empty = true, .allow_empty_message = true });
+        errdefer std.debug.print("case: {s}\n", .{case.msg});
+        try twin.expectSame(io, &.{ "cat-file", "commit", "HEAD" });
+    }
+}
+
+test "a comment string git dies on, or an auto with every candidate taken, is refused" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Case = struct { config: []const u8, msg: []const u8, says: []const u8, err: anyerror };
+    const cases = [_]Case{
+        .{ .config = "[core]\n\tcommentChar = \"\"\n", .msg = "m", .says = "must have at least one character", .err = error.InvalidCommentString },
+        .{ .config = "[core]\n\tcommentString = \"a\\nb\"\n", .msg = "m", .says = "cannot contain newline", .err = error.InvalidCommentString },
+        .{ .config = "[core]\n\tcommentChar\n", .msg = "m", .says = "missing value", .err = error.InvalidCommentString },
+        // refused wherever it is, a good value after it or not
+        .{ .config = "[core]\n\tcommentChar = \"\"\n\tcommentString = //\n", .msg = "m", .says = "must have at least one character", .err = error.InvalidCommentString },
+        .{ .config = "[core]\n\tcommentChar = auto\n", .msg = "#\n;\n@\n!\n$\n%\n^\n&\n|\n:\n", .says = "unable to select a comment character", .err = error.NoCommentCharacter },
+    };
+    for (cases) |case| {
+        var twin = try Twin.init(gpa, io);
+        defer twin.deinit();
+        twin.bind();
+        for ([_]*testgit.Repo{ &twin.git, &twin.relic }) |r| {
+            const config = try r.readFile(io, ".git/config");
+            defer gpa.free(config);
+            const text = try std.mem.concat(gpa, u8, &.{ config, case.config });
+            defer gpa.free(text);
+            try r.writeFile(io, ".git/config", text);
+        }
+        twin.git.report_failures = false;
+        var theirs = try twin.git.capture(io, &.{ "-c", "commit.cleanup=strip", "commit", "-q", "--allow-empty", "-m", case.msg });
+        defer theirs.deinit(gpa);
+        errdefer std.debug.print("{s}: git {d}: {s}\n", .{ case.config, theirs.code, theirs.stderr });
+        try testing.expect(theirs.code != 0);
+        try testing.expect(std.mem.find(u8, theirs.stderr, case.says) != null);
+        try testing.expectError(case.err, twin.relicCommit(gpa, io, case.msg, .{ .allow_empty = true, .cleanup = .strip }));
+    }
 }
 
 test "a message that is commit.template unedited is refused, as git commit refuses it" {

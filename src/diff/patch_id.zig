@@ -29,7 +29,12 @@ const attributes = @import("../patterns.zig").attributes;
 const Oid = hash.Oid;
 
 /// Errors from computing a patch id.
-pub const Error = diff.Error || diff.TextError || object.ParseError || attributes.Error || error{NotACommit};
+pub const Error = diff.Error || diff.TextError || object.ParseError || attributes.Error || error{
+    NotACommit,
+    /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
+    /// git dies on.
+    InvalidDriverBinary,
+};
 
 /// The patch id of `commit` against its parent, or against nothing for a
 /// root commit. `null` for a merge, which has none. `binary` says which

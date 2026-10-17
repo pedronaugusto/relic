@@ -38,6 +38,9 @@ const Repository = repo_mod.Repository;
 
 /// Errors from a range-diff.
 pub const Error = error{
+    /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
+    /// git dies on.
+    InvalidDriverBinary,
     /// The cost matrix would need `Options.max_memory` or more, which git
     /// dies on.
     RangeDiffTooLarge,

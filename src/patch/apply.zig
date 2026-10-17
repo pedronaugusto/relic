@@ -57,6 +57,9 @@ const Mode = patchparse.Mode;
 
 /// Errors from applying a patch.
 pub const Error = error{
+    /// `merge.conflictStyle` is bare or names a style git does not know,
+    /// which git dies on.
+    InvalidConflictStyle,
     /// At least one file did not apply and `reject` was not asked for.
     /// Nothing was written; `Diagnostic.failures` says which and why.
     PatchDoesNotApply,
@@ -583,7 +586,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     defer if (rules.attrs) |attrs| attrs.leave();
     _ = &rules;
 
-    var parsed = try parsePatches(gpa, a, text, options);
+    var parsed = try parsePatches(gpa, a, repo.objectFormat(), text, options);
     defer parsed.deinit();
 
     var list: std.ArrayList(*Entry) = .empty;
@@ -653,13 +656,14 @@ pub const Kept = struct {
 
 /// Read `text` as `apply` would under `options`, applying nothing: the
 /// files `git apply --build-fake-ancestor` takes, which `git am`'s
-/// three-way fallback builds its base from.
-pub fn keptFiles(gpa: Allocator, text: []const u8, options: Options) Self.Error!Kept {
+/// three-way fallback builds its base from, `index` lines read for
+/// `object_format`'s names.
+pub fn keptFiles(gpa: Allocator, object_format: hash.Kind, text: []const u8, options: Options) Self.Error!Kept {
     if (text.len >= max_patch_size) return error.PatchTooLarge;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
-    var parsed = try parsePatches(gpa, a, text, options);
+    var parsed = try parsePatches(gpa, a, object_format, text, options);
     errdefer parsed.deinit();
     var files: std.ArrayList(FilePatch) = .empty;
     for (parsed.files) |file| {
@@ -671,9 +675,10 @@ pub fn keptFiles(gpa: Allocator, text: []const u8, options: Options) Self.Error!
     return .{ .gpa = gpa, .arena = arena_instance.state, .patch = parsed, .files = files.items };
 }
 
-fn parsePatches(gpa: Allocator, a: Allocator, text: []const u8, options: Options) Error!patchparse.Patch {
+fn parsePatches(gpa: Allocator, a: Allocator, object_format: hash.Kind, text: []const u8, options: Options) Error!patchparse.Patch {
     var parse_diag: patchparse.Diagnostic = .{};
     return patchparse.parse(gpa, text, .{
+        .object_format = object_format,
         .strip = options.strip,
         .root = if (options.directory.len == 0) "" else try std.mem.concat(a, u8, &.{ std.mem.trimEnd(u8, options.directory, "/"), "/" }),
         .recount = options.recount,
@@ -1446,7 +1451,7 @@ fn threeWayMerge(st: *State, img: *Image, path: []const u8, base: Oid, ours: Oid
     defer db.allocator().free(o.bytes);
     const t = try db.read(st.io, theirs);
     defer db.allocator().free(t.bytes);
-    const style = if (st.repo.configuration().get("merge.conflictstyle")) |v| blob_merge.parseConflictStyle(v) orelse .merge else .merge;
+    const style = try blob_merge.configuredStyle(st.repo.configuration());
     _ = path;
     var result = blob_merge.blobs(st.gpa, b.bytes, o.bytes, t.bytes, .{
         .conflict_style = style,

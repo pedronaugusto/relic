@@ -355,6 +355,64 @@ test "a clean merge commits what git commits, and a fast-forward moves as git's 
     }.inFormat);
 }
 
+test "a merge setting git dies on refuses the merge where git's does, and leaves what git leaves" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const Case = struct { key: []const u8, value: []const u8, script: *const fn (Io, *testgit.Repo) anyerror!void, err: anyerror };
+    const cases = [_]Case{
+        // read by the content merge, so a conflicting merge dies there
+        .{ .key = "merge.conflictStyle", .value = "diff4", .script = divergedScript, .err = error.InvalidConflictStyle },
+        // read before anything is merged, clean or not
+        .{ .key = "commit.cleanup", .value = "tidy", .script = cleanScript, .err = error.InvalidCleanupMode },
+        .{ .key = "merge.log", .value = "-1", .script = cleanScript, .err = error.InvalidMergeLog },
+        .{ .key = "merge.summary", .value = "some", .script = cleanScript, .err = error.InvalidMergeLog },
+    };
+    // A bad value refuses the merge even with a good one after it, as git's
+    // config callback dies on the entry itself.
+    const later_good = [_][2][]const u8{ .{ "merge.conflictStyle", "diff3" }, .{ "commit.cleanup", "strip" }, .{ "merge.log", "0" }, .{ "merge.log", "0" } };
+    for (cases, later_good) |case, good| for ([_]bool{ false, true }) |then_good| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, case.script);
+        defer pair.deinit();
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "config", case.key, case.value });
+            if (then_good and !std.mem.eql(u8, case.key, "commit.cleanup")) try r.exec(io, &.{ "config", "--add", good[0], good[1] });
+        }
+        const branch = if (case.script == cleanScript) "clean" else "topic";
+        pair.git.report_failures = false;
+        var theirs = try pair.git.capture(io, &.{ "merge", branch });
+        defer theirs.deinit(gpa);
+        errdefer std.debug.print("{s}={s}: git {d}: {s}\n", .{ case.key, case.value, theirs.code, theirs.stderr });
+        try std.testing.expect(theirs.code != 0);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, branch);
+            try std.testing.expectError(case.err, merging.start(gpa, io, &repo, target, .{ .who = who }));
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+    };
+    // `merge.summary` is `merge.log`'s old name: whichever is set last
+    // decides, and off is off. (A bad value is refused wherever it is,
+    // which the cases above put last.)
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, .files, cleanScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "merge.log", "true" });
+        try r.exec(io, &.{ "config", "merge.summary", "false" });
+    }
+    try pair.git.exec(io, &.{ "merge", "clean" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "clean");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+}
+
 test "a merge one side stopped is concluded by the other" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {

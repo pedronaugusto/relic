@@ -322,7 +322,28 @@ test "a zip marks an entry text or binary by its diff driver, as git's entry_is_
     }
     // the driver named `default` is the one a path with no driver gets
     try git.exec(io, &.{ "config", "diff.default.binary", "true" });
+    {
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "HEAD" }, head, .{ .format = .zip, .level = 0 });
+    }
+    // `auto` after a boolean leaves it to the bytes again: the last value
+    // decides
+    try git.exec(io, &.{ "config", "--add", "diff.astext.binary", "auto" });
+    {
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "HEAD" }, head, .{ .format = .zip, .level = 0 });
+    }
+    // a value that is neither is refused, a good one after it or not, as
+    // git dies on it
+    try git.exec(io, &.{ "config", "diff.asbinary.binary", "maybe" });
+    try git.exec(io, &.{ "config", "--add", "diff.asbinary.binary", "true" });
+    git.report_failures = false;
+    var theirs = try git.capture(io, &.{ "archive", "--format=zip", "-0", "HEAD" });
+    defer theirs.deinit(gpa);
+    try std.testing.expect(theirs.code != 0);
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "HEAD" }, head, .{ .format = .zip, .level = 0 });
+    try std.testing.expectError(error.InvalidDriverBinary, ours(gpa, io, &repo, head, .{ .format = .zip, .level = 0 }));
 }

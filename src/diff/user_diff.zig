@@ -18,6 +18,9 @@ pub const Error = error{
     /// A pattern that does not compile, or a last one that is negated,
     /// both of which git dies on.
     InvalidFunctionPattern,
+    /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
+    /// git dies on.
+    InvalidDriverBinary,
 } || Allocator.Error;
 
 /// The driver userdiff's lookup gives a path by its `diff` attribute
@@ -42,18 +45,30 @@ pub const Driver = union(enum) {
     }
 
     /// `driver->binary`: whether the driver says, or `null` for the bytes
-    /// to decide; no configuration is an empty one. git dies on a
-    /// `diff.<name>.binary` that is no boolean; here it decides nothing.
-    pub fn says(d: Driver, config: ?*const config_mod.Config) ?bool {
+    /// to decide; no configuration is an empty one. Each
+    /// `diff.<name>.binary` is read as userdiff's `parse_tristate` reads
+    /// it: `auto` leaves it to the bytes, a boolean decides, the last
+    /// deciding, and anything else is refused wherever it is, as git dies
+    /// on it.
+    pub fn says(d: Driver, config: ?*const config_mod.Config) error{InvalidDriverBinary}!?bool {
         switch (d) {
             .text => return false,
             .binary => return true,
             .named => |driver| {
                 var key_buf: [512]u8 = undefined;
                 const c = config orelse return null;
+                // A name past the buffer is no driver a key could name.
                 const key = std.mem.print(&key_buf, "diff.{s}.binary", .{driver}) catch return null;
-                if (!c.has(key)) return null;
-                return c.getBool(key, false) catch null;
+                var said: ?bool = null;
+                var it = c.iterate(&.{key});
+                while (it.next()) |entry| {
+                    const value = entry.value orelse {
+                        said = true;
+                        continue;
+                    };
+                    said = if (std.ascii.eqlIgnoreCase(value, "auto")) null else config_mod.parseBool(value) catch return error.InvalidDriverBinary;
+                }
+                return said;
             },
         }
     }
@@ -61,8 +76,8 @@ pub const Driver = union(enum) {
     /// Whether `bytes` at a path with this driver are binary, as
     /// `diff_filespec_is_binary`, `grep_source_is_binary` and the zip
     /// archive's `entry_is_binary` decide.
-    pub fn isBinary(d: Driver, config: ?*const config_mod.Config, bytes: []const u8) bool {
-        return d.says(config) orelse attributes.isBinaryForDiff(bytes);
+    pub fn isBinary(d: Driver, config: ?*const config_mod.Config, bytes: []const u8) error{InvalidDriverBinary}!bool {
+        return try d.says(config) orelse attributes.isBinaryForDiff(bytes);
     }
 
     /// The name `Rule.init` takes: the text and binary drivers have no

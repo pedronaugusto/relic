@@ -11,6 +11,7 @@ const Allocator = std.mem.Allocator;
 
 const parallax = @import("parallax");
 const attributes = @import("../patterns.zig").attributes;
+const config_mod = @import("../config/config.zig");
 
 /// A content merge refuses data git classifies as binary.
 pub const BlobError = error{BinaryBlob} || Allocator.Error;
@@ -18,10 +19,22 @@ pub const BlobError = error{BinaryBlob} || Allocator.Error;
 /// Which conflict body to write, which is what `merge.conflictStyle` names.
 pub const ConflictStyle = parallax.merge.Style;
 
-/// The style a `merge.conflictStyle` value names, or `null` for one git
-/// does not know.
+/// The style a `merge.conflictStyle` or `--conflict` value names, or
+/// `null` for one git does not know: git's `parse_conflict_style_name`,
+/// exactly `merge`, `diff3` or `zdiff3`.
 pub fn parseConflictStyle(text: []const u8) ?ConflictStyle {
     return std.meta.stringToEnum(ConflictStyle, text);
+}
+
+/// `merge.conflictStyle`, as every git command that merges file contents
+/// reads it (`git_xmerge_config`): the last value, unset the plain style,
+/// and a bare name or a style git does not know refused wherever it is,
+/// as git dies on it.
+pub fn configuredStyle(config: *const config_mod.Config) error{InvalidConflictStyle}!ConflictStyle {
+    var style: ConflictStyle = .merge;
+    var it = config.iterate(&.{"merge.conflictstyle"});
+    while (it.next()) |entry| style = parseConflictStyle(entry.value orelse return error.InvalidConflictStyle) orelse return error.InvalidConflictStyle;
+    return style;
 }
 
 /// What a conflict becomes: markers, or a side without them, as `-X ours`
@@ -130,4 +143,4 @@ fn ownedBlob(gpa: Allocator, bytes: []const u8, status: BlobResult.Status) Alloc
 }
 
 /// All errors reported by this namespace.
-pub const Error = BlobError || Self.BlobError;
+pub const Error = BlobError || Self.BlobError || error{InvalidConflictStyle};

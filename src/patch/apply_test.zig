@@ -333,6 +333,25 @@ test "traditional patches, strip counts, directories, limits and an empty input 
     try compare(&p, io, miscounted, &.{"--recount"}, .{ .recount = true });
 }
 
+test "an index line naming longer names than the repository's, and a quoted name holding a NUL, are read as git reads them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var p = try Pair.init(gpa, io);
+    defer p.deinit();
+    try setupBase(&p, io);
+    // 41 hex digits each side: past SHA-1's names, so git reads no index
+    // line, and so no mode from it either.
+    const long = "diff --git a/b.txt b/b.txt\nindex 11111111111111111111111111111111111111111..22222222222222222222222222222222222222222 100755\n--- a/b.txt\n+++ b/b.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
+    try compare(&p, io, long, &.{}, .{});
+    try reset(&p, io);
+    // git keeps a name as a C string: `\000` inside the quotes ends it.
+    const nul = "diff --git \"a/n\\000ul\" \"b/n\\000ul\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/n\\000ul\"\n@@ -0,0 +1 @@\n+x\n";
+    try compare(&p, io, nul, &.{}, .{});
+    try reset(&p, io);
+    const traditional_nul = "--- /dev/null\n+++ \"b/t\\000ail\"\n@@ -0,0 +1 @@\n+x\n";
+    try compare(&p, io, traditional_nul, &.{}, .{});
+}
+
 test "a corrupt patch is refused by name and changes nothing" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

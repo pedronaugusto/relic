@@ -50,6 +50,9 @@ pub const default_ref = "refs/notes/commits";
 
 /// Errors from reading and writing notes.
 pub const Error = error{
+    /// `merge.conflictStyle` is bare or names a style git does not know,
+    /// which git dies on.
+    InvalidConflictStyle,
     /// A notes ref outside `refs/notes/`, which git refuses to change.
     RefOutsideNotes,
     /// `add` or `copy` onto an object that has a note, without `force`.
@@ -1365,7 +1368,7 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
         const base = try read(io, repo, p.base, &held[0]);
         const ours = try read(io, repo, p.local, &held[1]);
         const theirs = try read(io, repo, p.remote, &held[2]);
-        const style = if (repo.configuration().get("merge.conflictstyle")) |s| blob_merge.parseConflictStyle(s) orelse .merge else .merge;
+        const style = try blob_merge.configuredStyle(repo.configuration());
         if (blob_merge.blobs(gpa, base, ours, theirs, .{
             .conflict_style = style,
             .labels = .{ .ours = local_ref, .theirs = remote_ref, .base = "" },

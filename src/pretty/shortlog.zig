@@ -445,18 +445,12 @@ pub fn addWrappedText(gpa: Allocator, text: []const u8, out: *std.ArrayList(u8),
 }
 
 /// `base` with what a repository's configuration decides filled in: how
-/// trailers are read, `core.commentChar` (or `core.commentString`) and the
-/// `trailer.*` settings. `auto` reads as `#`, which is what git's trailer
-/// parser sees for a commit already made. What it reads is `arena`'s.
-pub fn configured(arena: Allocator, config: *const config_mod.Config, base: Options) Allocator.Error!Options {
+/// trailers are read, by the comment string and the `trailer.*` settings.
+/// `auto` reads as `#`, which is what git's trailer parser sees for a
+/// commit already made. What it reads is `arena`'s.
+pub fn configured(arena: Allocator, config: *const config_mod.Config, base: Options) (Allocator.Error || error{InvalidCommentString})!Options {
     var options = base;
-    var comment: []const u8 = "#";
-    for ([_][]const u8{ "core.commentchar", "core.commentstring" }) |key| {
-        if (config.get(key)) |raw| {
-            if (raw.len != 0 and !std.mem.eql(u8, raw, "auto")) comment = raw;
-        }
-    }
-    options.trailers = try trailer.Settings.load(arena, config, comment);
+    options.trailers = try message.trailerSettings(arena, config);
     return options;
 }
 

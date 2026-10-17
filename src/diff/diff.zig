@@ -540,13 +540,13 @@ pub const BinaryRule = struct {
     config: ?*const config_mod.Config = null,
 
     /// Whether `path`, holding `bytes`, is binary. `a` holds the lookup.
-    pub fn isBinary(rule: BinaryRule, a: Allocator, io: Io, path: []const u8, bytes: []const u8) attributes.Error!bool {
+    pub fn isBinary(rule: BinaryRule, a: Allocator, io: Io, path: []const u8, bytes: []const u8) (attributes.Error || error{InvalidDriverBinary})!bool {
         var state: ?attributes.State = null;
         if (rule.attrs) |attrs| {
             if (rule.work_dir) |wt| try attrs.enter(io, wt, path);
             state = (try attrs.lookup(a, path, .file)).get("diff");
         }
-        return user_diff.Driver.of(rule.config, state).isBinary(rule.config, bytes);
+        return try user_diff.Driver.of(rule.config, state).isBinary(rule.config, bytes);
     }
 };
 

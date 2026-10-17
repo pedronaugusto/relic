@@ -42,22 +42,109 @@ pub const Cleanup = enum {
     }
 };
 
-/// `commit.cleanup` as `git commit` reads it with no editor: `default` and
-/// `scissors` are `whitespace`, which is also what an unset one means, and
-/// any other value is refused, as git dies on it.
+/// git's `get_cleanup_mode`, which `git commit` and `git merge` read
+/// `commit.cleanup` (or `--cleanup`) with: unset and `default` are `strip`
+/// when an editor runs and `whitespace` when none does; `scissors` cleans
+/// as `whitespace` does wherever no cut line is involved; any other value is
+/// refused, as git dies on it. `null` is unset.
+pub fn cleanupMode(text: ?[]const u8, editor: bool) error{InvalidCleanupMode}!Cleanup {
+    const t = text orelse return if (editor) .strip else .whitespace;
+    if (std.mem.eql(u8, t, "default")) return if (editor) .strip else .whitespace;
+    return Cleanup.parse(t) orelse error.InvalidCleanupMode;
+}
+
+/// `commit.cleanup` as `git commit` and `git merge` keep it: the last
+/// value, `null` when unset, and refused if any is a bare name with no
+/// value, as git's `git_config_string` dies on one.
+pub fn cleanupSetting(config: *const config_mod.Config) error{InvalidCleanupMode}!?[]const u8 {
+    var last: ?[]const u8 = null;
+    var it = config.iterate(&.{"commit.cleanup"});
+    while (it.next()) |entry| last = entry.value orelse return error.InvalidCleanupMode;
+    return last;
+}
+
+/// `commit.cleanup` as `git commit` reads it with no editor.
 pub fn commitCleanup(config: *const config_mod.Config) error{InvalidCleanupMode}!Cleanup {
-    const text = config.get("commit.cleanup") orelse return .whitespace;
-    if (std.mem.eql(u8, text, "default")) return .whitespace;
-    return Cleanup.parse(text) orelse error.InvalidCleanupMode;
+    return cleanupMode(try cleanupSetting(config), false);
 }
 
 /// `commit.cleanup` as git's sequencer reads it for a pick, a revert or a
-/// rebase: unset, or a value it only warns about, leaves the message as
-/// it is.
-pub fn sequencerCleanup(config: *const config_mod.Config) Cleanup {
-    const text = config.get("commit.cleanup") orelse return .verbatim;
-    return Cleanup.parse(text) orelse .verbatim;
+/// rebase: each value it knows replaces the one before, one it does not
+/// is passed over with a warning, and none leaves the message as it is;
+/// a bare name with no value is refused, as git's `config_error_nonbool`
+/// dies.
+pub fn sequencerCleanup(config: *const config_mod.Config) error{InvalidCleanupMode}!Cleanup {
+    var mode: Cleanup = .verbatim;
+    var it = config.iterate(&.{"commit.cleanup"});
+    while (it.next()) |entry| mode = Cleanup.parse(entry.value orelse return error.InvalidCleanupMode) orelse mode;
+    return mode;
 }
+
+/// The comment string: `core.commentChar` and `core.commentString`, which
+/// git reads as one setting, the last of either set deciding.
+pub const Comment = union(enum) {
+    /// The string lines begin with to be comments.
+    string: []const u8,
+    /// `auto`: `#`, except for the message `git commit` makes a commit from,
+    /// where it is the first of git's candidates no line of the message
+    /// begins with.
+    auto,
+
+    pub const default: Comment = .{ .string = "#" };
+
+    /// The repository's setting, the last value of either name deciding.
+    /// Refused where git dies, whichever value it is: a bare name with no
+    /// value, an empty string, or one holding a line break.
+    pub fn read(config: *const config_mod.Config) error{InvalidCommentString}!Comment {
+        var comment: Comment = default;
+        var it = config.iterate(&.{ "core.commentchar", "core.commentstring" });
+        while (it.next()) |entry| {
+            const value = entry.value orelse return error.InvalidCommentString;
+            if (std.ascii.eqlIgnoreCase(value, "auto")) {
+                comment = .auto;
+                continue;
+            }
+            if (value.len == 0 or std.mem.findScalar(u8, value, '\n') != null) return error.InvalidCommentString;
+            comment = .{ .string = value };
+        }
+        return comment;
+    }
+
+    /// The string, wherever git does not choose by a message: `auto` is
+    /// `#`.
+    pub fn text(c: Comment) []const u8 {
+        return switch (c) {
+            .string => |s| s,
+            .auto => "#",
+        };
+    }
+
+    /// The string for `msg`, the message a commit is about to be made from,
+    /// as `git commit` takes it: git's `adjust_comment_line_char` for
+    /// `auto` -- `#` if the message has none at all, else the first of
+    /// `#;@!$%^&|:` that begins none of its lines before the comments and
+    /// blank lines at its end (or the old `Conflicts:` block), the first
+    /// line included -- and refused when every candidate is taken, as git
+    /// dies.
+    pub fn forMessage(c: Comment, msg: []const u8) error{NoCommentCharacter}![]const u8 {
+        if (c == .string) return c.string;
+        const candidates = "#;@!$%^&|:";
+        if (std.mem.findScalar(u8, msg, candidates[0]) == null) return candidates[0..1];
+        var taken: [candidates.len]bool = @splat(false);
+        const cutoff = msg.len - trailer.ignoredBytes(msg, msg.len, "#");
+        if (msg.len > 0) {
+            if (std.mem.findScalar(u8, candidates, msg[0])) |i| taken[i] = true;
+        }
+        var p: usize = 0;
+        while (p + 1 < cutoff) : (p += 1) {
+            if ((msg[p] == '\n' or msg[p] == '\r') and msg[p + 1] != 0) {
+                if (std.mem.findScalar(u8, candidates, msg[p + 1])) |i| taken[i] = true;
+            }
+        }
+        for (taken, 0..) |t, i| if (!t) return candidates[i .. i + 1];
+        return error.NoCommentCharacter;
+    }
+};
 
 /// The line `git commit -v` puts above the diff, after the comment string
 /// and a space.
@@ -118,11 +205,10 @@ fn nextLine(buf: []const u8, at: usize) usize {
     return if (std.mem.findScalarPos(u8, buf, at, '\n')) |nl| nl + 1 else buf.len;
 }
 
-/// How a repository reads trailers: its `trailer.*` settings, with the
-/// comment string `core.commentChar` names (`#` for `auto`). Everything is
-/// `arena`'s.
-pub fn trailerSettings(arena: Allocator, config: *const config_mod.Config) Allocator.Error!trailer.Settings {
-    return trailer.Settings.load(arena, config, commentString(config.get("core.commentchar"), ""));
+/// How a repository reads trailers: its `trailer.*` settings, with its
+/// comment string (`#` for `auto`). Everything is `arena`'s.
+pub fn trailerSettings(arena: Allocator, config: *const config_mod.Config) (Allocator.Error || error{InvalidCommentString})!trailer.Settings {
+    return trailer.Settings.load(arena, config, (try Comment.read(config)).text());
 }
 
 /// What `has_conforming_footer` says of a message: no trailer block, one
@@ -234,27 +320,6 @@ pub fn onelineSubject(gpa: Allocator, msg: []const u8) Allocator.Error![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-/// The comment string `core.commentChar` (or `core.commentString`) names:
-/// `#` when it is unset. `auto` picks the first of git's candidates no
-/// line of `msg` begins with.
-pub fn commentString(setting: ?[]const u8, msg: []const u8) []const u8 {
-    const text = setting orelse return "#";
-    if (!std.mem.eql(u8, text, "auto")) return if (text.len == 0) "#" else text;
-    const candidates = "#;@!$%^&|:";
-    for (0..candidates.len) |i| {
-        const candidate = candidates[i .. i + 1];
-        var used = false;
-        var at: usize = 0;
-        while (at < msg.len) : (at = nextLine(msg, at)) {
-            var p = at;
-            while (p < msg.len and (msg[p] == ' ' or msg[p] == '\t')) p += 1;
-            if (p < msg.len and msg[p] == candidate[0]) used = true;
-        }
-        if (!used) return candidate;
-    }
-    return "#";
-}
-
 //=========================================================================
 // Tests
 //=========================================================================
@@ -353,8 +418,12 @@ fn fuzzMessage(_: void, case: *shakedown.Case) anyerror!void {
     try std.testing.expect(std.mem.endsWith(u8, msg.items, "Signed-off-by: A <a@b>\n"));
     const subject = try onelineSubject(gpa, text);
     gpa.free(subject);
-    _ = commentString("auto", text);
+    // Any bytes choose a candidate or run out of them; a choice begins no
+    // line of the message before its trailing comments.
+    if (Comment.forMessage(.auto, text)) |chosen| {
+        try std.testing.expectEqual(@as(usize, 1), chosen.len);
+    } else |err| try std.testing.expectEqual(error.NoCommentCharacter, err);
 }
 
 /// All errors reported by this namespace.
-pub const Error = Allocator.Error;
+pub const Error = Allocator.Error || error{ InvalidCleanupMode, InvalidCommentString, NoCommentCharacter };

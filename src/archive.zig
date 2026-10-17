@@ -49,6 +49,12 @@ const Repository = repo_mod.Repository;
 
 /// Errors from archiving.
 pub const Error = error{
+    /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
+    /// git dies on.
+    InvalidDriverBinary,
+    /// `core.commentChar` or `core.commentString` is one git dies on: no
+    /// value, empty, or holding a line break.
+    InvalidCommentString,
     /// The object is not a commit, a tree, or a tag of one.
     NotATree,
     /// A pathspec names nothing in the tree: git's "did not match any
@@ -654,7 +660,7 @@ const Walk = struct {
             var is_binary = false;
             if (wk.format == .zip) {
                 const config = wk.repo.configuration();
-                is_binary = user_diff.Driver.of(config, applied.get("diff")).isBinary(config, content);
+                is_binary = try user_diff.Driver.of(config, applied.get("diff")).isBinary(config, content);
             }
             try wk.emit(entry.oid, out_path, mode, content, is_binary);
         }

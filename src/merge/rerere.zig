@@ -54,6 +54,9 @@ const Repository = repo_mod.Repository;
 
 /// Errors from reusing resolutions.
 pub const Error = error{
+    /// `merge.conflictStyle` is bare or names a style git does not know,
+    /// which git dies on.
+    InvalidConflictStyle,
     /// `MERGE_RR` does not say what git writes there.
     MalformedMergeRr,
     /// The repository has no working tree.
@@ -615,8 +618,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
             return .{ .bytes = ours, .clean = false };
         } else if (std.mem.eql(u8, driver, "union")) resolve = .both;
     }
-    const style_text = r.repo.configuration().get("merge.conflictstyle");
-    const style = if (style_text) |text| blob_merge.parseConflictStyle(text) orelse .merge else .merge;
+    const style = try blob_merge.configuredStyle(r.repo.configuration());
     var merged = blob_merge.blobs(r.arena, base, ours, theirs, .{
         .labels = labels,
         .marker_size = size,

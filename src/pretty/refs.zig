@@ -56,6 +56,9 @@ const Repository = repo_mod.Repository;
 /// Errors from listing and formatting refs.
 pub const Error = errors: {
     break :errors error{
+        /// `core.commentChar` or `core.commentString` is one git dies on:
+        /// no value, empty, or holding a line break.
+        InvalidCommentString,
         /// `%(...)` naming no atom git has: "unknown field name".
         UnknownField,
         /// A `%(` with no `)`, or `%(*)`: "malformed format string".

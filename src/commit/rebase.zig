@@ -69,6 +69,15 @@ const Repository = repo_mod.Repository;
 
 /// Errors from a rebase.
 pub const Error = error{
+    /// `merge.conflictStyle` is bare or names a style git does not know,
+    /// which git dies on.
+    InvalidConflictStyle,
+    /// `core.commentChar` or `core.commentString` is one git dies on: no
+    /// value, empty, or holding a line break.
+    InvalidCommentString,
+    /// `commit.cleanup` is bare or, where git dies on it, names no mode git
+    /// knows.
+    InvalidCleanupMode,
     /// `.git/rebase-merge` or `.git/rebase-apply` is there already.
     RebaseInProgress,
     /// There is no rebase to continue, skip or abort.
@@ -366,7 +375,7 @@ fn newRun(gpa: Allocator, io: Io, arena_state: *std.heap.ArenaAllocator, repo: *
         .io = io,
         .repo = repo,
         .options = options,
-        .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
+        .comment = (try message.Comment.read(repo.configuration())).text(),
         .trailers = try message.trailerSettings(arena_state.allocator(), repo.configuration()),
         .abbrev_len = abbrev.defaultLength(repo.configuration(), repo.objectDatabase()),
         .allow_ff = !options.force and !options.signoff,
@@ -1436,7 +1445,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     try writeAuthorScript(r, commit.author);
 
     const base_tree = if (parent) |p| try repo.commitTree(io, p) else null;
-    const style = r.options.conflict_style orelse merging.configuredStyle(repo);
+    const style = r.options.conflict_style orelse try merge.configuredStyle(repo.configuration());
     var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = base_tree, .ours = head_tree, .theirs = commit.tree }, .{
         .blob = .{
             .conflict_style = style,
@@ -1527,7 +1536,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
     // `try_to_commit` cleans nothing but whitespace, and that only with a
     // sign-off, unless `commit.cleanup` says otherwise; an edited message
     // is cleaned of comments as an editor's is.
-    const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else message.sequencerCleanup(repo.configuration());
+    const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else try message.sequencerCleanup(repo.configuration());
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     // An edited message is `git commit -n -e`'s: its hooks see the author
     // and the editor the person has.
@@ -2247,7 +2256,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     // The bases oldest first, as git hands them to its recursive merge.
     const reversed = try r.arena.alloc(Oid, bases.len);
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
-    const style = r.options.conflict_style orelse merging.configuredStyle(repo);
+    const style = r.options.conflict_style orelse try merge.configuredStyle(repo.configuration());
     const ref_name = try r.arena.print("refs/rewritten/{s}", .{name});
     var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = index, .ours = head_oid, .theirs = merge_head, .bases = reversed }, .{
         .blob = .{
@@ -2273,7 +2282,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         return finishOutcome(r, .stopped, .conflict, item.commit);
     }
 
-    var text: []const u8 = try message.cleanup(r.arena, r.msg.items, if (r.options.signoff) .whitespace else message.sequencerCleanup(repo.configuration()), r.comment);
+    var text: []const u8 = try message.cleanup(r.arena, r.msg.items, if (r.options.signoff) .whitespace else try message.sequencerCleanup(repo.configuration()), r.comment);
     if (item.edit_message) text = try edited(r, .merge, text);
     const made = try repo.writeCommit(io, .{
         .tree = outcome.tree.?,

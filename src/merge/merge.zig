@@ -43,6 +43,8 @@ pub const BlobError = blob_merge.BlobError;
 pub const ConflictStyle = blob_merge.ConflictStyle;
 /// The style a `merge.conflictStyle` value names.
 pub const parseConflictStyle = blob_merge.parseConflictStyle;
+/// `merge.conflictStyle` as git's merging commands read it.
+pub const configuredStyle = blob_merge.configuredStyle;
 /// What a conflict becomes: markers, one side, or both, parallax's.
 pub const Resolve = blob_merge.Resolve;
 /// How far conflicts are narrowed, parallax's.

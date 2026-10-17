@@ -51,6 +51,15 @@ const Repository = repo_mod.Repository;
 
 /// Errors from replaying commits.
 pub const Error = error{
+    /// `merge.conflictStyle` is bare or names a style git does not know,
+    /// which git dies on.
+    InvalidConflictStyle,
+    /// `core.commentChar` or `core.commentString` is one git dies on: no
+    /// value, empty, or holding a line break.
+    InvalidCommentString,
+    /// `commit.cleanup` is bare or, where git dies on it, names no mode git
+    /// knows.
+    InvalidCleanupMode,
     /// `.git/sequencer` already holds a cherry-pick or a revert.
     SequencerInProgress,
     /// There is no cherry-pick or revert to continue, skip or abort.
@@ -540,7 +549,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     }
     if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.trailers);
 
-    const style = r.options.conflict_style orelse merging.configuredStyle(repo);
+    const style = r.options.conflict_style orelse try merge.configuredStyle(repo.configuration());
     var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse try emptyTree(io, repo) }, .{
         .blob = .{
             .conflict_style = style,
@@ -642,7 +651,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     }
 
     const cleanup: message.Cleanup = r.options.cleanup orelse
-        if (r.options.signoff or r.options.record_origin) .whitespace else message.sequencerCleanup(repo.configuration());
+        if (r.options.signoff or r.options.record_origin) .whitespace else try message.sequencerCleanup(repo.configuration());
     // `try_to_commit`: `prepare-commit-msg` sees the message before it is
     // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
@@ -719,7 +728,7 @@ fn newReplay(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, action
         .repo = repo,
         .action = action,
         .options = options,
-        .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
+        .comment = (try message.Comment.read(repo.configuration())).text(),
         .trailers = try message.trailerSettings(arena, repo.configuration()),
         .abbrev_len = abbrev.defaultLength(repo.configuration(), repo.objectDatabase()),
     };

@@ -48,6 +48,21 @@ const Repository = repo_mod.Repository;
 
 /// Errors from a merge.
 pub const Error = error{
+    /// `merge.log` or `merge.summary` is a negative count or neither a
+    /// boolean nor a count, which git dies on.
+    InvalidMergeLog,
+    /// `merge.conflictStyle` is bare or names a style git does not know,
+    /// which git dies on.
+    InvalidConflictStyle,
+    /// `core.commentChar` or `core.commentString` is one git dies on: no
+    /// value, empty, or holding a line break.
+    InvalidCommentString,
+    /// `core.commentChar` is `auto` and every candidate begins a line of
+    /// the message.
+    NoCommentCharacter,
+    /// `commit.cleanup` is bare or, where git dies on it, names no mode git
+    /// knows.
+    InvalidCleanupMode,
     /// `MERGE_HEAD` is there: a merge is already waiting to be concluded.
     MergeInProgress,
     /// `CHERRY_PICK_HEAD` or `REVERT_HEAD` is there: a cherry-pick or a
@@ -196,6 +211,9 @@ pub const Options = struct {
     message: ?[]const u8 = null,
     /// `--signoff`.
     signoff: bool = false,
+    /// How the message is cleaned: `--cleanup`. `null` asks
+    /// `commit.cleanup`, whose default, with no editor, is `whitespace`.
+    cleanup: ?message.Cleanup = null,
     /// `--allow-unrelated-histories`.
     allow_unrelated_histories: bool = false,
     /// `null` asks `merge.conflictStyle`.
@@ -284,8 +302,12 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
 /// first. One left is merged by ort; two or more by git's octopus,
 /// `three_way.applyOctopus`, whose commit leaves `HEAD` out of its parents
 /// when a target already contains it and a fast-forward is allowed.
-pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Self.Error!Outcome {
-    diagnostic.reset(options.diagnostic);
+pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, given: Options) Self.Error!Outcome {
+    diagnostic.reset(given.diagnostic);
+    // git's `cmd_merge` reads `commit.cleanup` before it merges anything,
+    // and dies there on a mode it does not know.
+    var options = given;
+    options.cleanup = given.cleanup orelse try message.cleanupMode(try message.cleanupSetting(repo.configuration()), false);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -294,7 +316,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     if (inProgress(io, repo)) return error.MergeInProgress;
     if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) or
         repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.SequencerInProgress;
-    if (repo.configuration().getBool("merge.log", false) catch true) return error.UnsupportedMergeMessage;
+    if (try mergeLogLength(repo.configuration()) != 0) return error.UnsupportedMergeMessage;
     if (repo.configuration().getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
 
     var head = try head_mod.read(gpa, io, repo);
@@ -354,7 +376,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     // The bases oldest first, as git hands them to its recursive merge.
     const reversed = try arena.alloc(Oid, bases.len);
     for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
-    const style = options.conflict_style orelse configuredStyle(repo);
+    const style = options.conflict_style orelse try merge.configuredStyle(repo.configuration());
     var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = index, .ours = ours, .theirs = target.oid, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
@@ -456,7 +478,7 @@ fn octopus(
     if (fast_forward == .only) return error.NotFastForward;
 
     var outcome = try three_way.applyOctopus(gpa, io, repo, .{ .index = index, .head = ours, .heads = heads }, .{
-        .blob = .{ .conflict_style = options.conflict_style orelse configuredStyle(repo) },
+        .blob = .{ .conflict_style = options.conflict_style orelse try merge.configuredStyle(repo.configuration()) },
         .filters = options.filters,
         .programs = options.programs,
         .blocked = options.blocked,
@@ -519,7 +541,7 @@ fn commitOrStop(
     options: Options,
 ) Error!Outcome {
     const arena = arena_instance.allocator();
-    const comment = message.commentString(repo.configuration().get("core.commentchar"), "");
+    const comment = (try message.Comment.read(repo.configuration())).text();
     var msg: std.ArrayList(u8) = .empty;
     // The message as given, byte for byte; git's own title has no newline
     // at its end.
@@ -554,7 +576,7 @@ fn commitOrStop(
             if (h.verify) _ = try runner.commitMsg(io, e, message_path);
             text = (try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
         }
-        const cleaned = try message.cleanup(arena, text, cleanupMode(repo, false), comment);
+        const cleaned = try message.cleanup(arena, text, options.cleanup.?, comment);
         if (cleaned.len == 0) return error.EmptyMessage;
         const commit = try repo.writeCommit(io, .{
             .tree = outcome.tree.?,
@@ -670,8 +692,11 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const author = options.author orelse options.who;
     const given = options.message orelse ((try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
+    // `git commit`'s `prepare_to_commit`: an `auto` comment character is
+    // chosen against the message as given, whitespace cleaned, before the
+    // hook sees it.
+    const comment = try (try message.Comment.read(repo.configuration())).forMessage(if (options.cleanup == .verbatim) given else try message.stripSpace(arena, given, null));
     const raw = try h.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
-    const comment = message.commentString(repo.configuration().get("core.commentchar"), raw);
     const cleaned = try message.cleanup(arena, raw, options.cleanup, comment);
     if (cleaned.len == 0) return error.EmptyMessage;
     const commit = try repo.writeCommit(io, .{
@@ -726,18 +751,19 @@ fn configuredFastForward(repo: *Repository) FastForward {
     return if (on) .allow else .never;
 }
 
-/// `merge.conflictStyle`, or the plain style.
-pub fn configuredStyle(repo: *Repository) merge.ConflictStyle {
-    const text = repo.configuration().get("merge.conflictstyle") orelse return .merge;
-    return merge.parseConflictStyle(text) orelse .merge;
-}
-
-/// The cleanup `git merge` uses: `commit.cleanup`, or whitespace alone when
-/// no editor is involved.
-fn cleanupMode(repo: *Repository, editor: bool) message.Cleanup {
-    const text = repo.configuration().get("commit.cleanup") orelse return if (editor) .strip else .whitespace;
-    if (std.mem.eql(u8, text, "default")) return if (editor) .strip else .whitespace;
-    return message.Cleanup.parse(text) orelse .whitespace;
+/// How many commits of each merged branch `merge.log` (or its old name
+/// `merge.summary`, whichever was set last) lists in the message, as
+/// `fmt_merge_msg_config` reads each value: true is 20, false or unset
+/// none, a count itself, and a negative count or a value that is neither
+/// refused wherever it is, as git dies on it.
+pub fn mergeLogLength(settings: *const config.Config) error{InvalidMergeLog}!u31 {
+    var length: u31 = 0;
+    var it = settings.iterate(&.{ "merge.log", "merge.summary" });
+    while (it.next()) |entry| length = switch (config.parseBoolOrInt(entry.value) catch return error.InvalidMergeLog) {
+        .boolean => |on| if (on) 20 else 0,
+        .integer => |n| std.math.cast(u31, n) orelse return error.InvalidMergeLog,
+    };
+    return length;
 }
 
 /// `git fmt-merge-msg`'s title: `Merge branch 'topic'`, and ` into <branch>`

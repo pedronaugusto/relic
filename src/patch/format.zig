@@ -45,6 +45,12 @@ const Repository = repo_mod.Repository;
 
 /// Errors from formatting patches.
 pub const Error = error{
+    /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
+    /// git dies on.
+    InvalidDriverBinary,
+    /// `core.commentChar` or `core.commentString` is one git dies on: no
+    /// value, empty, or holding a line break.
+    InvalidCommentString,
     /// A name in the range is not a commit.
     NotACommit,
     /// `keep_subject` with `numbered`, which git refuses.

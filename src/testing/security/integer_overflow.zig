@@ -125,5 +125,5 @@ test "git 2.39.0 apply input cap, t4141-apply-too-large 'git apply rejects patch
     defer repo.deinit(io);
     const huge = unread(u8, apply.max_patch_size);
     try std.testing.expectError(error.PatchTooLarge, apply.apply(gpa, io, &repo, huge, .{}));
-    try std.testing.expectError(error.PatchTooLarge, apply.keptFiles(gpa, huge, .{}));
+    try std.testing.expectError(error.PatchTooLarge, apply.keptFiles(gpa, .sha1, huge, .{}));
 }

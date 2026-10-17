@@ -286,6 +286,31 @@ test "a patch that does not apply stops both at the same mail with the same stat
     }.inFormat);
 }
 
+test "a session git am started with -C in any of git's integer spellings is finished by relic" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
+    defer gpa.free(mbox);
+    // `git apply`'s `-C` is `OPT_UNSIGNED`: base 0 and a size suffix.
+    for ([_][]const u8{ "-C2", "-C0x2", "-C02", "-C+1", "-C0k" }) |context| {
+        var p = try Pair.init(gpa, io, .files);
+        defer p.deinit();
+        try setupPair(&p, io);
+        try p.write(io, "other.txt", "alpha\nbeta\nGamma-ours\n");
+        try p.both(io, &.{ "commit", "-q", "-a", "-m", "ours" });
+        try std.testing.expect(try gitAm(gpa, io, &p, &.{context}, mbox) != 0);
+        try p.write(io, "other.txt", "alpha\nbeta\nGAMMA\n");
+        try p.write(io, "base.txt", "one\nTWO\nthree\nfour\nfive\nsix\nseven\nEIGHT\n");
+        try p.git.exec(io, &.{ "add", "-A" });
+        var git_side = try Repository.open(gpa, io, p.git.dir, .{});
+        defer git_side.deinit(io);
+        errdefer std.debug.print("{s}\n", .{context});
+        var done = try am.proceed(gpa, io, &git_side, .{ .committer = committer });
+        defer done.deinit();
+        try std.testing.expect(done.stopped == null);
+    }
+}
+
 test "the three-way fallback leaves git's conflict, and skip and abort put things back as git's do" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {

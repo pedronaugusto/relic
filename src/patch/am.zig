@@ -23,6 +23,7 @@ const Self = @This();
 const std = @import("std");
 const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
+const config_mod = @import("../config/config.zig");
 const state_file = @import("../repo/state.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -52,6 +53,9 @@ const state_dir = "rebase-apply";
 
 /// Errors from `am`.
 pub const Error = error{
+    /// `core.commentChar` or `core.commentString` is one git dies on: no
+    /// value, empty, or holding a line break.
+    InvalidCommentString,
     /// A session is already in progress.
     AmInProgress,
     /// `rebase-apply` is there with no session in it: git's "Stray
@@ -353,7 +357,9 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
         } else if (std.mem.startsWith(u8, w, "--exclude=")) {
             try limits.append(a, .{ .pattern = w["--exclude=".len..], .include = false });
         } else if (std.mem.startsWith(u8, w, "-C")) {
-            o.min_context = decimal.whole(usize, w[2..], 10) orelse return error.UnsupportedApplyOption;
+            // `OPT_UNSIGNED` into an `unsigned int`, as `git apply` reads
+            // the `-C<n>` `git am` passes it.
+            o.min_context = @intCast(config_mod.parseNonNegative(w[2..], std.math.maxInt(u32)) catch return error.UnsupportedApplyOption);
         } else if (std.mem.startsWith(u8, w, "-p")) {
             o.strip = decimal.whole(usize, w[2..], 10) orelse return error.UnsupportedApplyOption;
         } else if (std.mem.eql(u8, w, "--reject")) {
@@ -664,7 +670,7 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
 
     // the fake ancestor: every file the patch changes, at its old blob
     // Read as the apply that failed read it, its directory and limits too.
-    var parsed = apply_mod.keptFiles(gpa, patch, apply_options) catch |err| switch (err) {
+    var parsed = apply_mod.keptFiles(gpa, s.repo.objectFormat(), patch, apply_options) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .failed,
     };

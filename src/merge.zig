@@ -10,6 +10,7 @@ pub const Error = @import("merge/merge.zig").Error;
 pub const BlobError = @import("merge/merge.zig").BlobError;
 pub const ConflictStyle = @import("merge/merge.zig").ConflictStyle;
 pub const parseConflictStyle = @import("merge/merge.zig").parseConflictStyle;
+pub const configuredStyle = @import("merge/merge.zig").configuredStyle;
 pub const Resolve = @import("merge/merge.zig").Resolve;
 pub const Level = @import("merge/merge.zig").Level;
 pub const Labels = @import("merge/merge.zig").Labels;

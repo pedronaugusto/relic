@@ -26,6 +26,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const c_quote = @import("../text.zig").c_quote;
+const hash = @import("../hash/hash.zig");
 const binarypatch = @import("binary.zig");
 const hunks = @import("parallax").patch;
 
@@ -77,6 +78,10 @@ pub const Options = struct {
     /// `-R`: the patch will be applied in reverse, so its added lines are
     /// the old file's, which decides whether the old file has CR LF.
     reverse: bool = false,
+    /// The object format of the repository the patch is read in, SHA-1
+    /// outside one: an `index` line naming more hex digits than its names
+    /// have is not read, as git's `gitdiff_index` reads none.
+    object_format: hash.Kind = .sha1,
     /// Where the line a refusal was found at is written.
     diagnostic: ?*Diagnostic = null,
 };
@@ -310,7 +315,8 @@ fn withRoot(p: *Parser, name: []const u8) Allocator.Error![]const u8 {
 /// A name quoted as git quotes one, with `p_value` components removed.
 fn findNameGnu(p: *Parser, line: []const u8, p_value: usize) Allocator.Error!?[]const u8 {
     const got = (try c_quote.unquote(p.a, line)) orelse return null;
-    var cp: []const u8 = got.name;
+    // git keeps the name as a C string, so a `\000` in the quotes ends it.
+    var cp: []const u8 = cString(got.name);
     var n = p_value;
     while (n > 0) : (n -= 1) {
         const slash = std.mem.findScalar(u8, cp, '/') orelse return null;
@@ -570,6 +576,12 @@ fn skipTreePrefix(p_value: usize, line: []const u8) ?[]const u8 {
 /// The name on a `diff --git` line when both sides name the same file,
 /// which is all a mode change or the creation or deletion of an empty file
 /// has to go on.
+/// `s` up to its first NUL: the name git's C string holds of an unquoted
+/// `\000`.
+fn cString(s: []const u8) []const u8 {
+    return s[0 .. std.mem.findScalar(u8, s, 0) orelse s.len];
+}
+
 fn gitHeaderName(p: *Parser, full_line: []const u8) Allocator.Error!?[]const u8 {
     // the line without "diff --git ", its newline kept as git's C string has it
     const line = full_line["diff --git ".len..];
@@ -582,14 +594,16 @@ fn gitHeaderName(p: *Parser, full_line: []const u8) Allocator.Error!?[]const u8 
         if (line[second] == '"') {
             const sp = (try c_quote.unquote(p.a, line[second..])) orelse return null;
             const cp = skipTreePrefix(p.p_value, sp.name) orelse return null;
-            if (!std.mem.eql(u8, cp, first_name)) return null;
-            return first_name;
+            // compared and kept as C strings, as git's `strcmp` and
+            // `strbuf_detach` have them: a `\000` ends each name
+            if (!std.mem.eql(u8, cString(cp), cString(first_name))) return null;
+            return cString(first_name);
         }
         // git compares the rest of the line, its newline included, so a
         // quoted first name and a bare second never agree
         const cp = skipTreePrefix(p.p_value, line[second..]) orelse return null;
         if (!std.mem.eql(u8, cp, first_name)) return null;
-        return first_name;
+        return cString(first_name);
     }
     const name = skipTreePrefix(p.p_value, line) orelse return null;
     // a quote in an unquoted first name begins the second name
@@ -776,9 +790,8 @@ fn verifyName(p: *Parser, line: []const u8, isnull: bool, name: *?[]const u8, si
     }
 }
 
-const max_hex = 64;
-
 fn parseIndexLine(p: *Parser, line: []const u8, file: *FilePatch) Error!void {
+    const max_hex = p.options.object_format.hexLen();
     const dot = std.mem.findScalar(u8, line, '.') orelse return;
     if (dot + 1 >= line.len or line[dot + 1] != '.' or dot > max_hex) return;
     const old = line[0..dot];

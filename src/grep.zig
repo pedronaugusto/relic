@@ -42,6 +42,9 @@ const Repository = repo_mod.Repository;
 
 /// Errors from a grep.
 pub const Error = error{
+    /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
+    /// git dies on.
+    InvalidDriverBinary,
     /// `-P` with no `Matcher`: Perl-compatible expressions, which git
     /// builds with PCRE and this does not have.
     UnsupportedPerlRegex,
@@ -907,7 +910,7 @@ fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attr
             state = (try at.lookup(a, item.path, .file)).get("diff");
         }
         const driver = user_diff.Driver.of(config, state);
-        item.binary = driver.says(config);
+        item.binary = try driver.says(config);
         if (!functions) continue;
         const key = driver.name() orelse "";
         item.rule = rules.get(key) orelse blk: {

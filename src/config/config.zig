@@ -1032,6 +1032,35 @@ pub const Config = struct {
         return found;
     }
 
+    /// Every entry setting any of `full_names`, oldest first: for a reader
+    /// that takes each value as git's config callback does -- refusing a bad
+    /// one wherever it is, the last good one deciding -- and for names git
+    /// reads as one setting, such as `core.commentChar` and
+    /// `core.commentString`, or `merge.log` and its old name
+    /// `merge.summary`.
+    pub fn iterate(config: *const Config, full_names: []const []const u8) Iterator {
+        return .{ .entries = config.entries.items, .names = full_names };
+    }
+
+    /// The entries `iterate` names, in the order git reads them.
+    pub const Iterator = struct {
+        entries: []const Entry,
+        names: []const []const u8,
+        at: usize = 0,
+
+        pub fn next(it: *Iterator) ?Entry {
+            while (it.at < it.entries.len) {
+                const entry = it.entries[it.at];
+                it.at += 1;
+                for (it.names) |full_name| {
+                    const split = splitFullName(full_name) orelse continue;
+                    if (entry.matches(split.section, split.subsection, split.name)) return entry;
+                }
+            }
+            return null;
+        }
+    };
+
     /// Which file and line last set `full_name`, as a path and a one-based
     /// line number. `null` when it is not set.
     pub fn origin(config: *const Config, full_name: []const u8) ?struct { path: []const u8, line: u32, level: Level } {
@@ -1462,6 +1491,29 @@ pub fn parseBool(raw: []const u8) Self.ValueError!bool {
     return n != 0;
 }
 
+/// A value git reads as a boolean or a count.
+pub const BoolOrInt = union(enum) {
+    boolean: bool,
+    integer: i32,
+};
+
+/// git's `git_config_bool_or_int`: a bare name and git's boolean spellings
+/// are a boolean, anything else an `int` as `git_parse_int` reads it
+/// (`error.NotAnInteger` where git dies with "bad numeric config value").
+/// `null` is a bare name.
+pub fn parseBoolOrInt(raw: ?[]const u8) Self.ValueError!BoolOrInt {
+    const text = raw orelse return .{ .boolean = true };
+    if (text.len == 0) return .{ .boolean = false };
+    for ([_][]const u8{ "true", "yes", "on" }) |t| {
+        if (std.ascii.eqlIgnoreCase(text, t)) return .{ .boolean = true };
+    }
+    for ([_][]const u8{ "false", "no", "off" }) |f| {
+        if (std.ascii.eqlIgnoreCase(text, f)) return .{ .boolean = false };
+    }
+    const n = try parseInteger(text);
+    return .{ .integer = std.math.cast(i32, n) orelse return error.NotAnInteger };
+}
+
 /// git's `interpolate_path`: `~` alone or before a `/` is `home`, `~user`
 /// is that user's home directory, and anything else is the path as it is.
 /// No home, no such user, and git's own `%(prefix)/` are
@@ -1533,6 +1585,19 @@ pub fn parseInteger(raw: []const u8) Self.ValueError!i64 {
     }
     if (i != raw.len) return error.NotAnInteger;
     return std.math.mul(i64, value, multiplier) catch error.NotAnInteger;
+}
+
+/// git's `git_parse_unsigned`, what an `OPT_UNSIGNED` option and an
+/// unsigned setting are read with: `strtoumax` in base 0 -- leading blanks
+/// and a `+`, `0x` for hexadecimal, a leading `0` for octal -- then a `k`,
+/// `m` or `g` size suffix and nothing after, no `-` anywhere, and at most
+/// `max` once multiplied.
+pub fn parseNonNegative(raw: []const u8, max: u64) Self.ValueError!u64 {
+    if (std.mem.findScalar(u8, raw, '-') != null) return error.NotAnInteger;
+    // Read as `i64`, which holds every `max` a caller passes.
+    const value: u64 = @intCast(try parseInteger(raw));
+    if (value > max) return error.NotAnInteger;
+    return value;
 }
 
 /// Errors from `checkKey`.
@@ -1996,6 +2061,46 @@ test "values read with the last one winning" {
     defer gpa.free(subs);
     try std.testing.expectEqual(@as(usize, 1), subs.len);
     try std.testing.expectEqualStrings("origin", subs[0]);
+}
+
+test "an unsigned value reads as git_parse_unsigned reads it" {
+    const max: u64 = std.math.maxInt(u32);
+    try std.testing.expectEqual(@as(u64, 3), try parseNonNegative("3", max));
+    try std.testing.expectEqual(@as(u64, 16), try parseNonNegative("0x10", max));
+    try std.testing.expectEqual(@as(u64, 8), try parseNonNegative("010", max));
+    try std.testing.expectEqual(@as(u64, 2048), try parseNonNegative(" +2k", max));
+    try std.testing.expectEqual(@as(u64, 1 << 30), try parseNonNegative("1g", max));
+    try std.testing.expectError(error.NotAnInteger, parseNonNegative("4g", max));
+    try std.testing.expectError(error.NotAnInteger, parseNonNegative("-0", max));
+    try std.testing.expectError(error.NotAnInteger, parseNonNegative("", max));
+    try std.testing.expectError(error.NotAnInteger, parseNonNegative("3x", max));
+}
+
+test "a boolean or a count reads as git_config_bool_or_int reads it" {
+    try std.testing.expectEqual(BoolOrInt{ .boolean = true }, try parseBoolOrInt(null));
+    try std.testing.expectEqual(BoolOrInt{ .boolean = false }, try parseBoolOrInt(""));
+    try std.testing.expectEqual(BoolOrInt{ .boolean = true }, try parseBoolOrInt("Yes"));
+    try std.testing.expectEqual(BoolOrInt{ .integer = 1 }, try parseBoolOrInt("1"));
+    try std.testing.expectEqual(BoolOrInt{ .integer = 2048 }, try parseBoolOrInt("2k"));
+    try std.testing.expectEqual(BoolOrInt{ .integer = -3 }, try parseBoolOrInt("-3"));
+    try std.testing.expectError(error.NotAnInteger, parseBoolOrInt("2g"));
+    try std.testing.expectError(error.NotAnInteger, parseBoolOrInt("maybe"));
+}
+
+test "an iteration over names read as one setting meets every entry of either, in order" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa, "[core]\n\tcommentString = //\n\tcommentChar = \";\"\n[merge]\n\tlog = 3\n\tsummary\n", .local);
+    defer config.deinit();
+    var it = config.iterate(&.{ "core.commentstring", "core.commentchar" });
+    try std.testing.expectEqualStrings("//", it.next().?.value.?);
+    try std.testing.expectEqualStrings(";", it.next().?.value.?);
+    try std.testing.expect(it.next() == null);
+    var logs = config.iterate(&.{ "merge.log", "merge.summary" });
+    try std.testing.expectEqualStrings("3", logs.next().?.value.?);
+    try std.testing.expect(logs.next().?.value == null);
+    try std.testing.expect(logs.next() == null);
+    var none = config.iterate(&.{"core.missing"});
+    try std.testing.expect(none.next() == null);
 }
 
 test "a bare name is true and an empty value is false" {
