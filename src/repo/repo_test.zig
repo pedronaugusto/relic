@@ -611,6 +611,7 @@ test "discovery stops at a damaged .git file, passes over a .git that is no repo
 test "an includeIf gitdir:./ starts from the including file's directory, and -c include.path is followed, as git does both" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
+    try testgit.requireGit(gpa, io);
     var home = std.testing.tmpDir(.{ .iterate = true });
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
@@ -652,6 +653,7 @@ test "an includeIf gitdir:./ starts from the including file's directory, and -c 
 test "includeIf gitdir: and onbranch: globs hold where git's wildmatch says they do" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
+    try testgit.requireGit(gpa, io);
     var home = std.testing.tmpDir(.{ .iterate = true });
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);

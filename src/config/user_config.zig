@@ -360,6 +360,7 @@ fn relicCommandValues(gpa: Allocator, io: Io, pairs: []const config_mod.Sources.
 test "GIT_CONFIG_COUNT is read by strtoul and GIT_CONFIG_NOSYSTEM as a boolean, refused where git refuses them" {
     const gpa = testing.allocator;
     const io = testing.io;
+    try testgit.requireGit(gpa, io);
     var home = testing.tmpDir(.{});
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
@@ -408,6 +409,7 @@ test "GIT_CONFIG_COUNT is read by strtoul and GIT_CONFIG_NOSYSTEM as a boolean, 
 test "GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are read as git reads them, both quotings, and refused where git refuses them" {
     const gpa = testing.allocator;
     const io = testing.io;
+    try testgit.requireGit(gpa, io);
     var home = testing.tmpDir(.{});
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
