@@ -78,7 +78,15 @@ pub const FullResult = union(enum) {
     absent,
     /// This platform does not report these fields, or the call failed for a
     /// reason the caller should see as an error. Ask `std.Io` instead.
+    /// Never the answer on Windows, which says `failed` instead.
     unavailable,
+    /// Windows only: the stat could not be taken, for this reason. There
+    /// `std.Io` is no second way to ask: its stat describes the file
+    /// otherwise (no attributes, the attribute-change time, a link's size as
+    /// zero), so an answer from it would be another stat, not this one taken
+    /// again, and a walk would see a different working tree when the first
+    /// call failed.
+    failed: Error,
 };
 
 /// One stat of `sub_path` relative to `dir`, without following a symlink.
@@ -175,7 +183,10 @@ pub fn modePermissions(mode: u32) Io.File.Permissions {
 /// attributes and nothing else, on the link itself rather than its target.
 fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8) FullResult {
     const windows = std.os.windows;
-    var path_w = Io.Threaded.sliceToPrefixedFileW(dir.handle, sub_path, .{}) catch return .unavailable;
+    var path_w = Io.Threaded.sliceToPrefixedFileW(dir.handle, sub_path, .{}) catch |err| return switch (err) {
+        error.FileNotFound => .absent,
+        else => |e| .{ .failed = e },
+    };
     // The directory itself is the empty name relative to it; Windows has no
     // `.`.
     if (std.mem.eql(u8, sub_path, ".")) path_w.len = 0;
@@ -204,7 +215,14 @@ fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8) FullResult {
     )) {
         .SUCCESS => {},
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND, .NOT_A_DIRECTORY => return .absent,
-        else => return .unavailable,
+        // git's `mingw_lstat` names these EACCES; a file being deleted is one
+        // of them there too.
+        .ACCESS_DENIED, .SHARING_VIOLATION, .DELETE_PENDING => return .{ .failed = error.AccessDenied },
+        .OBJECT_NAME_INVALID => return .{ .failed = error.BadPathName },
+        .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => return .{ .failed = error.NetworkNotFound },
+        .VIRUS_INFECTED, .VIRUS_DELETED => return .{ .failed = error.AntivirusInterference },
+        .INSUFFICIENT_RESOURCES => return .{ .failed = error.SystemResources },
+        else => return .{ .failed = error.Unexpected },
     }
     defer windows.CloseHandle(handle);
 
@@ -212,18 +230,25 @@ fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8) FullResult {
     switch (windows.ntdll.NtQueryInformationFile(handle, &iosb, &info, @sizeOf(windows.FILE.ALL_INFORMATION), .All)) {
         // More than the buffer holds is the name, which this does not use.
         .SUCCESS, .BUFFER_OVERFLOW => {},
-        else => return .unavailable,
+        .ACCESS_DENIED => return .{ .failed = error.AccessDenied },
+        else => return .{ .failed = error.Unexpected },
     }
     const attributes = info.BasicInformation.FileAttributes;
-    // A reparse point is a link when it is a name surrogate, as `std.Io`
-    // reads it, so a junction is never walked through either.
+    // git's `file_attr_to_st_mode` makes a link of a symbolic link's tag
+    // alone, and every other reparse point (a cloud placeholder, a
+    // deduplicated file, WSL's own links) the file or directory its
+    // attributes say. A junction is a link here too, as `std.Io`'s directory
+    // listing reads it, so a walk never goes through one.
     const kind: Io.File.Kind = if (attributes.REPARSE_POINT) kind: {
         var tag: windows.FILE.ATTRIBUTE_TAG_INFO = undefined;
         switch (windows.ntdll.NtQueryInformationFile(handle, &iosb, &tag, @sizeOf(windows.FILE.ATTRIBUTE_TAG_INFO), .AttributeTag)) {
             .SUCCESS => {},
-            else => return .unavailable,
+            .ACCESS_DENIED => return .{ .failed = error.AccessDenied },
+            else => return .{ .failed = error.Unexpected },
         }
-        break :kind if (tag.ReparseTag.IsSurrogate) .sym_link else .unknown;
+        const link = @as(u32, @bitCast(tag.ReparseTag)) == @as(u32, @bitCast(windows.IO_REPARSE_TAG.SYMLINK)) or
+            @as(u32, @bitCast(tag.ReparseTag)) == @as(u32, @bitCast(windows.IO_REPARSE_TAG.MOUNT_POINT));
+        break :kind if (link) .sym_link else if (attributes.DIRECTORY) .directory else .file;
     } else if (attributes.DIRECTORY) .directory else .file;
 
     // git's `file_attr_to_st_mode`: read for the owner always, write unless
@@ -231,14 +256,26 @@ fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8) FullResult {
     const type_bits: u32 = switch (kind) {
         .sym_link => 0o120000,
         .directory => 0o040000,
-        else => if (attributes.DIRECTORY) 0o040000 else 0o100000,
+        else => 0o100000,
     };
     const mode: u32 = type_bits | 0o400 | @as(u32, if (attributes.READONLY) 0 else 0o200);
     // A link's size is its target's length, as `lstat` gives it and the
-    // index records it.
+    // index records it. A link that cannot be read fails the stat, as it
+    // fails git's.
     const size: u64 = if (kind == .sym_link) size: {
         var target: [Io.Dir.max_path_bytes]u8 = undefined;
-        break :size dir.readLink(io, sub_path, &target) catch return .unavailable;
+        break :size dir.readLink(io, sub_path, &target) catch |err| return switch (err) {
+            // Gone, or no longer a link, since the handle above was closed.
+            error.FileNotFound, error.NotDir => .absent,
+            error.AccessDenied, error.PermissionDenied => .{ .failed = error.AccessDenied },
+            error.NameTooLong => .{ .failed = error.NameTooLong },
+            error.BadPathName => .{ .failed = error.BadPathName },
+            error.NetworkNotFound => .{ .failed = error.NetworkNotFound },
+            error.AntivirusInterference => .{ .failed = error.AntivirusInterference },
+            error.SystemResources => .{ .failed = error.SystemResources },
+            error.Canceled => .{ .failed = error.Canceled },
+            else => .{ .failed = error.Unexpected },
+        };
     } else @bitCast(info.StandardInformation.EndOfFile);
     return .{ .found = .{
         .mtime_ns = windows.fromSysTime(info.BasicInformation.LastWriteTime).nanoseconds,
@@ -343,8 +380,18 @@ test "a missing path is zeros, not an error" {
     try std.testing.expectEqual(@as(u32, 0), extra.dev);
 }
 
-/// All errors reported by this namespace.
-pub const Error = error{};
+/// All errors reported by this namespace: why a Windows stat could not be
+/// taken, each a name `std.Io`'s own stat gives the same failure.
+pub const Error = error{
+    AccessDenied,
+    BadPathName,
+    NameTooLong,
+    NetworkNotFound,
+    AntivirusInterference,
+    SystemResources,
+    Canceled,
+    Unexpected,
+};
 
 /// `st_dev` as the 32 bits git keeps of it, whether the platform's type is
 /// signed (macOS) or unsigned (Linux, FreeBSD).

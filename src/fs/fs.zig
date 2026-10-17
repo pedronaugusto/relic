@@ -501,6 +501,7 @@ pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
             .kind = f.kind,
             .executable = f.mode & 0o100 != 0,
         },
+        .failed => |e| return e,
         // Either the platform has no such call, or it failed for a reason the
         // caller should see named rather than guessed at. `std.Io` names it.
         .unavailable => {},
@@ -529,6 +530,7 @@ pub fn validityAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Sta
             stat.ino = @truncate(f.file_id);
             return stat;
         },
+        .failed => |e| return e,
         .unavailable => return if (try statAt(io, dir, sub_path)) |found| found.stat else null,
     }
 }
@@ -545,7 +547,7 @@ pub fn sameFile(io: Io, a: Io.Dir, a_path: []const u8, b: Io.Dir, b_path: []cons
 fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) ?struct { id: u64, dev: u32 } {
     switch (platstat.full(io, dir, sub_path)) {
         .found => |f| return .{ .id = f.file_id, .dev = f.extra.dev },
-        .absent => return null,
+        .absent, .failed => return null,
         .unavailable => {},
     }
     const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch return null;
@@ -863,10 +865,9 @@ pub fn permissionsAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?
     switch (platstat.full(io, dir, sub_path)) {
         .absent => return null,
         .found => |f| return .{ .kind = f.kind, .permissions = f.permissions },
-        // Where the platform answers everything else, a stat that cannot be
-        // taken is named by `std.Io`; on Windows its answer would be no
-        // attributes, which is not the file's.
-        .unavailable => if (builtin.target.os.tag == .windows) return error.Unexpected,
+        .failed => |e| return e,
+        // A stat that cannot be taken is named by `std.Io`.
+        .unavailable => {},
     }
     const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
@@ -994,7 +995,7 @@ pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) v
     if (shared == .umask or !Io.File.Permissions.has_executable_bit) return;
     const found = switch (platstat.full(io, dir, sub_path)) {
         .found => |f| f,
-        .absent, .unavailable => return,
+        .absent, .unavailable, .failed => return,
     };
     const old = found.mode & 0o7777;
     var new = shared.calc(old);
@@ -1103,7 +1104,7 @@ pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]co
         else => {
             const found = switch (platstat.full(io, dir, sub_path)) {
                 .found => |f| f,
-                .absent, .unavailable => return false,
+                .absent, .unavailable, .failed => return false,
             };
             const euid: u32 = switch (builtin.target.os.tag) {
                 .linux => std.os.linux.geteuid(),
@@ -1485,6 +1486,10 @@ test "a stat shortcut believes exactly as many nanoseconds as were measured" {
 }
 
 test "one stat and two stats describe a path the same way" {
+    // Windows has one stat, git for Windows' own, and no second way to take
+    // it: `std.Io`'s describes the file otherwise by design. The next test
+    // holds it to git's.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1505,10 +1510,7 @@ test "one stat and two stats describe a path the same way" {
         const one = (try statAt(io, dir, name)).?;
         // The two-call path, which is what a platform without a full stat
         // takes. Both must agree, or a walk would see a different working
-        // tree depending on the platform. Windows has a full stat, git for
-        // Windows' own, whose inode is zero and whose change time is the
-        // creation time where `std.Io` has the file id and the attribute
-        // change; `windows_git_stat` below holds it to git's.
+        // tree depending on the platform.
         const s = try dir.statFile(io, name, .{ .follow_symlinks = false });
         const two: Entry = .{
             .stat = .fromIo(s, platstat.statAt(dir, name)),
@@ -1518,7 +1520,7 @@ test "one stat and two stats describe a path the same way" {
         try std.testing.expectEqual(two.kind, one.kind);
         try std.testing.expectEqual(two.executable, one.executable);
         try std.testing.expectEqual(two.stat.size, one.stat.size);
-        if (builtin.target.os.tag != .windows) try std.testing.expectEqual(two.stat.ino, one.stat.ino);
+        try std.testing.expectEqual(two.stat.ino, one.stat.ino);
         try std.testing.expectEqual(two.stat.dev, one.stat.dev);
         try std.testing.expectEqual(two.stat.uid, one.stat.uid);
         try std.testing.expectEqual(two.stat.gid, one.stat.gid);
@@ -1555,6 +1557,17 @@ test "on Windows a stat is git for Windows' own: no inode, the creation time, th
     try std.testing.expect((try statAt(io, tmp.dir, "f")).?.stat.size == 21);
     try setFilePermissions(io, tmp.dir, "f", withReadOnly(locked.permissions, false));
     try std.testing.expect(!isReadOnly((try permissionsAt(io, tmp.dir, "f")).?.permissions));
+
+    // A link is the link itself, its size its target's length, where
+    // `std.Io` reports zero.
+    tmp.dir.symLink(io, "f", "link", .{}) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return,
+        else => |e| return e,
+    };
+    const link = (try statAt(io, tmp.dir, "link")).?;
+    try std.testing.expectEqual(Io.File.Kind.sym_link, link.kind);
+    try std.testing.expectEqual(@as(u32, 1), link.stat.size);
+    try std.testing.expect(!link.executable);
 }
 
 test "a link to a directory is removed as a link, and what it points at stays" {
