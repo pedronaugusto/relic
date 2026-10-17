@@ -56,6 +56,12 @@ pub const Error = error{
     BareRepository,
     /// `diff.algorithm` names no line diff git has.
     UnknownDiffAlgorithm,
+    /// A setting `merge_recursive_config` reads that git dies on:
+    /// `merge.verbosity`, `diff.renameLimit` or `merge.renameLimit` not an
+    /// `int` (or below -1, which git's assertion stops), `merge.renormalize`
+    /// not a boolean, `diff.renames` or `merge.renames` neither a boolean
+    /// nor `copies`, any of these or `merge.directoryRenames` a bare name.
+    InvalidMergeSetting,
 } || merge.Error || worktree.Error || repo_mod.Error || rev_walk.Error || strategy.Error || octopus.Error;
 
 /// Where a refusal writes the path that caused it, so a caller can say which
@@ -230,7 +236,8 @@ fn run(
     rules.attrs = &attrs;
     rules.filters = options.filters;
 
-    const settings = try configuredSettings(repo, options);
+    const merge_config = try MergeConfig.read(repo.configuration());
+    const settings = try configuredSettings(repo, merge_config, options);
     // Renormalizing takes each side out and back in, and asks no index
     // whether a stored version kept its CRLF endings.
     var normalizer: convert.Session = .open(gpa, io, .{
@@ -254,8 +261,8 @@ fn run(
         .rename_score = settings.rename_score,
         .whitespace = settings.whitespace,
         .subtree_shift = settings.subtree_shift,
-        .rename_limit = configuredRenameLimit(repo),
-        .directory_renames = options.directory_renames orelse configuredDirectoryRenames(repo),
+        .rename_limit = merge_config.rename_limit,
+        .directory_renames = options.directory_renames orelse merge_config.directory_renames,
         .attributes = &attrs,
         .attributes_dir = wt,
         .configured_drivers = try configuredDrivers(arena, repo),
@@ -674,14 +681,14 @@ const SubmoduleOpener = struct {
 /// then configuration -- `diff.algorithm`, `merge.renames`,
 /// `merge.renormalize` -- then each strategy option in turn, as git's merge
 /// configuration and `parse_merge_opt` have it.
-fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settings {
+fn configuredSettings(repo: *Repository, merge_config: MergeConfig, options: Options) Error!strategy.Settings {
     var settings: strategy.Settings = .{
         .resolve = options.blob.resolve,
         .algorithm = options.blob.algorithm,
         .minimal = options.blob.minimal,
         .whitespace = options.blob.whitespace,
-        .renames = configuredRenames(repo),
-        .renormalize = repo.configuration().getBool("merge.renormalize", false) catch false,
+        .renames = merge_config.renames,
+        .renormalize = merge_config.renormalize,
     };
     if (repo.configuration().get("diff.algorithm")) |text| {
         settings.configureAlgorithm(text) orelse return error.UnknownDiffAlgorithm;
@@ -690,22 +697,55 @@ fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settin
     return settings;
 }
 
-/// `merge.renameLimit`, then `diff.renameLimit`; zero for git's default.
-fn configuredRenameLimit(repo: *Repository) i64 {
-    for ([_][]const u8{ "merge.renamelimit", "diff.renamelimit" }) |key| {
-        const text = repo.configuration().get(key) orelse continue;
-        return config_mod.parseInteger(text) catch 0;
-    }
-    return 0;
-}
+/// What git's `merge_recursive_config` reads, each the last value alone as
+/// its configset gives it, refusing what git dies on
+/// (`error.InvalidMergeSetting`).
+const MergeConfig = struct {
+    /// `diff.renameLimit`, then `merge.renameLimit` over it; zero or less
+    /// for git's default.
+    rename_limit: i64 = -1,
+    /// `diff.renames`, then `merge.renames` over it; on when neither says.
+    /// Copies are renames to a merge.
+    renames: bool = true,
+    /// `merge.renormalize`.
+    renormalize: bool = false,
+    /// `merge.directoryRenames`: a boolean, `conflict` (the default), and
+    /// anything else passed over, as git passes over a later git's word.
+    directory_renames: ort.DirectoryRenames = .conflict,
 
-/// `merge.directoryRenames`: `true`, `false` or `conflict`, which is the
-/// default.
-fn configuredDirectoryRenames(repo: *Repository) ort.DirectoryRenames {
-    const text = repo.configuration().get("merge.directoryrenames") orelse return .conflict;
-    if (config_mod.parseBool(text)) |on| return if (on) .on else .off else |_| {}
-    return .conflict;
-}
+    fn read(config: *const config_mod.Config) Error!MergeConfig {
+        var out: MergeConfig = .{};
+        // Read and unused, as git reads it: a bad value stops the merge.
+        if (config.find("merge.verbosity")) |entry| _ = try mergeInt(entry.value);
+        for ([_][]const u8{ "diff.renamelimit", "merge.renamelimit" }) |key| {
+            if (config.find(key)) |entry| out.rename_limit = try mergeInt(entry.value);
+        }
+        if (out.rename_limit < -1) return error.InvalidMergeSetting;
+        if (config.find("merge.renormalize")) |entry| {
+            out.renormalize = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidMergeSetting else true;
+        }
+        for ([_][]const u8{ "diff.renames", "merge.renames" }) |key| {
+            const entry = config.find(key) orelse continue;
+            const detection = diff.parseRenameSetting(entry.value orelse return error.InvalidMergeSetting) catch return error.InvalidMergeSetting;
+            out.renames = detection != .off;
+        }
+        if (config.find("merge.directoryrenames")) |entry| {
+            const text = entry.value orelse return error.InvalidMergeSetting;
+            if (config_mod.parseBool(text)) |on| {
+                out.directory_renames = if (on) .on else .off;
+            } else |_| if (std.ascii.eqlIgnoreCase(text, "conflict")) {
+                out.directory_renames = .conflict;
+            }
+        }
+        return out;
+    }
+
+    /// git's `git_config_int` through `repo_config_get_int`.
+    fn mergeInt(value: ?[]const u8) Error!i64 {
+        const n = config_mod.parseInteger(value orelse return error.InvalidMergeSetting) catch return error.InvalidMergeSetting;
+        return std.math.cast(i32, n) orelse error.InvalidMergeSetting;
+    }
+};
 
 /// `error.DirtyIndex` unless `index` is exactly the tree `ours`, nothing
 /// staged beyond it.
@@ -781,17 +821,6 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
 
 fn lessThanConflict(_: void, a: Conflict, b: Conflict) bool {
     return std.mem.order(u8, a.path, b.path) == .lt;
-}
-
-/// Whether git's merge would follow renames: `merge.renames`, then
-/// `diff.renames`, and on when neither says otherwise. `copies` is on.
-fn configuredRenames(repo: *Repository) bool {
-    for ([_][]const u8{ "merge.renames", "diff.renames" }) |key| {
-        const text = repo.configuration().get(key) orelse continue;
-        if (std.ascii.eqlIgnoreCase(text, "copies") or std.ascii.eqlIgnoreCase(text, "copy")) return true;
-        return config_mod.parseBool(text) catch true;
-    }
-    return true;
 }
 
 /// The names `merge.<name>.driver` configures.

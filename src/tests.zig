@@ -96,6 +96,7 @@ test {
         _ = @import("transport/transport_test.zig");
         _ = @import("commit/stash_test.zig");
         _ = @import("worktree/snapshot_test.zig");
+        _ = @import("worktree/renames_test.zig");
         _ = @import("object/signing_test.zig");
         _ = @import("testing/embedded_repo.zig");
         _ = @import("testing/config_refresh.zig");

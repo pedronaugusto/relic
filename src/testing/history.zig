@@ -1198,6 +1198,20 @@ test "a merge message setting git dies on refuses every merge" {
         .{ .settings = &.{.{ "merge.branchdesc", "maybe" }}, .err = error.InvalidMergeSetting },
         .{ .settings = &.{ .{ "merge.branchdesc", "maybe" }, .{ "merge.branchdesc", "true" } }, .err = error.InvalidMergeSetting },
         .{ .settings = &.{}, .bare = "suppressDest", .err = error.InvalidMergeSetting },
+        // merge-ort's own reading, the last value of each.
+        .{ .settings = &.{.{ "merge.verbosity", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "verbosity", .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "merge.renamelimit", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "renamelimit", .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "merge.renamelimit", "-2" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "diff.renamelimit", "3000000000" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "merge.renormalize", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "merge.renames", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "renames", .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "directoryrenames", .err = error.InvalidMergeSetting },
+        // `git merge`'s diff settings, every value.
+        .{ .settings = &.{ .{ "diff.renames", "maybe" }, .{ "diff.renames", "true" } }, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{ .{ "diff.renamelimit", "x" }, .{ "diff.renamelimit", "5" } }, .err = error.InvalidMergeSetting },
         // A bare description dies only where it is read: listed, local, last.
         .{ .settings = &.{ .{ "merge.branchdesc", "true" }, .{ "merge.log", "true" } }, .bare = "description", .err = error.InvalidBranchDescription },
     };

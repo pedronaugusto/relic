@@ -3,6 +3,7 @@
 pub const sparse_checkout = @import("worktree/sparse_checkout.zig");
 pub const linked = @import("checkout.zig").worktrees;
 pub const snapshot = @import("worktree/snapshot.zig");
+pub const renames = @import("worktree/renames.zig");
 pub const sparse = @import("patterns.zig").sparse;
 pub const ignore = @import("patterns.zig").ignore;
 pub const attributes = @import("patterns.zig").attributes;

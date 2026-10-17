@@ -203,6 +203,8 @@ fn code(change: worktree.Change) u8 {
         .type_changed => 'T',
         .untracked => '?',
         .ignored => '!',
+        .renamed => 'R',
+        .copied => 'C',
     };
 }
 

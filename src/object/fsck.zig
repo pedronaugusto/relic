@@ -346,11 +346,16 @@ pub const Rules = struct {
         return r.skip.contains(oid);
     }
 
+    /// The object format a skip list's names are in, and the directory a
+    /// relative path to it is found from.
+    pub const SkipListAt = struct { kind: Kind, dir: Io.Dir };
+
     /// Add the names in the skip list at `path`: one full name a line,
     /// with `#` comments, blank lines and surrounding space allowed, as
     /// git reads `fsck.skipList`.
-    pub fn readSkipList(r: *Rules, gpa: Allocator, io: Io, kind: Kind, path: []const u8) LoadError!void {
-        const text_ = Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch |err| switch (err) {
+    pub fn readSkipList(r: *Rules, gpa: Allocator, io: Io, list: SkipListAt, path: []const u8) LoadError!void {
+        const kind = list.kind;
+        const text_ = list.dir.readFileAlloc(io, path, gpa, .limited(1 << 30)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.SkipListUnreadable,
@@ -370,22 +375,24 @@ pub const Rules = struct {
 
     /// The rules `config` gives `scope`: `<scope>.fsck.<msg-id>` and
     /// `<scope>.fsck.skipList` in the order they are set, each skip list
-    /// read whole, a relative path from the current directory. `strict`
+    /// read whole, a relative path from `base` (git's working directory:
+    /// the working tree's top, else the git directory; `null` the
+    /// process's). `strict`
     /// for a fetch, a clone or a received push, as git checks them.
     /// `fetch.fsck.` and `receive.fsck.` names no message has are left out
     /// and said in `warnings`, as git warns; `fsck.` ones are refused.
-    pub const LoadOptions = struct { kind: Kind, scope: Scope = .fsck, strict: bool = false, sink: ?Sink = null };
+    pub const LoadOptions = struct { kind: Kind, scope: Scope = .fsck, strict: bool = false, sink: ?Sink = null, base: ?Io.Dir = null };
     pub fn load(gpa: Allocator, io: Io, config: *const config_mod.Config, options: LoadOptions) LoadError!Rules {
         const strict = options.strict;
         var rules: Rules = .{ .strict = strict };
         errdefer rules.deinit(gpa);
-        try rules.configure(gpa, io, config, .{ .kind = options.kind, .scope = options.scope, .sink = options.sink });
+        try rules.configure(gpa, io, config, .{ .kind = options.kind, .scope = options.scope, .sink = options.sink, .base = options.base });
         return rules;
     }
 
     /// `load`, over rules already made: `baseline` takes the
     /// configuration this way.
-    pub const ConfigureOptions = struct { kind: Kind, scope: Scope = .fsck, sink: ?Sink = null };
+    pub const ConfigureOptions = struct { kind: Kind, scope: Scope = .fsck, sink: ?Sink = null, base: ?Io.Dir = null };
     pub fn configure(r: *Rules, gpa: Allocator, io: Io, config: *const config_mod.Config, options: ConfigureOptions) LoadError!void {
         const kind = options.kind;
         const scope = options.scope;
@@ -395,12 +402,16 @@ pub const Rules = struct {
             const raw = entry.value orelse return error.MissingValue;
             const value = raw;
             if (std.ascii.eqlIgnoreCase(entry.name, "skiplist")) {
-                const path = config_mod.interpolatePath(gpa, value, config.context.home) catch |err| return switch (err) {
-                    error.UnexpandablePath => error.SkipListUnreadable,
+                // A path setting: an `:(optional)` list that is not there
+                // is passed over, as git passes it over.
+                const base = options.base orelse Io.Dir.cwd();
+                const read = config_mod.pathSetting(gpa, io, base, config.context.home, value) catch |err| return switch (err) {
+                    error.UnexpandablePath, error.UnstatablePath, error.MissingPath => error.SkipListUnreadable,
                     error.OutOfMemory => error.OutOfMemory,
                 };
+                const path = read orelse continue;
                 defer gpa.free(path);
-                try r.readSkipList(gpa, io, kind, path);
+                try r.readSkipList(gpa, io, .{ .kind = kind, .dir = base }, path);
                 continue;
             }
             if (scope != .fsck) {
@@ -459,7 +470,12 @@ pub fn wanted(config: *const config_mod.Config, scope: Scope) config_mod.ValueEr
 pub const ForTransferError = LoadError || config_mod.ValueError;
 
 /// Borrowed format and transfer scope.
-pub const TransferInputs = struct { kind: Kind, scope: Scope };
+pub const TransferInputs = struct {
+    kind: Kind,
+    scope: Scope,
+    /// Where a relative skip list is found from: `ConfigureOptions.base`.
+    base: ?Io.Dir = null,
+};
 /// Explicit policy and an optional warning sink.
 pub const TransferOptions = struct { explicit: ?bool = null, sink: ?Sink = null };
 
@@ -480,7 +496,7 @@ pub fn forTransfer(gpa: Allocator, io: Io, config: ?*const config_mod.Config, in
         rules = .{ .strict = true };
     }
     errdefer rules.deinit(gpa);
-    if (config) |c| try rules.configure(gpa, io, c, .{ .kind = kind, .scope = scope, .sink = sink });
+    if (config) |c| try rules.configure(gpa, io, c, .{ .kind = kind, .scope = scope, .sink = sink, .base = inputs.base });
     return rules;
 }
 

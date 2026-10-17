@@ -22,6 +22,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const merge = @import("../merge/merge.zig");
+const diff = @import("../diff/diff.zig");
 const rev_walk = @import("../walk/walk.zig");
 const three_way = @import("../merge/three_way.zig");
 const refspec = @import("../wire.zig").refspec;
@@ -83,8 +84,9 @@ pub const Error = error{
     /// The name given is an annotated tag. git merges its commit and quotes
     /// the tag's message in the merge commit's; this release does not.
     AnnotatedTag,
-    /// `merge.branchdesc` is neither true nor false, or `merge.suppressDest`
-    /// has no value, which git dies on.
+    /// `merge.branchdesc` is neither true nor false, `merge.suppressDest`
+    /// has no value, or a `diff.renames` or `diff.renameLimit` is one
+    /// `git merge`'s diff settings die on (three_way's other cases).
     InvalidMergeSetting,
     /// `merge.branchdesc` lists a merged branch whose
     /// `branch.<name>.description` has no value, which git dies on.
@@ -326,8 +328,11 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     if (inProgress(io, repo)) return error.MergeInProgress;
     if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) or
         repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.SequencerInProgress;
-    // `git merge` reads `fmt_merge_msg_config`'s settings at its start too.
+    // `git merge` reads `fmt_merge_msg_config`'s settings at its start too,
+    // and the diff's (`git_diff_ui_config`): every `diff.renames` and
+    // `diff.renameLimit` value, where the merge itself reads the last.
     const settings = try MessageSettings.read(arena, repo.configuration());
+    _ = diff.RenameSettings.read(repo.configuration()) catch return error.InvalidMergeSetting;
 
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);

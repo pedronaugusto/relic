@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Path settings are read as git's `git_config_pathname`, one function (`config.pathSetting`, `PathSettingError`): `:(optional)` marks a file that may be missing and is no value when its stat says it is not there, a stat failing any other way and a bare name are refused (`UnstatablePath`, `MissingPath`), and a relative path is found from where git runs, the top of the working tree, else the git directory (`Repository.topDirectory`). `Config.getPath(gpa, io, base, name)` reads every value in order, as git's callbacks do. Used by `core.excludesFile`, `core.attributesFile`, `commit.template`, `core.hooksPath` and `mailmap.file` (the last value, as git's configset), `init.templateDir` (`templateDir(gpa, io, base, config)`: bare unsets, a missing `:(optional)` directory is the value as written, as git's `template_dir_cb`), `core.fsmonitor`'s hook (`fsmonitor.configured(arena, io, config, dirs, programs)`), `fsck.skipList` (`fsck.Rules.readSkipList(…, SkipListAt, path)`, `ConfigureOptions.base`, `TransferInputs.base`), `gpg.*.program` (a missing optional program keeps the one before it) and `gpg.ssh.allowedSignersFile`/`revocationFile` (`Signer.init(gpa, io, config, base, programs)`; the signing programs run in `base`, as git runs them), and `http.*` paths (`http_settings.Sources.base`, `smart_http.Options.base`; a relative path is made whole from it). `lfs.storage` keeps plain interpolation, being git-lfs's setting. Held to `git config --type=path` over a listed corpus.
+- `diff.renames` and `diff.renameLimit` are read as git's diff callbacks read them, every value, one git dies on refused (`diff.RenameSettings`, `diff.parseRenameSetting`, `diff.parseRenameLimit`; `patch.format.configuredRenames` is gone): relic took a bad value as the default. Held to `git log` over listed settings.
+- A merge reads `merge_recursive_config`'s settings as merge-ort does, the last value of each: `merge.verbosity`, `diff.renameLimit` then `merge.renameLimit` (below -1 refused, where git's assertion stops), `merge.renormalize`, `diff.renames` then `merge.renames`, `merge.directoryRenames`, each refused where git dies (`InvalidMergeSetting`; relic took them as defaults, a bare `merge.directoryRenames` as off); `git merge` also reads every `diff.renames` and `diff.renameLimit` value as its diff settings do. Held to `git merge`.
+- Status finds renames as `git status` finds them: `worktree.renames.find` puts the staged changes through diff's one rename engine (`diff.findRenames`), as git's `wt_status_collect_changes_index` does, and `worktree.renames.configured` reads `status.renames` and `status.renameLimit` over `diff.renames` and `diff.renameLimit`. The pass is in the worktree layer, above checkout's status and diff both. `worktree.Change` gains `renamed` and `copied`, `StatusEntry` its `source` and `score`. Held to `git status --porcelain` under each setting. Not yet: the working tree's side (a deletion paired with an intent-to-add file), which needs the working tree's bytes in the pairing.
+
+### Added
+
+- `diff.Order`: an order file (`-O`, `diff.orderFile`) as git's `diffcore_order` reads and applies it, through `TreeOptions.order`; format-patch (`Options.order`, `null` reads the setting) and range-diff read `diff.orderFile`. Held to `git diff-tree -O`.
+- format-patch's `--relative` (`Options.directory`, where the caller stands, and `Options.relative`, `null` reading `diff.relative`, `diff.configuredRelative`): only the changes under the directory, named from it in the headers and the diffstat, the summary lines keeping whole paths, as git writes them. `TreeOptions.prefix` takes git's prefix with its trailing `/`. Held to `git format-patch --relative`.
+- `diff.Options.suppress_blank_empty`, read by `diff.configured` from `diff.suppressBlankEmpty` and its old name `diff.suppress-blank-empty` (parallax 0.2.5's writer option). Held to `git diff` in the random settings corpus.
+
+### Changed
+
+- Pins parallax 0.2.5.
+
 ## [0.17.0] - 2026-10-17
 
 ### Breaking

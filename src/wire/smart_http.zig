@@ -132,6 +132,8 @@ pub const Options = struct {
     config: ?*const config_mod.Config = null,
     /// The configured remote, for `remote.<name>.proxy`.
     remote_name: ?[]const u8 = null,
+    /// Where a relative path setting is found from: `http_settings.Sources.base`.
+    base: ?Io.Dir = null,
     /// The proxy, over the one `remote_name` and the settings choose.
     proxy: http_settings.Proxy = .auto,
     /// The permission to run credential helpers and `askpass`; its
@@ -308,7 +310,7 @@ const Http = struct {
         h.base_path = path;
 
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
-        var settings = try http_settings.resolve(arena, h.io, url, .{ .config = h.options.config, .environ = environ, .remote_name = h.options.remote_name });
+        var settings = try http_settings.resolve(arena, h.io, url, .{ .config = h.options.config, .environ = environ, .remote_name = h.options.remote_name, .base = h.options.base });
         http_settings.chooseProxy(&settings, h.options.proxy);
         var tls_options: uplink.tls.ClientOptions = .{};
         if (url.scheme == .https) {

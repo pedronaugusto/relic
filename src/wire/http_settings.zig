@@ -89,7 +89,7 @@ pub const Settings = struct {
         settings: *Settings,
         arena: Allocator,
         io: Io,
-        home: ?[]const u8,
+        paths: Paths,
         name: []const u8,
         value: ?[]const u8,
         origin: []const u8,
@@ -129,7 +129,7 @@ pub const Settings = struct {
                 _ = std.math.cast(i32, n) orelse return error.InvalidHttpSetting;
             },
             .string => text = value orelse return error.InvalidHttpSetting,
-            .path => text = try pathValue(arena, io, home, value orelse return error.InvalidHttpSetting),
+            .path => text = try pathValue(arena, io, paths, value),
         };
 
         if (std.mem.eql(u8, name, "proxy")) {
@@ -187,23 +187,24 @@ pub const Settings = struct {
         }
     }
 
-    /// git's `git_config_pathname`: `:(optional)` and a file that is not
-    /// there is no value; `~` is `home`, `~user` that user's; a path that
-    /// cannot be expanded is a setting git dies on.
-    fn pathValue(arena: Allocator, io: Io, home: ?[]const u8, raw: []const u8) Error!?[]const u8 {
-        const optional = std.mem.startsWith(u8, raw, ":(optional)");
-        const path = config_mod.interpolatePath(arena, if (optional) raw[":(optional)".len..] else raw, home) catch |err| return switch (err) {
+    /// A path setting as `config.pathSetting` reads it, every failure one
+    /// git dies on; a relative path is found from `paths.base`, and made
+    /// whole from it when one was given, so whatever opens the file finds
+    /// the one git would.
+    fn pathValue(arena: Allocator, io: Io, paths: Paths, raw: ?[]const u8) Error!?[]const u8 {
+        const base = paths.base orelse Io.Dir.cwd();
+        const read = config_mod.pathSetting(arena, io, base, paths.home, raw) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.UnexpandablePath => error.InvalidHttpSetting,
+            error.MissingPath, error.UnexpandablePath, error.UnstatablePath => error.InvalidHttpSetting,
         };
-        if (optional) {
-            std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
-                error.FileNotFound => return null,
-                else => {},
-            };
-        }
-        return path;
+        const path = read orelse return null;
+        if (paths.base == null or std.Io.Dir.path.isAbsolute(path)) return path;
+        const top = base.realPathFileAlloc(io, ".", arena) catch return error.InvalidHttpSetting;
+        return try std.Io.Dir.path.join(arena, &.{ top, path });
     }
+
+    /// Where a path setting's `~` and relative paths are found from.
+    const Paths = struct { home: ?[]const u8, base: ?Io.Dir };
 
     /// What the environment says over the configuration, as git reads it:
     /// `GIT_SSL_*`, `GIT_HTTP_*`, `GIT_PROXY_SSL_*`, and the proxy
@@ -295,6 +296,11 @@ pub const Sources = struct {
     /// overrides `http.proxy`, an empty value included; the environment's
     /// `no_proxy` still applies to it.
     remote_name: ?[]const u8 = null,
+    /// Where a relative path setting (`http.sslCAInfo` and the rest) is
+    /// found from, as git finds it from where it runs: the repository's
+    /// working tree, else its git directory. `null` is the process's
+    /// working directory.
+    base: ?Io.Dir = null,
 };
 
 /// The settings for `url`, from `sources`. Every slice is in `arena`, or
@@ -336,7 +342,7 @@ pub fn resolve(arena: Allocator, io: Io, url: url_mod.Url, sources: Sources) Sel
             else
                 try arena.print("http.{s}.{s}", .{ entry.subsection, name });
             if (std.mem.eql(u8, name, "proxy")) proxy_set = true;
-            try s.take(arena, io, home, name, value, origin, &headers);
+            try s.take(arena, io, .{ .home = home, .base = sources.base }, name, value, origin, &headers);
         }
     }
     s.extra_headers = headers.items;

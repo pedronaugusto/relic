@@ -640,7 +640,9 @@ pub const Lfs = struct {
             if (options.lfsconfig) |text| file_config = try config_mod.Config.parseText(gpa, text, .local);
         }
 
-        const root = (try config.getPath(a, "lfs.storage")) orelse "lfs";
+        // git-lfs's own setting, expanded as git-lfs expands it: no
+        // `:(optional)`.
+        const root = if (config.get("lfs.storage")) |raw| try config_mod.interpolatePath(a, raw, config.context.home) else "lfs";
         const case_fold = config.getBool("core.ignorecase", false) catch false;
 
         const include = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.fetchinclude");

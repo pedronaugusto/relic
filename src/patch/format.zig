@@ -67,7 +67,7 @@ pub const Error = error{
     /// A cover letter's shortlog in a repository with a `.mailmap`, which
     /// git applies there and this does not yet.
     MailmapUnsupported,
-} || rev_walk.Error || diff.Error || diff.ConfigError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
+} || rev_walk.Error || diff.Error || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
     Io.Dir.ReadFileAllocError;
 
 /// A name and an address.
@@ -145,6 +145,15 @@ pub const Renames = union(enum) {
 
 /// How patches are formatted.
 pub const Options = struct {
+    /// `-O`: the order the files come in; `null` reads `diff.orderFile`.
+    order: ?diff.Order = null,
+    /// Where in the working tree the caller stands, `/`-separated and
+    /// ending in `/`, empty for the top: git's prefix, which `relative`
+    /// takes.
+    directory: []const u8 = "",
+    /// `--relative`: only the changes under `directory`, named from it;
+    /// `null` reads `diff.relative`.
+    relative: ?bool = null,
     /// `-n` or `-N`; `null` numbers when there is more than one mail.
     numbered: ?bool = null,
     /// `--start-number`.
@@ -254,6 +263,9 @@ const Ctx = struct {
     options: Options,
     diff_options: diff.Options,
     renames: ?diff.RenameOptions,
+    order: diff.Order,
+    /// The directory the changes are limited to and named from, or empty.
+    relative_to: []const u8,
     quote_path: bool,
     abbrev_len: usize,
     attrs: ?*attributes.Attrs,
@@ -284,7 +296,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     const renames: ?diff.RenameOptions = switch (options.renames) {
         .off => null,
         .on => |r| r,
-        .configured => configuredRenames(config),
+        .configured => (try diff.RenameSettings.read(config)).options(),
     };
 
     const prefix = try subjectPrefix(a, options);
@@ -317,6 +329,8 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         .options = options,
         .diff_options = diff_options,
         .renames = renames,
+        .order = options.order orelse try diff.Order.configured(a, io, repo.topDirectory(), config),
+        .relative_to = if (options.relative orelse try diff.configuredRelative(config)) options.directory else "",
         .quote_path = quote_path,
         .abbrev_len = abbrev.defaultLength(config, db),
         .attrs = if (own_attrs) |*x| x else null,
@@ -442,21 +456,6 @@ fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, rang
 fn containsOid(oids: []const Oid, oid: Oid) bool {
     for (oids) |o| if (o.eql(oid)) return true;
     return false;
-}
-
-/// The renames `git log -p` and `format-patch` find with nothing asked:
-/// `diff.renames` (on unless it says otherwise, copies too for `copies`)
-/// and `diff.renameLimit`.
-pub fn configuredRenames(config: *const config_mod.Config) ?diff.RenameOptions {
-    var r: diff.RenameOptions = .{};
-    if (config.get("diff.renamelimit")) |v| r.limit = @intCast(@max(0, config_mod.parseInteger(v) catch 1000));
-    const setting = config.get("diff.renames") orelse return r;
-    if (std.ascii.eqlIgnoreCase(setting, "copies") or std.ascii.eqlIgnoreCase(setting, "copy")) {
-        r.detect_copies = true;
-        return r;
-    }
-    const on = config_mod.parseBool(setting) catch true;
-    return if (on) r else null;
 }
 
 fn emptySeries(gpa: Allocator, arena: *std.heap.ArenaAllocator) Series {
@@ -883,7 +882,7 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
         defer parent.deinit();
         break :blk parent.tree;
     };
-    var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = ctx.renames });
+    var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = ctx.renames, .order = ctx.order, .prefix = ctx.relative_to });
     defer changes.deinit();
     if (changes.items.len == 0) return;
     if (ctx.options.stat) try out.appendSlice(a, "---");
@@ -1019,8 +1018,8 @@ fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, s
             const old = s[0];
             const new = s[1];
             var f: StatFile = .{
-                .from_name = if (c.status == .renamed or c.status == .copied) c.old.?.path else null,
-                .name = c.path(),
+                .from_name = if (c.status == .renamed or c.status == .copied) shown(ctx, c.old.?.path) else null,
+                .name = shown(ctx, c.path()),
                 .added = 0,
                 .deleted = 0,
                 .binary = false,
@@ -1112,8 +1111,8 @@ fn writeAbbrev(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid, full: bool) Error!v
 /// One file pair's patch, as git's `builtin_diff` writes it.
 fn writePair(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change, old: ?Side, new: ?Side) Error!void {
     const a = ctx.a;
-    const name_a = if (old) |o| o.path else new.?.path;
-    const name_b = if (new) |n| n.path else old.?.path;
+    const name_a = shown(ctx, if (old) |o| o.path else new.?.path);
+    const name_b = shown(ctx, if (new) |n| n.path else old.?.path);
     const a_one = try quoteTwo(ctx, "a/", name_a);
     const b_two = try quoteTwo(ctx, "b/", name_b);
     const lbl0: []const u8 = if (old != null) a_one else "/dev/null";
@@ -1125,7 +1124,7 @@ fn writePair(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change, old: ?Side, new
     if (!split or (old != null and new != null)) {
         if (c.status == .copied or c.status == .renamed) {
             const word = if (c.status == .copied) "copy" else "rename";
-            try meta.print(a, "similarity index {d}%\n{s} from {s}\n{s} to {s}\n", .{ c.similarity, word, try quoted(ctx, c.old.?.path), word, try quoted(ctx, c.new.?.path) });
+            try meta.print(a, "similarity index {d}%\n{s} from {s}\n{s} to {s}\n", .{ c.similarity, word, try quoted(ctx, shown(ctx, c.old.?.path)), word, try quoted(ctx, shown(ctx, c.new.?.path)) });
         }
     }
     const zero = Oid.zero(ctx.db.objectFormat());
@@ -1175,6 +1174,13 @@ fn writePair(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change, old: ?Side, new
         lbl1, if (std.mem.findScalar(u8, lbl1, ' ') != null) "\t" else "",
     });
     try out.appendSlice(a, body.written());
+}
+
+/// A path as a patch's headers and diffstat name it: under `--relative`,
+/// from the directory, as git's `strip_prefix` names it. The summary lines
+/// keep the whole path, as git's do.
+fn shown(ctx: *const Ctx, path: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, path, ctx.relative_to)) path[ctx.relative_to.len..] else path;
 }
 
 fn summary(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change) Allocator.Error!void {
@@ -1414,7 +1420,7 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?O
     if (origin) |o| {
         const origin_commit = try readCommit(ctx, o);
         const head_commit = try readCommit(ctx, list[0]);
-        var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, .{ .old = origin_commit.tree, .new = head_commit.tree }, .{ .renames = ctx.renames });
+        var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, .{ .old = origin_commit.tree, .new = head_commit.tree }, .{ .renames = ctx.renames, .order = ctx.order, .prefix = ctx.relative_to });
         defer changes.deinit();
         const saved = ctx.options.stat;
         ctx.options.stat = true;
@@ -1430,7 +1436,7 @@ fn writeStatOnly(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Chang
     for (changes) |c| {
         const old = if (c.old) |e| try loadSide(ctx, e) else null;
         const new = if (c.new) |e| try loadSide(ctx, e) else null;
-        var f: StatFile = .{ .from_name = if (c.status == .renamed or c.status == .copied) c.old.?.path else null, .name = c.path(), .added = 0, .deleted = 0, .binary = false };
+        var f: StatFile = .{ .from_name = if (c.status == .renamed or c.status == .copied) shown(ctx, c.old.?.path) else null, .name = shown(ctx, c.path()), .added = 0, .deleted = 0, .binary = false };
         const one: []const u8 = if (old) |o| o.bytes else "";
         const two: []const u8 = if (new) |n| n.bytes else "";
         if ((old != null and old.?.binary) or (new != null and new.?.binary)) {

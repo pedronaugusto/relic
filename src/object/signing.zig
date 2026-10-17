@@ -52,6 +52,9 @@ const Oid = hash.Oid;
 pub const Error = error{
     /// A program or key path whose `~` names no home.
     UnexpandablePath,
+    /// A program or file marked `:(optional)` whose stat failed other than
+    /// by its not being there, which git dies on.
+    UnstatablePath,
     /// Signing is asked for, by the caller or by `commit.gpgSign` or
     /// `tag.gpgSign`, and the caller gave no `program.Programs` to run the
     /// signer with. The object is not written unsigned in its place.
@@ -270,11 +273,17 @@ pub const Signer = struct {
     revocation_file: ?[]const u8,
     /// `gpg.minTrustLevel`.
     min_trust: Trust,
+    /// Where the programs run, as git runs them, and so where a relative
+    /// path in a setting is found from: `init`'s `base`.
+    base: Io.Dir,
     /// What the signing program printed when it failed.
     diagnostics: std.ArrayList(u8) = .empty,
 
-    /// Read the settings from a repository's configuration.
-    pub fn init(gpa: Allocator, config: *const config_mod.Config, programs: program.Programs) Self.Error!Signer {
+    /// Read the settings from a repository's configuration. `base` is
+    /// where git runs, the top of the working tree, else the git
+    /// directory: the programs run there and a relative path setting is
+    /// found from there.
+    pub fn init(gpa: Allocator, io: Io, config: *const config_mod.Config, base: Io.Dir, programs: program.Programs) Self.Error!Signer {
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -304,12 +313,14 @@ pub const Signer = struct {
                 // it is signed with, as git expands it
                 signing_key = value;
             } else if (entry.has_subsection and std.mem.eql(u8, entry.subsection, "ssh") and !std.mem.eql(u8, entry.name, "program")) {
+                // Path settings: an `:(optional)` file that is not there
+                // unsets the setting, as git's callback leaves it.
                 if (std.mem.eql(u8, entry.name, "defaultkeycommand")) {
                     default_key_command = value;
                 } else if (std.mem.eql(u8, entry.name, "allowedsignersfile")) {
-                    allowed_signers = try config_mod.interpolatePath(arena, value, home);
+                    allowed_signers = try pathSetting(arena, io, base, home, value);
                 } else {
-                    revocation_file = try config_mod.interpolatePath(arena, value, home);
+                    revocation_file = try pathSetting(arena, io, base, home, value);
                 }
             } else if (std.mem.eql(u8, entry.name, "format")) {
                 format = std.meta.stringToEnum(Format, value) orelse return error.UnknownSignatureFormat;
@@ -317,7 +328,9 @@ pub const Signer = struct {
                 min_trust = Trust.parse(value) orelse return error.UnknownTrustLevel;
             } else {
                 const this: Format = if (!entry.has_subsection) .openpgp else std.meta.stringToEnum(Format, entry.subsection).?;
-                chosen.set(this, try config_mod.interpolatePath(arena, value, home));
+                // An `:(optional)` program that is not there leaves the
+                // one before it, as git's callback does.
+                if (try pathSetting(arena, io, base, home, value)) |path| chosen.set(this, path);
             }
         }
         var format_programs: std.EnumArray(Format, []const u8) = undefined;
@@ -340,6 +353,17 @@ pub const Signer = struct {
             .allowed_signers = allowed_signers,
             .revocation_file = revocation_file,
             .min_trust = min_trust,
+            .base = base,
+        };
+    }
+
+    /// `config.pathSetting`, its failures in this namespace's words.
+    fn pathSetting(arena: Allocator, io: Io, base: Io.Dir, home: ?[]const u8, value: []const u8) Self.Error!?[]u8 {
+        return config_mod.pathSetting(arena, io, base, home, value) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.UnexpandablePath => error.UnexpandablePath,
+            error.UnstatablePath => error.UnstatablePath,
+            error.MissingPath => error.MissingSigningValue,
         };
     }
 
@@ -373,6 +397,7 @@ pub const Signer = struct {
     fn signGpg(signer: *Signer, io: Io, payload: []const u8, key: []const u8) ErrorNamespace.Error![]u8 {
         var outcome = try program.run(signer.gpa, io, signer.programs, .{
             .argv = &.{ signer.program, "--status-fd=2", "-bsau", key },
+            .cwd = .{ .dir = signer.base },
         }, .{
             .input = payload,
         });
@@ -402,7 +427,7 @@ pub const Signer = struct {
         if (key_file != null) try argv.append(arena, "-U");
         // With no file named, `ssh-keygen` signs its standard input and
         // writes the signature to its standard output.
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items }, .{
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base } }, .{
             .input = payload,
         });
         defer outcome.deinit(signer.gpa);
@@ -418,7 +443,7 @@ pub const Signer = struct {
         const command = signer.default_key_command orelse return error.NoSigningKey;
         const argv = try splitCommandLine(arena, command);
         if (argv.len == 0) return error.NoSigningKey;
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv }, .{});
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv, .cwd = .{ .dir = signer.base } }, .{});
         defer outcome.deinit(signer.gpa);
         if (!outcome.succeeded()) return error.NoSigningKey;
         const end = std.mem.findScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
@@ -462,7 +487,7 @@ pub const Signer = struct {
         try argv.append(arena, program_name);
         if (format == .openpgp) try argv.append(arena, "--keyid-format=long");
         try argv.appendSlice(arena, &.{ "--status-fd=1", "--verify", sig_file.path, "-" });
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items }, .{
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base } }, .{
             .input = payload,
         });
         defer outcome.deinit(signer.gpa);
@@ -497,7 +522,7 @@ pub const Signer = struct {
         var find: std.ArrayList([]const u8) = .empty;
         try find.appendSlice(arena, &.{ program_name, "-Y", "find-principals", "-f", allowed, "-s", sig_file.path });
         if (time_arg) |t| try find.append(arena, t);
-        var principals = try program.run(signer.gpa, io, signer.programs, .{ .argv = find.items }, .{});
+        var principals = try program.run(signer.gpa, io, signer.programs, .{ .argv = find.items, .cwd = .{ .dir = signer.base } }, .{});
         defer principals.deinit(signer.gpa);
 
         var output: std.ArrayList(u8) = .empty;
@@ -508,7 +533,7 @@ pub const Signer = struct {
             var check: std.ArrayList([]const u8) = .empty;
             try check.appendSlice(arena, &.{ program_name, "-Y", "check-novalidate", "-n", "git", "-s", sig_file.path });
             if (time_arg) |t| try check.append(arena, t);
-            var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items }, .{
+            var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base } }, .{
                 .input = payload,
             });
             defer checked.deinit(signer.gpa);
@@ -524,11 +549,11 @@ pub const Signer = struct {
                 if (time_arg) |t| try check.append(arena, t);
                 if (signer.revocation_file) |revoked| {
                     // Relative to where git runs, as git reads it.
-                    if (Io.Dir.cwd().access(io, revoked, .{})) |_| {
+                    if (signer.base.access(io, revoked, .{})) |_| {
                         try check.appendSlice(arena, &.{ "-r", revoked });
                     } else |_| {}
                 }
-                var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items }, .{
+                var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base } }, .{
                     .input = payload,
                 });
                 defer checked.deinit(signer.gpa);
@@ -944,7 +969,7 @@ test "a signer whose settings outgrow the arena's first block frees every one of
     defer config.deinit();
     var environ: std.process.Environ.Map = .init(gpa);
     defer environ.deinit();
-    var signer = try Signer.init(gpa, &config, .{ .environ = &environ });
+    var signer = try Signer.init(gpa, std.testing.io, &config, Io.Dir.cwd(), .{ .environ = &environ });
     defer signer.deinit();
     try std.testing.expectEqualStrings(long ++ "/id", signer.signing_key.?);
     try std.testing.expectEqualStrings(long ++ "/revoked", signer.revocation_file.?);

@@ -574,7 +574,7 @@ const Walk = struct {
         if (wk.decorations == null and (hasPlaceholder(format, "", "dD") or std.mem.find(u8, format, "%(decorate") != null))
             wk.decorations = try pretty.Decorations.load(wk.gpa, wk.io, wk.repo);
         if (wk.signer == null and hasPlaceholder(format, "", "G")) if (wk.options.programs) |programs| {
-            wk.signer = try signing.Signer.init(wk.gpa, wk.repo.configuration(), programs);
+            wk.signer = try signing.Signer.init(wk.gpa, wk.io, wk.repo.configuration(), wk.repo.topDirectory(), programs);
         };
         return .{
             .abbrev_len = wk.abbrev_len,

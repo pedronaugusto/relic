@@ -42,6 +42,7 @@
 //! | `worktree.sparse_checkout` | Module within `worktree`. |
 //! | `worktree.linked` | Module within `worktree`. |
 //! | `worktree.snapshot` | Module within `worktree`. |
+//! | `worktree.renames` | Module within `worktree`. |
 //! | `worktree.sparse` | Module within `worktree`. |
 //! | `worktree.ignore` | Module within `worktree`. |
 //! | `worktree.attributes` | Module within `worktree`. |

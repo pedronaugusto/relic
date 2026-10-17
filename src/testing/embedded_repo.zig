@@ -107,6 +107,8 @@ fn letter(change: worktree.Change) u8 {
         .deleted => 'D',
         .type_changed => 'T',
         .ignored => '!',
+        .renamed => 'R',
+        .copied => 'C',
     };
 }
 

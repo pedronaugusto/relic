@@ -61,7 +61,7 @@ pub const Error = error{
 
 /// Errors from making a runner.
 pub const InitError = Allocator.Error || Io.Dir.RealPathError ||
-    error{ MalformedValue, NameTooLong, UnexpandablePath };
+    error{ MalformedValue, NameTooLong } || config_mod.PathSettingError;
 
 /// Where a hook's output goes.
 pub const Output = enum {
@@ -309,7 +309,12 @@ pub const Runner = struct {
         const top = place.work_dir orelse place.git_dir;
         const cwd = try arena.dupe(u8, buf[0..try top.realPath(io, &buf)]);
 
-        const dir: []const u8 = if (try place.config.getPath(arena, "core.hookspath")) |configured|
+        // Read as git's configset reads it: the last value alone.
+        const hooks_path = if (place.config.find("core.hookspath")) |entry|
+            try config_mod.pathSetting(arena, io, top, place.config.context.home, entry.value)
+        else
+            null;
+        const dir: []const u8 = if (hooks_path) |configured|
             // A relative `core.hooksPath` is taken from where the hooks run.
             if (std.Io.Dir.path.isAbsolute(configured))
                 configured

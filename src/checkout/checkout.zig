@@ -710,6 +710,11 @@ pub const Change = enum {
     untracked,
     /// Present in the working tree and excluded by an ignore rule.
     ignored,
+    /// Staged under this path from `StatusEntry.source`, which is gone:
+    /// what `worktree.renames.find` finds among the staged changes.
+    renamed,
+    /// Staged under this path as a copy of `StatusEntry.source`.
+    copied,
 };
 
 /// One path's status.
@@ -724,6 +729,10 @@ pub const StatusEntry = struct {
     unstaged: Change,
     /// Set when the path has entries at stages 1 to 3.
     conflicted: bool = false,
+    /// Where a `renamed` or `copied` path came from, and how alike the two
+    /// are, in percent.
+    source: ?[]const u8 = null,
+    score: u8 = 0,
     /// Set when the path is a gitlink in `HEAD` or in the index: the path is
     /// a submodule, and this is what its working tree holds. It is the `S<c><m><u>` field of
     /// `git status --porcelain=v2`, where every other path has `N...`.

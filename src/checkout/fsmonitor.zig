@@ -42,7 +42,7 @@ const Index = index_mod.Index;
 pub const Error = error{
     /// `core.fsmonitorHookVersion` is neither 1 nor 2.
     InvalidFsmonitorHookVersion,
-} || config_mod.PathError || Io.Cancelable;
+} || config_mod.PathSettingError || Io.Cancelable;
 
 /// An answer: the token to ask with next time, and what changed.
 pub const Changes = struct {
@@ -78,6 +78,14 @@ pub const Daemon = struct {
     git_dir: Io.Dir,
 };
 
+/// The directories `configured` reads against.
+pub const Dirs = struct {
+    /// The repository's own git directory.
+    git_dir: Io.Dir,
+    /// The top of the working tree.
+    work_tree: Io.Dir,
+};
+
 /// Where the changes come from.
 pub const Source = union(enum) {
     hook: Hook,
@@ -88,17 +96,18 @@ pub const Source = union(enum) {
 /// The monitor the configuration names, or `null` when there is none, as
 /// git reads `core.fsmonitor`: a boolean (git's spellings, a bare name and
 /// any integer included) turns git's daemon on or everything off, an empty
-/// value is off, and anything else is a hook's path, `~` expanded against
-/// the configuration's home. `git_dir` is the repository's own git
-/// directory, where the daemon listens; the hook's path lives in `arena`
-/// or borrows the configuration.
-pub fn configured(arena: Allocator, config: *const config_mod.Config, git_dir: Io.Dir, programs: program.Programs) Self.Error!?Source {
+/// value is off, and anything else is a hook's path, a path setting
+/// (`config.pathSetting`) found from the top of the working tree, where
+/// the hook runs: an `:(optional)` hook that is not there is off. `dirs`
+/// are the repository's own git directory, where the daemon listens, and
+/// that top; the hook's path lives in `arena`.
+pub fn configured(arena: Allocator, io: Io, config: *const config_mod.Config, dirs: Dirs, programs: program.Programs) Self.Error!?Source {
     const entry = config.find("core.fsmonitor") orelse return null;
-    const value = entry.value orelse return .{ .daemon = .{ .git_dir = git_dir } };
+    const value = entry.value orelse return .{ .daemon = .{ .git_dir = dirs.git_dir } };
     if (config_mod.parseBool(value)) |on| {
-        return if (on) .{ .daemon = .{ .git_dir = git_dir } } else null;
+        return if (on) .{ .daemon = .{ .git_dir = dirs.git_dir } } else null;
     } else |_| {}
-    const command = try config_mod.interpolatePath(arena, value, config.context.home);
+    const command = (try config_mod.pathSetting(arena, io, dirs.work_tree, config.context.home, value)) orelse return null;
     const version: ?u2 = if (config.get("core.fsmonitorhookversion")) |text| switch (config_mod.parseInteger(text) catch return error.InvalidFsmonitorHookVersion) {
         1 => 1,
         2 => 2,

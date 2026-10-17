@@ -36,6 +36,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
 const worktree = @import("../checkout/checkout.zig");
 const index_mod = @import("../index/index.zig");
 const hooks = @import("../hooks/hooks.zig");
@@ -287,14 +288,13 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 
 /// What `commit.template` holds: the text git starts a message from when
 /// none is given, `null` when it is not set, cannot be read or is empty.
-/// A path that is not absolute is the working tree's, where git runs
-/// `commit`, and `~/` is the home the repository was opened with. The text
-/// is `gpa`'s.
-pub fn template(gpa: Allocator, io: Io, repo: *Repository) (Allocator.Error || error{UnexpandablePath})!?[]u8 {
-    const path = (try repo.configuration().getPath(gpa, "commit.template")) orelse return null;
+/// It is a path setting (`Config.getPath`): one that is not absolute is
+/// found from where git runs `commit`, the top of the working tree, and
+/// `~/` is the home the repository was opened with. The text is `gpa`'s.
+pub fn template(gpa: Allocator, io: Io, repo: *Repository) config_mod.PathSettingError!?[]u8 {
+    const path = (try repo.configuration().getPath(gpa, io, repo.topDirectory(), "commit.template")) orelse return null;
     defer gpa.free(path);
-    const dir = if (std.Io.Dir.path.isAbsolute(path)) Io.Dir.cwd() else repo.workDirectory() orelse Io.Dir.cwd();
-    const text = dir.readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;
+    const text = repo.topDirectory().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;
     if (text.len == 0) {
         gpa.free(text);
         return null;

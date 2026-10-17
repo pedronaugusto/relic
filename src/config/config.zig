@@ -74,6 +74,15 @@ pub const PathError = error{
     UnexpandablePath,
 } || Allocator.Error;
 
+/// Errors from reading a path setting as git's `git_config_pathname` does.
+pub const PathSettingError = PathError || error{
+    /// The name was written bare, with no `=`: git's "missing value".
+    MissingPath,
+    /// A path marked `:(optional)` whose stat failed other than by the file
+    /// not being there, which git dies on ("could not stat").
+    UnstatablePath,
+};
+
 /// One line of a configuration file, in the order the file holds them.
 ///
 /// A `.section` line opens a section; a `.variable` line sets a value; a
@@ -1113,11 +1122,23 @@ pub const Config = struct {
         return parseInteger(value);
     }
 
-    /// The value of `full_name` as a path, `interpolatePath`'d against
-    /// `Context.home`. The result is the caller's.
-    pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) PathError!?[]u8 {
-        const value = config.get(full_name) orelse return null;
-        return try interpolatePath(gpa, value, config.context.home);
+    /// The value of `full_name` as a path, as git's config callback reads
+    /// a path setting: every value in order through `pathSetting` against
+    /// `Context.home` and `base`, a bad one refused wherever it stands, the
+    /// last deciding (`null` when it is an `:(optional)` file that is not
+    /// there). `base` is where a relative path is found from: git's working
+    /// directory, the working tree's top, else the git directory. The
+    /// result is the caller's.
+    pub fn getPath(config: *const Config, gpa: Allocator, io: Io, base: Io.Dir, full_name: []const u8) PathSettingError!?[]u8 {
+        var found: ?[]u8 = null;
+        errdefer if (found) |path| gpa.free(path);
+        var it = config.iterate(&.{full_name});
+        while (it.next()) |entry| {
+            const path = try pathSetting(gpa, io, base, config.context.home, entry.value);
+            if (found) |old| gpa.free(old);
+            found = path;
+        }
+        return found;
     }
 
     /// Every subsection name under `section`, in order and without
@@ -1530,6 +1551,37 @@ pub fn interpolatePath(gpa: Allocator, path: []const u8, home: ?[]const u8) Path
     defer if (user.len != 0) gpa.free(dir);
     return gpa.print("{s}{s}", .{ dir, path[slash..] });
 }
+
+/// git's `git_config_pathname`, the one reading of a path setting: a bare
+/// name (`raw` `null`) is `error.MissingPath`; `:(optional)` in front marks
+/// a file that may be missing, and is `null` when its stat says it is not
+/// there (a stat failing any other way is `error.UnstatablePath`); the
+/// rest is `interpolatePath`'d against `home`. A relative path is stat'ed
+/// from `base`, where git runs, and returned as written: the caller finds
+/// it from the same place. The result is the caller's.
+pub fn pathSetting(gpa: Allocator, io: Io, base: Io.Dir, home: ?[]const u8, raw: ?[]const u8) PathSettingError!?[]u8 {
+    const text = raw orelse return error.MissingPath;
+    const optional = std.mem.startsWith(u8, text, optional_prefix);
+    const path = try interpolatePath(gpa, if (optional) text[optional_prefix.len..] else text, home);
+    if (!optional) return path;
+    errdefer gpa.free(path);
+    // `stat("")` is ENOENT, as it is for git.
+    if (path.len == 0) {
+        gpa.free(path);
+        return null;
+    }
+    _ = base.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            gpa.free(path);
+            return null;
+        },
+        else => return error.UnstatablePath,
+    };
+    return path;
+}
+
+/// What marks a path setting's file as one that may be missing.
+const optional_prefix = ":(optional)";
 
 /// The home directory of `user`, from the password database, where the
 /// platform has one this can ask. The result is the caller's.
@@ -2164,6 +2216,52 @@ test "get hands back the value git reads, quotes and escapes undone once, and an
     }
 }
 
+test "path settings read as git config --type=path reads them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    git.report_failures = false;
+    try git.writeFile(io, "here", "");
+    try git.writeFile(io, "sub/file", "");
+    const home = try git.home.?.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(home);
+    try git.home.?.dir.writeFile(io, .{ .sub_path = "in-home", .data = "" });
+    // `%(prefix)/` is git's own install directory, which relic has none of
+    // (`interpolatePath`): left out.
+    const values = [_][]const u8{
+        "here",             ":(optional)here",            ":(optional)gone",     ":(optional)",
+        ":(optional)sub",   ":(optional)sub/file",        ":(optional)sub/gone", ":(optional)gone/x",
+        "~/in-home",        ":(optional)~/in-home",       ":(optional)~/gone",   "~",
+        ":(optional)~",     ":(Optional)gone",            " :(optional)gone",    ":(optional) here",
+        "::(optional)gone", ":(optional):(optional)here",
+    };
+    for (values) |value| {
+        const text = try gpa.print("[p]\n\tv = \"{s}\"\n", .{value});
+        defer gpa.free(text);
+        try git.writeFile(io, "probe.config", text);
+        var theirs = try git.capture(io, &.{ "config", "-f", "probe.config", "--type=path", "p.v" });
+        defer theirs.deinit(gpa);
+        var config = try Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        config.context.home = home;
+        const ours = config.getPath(gpa, io, git.dir, "p.v");
+        defer if (ours) |path| {
+            if (path) |p| gpa.free(p);
+        } else |_| {};
+        errdefer std.debug.print("value: {s}\ngit: {d} {s}{s}\n", .{ value, theirs.code, theirs.stdout, theirs.stderr });
+        // git prints the path, exits 1 for no value, dies for a bad one.
+        switch (theirs.code) {
+            0 => {
+                try std.testing.expect(std.mem.endsWith(u8, theirs.stdout, "\n"));
+                try std.testing.expectEqualStrings(theirs.stdout[0 .. theirs.stdout.len - 1], (try ours).?);
+            },
+            1 => try std.testing.expectEqual(@as(?[]u8, null), try ours),
+            else => try std.testing.expect(std.meta.isError(ours)),
+        }
+    }
+}
+
 test "integers and booleans read as git config --type reads them" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -2217,9 +2315,67 @@ test "typed getters unquote values before parsing them" {
 
     try std.testing.expect(try config.getBool("typed.flag", false));
     try std.testing.expectEqual(@as(i64, 5 * 1024), try config.getInt("typed.size", 0));
-    const path = (try config.getPath(gpa, "typed.path")).?;
+    const path = (try config.getPath(gpa, std.testing.io, Io.Dir.cwd(), "typed.path")).?;
     defer gpa.free(path);
     try std.testing.expectEqualStrings("/home/ada/a b", path);
+}
+
+test "path settings read as git_config_pathname: :(optional), bare names, a stat failing" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "here", .data = "" });
+
+    const Case = struct { []const u8, PathSettingError!?[]const u8 };
+    const cases = [_]Case{
+        .{ "[p]\n\tv = :(optional)here\n", "here" },
+        .{ "[p]\n\tv = :(optional)gone\n", null },
+        .{ "[p]\n\tv = :(optional)\n", null },
+        .{ "[p]\n\tv = :(optional)~/x\n", null },
+        .{ "[p]\n\tv = ~/x\n", "/home/ada/x" },
+        .{ "[p]\n\tv = gone\n", "gone" },
+        .{ "[p]\n\tv = ~nosuchuser-relic/x\n", error.UnexpandablePath },
+        .{ "[p]\n\tv\n", error.MissingPath },
+        // Every value is read, as git's callback reads it: a bad one stops
+        // the reading wherever it is, a missing optional file is no value.
+        .{ "[p]\n\tv\n\tv = here\n", error.MissingPath },
+        .{ "[p]\n\tv = here\n\tv = :(optional)gone\n", null },
+        .{ "[p]\n\tv = :(optional)gone\n\tv = :(optional)here\n", "here" },
+    };
+    for (cases) |case| {
+        var config = try Config.parseText(gpa, case[0], .local);
+        defer config.deinit();
+        config.context.home = "/home/ada";
+        const got = config.getPath(gpa, io, tmp.dir, "p.v");
+        defer if (got) |path| {
+            if (path) |p| gpa.free(p);
+        } else |_| {};
+        if (case[1]) |want| {
+            const path = try got;
+            if (want) |w| try std.testing.expectEqualStrings(w, path.?) else try std.testing.expectEqual(@as(?[]u8, null), path);
+        } else |err| try std.testing.expectError(err, got);
+    }
+
+    // A stat failing other than ENOENT is a setting git dies on: a
+    // directory that cannot be searched, and (where std tells it apart: its
+    // macOS stat reads ENOTDIR as `FileNotFound`, which airlock's stat seam
+    // is to settle) a file standing where a directory would be.
+    if (builtin.os.tag == .windows) return;
+    try tmp.dir.createDir(io, "shut", .fromMode(0));
+    // glint-ignore: Z026 -- the scratch directory is removed either way; this only lets its removal in
+    defer tmp.dir.setFilePermissions(io, "shut", .fromMode(0o755), .{}) catch {};
+    var unstatable: std.ArrayList([]const u8) = .empty;
+    defer unstatable.deinit(gpa);
+    // Root searches any directory.
+    const euid = if (builtin.os.tag == .linux) std.os.linux.geteuid() else std.c.geteuid();
+    if (euid != 0) try unstatable.append(gpa, "[p]\n\tv = :(optional)shut/x\n");
+    if (builtin.os.tag == .linux) try unstatable.append(gpa, "[p]\n\tv = :(optional)here/below\n");
+    for (unstatable.items) |text| {
+        var config = try Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        try std.testing.expectError(error.UnstatablePath, config.getPath(gpa, io, tmp.dir, "p.v"));
+    }
 }
 
 test "relative includes start beside the including file" {

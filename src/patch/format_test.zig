@@ -326,3 +326,37 @@ test "a commit already upstream is left out, and copies are found when diff.rena
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--ignore-if-in-upstream" }, "upstream..main", range, .{ .ignore_if_in_upstream = true });
     try compare(gpa, io, &git, &repo, &.{"--no-signature"}, "upstream..main", range, .{});
 }
+
+test "format-patch takes an order file and --relative, given or from diff.orderFile and diff.relative, as git does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const diff = @import("../diff/diff.zig");
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try buildHistory(io, &git);
+    try git.writeFile(io, "dir/more.txt", "more\n");
+    try git.writeFile(io, "dir/b.txt", "bee again\n");
+    try git.writeFile(io, "run.sh", "#!/bin/sh\necho again\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "Under dir and beside it" });
+    try git.writeFile(io, "order", "*.sh\nnew*\n# a.txt\n\ndir\n");
+    const base = try oidOf(gpa, io, &git, "base");
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    const range: formatpatch.Range = .{ .upstream = base, .tip = head };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const order = try diff.Order.parse(arena.allocator(), "*.sh\nnew*\n# a.txt\n\ndir\n");
+    {
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        try compare(gpa, io, &git, &repo, &.{ "--no-signature", "-Oorder" }, "base..HEAD", range, .{ .order = order });
+        try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--relative=dir/" }, "base..HEAD", range, .{ .directory = "dir/", .relative = true });
+    }
+    try git.exec(io, &.{ "config", "diff.orderFile", "order" });
+    try git.exec(io, &.{ "config", "diff.relative", "true" });
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    // git's `--relative=dir/` from the top is `diff.relative` from `dir`.
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--relative=dir/" }, "base..HEAD", range, .{ .directory = "dir/" });
+    try compare(gpa, io, &git, &repo, &.{"--no-signature"}, "base..HEAD", range, .{});
+}

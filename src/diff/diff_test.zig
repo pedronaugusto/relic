@@ -796,7 +796,7 @@ test "under a whitespace option a context line is the new side's, \\v and \\f ar
     }
 }
 
-test "diff.context, diff.interHunkContext, diff.indentHeuristic and diff.algorithm shape a diff as git diff reads them" {
+test "diff.context, diff.interHunkContext, diff.indentHeuristic, diff.algorithm and diff.suppressBlankEmpty shape a diff as git diff reads them" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     const config_mod = @import("../config/config.zig");
@@ -812,6 +812,8 @@ test "diff.context, diff.interHunkContext, diff.indentHeuristic and diff.algorit
         .{ .key = "diff.interHunkContext", .values = &.{ "0", "1", "3", "7", "-2", "", null, "0x10" } },
         .{ .key = "diff.indentHeuristic", .values = &.{ "true", "false", "off", "0", null, "maybe", "" } },
         .{ .key = "diff.algorithm", .values = &.{ "myers", "patience", "histogram", "minimal", null, "sideways" } },
+        .{ .key = "diff.suppressBlankEmpty", .values = &.{ "true", "false", "yes", null, "maybe" } },
+        .{ .key = "diff.suppress-blank-empty", .values = &.{ "true", "no", null } },
     };
     var prng: std.Random.DefaultPrng = .init(0x5f17_d1ff);
     const random = prng.random();
@@ -890,4 +892,122 @@ test "diff.context, diff.interHunkContext, diff.indentHeuristic and diff.algorit
     }
     // The corpus holds both outcomes.
     try std.testing.expect(refused > 20 and refused < 250);
+}
+
+test "diff.renames and diff.renameLimit read as git log reads them: every value, a bad one fatal" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const config_mod = @import("../config/config.zig");
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    git.report_failures = false;
+    const original = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
+    try git.writeFile(io, "a", "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n");
+    try git.writeFile(io, "x", original);
+    try git.exec(io, &.{ "add", "." });
+    try git.exec(io, &.{ "commit", "-qm", "one" });
+    try git.exec(io, &.{ "mv", "a", "b" });
+    try git.writeFile(io, "x", original ++ "nine\n");
+    try git.writeFile(io, "y", original);
+    try git.exec(io, &.{ "add", "." });
+    try git.exec(io, &.{ "commit", "-qm", "two" });
+
+    // Each case is a list of settings, given in order; `null` is a bare name.
+    const Setting = struct { []const u8, ?[]const u8 };
+    const cases = [_][]const Setting{
+        &.{},
+        &.{.{ "diff.renames", "false" }},
+        &.{.{ "diff.renames", "copies" }},
+        &.{.{ "diff.renames", "COPY" }},
+        &.{.{ "diff.renames", null }},
+        &.{.{ "diff.renames", "" }},
+        &.{.{ "diff.renames", "2" }},
+        &.{.{ "diff.renames", "maybe" }},
+        &.{ .{ "diff.renames", "maybe" }, .{ "diff.renames", "true" } },
+        &.{ .{ "diff.renames", "off" }, .{ "diff.renames", null } },
+        &.{.{ "diff.renamelimit", "1k" }},
+        &.{.{ "diff.renamelimit", "-3" }},
+        &.{.{ "diff.renamelimit", "x" }},
+        &.{.{ "diff.renamelimit", null }},
+        &.{.{ "diff.renamelimit", "3000000000" }},
+        &.{ .{ "diff.renamelimit", "x" }, .{ "diff.renamelimit", "5" } },
+    };
+    for (cases) |settings| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        try text.appendSlice(gpa, "[diff]\n");
+        for (settings) |setting| {
+            const name = setting[0]["diff.".len..];
+            if (setting[1]) |v| {
+                try argv.appendSlice(gpa, &.{ "-c", try arena.allocator().print("{s}={s}", .{ setting[0], v }) });
+                try text.print(gpa, "\t{s} = \"{s}\"\n", .{ name, v });
+            } else {
+                try argv.appendSlice(gpa, &.{ "-c", setting[0] });
+                try text.print(gpa, "\t{s}\n", .{name});
+            }
+        }
+        try argv.appendSlice(gpa, &.{ "log", "-1", "--format=", "--name-status" });
+        var theirs = try git.capture(io, argv.items);
+        defer theirs.deinit(gpa);
+        var config = try config_mod.Config.parseText(gpa, text.items, .local);
+        defer config.deinit();
+        errdefer std.debug.print("settings: {s}\ngit: {d} {s}{s}\n", .{ text.items, theirs.code, theirs.stdout, theirs.stderr });
+        const ours = diff.RenameSettings.read(&config);
+        if (theirs.code != 0) {
+            try std.testing.expectError(error.InvalidDiffSetting, ours);
+            continue;
+        }
+        const options = (try ours).options();
+        const renamed = std.mem.find(u8, theirs.stdout, "\nR") != null or std.mem.startsWith(u8, theirs.stdout, "R");
+        const copied = std.mem.find(u8, theirs.stdout, "C") != null;
+        try std.testing.expectEqual(renamed, options != null);
+        try std.testing.expectEqual(copied, options != null and options.?.detect_copies);
+    }
+}
+
+fn setupOrdered(io: Io, repo: *testgit.Repo) anyerror!void {
+    const paths = [_][]const u8{ "a.txt", "b/c", "dir/sub/y.txt", "dir/x.c", "z.md", "zz/a.txt" };
+    for (paths) |path| try repo.writeFile(io, path, "one\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    for (paths) |path| try repo.writeFile(io, path, "two\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+}
+
+test "an order file orders the changes as git diff-tree -O orders them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(setupOrdered, gpa, io);
+    defer pair.deinit(gpa, io);
+    const texts = [_][]const u8{
+        "*.md\ndir\n",
+        "#*.txt\n\ndir/sub\n*.c\n",
+        "*\n",
+        "b/*\ndir/s*\n",
+        "nomatch\n",
+        "*.txt\r\nzz\n",
+        "a.txt\n*.txt",
+        "dir/*.txt\nzz/*\n",
+    };
+    for (texts) |text| {
+        try pair.repo.writeFile(io, "order", text);
+        const expected = try pair.repo.run(io, &.{ "diff-tree", "--name-only", "-r", "-Oorder", pair.old_text, pair.new_text });
+        defer gpa.free(expected);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{ .order = try diff.Order.parse(arena.allocator(), text) });
+        defer changes.deinit();
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        for (changes.items) |change| try out.writer.print("{s}\n", .{change.path()});
+        std.testing.expectEqualStrings(expected, out.written()) catch |err| {
+            std.debug.print("order file: {s}\n", .{text});
+            return err;
+        };
+    }
 }

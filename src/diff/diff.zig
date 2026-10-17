@@ -23,6 +23,7 @@ const odb_mod = @import("../odb/odb.zig");
 const attributes = @import("../patterns.zig").attributes;
 const user_diff = @import("user_diff.zig");
 const config_mod = @import("../config/config.zig");
+const glob = @import("../text.zig").glob;
 
 const Oid = hash.Oid;
 
@@ -163,8 +164,81 @@ pub const RenameOptions = struct {
 pub const TreeOptions = struct {
     /// Rename and copy detection, or `null` for none.
     renames: ?RenameOptions = null,
-    /// Only paths beginning with this prefix, `/`-separated.
+    /// Only paths under this directory, `/`-separated; a trailing `/`, as
+    /// git's prefix has, is the same directory.
     prefix: []const u8 = "",
+    /// An order file's patterns (`-O`, `diff.orderFile`: `Order`): the
+    /// changes come out in the order of the first pattern each path
+    /// matches, the rest after them, otherwise as they were.
+    order: Order = .{},
+};
+
+/// An order file, as git's `diffcore_order` reads and applies it: one
+/// pattern a line, blank lines and lines beginning `#` passed over, the
+/// rest kept whole. A path takes the first pattern that matches it or one
+/// of its leading directories, as `wildmatch` with no flags matches (`*`
+/// crosses `/`); a path matching none comes after all of them.
+pub const Order = struct {
+    patterns: []const []const u8 = &.{},
+
+    /// The patterns of an order file's `text`, borrowing it; the list is
+    /// `arena`'s.
+    pub fn parse(arena: Allocator, text: []const u8) Allocator.Error!Order {
+        var patterns: std.ArrayList([]const u8) = .empty;
+        var at: usize = 0;
+        while (at < text.len) {
+            const end = std.mem.findScalarPos(u8, text, at, '\n') orelse text.len;
+            const line = text[at..end];
+            if (line.len != 0 and line[0] != '#') try patterns.append(arena, line);
+            at = end + 1;
+        }
+        return .{ .patterns = patterns.items };
+    }
+
+    /// Which pattern `path` takes: its index, or the count for none.
+    pub fn rank(o: Order, gpa: Allocator, path: []const u8) Allocator.Error!usize {
+        for (o.patterns, 0..) |pattern, i| {
+            var subject = path;
+            while (subject.len != 0) {
+                if (try glob.matches(gpa, pattern, subject, .{ .pathname = false })) return i;
+                subject = subject[0 .. std.mem.findScalarLast(u8, subject, '/') orelse break];
+            }
+        }
+        return o.patterns.len;
+    }
+
+    /// `changes` in the order's order, stable, as git's sort keeps equal
+    /// ranks in their order.
+    fn apply(o: Order, arena: Allocator, changes: []Change) Allocator.Error!void {
+        if (o.patterns.len == 0 or changes.len < 2) return;
+        const Ranked = struct { rank: usize, change: Change };
+        const ranked = try arena.alloc(Ranked, changes.len);
+        for (changes, ranked) |c, *r| r.* = .{ .rank = try o.rank(arena, c.path()), .change = c };
+        std.sort.block(Ranked, ranked, {}, struct {
+            fn less(_: void, a: Ranked, b: Ranked) bool {
+                return a.rank < b.rank;
+            }
+        }.less);
+        for (changes, ranked) |*c, r| c.* = r.change;
+    }
+
+    /// Errors from `configured`.
+    pub const ConfiguredError = config_mod.PathSettingError || error{
+        /// The order file named cannot be read, which git dies on.
+        OrderFileUnreadable,
+    };
+
+    /// The order file `diff.orderFile` names, a path setting found from
+    /// `base` (`Config.getPath`), read whole; none when it is not set.
+    /// Everything is `arena`'s.
+    pub fn configured(arena: Allocator, io: Io, base: Io.Dir, config: *const config_mod.Config) ConfiguredError!Order {
+        const path = (try config.getPath(arena, io, base, "diff.orderfile")) orelse return .{};
+        const text = base.readFileAlloc(io, path, arena, .unlimited) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OrderFileUnreadable,
+        };
+        return parse(arena, text);
+    }
 };
 
 const Flat = std.array_hash_map.String(Entry);
@@ -194,9 +268,10 @@ pub fn tree(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, option
     std.mem.sort(Change, changes.items, {}, lessThanChange);
 
     if (options.renames) |rename_options| {
-        try detectRenames(arena, gpa, io, db, &changes, &old_entries, rename_options);
+        try detectRenames(arena, io, db, &changes, &old_entries, rename_options);
         std.mem.sort(Change, changes.items, {}, lessThanChange);
     }
+    try options.order.apply(arena, changes.items);
 
     return .{ .gpa = gpa, .arena = arena_instance.state, .items = changes.items };
 }
@@ -308,6 +383,7 @@ fn treeOrder(a: object.Tree.Entry, b: object.Tree.Entry) std.math.Order {
 
 fn underPrefix(path: []const u8, prefix: []const u8) bool {
     if (prefix.len == 0) return true;
+    if (prefix[prefix.len - 1] == '/') return std.mem.startsWith(u8, path, prefix);
     if (!std.mem.startsWith(u8, path, prefix)) return false;
     return path.len == prefix.len or path[prefix.len] == '/';
 }
@@ -344,16 +420,26 @@ fn flatten(
     }
 }
 
+/// Pair the deletions and additions among `changes` as `tree` pairs them,
+/// git's `diffcore_rename`, writing the list back as git writes its queue:
+/// a rename or copy where its destination stood, a deletion whose file
+/// went somewhere gone. For changes made elsewhere than between two trees,
+/// such as a status's staged ones; their paths and everything allocated
+/// are `arena`'s.
+pub fn findRenames(arena: Allocator, io: Io, db: *odb_mod.Odb, changes: *std.ArrayList(Change), options: RenameOptions) Self.Error!void {
+    std.mem.sort(Change, changes.items, {}, lessThanChange);
+    try detectRenames(arena, io, db, changes, &Flat.empty, options);
+    std.mem.sort(Change, changes.items, {}, lessThanChange);
+}
+
 fn detectRenames(
     arena: Allocator,
-    gpa: Allocator,
     io: Io,
     db: *odb_mod.Odb,
     changes: *std.ArrayList(Change),
     old_entries: *const Flat,
     options: RenameOptions,
 ) Error!void {
-    _ = gpa;
     // git's queue: every change in path order, and with
     // `--find-copies-harder` every unchanged file as well.
     var queue: std.ArrayList(*rename.Pair) = .empty;
@@ -447,6 +533,9 @@ pub const Options = struct {
     /// Whether to slide an ambiguous change group to the position with the
     /// best indentation. On by default, as it is in git since 2.14.
     indent_heuristic: bool = true,
+    /// `diff.suppressBlankEmpty`: a context line that is a line ending
+    /// alone is written without its space.
+    suppress_blank_empty: bool = false,
     /// Whether to spend the time proving the script is minimal. git does
     /// not by default, and its output is what a fixture holds.
     minimal: bool = false,
@@ -489,15 +578,16 @@ pub const ConfigError = error{
     /// refuses too.
     UnknownDiffAlgorithm,
     /// A `diff.context` or `diff.interHunkContext` that is not an `int` of
-    /// zero or more, or a `diff.indentHeuristic` that is not a boolean:
-    /// values git dies on.
+    /// zero or more, a `diff.indentHeuristic` that is not a boolean, a
+    /// rename setting that is neither a boolean nor `copies`, a rename
+    /// limit that is not an `int`: values git dies on.
     InvalidDiffSetting,
 };
 
 /// `options` with what the configuration says of the content diff `git
 /// diff`, `git log -p`, `git show` and `format-patch` make when nothing is
-/// asked: `diff.algorithm`, `diff.context`, `diff.interHunkContext` and
-/// `diff.indentHeuristic`.
+/// asked: `diff.algorithm`, `diff.context`, `diff.interHunkContext`,
+/// `diff.indentHeuristic` and `diff.suppressBlankEmpty`.
 ///
 /// Every value is read in order, as git's callback reads it: one git dies
 /// on is refused wherever it stands, and the last one decides. An
@@ -507,7 +597,7 @@ pub const ConfigError = error{
 /// as it was given.
 pub fn configured(config: *const config_mod.Config, options: Options) ConfigError!Options {
     var out = options;
-    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic" });
+    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty" });
     while (it.next()) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.name, "algorithm")) {
             const parsed = LineDiff.parse(entry.value orelse return error.UnknownDiffAlgorithm) orelse return error.UnknownDiffAlgorithm;
@@ -517,8 +607,11 @@ pub fn configured(config: *const config_mod.Config, options: Options) ConfigErro
             out.context = try configCount(entry.value);
         } else if (std.ascii.eqlIgnoreCase(entry.name, "interhunkcontext")) {
             out.inter_hunk_context = try configCount(entry.value);
-        } else {
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "indentheuristic")) {
             out.indent_heuristic = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
+        } else {
+            // `suppressBlankEmpty`, and its old name `suppress-blank-empty`.
+            out.suppress_blank_empty = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
         }
     }
     return out;
@@ -531,6 +624,68 @@ fn configCount(value: ?[]const u8) ConfigError!u32 {
     const int = std.math.cast(i32, n) orelse return error.InvalidDiffSetting;
     return std.math.cast(u32, int) orelse error.InvalidDiffSetting;
 }
+
+/// `diff.relative`, every value as git's callback reads it: whether a
+/// diff made in a subdirectory shows only that directory, its paths
+/// relative to it. Off when it is not there.
+pub fn configuredRelative(config: *const config_mod.Config) ConfigError!bool {
+    var out = false;
+    var it = config.iterate(&.{"diff.relative"});
+    while (it.next()) |entry| out = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
+    return out;
+}
+
+/// What a rename setting asks for: git's `DIFF_DETECT_*`.
+pub const RenameDetection = enum { off, renames, copies };
+
+/// A rename setting's value as git's `git_config_rename` reads it, for
+/// `diff.renames`, `merge.renames` and `status.renames`: a bare name is
+/// renames, `copies` or `copy` in any case is copies, anything else one of
+/// git's boolean spellings (`error.InvalidDiffSetting` where git dies).
+pub fn parseRenameSetting(value: ?[]const u8) ConfigError!RenameDetection {
+    const text = value orelse return .renames;
+    if (std.ascii.eqlIgnoreCase(text, "copies") or std.ascii.eqlIgnoreCase(text, "copy")) return .copies;
+    const on = config_mod.parseBool(text) catch return error.InvalidDiffSetting;
+    return if (on) .renames else .off;
+}
+
+/// A rename limit as git's `git_config_int` reads it: an `int`, unit
+/// suffixes included, and a bare name refused.
+pub fn parseRenameLimit(value: ?[]const u8) ConfigError!i32 {
+    const n = config_mod.parseInteger(value orelse return error.InvalidDiffSetting) catch return error.InvalidDiffSetting;
+    return std.math.cast(i32, n) orelse error.InvalidDiffSetting;
+}
+
+/// What `diff.renames` and `diff.renameLimit` say, read as git's diff
+/// callbacks read them: every value in order, one git dies on refused
+/// wherever it stands, the last deciding. `null` where a setting is not
+/// there.
+pub const RenameSettings = struct {
+    detection: ?RenameDetection = null,
+    limit: ?i32 = null,
+
+    pub fn read(config: *const config_mod.Config) ConfigError!RenameSettings {
+        var out: RenameSettings = .{};
+        var it = config.iterate(&.{ "diff.renames", "diff.renamelimit" });
+        while (it.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.name, "renames")) {
+                out.detection = try parseRenameSetting(entry.value);
+            } else out.limit = try parseRenameLimit(entry.value);
+        }
+        return out;
+    }
+
+    /// The renames a diff, `git log -p` or `format-patch` finds with
+    /// nothing asked: on unless `diff.renames` says otherwise, copies too
+    /// for `copies`, scored up to `diff.renameLimit` (1000, and none when
+    /// it is zero or less); `null` for none.
+    pub fn options(s: RenameSettings) ?RenameOptions {
+        const detection = s.detection orelse .renames;
+        if (detection == .off) return null;
+        const limit = s.limit orelse 1000;
+        return .{ .detect_copies = detection == .copies, .limit = @intCast(@max(0, limit)) };
+    }
+};
 
 /// The line diff `options` asks for.
 fn lineOptions(options: Options) parallax.Options {
@@ -788,7 +943,11 @@ pub fn unifiedBody(
         .{ .context = rule, .find = findByRule }
     else
         .c_function;
-    try parallax.writeUnified(w, diff, .{ .hunks = .{ .context = options.context, .inter_hunk_context = options.inter_hunk_context }, .heading = heading });
+    try parallax.writeUnified(w, diff, .{
+        .hunks = .{ .context = options.context, .inter_hunk_context = options.inter_hunk_context },
+        .heading = heading,
+        .suppress_blank_empty = options.suppress_blank_empty,
+    });
 }
 
 /// A caller's `FunctionLine` asked of a line, as git's `ff_regexp` asks a

@@ -167,6 +167,8 @@ fn changeLetter(change: worktree.Change) u8 {
         .modified => 'M',
         .deleted => 'D',
         .type_changed => 'T',
+        .renamed => 'R',
+        .copied => 'C',
     };
 }
 

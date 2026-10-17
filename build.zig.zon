@@ -13,8 +13,8 @@
         },
 
         .parallax = .{
-            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.4#1b2466e7e482e8a0b76e98800adebaace2f8feab",
-            .hash = "parallax-0.2.4-lz9Br4ljBgCZgvJjJH_ElFiKEn3hr0VmW-dk5E-PxHvF",
+            .url = "git+https://github.com/pedronaugusto/parallax?ref=v0.2.5#233750d0265e99820370161f2664ce62165ca83e",
+            .hash = "parallax-0.2.5-lz9Br4doBgD7cNUem7e-pa3Gpk-XO38TkbDV_C76bcTh",
         },
 
         .uplink = .{

@@ -39,6 +39,7 @@ const Io = std.Io;
 const odb_mod = @import("../odb/odb.zig");
 
 const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
 const rev_parse = @import("rev_parse.zig");
 
 const Repository = repo_mod.Repository;
@@ -52,7 +53,7 @@ pub const Identity = struct {
 
 /// Errors from loading a repository's mailmap.
 pub const LoadError = Allocator.Error || Io.File.Reader.Error || Io.Dir.ReadFileAllocError ||
-    error{ MalformedValue, UnexpandablePath } || odb_mod.Error;
+    error{MalformedValue} || config_mod.PathSettingError || odb_mod.Error;
 
 /// Keys compared as `strcasecmp` compares them: ASCII case folded.
 pub const Folded = struct {
@@ -238,10 +239,14 @@ pub const Mailmap = struct {
             try m.addText(found.bytes);
         }
 
-        if (try config.getPath(gpa, "mailmap.file")) |path| {
+        // Read as git's configset reads it: the last value alone.
+        const file = if (config.find("mailmap.file")) |entry|
+            try config_mod.pathSetting(gpa, io, repo.topDirectory(), config.context.home, entry.value)
+        else
+            null;
+        if (file) |path| {
             defer gpa.free(path);
-            const dir = repo.workDirectory() orelse Io.Dir.cwd();
-            try m.addFileAt(io, dir, path, .{ .follow_symlinks = true });
+            try m.addFileAt(io, repo.topDirectory(), path, .{ .follow_symlinks = true });
         }
         return m;
     }

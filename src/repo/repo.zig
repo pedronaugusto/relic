@@ -97,7 +97,7 @@ pub const Error = error{
 } || object.ParseError || discover_directory.Error || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
-    config_mod.ParseError || config_mod.ValueError || odb_mod.Error ||
+    config_mod.ParseError || config_mod.ValueError || config_mod.PathSettingError || odb_mod.Error ||
     refs_mod.ReadError || refs_mod.TransactionError || worktrees.Error;
 
 /// Errors from writing a commit or a tag, which may be signed.
@@ -110,12 +110,28 @@ pub const max_discovery_depth: u8 = 64;
 pub const Diagnostic = diagnostic_mod.Diagnostic;
 
 /// Errors from `templateDir`.
-pub const TemplateDirError = Allocator.Error || error{ MalformedValue, UnexpandablePath };
+pub const TemplateDirError = Allocator.Error || error{ UnexpandablePath, UnstatablePath };
 
-/// `init.templateDir` in `config`, as git reads it for `git init`, with
-/// `~/` expanded; `null` when it is not set. The path is `gpa`'s.
-pub fn templateDir(gpa: Allocator, config: *const config_mod.Config) TemplateDirError!?[]u8 {
-    return config.getPath(gpa, "init.templatedir");
+/// `init.templateDir` in `config`, as git's `template_dir_cb` reads it for
+/// `git init`: every value in order, a bare name unsetting it, the rest a
+/// path setting (`config.pathSetting`) found from `base`, the directory
+/// being made into a repository, where git init runs; an `:(optional)`
+/// directory that is not there is the value as written, `:(optional)`
+/// and all, as git keeps it. `null` when it is not set. The path is
+/// `gpa`'s.
+pub fn templateDir(gpa: Allocator, io: Io, base: Io.Dir, config: *const config_mod.Config) TemplateDirError!?[]u8 {
+    var found: ?[]u8 = null;
+    errdefer if (found) |path| gpa.free(path);
+    var it = config.iterate(&.{"init.templatedir"});
+    while (it.next()) |entry| {
+        const path: ?[]u8 = if (entry.value) |value| (config_mod.pathSetting(gpa, io, base, config.context.home, value) catch |err| return switch (err) {
+            error.MissingPath => unreachable,
+            else => |e| e,
+        }) orelse try gpa.dupe(u8, value) else null;
+        if (found) |old| gpa.free(old);
+        found = path;
+    }
+    return found;
 }
 
 /// An open repository.
@@ -399,6 +415,13 @@ pub const Repository = struct {
 
     pub fn workDirectory(repo: *const Repository) ?Io.Dir {
         return repo.data().work_dir;
+    }
+
+    /// Where git runs for this repository, and so where a relative path in
+    /// a setting is found from: the top of the working tree, else the git
+    /// directory.
+    pub fn topDirectory(repo: *const Repository) Io.Dir {
+        return repo.data().work_dir orelse repo.data().git_dir;
     }
 
     /// Borrowed until this repository is deinitialized.
@@ -1316,15 +1339,15 @@ pub const Repository = struct {
         const case_fold = repo.data().settings.ignore_case;
         var rules = try ignore.Rules.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer rules.deinit();
-        const excludes = try repo.configuration().getPath(repo.data().gpa, "core.excludesfile");
+        const excludes = try repo.configuration().getPath(repo.data().gpa, io, repo.topDirectory(), "core.excludesfile");
         defer if (excludes) |p| repo.data().gpa.free(p);
-        try rules.loadGlobal(io, repo.data().common_dir, excludes, Io.Dir.cwd());
+        try rules.loadGlobal(io, repo.data().common_dir, excludes, repo.topDirectory());
         return rules;
     }
 
     /// Errors from naming one of the repository's files as a path.
     pub const PathError = Allocator.Error || Io.Dir.RealPathFileAllocError ||
-        std.process.CurrentPathAllocError || error{ MalformedValue, UnexpandablePath };
+        config_mod.PathSettingError;
 
     /// The files `loadIgnore` reads, named.
     pub fn ignoreSources(repo: *const Repository, gpa: Allocator, io: Io) PathError!IgnoreSources {
@@ -1332,13 +1355,13 @@ pub const Repository = struct {
         defer gpa.free(common);
         const info_exclude = try std.Io.Dir.path.join(gpa, &.{ common, "info", "exclude" });
         errdefer gpa.free(info_exclude);
-        const configured = try repo.configuration().getPath(gpa, "core.excludesfile");
+        const configured = try repo.configuration().getPath(gpa, io, repo.topDirectory(), "core.excludesfile");
         defer if (configured) |path| gpa.free(path);
         const excludes_file: ?[]u8 = if (configured) |path| blk: {
             if (std.Io.Dir.path.isAbsolute(path)) break :blk try gpa.dupe(u8, path);
-            const cwd = try std.process.currentPathAlloc(io, gpa);
-            defer gpa.free(cwd);
-            break :blk try std.Io.Dir.path.join(gpa, &.{ cwd, path });
+            const top = try repo.topDirectory().realPathFileAlloc(io, ".", gpa);
+            defer gpa.free(top);
+            break :blk try std.Io.Dir.path.join(gpa, &.{ top, path });
         } else null;
         return .{ .excludes_file = excludes_file, .info_exclude = info_exclude };
     }
@@ -1357,9 +1380,9 @@ pub const Repository = struct {
         const case_fold = repo.data().settings.ignore_case;
         var attrs = try attributes.Attrs.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer attrs.deinit();
-        const file = try repo.configuration().getPath(repo.data().gpa, "core.attributesfile");
+        const file = try repo.configuration().getPath(repo.data().gpa, io, repo.topDirectory(), "core.attributesfile");
         defer if (file) |p| repo.data().gpa.free(p);
-        try attrs.loadGlobal(io, repo.data().common_dir, file, Io.Dir.cwd());
+        try attrs.loadGlobal(io, repo.data().common_dir, file, repo.topDirectory());
         return attrs;
     }
 
@@ -1660,7 +1683,7 @@ pub const Repository = struct {
             .extra = request.extra,
             .message = request.message,
         };
-        var signer = try repo.signerFor(request.signing, .commit, diagnostic);
+        var signer = try repo.signerFor(io, request.signing, .commit, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
             signing.signCommit(io, s, repo.objectFormat(), fields, request.signing.key)
@@ -1689,7 +1712,7 @@ pub const Repository = struct {
         const request = options.signing;
         const diagnostic = options.diagnostic;
         diagnostic_mod.reset(diagnostic);
-        var signer = try repo.signerFor(request, .tag, diagnostic);
+        var signer = try repo.signerFor(io, request, .tag, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
             signing.signTag(io, s, repo.objectFormat(), fields, request.key)
@@ -1704,7 +1727,7 @@ pub const Repository = struct {
 
     /// The signer a write needs, or `null` when it is not to be signed.
     /// The same decision names the setting that requires programs.
-    fn signerFor(repo: *Repository, request: signing.Request, target: enum { commit, tag }, diagnostic: ?*Diagnostic) WriteError!?signing.Signer {
+    fn signerFor(repo: *Repository, io: Io, request: signing.Request, target: enum { commit, tag }, diagnostic: ?*Diagnostic) WriteError!?signing.Signer {
         const primary = switch (target) {
             .commit => "commit.gpgSign",
             .tag => "tag.gpgSign",
@@ -1723,7 +1746,7 @@ pub const Repository = struct {
             if (setting.len != 0) try refuseSetting(diagnostic, setting);
             return error.SigningRequiresPrograms;
         };
-        return signing.Signer.init(repo.data().gpa, repo.configuration(), programs) catch |err| {
+        return signing.Signer.init(repo.data().gpa, io, repo.configuration(), repo.topDirectory(), programs) catch |err| {
             switch (err) {
                 error.UnknownSignatureFormat => try refuseSetting(diagnostic, "gpg.format"),
                 error.UnknownTrustLevel => try refuseSetting(diagnostic, "gpg.minTrustLevel"),

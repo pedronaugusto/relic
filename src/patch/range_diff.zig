@@ -50,7 +50,7 @@ pub const Error = error{
     /// Latin-1.
     UnsupportedEncoding,
     NotACommit,
-} || diff.Error || diff.TextError || diff.ConfigError || rev_walk.Error || pretty.Error || notes_mod.Error ||
+} || diff.Error || diff.TextError || diff.ConfigError || diff.Order.ConfiguredError || rev_walk.Error || pretty.Error || notes_mod.Error ||
     mailmap_mod.LoadError || repo_mod.Error || attributes.Error || Io.Writer.Error;
 
 /// `<base>..<tip>`: the commits `tip` reaches and `base` does not, merges
@@ -162,6 +162,7 @@ const Reader = struct {
     attrs: ?attributes.Attrs = null,
     diff_options: diff.Options,
     renames: ?diff.RenameOptions,
+    order: diff.Order,
     show_root: bool,
     quote_path: bool,
 
@@ -173,7 +174,8 @@ const Reader = struct {
             .repo = repo,
             .a = a,
             .diff_options = try diff.configured(config, .{}),
-            .renames = formatpatch.configuredRenames(config),
+            .renames = (try diff.RenameSettings.read(config)).options(),
+            .order = try diff.Order.configured(a, io, repo.topDirectory(), config),
             .show_root = config.getBool("log.showroot", true) catch true,
             .quote_path = config.getBool("core.quotepath", true) catch true,
         };
@@ -249,7 +251,7 @@ const Reader = struct {
                 defer parent.deinit();
                 break :blk parent.tree;
             };
-            var changes = try diff.tree(r.gpa, r.io, db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = r.renames });
+            var changes = try diff.tree(r.gpa, r.io, db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = r.renames, .order = r.order });
             defer changes.deinit();
             for (changes.items) |change| {
                 const old = if (change.old) |e| try r.loadSide(e) else null;

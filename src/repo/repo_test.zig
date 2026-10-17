@@ -1563,9 +1563,27 @@ test "init.templateDir names the template git init copies" {
     var config = try config_mod.Config.parseText(gpa, "[init]\n\ttemplateDir = ~/templates\n", .global);
     defer config.deinit();
     config.context.home = "/home/someone";
-    const path = (try repo_mod.templateDir(gpa, &config)).?;
+    const path = (try repo_mod.templateDir(gpa, std.testing.io, std.Io.Dir.cwd(), &config)).?;
     defer gpa.free(path);
     try std.testing.expectEqualStrings("/home/someone/templates", path);
+
+    // git's `template_dir_cb`: a bare name unsets it, and an `:(optional)`
+    // directory that is not there is the value as written.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "t", .default_dir);
+    const cases = [_]struct { []const u8, ?[]const u8 }{
+        .{ "[init]\n\ttemplateDir = t\n\ttemplateDir\n", null },
+        .{ "[init]\n\ttemplateDir = :(optional)gone\n", ":(optional)gone" },
+        .{ "[init]\n\ttemplateDir = :(optional)t\n", "t" },
+    };
+    for (cases) |case| {
+        var c = try config_mod.Config.parseText(gpa, case[0], .global);
+        defer c.deinit();
+        const got = try repo_mod.templateDir(gpa, std.testing.io, tmp.dir, &c);
+        defer if (got) |g| gpa.free(g);
+        if (case[1]) |want| try std.testing.expectEqualStrings(want, got.?) else try std.testing.expectEqual(@as(?[]u8, null), got);
+    }
 }
 
 test "a detached HEAD opens with no branch for onbranch:, and a HEAD that names neither a ref nor an object is no repository, as in git" {
