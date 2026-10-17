@@ -33,7 +33,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The release tier's ThreadSanitizer run is four jobs, each a shard of the suite (preflight 0.6.3's declared shards); the whole suite under the sanitizer outgrew one job's 30 minutes.
+- The release tier's ThreadSanitizer run is four jobs, each a shard of the suite (preflight 0.6.3, pinned for development, splits a declared job); the whole suite under the sanitizer outgrew one job's 30 minutes.
 
 ## [0.11.0] - 2026-10-15
 
