@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-17
+
 ### Breaking
 
 - One reader per operation setting, each refusing a value git dies on wherever it stands, the last good one deciding: `commit.message.Comment` (`core.commentChar` and `core.commentString` as one setting, `auto` choosing as `git commit`'s `adjust_comment_line_char` does against the message given, before trailers and hooks) replaces `commit.message.commentString`; `message.cleanupMode`, `cleanupSetting`, `commitCleanup` and `sequencerCleanup` (which now refuses a bare `commit.cleanup`); `merge.configuredStyle` for every content merge (`merge`, picks, rebase, notes, rerere, `apply --3way`). New errors: `MissingSigningValue`, `InvalidCommentString`, `NoCommentCharacter`, `InvalidConflictStyle`, `InvalidCleanupMode` (merge, picks, rebase), `InvalidMergeLog`, `InvalidDriverBinary`.
