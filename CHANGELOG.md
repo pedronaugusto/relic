@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-18
+
 ### Breaking
 
 - Path settings are read as git's `git_config_pathname`, one function (`config.pathSetting`, `PathSettingError`): `:(optional)` marks a file that may be missing and is no value when its stat says it is not there, a stat failing any other way and a bare name are refused (`UnstatablePath`, `MissingPath`), and a relative path is found from where git runs, the top of the working tree, else the git directory (`Repository.topDirectory`). `Config.getPath(gpa, io, base, name)` reads every value in order, as git's callbacks do. Used by `core.excludesFile`, `core.attributesFile`, `commit.template`, `core.hooksPath` and `mailmap.file` (the last value, as git's configset), `init.templateDir` (`templateDir(gpa, io, base, config)`: bare unsets, a missing `:(optional)` directory is the value as written, as git's `template_dir_cb`), `core.fsmonitor`'s hook (`fsmonitor.configured(arena, io, config, dirs, programs)`), `fsck.skipList` (`fsck.Rules.readSkipList(…, SkipListAt, path)`, `ConfigureOptions.base`, `TransferInputs.base`), `gpg.*.program` (a missing optional program keeps the one before it) and `gpg.ssh.allowedSignersFile`/`revocationFile` (`Signer.init(gpa, io, config, base, programs)`; the signing programs run in `base`, as git runs them), and `http.*` paths (`http_settings.Sources.base`, `smart_http.Options.base`; a relative path is made whole from it). `lfs.storage` keeps plain interpolation, being git-lfs's setting. Held to `git config --type=path` over a listed corpus.
