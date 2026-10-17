@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- One reader per operation setting, each refusing a value git dies on wherever it stands, the last good one deciding: `commit.message.Comment` (`core.commentChar` and `core.commentString` as one setting, `auto` choosing as `git commit`'s `adjust_comment_line_char` does against the message given, before trailers and hooks) replaces `commit.message.commentString`; `message.cleanupMode`, `cleanupSetting`, `commitCleanup` and `sequencerCleanup` (which now refuses a bare `commit.cleanup`); `merge.configuredStyle` for every content merge (`merge`, picks, rebase, notes, rerere, `apply --3way`). New errors: `InvalidCommentString`, `NoCommentCharacter`, `InvalidConflictStyle`, `InvalidCleanupMode` (merge, picks, rebase), `InvalidMergeLog`, `InvalidDriverBinary`.
+- `user_diff.Driver.says` and `isBinary`, and `diff.BinaryRule.isBinary`, refuse a `diff.<driver>.binary` that is neither a boolean nor `auto` (`InvalidDriverBinary`), as git dies on it, and read every value as userdiff's `parse_tristate` does: `auto` after a boolean leaves it to the bytes again.
+- `patch.apply.keptFiles` takes the object format whose names bound an `index` line.
+
+### Added
+
+- `config.Config.iterate`: every entry of one or more names in git's reading order, for settings git reads value by value and names it reads as one setting.
+- `config.parseBoolOrInt` (git's `git_config_bool_or_int`) and `config.parseNonNegative` (git's `git_parse_unsigned`).
+- `commit.merging.Options.cleanup` (`--cleanup`) and `commit.merging.mergeLogLength`: `merge.log` and its old name `merge.summary`, read as one setting, true being 20; a merge reads `commit.cleanup` before it merges anything, as `git merge` does.
+
+### Fixed
+
+- A Windows stat that cannot be taken names its failure (`AccessDenied`, `BadPathName`, `NetworkNotFound`, ...) instead of answering with `std.Io`'s stat, which describes a file otherwise (no attributes, the attribute-change time, a link's size as zero); a reparse point other than a symbolic link or a junction is the file or directory its attributes say, as git for Windows' `file_attr_to_st_mode` makes it, where relic called it unknown (cloud placeholders, deduplicated files).
+- `git commit` with `auto` comment characters: the characters a line begins with in the message are passed over, `\r` line starts too, and those in the comments at its end are not, as git counts them; every candidate taken is refused, as git dies. The message is cleaned of whitespace only before the `prepare-commit-msg` hook, its comments after, as `git commit` does.
+- `merge.summary` is read, as `merge.log`'s old name; a `merge.log` count or boolean is read where relic refused a count (a positive length is still `UnsupportedMergeMessage`).
+- `git am`'s `-C<n>` reads as `git apply`'s `OPT_UNSIGNED`: base 0 and a `k`, `m` or `g` suffix (`-C0x2`, `-C+1`).
+- A patch's quoted name ends at a `\000`, as git's C string does, in the `diff --git` line and the `---`/`+++` lines; an `index` line naming more hex digits than the repository's object names is not read, its mode included, as `gitdiff_index` reads none (relic took up to 64 in a SHA-1 repository).
+
+### Changed
+
+- The release tier's ThreadSanitizer run is four jobs, each a shard of the suite (preflight 0.6.3's declared shards); the whole suite under the sanitizer outgrew one job's 30 minutes.
+
 ## [0.11.0] - 2026-10-15
 
 ### Breaking

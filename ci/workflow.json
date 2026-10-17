@@ -28,7 +28,8 @@
       "step": "test",
       "args": ["-Dthread-sanitizer=true", "-Doptimize=debug", "-Dci-lint=false"],
       "tiers": ["release"],
-      "timeout": 30
+      "timeout": 30,
+      "shards": 4
     }
   ]
 }
