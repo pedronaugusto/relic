@@ -28,8 +28,6 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
-const quote = @import("../text.zig").quote;
-const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const gitdate = @import("../text.zig").date;
@@ -968,11 +966,14 @@ fn writeBasicState(r: *Run, tip: Tip, onto: Oid) Error!void {
     }
 }
 
-/// Read back what `writeBasicState` wrote, whoever wrote it.
+/// Read back what `writeBasicState` wrote, whoever wrote it, as git's
+/// `read_basic_state` and `read_populate_opts` read it: each one-line file
+/// as `read_oneliner` takes it, the names as `get_oid_hex` reads them, a
+/// value either does not know passed over as git passes it over.
 fn readBasicState(r: *Run) Error!Tip {
-    const head_name = (try r.readState("head-name")) orelse return error.MalformedState;
-    const orig = (try r.readState("orig-head")) orelse return error.MalformedState;
-    const name = std.mem.trimEnd(u8, head_name, "\n");
+    const head_name = state_file.oneliner((try r.readState("head-name")) orelse return error.MalformedState);
+    // git always writes `orig-head`; an older one wrote `head`.
+    const orig = (try r.readState("orig-head")) orelse (try r.readState("head")) orelse return error.MalformedState;
     if (r.hasState("signoff")) {
         r.options.signoff = true;
         r.allow_ff = false;
@@ -980,43 +981,54 @@ fn readBasicState(r: *Run) Error!Tip {
     if (r.hasState("drop_redundant_commits")) r.empty = .drop else if (r.hasState("keep_redundant_commits")) r.empty = .keep else r.empty = .stop;
     r.options.reschedule_failed_exec = r.hasState("reschedule-failed-exec");
     if (try r.readState("allow_rerere_autoupdate")) |text| {
-        const value = std.mem.trim(u8, text, " \n");
+        const value = state_file.oneliner(text);
         if (std.mem.eql(u8, value, "--rerere-autoupdate")) r.options.rerere_autoupdate = true else if (std.mem.eql(u8, value, "--no-rerere-autoupdate")) r.options.rerere_autoupdate = false;
     }
     // git reads the strategy options only when a strategy is named.
     if (try r.readState("strategy")) |text| {
-        const s = std.mem.trim(u8, text, " \n");
-        if (!std.mem.eql(u8, s, "ort") and !std.mem.eql(u8, s, "recursive")) return error.UnsupportedStrategy;
-        if (try r.readState("strategy_opts")) |line| {
-            const words = strategy.split(r.arena, std.mem.trimEnd(u8, line, "\n")) catch |err| switch (err) {
-                error.MalformedStrategyOptions => return error.MalformedState,
-                error.OutOfMemory => return error.OutOfMemory,
-            };
-            r.options.strategy_options = try std.mem.concat(r.arena, []const u8, &.{ r.options.strategy_options, words });
+        const s = state_file.oneliner(text);
+        if (s.len != 0) {
+            if (!std.mem.eql(u8, s, "ort") and !std.mem.eql(u8, s, "recursive")) return error.UnsupportedStrategy;
+            if (try r.readState("strategy_opts")) |line| {
+                const words = strategy.split(r.arena, state_file.oneliner(line)) catch |err| switch (err) {
+                    error.MalformedStrategyOptions => return error.MalformedState,
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+                r.options.strategy_options = try std.mem.concat(r.arena, []const u8, &.{ r.options.strategy_options, words });
+            }
         }
     }
+    // `-S<key>` signs with the key, or the default one; anything else is
+    // passed over, leaving `commit.gpgSign` to decide.
     if (try r.readState("gpg_sign_opt")) |text| {
-        const line = std.mem.trimEnd(u8, text, "\n");
-        if (std.mem.eql(u8, line, "--no-gpg-sign")) {
-            r.options.signing.sign = .never;
-        } else if (std.mem.startsWith(u8, line, "-S")) {
+        const line = state_file.oneliner(text);
+        if (std.mem.startsWith(u8, line, "-S")) {
             r.options.signing.sign = .always;
             r.options.signing.key = if (line.len == 2) null else try r.arena.dupe(u8, line[2..]);
-        } else return error.MalformedState;
+        }
     }
-    if (try r.readState("current-fixups")) |text| {
+    // `current_fixup_count`: one, and one more for each line after a
+    // newline that is not itself empty, older gits having left blank
+    // lines for skipped fixups.
+    if (try r.readState("current-fixups")) |raw| {
+        const text = state_file.oneliner(raw);
         try r.fixups.appendSlice(r.arena, text);
-        if (text.len != 0) r.fixup_count = std.mem.count(u8, text, "\n") + 1;
+        if (text.len != 0) {
+            r.fixup_count = 1;
+            for (text, 0..) |c, i| {
+                if (c == '\n' and i + 1 < text.len and text[i + 1] != '\n') r.fixup_count += 1;
+            }
+        }
     }
     return .{
-        .head_name = if (std.mem.startsWith(u8, name, "refs/")) name else null,
-        .orig_head = Oid.parse(r.repo.objectFormat(), std.mem.trimEnd(u8, orig, "\n")) catch return error.MalformedState,
+        .head_name = if (std.mem.startsWith(u8, head_name, "refs/")) head_name else null,
+        .orig_head = state_file.oidHex(r.repo.objectFormat(), state_file.oneliner(orig)) orelse return error.MalformedState,
     };
 }
 
 fn ontoOf(r: *Run) Error!Oid {
     const text = (try r.readState("onto")) orelse return error.MalformedState;
-    return Oid.parse(r.repo.objectFormat(), std.mem.trimEnd(u8, text, "\n")) catch error.MalformedState;
+    return state_file.oidHex(r.repo.objectFormat(), state_file.oneliner(text)) orelse error.MalformedState;
 }
 
 /// `skip_unnecessary_picks`: leading picks whose parent is already where
@@ -2136,7 +2148,8 @@ fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), di
     };
     for ([_][]const u8{ "rebase-apply/head-name", "rebase-merge/head-name" }) |sub| {
         const text = (try state_file.read(arena, r.io, dir, sub)) orelse continue;
-        const name = std.mem.trim(u8, text, " \t\r\n");
+        // `get_branch`: one newline off the end.
+        const name = if (std.mem.endsWith(u8, text, "\n")) text[0 .. text.len - 1] else text;
         if (std.mem.startsWith(u8, name, "refs/heads/")) try map.put(arena, name, where);
         break;
     }
@@ -2412,8 +2425,15 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
     var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
     const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
     try r.items.appendSlice(r.arena, list.items.items);
-    if (try r.readState("msgnum")) |n| {
-        r.done_nr = decimal.whole(usize, std.mem.trimEnd(u8, n, " \n"), 10) orelse return error.MalformedState;
+    // `read_populate_todo`: how many are done is what `done` lists, or
+    // none where it does not parse; `msgnum` is only written.
+    if (try r.readState("done")) |done| {
+        if (todo.parse(r.arena, done, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true })) |parsed| {
+            r.done_nr = countCommands(parsed.items.items);
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidTodoLine, error.FixupWithoutCommit => r.done_nr = 0,
+        }
     }
     return r;
 }
@@ -2444,8 +2464,8 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     try commitStagedChanges(&r);
     if (r.hasState("stopped-sha")) {
         const text = (try r.readState("stopped-sha")).?;
-        const oid = Oid.parse(repo.objectFormat(), std.mem.trim(u8, text, " \n")) catch return error.MalformedState;
-        try recordInRewritten(&r, oid, peekCommand(&r, 0));
+        // git records it only when it reads as a name, and goes on if not.
+        if (state_file.oidHex(repo.objectFormat(), state_file.oneliner(text))) |oid| try recordInRewritten(&r, oid, peekCommand(&r, 0));
     }
     return runLoop(&r);
 }
@@ -2494,7 +2514,7 @@ fn commitStagedChanges(r: *Run) Error!void {
 
     var amend = false;
     if (try r.readState("amend")) |text| {
-        const to_amend = Oid.parse(repo.objectFormat(), std.mem.trim(u8, text, " \n")) catch return error.MalformedState;
+        const to_amend = state_file.oidHex(repo.objectFormat(), state_file.oneliner(text)) orelse return error.MalformedState;
         if (!is_clean and !head_oid.eql(to_amend)) return error.DirtyWorktree;
         amend = true;
     }

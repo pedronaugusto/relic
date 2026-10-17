@@ -681,6 +681,51 @@ test "a cherry-pick sequence stops where git's does, and each side continues the
     }.inFormat);
 }
 
+test "a stopped sequence's opts, head and abort-safety are read as git reads them, and refused where git refuses them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const Case = struct { file: []const u8, text: []const u8, ok: bool, abort: bool = false };
+    const cases = [_]Case{
+        .{ .file = ".git/sequencer/opts", .text = "[options]\n\tsignoff = yes\n\tallow-ff = off\n\tdefault-msg-cleanup = default\n\tmainline = 0\n", .ok = true },
+        .{ .file = ".git/sequencer/opts", .text = "[options]\n\tsignoff = 1\n", .ok = false },
+        .{ .file = ".git/sequencer/opts", .text = "[options]\n\tsignoff\n", .ok = false },
+        .{ .file = ".git/sequencer/opts", .text = "[options \"x\"]\n\tsignoff = true\n", .ok = false },
+        .{ .file = ".git/sequencer/opts", .text = "[other]\n\tsignoff = true\n", .ok = false },
+        .{ .file = ".git/sequencer/opts", .text = "[options]\n\tdefault-msg-cleanup = tidy\n", .ok = false },
+        // abort reads the first line of `head`, all of it a name
+        .{ .file = ".git/sequencer/head", .text = "", .ok = false, .abort = true },
+        .{ .file = ".git/sequencer/abort-safety", .text = "  \n", .ok = false, .abort = true },
+    };
+    for (cases) |case| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, divergedScript);
+        defer pair.deinit();
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try gitMayFail(io, r, &.{ "cherry-pick", "main..topic" });
+            try r.writeFile(io, case.file, case.text);
+            try r.writeFile(io, "f", "a\nresolved\nc\n");
+            try r.exec(io, &.{ "add", "f" });
+        }
+        errdefer std.debug.print("{s}: {s}\n", .{ case.file, case.text });
+        pair.git.report_failures = false;
+        var theirs = try pair.git.capture(io, if (case.abort) &.{ "cherry-pick", "--abort" } else &.{ "cherry-pick", "--continue" });
+        defer theirs.deinit(gpa);
+        try std.testing.expectEqual(case.ok, theirs.code == 0);
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        if (case.abort) {
+            try std.testing.expectError(error.MalformedState, sequencer.abort(gpa, io, &repo, who, null));
+        } else if (case.ok) {
+            var outcome = try sequencer.proceed(gpa, io, &repo, .{ .who = who });
+            defer outcome.deinit();
+            try std.testing.expect(outcome.stopped == null);
+            try expectSameState(&pair, io, &pick_state, &main_logs);
+        } else {
+            try std.testing.expectError(error.MalformedState, sequencer.proceed(gpa, io, &repo, .{ .who = who }));
+        }
+    }
+}
+
 test "a pick with -x, a sign-off and the other recorded options leaves git's opts and message" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {

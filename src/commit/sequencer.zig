@@ -371,13 +371,20 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
     var words: std.ArrayList([]const u8) = .empty;
     try words.appendSlice(arena, options.strategy_options);
     defer options.strategy_options = words.items;
+    // git's `populate_opts_cb`: every key is `options.<name>`, every
+    // value given, and the switches booleans and nothing else (a count is
+    // "invalid value" there).
     for (parsed.entries.items) |entry| {
-        if (!std.ascii.eqlIgnoreCase(entry.section, "options")) continue;
-        const value = entry.value orelse "true";
-        // git reads these as a boolean or a number, a number being true
-        // unless it is zero.
-        const on = config_mod.parseBool(value) catch ((config_mod.parseInteger(value) catch return error.MalformedState) != 0);
+        if (!std.mem.eql(u8, entry.section, "options") or entry.has_subsection) return error.MalformedState;
+        const value = entry.value orelse return error.MalformedState;
         const key = entry.name;
+        const is_switch = for ([_][]const u8{ "no-commit", "edit", "allow-empty", "allow-empty-message", "drop-redundant-commits", "keep-redundant-commits", "signoff", "record-origin", "allow-ff", "allow-rerere-auto" }) |name| {
+            if (std.mem.eql(u8, key, name)) break true;
+        } else false;
+        const on = if (!is_switch) false else switch (config_mod.parseBoolOrInt(value) catch return error.MalformedState) {
+            .boolean => |b| b,
+            .integer => return error.MalformedState,
+        };
         if (std.mem.eql(u8, key, "no-commit")) {
             options.no_commit = on;
         } else if (std.mem.eql(u8, key, "edit")) {
@@ -407,7 +414,9 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
         } else if (std.mem.eql(u8, key, "strategy-option")) {
             try words.append(arena, try arena.dupe(u8, value));
         } else if (std.mem.eql(u8, key, "default-msg-cleanup")) {
-            options.cleanup = message.Cleanup.parse(value) orelse if (std.mem.eql(u8, value, "default")) null else return error.MalformedState;
+            // `get_cleanup_mode(value, 1)`: as with an editor, and dying on
+            // a mode it does not know.
+            options.cleanup = message.cleanupMode(value, true) catch return error.MalformedState;
         } else if (std.mem.eql(u8, key, "allow-rerere-auto")) {
             options.rerere_autoupdate = on;
         } else return error.MalformedState;
@@ -1009,8 +1018,9 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
         return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = who, .blocked = blocked });
     };
     defer gpa.free(text);
-    const trimmed = std.mem.trimEnd(u8, text, "\n");
-    const start_oid = Oid.parse(repo.objectFormat(), trimmed) catch return error.MalformedState;
+    // `sequencer_rollback`: the first line, all of it one object name.
+    const nl = std.mem.findScalar(u8, text, '\n') orelse if (text.len == 0) return error.MalformedState else text.len;
+    const start_oid = Oid.parse(repo.objectFormat(), text[0..nl]) catch return error.MalformedState;
     if (start_oid.isZero()) return error.UnbornBranch;
     if (try abortIsSafe(gpa, io, repo)) try resetMerge(gpa, io, repo, start_oid, .{ .who = who, .blocked = blocked });
     try removeSequencerState(io, repo);
@@ -1037,9 +1047,9 @@ fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
         return head.oid == null;
     };
     defer gpa.free(text);
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    if (trimmed.len == 0) return head.oid == null;
-    const expected = Oid.parse(repo.objectFormat(), trimmed) catch return error.MalformedState;
+    // `rollback_is_safe`: trimmed, then `get_oid_hex`, which refuses an
+    // empty file as git dies on it.
+    const expected = state_file.oidHex(repo.objectFormat(), std.mem.trim(u8, text, " \t\n\r")) orelse return error.MalformedState;
     return head.oid != null and head.oid.?.eql(expected);
 }
 

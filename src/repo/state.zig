@@ -12,6 +12,7 @@ const Io = std.Io;
 const fs = @import("../fs/fs.zig");
 const quote = @import("../text.zig").quote;
 const shakedown = @import("shakedown");
+const hash = @import("../hash/hash.zig");
 
 /// All errors reported by this namespace.
 pub const Error = fs.AtomicWriteError || Io.Dir.CreateDirPathError || Io.Dir.DeleteFileError;
@@ -47,6 +48,26 @@ pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8) Self.Error!void {
 pub fn exists(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
     dir.access(io, sub_path, .{}) catch return false;
     return true;
+}
+
+/// A one-line state file's value as git's `read_oneliner` takes it: one
+/// `\n` off the end, and then one `\r`.
+pub fn oneliner(bytes: []const u8) []const u8 {
+    var v = bytes;
+    if (v.len > 0 and v[v.len - 1] == '\n') {
+        v = v[0 .. v.len - 1];
+        if (v.len > 0 and v[v.len - 1] == '\r') v = v[0 .. v.len - 1];
+    }
+    return v;
+}
+
+/// An object name at the start of a state file's value, as git's
+/// `get_oid_hex` reads it: the format's hex digits and whatever follows
+/// them left unread. `null` where they are not all there.
+pub fn oidHex(format: hash.Kind, text: []const u8) ?hash.Oid {
+    const n = format.hexLen();
+    if (text.len < n) return null;
+    return hash.Oid.parse(format, text[0..n]) catch null;
 }
 
 /// The author an operation stopped with, as `rebase-merge/author-script` and
@@ -128,4 +149,15 @@ fn fuzzAuthorScript(_: void, case: *shakedown.Case) anyerror!void {
         error.MalformedState => return,
         error.OutOfMemory => return err,
     };
+}
+
+test "a one-line state file reads as read_oneliner and get_oid_hex read it" {
+    try std.testing.expectEqualStrings("a", oneliner("a\r\n"));
+    try std.testing.expectEqualStrings("a\n", oneliner("a\n\n"));
+    try std.testing.expectEqualStrings("a\r", oneliner("a\r"));
+    try std.testing.expectEqualStrings(" a ", oneliner(" a \n"));
+    const hex = "1234567890123456789012345678901234567890";
+    try std.testing.expect(oidHex(.sha1, hex ++ " trailing") != null);
+    try std.testing.expect(oidHex(.sha1, hex[0..39]) == null);
+    try std.testing.expect(oidHex(.sha1, " " ++ hex) == null);
 }
