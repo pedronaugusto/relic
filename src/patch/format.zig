@@ -280,7 +280,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     if (options.keep_subject and options.numbered == true) return error.KeepSubjectWithNumbered;
     if (options.keep_subject and (options.rfc != null or !std.mem.eql(u8, options.subject_prefix, "PATCH"))) return error.KeepSubjectWithPrefix;
 
-    const diff_options = options.diff orelse try configuredDiff(config);
+    const diff_options = options.diff orelse try diff.configured(config, .{});
     const renames: ?diff.RenameOptions = switch (options.renames) {
         .off => null,
         .on => |r| r,
@@ -442,14 +442,6 @@ fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, rang
 fn containsOid(oids: []const Oid, oid: Oid) bool {
     for (oids) |o| if (o.eql(oid)) return true;
     return false;
-}
-
-/// The content diff `git log -p` and `format-patch` make with nothing
-/// asked: `diff.algorithm` and `diff.context`.
-pub fn configuredDiff(config: *const config_mod.Config) diff.ConfigError!diff.Options {
-    var out = try diff.configured(config, .{});
-    if (config.get("diff.context")) |v| out.context = @intCast(@max(0, config_mod.parseInteger(v) catch 3));
-    return out;
 }
 
 /// The renames `git log -p` and `format-patch` find with nothing asked:

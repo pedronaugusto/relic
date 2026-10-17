@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - `worktree.fsmonitor.configured(arena, config, git_dir, programs)`: `core.fsmonitor=true` is git's daemon, `Source.daemon`, asked over the socket it listens on in the git directory (on Windows the pipe named after it) as git's `fsmonitor_ipc__send_query` asks it, held to git against a stand-in daemon (questions, answers split over lines or ended early, broken answers, what status reports, what the index vouches for and the token it keeps) and to git's own daemon where git has one. With no daemon listening every file is looked at and `builtin:fake` is kept, as git keeps it; git starts its daemon first, relic does not. `error.FsmonitorDaemonUnsupported` is gone. A bare `core.fsmonitor` is the daemon and a hook's path has its `~` expanded, as git reads them (relic took a bare name as off).
+- `diff.configured` reads `diff.context`, `diff.interHunkContext` and `diff.indentHeuristic` beside `diff.algorithm`, every value in order as git's callback reads them, held to `git diff` over a random corpus of settings and texts: a count that is not an `int` of zero or more, or a heuristic that is not a boolean, is the new `error.InvalidDiffSetting` wherever it stands (relic read a bad `diff.context` as 3 or 0), and a bare `diff.algorithm` is `UnknownDiffAlgorithm`. `Options.inter_hunk_context` joins hunks as `--inter-hunk-context` does. `patch.format.configuredDiff` is gone: `format-patch` and `range-diff` take `diff.configured`.
 
 ## [0.15.0] - 2026-10-17
 

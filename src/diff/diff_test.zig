@@ -795,3 +795,99 @@ test "under a whitespace option a context line is the new side's, \\v and \\f ar
         };
     }
 }
+
+test "diff.context, diff.interHunkContext, diff.indentHeuristic and diff.algorithm shape a diff as git diff reads them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const config_mod = @import("../config/config.zig");
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    repo.report_failures = false;
+
+    // Each setting from git's spellings, bad values among them; `null` is a
+    // bare name.
+    const Setting = struct { key: []const u8, values: []const ?[]const u8 };
+    const settings = [_]Setting{
+        .{ .key = "diff.context", .values = &.{ "0", "1", "2", "5", "-1", "1k", "x", "", null, "2147483648", " 3" } },
+        .{ .key = "diff.interHunkContext", .values = &.{ "0", "1", "3", "7", "-2", "", null, "0x10" } },
+        .{ .key = "diff.indentHeuristic", .values = &.{ "true", "false", "off", "0", null, "maybe", "" } },
+        .{ .key = "diff.algorithm", .values = &.{ "myers", "patience", "histogram", "minimal", null, "sideways" } },
+    };
+    var prng: std.Random.DefaultPrng = .init(0x5f17_d1ff);
+    const random = prng.random();
+    var cases: usize = 0;
+    var refused: usize = 0;
+    while (cases < 300) : (cases += 1) {
+        // Two texts of a few distinct lines, the second edited here and
+        // there, so hunks fall at every distance from each other.
+        var old: std.ArrayList(u8) = .empty;
+        defer old.deinit(gpa);
+        var new: std.ArrayList(u8) = .empty;
+        defer new.deinit(gpa);
+        const pool = [_][]const u8{ "a\n", "b\n", "\n", "\tif (x) {\n", "\t}\n", "c\n" };
+        const lines = random.intRangeAtMost(usize, 4, 40);
+        for (0..lines) |_| {
+            const text = pool[random.uintLessThan(usize, pool.len)];
+            try old.appendSlice(gpa, text);
+            switch (random.uintLessThan(u8, 8)) {
+                0 => {},
+                1 => try new.appendSlice(gpa, "new\n"),
+                2 => {
+                    try new.appendSlice(gpa, text);
+                    try new.appendSlice(gpa, "added\n");
+                },
+                else => try new.appendSlice(gpa, text),
+            }
+        }
+        try repo.writeFile(io, "old", old.items);
+        try repo.writeFile(io, "new", new.items);
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        var config_text: std.ArrayList(u8) = .empty;
+        defer config_text.deinit(gpa);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        try config_text.appendSlice(gpa, "[diff]\n");
+        for (0..random.uintAtMost(usize, 4)) |_| {
+            const setting = settings[random.uintLessThan(usize, settings.len)];
+            const value = setting.values[random.uintLessThan(usize, setting.values.len)];
+            const name = setting.key["diff.".len..];
+            if (value) |v| {
+                try argv.appendSlice(gpa, &.{ "-c", try arena.allocator().print("{s}={s}", .{ setting.key, v }) });
+                try config_text.print(gpa, "\t{s} = \"{s}\"\n", .{ name, v });
+            } else {
+                try argv.appendSlice(gpa, &.{ "-c", setting.key });
+                try config_text.print(gpa, "\t{s}\n", .{name});
+            }
+        }
+        try argv.appendSlice(gpa, &.{ "diff", "--no-index", "old", "new" });
+        var git = try repo.capture(io, argv.items);
+        defer git.deinit(gpa);
+
+        var config = try config_mod.Config.parseText(gpa, config_text.items, .local);
+        defer config.deinit();
+        const options = diff.configured(&config, .{}) catch |err| {
+            if (git.code != 128) {
+                std.debug.print("relic refused ({t}) what git took:\n{s}", .{ err, config_text.items });
+                return error.TestUnexpectedResult;
+            }
+            refused += 1;
+            continue;
+        };
+        if (git.code == 128) {
+            std.debug.print("git refused what relic took:\n{s}{s}", .{ config_text.items, git.stderr });
+            return error.TestUnexpectedResult;
+        }
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try diff.unifiedBody(gpa, &out.writer, old.items, new.items, options);
+        const body = if (std.mem.find(u8, git.stdout, "\n@@")) |at| git.stdout[at + 1 ..] else "";
+        std.testing.expectEqualStrings(body, out.written()) catch |err| {
+            std.debug.print("with\n{s}", .{config_text.items});
+            return err;
+        };
+    }
+    // The corpus holds both outcomes.
+    try std.testing.expect(refused > 20 and refused < 250);
+}

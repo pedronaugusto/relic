@@ -440,6 +440,10 @@ pub const Options = struct {
     algorithm: Algorithm = .myers,
     /// Lines of context on each side of a hunk.
     context: u32 = 3,
+    /// Unchanged lines between two hunks that are shown, joining them,
+    /// rather than cut: `--inter-hunk-context`. Two hunks whose contexts
+    /// meet are always joined.
+    inter_hunk_context: u32 = 0,
     /// Whether to slide an ambiguous change group to the position with the
     /// best indentation. On by default, as it is in git since 2.14.
     indent_heuristic: bool = true,
@@ -481,23 +485,51 @@ pub const FunctionLine = struct {
 /// Errors from reading the diff settings out of a configuration.
 pub const ConfigError = error{
     /// `diff.algorithm` names something other than `default`, `myers`,
-    /// `minimal`, `patience` or `histogram`, which git refuses too.
+    /// `minimal`, `patience` or `histogram`, or is a bare name, which git
+    /// refuses too.
     UnknownDiffAlgorithm,
+    /// A `diff.context` or `diff.interHunkContext` that is not an `int` of
+    /// zero or more, or a `diff.indentHeuristic` that is not a boolean:
+    /// values git dies on.
+    InvalidDiffSetting,
 };
 
-/// `options` with the algorithm `diff.algorithm` names, which is the one
-/// `git diff`, `git log -p` and `git show` use when none is asked for.
+/// `options` with what the configuration says of the content diff `git
+/// diff`, `git log -p`, `git show` and `format-patch` make when nothing is
+/// asked: `diff.algorithm`, `diff.context`, `diff.interHunkContext` and
+/// `diff.indentHeuristic`.
 ///
-/// The value is read without regard to case, as git reads it. `minimal` is
-/// Myers made to prove its script minimal, and `default` is Myers. With the
-/// setting absent `options` comes back as it was given.
+/// Every value is read in order, as git's callback reads it: one git dies
+/// on is refused wherever it stands, and the last one decides. An
+/// algorithm is named without regard to case; `minimal` is Myers made to
+/// prove its script minimal, and `default` is Myers. A count is git's
+/// `int`, unit suffixes included. A setting that is absent leaves `options`
+/// as it was given.
 pub fn configured(config: *const config_mod.Config, options: Options) ConfigError!Options {
-    const text = config.get("diff.algorithm") orelse return options;
     var out = options;
-    const parsed = LineDiff.parse(text) orelse return error.UnknownDiffAlgorithm;
-    out.algorithm = parsed.algorithm;
-    out.minimal = parsed.minimal;
+    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic" });
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.name, "algorithm")) {
+            const parsed = LineDiff.parse(entry.value orelse return error.UnknownDiffAlgorithm) orelse return error.UnknownDiffAlgorithm;
+            out.algorithm = parsed.algorithm;
+            out.minimal = parsed.minimal;
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "context")) {
+            out.context = try configCount(entry.value);
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "interhunkcontext")) {
+            out.inter_hunk_context = try configCount(entry.value);
+        } else {
+            out.indent_heuristic = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
+        }
+    }
     return out;
+}
+
+/// git's `git_config_int` refusing a negative, as `diff.context` and
+/// `diff.interHunkContext` are read.
+fn configCount(value: ?[]const u8) ConfigError!u32 {
+    const n = config_mod.parseInteger(value orelse return error.InvalidDiffSetting) catch return error.InvalidDiffSetting;
+    const int = std.math.cast(i32, n) orelse return error.InvalidDiffSetting;
+    return std.math.cast(u32, int) orelse error.InvalidDiffSetting;
 }
 
 /// The line diff `options` asks for.
@@ -756,7 +788,7 @@ pub fn unifiedBody(
         .{ .context = rule, .find = findByRule }
     else
         .c_function;
-    try parallax.writeUnified(w, diff, .{ .hunks = .{ .context = options.context }, .heading = heading });
+    try parallax.writeUnified(w, diff, .{ .hunks = .{ .context = options.context, .inter_hunk_context = options.inter_hunk_context }, .heading = heading });
 }
 
 /// A caller's `FunctionLine` asked of a line, as git's `ff_regexp` asks a

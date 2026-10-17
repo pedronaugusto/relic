@@ -172,7 +172,7 @@ const Reader = struct {
             .io = io,
             .repo = repo,
             .a = a,
-            .diff_options = try formatpatch.configuredDiff(config),
+            .diff_options = try diff.configured(config, .{}),
             .renames = formatpatch.configuredRenames(config),
             .show_root = config.getBool("log.showroot", true) catch true,
             .quote_path = config.getBool("core.quotepath", true) catch true,
@@ -889,7 +889,7 @@ fn output(gpa: Allocator, io: Io, repo: *Repository, result: *RangeDiff, options
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const config = repo.configuration();
-    var diff_options = options.diff orelse try formatpatch.configuredDiff(config);
+    var diff_options = options.diff orelse try diff.configured(config, .{});
     diff_options.function_line = .{ .find = sectionHeader };
     const old = result.old;
     const new = result.new;
