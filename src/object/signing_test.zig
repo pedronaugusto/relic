@@ -401,6 +401,49 @@ test "signing configured with no programs is refused by name, never written unsi
     }, .{ .diagnostic = &diagnostic });
 }
 
+test "a signing setting git dies on is refused wherever it stands, a good one after it or not" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Case = struct { config: []const u8, err: anyerror };
+    const cases = [_]Case{
+        .{ .config = "[gpg]\n\tformat = pgp\n\tformat = openpgp\n", .err = error.UnknownSignatureFormat },
+        .{ .config = "[gpg]\n\tformat\n", .err = error.MissingSigningValue },
+        .{ .config = "[gpg]\n\tminTrustLevel = total\n\tminTrustLevel = full\n", .err = error.UnknownTrustLevel },
+        .{ .config = "[user]\n\tsigningKey\n\tsigningKey = ABCD\n", .err = error.MissingSigningValue },
+        .{ .config = "[gpg \"ssh\"]\n\tprogram\n", .err = error.MissingSigningValue },
+    };
+    for (cases) |case| {
+        var fixture = try testgit.Repo.init(gpa, io, &.{});
+        defer fixture.deinit();
+        const config = try fixture.readFile(io, ".git/config");
+        defer gpa.free(config);
+        const text = try std.mem.concat(gpa, u8, &.{ config, case.config });
+        defer gpa.free(text);
+        try fixture.writeFile(io, ".git/config", text);
+        fixture.report_failures = false;
+        var theirs = try fixture.capture(io, &.{ "commit", "-q", "-S", "--allow-empty", "-m", "m" });
+        defer theirs.deinit(gpa);
+        errdefer std.debug.print("{s}: git {d}: {s}\n", .{ case.config, theirs.code, theirs.stderr });
+        try testing.expect(theirs.code != 0);
+        var repo = try Repository.open(gpa, io, fixture.dir, .{});
+        defer repo.deinit(io);
+        var environ: std.process.Environ.Map = .init(gpa);
+        defer environ.deinit();
+        try testing.expectError(case.err, signing.Signer.init(gpa, repo.configuration(), .{ .environ = &environ }));
+    }
+    // The last good value decides, a lower-case trust level included.
+    var config = try @import("../config/config.zig").Config.parseText(gpa, "[gpg]\n\tformat = x509\n\tformat = ssh\n\tminTrustLevel = marginal\n[gpg \"ssh\"]\n\tprogram = /a/ssh-keygen\n[user]\n\tsigningKey = ~/key\n", .local);
+    defer config.deinit();
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    var signer = try signing.Signer.init(gpa, &config, .{ .environ = &environ });
+    defer signer.deinit();
+    try testing.expectEqual(signing.Format.ssh, signer.format);
+    try testing.expectEqualStrings("/a/ssh-keygen", signer.program);
+    // kept as written; an SSH key file's `~` is expanded as it is signed with
+    try testing.expectEqualStrings("~/key", signer.signing_key.?);
+}
+
 test "the commit porcelain signs as commit.gpgSign says" {
     const gpa = testing.allocator;
     const io = testing.io;

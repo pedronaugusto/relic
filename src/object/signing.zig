@@ -58,6 +58,9 @@ pub const Error = error{
     SigningRequiresPrograms,
     /// `gpg.format` names a format git does not know.
     UnknownSignatureFormat,
+    /// `user.signingKey`, `gpg.format`, `gpg.minTrustLevel`, a program or
+    /// an SSH setting is a bare name with no value, which git dies on.
+    MissingSigningValue,
     /// `gpg.minTrustLevel` names a level git does not know.
     UnknownTrustLevel,
     /// The signing program failed, or said nothing of a signature.
@@ -255,8 +258,10 @@ pub const Signer = struct {
     /// than `format` is verified with: `gpg.<format>.program`, as git
     /// keeps one per format.
     format_programs: std.EnumArray(Format, []const u8),
-    /// `user.signingKey`, with a leading `~/` expanded.
+    /// `user.signingKey`, as written.
     signing_key: ?[]const u8,
+    /// The home a key file's `~` names.
+    home: ?[]const u8,
     /// `gpg.ssh.defaultKeyCommand`.
     default_key_command: ?[]const u8,
     /// `gpg.ssh.allowedSignersFile`.
@@ -274,41 +279,50 @@ pub const Signer = struct {
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
 
-        const format: Format = if (config.get("gpg.format")) |raw| blk: {
-            const text = try unquote(arena, raw);
-            break :blk std.meta.stringToEnum(Format, text) orelse return error.UnknownSignatureFormat;
-        } else .openpgp;
-
-        // `gpg.program` and `gpg.openpgp.program` are one setting, and the
-        // one the configuration names last wins.
+        // git's `git_gpg_config`, value by value: a bare name where a value
+        // is wanted, a format or trust level it does not know, is refused
+        // wherever it stands; the last good value decides. `gpg.program` and
+        // `gpg.openpgp.program` are one setting.
+        var format: Format = .openpgp;
         var chosen: std.EnumArray(Format, ?[]const u8) = .initFill(null);
-        for (config.entries.items) |entry| {
-            if (!std.ascii.eqlIgnoreCase(entry.section, "gpg")) continue;
-            if (!std.ascii.eqlIgnoreCase(entry.name, "program")) continue;
-            const this: Format = if (entry.subsection.len == 0)
-                .openpgp
-            else
-                std.meta.stringToEnum(Format, entry.subsection) orelse continue;
-            chosen.set(this, entry.value orelse "");
+        var min_trust: Trust = .undefined;
+        var signing_key: ?[]const u8 = null;
+        var default_key_command: ?[]const u8 = null;
+        var allowed_signers: ?[]const u8 = null;
+        var revocation_file: ?[]const u8 = null;
+        var it = config.iterate(&.{
+            "user.signingkey",           "gpg.format",                 "gpg.mintrustlevel",
+            "gpg.ssh.defaultkeycommand", "gpg.ssh.allowedsignersfile", "gpg.ssh.revocationfile",
+            "gpg.program",               "gpg.openpgp.program",        "gpg.x509.program",
+            "gpg.ssh.program",
+        });
+        const home = config.context.home;
+        while (it.next()) |entry| {
+            const value = entry.value orelse return error.MissingSigningValue;
+            if (std.mem.eql(u8, entry.section, "user")) {
+                // kept as written: an SSH key file's `~` is expanded where
+                // it is signed with, as git expands it
+                signing_key = value;
+            } else if (entry.has_subsection and std.mem.eql(u8, entry.subsection, "ssh") and !std.mem.eql(u8, entry.name, "program")) {
+                if (std.mem.eql(u8, entry.name, "defaultkeycommand")) {
+                    default_key_command = value;
+                } else if (std.mem.eql(u8, entry.name, "allowedsignersfile")) {
+                    allowed_signers = try config_mod.interpolatePath(arena, value, home);
+                } else {
+                    revocation_file = try config_mod.interpolatePath(arena, value, home);
+                }
+            } else if (std.mem.eql(u8, entry.name, "format")) {
+                format = std.meta.stringToEnum(Format, value) orelse return error.UnknownSignatureFormat;
+            } else if (std.mem.eql(u8, entry.name, "mintrustlevel")) {
+                min_trust = Trust.parse(value) orelse return error.UnknownTrustLevel;
+            } else {
+                const this: Format = if (!entry.has_subsection) .openpgp else std.meta.stringToEnum(Format, entry.subsection).?;
+                chosen.set(this, try config_mod.interpolatePath(arena, value, home));
+            }
         }
         var format_programs: std.EnumArray(Format, []const u8) = undefined;
-        for (std.enums.values(Format)) |each| {
-            format_programs.set(each, if (chosen.get(each)) |raw|
-                try config_mod.interpolatePath(arena, try unquote(arena, raw), config.context.home)
-            else
-                each.defaultProgram());
-        }
+        for (std.enums.values(Format)) |each| format_programs.set(each, chosen.get(each) orelse each.defaultProgram());
         const program_name = format_programs.get(format);
-
-        const min_trust: Trust = if (config.get("gpg.mintrustlevel")) |raw|
-            Trust.parse(try unquote(arena, raw)) orelse return error.UnknownTrustLevel
-        else
-            .undefined;
-
-        const signing_key: ?[]const u8 = if (config.get("user.signingkey")) |raw| try config_mod.interpolatePath(arena, try unquote(arena, raw), config.context.home) else null;
-        const default_key_command: ?[]const u8 = if (config.get("gpg.ssh.defaultkeycommand")) |raw| try unquote(arena, raw) else null;
-        const allowed_signers = try config.getPath(arena, "gpg.ssh.allowedsignersfile");
-        const revocation_file = try config.getPath(arena, "gpg.ssh.revocationfile");
 
         // The arena's state is taken after its last allocation: a copy taken
         // earlier would not hold the blocks allocated after it, and they
@@ -321,6 +335,7 @@ pub const Signer = struct {
             .program = program_name,
             .format_programs = format_programs,
             .signing_key = signing_key,
+            .home = home,
             .default_key_command = default_key_command,
             .allowed_signers = allowed_signers,
             .revocation_file = revocation_file,
@@ -377,11 +392,11 @@ pub const Signer = struct {
         // `-U` says its private half is in the agent.
         var key_file: ?TempFile = null;
         defer if (key_file) |*f| f.remove(io);
-        var key_path = key;
+        var key_path: []const u8 = undefined;
         if (literalSshKey(key)) |text| {
             key_file = try TempFile.create(arena, io, signer.programs, ".git_signing_key_tmp", text);
             key_path = key_file.?.path;
-        }
+        } else key_path = try config_mod.interpolatePath(arena, key, signer.home);
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(arena, &.{ signer.program, "-Y", "sign", "-n", "git", "-f", key_path });
         if (key_file != null) try argv.append(arena, "-U");
@@ -830,10 +845,6 @@ fn withoutCarriageReturns(gpa: Allocator, bytes: []const u8) Allocator.Error![]u
         n += 1;
     }
     return gpa.realloc(out, n);
-}
-
-fn unquote(arena: Allocator, value: []const u8) (Allocator.Error || error{MalformedValue})![]u8 {
-    return arena.dupe(u8, value);
 }
 
 /// A command line split into words the way git splits
