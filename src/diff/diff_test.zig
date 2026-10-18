@@ -1011,3 +1011,98 @@ test "an order file orders the changes as git diff-tree -O orders them" {
         };
     }
 }
+
+fn setupColour(io: Io, repo: *testgit.Repo) anyerror!void {
+    try repo.writeFile(io, "a.c", "int f()\n{\n\ta;\n}\nx\n");
+    try repo.writeFile(io, "blank", "old\n");
+    try repo.writeFile(io, "with space", "one\n");
+    try repo.writeFile(io, "q\"uote", "one\n");
+    try repo.writeFile(io, "ws", "keep\n\tindented\nend\n");
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(repo.gpa);
+    for (0..20) |i| try body.print(repo.gpa, "line {d} of a file that moves\n", .{i});
+    try repo.writeFile(io, "moved", body.items);
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    try repo.writeFile(io, "a.c", "int f()\n{\n\tb;  \n    \tc;\n}\ny");
+    try repo.writeFile(io, "blank", "old\n\n \n");
+    try repo.writeFile(io, "with space", "two\n");
+    try repo.writeFile(io, "q\"uote", "two\r\n");
+    try repo.writeFile(io, "ws", "keep \n        indented\n\t \tend\n");
+    try repo.dir.deleteFile(io, "moved");
+    try body.appendSlice(repo.gpa, "and one more\n");
+    try repo.writeFile(io, "moved to", body.items);
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "update-index", "--chmod=+x", "moved to" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+}
+
+test "a coloured patch is byte for byte what git diff --color=always prints, under its colour and whitespace settings" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(setupColour, gpa, io);
+    defer pair.deinit(gpa, io);
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{ .renames = .{} });
+    defer changes.deinit();
+
+    const config_mod = @import("../config/config.zig");
+    const variants = [_][]const u8{
+        "",
+        "[color \"diff\"]\n\tmeta = blue reverse\n\tfrag = \"100 #00ff00\"\n\tfunc = ul\n\tcontext = dim\n\told = brightred\n\tnew = green bold\n\twhitespace = yellow\n",
+        "[diff]\n\twsErrorHighlight = all\n[core]\n\twhitespace = tab-in-indent,cr-at-eol,incomplete-line\n",
+        "[diff]\n\twsErrorHighlight = old,context\n[core]\n\twhitespace = indent-with-non-tab,-blank-at-eof\n[diff \"color\"]\n\tplain = cyan\n",
+        "[color \"diff\"]\n\twhitespace = normal\n[diff]\n\tsuppressBlankEmpty = true\n",
+        "[core]\n\tquotePath = false\n[diff]\n\twsErrorHighlight = none\n",
+    };
+    for (variants) |text| {
+        var config = try config_mod.Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        const colors = (try diff.Colors.configured(&config, .always)).?;
+        const options = try diff.configured(&config, .{ .colors = &colors });
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        var section: []const u8 = "";
+        var settings: std.ArrayList([]u8) = .empty;
+        defer {
+            for (settings.items) |s| gpa.free(s);
+            settings.deinit(gpa);
+        }
+        // the same settings as `-c` arguments
+        while (lines.next()) |line| {
+            if (line[0] == '[') {
+                section = line[1 .. line.len - 1];
+                continue;
+            }
+            const eq = std.mem.findScalar(u8, line, '=').?;
+            const name = std.mem.trim(u8, line[0..eq], " \t");
+            const value = std.mem.trim(u8, line[eq + 1 ..], " ");
+            var dotted: std.ArrayList(u8) = .empty;
+            for (section) |c| switch (c) {
+                ' ' => try dotted.append(gpa, '.'),
+                '"' => {},
+                else => try dotted.append(gpa, c),
+            };
+            try dotted.print(gpa, ".{s}=", .{name});
+            for (value) |c| if (c != '"') try dotted.append(gpa, c);
+            try settings.append(gpa, try dotted.toOwnedSlice(gpa));
+        }
+        for (settings.items) |s| try args.appendSlice(gpa, &.{ "-c", s });
+        try args.appendSlice(gpa, &.{ "diff", "--color=always", "-M", pair.old_text, pair.new_text, "--" });
+        for (changes.items) |change| {
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &out.writer, options);
+            try args.append(gpa, change.path());
+            if (change.status == .renamed) try args.append(gpa, change.old.?.path);
+            const expected = try pair.repo.run(io, args.items);
+            defer gpa.free(expected);
+            args.items.len -= if (change.status == .renamed) 2 else 1;
+            std.testing.expectEqualStrings(expected, out.written()) catch |err| {
+                std.debug.print("variant {s}, path {s}\n", .{ text, change.path() });
+                return err;
+            };
+        }
+    }
+}

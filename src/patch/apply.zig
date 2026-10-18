@@ -32,7 +32,7 @@ const Io = std.Io;
 
 const patchparse = @import("patch.zig");
 const hunks = @import("parallax").patch;
-const whitespace = @import("whitespace.zig");
+const whitespace = @import("../text.zig").whitespace;
 const binarypatch = @import("binary.zig");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -43,6 +43,7 @@ const worktree = @import("../checkout/checkout.zig");
 const attributes = @import("../patterns.zig").attributes;
 const convert = @import("../checkout/convert.zig");
 const blob_merge = @import("../merge/blob_merge.zig");
+const diff = @import("../diff/diff.zig");
 const fs = @import("../fs/fs.zig");
 const safe_path = @import("../names.zig").path;
 const glob_mod = @import("../text.zig").glob;
@@ -827,16 +828,8 @@ fn usePatch(gpa: Allocator, limits: []const Limit, p: *const FilePatch) Allocato
 }
 
 fn wsRuleFor(st: *State, path: []const u8, configured: whitespace.Rule) Error!whitespace.Rule {
-    const attrs = st.rules.attrs orelse return configured;
-    if (st.wt) |wt| try attrs.enter(st.io, wt, path);
-    const applied = try attrs.lookup(st.a, path, .file);
-    const attribute: whitespace.Attribute = if (applied.get("whitespace")) |state| switch (state) {
-        .set => .set,
-        .unset => .unset,
-        .unspecified => .unspecified,
-        .value => |v| .{ .value = v },
-    } else .unspecified;
-    return whitespace.forAttribute(attribute, configured) catch error.ConflictingWhitespaceRules;
+    const rule: diff.WhitespaceRule = .{ .attrs = st.rules.attrs, .work_dir = st.wt, .configured = configured };
+    return rule.of(st.a, st.io, path);
 }
 
 fn linelen(buf: []const u8) usize {

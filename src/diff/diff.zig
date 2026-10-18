@@ -24,8 +24,16 @@ const attributes = @import("../patterns.zig").attributes;
 const user_diff = @import("user_diff.zig");
 const config_mod = @import("../config/config.zig");
 const glob = @import("../text.zig").glob;
+const whitespace = @import("../text.zig").whitespace;
+const c_quote = @import("../text.zig").c_quote;
+const paint = @import("paint.zig");
 
 const Oid = hash.Oid;
+
+/// The colours a patch is written in, as `color.diff.<slot>` sets them.
+pub const Colors = paint.Colors;
+/// Which lines a coloured patch marks whitespace errors on.
+pub const WsErrorHighlight = paint.WsErrorHighlight;
 
 /// Which algorithm produces the edit script: parallax's.
 pub const Algorithm = parallax.Algorithm;
@@ -560,6 +568,20 @@ pub const Options = struct {
     /// they can, which is `git diff --anchored`. Read by the patience
     /// algorithm only, as in git, where `--anchored` also selects it.
     anchors: []const []const u8 = &.{},
+    /// The colours a patch is written in, `null` for none: what
+    /// `Colors.configured` gives where git colours.
+    colors: ?*const Colors = null,
+    /// The whitespace errors a coloured patch marks: `core.whitespace`,
+    /// with the path's `whitespace` attribute applied as
+    /// `WhitespaceRule.of` applies it. git's default is
+    /// `blank-at-eol,space-before-tab,blank-at-eof`, tabs eight wide.
+    whitespace_rule: u32 = whitespace.default_rule,
+    /// Which lines a coloured patch marks whitespace errors on.
+    ws_error_highlight: WsErrorHighlight = .{},
+    /// `core.quotePath`: whether a name's bytes above 0x7f are quoted
+    /// in the headers, as well as its control characters, quotes and
+    /// backslashes.
+    quote_path: bool = true,
 };
 
 /// A caller's rule for the text after a hunk's `@@`: given a line without
@@ -582,12 +604,17 @@ pub const ConfigError = error{
     /// rename setting that is neither a boolean nor `copies`, a rename
     /// limit that is not an `int`: values git dies on.
     InvalidDiffSetting,
+    /// `core.whitespace` or a `whitespace` attribute names both
+    /// `tab-in-indent` and `indent-with-non-tab`, which git refuses.
+    ConflictingWhitespaceRules,
 };
 
 /// `options` with what the configuration says of the content diff `git
 /// diff`, `git log -p`, `git show` and `format-patch` make when nothing is
 /// asked: `diff.algorithm`, `diff.context`, `diff.interHunkContext`,
-/// `diff.indentHeuristic` and `diff.suppressBlankEmpty`.
+/// `diff.indentHeuristic` and `diff.suppressBlankEmpty`; and what a
+/// coloured patch marks, `core.whitespace` and `diff.wsErrorHighlight`, and
+/// `core.quotePath`.
 ///
 /// Every value is read in order, as git's callback reads it: one git dies
 /// on is refused wherever it stands, and the last one decides. An
@@ -597,9 +624,15 @@ pub const ConfigError = error{
 /// as it was given.
 pub fn configured(config: *const config_mod.Config, options: Options) ConfigError!Options {
     var out = options;
-    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty" });
+    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.wserrorhighlight", "core.whitespace", "core.quotepath" });
     while (it.next()) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.name, "algorithm")) {
+        if (std.ascii.eqlIgnoreCase(entry.name, "quotepath")) {
+            out.quote_path = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
+        } else if (std.mem.eql(u8, entry.section, "core")) {
+            out.whitespace_rule = whitespace.parse(entry.value orelse return error.InvalidDiffSetting) catch return error.ConflictingWhitespaceRules;
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "wserrorhighlight")) {
+            out.ws_error_highlight = WsErrorHighlight.parse(entry.value orelse return error.InvalidDiffSetting) orelse return error.InvalidDiffSetting;
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "algorithm")) {
             const parsed = LineDiff.parse(entry.value orelse return error.UnknownDiffAlgorithm) orelse return error.UnknownDiffAlgorithm;
             out.algorithm = parsed.algorithm;
             out.minimal = parsed.minimal;
@@ -737,6 +770,31 @@ pub const BinaryRule = struct {
     }
 };
 
+/// The whitespace rule a path's patch is marked by, as git's
+/// `whitespace_rule` decides it: the path's `whitespace` attribute over
+/// `configured`, which is `core.whitespace` as `configured` reads it into
+/// `Options.whitespace_rule`.
+pub const WhitespaceRule = struct {
+    attrs: ?*attributes.Attrs = null,
+    /// The working tree whose `.gitattributes` are read on the way down to
+    /// a path; `null` reads only what `attrs` holds.
+    work_dir: ?Io.Dir = null,
+    configured: u32 = whitespace.default_rule,
+
+    /// The rule for `path`. `a` holds the lookup.
+    pub fn of(rule: WhitespaceRule, a: Allocator, io: Io, path: []const u8) (attributes.Error || error{ConflictingWhitespaceRules})!u32 {
+        const attrs = rule.attrs orelse return rule.configured;
+        if (rule.work_dir) |wt| try attrs.enter(io, wt, path);
+        const attribute: whitespace.Attribute = if ((try attrs.lookup(a, path, .file)).get("whitespace")) |state| switch (state) {
+            .set => .set,
+            .unset => .unset,
+            .unspecified => .unspecified,
+            .value => |v| .{ .value = v },
+        } else .unspecified;
+        return whitespace.forAttribute(attribute, rule.configured);
+    }
+};
+
 /// The longest line `gitlinkText` writes: the words, the widest name, the newline.
 const gitlink_text_max = "Subproject commit \n".len + hash.max_hex_len;
 
@@ -825,34 +883,38 @@ pub fn unified(
     const change = inputs.change;
     const old_path = if (change.old) |e| e.path else change.new.?.path;
     const new_path = if (change.new) |e| e.path else change.old.?.path;
+    const colors = options.colors;
+    const fully = options.quote_path;
+    const old_name = try quoteTwo(gpa, "a/", old_path, fully);
+    defer gpa.free(old_name);
+    const new_name = try quoteTwo(gpa, "b/", new_path, fully);
+    defer gpa.free(new_name);
 
-    try w.print("diff --git a/{s} b/{s}\n", .{ old_path, new_path });
+    try paint.writeMeta(w, colors, "diff --git {s} {s}", .{ old_name, new_name });
 
     var old_mode_buf: [6]u8 = undefined;
     var new_mode_buf: [6]u8 = undefined;
     switch (change.status) {
-        .added => try w.print("new file mode {s}\n", .{change.new.?.mode.text(&new_mode_buf)}),
-        .deleted => try w.print("deleted file mode {s}\n", .{change.old.?.mode.text(&old_mode_buf)}),
+        .added => try paint.writeMeta(w, colors, "new file mode {s}", .{change.new.?.mode.text(&new_mode_buf)}),
+        .deleted => try paint.writeMeta(w, colors, "deleted file mode {s}", .{change.old.?.mode.text(&old_mode_buf)}),
         .renamed, .copied => {
-            try w.print("similarity index {d}%\n", .{change.similarity});
-            if (change.status == .renamed) {
-                try w.print("rename from {s}\nrename to {s}\n", .{ old_path, new_path });
-            } else {
-                try w.print("copy from {s}\ncopy to {s}\n", .{ old_path, new_path });
-            }
             if (change.old.?.mode != change.new.?.mode) {
-                try w.print("old mode {s}\nnew mode {s}\n", .{
-                    change.old.?.mode.text(&old_mode_buf),
-                    change.new.?.mode.text(&new_mode_buf),
-                });
+                try paint.writeMeta(w, colors, "old mode {s}", .{change.old.?.mode.text(&old_mode_buf)});
+                try paint.writeMeta(w, colors, "new mode {s}", .{change.new.?.mode.text(&new_mode_buf)});
             }
+            const word = if (change.status == .renamed) "rename" else "copy";
+            try paint.writeMeta(w, colors, "similarity index {d}%", .{change.similarity});
+            const from = try quoteTwo(gpa, "", old_path, fully);
+            defer gpa.free(from);
+            const to = try quoteTwo(gpa, "", new_path, fully);
+            defer gpa.free(to);
+            try paint.writeMeta(w, colors, "{s} from {s}", .{ word, from });
+            try paint.writeMeta(w, colors, "{s} to {s}", .{ word, to });
         },
         .modified, .type_changed => {
             if (change.old.?.mode != change.new.?.mode) {
-                try w.print("old mode {s}\nnew mode {s}\n", .{
-                    change.old.?.mode.text(&old_mode_buf),
-                    change.new.?.mode.text(&new_mode_buf),
-                });
+                try paint.writeMeta(w, colors, "old mode {s}", .{change.old.?.mode.text(&old_mode_buf)});
+                try paint.writeMeta(w, colors, "new mode {s}", .{change.new.?.mode.text(&new_mode_buf)});
             }
         },
     }
@@ -866,18 +928,16 @@ pub fn unified(
 
     var old_hex: [hash.max_hex_len]u8 = undefined;
     var new_hex: [hash.max_hex_len]u8 = undefined;
-    try w.print("index {s}..{s}", .{
-        old_oid.abbrev(&old_hex, options.abbrev),
-        new_oid.abbrev(&new_hex, options.abbrev),
-    });
     // The mode is on the index line only when it did not change and the
     // file was neither created nor removed; otherwise it is on its own line
     // above.
-    if (change.old != null and change.new != null and change.old.?.mode == change.new.?.mode) {
-        try w.print(" {s}\n", .{change.new.?.mode.text(&new_mode_buf)});
-    } else {
-        try w.writeByte('\n');
-    }
+    const same_mode = change.old != null and change.new != null and change.old.?.mode == change.new.?.mode;
+    try paint.writeMeta(w, colors, "index {s}..{s}{s}{s}", .{
+        old_oid.abbrev(&old_hex, options.abbrev),
+        new_oid.abbrev(&new_hex, options.abbrev),
+        if (same_mode) " " else "",
+        if (same_mode) change.new.?.mode.text(&new_mode_buf) else "",
+    });
 
     var old_gitlink: [gitlink_text_max]u8 = undefined;
     // an object's bytes are the object database's allocator's, whoever
@@ -899,23 +959,37 @@ pub fn unified(
     } else "";
 
     try checkTextSize(old_bytes, new_bytes);
+    const old_label = if (change.status == .added) "/dev/null" else old_name;
+    const new_label = if (change.status == .deleted) "/dev/null" else new_name;
     if (isBinary(old_bytes) or isBinary(new_bytes)) {
-        try w.print("Binary files a/{s} and b/{s} differ\n", .{ old_path, new_path });
+        try w.print("Binary files {s} and {s} differ\n", .{ old_label, new_label });
         return;
     }
 
-    if (change.status == .added) {
-        try w.writeAll("--- /dev/null\n");
-    } else {
-        try w.print("--- a/{s}\n", .{old_path});
-    }
-    if (change.status == .deleted) {
-        try w.writeAll("+++ /dev/null\n");
-    } else {
-        try w.print("+++ b/{s}\n", .{new_path});
-    }
-    try unifiedBody(gpa, w, old_bytes, new_bytes, options);
+    var body_options = options;
+    // A symbolic link is a line without its ending, which is no news.
+    if (change.new) |entry| if (entry.mode == .symlink) {
+        body_options.whitespace_rule &= ~whitespace.incomplete_line;
+    };
+    try writeBody(gpa, w, old_bytes, new_bytes, body_options, .{ .old = old_label, .new = new_label });
 }
+
+/// `prefix` and `path` as a patch's headers write them: C-quoted
+/// together as git's `quote_two_c_style` quotes them, where either needs
+/// it. The text is `gpa`'s.
+fn quoteTwo(gpa: Allocator, prefix: []const u8, path: []const u8, fully: bool) Allocator.Error![]u8 {
+    if (!c_quote.needsQuote(prefix, fully) and !c_quote.needsQuote(path, fully)) return std.mem.concat(gpa, u8, &.{ prefix, path });
+    var out: Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    out.writer.writeByte('"') catch return error.OutOfMemory;
+    c_quote.writeBody(&out.writer, prefix, fully) catch return error.OutOfMemory;
+    c_quote.writeBody(&out.writer, path, fully) catch return error.OutOfMemory;
+    out.writer.writeByte('"') catch return error.OutOfMemory;
+    return out.toOwnedSlice();
+}
+
+/// The `---` and `+++` names a patch body is written under, quoted.
+const FileNames = struct { old: []const u8, new: []const u8 };
 
 /// Errors from `unifiedBody`.
 pub const UnifiedBodyError = Self.TextError || Io.Writer.Error;
@@ -932,6 +1006,12 @@ pub fn unifiedBody(
     new: []const u8,
     options: Options,
 ) UnifiedBodyError!void {
+    return writeBody(gpa, w, old, new, options, null);
+}
+
+/// The hunks, under `---` and `+++` lines naming `files` where there are
+/// any, painted where `options` has colours.
+fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, options: Options, files: ?FileNames) UnifiedBodyError!void {
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
     try checkTextSize(old, new);
@@ -943,10 +1023,22 @@ pub fn unifiedBody(
         .{ .context = rule, .find = findByRule }
     else
         .c_function;
+    var painter: ?paint.Painter = if (options.colors) |c| .init(c, options.whitespace_rule, options.ws_error_highlight, old, new) else null;
+    // The names as the `---` and `+++` lines write them; plain, a name with
+    // a space gets a tab after it, for GNU patch, which a painter writes
+    // itself outside the colour.
+    var names: [2][]const u8 = .{ "", "" };
+    defer for (names) |n| gpa.free(n);
+    if (files) |f| for ([_][]const u8{ f.old, f.new }, &names) |name, *out| {
+        const tab = painter == null and std.mem.findScalar(u8, name, ' ') != null;
+        out.* = try std.mem.concat(gpa, u8, &.{ name, if (tab) "\t" else "" });
+    };
     try parallax.writeUnified(w, diff, .{
         .hunks = .{ .context = options.context, .inter_hunk_context = options.inter_hunk_context },
         .heading = heading,
+        .files = if (files != null) .{ .old = names[0], .new = names[1] } else null,
         .suppress_blank_empty = options.suppress_blank_empty,
+        .paint = if (painter) |*p| p.paint() else null,
     });
 }
 

@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `diff.ConfigError` has `ConflictingWhitespaceRules`: `diff.configured` reads `core.whitespace` (and refuses `tab-in-indent` with `indent-with-non-tab`, where git dies), `diff.wsErrorHighlight` and `core.quotePath`.
+
+### Added
+
+- Colour, one layer for every writer that colours, as git's `color.c` (`config.color`): a value read into the sequence `color_parse` writes, `color.ui` beneath a writer's `color.<writer>` and the caller's `--color=<when>` (`Output`, whose `terminal` is what `auto` means, since relic does not see where its text goes), and a writer's `color.<writer>.<slot>` slots, each value refused where git dies.
+- `diff.Options.colors` (`diff.Colors.configured`, `color.diff.<slot>` and `diff.color.<slot>`): `diff.unified` and `diff.unifiedBody` write a patch in colour as `git diff --color` does, line by line through parallax 0.2.6's `Paint`, whitespace errors marked as git's `ws_check_emit` marks them (`Options.whitespace_rule`, `Options.ws_error_highlight`, `diff.WhitespaceRule` for the `whitespace` attribute, which `patch.apply` now reads through too) and blank lines added at the end of a file painted whole. Held to `git diff --color=always` under colour, `core.whitespace` and `diff.wsErrorHighlight` settings.
+
+### Changed
+
+- Pins parallax 0.2.6.
+
+### Fixed
+
+- `diff.unified` writes git's headers: a name C-quoted as `quote_two_c_style` quotes it (`Options.quote_path`, `core.quotePath`), a tab after a `---`/`+++` name with a space in it, `old mode`/`new mode` before a rename's `similarity index`, and no `---`/`+++` lines for a patch with no hunks.
+
 ## [0.20.0] - 2026-10-18
 
 ### Breaking

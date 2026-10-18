@@ -1,6 +1,7 @@
 //! Public config namespace. Implementation is in `config/config.zig`.
 
 pub const user = @import("config/user_config.zig");
+pub const color = @import("config/color.zig");
 pub const ParseError = @import("config/config.zig").ParseError;
 pub const ValueError = @import("config/config.zig").ValueError;
 pub const PathError = @import("config/config.zig").PathError;

@@ -36,6 +36,7 @@
 //! | `refs.names` | Module within `refs`. |
 //! | `config` | Public concern. |
 //! | `config.user` | Module within `config`. |
+//! | `config.color` | git's colours: values, `color.ui` and the writers' settings and slots. |
 //! | `index` | Public concern. |
 //! | `index.sparse` | Module within `index`. |
 //! | `worktree` | Public concern. |

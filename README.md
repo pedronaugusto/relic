@@ -614,6 +614,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `refs.names` | What a ref may be named: `checkFormat` (git's `check_refname_format`, with its one-level and pattern flags), `isSafe` (what a deletion may name), the root, special and per-worktree classes, `parseWorktreeRef` for `main-worktree/` and `worktrees/<id>/`, and every root ref by name (`Root`, `Special`). |
 | `config` | `Config.open`, `get`, `all`, `getBool`, `getInt`, `getPath`, `subsections`, `origin`, `set`, `unset`, `renderWritable`. Lossless: setting a value rewrites one line; a repository's files are written through `Repository.writeConfig`. `include.path` and `includeIf` with `gitdir:`, `gitdir/i:`, `onbranch:` and `hasconfig:remote.*.url:`. |
 | `config.user` | Where the person's git reads its configuration from. |
+| `config.color` | `parse`, `When`, `wanted`, `readSlots` — git's colours: a value as `color_parse` writes it, `color.ui` beneath each writer's `color.<writer>`, and its `color.<writer>.<slot>` colours. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `index.sparse` | The sparse index. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
@@ -631,7 +632,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `worktree.filter.native` | Native content-filter protocol. |
 | `worktree.dir_scan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safe_path` | What a path from a tree is allowed to be. |
-| `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`. |
+| `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, `Colors`, `WhitespaceRule` — a patch with git's headers, in colour as `git diff --color` writes it where `Options.colors` is given: `color.diff.<slot>`, whitespace errors by `core.whitespace`, the `whitespace` attribute and `diff.wsErrorHighlight`. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
 | `diff.patch_id` | Patch ids: a name for what a commit changes. |
 | `diff.rename` | Module within `diff`. |

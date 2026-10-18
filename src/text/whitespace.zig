@@ -4,8 +4,8 @@
 //! --check` read lines through it.
 
 const std = @import("std");
-const ctype = @import("../text.zig").ctype;
-const decimal = @import("../text.zig").decimal;
+const ctype = @import("ctype.zig");
+const decimal = @import("decimal.zig");
 const Allocator = std.mem.Allocator;
 
 /// A rule set: the bits below and, in the low six bits, the tab width.
@@ -122,16 +122,38 @@ pub fn forAttribute(attribute: Attribute, configured: Rule) ParseError!Rule {
 
 /// The errors `line` has under `rule`: a set of the bits above. `line`
 /// includes its newline, if it has one.
-pub fn check(line_in: []const u8, rule: Rule) Rule {
+pub fn check(line: []const u8, rule: Rule) Rule {
+    // unreachable: with nowhere to write, nothing fails
+    return checkEmit(line, rule, null) catch unreachable;
+}
+
+/// Where `checkEmit` writes a line with its errors marked, as git's diff
+/// colours a line: `set` and `reset` around the text, `ws` around an
+/// error.
+pub const Emit = struct {
+    w: *std.Io.Writer,
+    set: []const u8,
+    reset: []const u8,
+    ws: []const u8,
+};
+
+/// `check`, and where `emit` is given, `line` written to it with its
+/// errors marked, as git's `ws_check_emit` writes it: the indentation as
+/// it is with each error in `ws`, the text in `set`, trailing whitespace
+/// in `ws`, the line's ending after.
+pub fn checkEmit(line: []const u8, rule: Rule, emit: ?Emit) std.Io.Writer.Error!Rule {
     var result: Rule = 0;
-    var len = line_in.len;
-    const line = line_in;
+    var len = line.len;
     var trailing_newline = false;
+    var trailing_carriage_return = false;
     if (len > 0 and line[len - 1] == '\n') {
         trailing_newline = true;
         len -= 1;
     }
-    if (rule & cr_at_eol != 0 and len > 0 and line[len - 1] == '\r') len -= 1;
+    if (rule & cr_at_eol != 0 and len > 0 and line[len - 1] == '\r') {
+        trailing_carriage_return = true;
+        len -= 1;
+    }
     var trailing_whitespace: usize = len;
     if (rule & blank_at_eol != 0) {
         var i = len;
@@ -151,12 +173,47 @@ pub fn check(line_in: []const u8, rule: Rule) Rule {
         if (line[i] != '\t') break;
         if (rule & space_before_tab != 0 and written < i) {
             result |= space_before_tab;
+            if (emit) |e| {
+                try e.w.writeAll(e.ws);
+                try e.w.writeAll(line[written..i]);
+                try e.w.writeAll(e.reset);
+                try e.w.writeByte(line[i]);
+            }
         } else if (rule & tab_in_indent != 0) {
             result |= tab_in_indent;
-        }
+            if (emit) |e| {
+                try e.w.writeAll(line[written..i]);
+                try e.w.writeAll(e.ws);
+                try e.w.writeByte(line[i]);
+                try e.w.writeAll(e.reset);
+            }
+        } else if (emit) |e| try e.w.writeAll(line[written .. i + 1]);
         written = i + 1;
     }
-    if (rule & indent_with_non_tab != 0 and i - written >= tabWidth(rule)) result |= indent_with_non_tab;
+    if (rule & indent_with_non_tab != 0 and i - written >= tabWidth(rule)) {
+        result |= indent_with_non_tab;
+        if (emit) |e| {
+            try e.w.writeAll(e.ws);
+            try e.w.writeAll(line[written..i]);
+            try e.w.writeAll(e.reset);
+        }
+        written = i;
+    }
+    const e = emit orelse return result;
+    // git's `written` can pass the trailing whitespace only where the
+    // whole line is indentation, which leaves nothing in the middle.
+    if (trailing_whitespace > written) {
+        try e.w.writeAll(e.set);
+        try e.w.writeAll(line[written..trailing_whitespace]);
+        try e.w.writeAll(e.reset);
+    }
+    if (trailing_whitespace != len) {
+        try e.w.writeAll(e.ws);
+        try e.w.writeAll(line[trailing_whitespace..len]);
+        try e.w.writeAll(e.reset);
+    }
+    if (trailing_carriage_return) try e.w.writeByte('\r');
+    if (trailing_newline) try e.w.writeByte('\n');
     return result;
 }
 

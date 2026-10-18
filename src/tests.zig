@@ -219,7 +219,8 @@ test {
     _ = @import("patch/binary.zig");
     _ = @import("mail/mail.zig");
     _ = @import("mail/format.zig");
-    _ = @import("patch/whitespace.zig");
+    _ = @import("text/whitespace.zig");
+    _ = @import("config/color.zig");
     _ = @import("patterns/pathspec.zig");
     _ = @import("pretty/pretty.zig");
     _ = @import("rev_walk/bisect.zig");
