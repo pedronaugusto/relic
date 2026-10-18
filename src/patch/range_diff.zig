@@ -32,6 +32,7 @@ const attributes = @import("../patterns.zig").attributes;
 const c_quote = @import("../text.zig").c_quote;
 const unicode_width = @import("../text.zig").unicode_width;
 const message = @import("../object/message.zig");
+const color = @import("../config/color.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -83,6 +84,13 @@ pub const Options = struct {
     /// How a pair's patches are compared; `null` reads `diff.algorithm`
     /// and `diff.context` as git does.
     diff: ?diff.Options = null,
+    /// The colours the range-diff is written in, `null` for none:
+    /// `diff.Colors.configured` gives git's, as `git range-diff` colours
+    /// by the diff's settings. They decide over `diff`'s.
+    colors: ?*const diff.Colors = null,
+    /// Whether the diff of two patches is in dual colour, each line by
+    /// both its signs; `--no-dual-color` is `false`.
+    dual_color: bool = true,
 };
 
 /// One commit's patch as range-diff compares it: ` ## Metadata ##` with
@@ -140,7 +148,7 @@ pub fn compute(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, option
 /// `git range-diff`, written to `w`: a line for each pair in the order of
 /// the new range, an old commit with no partner once those before it have
 /// been shown, and under a pair whose patches differ, the diff between
-/// them. No colour.
+/// them; in `Options.colors` where there are.
 pub fn write(gpa: Allocator, io: Io, inputs: WriteInputs, w: *Io.Writer, options: Options) Self.Error!void {
     const repo = inputs.repo;
     const old = inputs.old;
@@ -825,7 +833,12 @@ const Writer = struct {
     a: Allocator,
     /// The log's output encoding, which the subjects are written in.
     encoding: []const u8,
+    colors: ?*const diff.Colors,
 
+    /// git's `output_pair_header`: the line in the commit's colour, the
+    /// old side's for a commit only it has and the new side's for one only
+    /// it has; a pair whose patches differ in the old, then the new, around
+    /// its `!`.
     fn pairHeader(s: *Writer, old: ?*const Patch, old_index: usize, new: ?*const Patch, new_index: usize) Error!void {
         const db = s.repo.objectDatabase();
         const oid = if (old) |p| p.oid else new.?.oid;
@@ -833,13 +846,28 @@ const Writer = struct {
             var buf: [hash.max_hex_len]u8 = undefined;
             s.dashes = (try abbrev.unique(s.io, db, oid, s.abbrev_len, &buf)).len;
         }
+        const c = s.colors;
+        const reset: []const u8 = if (c != null) color.reset else "";
+        const color_old: []const u8 = if (c) |x| x.old.bytes() else "";
+        const color_new: []const u8 = if (c) |x| x.new.bytes() else "";
+        const color_commit: []const u8 = if (c) |x| x.commit.bytes() else "";
         const status: u8 = if (new == null) '<' else if (old == null) '>' else if (std.mem.eql(u8, old.?.text, new.?.text)) '=' else '!';
+        const own = switch (status) {
+            '<' => color_old,
+            '>' => color_new,
+            else => color_commit,
+        };
+        try s.w.writeAll(if (status == '!') color_old else own);
         try s.side(old, old_index);
-        try s.w.print(" {c} ", .{status});
+        if (status == '!') try s.w.print(" {s}{s}", .{ reset, own }) else try s.w.writeByte(' ');
+        try s.w.writeByte(status);
+        if (status == '!') try s.w.print("{s}{s}", .{ reset, color_new });
+        try s.w.writeByte(' ');
         try s.side(new, new_index);
         var subject: std.ArrayList(u8) = .empty;
         try pretty.formatCommit(s.a, s.io, .{ .db = db, .oid = oid, .format = "%s" }, &subject, .{ .output_encoding = s.encoding });
-        try s.w.print(" {s}\n", .{subject.items});
+        if (status == '!') try s.w.print("{s}{s}", .{ reset, own });
+        try s.w.print(" {s}{s}\n", .{ subject.items, reset });
     }
 
     fn side(s: *Writer, patch: ?*const Patch, index: usize) Error!void {
@@ -857,27 +885,10 @@ const Writer = struct {
         try s.w.print("{s}:  {s}", .{ text, try abbrev.unique(s.io, s.repo.objectDatabase(), p.oid, s.abbrev_len, &buf) });
     }
 
-    /// `patch_diff`: the diff of two patches, every line indented four
-    /// spaces, its `@@` lines without their numbers, and the section a
-    /// hunk is in after them.
+    /// `patch_diff`: the diff of two patches, as `diff.DiffOfPatches`
+    /// writes it, the section a hunk is in after its `@@`.
     fn patchDiff(s: *Writer, old: *const Patch, new: *const Patch, options: diff.Options) Error!void {
-        var body: Io.Writer.Allocating = .init(s.gpa);
-        defer body.deinit();
-        diff.unifiedBody(s.gpa, &body.writer, old.text, new.text, options) catch |err| switch (err) {
-            error.WriteFailed => return error.OutOfMemory,
-            else => |e| return e,
-        };
-        var lines = std.mem.splitScalar(u8, body.written(), '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            try s.w.writeAll("    ");
-            if (std.mem.startsWith(u8, line, "@@ ")) {
-                const end = std.mem.findPos(u8, line, 3, "@@") orelse line.len - 2;
-                try s.w.writeAll("@@");
-                try s.w.writeAll(line[end + 2 ..]);
-            } else try s.w.writeAll(line);
-            try s.w.writeByte('\n');
-        }
+        try diff.unifiedBody(s.gpa, s.w, old.text, new.text, options);
     }
 };
 
@@ -898,6 +909,8 @@ fn output(gpa: Allocator, io: Io, repo: *Repository, result: *RangeDiff, options
     const config = repo.configuration();
     var diff_options = options.diff orelse try diff.configured(config, .{});
     diff_options.function_line = .{ .find = sectionHeader };
+    diff_options.colors = options.colors;
+    diff_options.diff_of_patches = .{ .dual_color = options.dual_color };
     const old = result.old;
     const new = result.new;
     var s: Writer = .{
@@ -909,6 +922,7 @@ fn output(gpa: Allocator, io: Io, repo: *Repository, result: *RangeDiff, options
         .width = decimalWidth(1 + @max(old.len, new.len)),
         .abbrev_len = abbrev.defaultLength(config, repo.objectDatabase()),
         .encoding = try message.logOutputEncoding(config),
+        .colors = options.colors,
     };
     const shown = try gpa.alloc(bool, old.len);
     defer gpa.free(shown);

@@ -32,6 +32,7 @@ pub const BinaryRule = @import("diff/diff.zig").BinaryRule;
 pub const WhitespaceRule = @import("diff/diff.zig").WhitespaceRule;
 pub const Colors = @import("diff/diff.zig").Colors;
 pub const WsErrorHighlight = @import("diff/diff.zig").WsErrorHighlight;
+pub const DiffOfPatches = @import("diff/diff.zig").DiffOfPatches;
 pub const blobNumStat = @import("diff/diff.zig").blobNumStat;
 pub const numstat = @import("diff/diff.zig").numstat;
 pub const UnifiedInputs = @import("diff/diff.zig").UnifiedInputs;

@@ -124,11 +124,34 @@ pub fn writeMeta(w: *Io.Writer, colors: ?*const Colors, comptime fmt: []const u8
     try w.writeByte('\n');
 }
 
+/// range-diff's diff of two patches, as git writes it (`output_prefix`,
+/// `suppress_hunk_header_line_count`, `dual_color_diffed_diffs`): every
+/// line indented four spaces, each `@@` line without its ranges, and in
+/// colour under `dual_color` each line painted by both its signs, the outer
+/// one reversed.
+pub const DiffOfPatches = struct {
+    dual_color: bool = true,
+
+    const prefix = "    ";
+};
+
+/// The colours of a patch written without colour: none, which a painter
+/// writes as git writes its empty colours.
+const plain: Colors = blk: {
+    var c: Colors = .{};
+    for (@typeInfo(Colors).@"struct".field_names) |name| @field(c, name) = .none;
+    break :blk c;
+};
+
 /// What paints one file's patch: parallax hands it each line.
 pub const Painter = struct {
     colors: *const Colors,
+    /// What ends a colour: nothing without colours, as git's empty
+    /// `DIFF_RESET` is.
+    reset: []const u8,
     rule: whitespace.Rule,
     highlight: WsErrorHighlight,
+    of_patches: ?DiffOfPatches = null,
     /// git's `blank_at_eof_in_preimage` and `_postimage`: where the blank
     /// lines the new side adds at its end begin, one-based, or zero.
     blank_at_eof_old: u32 = 0,
@@ -137,9 +160,9 @@ pub const Painter = struct {
     old_line: u32 = 0,
     new_line: u32 = 0,
 
-    /// A painter for one pair of texts.
-    pub fn init(colors: *const Colors, rule: whitespace.Rule, highlight: WsErrorHighlight, old: []const u8, new: []const u8) Painter {
-        var p: Painter = .{ .colors = colors, .rule = rule, .highlight = highlight };
+    /// A painter for one pair of texts; `null` colours write none.
+    pub fn init(colors: ?*const Colors, rule: whitespace.Rule, highlight: WsErrorHighlight, of_patches: ?DiffOfPatches, old: []const u8, new: []const u8) Painter {
+        var p: Painter = .{ .colors = colors orelse &plain, .reset = if (colors != null) color.reset else "", .rule = rule, .highlight = highlight, .of_patches = of_patches };
         if (rule & whitespace.blank_at_eof != 0) {
             const l1 = trailingBlank(old);
             const l2 = trailingBlank(new);
@@ -155,46 +178,84 @@ pub const Painter = struct {
         return .{ .context = p, .write = write };
     }
 
+    fn prefix(p: *const Painter) []const u8 {
+        return if (p.of_patches != null) DiffOfPatches.prefix else "";
+    }
+
+    /// Whether lines are painted by both their signs.
+    fn dual(p: *const Painter) bool {
+        return if (p.of_patches) |o| o.dual_color else false;
+    }
+
     fn write(context: ?*const anyopaque, w: *Io.Writer, line: parallax.Paint.Line) Io.Writer.Error!void {
         const p: *Painter = @ptrCast(@alignCast(@constCast(context.?))); // safe: `paint` hands its own *Painter
         const c = p.colors;
+        const reset = p.reset;
+        try w.writeAll(p.prefix());
         switch (line.kind) {
             .old_file, .new_file => {
                 try w.writeAll(c.meta.bytes());
                 try w.writeAll(if (line.kind == .old_file) "--- " else "+++ ");
                 try w.writeAll(line.text);
-                try w.writeAll(color.reset);
+                try w.writeAll(reset);
                 if (std.mem.findScalar(u8, line.text, ' ') != null) try w.writeByte('\t');
                 try w.writeByte('\n');
             },
             .hunk => {
+                // git's `emit_hunk_header`
                 p.old_line = start(line.text, '-');
                 p.new_line = start(line.text, '+');
+                if (p.dual() and reset.len != 0) try w.writeAll(color.reverse.bytes());
                 try w.writeAll(c.frag.bytes());
-                try w.writeAll(line.text);
-                try w.writeAll(color.reset);
+                try w.writeAll(if (p.of_patches != null) "@@" else line.text);
+                try w.writeAll(reset);
                 if (line.heading.len != 0) {
                     try w.writeAll(c.context.bytes());
                     try w.writeByte(' ');
-                    try w.writeAll(color.reset);
+                    try w.writeAll(reset);
                     try w.writeAll(c.func.bytes());
                     try w.writeAll(line.heading);
-                    try w.writeAll(color.reset);
+                    try w.writeAll(reset);
                 }
                 try w.writeByte('\n');
             },
+            // git's `emit_diff_symbol_from_struct`: under dual colour a line
+            // of a diff of patches is painted by its own sign and by the
+            // patch's sign it begins with
             .context => {
                 p.old_line += 1;
                 p.new_line += 1;
-                try p.markup(w, c.context.bytes(), line, p.highlight.context, false);
+                var set = c.context.bytes();
+                if (p.dual()) switch (first(line.text)) {
+                    '+' => set = c.new.bytes(),
+                    '@' => set = c.frag.bytes(),
+                    '-' => set = c.old.bytes(),
+                    else => {},
+                };
+                try p.markup(w, null, set, line, p.highlight.context, false);
             },
             .old => {
                 p.old_line += 1;
-                try p.markup(w, c.old.bytes(), line, p.highlight.old, false);
+                if (!p.dual()) return p.markup(w, null, c.old.bytes(), line, p.highlight.old, false);
+                const set = switch (first(line.text)) {
+                    '+' => c.new_dimmed.bytes(),
+                    '@' => c.frag.bytes(),
+                    '-' => c.old_dimmed.bytes(),
+                    else => c.context_dimmed.bytes(),
+                };
+                try p.markup(w, c.old.bytes(), set, line, p.highlight.old, false);
             },
             .new => {
                 p.new_line += 1;
-                try p.markup(w, c.new.bytes(), line, p.highlight.new, p.blankAtEof(line.text));
+                if (!p.dual()) return p.markup(w, null, c.new.bytes(), line, p.highlight.new, p.blankAtEof(line.text));
+                const set = switch (first(line.text)) {
+                    '-' => c.old_bold.bytes(),
+                    '@' => c.frag.bytes(),
+                    '+' => c.new_bold.bytes(),
+                    else => c.context_bold.bytes(),
+                };
+                // git marks no whitespace on these
+                try p.markup(w, c.new.bytes(), set, line, false, false);
             },
             .incomplete => {
                 const after = switch (line.sign) {
@@ -203,25 +264,32 @@ pub const Painter = struct {
                     else => p.highlight.context,
                 };
                 const set = if (p.rule & whitespace.incomplete_line != 0 and after) c.whitespace.bytes() else c.context.bytes();
-                try emitLine(w, set, null, false, 0, line.text);
+                try emitLine(w, set, null, false, reset, 0, line.text);
             },
         }
     }
 
-    /// git's `emit_line_ws_markup`, for one colour.
-    fn markup(p: *Painter, w: *Io.Writer, set: []const u8, line: parallax.Paint.Line, highlighted: bool, blank_at_eof: bool) Io.Writer.Error!void {
+    /// git's `emit_line_ws_markup`: the sign in `set_sign`, reversed, where
+    /// a line has two colours, else all in `set`; whitespace errors marked
+    /// where `highlighted`.
+    fn markup(p: *Painter, w: *Io.Writer, set_sign: ?[]const u8, set: []const u8, line: parallax.Paint.Line, highlighted: bool, blank_at_eof: bool) Io.Writer.Error!void {
         const ws: ?[]const u8 = if (highlighted and !p.colors.whitespace.isNone()) p.colors.whitespace.bytes() else null;
         const text = line.text;
+        // reverse is written only where there are colours, as git's
+        // `want_color` decides
+        const reverse = set_sign != null and p.reset.len != 0;
         // A last line without its ending is written with one, as git's
         // xdiff hands it on.
         const complete = text.len != 0 and text[text.len - 1] == '\n';
         if (ws == null) {
-            try emitLine(w, set, null, false, line.sign, text);
+            if (set_sign) |sign_set| {
+                try emitLine(w, sign_set, set, reverse, p.reset, line.sign, text);
+            } else try emitLine(w, set, null, false, p.reset, line.sign, text);
         } else if (blank_at_eof) {
-            try emitLine(w, ws.?, null, false, line.sign, text);
+            try emitLine(w, ws.?, null, false, p.reset, line.sign, text);
         } else {
-            try emitLine(w, set, null, false, line.sign, "");
-            _ = try whitespace.checkEmit(text, p.rule, .{ .w = w, .set = set, .reset = color.reset, .ws = ws.? });
+            try emitLine(w, set_sign orelse set, null, reverse, p.reset, line.sign, "");
+            _ = try whitespace.checkEmit(text, p.rule, .{ .w = w, .set = set, .reset = p.reset, .ws = ws.? });
         }
         if (!complete) try w.writeByte('\n');
     }
@@ -234,16 +302,22 @@ pub const Painter = struct {
     }
 };
 
-/// git's `emit_line_0`: the sign in `set_sign`, or with `set_sign` null in
-/// `set`; the text after it, its ending kept outside the colour.
-fn emitLine(w: *Io.Writer, set_sign: ?[]const u8, set: ?[]const u8, reverse: bool, first: u8, line: []const u8) Io.Writer.Error!void {
+/// A line's first byte, zero for an empty one.
+fn first(text: []const u8) u8 {
+    return if (text.len != 0) text[0] else 0;
+}
+
+/// git's `emit_line_0`, after its prefix: the sign in `set_sign`, or with
+/// `set_sign` null in `set`; the text after it, its ending kept outside
+/// the colour.
+fn emitLine(w: *Io.Writer, set_sign: ?[]const u8, set: ?[]const u8, reverse: bool, reset: []const u8, sign: u8, line: []const u8) Io.Writer.Error!void {
     var len = line.len;
     const newline = len > 0 and line[len - 1] == '\n';
     if (newline) len -= 1;
     const carriage_return = len > 0 and line[len - 1] == '\r';
     if (carriage_return) len -= 1;
     var needs_reset = false;
-    if (len != 0 or first != 0) {
+    if (len != 0 or sign != 0) {
         if (reverse) {
             try w.writeAll(color.reverse.bytes());
             needs_reset = true;
@@ -252,17 +326,17 @@ fn emitLine(w: *Io.Writer, set_sign: ?[]const u8, set: ?[]const u8, reverse: boo
             try w.writeAll(s);
             needs_reset = true;
         }
-        if (first != 0) try w.writeByte(first);
+        if (sign != 0) try w.writeByte(sign);
         if (len != 0) {
             if (set) |s| {
-                if (set_sign != null and set_sign.?.ptr != s.ptr) try w.writeAll(color.reset);
+                if (set_sign != null and set_sign.?.ptr != s.ptr) try w.writeAll(reset);
                 try w.writeAll(s);
             }
             try w.writeAll(line[0..len]);
             needs_reset = true;
         }
     }
-    if (needs_reset) try w.writeAll(color.reset);
+    if (needs_reset) try w.writeAll(reset);
     if (carriage_return) try w.writeByte('\r');
     if (newline) try w.writeByte('\n');
 }

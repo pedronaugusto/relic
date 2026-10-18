@@ -27,7 +27,7 @@ fn range(gpa: Allocator, io: Io, git: *testgit.Repo, base: []const u8, tip: []co
 fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, args: []const []const u8, old: range_diff.Range, new: range_diff.Range, options: range_diff.Options) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "range-diff", "--no-color" });
+    try argv.appendSlice(gpa, &.{ "range-diff", if (options.colors == null) "--no-color" else "--color=always" });
     try argv.appendSlice(gpa, args);
     const theirs = try git.run(io, argv.items);
     defer gpa.free(theirs);
@@ -249,4 +249,42 @@ test "a cost matrix past the limit is refused, as git refuses it" {
     const new = try range(gpa, io, &git, "base", "new");
     try std.testing.expectError(error.RangeDiffTooLarge, range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .max_memory = 100 }));
     try std.testing.expectError(error.LeftAndRightOnly, range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .left_only = true, .right_only = true }));
+}
+
+test "a range-diff in colour is git's, in dual colour and without, under color.diff.<slot>" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try buildSeries(io, &git);
+    // whitespace errors in the patches and in the diff between them
+    try git.exec(io, &.{ "checkout", "-q", "old" });
+    try git.writeFile(io, "ws.txt", "trailing   \n\tmixed \tindent\n");
+    try commitAll(io, &git, "Whitespace");
+    try git.exec(io, &.{ "checkout", "-q", "new" });
+    try git.writeFile(io, "ws.txt", "trailing \n    \tmixed\n\n");
+    try commitAll(io, &git, "Whitespace");
+    const old = try range(gpa, io, &git, "base", "old");
+    const new = try range(gpa, io, &git, "base", "new");
+    const diff = @import("../diff/diff.zig");
+    const color = @import("../config/color.zig");
+    const settings = [_][]const []const u8{
+        &.{},
+        &.{ "color.diff.oldBold=blue", "color.diff.newBold=#00ff00 ul", "color.diff.contextBold=italic", "color.diff.oldDimmed=dim red", "color.diff.newDimmed=normal", "color.diff.contextDimmed=strike", "color.diff.frag=magenta", "color.diff.commit=cyan bold", "color.diff.func=yellow", "color.diff.context=dim" },
+        &.{ "color.diff.whitespace=blue reverse", "diff.wsErrorHighlight=all", "color.diff.old=normal" },
+    };
+    for (settings) |set| {
+        for (set) |text| {
+            const eq = std.mem.findScalar(u8, text, '=').?;
+            try git.exec(io, &.{ "config", text[0..eq], text[eq + 1 ..] });
+        }
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        const colors = (try diff.Colors.configured(repo.configuration(), color.Output.always)).?;
+        const diff_options = try diff.configured(repo.configuration(), .{});
+        try compare(gpa, io, &git, &.{ "base", "old", "new" }, old, new, .{ .colors = &colors, .diff = diff_options });
+        try compare(gpa, io, &git, &.{ "--no-dual-color", "base", "old", "new" }, old, new, .{ .colors = &colors, .dual_color = false, .diff = diff_options });
+        try compare(gpa, io, &git, &.{ "--left-only", "base", "old", "new" }, old, new, .{ .colors = &colors, .left_only = true, .diff = diff_options });
+        for (set) |text| try git.exec(io, &.{ "config", "--unset", text[0..std.mem.findScalar(u8, text, '=').?] });
+    }
 }

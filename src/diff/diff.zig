@@ -36,6 +36,8 @@ const Oid = hash.Oid;
 pub const Colors = paint.Colors;
 /// Which lines a coloured patch marks whitespace errors on.
 pub const WsErrorHighlight = paint.WsErrorHighlight;
+/// How range-diff writes the diff of two patches.
+pub const DiffOfPatches = paint.DiffOfPatches;
 
 /// Which algorithm produces the edit script: parallax's.
 pub const Algorithm = parallax.Algorithm;
@@ -591,6 +593,9 @@ pub const Options = struct {
     whitespace_rule: u32 = whitespace.default_rule,
     /// Which lines a coloured patch marks whitespace errors on.
     ws_error_highlight: WsErrorHighlight = .{},
+    /// range-diff's diff of two patches (`DiffOfPatches`), for
+    /// `unifiedBody`; `null` for any other diff.
+    diff_of_patches: ?DiffOfPatches = null,
     /// `core.quotePath`: whether a name's bytes above 0x7f are quoted
     /// in the headers, as well as its control characters, quotes and
     /// backslashes.
@@ -1086,7 +1091,10 @@ fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, op
         .{ .context = rule, .find = findByRule }
     else
         .c_function;
-    var painter: ?paint.Painter = if (options.colors) |c| .init(c, options.whitespace_rule, options.ws_error_highlight, old, new) else null;
+    var painter: ?paint.Painter = if (options.colors != null or options.diff_of_patches != null)
+        .init(options.colors, options.whitespace_rule, options.ws_error_highlight, options.diff_of_patches, old, new)
+    else
+        null;
     // The names as the `---` and `+++` lines write them; plain, a name with
     // a space gets a tab after it, for GNU patch, which a painter writes
     // itself outside the colour.
