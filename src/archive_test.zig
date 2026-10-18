@@ -118,7 +118,7 @@ test "export-subst names people by the mailmap and commits by their refs, and ta
     try git.writeFile(io, ".gitattributes", "subst.txt export-subst\n");
     // Git 2.43 introduced the configurable decoration placeholder.
     const decorations = if (try testgit.gitAtLeast(gpa, io, 2, 43)) "%(decorate:prefix=[,suffix=],separator=%x3b,pointer=>,tag=T:)|%(decorate)|%(decorate:bogus)|" else "";
-    const subst = try gpa.print("$Format:%aN <%aE> %aL|%cN <%cE> %cL|%an|%d|%D|%+d|{s}%N|%G?|%GS|%GK|%GT$\n", .{decorations});
+    const subst = try gpa.print("$Format:%aN <%aE> %aL|%cN <%cE> %cL|%an|%d|%D|%+d|{s}%N|%G?|%GS|%GK|%GT|%C(red)%Cblue%C(auto)%h%C(always,green)%d%Creset$\n", .{decorations});
     defer gpa.free(subst);
     try git.writeFile(io, "subst.txt", subst);
     try git.exec(io, &.{ "add", "-A" });
