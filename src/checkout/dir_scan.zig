@@ -418,6 +418,7 @@ fn parseEntry(bytes: []const u8) ?Parsed {
                     .size = size,
                     .inode = fileid,
                     .file_id = fileid,
+                    .device = devid,
                     .mode = mode,
                     .permissions = platstat.modePermissions(mode),
                     .kind = kind,
