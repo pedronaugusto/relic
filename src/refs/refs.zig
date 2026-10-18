@@ -136,6 +136,7 @@ pub const Store = struct {
         state_mod.get(state).fsync = options.fsync;
         state_mod.get(state).options.fsync = options.fsync;
         state_mod.get(state).packed_lock = options.packed_lock;
+        state_mod.get(state).precompose = options.precompose_unicode;
         return .{ .state = state };
     }
 
@@ -151,6 +152,10 @@ pub const Store = struct {
         /// `core.packedRefsTimeout`: how long a writer waits for
         /// `packed-refs.lock`, with git's backoff. git waits a second.
         packed_lock: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
+        /// `core.precomposeUnicode`, acted on on macOS: a loose ref whose
+        /// file name is spelled decomposed is listed under its composed
+        /// name, as git's `readdir` gives it.
+        precompose_unicode: bool = false,
     };
 
     /// Choose the backend and its cache once, before the store is published.
@@ -204,6 +209,17 @@ pub const Store = struct {
         data.fsync = fsync;
         data.options.shared = shared;
         data.options.fsync = fsync;
+    }
+
+    /// Read the names of loose refs composed or not, as a newly published
+    /// `core.precomposeUnicode` says.
+    pub fn configureNames(store: *Store, precompose_unicode: bool) void {
+        state_mod.get(store.state).precompose = precompose_unicode;
+    }
+
+    /// Whether loose ref names are read composed (`configureNames`).
+    pub fn precomposeUnicode(store: *const Store) bool {
+        return state_mod.get(store.state).precompose;
     }
 
     /// Release the backend and every cached stack together.
@@ -524,7 +540,7 @@ pub const Store = struct {
         depth: u8,
     ) ReadError!void {
         if (depth > 32) return;
-        var it = dir.iterate();
+        var it: fs.Names = .init(dir, store.precomposeUnicode());
         while (try it.next(io)) |entry| {
             // `<ref>.lock` is a lock file, not a ref. It is skipped rather
             // than read, and a caller that wants to know one is there asks

@@ -36,8 +36,9 @@ pub const bulk_supported = builtin.target.os.tag == .macos and builtin.link_libc
 
 /// One directory entry.
 ///
-/// `name` points into the scan's own buffer and is valid until the next call
-/// to `next`. Copy it to keep it.
+/// `name` is the name git reads (`fs.readName`): on macOS under
+/// `core.precomposeUnicode`, composed. It points into the scan's own buffer
+/// and is valid until the next call to `next`. Copy it to keep it.
 pub const Item = struct {
     name: []const u8,
     entry: fs.Entry,
@@ -57,6 +58,16 @@ pub const Scan = struct {
     io: Io,
     dir: Io.Dir,
     arm: Arm,
+    precompose: bool,
+    /// Where a composed name is written.
+    name_buffer: [fs.name_max]u8 = undefined,
+
+    /// How a scan reads names.
+    pub const Options = struct {
+        /// `core.precomposeUnicode` on macOS: give a decomposed name
+        /// composed, as git's `readdir` does (`fs.readName`).
+        precompose: bool = false,
+    };
 
     const Arm = union(enum) {
         /// `getattrlistbulk(2)`: `count` entries left in `buffer` from
@@ -81,7 +92,7 @@ pub const Scan = struct {
     ///
     /// The bulk arm is tried first where the platform has one; a volume that
     /// refuses it leaves the scan on the ordinary arm, with nothing consumed.
-    pub fn init(gpa: Allocator, io: Io, dir: Io.Dir) Allocator.Error!Scan {
+    pub fn init(gpa: Allocator, io: Io, dir: Io.Dir, options: Options) Allocator.Error!Scan {
         if (bulk_supported) {
             const buffer = try gpa.alloc(u8, batch_bytes);
             // A batch read walks the descriptor's own offset forward, so a
@@ -94,6 +105,7 @@ pub const Scan = struct {
                     .gpa = gpa,
                     .io = io,
                     .dir = dir,
+                    .precompose = options.precompose,
                     .arm = .{ .bulk = .{
                         .buffer = buffer,
                         .cursor = 0,
@@ -107,7 +119,7 @@ pub const Scan = struct {
             // ordinary read starts from, so put it back at the beginning.
             rewind(dir);
         }
-        return .{ .gpa = gpa, .io = io, .dir = dir, .arm = .{ .plain = dir.iterate() } };
+        return initPlain(gpa, io, dir, options);
     }
 
     /// Begin reading `dir` the ordinary way, whatever the platform has.
@@ -115,8 +127,8 @@ pub const Scan = struct {
     /// This is what the suite compares the batch arm against, and what a
     /// caller uses to reproduce a result on a machine whose volume takes the
     /// other path.
-    pub fn initPlain(gpa: Allocator, io: Io, dir: Io.Dir) Scan {
-        return .{ .gpa = gpa, .io = io, .dir = dir, .arm = .{ .plain = dir.iterate() } };
+    pub fn initPlain(gpa: Allocator, io: Io, dir: Io.Dir, options: Options) Scan {
+        return .{ .gpa = gpa, .io = io, .dir = dir, .precompose = options.precompose, .arm = .{ .plain = dir.iterate() } };
     }
 
     /// Release the scan's buffer.
@@ -133,6 +145,12 @@ pub const Scan = struct {
     /// it.
     pub fn isBulk(s: *const Scan) bool {
         return s.arm == .bulk;
+    }
+
+    /// A name as the directory spelled it, under the name git reads; the
+    /// stat is always taken by the spelling on disk.
+    fn readName(s: *Scan, name: []const u8) []const u8 {
+        return fs.readName(name, s.precompose, &s.name_buffer);
     }
 
     /// The next entry, or `null` at the end of the directory.
@@ -158,17 +176,17 @@ pub const Scan = struct {
                     b.cursor += parsed.length;
                     b.count -= 1;
                     if (std.mem.eql(u8, parsed.name, ".") or std.mem.eql(u8, parsed.name, "..")) continue;
-                    if (parsed.item) |item| return item;
+                    if (parsed.item) |item| return .{ .name = s.readName(item.name), .entry = item.entry };
                     // The volume answered this one entry short. Stat it the
                     // ordinary way rather than making up what it did not say.
                     const found = (try fs.statAt(s.io, s.dir, parsed.name)) orelse continue;
-                    return .{ .name = parsed.name, .entry = found };
+                    return .{ .name = s.readName(parsed.name), .entry = found };
                 }
             },
             .plain => |*it| {
                 while (try it.next(s.io)) |entry| {
                     const found = (try fs.statAt(s.io, s.dir, entry.name)) orelse continue;
-                    return .{ .name = entry.name, .entry = found };
+                    return .{ .name = s.readName(entry.name), .entry = found };
                 }
                 return null;
             },
@@ -429,7 +447,7 @@ fn vnodeKind(objtype: u32) Io.File.Kind {
 /// Which arm a walk over this directory would take. A benchmark says so in
 /// its output; nothing in the package branches on it.
 pub fn armFor(gpa: Allocator, io: Io, dir: Io.Dir) []const u8 {
-    var scan = Scan.init(gpa, io, dir) catch return "unknown";
+    var scan = Scan.init(gpa, io, dir, .{}) catch return "unknown";
     defer scan.deinit();
     return if (scan.isBulk()) "getattrlistbulk" else "one stat per entry";
 }
@@ -473,7 +491,7 @@ test "both arms describe a directory the same way" {
     }
     try std.testing.expect(expected.count() >= 6);
 
-    var scan = try Scan.init(gpa, io, dir);
+    var scan = try Scan.init(gpa, io, dir, .{});
     defer scan.deinit();
     // Nothing is proved by comparing the ordinary arm with itself, so a
     // volume that refuses the batch call skips this rather than passing it.
@@ -510,7 +528,7 @@ test "a scan of an empty directory gives nothing on either arm" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var scan = try Scan.init(gpa, io, tmp.dir);
+    var scan = try Scan.init(gpa, io, tmp.dir, .{});
     defer scan.deinit();
     try std.testing.expect((try scan.next()) == null);
     // And stays finished.
@@ -538,7 +556,7 @@ test "a scan reads a directory larger than one batch" {
         while (keys.next()) |k| gpa.free(k.*);
         names.deinit(gpa);
     }
-    var scan = try Scan.init(gpa, io, tmp.dir);
+    var scan = try Scan.init(gpa, io, tmp.dir, .{});
     defer scan.deinit();
     while (try scan.next()) |item| {
         try std.testing.expectEqual(@as(u32, 1), item.entry.stat.size);
@@ -547,7 +565,7 @@ test "a scan reads a directory larger than one batch" {
     try std.testing.expectEqual(@as(usize, count), names.count());
 
     // And the ordinary arm reads the same directory, name for name.
-    var plain = Scan.initPlain(gpa, io, tmp.dir);
+    var plain = Scan.initPlain(gpa, io, tmp.dir, .{});
     defer plain.deinit();
     var plain_count: usize = 0;
     while (try plain.next()) |item| {
@@ -570,10 +588,29 @@ test "a scan can be taken twice over the same handle" {
     // over the same handle would see an empty directory if it did not put
     // the offset back. A working tree's root is scanned once per `addAll`.
     for (0..3) |_| {
-        var scan = try Scan.init(gpa, io, tmp.dir);
+        var scan = try Scan.init(gpa, io, tmp.dir, .{});
         defer scan.deinit();
         var n: usize = 0;
         while (try scan.next()) |_| n += 1;
         try std.testing.expectEqual(@as(usize, 5), n);
+    }
+}
+
+test "both arms give a decomposed name composed when asked, and as spelled when not" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "cafe\u{301}", .data = "x" });
+    for ([_]bool{ false, true }) |precompose| {
+        for ([_]bool{ false, true }) |plain| {
+            var scan = if (plain) Scan.initPlain(gpa, io, tmp.dir, .{ .precompose = precompose }) else try Scan.init(gpa, io, tmp.dir, .{ .precompose = precompose });
+            defer scan.deinit();
+            const item = (try scan.next()) orelse return error.TestUnexpectedResult;
+            // the composition is what was asked for; the stat is the file's
+            try std.testing.expectEqualStrings(if (precompose) "caf\u{e9}" else "cafe\u{301}", item.name);
+            try std.testing.expectEqual(@as(u32, 1), item.entry.stat.size);
+            try std.testing.expectEqual(null, try scan.next());
+        }
     }
 }

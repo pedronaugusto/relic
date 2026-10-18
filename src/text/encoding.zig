@@ -22,11 +22,16 @@
 //! `i18n.logOutputEncoding`, a mail in its `charset` (`reencode`, git's
 //! `reencode_string_len`, and `same`, its `same_encoding`), for the
 //! character sets `Charset` names.
+//!
+//! Names: on macOS, under `core.precomposeUnicode`, a name read from a
+//! directory in its decomposed spelling, composed as git's `readdir`
+//! composes it through iconv's `UTF-8-MAC` (`precompose`).
 
 const Self = @This();
 
 const std = @import("std");
 const shakedown = @import("shakedown");
+const xenoglyph = @import("xenoglyph");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -157,6 +162,60 @@ pub fn reencode(a: Allocator, src: []const u8, to: []const u8, from: []const u8)
         }
     }
     return try out.toOwnedSlice(a);
+}
+
+/// The name git's `readdir` gives on macOS under `core.precomposeUnicode`
+/// for `name` as the directory spelled it, into `out`, which holds at least
+/// `name.len` bytes; `null` when that is `name` itself.
+///
+/// git passes every name with a byte past ASCII through iconv from
+/// `UTF-8-MAC` to `UTF-8` (`compat/precompose_utf8.c`) and keeps the name
+/// as it is where iconv fails. macOS's iconv composes each character with
+/// the one it has just written, when the pair has a primary composite: no
+/// reordering of marks and no singletons (U+212B stays, where NFC gives
+/// U+00C5), so a full NFC would differ. Its table stops before Unicode 5.0:
+/// Balinese's vowel sign U+1B35 composes with nothing. And it refuses
+/// anything outside the Basic Multilingual Plane, as it refuses a byte that
+/// begins no valid character, where every later composition lies. Checked
+/// over every code point and every pair of the plane against the iconv
+/// macOS 26 ships.
+pub fn precompose(name: []const u8, out: []u8) ?[]const u8 {
+    assert(out.len >= name.len);
+    for (name) |b| {
+        if (b >= 0x80) break;
+    } else return null;
+    var len: usize = 0;
+    // the character last written, and where it starts in `out`
+    var last: ?u21 = null;
+    var last_at: usize = 0;
+    var i: usize = 0;
+    while (i < name.len) {
+        const n = std.unicode.utf8ByteSequenceLength(name[i]) catch return null;
+        if (n == 4 or i + n > name.len) return null;
+        const c: u21 = switch (n) {
+            1 => name[i],
+            2 => std.unicode.utf8Decode2(name[i..][0..2].*) catch return null,
+            3 => std.unicode.utf8Decode3(name[i..][0..3].*) catch return null,
+            else => unreachable, // unreachable: a lead byte asks for one to four, and four is refused above
+        };
+        i += n;
+        if (last) |l| if (c != 0x1b35) if (xenoglyph.normalize.compose(l, c)) |composite| {
+            // A composite in the plane is never longer than its pair: the
+            // second is at least U+0300, two bytes, so the pair is at least
+            // three. What is written stays behind what is read.
+            // unreachable: a composite is a scalar value, and `out` holds the name
+            len = last_at + (std.unicode.utf8Encode(composite, out[last_at..]) catch unreachable);
+            assert(len <= i);
+            last = composite;
+            continue;
+        };
+        last_at = len;
+        // unreachable: `c` was decoded, and what is written stays behind what is read
+        len += std.unicode.utf8Encode(c, out[len..]) catch unreachable;
+        last = c;
+    }
+    if (std.mem.eql(u8, out[0..len], name)) return null;
+    return out[0..len];
 }
 
 /// git's `ensure_utf8`, which every commit git writes with a UTF-8
@@ -485,6 +544,64 @@ test "fuzz: Latin-1 converts to UTF-8 and back to itself" {
             if (try reencode(a, buf[0..len], "UTF-8", "UTF-8")) |same_bytes| {
                 try testing.expectEqualSlices(u8, buf[0..len], same_bytes);
             } else try testing.expect(!std.unicode.utf8ValidateSlice(buf[0..len]));
+        }
+    }.one, .{});
+}
+
+test "a decomposed name is composed as macOS's iconv composes it for git" {
+    const cases = [_]struct { in: []const u8, want: ?[]const u8 }{
+        // ASCII and an already composed name are left alone
+        .{ .in = "plain", .want = null },
+        .{ .in = "caf\u{e9}", .want = null },
+        .{ .in = "cafe\u{301}", .want = "caf\u{e9}" },
+        .{ .in = "o\u{308}d/u\u{308}", .want = "\u{f6}d/\u{fc}" },
+        // pairwise: a dot below then a circumflex compose, the other order
+        // stops after the first; nothing is reordered
+        .{ .in = "a\u{323}\u{302}", .want = "\u{1ead}" },
+        .{ .in = "a\u{302}\u{323}", .want = "\u{e2}\u{323}" },
+        .{ .in = "e\u{315}\u{300}", .want = null },
+        // no singletons, no excluded composition
+        .{ .in = "\u{212b}", .want = null },
+        .{ .in = "\u{915}\u{93c}", .want = null },
+        // Hangul jamo
+        .{ .in = "\u{1100}\u{1161}\u{11a8}", .want = "\u{ac01}" },
+        // Balinese composes in Unicode 5.0, after macOS's table
+        .{ .in = "\u{1b05}\u{1b35}", .want = null },
+        // outside the plane, or not UTF-8: iconv refuses and git keeps it
+        .{ .in = "e\u{301}\u{1f600}", .want = null },
+        .{ .in = "\u{11099}\u{110ba}", .want = null },
+        .{ .in = "e\u{301}\xc0\x80", .want = null },
+        .{ .in = "e\u{301}\xcc", .want = null },
+    };
+    for (cases) |case| {
+        var buffer: [64]u8 = undefined;
+        const got = precompose(case.in, &buffer);
+        if (case.want) |want| {
+            try testing.expectEqualStrings(want, got orelse return error.TestExpectedEqual);
+        } else try testing.expectEqual(null, got);
+    }
+}
+
+test "fuzz: a composed name is never longer and composes to itself" {
+    try shakedown.check(testing.allocator, {}, struct {
+        // starters, the marks that compose with them, and bytes of no
+        // character, in any order
+        const pieces = [_][]const u8{ "a", "e", "o", "s", "/", "\u{3b1}", "\u{1100}", "\u{1161}", "\u{11a8}", "\u{915}", "\u{300}", "\u{301}", "\u{302}", "\u{308}", "\u{323}", "\u{327}", "\u{345}", "\u{93c}", "\u{1b35}", "\u{1f600}", "\xcc", "\xff" };
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            var name: [128]u8 = undefined;
+            var len: usize = 0;
+            const count = shakedown.gen.intRange(case.source, usize, 0, 24);
+            for (0..count) |_| {
+                const piece = pieces[shakedown.gen.intRange(case.source, usize, 0, pieces.len - 1)];
+                @memcpy(name[len..][0..piece.len], piece);
+                len += piece.len;
+            }
+            var buffer: [128]u8 = undefined;
+            const once = precompose(name[0..len], buffer[0..len]) orelse return;
+            // `a` and U+0323 are three bytes, and so is U+1EA1
+            try testing.expect(once.len <= len);
+            var again: [128]u8 = undefined;
+            try testing.expectEqual(null, precompose(once, again[0..once.len]));
         }
     }.one, .{});
 }

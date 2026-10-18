@@ -804,8 +804,9 @@ running it, and CI does that for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 One module, with [conduit](https://github.com/pedronaugusto/conduit) for
 running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's globs,
 [parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges,
-[warp](https://github.com/pedronaugusto/warp) for checksums and DEFLATE, and
-[airlock](https://github.com/pedronaugusto/airlock) for durable writes. Conduit carries its libc linkage on POSIX; Windows needs
+[warp](https://github.com/pedronaugusto/warp) for checksums and DEFLATE,
+[airlock](https://github.com/pedronaugusto/airlock) for durable writes, and
+[xenoglyph](https://github.com/pedronaugusto/xenoglyph) for the Unicode composition behind `core.precomposeUnicode`. Conduit carries its libc linkage on POSIX; Windows needs
 no C runtime. SHA-256 comes from `std.crypto`; SHA-1 is in the package.
 
 Fetching and pushing over HTTP and HTTPS, and Git LFS, take three more:

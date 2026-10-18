@@ -3,7 +3,7 @@ const std = @import("std");
 const airlock_build = @import("airlock");
 
 /// What a project that depends on relic builds: the `relic` module, on conduit,
-/// sweep, parallax, airlock and warp, and with `http` (the default) uplink,
+/// sweep, parallax, airlock, warp and xenoglyph, and with `http` (the default) uplink,
 /// cloak and strand. The tests, examples, benchmarks and gate are `dev`'s.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -12,8 +12,9 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
     // The module. Conduit runs programs and carries its platform linkage;
     // command preparation and the permission to run remain here. sweep
-    // matches git's globs, parallax diffs and merges lines, warp compresses
-    // and airlock makes writes durable.
+    // matches git's globs, parallax diffs and merges lines, warp compresses,
+    // airlock makes writes durable and xenoglyph composes the names macOS
+    // hands back decomposed.
     //
     // Fetching and pushing over HTTP and HTTPS, and Git LFS, take three more:
     // uplink speaks HTTP, cloak holds the certificates, keys and trust TLS
@@ -33,7 +34,7 @@ pub fn build(b: *std.Build) void {
 }
 
 /// What the `relic` module imports, from `p`, relic's own build, for `target`
-/// and `optimize`: conduit, sweep, parallax, airlock and warp, the
+/// and `optimize`: conduit, sweep, parallax, airlock, warp and xenoglyph, the
 /// `relic_options` that say whether `http` is on, and with it uplink, cloak
 /// and strand, each once the build has fetched it. The tests and the
 /// benchmarks build their roots on the same.
@@ -41,7 +42,7 @@ fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const features = p.addOptions();
     features.addOption(bool, "http", http);
     var imports: std.ArrayList(std.Build.Module.Import) = .empty;
-    for ([_][]const u8{ "conduit", "sweep", "parallax", "airlock", "warp" }) |name| {
+    for ([_][]const u8{ "conduit", "sweep", "parallax", "airlock", "warp", "xenoglyph" }) |name| {
         imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
     }
     imports.append(p.allocator, .{ .name = "relic_options", .module = features.createModule() }) catch @panic("out of memory");
@@ -333,8 +334,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         },
     });
     // A project that depends on relic by path with `.http = false`: the
-    // build a consumer gets, with conduit, sweep, parallax, airlock and warp
-    // to fetch, and aegis and reactor beneath them, and none of uplink,
+    // build a consumer gets, with conduit, sweep, parallax, airlock, warp and
+    // xenoglyph to fetch, and aegis and reactor beneath them, and none of uplink,
     // cloak and strand. Its program names the entry points that may speak
     // HTTP, so each must compile without them.
     const conduit_dependency = p.dependency("conduit", .{ .target = target, .optimize = optimize });
@@ -350,6 +351,7 @@ pub fn dev(b: *std.Build, tools: type) void {
             p.dependency("parallax", .{}),
             airlock_dependency,
             p.dependency("warp", .{}),
+            p.dependency("xenoglyph", .{}),
         },
         .options = &.{.{ .name = "http", .value = .{ .flag = false } }},
     });

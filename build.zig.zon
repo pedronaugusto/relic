@@ -44,6 +44,10 @@
             .hash = "strand-0.12.0-8LNWVk0HJwB_gbCb-JFzP2A74Y3x01meSYw69w8W1Qg3",
             .lazy = true,
         },
+        .xenoglyph = .{
+            .url = "git+https://github.com/pedronaugusto/xenoglyph?ref=v0.3.2#f6166e8ba5108cc169663ed46e78eb422087b38c",
+            .hash = "xenoglyph-0.3.2-YKXZlXUoGwAmNSZEy8Y4yr3zUTGRuODke6HR6iXGLYBs",
+        },
     },
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x688191cb6037a69f,

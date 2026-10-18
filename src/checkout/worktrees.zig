@@ -139,7 +139,9 @@ pub fn list(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!List
     };
     defer worktrees_dir.close(io);
 
-    var it = worktrees_dir.iterate();
+    // ids as git's `readdir` gives them: composed under
+    // `core.precomposeUnicode` on macOS
+    var it: fs.Names = .init(worktrees_dir, refs.precomposeUnicode());
     while (try it.next(io)) |dir_entry| {
         if (dir_entry.kind != .directory) continue;
         const admin = worktrees_dir.openDir(io, dir_entry.name, .{ .iterate = true }) catch continue;

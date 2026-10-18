@@ -196,17 +196,30 @@ const Checker = struct {
             else => |e| return e,
         };
         defer refs_dir.close(c.io);
-        var walker = try refs_dir.walk(c.a);
-        defer walker.deinit();
         const Item = struct { sub: []const u8, kind: Io.File.Kind };
         var items: std.ArrayList(Item) = .empty;
-        while (try walker.next(c.io)) |entry| {
-            if (entry.kind == .directory) continue;
-            // a name ending `.lock` is a lock unless it starts with a dot
-            if (entry.basename.len > 0 and entry.basename[0] != '.' and std.mem.endsWith(u8, entry.basename, ".lock")) continue;
-            const sub = try c.a.dupe(u8, entry.path);
-            if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, sub, std.fs.path.sep, '/');
-            try items.append(c.a, .{ .sub = sub, .kind = entry.kind });
+        // The directories left to read, by their paths under `refs`; names
+        // as git's `readdir` gives them, composed under
+        // `core.precomposeUnicode` on macOS.
+        var pending: std.ArrayList([]const u8) = .empty;
+        try pending.append(c.a, "");
+        while (pending.pop()) |sub_dir| {
+            var dir = if (sub_dir.len == 0) refs_dir else refs_dir.openDir(c.io, sub_dir, .{ .iterate = true }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => continue,
+                else => |e| return e,
+            };
+            defer if (sub_dir.len != 0) dir.close(c.io);
+            var it: fs.Names = .init(dir, c.store.precomposeUnicode());
+            while (try it.next(c.io)) |entry| {
+                const sub = if (sub_dir.len == 0) try c.a.dupe(u8, entry.name) else try c.a.print("{s}/{s}", .{ sub_dir, entry.name });
+                if (entry.kind == .directory) {
+                    try pending.append(c.a, sub);
+                    continue;
+                }
+                // a name ending `.lock` is a lock unless it starts with a dot
+                if (entry.name.len > 0 and entry.name[0] != '.' and std.mem.endsWith(u8, entry.name, ".lock")) continue;
+                try items.append(c.a, .{ .sub = sub, .kind = entry.kind });
+            }
         }
         std.mem.sort(Item, items.items, {}, struct {
             fn lessThan(_: void, x: Item, y: Item) bool {

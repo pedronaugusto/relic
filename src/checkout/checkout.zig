@@ -103,6 +103,10 @@ pub const Rules = struct {
     filters: ?*const filter.Drivers = null,
     /// Whether the filesystem folds case, from `core.ignoreCase`.
     ignore_case: bool = false,
+    /// `core.precomposeUnicode`, which git acts on only on macOS: a name
+    /// read from the working tree in its decomposed spelling is taken
+    /// composed (`fs.readName`), as git's `readdir` gives it.
+    precompose_unicode: bool = false,
     /// How much of a cached stat to believe, from `core.checkStat`.
     check_stat: fs.Stat.Check = .full,
     /// `core.protectNTFS` and `core.protectHFS`: the spellings of `.git`
@@ -432,7 +436,7 @@ const Walker = struct {
             for (entries.items) |e| w.gpa.free(e.name);
             entries.deinit(w.gpa);
         }
-        var scan = try dir_scan.Scan.init(w.gpa, w.io, dir);
+        var scan = try dir_scan.Scan.init(w.gpa, w.io, dir, .{ .precompose = w.options.rules.precompose_unicode });
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
@@ -1214,7 +1218,8 @@ const StatusScan = struct {
         if (s.options.rules.attrs) |attrs| try attrs.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
-        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir);
+        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.options.rules.precompose_unicode });
+
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
@@ -1448,7 +1453,8 @@ const StatusScan = struct {
         errdefer out.deinit(s.gpa);
         const dir = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
         defer if (path.len != 0) dir.close(s.io);
-        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir);
+        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.options.rules.precompose_unicode });
+
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
@@ -1771,7 +1777,7 @@ pub fn checkout(
 
     try refuseUnsafeTree(arena, &wanted, options);
     if (!options.force) try verifyCheckout(gpa, arena, io, wt, index, &wanted, options);
-    try refuseDirectoriesInTheWay(arena, io, wt, index, &wanted, options.force);
+    try refuseDirectoriesInTheWay(arena, io, wt, index, &wanted, options.force, options.rules.precompose_unicode);
     var removed_dirs = try removeUnwanted(gpa, arena, io, wt, index, &wanted, &outcome);
 
     // Write what the tree has, in path order.
@@ -1914,6 +1920,7 @@ fn refuseDirectoriesInTheWay(
     index: *const Index,
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
     force: bool,
+    precompose: bool,
 ) Error!void {
     var conflict_it = wanted.iterator();
     while (conflict_it.next()) |item| {
@@ -1921,7 +1928,7 @@ fn refuseDirectoriesInTheWay(
         if (keeps(index, item.key_ptr.*, item.value_ptr.*, force)) continue;
         if (try fs.statAt(io, wt, item.key_ptr.*)) |found| {
             if (found.kind == .directory and
-                !try directoryIsReplaceable(arena, io, wt, item.key_ptr.*, index, wanted))
+                !try directoryIsReplaceable(arena, io, wt, item.key_ptr.*, index, wanted, precompose))
             {
                 return error.UntrackedWouldBeOverwritten;
             }
@@ -2830,7 +2837,7 @@ pub fn verifyUpdates(
             const is_last = slash == null;
             if (try fs.statAt(io, wt, prefix)) |found| {
                 const blocks = if (found.kind == .directory)
-                    is_last and !try directoryGoes(arena, io, wt, prefix, index, updates)
+                    is_last and !try directoryGoes(arena, io, wt, prefix, index, updates, options.rules.precompose_unicode)
                 else if (index.find(prefix) != null)
                     false
                 else
@@ -2861,14 +2868,15 @@ fn directoryGoes(
     dir_path: []const u8,
     index: *const Index,
     updates: *const std.array_hash_map.String(?TreeEntry),
+    precompose: bool,
 ) Error!bool {
     var dir = try wt.openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);
-    var it = dir.iterate();
+    var it: fs.Names = .init(dir, precompose);
     while (try it.next(io)) |item| {
         const path = try arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {
-            if (!try directoryGoes(arena, io, wt, path, index, updates)) return false;
+            if (!try directoryGoes(arena, io, wt, path, index, updates, precompose)) return false;
             continue;
         }
         if (index.find(path) == null) return false;
@@ -2965,14 +2973,15 @@ fn directoryIsReplaceable(
     dir_path: []const u8,
     index: *const Index,
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    precompose: bool,
 ) Error!bool {
     var dir = try wt.openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);
-    var iterator = dir.iterate();
+    var iterator: fs.Names = .init(dir, precompose);
     while (try iterator.next(io)) |item| {
         const path = try arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {
-            if (!try directoryIsReplaceable(arena, io, wt, path, index, wanted)) return false;
+            if (!try directoryIsReplaceable(arena, io, wt, path, index, wanted, precompose)) return false;
             continue;
         }
         const tracked = index.find(path) != null;
@@ -3317,7 +3326,8 @@ const ListScan = struct {
         if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.rules.ignore) |rules| rules.popTo(depth + 2);
 
-        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir);
+        var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.rules.precompose_unicode });
+
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;

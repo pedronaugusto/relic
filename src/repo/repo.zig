@@ -287,6 +287,10 @@ const RepositoryData = struct {
 pub const Settings = struct {
     /// `core.ignoreCase`: the working tree folds case.
     ignore_case: bool,
+    /// `core.precomposeUnicode`, acted on on macOS only, as git acts on it:
+    /// a name read from a directory in its decomposed spelling is taken
+    /// composed.
+    precompose_unicode: bool,
     /// `core.fileMode`: the executable bit is real (git's default where
     /// the platform has one).
     file_mode: bool,
@@ -313,6 +317,9 @@ pub const Settings = struct {
         if (depth < 0 or depth > std.math.maxInt(u32)) return error.MalformedValue;
         return .{
             .ignore_case = try config.getBool("core.ignorecase", false),
+            // git reads the setting everywhere, and refuses a bad value
+            // everywhere, but composes on macOS alone
+            .precompose_unicode = try config.getBool("core.precomposeunicode", false) and builtin.target.os.tag == .macos,
             .file_mode = try config.getBool("core.filemode", Io.File.Permissions.has_executable_bit),
             .symlinks = try config.getBool("core.symlinks", builtin.target.os.tag != .windows),
             .check_stat = check,
@@ -757,6 +764,7 @@ pub const Repository = struct {
             .shared = repo.data().shared,
             .fsync = repo.data().fsync,
             .packed_lock = try lockTimeout(repo.configuration(), "core.packedrefstimeout", 1000),
+            .precompose_unicode = repo.data().settings.precompose_unicode,
         });
         repo.data().refs_state = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
         return repo;
@@ -1281,6 +1289,7 @@ pub const Repository = struct {
         // Every writer takes the new policy at once: a changed
         // `core.sharedRepository` used to reach none of them.
         repo.refStore().configureWrites(policy.shared, policy.fsync);
+        repo.refStore().configureNames(policy.settings.precompose_unicode);
         repo.data().odb.configureWrites(policy.shared, policy.fsync);
         repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;
@@ -1329,6 +1338,7 @@ pub const Repository = struct {
         return .{
             .core = try repo.coreSettings(),
             .ignore_case = repo.data().settings.ignore_case,
+            .precompose_unicode = repo.data().settings.precompose_unicode,
             .check_stat = repo.data().settings.check_stat,
             .trust_ctime = repo.data().settings.trust_ctime,
             .timestamp_resolution = repo.data().odb.timestamp_resolution,

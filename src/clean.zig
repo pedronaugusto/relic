@@ -149,6 +149,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
     var standard: ?ignore.Rules = if (options.ignored != .too) try repo.loadIgnore(io) else null;
     defer if (standard) |*r| r.deinit();
     const case_fold = try config.getBool("core.ignorecase", false);
+    const precompose = repo.settings().precompose_unicode;
     var command_line = try ignore.Rules.init(gpa, .{ .case_fold = case_fold });
     defer command_line.deinit();
     try command_line.addPatterns(options.excludes, "", "--exclude option", 0);
@@ -169,6 +170,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
         .command_line = &command_line,
         .spec = if (options.pathspecs.len > 0) &spec else null,
         .case_fold = case_fold,
+        .precompose = precompose,
         .show_ignored = show_ignored,
         .show_ignored_too = show_ignored_too,
         .mode_matching = show_ignored_too and options.ignored == .keep,
@@ -187,6 +189,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
         .wt = wt,
         .dry_run = options.dry_run,
         .keep_nested = options.force != .nested_repositories,
+        .precompose = precompose,
         .out = options.out,
         .quote_fully = quote_fully,
         .cwd = cwdUnder(a, io, wt),
@@ -242,6 +245,8 @@ const Walk = struct {
     command_line: *ignore.Rules,
     spec: ?*const pathspec_mod.Pathspec,
     case_fold: bool,
+    /// `core.precomposeUnicode` on macOS: names read composed.
+    precompose: bool,
     /// `DIR_SHOW_IGNORED`: ignored paths are the entries (`-X`).
     show_ignored: bool,
     /// `DIR_SHOW_IGNORED_TOO`: ignored paths are collected beside the
@@ -270,7 +275,7 @@ const Walk = struct {
             names.deinit(w.gpa);
         }
         {
-            var scan = try dir_scan.Scan.init(w.gpa, w.io, dir);
+            var scan = try dir_scan.Scan.init(w.gpa, w.io, dir, .{ .precompose = w.precompose });
             defer scan.deinit();
             while (try scan.next()) |item| {
                 const name = try w.gpa.dupe(u8, item.name);
@@ -475,6 +480,8 @@ const Remover = struct {
     wt: Io.Dir,
     dry_run: bool,
     keep_nested: bool,
+    /// `core.precomposeUnicode` on macOS: names read composed.
+    precompose: bool,
     out: ?*Io.Writer,
     quote_fully: bool,
     cwd: ?[]const u8,
@@ -520,7 +527,7 @@ const Remover = struct {
         var names: std.ArrayList([]const u8) = .empty;
         {
             defer dir.close(r.io);
-            var it = dir.iterate();
+            var it: fs.Names = .init(dir, r.precompose);
             while (it.next(r.io) catch null) |entry| try names.append(r.a, try r.a.dupe(u8, entry.name));
         }
         std.mem.sort([]const u8, names.items, {}, lessThan);

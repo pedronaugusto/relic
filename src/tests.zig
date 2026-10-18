@@ -248,6 +248,7 @@ test {
     _ = @import("text/unicode_width.zig");
     _ = @import("checkout/convert.zig");
     _ = @import("checkout/dir_scan.zig");
+    _ = @import("checkout/precompose_test.zig");
     _ = @import("names/path.zig");
     _ = @import("worktree/sparse_checkout.zig");
     _ = @import("diff/user_diff.zig");

@@ -626,7 +626,7 @@ fn walkFiles(ctx: *Ctx, dir_path: []const u8, specs: []const []const u8, out: *s
     if (depth > 64) return;
     var dir = try ctx.wt.openDir(ctx.io, dir_path, .{ .iterate = true });
     defer dir.close(ctx.io);
-    var it = dir.iterate();
+    var it: fs.Names = .init(dir, ctx.repo.settings().precompose_unicode);
     while (try it.next(ctx.io)) |item| {
         const path = try ctx.arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {

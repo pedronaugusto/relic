@@ -17,6 +17,7 @@ const Self = @This();
 
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
+const encoding = @import("../text.zig").encoding;
 const airlock_mod = @import("airlock.testing");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -516,6 +517,44 @@ pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
         .executable = isExecutable(s.permissions),
     };
 }
+
+/// The longest name a directory gives, in bytes: macOS's `d_name`, which
+/// holds HFS+'s 255 UTF-16 units in UTF-8, and more than any other
+/// platform's.
+pub const name_max = 1024;
+
+/// `name`, as a directory spelled it, under the name git reads it by: on
+/// macOS under `core.precomposeUnicode` (`precompose`), composed as git's
+/// `readdir` composes it (`text.encoding.precompose`); `name` itself
+/// otherwise. The result is `name` or in `buffer`.
+pub fn readName(name: []const u8, precompose: bool, buffer: *[name_max]u8) []const u8 {
+    if (!precompose or name.len > buffer.len) return name;
+    return encoding.precompose(name, buffer[0..name.len]) orelse name;
+}
+
+/// A directory's entries under the names git reads them by (`readName`):
+/// what git's `opendir` and `readdir` give, which on macOS compose a
+/// decomposed name under `core.precomposeUnicode`. Every name read from
+/// the working tree's directories, the loose refs and the worktree ids
+/// comes through this or through `worktree.dir_scan`, so a name means the
+/// same in the index, in a ref and on the disk.
+pub const Names = struct {
+    iterator: Io.Dir.Iterator,
+    precompose: bool,
+    buffer: [name_max]u8 = undefined,
+
+    /// Read `dir`, opened to iterate, composing names when `precompose`.
+    pub fn init(dir: Io.Dir, precompose: bool) Names {
+        return .{ .iterator = dir.iterate(), .precompose = precompose };
+    }
+
+    /// The next entry, its name valid until the next call; `.` and `..`
+    /// are never given.
+    pub fn next(names: *Names, io: Io) Io.Dir.Iterator.Error!?Io.Dir.Entry {
+        const entry = (try names.iterator.next(io)) orelse return null;
+        return .{ .name = readName(entry.name, names.precompose, &names.buffer), .kind = entry.kind, .inode = entry.inode };
+    }
+};
 
 /// What `sub_path` is now, for telling whether it changed since it was last
 /// looked at, as git's `stat_validity` does: the index's stat, with the

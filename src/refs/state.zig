@@ -28,6 +28,8 @@ pub const Data = struct {
     /// `core.packedRefsTimeout`: how long a writer waits for
     /// `packed-refs.lock`. git waits a second unless told otherwise.
     packed_lock: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
+    /// `core.precomposeUnicode` on macOS: loose ref names read composed.
+    precompose: bool = false,
 };
 
 pub fn get(state: *State) *Data {
