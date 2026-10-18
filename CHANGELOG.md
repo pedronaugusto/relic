@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-18
+
 ### Breaking
 
 - Commits are read and written in their encodings as git's are, through one conversion (`text.encoding.reencode`, git's `reencode_string_len`, with `same` and `Charset`: UTF-8, US-ASCII and ISO-8859-1; another name is `UnsupportedEncoding`, where git converts through iconv). `pretty.reencodeCommit` is git's `logmsg_reencode`, `commit.message.logOutputEncoding` and `commitEncoding` read `i18n.logOutputEncoding` and `i18n.commitEncoding` (a bare name refused, `InvalidEncodingSetting`). `pretty.formatCommit` expands placeholders on the commit in UTF-8 and writes `Context.output_encoding`, `null` being the commit's own encoding as `git archive` and a merge message's list write it (`outputEncoding`, `toOutput`); `%e` names the commit's encoding. The shortlog (`configured` sets the log's encoding; `addCommit`, `FormatGroupNeedsName` and `EncodingUnsupported` are gone, a commit is added by name), format-patch (the mails' `charset` and RFC 2047 words name the log's encoding; the people convert too; `patch.format.logMessage` and `logText`, its Latin-1-only path, are gone), range-diff, stash's subject and the sequencer's instruction sheets write the log's encoding; a pick, a revert and a rebase take messages and authors in the commit encoding, as git's `get_message` does. `patch.mail.InfoOptions.charset` replaces `utf8`: am takes mail into `i18n.commitEncoding`. Held to `git log --format`, `git shortlog`, `git format-patch --cover-letter` and `git cherry-pick` over commits in Latin-1 and UTF-8 in each log encoding.
