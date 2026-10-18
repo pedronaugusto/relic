@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-18
+
 ### Breaking
 
 - `diff.ConfigError` has `ConflictingWhitespaceRules`: `diff.configured` reads `core.whitespace` (and refuses `tab-in-indent` with `indent-with-non-tab`, where git dies), `diff.wsErrorHighlight` and `core.quotePath`.
