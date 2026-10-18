@@ -65,7 +65,7 @@ pub const Colors = struct {
         try color.readSlots(Colors, &out, config, &names, &.{
             .{ .section = "color", .subsection = "diff" },
             .{ .section = "diff", .subsection = "color" },
-        });
+        }, .pass_over);
         return out;
     }
 

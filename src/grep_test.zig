@@ -400,3 +400,51 @@ test "patterns made of braces, brackets, anchors and repetitions compile and mat
         }
     }
 }
+
+test "git grep --color=always comes out byte for byte, under color.grep.<slot> and color.grep.match" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try fixture(io, &git);
+    const config_mod = @import("config/config.zig");
+    const color = @import("config/color.zig");
+    const settings = [_][]const []const u8{
+        &.{},
+        &.{ "color.grep.filename=blue ul", "color.grep.lineNumber=#ffaa00", "color.grep.column=dim", "color.grep.separator=normal", "color.grep.selected=yellow", "color.grep.context=italic", "color.grep.function=reverse" },
+        &.{ "color.grep.match=green", "color.grep.matchContext=red" },
+        &.{ "color.grep.matchSelected=magenta", "color.grep.match=cyan" },
+    };
+    for (settings) |set| {
+        for (set) |s| {
+            const eq = std.mem.findScalar(u8, s, '=').?;
+            try git.exec(io, &.{ "config", s[0..eq], s[eq + 1 ..] });
+        }
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        const colors = (try grep_mod.Colors.configured(repo.configuration(), color.Output.always)).?;
+        const cases = .{
+            .{ &.{ "-n", "--column", "count" }, grep_mod.Options{ .patterns = &.{"count"}, .line_number = true, .column = true } },
+            .{ &.{ "-n", "-C1", "count" }, grep_mod.Options{ .patterns = &.{"count"}, .line_number = true, .before = 1, .after = 1 } },
+            .{ &.{ "-o", "-n", "--column", "co*unt\\|re[a-z]*" }, grep_mod.Options{ .patterns = &.{"co*unt\\|re[a-z]*"}, .only_matching = true, .line_number = true, .column = true } },
+            .{ &.{ "-v", "-n", "a" }, grep_mod.Options{ .patterns = &.{"a"}, .invert = true, .line_number = true } },
+            .{ &.{ "-l", "count" }, grep_mod.Options{ .patterns = &.{"count"}, .show = .files_with_matches } },
+            .{ &.{ "-c", "count" }, grep_mod.Options{ .patterns = &.{"count"}, .show = .count } },
+            .{ &.{ "-z", "-n", "count" }, grep_mod.Options{ .patterns = &.{"count"}, .null_separator = true, .line_number = true } },
+            .{ &.{ "-p", "-n", "return" }, grep_mod.Options{ .patterns = &.{"return"}, .show_function = true, .line_number = true } },
+            .{ &.{ "-W", "doubled" }, grep_mod.Options{ .patterns = &.{"doubled"}, .function_context = true } },
+            .{ &.{ "-e", "alpha", "-e", "ta" }, grep_mod.Options{ .patterns = &.{ "alpha", "ta" } } },
+            .{ &.{ "-h", "-i", "COUNT" }, grep_mod.Options{ .patterns = &.{"COUNT"}, .with_filename = false, .ignore_case = true } },
+        };
+        inline for (cases) |case| {
+            var options = case[1];
+            options.colors = &colors;
+            try compare(gpa, io, &git, &repo, &(.{"--color=always"} ++ case[0].*), options);
+        }
+        for (set) |s| try git.exec(io, &.{ "config", "--unset", s[0..std.mem.findScalar(u8, s, '=').?] });
+    }
+    // a slot grep does not have is refused, as git dies on it
+    var config = try config_mod.Config.parseText(gpa, "[color \"grep\"]\n\tbogus = red\n", .local);
+    defer config.deinit();
+    try std.testing.expectError(error.UnknownColorSlot, grep_mod.Colors.configured(&config, color.Output.always));
+}

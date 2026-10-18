@@ -127,7 +127,7 @@ pub const Colors = struct {
     /// (`diff.Colors.read`), each value read as `git log` reads it.
     pub fn read(config: *const config_mod.Config) color.Error!Colors {
         var slots: Decorate = .{};
-        try color.readSlots(Decorate, &slots, config, &decorate_names, &.{.{ .section = "color", .subsection = "decorate" }});
+        try color.readSlots(Decorate, &slots, config, &decorate_names, &.{.{ .section = "color", .subsection = "decorate" }}, .pass_over);
         var out: Colors = .{ .commit = (try diff_colors.Colors.read(config)).commit };
         inline for (@typeInfo(Decorate).@"struct".field_names) |name| @field(out, name) = @field(slots, name);
         return out;

@@ -36,6 +36,8 @@ const ere = @import("text.zig").ere;
 const pathspec_mod = @import("patterns.zig").pathspec;
 const fs = @import("fs/fs.zig");
 const user_diff = @import("diff/user_diff.zig");
+const color = @import("config/color.zig");
+const config_mod = @import("config/config.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -182,6 +184,46 @@ pub const Options = struct {
     source: Source = .worktree,
     /// Tasks to search on: zero is one per processor.
     threads: u16 = 0,
+    /// The colours the output is written in, `null` for none:
+    /// `Colors.configured` gives git's.
+    colors: ?*const Colors = null,
+};
+
+/// `git grep`'s colours: git's defaults under `color.grep.<slot>`.
+pub const Colors = struct {
+    context: color.Color = .none,
+    filename: color.Color = color.magenta,
+    function: color.Color = .none,
+    line_number: color.Color = color.green,
+    column: color.Color = color.green,
+    match_context: color.Color = color.bold_red,
+    match_selected: color.Color = color.bold_red,
+    selected: color.Color = .none,
+    separator: color.Color = color.cyan,
+
+    /// git's `color_grep_slots`, and `match` for both match slots.
+    const names = [_]struct { []const u8, std.meta.FieldEnum(Colors) }{
+        .{ "context", .context },              .{ "filename", .filename },    .{ "function", .function },
+        .{ "lineNumber", .line_number },       .{ "column", .column },        .{ "matchContext", .match_context },
+        .{ "matchSelected", .match_selected }, .{ "selected", .selected },    .{ "separator", .separator },
+        .{ "match", .match_context },          .{ "match", .match_selected },
+    };
+
+    /// git's defaults under what `color.grep.<slot>` sets, read in order
+    /// as git's `grep_config` reads them: a slot grep does not have is
+    /// refused, where git dies.
+    pub fn read(config: *const config_mod.Config) color.Error!Colors {
+        var out: Colors = .{};
+        try color.readSlots(Colors, &out, config, &names, &.{.{ .section = "color", .subsection = "grep" }}, .refuse);
+        return out;
+    }
+
+    /// The colours `output` asks for: `null` where git greps without
+    /// colour, as `color.grep` and `color.ui` decide.
+    pub fn configured(config: ?*const config_mod.Config, output: color.Output) color.Error!?Colors {
+        if (!try color.wanted(config, &.{"color.grep"}, output)) return null;
+        return if (config) |c| try read(c) else .{};
+    }
 };
 
 /// What a grep found.
@@ -558,7 +600,19 @@ const Format = struct {
     max_count: ?usize,
     null_sep: bool,
     binary: Binary,
+    colors: ?*const Colors,
+
+    /// What a context hunk is marked with: `--`, in `separator`.
+    fn mark(fmt: *const Format, buf: []u8) []const u8 {
+        const sep: []const u8 = if (fmt.colors) |c| c.separator.bytes() else "";
+        if (sep.len == 0) return "--\n";
+        // unreachable: the buffer holds the longest colour, the mark and a reset
+        return std.mem.print(buf, "{s}--{s}\n", .{ sep, color.reset }) catch unreachable;
+    }
 };
+
+/// The buffer `Format.mark` writes into.
+const mark_max = color.max_len + "--".len + color.reset.len + 1;
 
 const FileState = struct {
     w: *Io.Writer,
@@ -605,22 +659,33 @@ fn isEmptyLine(text: []const u8) bool {
     return true;
 }
 
+/// git's `output_color`: `text` in the colour of `slot`, where there are
+/// colours and that one writes something.
+fn outputColor(st: *FileState, text: []const u8, comptime slot: std.meta.FieldEnum(Colors)) Io.Writer.Error!void {
+    const c: []const u8 = if (st.fmt.colors) |colors| @field(colors, @tagName(slot)).bytes() else "";
+    if (c.len == 0) return st.w.writeAll(text);
+    try st.w.print("{s}{s}{s}", .{ c, text, color.reset });
+}
+
 fn outputSep(st: *FileState, sign: u8) Io.Writer.Error!void {
-    if (st.fmt.null_sep) try st.w.writeByte(0) else try st.w.writeByte(sign);
+    if (st.fmt.null_sep) try st.w.writeByte(0) else try outputColor(st, &.{sign}, .separator);
 }
 
 fn showLineHeader(st: *FileState, lno: usize, cno: usize, sign: u8) Io.Writer.Error!void {
     st.last_shown = lno;
+    var buf: [32]u8 = undefined;
     if (st.fmt.pathname) {
-        try st.w.writeAll(st.name);
+        try outputColor(st, st.name, .filename);
         try outputSep(st, sign);
     }
     if (st.fmt.line_number) {
-        try st.w.print("{d}", .{lno});
+        // unreachable: a line number fits
+        try outputColor(st, std.mem.print(&buf, "{d}", .{lno}) catch unreachable, .line_number);
         try outputSep(st, sign);
     }
     if (st.fmt.column and cno != 0) {
-        try st.w.print("{d}", .{cno});
+        // unreachable: a column fits
+        try outputColor(st, std.mem.print(&buf, "{d}", .{cno}) catch unreachable, .column);
         try outputSep(st, sign);
     }
 }
@@ -628,36 +693,51 @@ fn showLineHeader(st: *FileState, lno: usize, cno: usize, sign: u8) Io.Writer.Er
 fn showLine(st: *FileState, line: []const u8, lno: usize, cno_in: usize, sign: u8) SearchError!void {
     const context = st.fmt.before != 0 or st.fmt.after != 0 or st.fmt.funcbody;
     if (context) {
-        if (st.last_shown == 0) {
-            // every file's first hunk is marked; the writer drops the very
-            // first mark, as git's threaded output does
-            try st.w.writeAll("--\n");
-        } else if (lno > st.last_shown + 1) {
-            try st.w.writeAll("--\n");
+        // every file's first hunk is marked; the writer drops the very
+        // first mark, as git's threaded output does
+        if (st.last_shown == 0 or lno > st.last_shown + 1) {
+            var buf: [mark_max]u8 = undefined;
+            try st.w.writeAll(st.fmt.mark(&buf));
         }
     }
     var cno = cno_in;
     if (!st.fmt.only_matching) try showLineHeader(st, lno, cno, sign);
-    if (st.fmt.only_matching) {
-        var bol: usize = 0;
+    var bol: usize = 0;
+    if (st.fmt.colors != null or st.fmt.only_matching) {
+        // git's `show_line`: each match in its colour, the text between in
+        // the line's
         var not_bol = false;
         while (try nextMatch(st.s, st.sc, line[bol..], not_bol)) |m| {
             if (m.start == m.end) break;
             cno = bol + m.start + 1;
-            try showLineHeader(st, lno, cno, sign);
-            try st.w.writeAll(line[bol + m.start .. bol + m.end]);
-            try st.w.writeByte('\n');
+            if (st.fmt.only_matching) {
+                try showLineHeader(st, lno, cno, sign);
+            } else try outputLinePart(st, line[bol..][0..m.start], sign);
+            const match = line[bol + m.start .. bol + m.end];
+            if (sign == ':') try outputColor(st, match, .match_selected) else try outputColor(st, match, .match_context);
+            if (st.fmt.only_matching) try st.w.writeByte('\n');
             bol += m.end;
             not_bol = true;
         }
-        return;
+        if (st.fmt.only_matching) return;
     }
-    try st.w.writeAll(line);
+    try outputLinePart(st, line[bol..], sign);
     try st.w.writeByte('\n');
 }
 
+/// Text of a line outside its matches, in the colour of the line's kind:
+/// `selected`, `context` or `function`.
+fn outputLinePart(st: *FileState, text: []const u8, sign: u8) Io.Writer.Error!void {
+    switch (sign) {
+        ':' => try outputColor(st, text, .selected),
+        '-' => try outputColor(st, text, .context),
+        '=' => try outputColor(st, text, .function),
+        else => try st.w.writeAll(text),
+    }
+}
+
 fn showName(st: *FileState) Io.Writer.Error!void {
-    try st.w.writeAll(st.name);
+    try outputColor(st, st.name, .filename);
     try st.w.writeByte(if (st.fmt.null_sep) 0 else '\n');
 }
 
@@ -779,7 +859,9 @@ fn searchFile(s: *const Searcher, sc: *Scratch, fmt: *const Format, item: *const
             }
             if (fmt.show != .count) {
                 if (binary_match_only) {
-                    try w.print("Binary file {s} matches\n", .{item.name});
+                    try w.writeAll("Binary file ");
+                    try outputColor(&st, item.name, .filename);
+                    try w.writeAll(" matches\n");
                     return true;
                 }
                 if (fmt.before > 0 or fmt.funcbody) {
@@ -811,7 +893,7 @@ fn searchFile(s: *const Searcher, sc: *Scratch, fmt: *const Format, item: *const
     }
     if (fmt.show == .count and count > 0) {
         if (fmt.pathname) {
-            try w.writeAll(item.name);
+            try outputColor(&st, item.name, .filename);
             try outputSep(&st, ':');
         }
         try w.print("{d}\n", .{count});
@@ -1071,6 +1153,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
         .max_count = options.max_count,
         .null_sep = options.null_separator,
         .binary = options.binary,
+        .colors = options.colors,
     };
 
     var spec = try pathspec_mod.parse(gpa, options.pathspecs);
@@ -1145,8 +1228,10 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
             }
             if (work.hits[i]) matched = true;
             if (out.len == 0) continue;
-            if (first_mark and std.mem.startsWith(u8, out, "--\n")) {
-                out = out[3..];
+            var mark_buf: [mark_max]u8 = undefined;
+            const mark = fmt.mark(&mark_buf);
+            if (first_mark and std.mem.startsWith(u8, out, mark)) {
+                out = out[mark.len..];
             }
             first_mark = false;
             if (fmt.show != .quiet) try w.writeAll(out);

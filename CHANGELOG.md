@@ -8,12 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `config.color.readSlots` takes what a writer does with a slot it does not have (`UnknownSlot`), and a name may set more than one slot; `config.color.Error` has `UnknownColorSlot`.
 - `pretty.Error` has `InvalidColor`; `%C` is no longer `error.UnsupportedPlaceholder`.
 - `diff.UnifiedError` has the attribute lookup's errors and `InvalidDriverBinary`: `diff.unified` decides which files are binary by `UnifiedInputs.binary` (`diff.BinaryRule`: the `diff` attribute and `diff.<driver>.binary`), as git's `diff_filespec_is_binary` does.
 
 ### Added
 
 - `pretty.Context.colors` (`pretty.Colors.configured`, read as `git log` reads `color.decorate.<slot>` and `color.diff.commit`): `%C(...)` with `auto,` and `always,`, the old `%Cred`, `%Cgreen`, `%Cblue` and `%Creset`, and `%C(auto)`, under which `%H`, `%h`, `%d`, `%D` and `%(decorate)` are painted as `git log --format` paints them. A colour that does not parse is `error.InvalidColor` where git dies, and passed over where git writes none. Held to `git log --format` under `--color=always` and `--no-color`.
+- `grep.Options.colors` (`grep.Colors.configured`: `color.grep`, `color.ui` and `color.grep.<slot>`, `match` setting both match slots, a slot grep does not have refused as git dies on it): names, numbers, separators, hunk marks, matches and the text around them painted as git's `show_line`. Held to `git grep --color=always` under every slot.
 - `pretty.refs.Context.color`: `%(color:...)` writes its colour, parsed by `config.color` (the listing's own colour check gone), and a line whose last colour is not `reset` ends in one, as git's `need_color_reset_at_eol`; `pretty.refs.BranchColors` (`color.branch.<slot>`, `color.branch` and `color.ui`) paints `git branch`'s own format and decides `%(color:...)` in `listBranches`. Held to `git for-each-ref`, `git branch` and `git tag` under `--color=always`, `color.ui` (which for-each-ref does not read) and every branch slot.
 
 ### Changed

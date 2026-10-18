@@ -2686,7 +2686,7 @@ pub const BranchColors = struct {
     /// order as git's branch reads them.
     pub fn read(config: *const config_mod.Config) color.Error!BranchColors {
         var out: BranchColors = .{};
-        try color.readSlots(BranchColors, &out, config, &names, &.{.{ .section = "color", .subsection = "branch" }});
+        try color.readSlots(BranchColors, &out, config, &names, &.{.{ .section = "color", .subsection = "branch" }}, .pass_over);
         return out;
     }
 

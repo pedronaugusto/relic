@@ -73,6 +73,9 @@ pub const Error = error{
     /// A `color.ui`, `color.<writer>` or `--color` value that is neither
     /// `never`, `always`, `auto` nor a boolean: git dies on it.
     InvalidColorSetting,
+    /// A slot the writer does not have, where the writer refuses one as
+    /// git's grep does.
+    UnknownColorSlot,
 };
 
 /// A colour value as git's `color_parse` reads it: `[reset] [fg [bg]]
@@ -270,31 +273,40 @@ pub fn wanted(config: ?*const config_mod.Config, writer_keys: []const []const u8
 /// such as `diff.color.<slot>`.
 pub const SlotSection = struct { section: []const u8, subsection: []const u8 };
 
+/// What a writer does with a slot it does not have: pass it over, as
+/// most of git's writers do, or refuse it, as git's grep dies on it.
+pub const UnknownSlot = enum { pass_over, refuse };
+
 /// Read a writer's colour slots into `slots`, a struct of `Color` fields
 /// holding git's defaults. `names` gives git's name for each slot (a field
-/// may have more than one, as `color.diff.plain` is `context`); a name is
-/// matched without regard to case, and one the writer does not have is
-/// passed over, as git passes it over. Values are read in order, the last
-/// deciding; one git dies on is refused wherever it stands.
+/// may have more than one, as `color.diff.plain` is `context`, and a name
+/// may set more than one field, as `color.grep.match` sets both match
+/// slots); a name is matched without regard to case. Values are read in
+/// order, the last deciding; one git dies on is refused wherever it
+/// stands.
 pub fn readSlots(
     comptime Slots: type,
     slots: *Slots,
     config: *const config_mod.Config,
     comptime names: []const struct { []const u8, std.meta.FieldEnum(Slots) },
     sections: []const SlotSection,
+    unknown: UnknownSlot,
 ) Error!void {
     for (config.entries.items) |entry| {
         if (!entry.has_subsection) continue;
         for (sections) |s| {
             if (std.mem.eql(u8, entry.section, s.section) and std.mem.eql(u8, entry.subsection, s.subsection)) break;
         } else continue;
-        const field = for (names) |n| {
-            if (std.ascii.eqlIgnoreCase(entry.name, n[0])) break n[1];
-        } else continue;
-        const color = try parse(entry.value orelse return error.MissingColorValue);
-        switch (field) {
-            inline else => |f| @field(slots, @tagName(f)) = color,
+        var known = false;
+        for (names) |n| {
+            if (!std.ascii.eqlIgnoreCase(entry.name, n[0])) continue;
+            known = true;
+            const color = try parse(entry.value orelse return error.MissingColorValue);
+            switch (n[1]) {
+                inline else => |f| @field(slots, @tagName(f)) = color,
+            }
         }
+        if (!known and unknown == .refuse) return error.UnknownColorSlot;
     }
 }
 
