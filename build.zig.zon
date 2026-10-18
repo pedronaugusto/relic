@@ -24,8 +24,8 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.5#110a80319449523ebf71b28da0ea001bd8e66f54",
-            .hash = "airlock-0.3.5-rfvu6Jf2BQCDxSnzkPb84Cay4j7ZvQFmhTyfGQJh-1O3",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.4.0#6b6d53c459c6ac40e02e33f4a3ed248071b4d476",
+            .hash = "airlock-0.4.0-rfvu6FJaBgC8pvwB6rRkDManozRQow3t-qVbUzgHbJ5s",
         },
 
         .warp = .{

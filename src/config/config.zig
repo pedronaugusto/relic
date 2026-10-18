@@ -1570,13 +1570,11 @@ pub fn pathSetting(gpa: Allocator, io: Io, base: Io.Dir, home: ?[]const u8, raw:
         gpa.free(path);
         return null;
     }
-    _ = base.statFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            gpa.free(path);
-            return null;
-        },
-        else => return error.UnstatablePath,
-    };
+    const present = fs.existsFollowing(io, base, path) catch return error.UnstatablePath;
+    if (!present) {
+        gpa.free(path);
+        return null;
+    }
     return path;
 }
 
@@ -2358,9 +2356,9 @@ test "path settings read as git_config_pathname: :(optional), bare names, a stat
     }
 
     // A stat failing other than ENOENT is a setting git dies on: a
-    // directory that cannot be searched, and (where std tells it apart: its
-    // macOS stat reads ENOTDIR as `FileNotFound`, which airlock's stat seam
-    // is to settle) a file standing where a directory would be.
+    // directory that cannot be searched, and a file standing where a
+    // directory would be (ENOTDIR, which std's macOS stat reads as
+    // `FileNotFound` and airlock's tells apart).
     if (builtin.os.tag == .windows) return;
     try tmp.dir.createDir(io, "shut", .fromMode(0));
     // glint-ignore: Z026 -- the scratch directory is removed either way; this only lets its removal in
@@ -2370,7 +2368,7 @@ test "path settings read as git_config_pathname: :(optional), bare names, a stat
     // Root searches any directory.
     const euid = if (builtin.os.tag == .linux) std.os.linux.geteuid() else std.c.geteuid();
     if (euid != 0) try unstatable.append(gpa, "[p]\n\tv = :(optional)shut/x\n");
-    if (builtin.os.tag == .linux) try unstatable.append(gpa, "[p]\n\tv = :(optional)here/below\n");
+    try unstatable.append(gpa, "[p]\n\tv = :(optional)here/below\n");
     for (unstatable.items) |text| {
         var config = try Config.parseText(gpa, text, .local);
         defer config.deinit();
