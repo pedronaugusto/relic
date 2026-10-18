@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-18
+
 ### Breaking
 
 - `config.color.readSlots` takes a `SlotRead`: the sections, and what a writer does with a slot it does not have (`UnknownSlot`); a name may set more than one slot; `config.color.Error` has `UnknownColorSlot`.
