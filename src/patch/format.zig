@@ -7,9 +7,8 @@
 //! for a name that is not ASCII, RFC 822 quoting for one with specials),
 //! `Subject:` with its `[PATCH n/m]` prefix, the message, `---`, the
 //! diffstat and summary at git's 72 columns, the patch with renames found
-//! as git's `-M` finds them, and the signature. Binary files are written as
-//! `GIT binary patch` hunks (`binarypatch.zig` says what their compressed
-//! bytes are). A cover letter, the base tree information, threading and
+//! as git's `-M` finds them, and the signature. Each file's patch is
+//! `diff.unified`'s, binary files as `GIT binary patch` hunks. A cover letter, the base tree information, threading and
 //! MIME attachments are git's too.
 //!
 //! What git reads from the clock or the person's identity — a cover
@@ -34,7 +33,6 @@ const patch_id = @import("../diff/patch_id.zig");
 const rev_walk = @import("../walk/walk.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const c_quote = @import("../text.zig").c_quote;
-const binarypatch = @import("binary.zig");
 const mailfmt = @import("../mail/format.zig");
 const unicode_width = @import("../text.zig").unicode_width;
 const message = @import("../object/message.zig");
@@ -271,7 +269,6 @@ const Ctx = struct {
     /// The directory the changes are limited to and named from, or empty.
     relative_to: []const u8,
     quote_path: bool,
-    abbrev_len: usize,
     attrs: ?*attributes.Attrs,
     prefix: []const u8,
     total: i64,
@@ -299,7 +296,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     if (options.keep_subject and options.numbered == true) return error.KeepSubjectWithNumbered;
     if (options.keep_subject and (options.rfc != null or !std.mem.eql(u8, options.subject_prefix, "PATCH"))) return error.KeepSubjectWithPrefix;
 
-    const diff_options = options.diff orelse try diff.configured(config, .{});
+    var diff_options = options.diff orelse try diff.configured(config, .{});
     const renames: ?diff.RenameOptions = switch (options.renames) {
         .off => null,
         .on => |r| r,
@@ -327,6 +324,12 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     var quote_path = true;
     if (options.quote_path) |q| quote_path = q else if (config.get("core.quotepath")) |v| quote_path = config_mod.parseBool(v) catch true;
 
+    const relative_to = if (options.relative orelse try diff.configuredRelative(config)) options.directory else "";
+    diff_options.quote_path = quote_path;
+    diff_options.abbrev = abbrev.defaultLength(config, db);
+    diff_options.relative_to = relative_to;
+    diff_options.binary_patches = options.binary;
+
     var ctx: Ctx = .{
         .gpa = gpa,
         .a = a,
@@ -338,9 +341,8 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         .diff_options = diff_options,
         .renames = renames,
         .order = options.order orelse try diff.Order.configured(a, io, repo.topDirectory(), config),
-        .relative_to = if (options.relative orelse try diff.configuredRelative(config)) options.directory else "",
+        .relative_to = relative_to,
         .quote_path = quote_path,
-        .abbrev_len = abbrev.defaultLength(config, db),
         .attrs = if (own_attrs) |*x| x else null,
         .prefix = prefix,
         .total = if (options.keep_subject) -1 else if (numbered) @intCast(total + start_number - 1) else 0,
@@ -969,31 +971,14 @@ const StatFile = struct {
     print_name: []const u8 = "",
 };
 
-fn countLines(bytes: []const u8) usize {
-    if (bytes.len == 0) return 0;
-    var n: usize = 0;
-    for (bytes) |c| if (c == '\n') {
-        n += 1;
-    };
-    if (bytes[bytes.len - 1] != '\n') n += 1;
-    return n;
-}
-
 fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, stat_sep: ?[]const u8) Error!void {
     const a = ctx.a;
-    var sides: std.ArrayList([2]?Side) = .empty;
-    for (changes) |c| {
-        try sides.append(a, .{
-            if (c.old) |e| try loadSide(ctx, e) else null,
-            if (c.new) |e| try loadSide(ctx, e) else null,
-        });
-    }
     var separator = false;
     if (ctx.options.stat) {
         var files: std.ArrayList(StatFile) = .empty;
-        for (changes, sides.items) |c, s| {
-            const old = s[0];
-            const new = s[1];
+        for (changes) |c| {
+            const old = if (c.old) |e| try loadSide(ctx, e) else null;
+            const new = if (c.new) |e| try loadSide(ctx, e) else null;
             var f: StatFile = .{
                 .from_name = if (c.status == .renamed or c.status == .copied) shown(ctx, c.old.?.path) else null,
                 .name = shown(ctx, c.path()),
@@ -1040,117 +1025,18 @@ fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, s
         try out.append(a, '\n');
         if (stat_sep) |s| try out.appendSlice(a, s);
     }
-    for (changes, sides.items) |c, s| {
-        const old = s[0];
-        const new = s[1];
-        if (old != null and new != null and typeChanged(old.?.mode, new.?.mode)) {
-            // git splits a type change into a deletion and a creation
-            try writePair(ctx, out, c, old, null);
-            try writePair(ctx, out, c, null, new);
-        } else try writePair(ctx, out, c, old, new);
+    var w: Io.Writer.Allocating = .fromArrayList(a, out);
+    defer out.* = w.toArrayList();
+    for (changes) |c| {
+        diff.unified(ctx.gpa, ctx.io, .{ .db = ctx.db, .change = c, .binary = ctx.binaryRule() }, &w.writer, ctx.diff_options) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
     }
-}
-
-fn typeChanged(a: object.Mode, b: object.Mode) bool {
-    return (modeNum(a) & 0o170000) != (modeNum(b) & 0o170000);
-}
-
-fn quoteTwo(ctx: *Ctx, prefix: []const u8, path: []const u8) Allocator.Error![]const u8 {
-    const a = ctx.a;
-    if (c_quote.needsQuote(prefix, ctx.quote_path) or c_quote.needsQuote(path, ctx.quote_path)) {
-        var w: Io.Writer.Allocating = .init(a);
-        w.writer.writeByte('"') catch return error.OutOfMemory;
-        c_quote.writeBody(&w.writer, prefix, ctx.quote_path) catch return error.OutOfMemory;
-        c_quote.writeBody(&w.writer, path, ctx.quote_path) catch return error.OutOfMemory;
-        w.writer.writeByte('"') catch return error.OutOfMemory;
-        return w.written();
-    }
-    return std.mem.concat(a, u8, &.{ prefix, path });
 }
 
 fn quoted(ctx: *Ctx, path: []const u8) Allocator.Error![]const u8 {
     return c_quote.alloc(ctx.a, path, ctx.quote_path);
-}
-
-fn writeAbbrev(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid, full: bool) Error!void {
-    var buf: [hash.max_hex_len]u8 = undefined;
-    if (full) {
-        try out.appendSlice(ctx.a, oid.hex(&buf));
-        return;
-    }
-    if (oid.isZero()) {
-        try out.appendSlice(ctx.a, oid.hex(&buf)[0..ctx.abbrev_len]);
-        return;
-    }
-    try out.appendSlice(ctx.a, try abbrev.unique(ctx.io, ctx.db, oid, ctx.abbrev_len, &buf));
-}
-
-/// One file pair's patch, as git's `builtin_diff` writes it.
-fn writePair(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change, old: ?Side, new: ?Side) Error!void {
-    const a = ctx.a;
-    const name_a = shown(ctx, if (old) |o| o.path else new.?.path);
-    const name_b = shown(ctx, if (new) |n| n.path else old.?.path);
-    const a_one = try quoteTwo(ctx, "a/", name_a);
-    const b_two = try quoteTwo(ctx, "b/", name_b);
-    const lbl0: []const u8 = if (old != null) a_one else "/dev/null";
-    const lbl1: []const u8 = if (new != null) b_two else "/dev/null";
-    try out.print(a, "diff --git {s} {s}\n", .{ a_one, b_two });
-    const split = old == null or new == null;
-    // the metainfo: similarity, rename or copy, and the index line
-    var meta: std.ArrayList(u8) = .empty;
-    if (!split or (old != null and new != null)) {
-        if (c.status == .copied or c.status == .renamed) {
-            const word = if (c.status == .copied) "copy" else "rename";
-            try meta.print(a, "similarity index {d}%\n{s} from {s}\n{s} to {s}\n", .{ c.similarity, word, try quoted(ctx, shown(ctx, c.old.?.path)), word, try quoted(ctx, shown(ctx, c.new.?.path)) });
-        }
-    }
-    const zero = Oid.zero(ctx.db.objectFormat());
-    const one_oid = if (old) |o| o.oid else zero;
-    const two_oid = if (new) |n| n.oid else zero;
-    const one_bin = if (old) |o| o.binary else false;
-    const two_bin = if (new) |n| n.binary else false;
-    if (!one_oid.eql(two_oid)) {
-        const full = ctx.options.binary and (one_bin or two_bin);
-        try meta.appendSlice(a, "index ");
-        try writeAbbrev(ctx, &meta, one_oid, full);
-        try meta.appendSlice(a, "..");
-        try writeAbbrev(ctx, &meta, two_oid, full);
-        if (old != null and new != null and old.?.mode == new.?.mode) try meta.print(a, " {o:0>6}", .{modeNum(old.?.mode)});
-        try meta.append(a, '\n');
-    }
-    if (old == null) {
-        try out.print(a, "new file mode {o:0>6}\n", .{modeNum(new.?.mode)});
-        try out.appendSlice(a, meta.items);
-    } else if (new == null) {
-        try out.print(a, "deleted file mode {o:0>6}\n", .{modeNum(old.?.mode)});
-        try out.appendSlice(a, meta.items);
-    } else {
-        if (old.?.mode != new.?.mode) try out.print(a, "old mode {o:0>6}\nnew mode {o:0>6}\n", .{ modeNum(old.?.mode), modeNum(new.?.mode) });
-        try out.appendSlice(a, meta.items);
-    }
-    const one: []const u8 = if (old) |o| o.bytes else "";
-    const two: []const u8 = if (new) |n| n.bytes else "";
-    if (one_bin or two_bin) {
-        if (std.mem.eql(u8, one, two)) return;
-        if (ctx.options.binary) {
-            var w: Io.Writer.Allocating = .fromArrayList(a, out);
-            binarypatch.write(a, &w.writer, one, two) catch return error.OutOfMemory;
-            out.* = w.toArrayList();
-        } else try out.print(a, "Binary files {s} and {s} differ\n", .{ lbl0, lbl1 });
-        return;
-    }
-    var body: Io.Writer.Allocating = .init(a);
-    diff.unifiedBody(ctx.gpa, &body.writer, one, two, ctx.diff_options) catch |err| switch (err) {
-        error.WriteFailed => return error.OutOfMemory,
-        else => |e| return e,
-    };
-    if (body.written().len == 0) return;
-    // a name with a space gets a tab after it, for GNU patch
-    try out.print(a, "--- {s}{s}\n+++ {s}{s}\n", .{
-        lbl0, if (std.mem.findScalar(u8, lbl0, ' ') != null) "\t" else "",
-        lbl1, if (std.mem.findScalar(u8, lbl1, ' ') != null) "\t" else "",
-    });
-    try out.appendSlice(a, body.written());
 }
 
 /// A path as a patch's headers and diffstat name it: under `--relative`,

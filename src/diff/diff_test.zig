@@ -1106,3 +1106,106 @@ test "a coloured patch is byte for byte what git diff --color=always prints, und
         }
     }
 }
+
+/// The new side of `sub/x.txt`, and a file whose name shares its first
+/// four hexadecimal digits, so that `--abbrev=4` has to lengthen it.
+const x_two = "x two\n";
+
+fn collidingFiller(buf: []u8) ![]const u8 {
+    var want: [hash.max_hex_len]u8 = undefined;
+    const target = hash.Hasher.object(.sha1, "blob", x_two).hex(&want)[0..4];
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        const text = try std.mem.print(buf, "filler {d}\n", .{i});
+        var hex: [hash.max_hex_len]u8 = undefined;
+        if (std.mem.eql(u8, hash.Hasher.object(.sha1, "blob", text).hex(&hex)[0..4], target)) return text;
+    }
+}
+
+fn setupHeaders(io: Io, repo: *testgit.Repo) anyerror!void {
+    try repo.writeFile(io, ".gitattributes", "*.dat binary\n");
+    try repo.writeFile(io, "kind", "a file, then a link\n");
+    try repo.writeFile(io, "data.bin", "before\x00binary\n");
+    try repo.writeFile(io, "text.dat", "text the attribute calls binary\n");
+    try repo.writeFile(io, "top.txt", "outside the directory\n");
+    try repo.writeFile(io, "sub/x.txt", "x one\n");
+    try repo.writeFile(io, "sub/old name", "a file renamed\nwithin the directory\nwith enough lines\nto be found\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    try repo.writeFile(io, "data.bin", "after\x00binary\n");
+    try repo.writeFile(io, "text.dat", "text the attribute calls binary, changed\n");
+    try repo.writeFile(io, "top.txt", "outside the directory, changed\n");
+    try repo.writeFile(io, "sub/x.txt", x_two);
+    var buf: [32]u8 = undefined;
+    try repo.writeFile(io, "sub/filler", try collidingFiller(&buf));
+    try repo.exec(io, &.{ "mv", "sub/old name", "sub/new name" });
+    try repo.exec(io, &.{ "add", "-A" });
+    const link = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "target");
+    defer repo.gpa.free(link);
+    const info = try std.mem.concat(repo.gpa, u8, &.{ "120000,", std.mem.trimEnd(u8, link, "\n"), ",kind" });
+    defer repo.gpa.free(info);
+    try repo.exec(io, &.{ "update-index", "--cacheinfo", info });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+}
+
+/// `text` with each `GIT binary patch` block's hunks left out: their
+/// deflated bytes are this package's, not zlib's.
+fn withoutBinaryHunks(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var blanks_left: usize = 0;
+    while (lines.next()) |line| {
+        if (blanks_left > 0) {
+            if (line.len == 0) blanks_left -= 1;
+            continue;
+        }
+        try out.appendSlice(gpa, line);
+        if (lines.peek() != null) try out.append(gpa, '\n');
+        if (std.mem.eql(u8, line, "GIT binary patch")) blanks_left = 2;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "a patch's headers are git diff's: a change of kind split, binary files by their attributes, binary patches, full and unique names, relative paths" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(setupHeaders, gpa, io);
+    defer pair.deinit(gpa, io);
+    const attributes = @import("../patterns.zig").attributes;
+    var attrs = try attributes.Attrs.init(gpa, .{});
+    defer attrs.deinit();
+    const binary: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = pair.repo.dir };
+
+    const Variant = struct { args: []const []const u8, options: diff.Options, prefix: []const u8 = "" };
+    const variants = [_]Variant{
+        .{ .args = &.{"--abbrev=4"}, .options = .{ .abbrev = 4 } },
+        .{ .args = &.{"--abbrev=4"}, .options = .{ .abbrev = 4, .relative_to = "sub/" }, .prefix = "sub/" },
+        .{ .args = &.{"--full-index"}, .options = .{ .full_index = true } },
+        .{ .args = &.{"--binary"}, .options = .{ .binary_patches = true } },
+    };
+    for (variants) |v| {
+        var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{ .renames = .{}, .prefix = v.prefix });
+        defer changes.deinit();
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        for (changes.items) |change| try diff.unified(gpa, io, .{ .db = &pair.db, .change = change, .binary = binary }, &out.writer, v.options);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "diff", "--no-color", "-M" });
+        try args.appendSlice(gpa, v.args);
+        if (v.prefix.len != 0) try args.append(gpa, "--relative=sub/");
+        try args.appendSlice(gpa, &.{ pair.old_text, pair.new_text });
+        const expected = try pair.repo.run(io, args.items);
+        defer gpa.free(expected);
+        const theirs = try withoutBinaryHunks(gpa, expected);
+        defer gpa.free(theirs);
+        const ours = try withoutBinaryHunks(gpa, out.written());
+        defer gpa.free(ours);
+        std.testing.expectEqualStrings(theirs, ours) catch |err| {
+            std.debug.print("variant {s} {s}\n", .{ v.args[0], v.prefix });
+            return err;
+        };
+    }
+}

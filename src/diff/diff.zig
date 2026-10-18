@@ -27,6 +27,8 @@ const glob = @import("../text.zig").glob;
 const whitespace = @import("../text.zig").whitespace;
 const c_quote = @import("../text.zig").c_quote;
 const paint = @import("paint.zig");
+const binarypatch = @import("binary.zig");
+const abbrev = @import("../odb/abbrev.zig");
 
 const Oid = hash.Oid;
 
@@ -553,8 +555,19 @@ pub const Options = struct {
     /// How many hexadecimal characters the `index` line carries. git's own
     /// default is seven in a small repository and grows with the object
     /// count; a caller that wants git's exact line passes what
-    /// `core.abbrev` resolves to.
+    /// `core.abbrev` resolves to. A name is lengthened past it until no
+    /// other object shares the prefix, as git's are.
     abbrev: usize = 7,
+    /// `--full-index`: the `index` line names its objects in full.
+    full_index: bool = false,
+    /// `--binary`: a binary file's change is written as a `GIT binary
+    /// patch`, its objects named in full, rather than as `Binary files
+    /// ... differ`.
+    binary_patches: bool = false,
+    /// `--relative`: the directory, with its trailing slash, the headers
+    /// name paths from; a path outside it keeps its whole name. Which
+    /// changes are shown is the caller's: git shows only those under it.
+    relative_to: []const u8 = "",
     /// Whether the `@@` line carries the enclosing function's text, which
     /// git does by default.
     function_context_names: bool = true,
@@ -863,15 +876,23 @@ pub fn numstat(
 }
 
 /// Errors from `unified`.
-pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error;
+pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || error{InvalidDriverBinary};
 
-/// The borrowed object store and one change whose patch is written.
+/// The borrowed object store, one change whose patch is written, and what
+/// decides which of its files are binary.
 pub const UnifiedInputs = struct {
     db: *odb_mod.Odb,
     change: Change,
+    /// Which files are binary, as git's `diff_filespec_is_binary` says;
+    /// the zero value decides by the bytes alone.
+    binary: BinaryRule = .{},
 };
 
-/// Append a unified diff for one change to `w`, with git's headers.
+/// Append a unified diff for one change to `w`, with git's headers, as
+/// `git diff`, `git log -p` and `git format-patch` write a file's patch
+/// (git's `builtin_diff`). A change between a file and a symbolic link or
+/// a gitlink is written as a deletion and a creation, as git's `run_diff`
+/// splits it.
 pub fn unified(
     gpa: Allocator,
     io: Io,
@@ -879,12 +900,46 @@ pub fn unified(
     w: *Io.Writer,
     options: Options,
 ) UnifiedError!void {
+    const change = inputs.change;
+    if (change.old != null and change.new != null and typeChanged(change.old.?.mode, change.new.?.mode)) {
+        try writeFilePatch(gpa, io, inputs, w, options, change.old, null);
+        return writeFilePatch(gpa, io, inputs, w, options, null, change.new);
+    }
+    return writeFilePatch(gpa, io, inputs, w, options, change.old, change.new);
+}
+
+/// A side's bytes, as the patch compares them: a gitlink's commit as git's
+/// `Subproject commit` line, an object's bytes read from `db`.
+const SideBytes = struct {
+    bytes: []const u8 = "",
+    read: ?[]u8 = null,
+    gitlink: [gitlink_text_max]u8 = undefined,
+
+    fn load(side: *SideBytes, io: Io, db: *odb_mod.Odb, entry: ?Entry) Self.Error!void {
+        const e = entry orelse return;
+        if (e.mode == .gitlink) {
+            side.bytes = gitlinkText(&side.gitlink, e.oid);
+            return;
+        }
+        side.read = (try db.read(io, e.oid)).bytes;
+        side.bytes = side.read.?;
+    }
+
+    /// An object's bytes are the object database's allocator's, whoever
+    /// asked for them.
+    fn deinit(side: *SideBytes, db: *odb_mod.Odb) void {
+        if (side.read) |bytes| db.allocator().free(bytes);
+    }
+};
+
+/// One file pair's patch, either side absent for a creation or a deletion.
+fn writeFilePatch(gpa: Allocator, io: Io, inputs: UnifiedInputs, w: *Io.Writer, options: Options, old: ?Entry, new: ?Entry) UnifiedError!void {
     const db = inputs.db;
     const change = inputs.change;
-    const old_path = if (change.old) |e| e.path else change.new.?.path;
-    const new_path = if (change.new) |e| e.path else change.old.?.path;
     const colors = options.colors;
     const fully = options.quote_path;
+    const old_path = shownPath(options, (old orelse new.?).path);
+    const new_path = shownPath(options, (new orelse old.?).path);
     const old_name = try quoteTwo(gpa, "a/", old_path, fully);
     defer gpa.free(old_name);
     const new_name = try quoteTwo(gpa, "b/", new_path, fully);
@@ -894,14 +949,16 @@ pub fn unified(
 
     var old_mode_buf: [6]u8 = undefined;
     var new_mode_buf: [6]u8 = undefined;
-    switch (change.status) {
-        .added => try paint.writeMeta(w, colors, "new file mode {s}", .{change.new.?.mode.text(&new_mode_buf)}),
-        .deleted => try paint.writeMeta(w, colors, "deleted file mode {s}", .{change.old.?.mode.text(&old_mode_buf)}),
-        .renamed, .copied => {
-            if (change.old.?.mode != change.new.?.mode) {
-                try paint.writeMeta(w, colors, "old mode {s}", .{change.old.?.mode.text(&old_mode_buf)});
-                try paint.writeMeta(w, colors, "new mode {s}", .{change.new.?.mode.text(&new_mode_buf)});
-            }
+    if (old == null) {
+        try paint.writeMeta(w, colors, "new file mode {s}", .{new.?.mode.text(&new_mode_buf)});
+    } else if (new == null) {
+        try paint.writeMeta(w, colors, "deleted file mode {s}", .{old.?.mode.text(&old_mode_buf)});
+    } else {
+        if (old.?.mode != new.?.mode) {
+            try paint.writeMeta(w, colors, "old mode {s}", .{old.?.mode.text(&old_mode_buf)});
+            try paint.writeMeta(w, colors, "new mode {s}", .{new.?.mode.text(&new_mode_buf)});
+        }
+        if (change.status == .renamed or change.status == .copied) {
             const word = if (change.status == .renamed) "rename" else "copy";
             try paint.writeMeta(w, colors, "similarity index {d}%", .{change.similarity});
             const from = try quoteTwo(gpa, "", old_path, fully);
@@ -910,68 +967,74 @@ pub fn unified(
             defer gpa.free(to);
             try paint.writeMeta(w, colors, "{s} from {s}", .{ word, from });
             try paint.writeMeta(w, colors, "{s} to {s}", .{ word, to });
-        },
-        .modified, .type_changed => {
-            if (change.old.?.mode != change.new.?.mode) {
-                try paint.writeMeta(w, colors, "old mode {s}", .{change.old.?.mode.text(&old_mode_buf)});
-                try paint.writeMeta(w, colors, "new mode {s}", .{change.new.?.mode.text(&new_mode_buf)});
-            }
-        },
+        }
     }
 
-    const old_oid = if (change.old) |e| e.oid else Oid.zero(db.objectFormat());
-    const new_oid = if (change.new) |e| e.oid else Oid.zero(db.objectFormat());
+    const old_oid = if (old) |e| e.oid else Oid.zero(db.objectFormat());
+    const new_oid = if (new) |e| e.oid else Oid.zero(db.objectFormat());
     if (old_oid.eql(new_oid)) {
         // Only the mode moved: git prints no index line and no hunks.
         return;
     }
 
-    var old_hex: [hash.max_hex_len]u8 = undefined;
-    var new_hex: [hash.max_hex_len]u8 = undefined;
+    var old_side: SideBytes = .{};
+    defer old_side.deinit(db);
+    try old_side.load(io, db, old);
+    var new_side: SideBytes = .{};
+    defer new_side.deinit(db);
+    try new_side.load(io, db, new);
+    try checkTextSize(old_side.bytes, new_side.bytes);
+
+    var lookup: std.heap.ArenaAllocator = .init(gpa);
+    defer lookup.deinit();
+    const binary = (if (old) |e| try inputs.binary.isBinary(lookup.allocator(), io, e.path, old_side.bytes) else false) or
+        (if (new) |e| try inputs.binary.isBinary(lookup.allocator(), io, e.path, new_side.bytes) else false);
+
     // The mode is on the index line only when it did not change and the
     // file was neither created nor removed; otherwise it is on its own line
-    // above.
-    const same_mode = change.old != null and change.new != null and change.old.?.mode == change.new.?.mode;
+    // above. A binary patch names its objects in full, which `git apply`
+    // checks.
+    const full = options.full_index or (options.binary_patches and binary);
+    var old_hex: [hash.max_hex_len]u8 = undefined;
+    var new_hex: [hash.max_hex_len]u8 = undefined;
+    const same_mode = old != null and new != null and old.?.mode == new.?.mode;
     try paint.writeMeta(w, colors, "index {s}..{s}{s}{s}", .{
-        old_oid.abbrev(&old_hex, options.abbrev),
-        new_oid.abbrev(&new_hex, options.abbrev),
+        try abbreviated(io, db, old_oid, options.abbrev, full, &old_hex),
+        try abbreviated(io, db, new_oid, options.abbrev, full, &new_hex),
         if (same_mode) " " else "",
-        if (same_mode) change.new.?.mode.text(&new_mode_buf) else "",
+        if (same_mode) new.?.mode.text(&new_mode_buf) else "",
     });
 
-    var old_gitlink: [gitlink_text_max]u8 = undefined;
-    // an object's bytes are the object database's allocator's, whoever
-    // asked for them
-    var old_read: ?[]u8 = null;
-    defer if (old_read) |bytes| db.allocator().free(bytes);
-    const old_bytes: []const u8 = if (change.old) |entry| blk: {
-        if (entry.mode == .gitlink) break :blk gitlinkText(&old_gitlink, entry.oid);
-        old_read = (try db.read(io, entry.oid)).bytes;
-        break :blk old_read.?;
-    } else "";
-    var new_gitlink: [gitlink_text_max]u8 = undefined;
-    var new_read: ?[]u8 = null;
-    defer if (new_read) |bytes| db.allocator().free(bytes);
-    const new_bytes: []const u8 = if (change.new) |entry| blk: {
-        if (entry.mode == .gitlink) break :blk gitlinkText(&new_gitlink, entry.oid);
-        new_read = (try db.read(io, entry.oid)).bytes;
-        break :blk new_read.?;
-    } else "";
-
-    try checkTextSize(old_bytes, new_bytes);
-    const old_label = if (change.status == .added) "/dev/null" else old_name;
-    const new_label = if (change.status == .deleted) "/dev/null" else new_name;
-    if (isBinary(old_bytes) or isBinary(new_bytes)) {
-        try w.print("Binary files {s} and {s} differ\n", .{ old_label, new_label });
+    const old_label = if (old == null) "/dev/null" else old_name;
+    const new_label = if (new == null) "/dev/null" else new_name;
+    if (binary) {
+        if (options.binary_patches) {
+            try binarypatch.write(gpa, w, old_side.bytes, new_side.bytes);
+        } else try w.print("Binary files {s} and {s} differ\n", .{ old_label, new_label });
         return;
     }
 
     var body_options = options;
     // A symbolic link is a line without its ending, which is no news.
-    if (change.new) |entry| if (entry.mode == .symlink) {
+    if (new) |entry| if (entry.mode == .symlink) {
         body_options.whitespace_rule &= ~whitespace.incomplete_line;
     };
-    try writeBody(gpa, w, old_bytes, new_bytes, body_options, .{ .old = old_label, .new = new_label });
+    try writeBody(gpa, w, old_side.bytes, new_side.bytes, body_options, .{ .old = old_label, .new = new_label });
+}
+
+/// A path as a patch's headers name it: under `Options.relative_to`, from
+/// that directory, as git's `strip_prefix` names it.
+fn shownPath(options: Options, path: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, path, options.relative_to)) path[options.relative_to.len..] else path;
+}
+
+/// An object's name on the `index` line, as git's `diff_abbrev_oid` writes
+/// it: in full, or the shortest prefix of at least `len` the object
+/// database holds no other object under; the null name cut at `len`.
+fn abbreviated(io: Io, db: *odb_mod.Odb, oid: Oid, len: usize, full: bool, buf: *[hash.max_hex_len]u8) odb_mod.Error![]const u8 {
+    if (full) return oid.hex(buf);
+    if (oid.isZero()) return oid.abbrev(buf, len);
+    return abbrev.unique(io, db, oid, len, buf);
 }
 
 /// `prefix` and `path` as a patch's headers write them: C-quoted

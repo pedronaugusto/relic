@@ -216,7 +216,7 @@ test {
     _ = @import("text/date.zig");
     _ = @import("odb/abbrev.zig");
     _ = @import("odb/index_pack.zig");
-    _ = @import("patch/binary.zig");
+    _ = @import("diff/binary.zig");
     _ = @import("mail/mail.zig");
     _ = @import("mail/format.zig");
     _ = @import("text/whitespace.zig");

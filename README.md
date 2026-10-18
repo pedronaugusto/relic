@@ -632,7 +632,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `worktree.filter.native` | Native content-filter protocol. |
 | `worktree.dir_scan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safe_path` | What a path from a tree is allowed to be. |
-| `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, `Colors`, `WhitespaceRule` — a patch with git's headers, in colour as `git diff --color` writes it where `Options.colors` is given: `color.diff.<slot>`, whitespace errors by `core.whitespace`, the `whitespace` attribute and `diff.wsErrorHighlight`. |
+| `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, `Colors`, `WhitespaceRule` — a file's patch as `git diff` and `git format-patch` write it (git's headers, unique abbreviations, `--binary`, `--full-index`, `--relative`), in colour as `git diff --color` writes it where `Options.colors` is given: `color.diff.<slot>`, whitespace errors by `core.whitespace`, the `whitespace` attribute and `diff.wsErrorHighlight`. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
 | `diff.patch_id` | Patch ids: a name for what a commit changes. |
 | `diff.rename` | Module within `diff`. |

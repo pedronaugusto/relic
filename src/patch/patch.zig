@@ -27,7 +27,7 @@ const assert = std.debug.assert;
 
 const c_quote = @import("../text.zig").c_quote;
 const hash = @import("../hash/hash.zig");
-const binarypatch = @import("binary.zig");
+const binarypatch = @import("../diff/binary.zig");
 const hunks = @import("parallax").patch;
 
 /// Errors from reading a patch.

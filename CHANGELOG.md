@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `diff.UnifiedError` has the attribute lookup's errors and `InvalidDriverBinary`: `diff.unified` decides which files are binary by `UnifiedInputs.binary` (`diff.BinaryRule`: the `diff` attribute and `diff.<driver>.binary`), as git's `diff_filespec_is_binary` does.
+
+### Changed
+
+- One writer for a file's patch: `patch.format` writes each file through `diff.unified`, its own header writer gone. `diff.unified` gains what only format-patch had, each held to `git diff` and `git format-patch`: `Options.binary_patches` (`--binary`, a `GIT binary patch` with its objects named in full), `Options.full_index`, `Options.relative_to` (`--relative`), and the `index` line's names lengthened past `Options.abbrev` until unique, as git's `diff_abbrev_oid` writes them. The binary patch codec moves from `patch` to `diff`.
+
+### Fixed
+
+- `diff.unified` writes a change between a file and a symbolic link or a gitlink as a deletion and a creation, as git's `run_diff` splits it; it wrote one pair with `old mode`/`new mode`.
+
 ## [0.21.0] - 2026-10-18
 
 ### Breaking
