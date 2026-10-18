@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
-- `config.color.readSlots` takes what a writer does with a slot it does not have (`UnknownSlot`), and a name may set more than one slot; `config.color.Error` has `UnknownColorSlot`.
+- `config.color.readSlots` takes a `SlotRead`: the sections, and what a writer does with a slot it does not have (`UnknownSlot`); a name may set more than one slot; `config.color.Error` has `UnknownColorSlot`.
 - `pretty.Error` has `InvalidColor`; `%C` is no longer `error.UnsupportedPlaceholder`.
 - `diff.UnifiedError` has the attribute lookup's errors and `InvalidDriverBinary`: `diff.unified` decides which files are binary by `UnifiedInputs.binary` (`diff.BinaryRule`: the `diff` attribute and `diff.<driver>.binary`), as git's `diff_filespec_is_binary` does.
 

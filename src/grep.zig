@@ -214,7 +214,7 @@ pub const Colors = struct {
     /// refused, where git dies.
     pub fn read(config: *const config_mod.Config) color.Error!Colors {
         var out: Colors = .{};
-        try color.readSlots(Colors, &out, config, &names, &.{.{ .section = "color", .subsection = "grep" }}, .refuse);
+        try color.readSlots(Colors, &out, config, &names, .{ .sections = &.{.{ .section = "color", .subsection = "grep" }}, .unknown = .refuse });
         return out;
     }
 

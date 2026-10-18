@@ -62,10 +62,10 @@ pub const Colors = struct {
     /// set, read in order as git's diff reads them.
     pub fn read(config: *const config_mod.Config) color.Error!Colors {
         var out: Colors = .{};
-        try color.readSlots(Colors, &out, config, &names, &.{
+        try color.readSlots(Colors, &out, config, &names, .{ .sections = &.{
             .{ .section = "color", .subsection = "diff" },
             .{ .section = "diff", .subsection = "color" },
-        }, .pass_over);
+        } });
         return out;
     }
 

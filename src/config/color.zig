@@ -277,6 +277,13 @@ pub const SlotSection = struct { section: []const u8, subsection: []const u8 };
 /// most of git's writers do, or refuse it, as git's grep dies on it.
 pub const UnknownSlot = enum { pass_over, refuse };
 
+/// Where a writer's slots are read, and what it does with one it does not
+/// have.
+pub const SlotRead = struct {
+    sections: []const SlotSection,
+    unknown: UnknownSlot = .pass_over,
+};
+
 /// Read a writer's colour slots into `slots`, a struct of `Color` fields
 /// holding git's defaults. `names` gives git's name for each slot (a field
 /// may have more than one, as `color.diff.plain` is `context`, and a name
@@ -289,12 +296,11 @@ pub fn readSlots(
     slots: *Slots,
     config: *const config_mod.Config,
     comptime names: []const struct { []const u8, std.meta.FieldEnum(Slots) },
-    sections: []const SlotSection,
-    unknown: UnknownSlot,
+    read: SlotRead,
 ) Error!void {
     for (config.entries.items) |entry| {
         if (!entry.has_subsection) continue;
-        for (sections) |s| {
+        for (read.sections) |s| {
             if (std.mem.eql(u8, entry.section, s.section) and std.mem.eql(u8, entry.subsection, s.subsection)) break;
         } else continue;
         var known = false;
@@ -306,7 +312,7 @@ pub fn readSlots(
                 inline else => |f| @field(slots, @tagName(f)) = color,
             }
         }
-        if (!known and unknown == .refuse) return error.UnknownColorSlot;
+        if (!known and read.unknown == .refuse) return error.UnknownColorSlot;
     }
 }
 
