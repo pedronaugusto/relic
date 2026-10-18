@@ -132,6 +132,7 @@ test {
         _ = @import("checkout/fsmonitor_daemon_test.zig");
         _ = @import("patch/range_diff_test.zig");
         _ = @import("pretty/refs_test.zig");
+        _ = @import("pretty/pretty_test.zig");
         _ = @import("object/trailer_test.zig");
         _ = @import("repo/safe_test.zig");
         _ = @import("wire/hidden.zig");

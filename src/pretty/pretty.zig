@@ -11,9 +11,11 @@
 //! `Context` holds, and `%(trailers)` with every option reads trailers as
 //! its `trailers` settings say. A commit in another encoding is converted
 //! to UTF-8 first and the output written in `Context.output_encoding`, as
-//! git's `format_commit_message` does. What needs more — `%(describe)`, relative
-//! and human dates, wrapping, padding and colour — is refused as
-//! `error.UnsupportedPlaceholder`.
+//! git's `format_commit_message` does. Colour (`%C(...)`, `%C(auto)`, the
+//! object names and decorations it paints) is written as `Context.colors`
+//! says, as a log writes it under `--color`. What needs more —
+//! `%(describe)`, relative and human dates, wrapping and padding — is
+//! refused as `error.UnsupportedPlaceholder`.
 
 const ErrorNamespace = @This();
 const Self = @This();
@@ -37,6 +39,9 @@ const signing = @import("../object/signing.zig");
 const trailer = @import("../object/trailer.zig");
 const ref_names = @import("../names.zig").ref;
 const mailmap_mod = @import("../rev_walk/mailmap.zig");
+const color = @import("../config/color.zig");
+const config_mod = @import("../config/config.zig");
+const diff_colors = @import("../diff/paint.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -53,6 +58,9 @@ pub const Error = error{
     /// `encoding.Charset` does not convert, where git converts it with
     /// iconv.
     UnsupportedEncoding,
+    /// A `%C(...)` whose colour does not parse, where git dies ("unable
+    /// to parse --pretty format"). git reads it only when it writes it.
+    InvalidColor,
 } || signing.Error || odb_mod.Error || object.ParseError || Allocator.Error;
 
 /// What formatting needs besides the commit.
@@ -82,6 +90,69 @@ pub const Context = struct {
     /// and a merge message's list of commits do. The placeholders are
     /// expanded in UTF-8 either way, the commit converted first.
     output_encoding: ?[]const u8 = null,
+    /// The colours of a log written in colour, `null` for one written
+    /// without: what `Colors.configured` gives. `%C(...)` writes its
+    /// colour only where there are colours, unless it says `always`.
+    colors: ?*const Colors = null,
+};
+
+/// What a log format colours with, as `git log --color` does: the
+/// object name `%H` and `%h` show and a decoration's punctuation in
+/// `color.diff.commit`, each decoration in its `color.decorate.<slot>`.
+pub const Colors = struct {
+    commit: color.Color = color.yellow,
+    branch: color.Color = color.bold_green,
+    remote_branch: color.Color = color.bold_red,
+    tag: color.Color = color.bold_yellow,
+    stash: color.Color = color.bold_magenta,
+    head: color.Color = color.bold_cyan,
+    grafted: color.Color = color.bold_blue,
+
+    const Decorate = struct {
+        branch: color.Color = color.bold_green,
+        remote_branch: color.Color = color.bold_red,
+        tag: color.Color = color.bold_yellow,
+        stash: color.Color = color.bold_magenta,
+        head: color.Color = color.bold_cyan,
+        grafted: color.Color = color.bold_blue,
+    };
+
+    /// git's `color_decorate_slots`.
+    const decorate_names = [_]struct { []const u8, std.meta.FieldEnum(Decorate) }{
+        .{ "branch", .branch }, .{ "remoteBranch", .remote_branch }, .{ "tag", .tag },
+        .{ "stash", .stash },   .{ "HEAD", .head },                  .{ "grafted", .grafted },
+    };
+
+    /// git's defaults under `color.decorate.<slot>` and the diff's slots
+    /// (`diff.Colors.read`), each value read as `git log` reads it.
+    pub fn read(config: *const config_mod.Config) color.Error!Colors {
+        var slots: Decorate = .{};
+        try color.readSlots(Decorate, &slots, config, &decorate_names, &.{.{ .section = "color", .subsection = "decorate" }});
+        var out: Colors = .{ .commit = (try diff_colors.Colors.read(config)).commit };
+        inline for (@typeInfo(Decorate).@"struct".field_names) |name| @field(out, name) = @field(slots, name);
+        return out;
+    }
+
+    /// The colours `output` asks for: `null` where git writes a log
+    /// without colour, as the diff's `color.diff` (or `diff.color`) and
+    /// `color.ui` decide, which is what `git log` colours by.
+    pub fn configured(config: ?*const config_mod.Config, output: color.Output) color.Error!?Colors {
+        if (!try color.wanted(config, &.{ "color.diff", "diff.color" }, output)) return null;
+        return if (config) |c| try read(c) else .{};
+    }
+
+    /// git's `decorate_get_color`: a ref of no kind is in the reset.
+    fn of(c: *const Colors, kind: Decorations.Kind) []const u8 {
+        return switch (kind) {
+            .none => color.reset,
+            .local => c.branch.bytes(),
+            .remote => c.remote_branch.bytes(),
+            .tag => c.tag.bytes(),
+            .stash => c.stash.bytes(),
+            .head => c.head.bytes(),
+            .grafted => c.grafted.bytes(),
+        };
+    }
 };
 
 /// A commit's bytes in an output encoding: what `reencodeCommit` gives.
@@ -237,8 +308,8 @@ pub const Decorations = struct {
         }
     }
 
-    /// git's `format_decorations` for `oid`.
-    fn write(d: *const Decorations, a: Allocator, out: *std.ArrayList(u8), oid: Oid, opts: Options) Allocator.Error!void {
+    /// git's `format_decorations` for `oid`, in `colors` where there are.
+    fn write(d: *const Decorations, a: Allocator, out: *std.ArrayList(u8), oid: Oid, opts: Options, colors: ?*const Colors) Allocator.Error!void {
         const first = d.by_object.get(oid) orelse return;
         // HEAD and the branch it is on, where both are here, are one entry
         // where HEAD stands
@@ -257,20 +328,23 @@ pub const Decorations = struct {
                 }
             }
         };
+        const commit: []const u8 = if (colors) |c| c.commit.bytes() else "";
+        const reset: []const u8 = if (colors != null) color.reset else "";
         var prefix = opts.prefix;
         node = first;
         while (node) |n| : (node = n.next) {
             if (n == head_and_current) continue;
-            try out.appendSlice(a, prefix);
-            if (n.kind == .tag) try out.appendSlice(a, opts.tag);
-            try out.appendSlice(a, prettify(n.name));
-            if (head_and_current != null and n.kind == .head) {
-                try out.appendSlice(a, opts.pointer);
-                try out.appendSlice(a, prettify(head_and_current.?.name));
-            }
+            const own: []const u8 = if (colors) |c| c.of(n.kind) else "";
+            if (prefix.len != 0) try out.print(a, "{s}{s}{s}", .{ commit, prefix, reset });
+            if (opts.tag.len != 0 and n.kind == .tag) try out.print(a, "{s}{s}{s}", .{ own, opts.tag, reset });
+            try out.print(a, "{s}{s}{s}", .{ own, prettify(n.name), reset });
+            if (head_and_current) |current| if (n.kind == .head) {
+                try out.print(a, "{s}{s}{s}", .{ commit, opts.pointer, reset });
+                try out.print(a, "{s}{s}{s}", .{ if (colors) |c| c.of(current.kind) else "", prettify(current.name), reset });
+            };
             prefix = opts.separator;
         }
-        try out.appendSlice(a, opts.suffix);
+        if (opts.suffix.len != 0) try out.print(a, "{s}{s}{s}", .{ commit, opts.suffix, reset });
     }
 
     /// git's `prettify_refname`.
@@ -413,6 +487,14 @@ const State = struct {
     ctx: Context,
     p: Parsed,
     verdict: ?signing.Verdict = null,
+    /// git's `auto_color`: whether `%C(auto)` is in force and colours
+    /// what follows.
+    auto_color: bool = false,
+
+    /// The colours the placeholders after `%C(auto)` paint with.
+    fn autoColors(st: *const State) ?*const Colors {
+        return if (st.auto_color) st.ctx.colors else null;
+    }
 };
 
 /// git's `expand_string_arg`: `%%`, `%n` and `%xNN` in an option's value.
@@ -472,7 +554,7 @@ fn decorate(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         }
     }
     if (at >= ph.len or ph[at] != ')') return 0;
-    if (st.ctx.decorations) |d| try d.write(st.a, out, st.p.oid, opts);
+    if (st.ctx.decorations) |d| try d.write(st.a, out, st.p.oid, opts, st.autoColors());
     return at + 1;
 }
 
@@ -527,6 +609,46 @@ fn trailers(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
     return at + 1;
 }
 
+/// `%C(auto)`, `%C(...)` and the old `%Cred`, `%Cgreen`, `%Cblue` and
+/// `%Creset`, as git's `format_commit_one` and `parse_color` take them:
+/// a colour is written where the log has colours, or with `always,`
+/// regardless; `auto,` and no prefix are alike. Any of them but `%C(auto)`
+/// ends `%C(auto)`; one git does not know is written as it stands, and
+/// leaves `%C(auto)` in force.
+fn colour(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
+    const a = st.a;
+    const want = st.ctx.colors != null;
+    if (std.mem.startsWith(u8, ph[1..], "(auto)")) {
+        st.auto_color = want;
+        if (want and out.items.len != 0) try out.appendSlice(a, color.reset);
+        return "C(auto)".len;
+    }
+    const consumed: usize = if (ph.len > 1 and ph[1] == '(') blk: {
+        const end = std.mem.findScalarPos(u8, ph, 2, ')') orelse return 0;
+        var begin: usize = 2;
+        if (std.mem.startsWith(u8, ph[begin..end], "auto,")) {
+            if (!want) break :blk end + 1;
+            begin += "auto,".len;
+        } else if (std.mem.startsWith(u8, ph[begin..end], "always,")) {
+            begin += "always,".len;
+        } else if (!want) break :blk end + 1;
+        const parsed = color.parse(ph[begin..end]) catch return error.InvalidColor;
+        try out.appendSlice(a, parsed.bytes());
+        break :blk end + 1;
+    } else blk: {
+        const basic = [_]struct { []const u8, []const u8 }{
+            .{ "red", color.red.bytes() }, .{ "green", color.green.bytes() }, .{ "blue", color.blue.bytes() }, .{ "reset", color.reset },
+        };
+        for (basic) |b| if (std.mem.startsWith(u8, ph[1..], b[0])) {
+            if (want) try out.appendSlice(a, b[1]);
+            break :blk 1 + b[0].len;
+        };
+        return 0;
+    };
+    st.auto_color = false;
+    return consumed;
+}
+
 /// One placeholder, `ph` being what follows the `%`. Returns how many
 /// bytes it took, zero for one git does not know.
 fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
@@ -546,7 +668,8 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
             try out.append(a, percent.hexPair(ph[1], ph[2]) orelse return 0);
             return 3;
         },
-        'C', 'w', '<', '>' => return error.UnsupportedPlaceholder,
+        'C' => return colour(st, out, ph),
+        'w', '<', '>' => return error.UnsupportedPlaceholder,
         else => {},
     }
     if (std.mem.startsWith(u8, ph, "(decorate")) return decorate(st, out, ph);
@@ -555,12 +678,11 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         std.mem.startsWith(u8, ph, "(total)")) return error.UnsupportedPlaceholder;
     var hexbuf: [hash.max_hex_len]u8 = undefined;
     switch (ph[0]) {
-        'H' => {
-            try out.appendSlice(a, p.oid.hex(&hexbuf));
-            return 1;
-        },
-        'h' => {
-            try out.appendSlice(a, try uniqueHex(a, io, db, p.oid, ctx.abbrev_len));
+        'H', 'h' => {
+            const colors = st.autoColors();
+            if (colors) |c| try out.appendSlice(a, c.commit.bytes());
+            try out.appendSlice(a, if (ph[0] == 'H') p.oid.hex(&hexbuf) else try uniqueHex(a, io, db, p.oid, ctx.abbrev_len));
+            if (colors != null) try out.appendSlice(a, color.reset);
             return 1;
         },
         'T' => {
@@ -587,7 +709,7 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         },
         'm' => return 0,
         'd', 'D' => {
-            if (ctx.decorations) |d| try d.write(a, out, p.oid, if (ph[0] == 'd') .{} else .{ .prefix = "", .suffix = "" });
+            if (ctx.decorations) |d| try d.write(a, out, p.oid, if (ph[0] == 'd') .{} else .{ .prefix = "", .suffix = "" }, st.autoColors());
             return 1;
         },
         'N' => {
@@ -659,7 +781,10 @@ fn cstr(s: []const u8) []const u8 {
 /// The object database, commit and format, borrowed for the call.
 pub const CommitInputs = struct { db: *odb_mod.Odb, oid: Oid, format: []const u8 };
 
-/// The commit `oid` formatted by `format`, appended to `out`.
+/// The commit `oid` formatted by `format`, appended to `out`. What `out`
+/// already holds is git's buffer before the format, as `git archive`
+/// hands it: `%-` removes line ends from it and `%C(auto)` resets after
+/// it. A log formats each commit into a buffer of its own.
 pub fn formatCommit(a: Allocator, io: Io, inputs: CommitInputs, out: *std.ArrayList(u8), ctx: Context) Self.Error!void {
     const db = inputs.db;
     const oid = inputs.oid;
