@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-18
+
 ### Breaking
 
 - `core.precomposeUnicode` is acted on as git acts on it on macOS: a name the disk spells decomposed is read composed, as git's `readdir` composes it through iconv's `UTF-8-MAC` (`worktree.encoding.precompose`: each character with the one before it, no reordering and no singletons, Unicode's compositions before 5.0, and a name holding anything outside the Basic Multilingual Plane or not UTF-8 kept as it is, where macOS's iconv refuses it). Every name read from the working tree (status, add, checkout's scans, clean, stash's untracked files), the loose refs (listing and `refs verify`) and the worktree ids comes through `repo.fs.Names` or `worktree.dir_scan` (`Scan.init` and `initPlain` take `Options.precompose`). `repo.Settings.precompose_unicode` reads the setting everywhere, a bad value refused as git refuses it, and is true on macOS only; `worktree.Rules.precompose_unicode` and `refs.Store.Options.precompose_unicode` (`Store.configureNames`) carry it. Callers composing their own paths, git's argv step, use `precompose`. Held to `git ls-files -o`, `git add -A`, `git clean -n -d` and `git for-each-ref` over decomposed names, and `precompose` to macOS's iconv over every code point and every pair of the plane.
