@@ -96,6 +96,31 @@ pub fn sequencerDefault(trailers_added: bool) Cleanup {
     return if (trailers_added) .whitespace else .verbatim;
 }
 
+/// The last value of `name`, `null` when unset; a bare name with no value
+/// is refused, as git's `git_config_string` dies on one for every command.
+fn lastString(config: *const config_mod.Config, name: []const u8) error{InvalidEncodingSetting}!?[]const u8 {
+    var last: ?[]const u8 = null;
+    var it = config.iterate(&.{name});
+    while (it.next()) |entry| last = entry.value orelse return error.InvalidEncodingSetting;
+    return last;
+}
+
+/// git's `get_commit_output_encoding`: `i18n.commitEncoding`, the
+/// encoding a new commit's message is in and named in its `encoding`
+/// header when it is not UTF-8, and the one the sequencer converts a
+/// picked message into; UTF-8 when unset. A bare name is refused.
+pub fn commitEncoding(config: *const config_mod.Config) error{InvalidEncodingSetting}![]const u8 {
+    return try lastString(config, "i18n.commitencoding") orelse "UTF-8";
+}
+
+/// git's `get_log_output_encoding`: `i18n.logOutputEncoding`, the
+/// encoding `git log`, `git shortlog` and `git format-patch` write a
+/// commit's message in, `commitEncoding` when unset. A bare name is
+/// refused.
+pub fn logOutputEncoding(config: *const config_mod.Config) error{InvalidEncodingSetting}![]const u8 {
+    return try lastString(config, "i18n.logoutputencoding") orelse commitEncoding(config);
+}
+
 /// The comment string: `core.commentChar` and `core.commentString`, which
 /// git reads as one setting, the last of either set deciding.
 pub const Comment = union(enum) {

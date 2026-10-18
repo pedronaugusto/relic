@@ -7,6 +7,7 @@ const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 
 const unicode_width = @import("../text.zig").unicode_width;
+const text_encoding = @import("../text.zig").encoding;
 
 const weekday_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -130,17 +131,19 @@ fn lastLineLength(buf: []const u8) usize {
     return buf.len - (nl + 1);
 }
 
-/// Append `line` as RFC 2047 `Q`-encoded words in UTF-8, breaking before
-/// 76 columns as git's `add_rfc2047` does, never inside a character.
-pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, kind: Rfc2047Kind) Allocator.Error!void {
+/// Append `line`, text in `encoding`, as RFC 2047 `Q`-encoded words
+/// naming it, breaking before 76 columns as git's `add_rfc2047` does,
+/// never inside a UTF-8 character; text in another encoding is taken a
+/// byte to a character, as git takes it.
+pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, encoding: []const u8, kind: Rfc2047Kind) Allocator.Error!void {
     const max_encoded_length = 76;
-    const encoding = "UTF-8";
+    const utf8 = text_encoding.isUtf8(encoding);
     var line_len = lastLineLength(out.items);
     try out.print(gpa, "=?{s}?q?", .{encoding});
     line_len += encoding.len + 5;
     var at: usize = 0;
     while (at < line.len) {
-        const chrlen: usize = if (unicode_width.decode(line[at..])) |decoded| decoded.len else 1;
+        const chrlen: usize = if (!utf8) 1 else if (unicode_width.decode(line[at..])) |decoded| decoded.len else 1;
         const p = line[at .. at + chrlen];
         const special = chrlen > 1 or isRfc2047Special(p[0], kind);
         const encoded_len: usize = if (special) 3 * chrlen else 1;
@@ -286,7 +289,7 @@ test "encoded words, quoting and wrapping come out as git's" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     try out.appendSlice(gpa, "From: ");
-    try appendRfc2047(gpa, &out, "J\xc3\xb6hn D\xc5\x93", .address);
+    try appendRfc2047(gpa, &out, "J\xc3\xb6hn D\xc5\x93", "UTF-8", .address);
     try std.testing.expectEqualStrings("From: =?UTF-8?q?J=C3=B6hn=20D=C5=93?=", out.items);
     out.clearRetainingCapacity();
     try appendWrapped(gpa, &out, "a b c", -9, 1, 78);

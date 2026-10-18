@@ -520,7 +520,7 @@ fn parseMail(s: *Session, name: []const u8) Error!bool {
     const config = s.repo.configuration();
     const mail = (try s.read(name)).?;
     var options: mailinfo.InfoOptions = .{
-        .utf8 = s.utf8,
+        .charset = if (s.utf8) try message.commitEncoding(config) else null,
         .keep_subject = s.keep == .subject,
         .keep_non_patch_brackets = s.keep == .non_patch,
         .add_message_id = s.message_id,

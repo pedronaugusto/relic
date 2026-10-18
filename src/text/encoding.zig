@@ -1,12 +1,14 @@
+//! Character sets, converted as git converts them through iconv: one
+//! place for both of git's jobs.
+//!
 //! `working-tree-encoding`: a file kept in the working tree in UTF-16 or
 //! UTF-32 and in the repository in UTF-8, converted as git's `convert.c`
-//! converts it through iconv.
-//!
-//! The names git reads for these are taken: `UTF-16`, `UTF-16LE`,
-//! `UTF-16BE`, `UTF-32`, `UTF-32LE` and `UTF-32BE`, with or without the
-//! hyphen and in any case, and git's own `UTF-16LE-BOM` and `UTF-16BE-BOM`.
-//! Any other character set is a conversion this package does not do, and
-//! `attributes.unsupported` names it.
+//! converts it (`toUtf8`, `fromUtf8`). The names git reads for these are
+//! taken: `UTF-16`, `UTF-16LE`, `UTF-16BE`, `UTF-32`, `UTF-32LE` and
+//! `UTF-32BE`, with or without the hyphen and in any case, and git's own
+//! `UTF-16LE-BOM` and `UTF-16BE-BOM`. Any other character set is a
+//! conversion this package does not do, and `attributes.unsupported`
+//! names it.
 //!
 //! git's rules for the byte order mark are kept. On the way in, `UTF-16`
 //! and `UTF-32` need one, which says the byte order and is dropped, and the
@@ -15,6 +17,11 @@
 //! iconv writes and so the platform's git: little-endian on Linux, whose C
 //! library writes its own order, and big-endian elsewhere, where git uses
 //! libiconv. An empty file is not converted either way.
+//!
+//! Text: a commit's message in its `encoding`, log output in
+//! `i18n.logOutputEncoding`, a mail in its `charset` (`reencode`, git's
+//! `reencode_string_len`, and `same`, its `same_encoding`), for the
+//! character sets `Charset` names.
 
 const Self = @This();
 
@@ -75,6 +82,162 @@ pub fn isUtf8(name: []const u8) bool {
         if (std.mem.eql(u8, rest, "8")) return true;
     }
     return std.ascii.eqlIgnoreCase(name, "UTF-8");
+}
+
+/// git's `same_encoding`: whether two names are one encoding, `null`
+/// being UTF-8. Two `utf` names compare after the prefix and its
+/// optional hyphen; any other two compare ignoring case.
+pub fn same(x: ?[]const u8, y: ?[]const u8) bool {
+    const s = x orelse "UTF-8";
+    const d = y orelse "UTF-8";
+    if (utfSuffix(s)) |sr| if (utfSuffix(d)) |dr| if (std.ascii.eqlIgnoreCase(sr, dr)) return true;
+    return std.ascii.eqlIgnoreCase(s, d);
+}
+
+/// The character sets commit messages, log output and mail are converted
+/// between, as git converts them with iconv (`reencode_string_len`): text
+/// in which every ASCII byte is itself. Another name is one this package
+/// does not convert, which `reencode` refuses rather than leave the text
+/// unconverted where git would convert it.
+pub const Charset = enum {
+    utf8,
+    ascii,
+    latin1,
+
+    /// The spellings iconv takes for each, compared ignoring case; any
+    /// `utf` name `isUtf8` says is UTF-8 is UTF-8 too, as git's
+    /// `fallback_encoding` makes it.
+    const ascii_names = [_][]const u8{ "US-ASCII", "ASCII", "ANSI_X3.4-1968", "ISO646-US", "US", "CSASCII", "ISO-IR-6", "IBM367", "CP367" };
+    const latin1_names = [_][]const u8{ "ISO-8859-1", "ISO8859-1", "ISO_8859-1", "ISO_8859-1:1987", "LATIN1", "LATIN-1", "L1", "CP819", "IBM819", "ISO-IR-100", "CSISOLATIN1" };
+
+    /// The character set `name` is, or `null` for one this does not
+    /// convert.
+    pub fn fromName(name: []const u8) ?Charset {
+        if (isUtf8(name)) return .utf8;
+        for (ascii_names) |n| if (std.ascii.eqlIgnoreCase(name, n)) return .ascii;
+        for (latin1_names) |n| if (std.ascii.eqlIgnoreCase(name, n)) return .latin1;
+        return null;
+    }
+};
+
+/// Why `reencode` converts nothing.
+pub const ReencodeError = error{
+    /// `to` or `from` is a character set `Charset` does not name.
+    UnsupportedEncoding,
+} || Allocator.Error;
+
+/// git's `reencode_string_len`: `src`, text in `from`, in `to`. `null`
+/// where iconv stops: bytes that are not text in `from` (a broken UTF-8
+/// sequence, a byte above 0x7f in ASCII) or a character `to` does not
+/// have. git's callers keep the text as it was there, or refuse it. The
+/// result is `a`'s.
+pub fn reencode(a: Allocator, src: []const u8, to: []const u8, from: []const u8) ReencodeError!?[]u8 {
+    const in = Charset.fromName(from) orelse return error.UnsupportedEncoding;
+    const out_set = Charset.fromName(to) orelse return error.UnsupportedEncoding;
+    var out: std.ArrayList(u8) = try .initCapacity(a, src.len + src.len / 2);
+    defer out.deinit(a);
+    var i: usize = 0;
+    while (i < src.len) {
+        const cp = decodeOne(in, src, &i) orelse return null;
+        switch (out_set) {
+            .ascii => {
+                if (cp >= 0x80) return null;
+                try out.append(a, @intCast(cp)); // safe: below 0x80
+            },
+            .latin1 => {
+                if (cp > 0xff) return null;
+                try out.append(a, @intCast(cp)); // safe: at most 0xff
+            },
+            .utf8 => {
+                var buf: [4]u8 = undefined;
+                // unreachable: every decoded code point is a scalar value
+                const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
+                try out.appendSlice(a, buf[0..n]);
+            },
+        }
+    }
+    return try out.toOwnedSlice(a);
+}
+
+/// git's `ensure_utf8`, which every commit git writes with a UTF-8
+/// `i18n.commitEncoding` passes through: each byte that does not begin a
+/// valid UTF-8 character is taken as Latin-1 and written in UTF-8. Valid
+/// is git's `has_invalid_utf8`'s: no overlong form, no surrogate, nothing
+/// past U+10FFFF, and none of the noncharacters U+FDD0 to U+FDEF and
+/// U+xxFFFE, U+xxFFFF. `text` itself when it is valid; else `a`'s.
+pub fn ensureUtf8(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    var bad = invalidUtf8At(text, 0) orelse return text;
+    var out: std.ArrayList(u8) = try .initCapacity(a, text.len + 8);
+    errdefer out.deinit(a);
+    var from: usize = 0;
+    while (true) {
+        try out.appendSlice(a, text[from..bad]);
+        const c = text[bad];
+        // a byte that begins no valid character is at least 0x80
+        assert(c >= 0x80);
+        try out.appendSlice(a, &.{ 0xc0 | (c >> 6), 0x80 | (c & 0x3f) });
+        from = bad + 1;
+        bad = invalidUtf8At(text, from) orelse break;
+    }
+    try out.appendSlice(a, text[from..]);
+    return out.toOwnedSlice(a);
+}
+
+/// Where the first byte at or after `from` that begins no valid character
+/// is, by git's `has_invalid_utf8`.
+fn invalidUtf8At(text: []const u8, from: usize) ?usize {
+    const max_codepoint = [_]u21{ 0x7f, 0x7ff, 0xffff, 0x10ffff };
+    var i = from;
+    while (i < text.len) {
+        const lead = text[i];
+        if (lead < 0x80) {
+            i += 1;
+            continue;
+        }
+        // how many more bytes the lead's high bits ask for: one to three
+        var c = lead;
+        var more: usize = 0;
+        while (c & 0x40 != 0) : (more += 1) c <<= 1;
+        if (more < 1 or more > 3 or text.len - (i + 1) < more) return i;
+        var cp: u21 = (c & 0x7f) >> @intCast(more);
+        for (text[i + 1 ..][0..more]) |b| {
+            if (b & 0xc0 != 0x80) return i;
+            cp = (cp << 6) | (b & 0x3f);
+        }
+        if (cp < max_codepoint[more - 1] + 1 or cp > max_codepoint[more]) return i;
+        if (cp & 0x1ff800 == 0xd800) return i;
+        if (cp & 0xfffe == 0xfffe) return i;
+        if (cp >= 0xfdd0 and cp <= 0xfdef) return i;
+        i += 1 + more;
+    }
+    return null;
+}
+
+/// The character at `src[i.*]` in `set`, `i` moved past it; `null` for
+/// bytes that are not one.
+fn decodeOne(set: Charset, src: []const u8, i: *usize) ?u21 {
+    const b = src[i.*];
+    switch (set) {
+        .ascii, .latin1 => {
+            if (set == .ascii and b >= 0x80) return null;
+            i.* += 1;
+            return b;
+        },
+        .utf8 => {
+            const len = std.unicode.utf8ByteSequenceLength(b) catch return null;
+            if (len > src.len - i.*) return null;
+            const at = src[i.*..];
+            const cp = switch (len) {
+                1 => b,
+                2 => std.unicode.utf8Decode2(at[0..2].*),
+                3 => std.unicode.utf8Decode3(at[0..3].*),
+                4 => std.unicode.utf8Decode4(at[0..4].*),
+                else => unreachable, // utf8ByteSequenceLength gives 1 to 4
+            } catch return null;
+            i.* += len;
+            return cp;
+        },
+    }
 }
 
 /// Why content could not be converted.
@@ -271,6 +434,57 @@ test "fuzz: any bytes convert in and back out to themselves, or are refused" {
                 const utf8 = toUtf8(a, e, buf[0..len]) catch continue;
                 try testing.expectEqualSlices(u8, buf[0..len], try fromUtf8(a, e, utf8));
             }
+        }
+    }.one, .{});
+}
+
+test "text is reencoded as iconv converts it, and stops where iconv stops" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("caf\xc3\xa9", (try reencode(a, "caf\xe9", "UTF-8", "ISO-8859-1")).?);
+    try testing.expectEqualStrings("caf\xe9", (try reencode(a, "caf\xc3\xa9", "latin1", "utf8")).?);
+    try testing.expectEqualStrings("plain", (try reencode(a, "plain", "US-ASCII", "UTF-8")).?);
+    // a character Latin-1 does not have, a broken sequence, a high byte in ASCII
+    try testing.expect(try reencode(a, "\xe2\x82\xac", "ISO-8859-1", "UTF-8") == null);
+    try testing.expect(try reencode(a, "caf\xc3", "ISO-8859-1", "UTF-8") == null);
+    try testing.expect(try reencode(a, "\xed\xa0\x80", "ISO-8859-1", "UTF-8") == null);
+    try testing.expect(try reencode(a, "caf\xe9", "UTF-8", "US-ASCII") == null);
+    try testing.expectError(error.UnsupportedEncoding, reencode(a, "x", "UTF-8", "EUC-JP"));
+    try testing.expectError(error.UnsupportedEncoding, reencode(a, "x", "UTF-16", "UTF-8"));
+    try testing.expect(same(null, "utf8") and same("UTF-8", "utf-8") and same("latin1", "LATIN1"));
+    try testing.expect(!same("latin1", "ISO-8859-1") and !same(null, "ISO-8859-1"));
+}
+
+test "ensureUtf8 takes what is not UTF-8 as Latin-1, as git's commit_tree does" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("caf\xc3\xa9", try ensureUtf8(a, "caf\xc3\xa9"));
+    try testing.expectEqualStrings("caf\xc3\xa9!", try ensureUtf8(a, "caf\xe9!"));
+    // a cut sequence: its lead, then the continuation alone
+    try testing.expectEqualStrings("\xc3\xa2\xc2\x82x", try ensureUtf8(a, "\xe2\x82x"));
+    // a noncharacter and an overlong form are not valid to git
+    try testing.expectEqualStrings("\xc3\xaf\xc2\xbf\xc2\xbf", try ensureUtf8(a, "\xef\xbf\xbf"));
+    try testing.expectEqualStrings("\xc3\x80\xc2\xaf", try ensureUtf8(a, "\xc0\xaf"));
+}
+
+test "fuzz: Latin-1 converts to UTF-8 and back to itself" {
+    try shakedown.check(testing.allocator, {}, struct {
+        fn one(_: void, case: *shakedown.Case) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const len = shakedown.gen.intRange(case.source, usize, 0, buf.len);
+            case.source.bytes(buf[0..len]);
+            var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const utf8 = (try reencode(a, buf[0..len], "UTF-8", "ISO-8859-1")).?;
+            try testing.expect(std.unicode.utf8ValidateSlice(utf8));
+            try testing.expectEqualSlices(u8, buf[0..len], (try reencode(a, utf8, "ISO-8859-1", "UTF-8")).?);
+            // any bytes as UTF-8: converted only where they are UTF-8
+            if (try reencode(a, buf[0..len], "UTF-8", "UTF-8")) |same_bytes| {
+                try testing.expectEqualSlices(u8, buf[0..len], same_bytes);
+            } else try testing.expect(!std.unicode.utf8ValidateSlice(buf[0..len]));
         }
     }.one, .{});
 }

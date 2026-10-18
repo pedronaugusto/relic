@@ -12,9 +12,9 @@
 //! as `-M` and `-C` do. Marks files are read and written as git's are.
 //!
 //! What git's command line takes beside: `--anonymize` and a path limit are
-//! not offered, nor is `--reencode=yes`, which needs a character set
-//! converter; a commit in another encoding is written as it is
-//! (`Reencode.no`) or refused.
+//! not offered. A commit in another encoding is refused, written as it is
+//! (`Reencode.no`), or its message converted to UTF-8 (`Reencode.yes`) for
+//! the character sets `text.encoding.Charset` converts.
 
 const Self = @This();
 
@@ -29,6 +29,7 @@ const repo_mod = @import("../repo/repo.zig");
 const rev_walk = @import("../walk/walk.zig");
 const diff = @import("../diff/diff.zig");
 const c_quote = @import("../text.zig").c_quote;
+const text_encoding = @import("../text.zig").encoding;
 const signing = @import("../object/signing.zig");
 const refspec_mod = @import("../wire.zig").refspec;
 const fast_import = @import("importer.zig");
@@ -41,6 +42,10 @@ const Repository = repo_mod.Repository;
 pub const Error = error{
     /// A commit with a message in another encoding, under `Reencode.abort`.
     EncodedCommit,
+    /// A commit's `encoding`, under `Reencode.yes`, names a character set
+    /// `text.encoding.Charset` does not convert, where git converts it
+    /// with iconv.
+    UnsupportedEncoding,
     /// A signed commit or tag under `SignMode.abort`.
     SignedObject,
     /// A tag of an object the stream does not carry, under
@@ -64,12 +69,15 @@ pub const Error = error{
 /// `--tag-of-filtered-object`.
 pub const TagOfFiltered = enum { abort, drop, rewrite };
 
-/// A commit in another encoding: git's `--reencode`, less `yes`.
+/// A commit in another encoding: git's `--reencode`.
 pub const Reencode = enum {
     /// Stop with `error.EncodedCommit`.
     abort,
     /// Write the message as it is, and its `encoding`.
     no,
+    /// Write the message in UTF-8 and no `encoding`; one that will not
+    /// convert is written as `no` writes it, as git writes it.
+    yes,
 };
 
 /// One revision to export, as git's command line names one.
@@ -361,9 +369,11 @@ const Exporter = struct {
             break;
         };
         const mark = try ex.markNext(oid);
-        if (encoding) |e| if (ex.options.reencode == .abort) {
-            _ = e;
-            return error.EncodedCommit;
+        var reencoded: ?[]const u8 = null;
+        if (encoding) |e| switch (ex.options.reencode) {
+            .abort => return error.EncodedCommit,
+            .no => {},
+            .yes => reencoded = try text_encoding.reencode(ex.arena(), message, "UTF-8", e),
         };
         if (parents.len == 0) try ex.w.print("reset {s}\n", .{refname});
         try ex.w.print("commit {s}\nmark :{d}\n", .{ refname, mark });
@@ -377,8 +387,12 @@ const Exporter = struct {
             .strip => {},
             .abort => return error.SignedObject,
         };
-        if (encoding) |e| try ex.w.print("encoding {s}\n", .{e});
-        try ex.w.print("data {d}\n{s}", .{ message.len, message });
+        if (reencoded) |utf8| {
+            try ex.w.print("data {d}\n{s}", .{ utf8.len, utf8 });
+        } else {
+            if (encoding) |e| try ex.w.print("encoding {s}\n", .{e});
+            try ex.w.print("data {d}\n{s}", .{ message.len, message });
+        }
 
         var written: usize = 0;
         for (parents) |p| {
@@ -655,8 +669,8 @@ fn depthFirst(_: void, a: diff.Change, b: diff.Change) bool {
 }
 
 test "a commit's header is found by its name alone" {
-    const buf = "tree 1\nauthor a\ncommitter c\nencoding ISO-8859-1\n\nmessage\nencoding no\n";
+    const buf = "tree 1\nauthor a\ncommitter c\nencoding KOI8-R\n\nmessage\nencoding no\n";
     const h = object.findHeader(buf, 0, "encoding").?;
-    try std.testing.expectEqualStrings("ISO-8859-1", buf[h.start..h.end]);
+    try std.testing.expectEqualStrings("KOI8-R", buf[h.start..h.end]);
     try std.testing.expect(object.findHeader(buf, 0, "gpgsig") == null);
 }

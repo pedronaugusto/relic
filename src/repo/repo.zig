@@ -37,6 +37,8 @@ const worktrees = @import("../checkout/worktrees.zig");
 const filter = @import("../checkout/filter.zig");
 const reftable_stack = @import("../refs/reftable/stack.zig");
 const signing = @import("../object/signing.zig");
+const message = @import("../object/message.zig");
+const encoding = @import("../text.zig").encoding;
 const diagnostic_mod = @import("../report.zig").diagnostic;
 const repository_format = @import("../discover.zig").format;
 const gitfile = @import("../discover.zig").gitfile;
@@ -101,7 +103,12 @@ pub const Error = error{
     refs_mod.ReadError || refs_mod.TransactionError || worktrees.Error;
 
 /// Errors from writing a commit or a tag, which may be signed.
-pub const WriteError = Error || signing.Error || object.Commit.WriteError;
+pub const WriteError = Error || signing.Error || object.Commit.WriteError || error{
+    /// `i18n.commitEncoding` set with no value, which git dies on.
+    InvalidEncodingSetting,
+    /// A commit message holding a NUL byte, which git refuses.
+    NulInMessage,
+};
 
 /// How deep `open` walks upwards looking for a `.git`.
 pub const max_discovery_depth: u8 = 64;
@@ -1655,8 +1662,10 @@ pub const Repository = struct {
         parents: []const Oid = &.{},
         author: object.Signature,
         committer: object.Signature,
+        /// The message, in `i18n.commitEncoding` (`message.commitEncoding`),
+        /// which the commit's `encoding` header names when it is not UTF-8,
+        /// as git's `commit_tree` writes it.
         message: []const u8,
-        encoding: ?[]const u8 = null,
         extra: []const object.ExtraHeader = &.{},
         /// Whether and how to sign it. By default `commit.gpgSign` decides,
         /// as it does for `git commit-tree`.
@@ -1674,15 +1683,36 @@ pub const Repository = struct {
     pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, options: WriteCommitOptions) Self.WriteError!Oid {
         const diagnostic = options.diagnostic;
         diagnostic_mod.reset(diagnostic);
-        const fields: object.Commit.Fields = .{
+        const commit_encoding = message.commitEncoding(repo.configuration()) catch |err| {
+            try refuseSetting(diagnostic, "i18n.commitEncoding");
+            return err;
+        };
+        if (std.mem.findScalar(u8, request.message, 0) != null) return error.NulInMessage;
+        var fields: object.Commit.Fields = .{
             .tree = request.tree,
             .parents = request.parents,
             .author = request.author,
             .committer = request.committer,
-            .encoding = request.encoding,
+            .encoding = if (encoding.isUtf8(commit_encoding)) null else commit_encoding,
             .extra = request.extra,
             .message = request.message,
         };
+        // git's `commit_tree`: in UTF-8, what is not UTF-8 is taken as
+        // Latin-1, the people and the headers too; the separators between
+        // the pieces are ASCII, so each piece converts as the whole would
+        var arena: std.heap.ArenaAllocator = .init(repo.data().gpa);
+        defer arena.deinit();
+        if (fields.encoding == null) {
+            const a = arena.allocator();
+            fields.author.name = try encoding.ensureUtf8(a, fields.author.name);
+            fields.author.email = try encoding.ensureUtf8(a, fields.author.email);
+            fields.committer.name = try encoding.ensureUtf8(a, fields.committer.name);
+            fields.committer.email = try encoding.ensureUtf8(a, fields.committer.email);
+            fields.message = try encoding.ensureUtf8(a, fields.message);
+            const extra = try a.dupe(object.ExtraHeader, fields.extra);
+            for (extra) |*h| h.value = try encoding.ensureUtf8(a, h.value);
+            fields.extra = extra;
+        }
         var signer = try repo.signerFor(io, request.signing, .commit, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|

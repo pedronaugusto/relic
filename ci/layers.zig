@@ -98,6 +98,7 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     // and a form feed too; git-lfs's netrc reads Go's
     .{ .name = "space class", .tokens = &.{"isWhitespace"}, .owners = &[_][]const u8{ "src/text/**", "src/lfs/netrc.zig" } ++ tests },
     .{ .name = "number grammars", .tokens = &.{ "parseInt", "parseUnsigned" }, .owners = &[_][]const u8{ "src/text/**", "src/config/config.zig" } ++ tests },
+    .{ .name = "one character set conversion", .kind = .string, .tokens = &.{ "ISO-8859-1", "iso-8859-1", "latin1", "LATIN1", "US-ASCII", "us-ascii" }, .owners = &[_][]const u8{"src/text/**"} ++ tests },
 };
 
 // The owner requires every production edge to count. No re-export exemptions.

@@ -31,7 +31,7 @@ const mailmap_mod = @import("../rev_walk/mailmap.zig");
 const attributes = @import("../patterns.zig").attributes;
 const c_quote = @import("../text.zig").c_quote;
 const unicode_width = @import("../text.zig").unicode_width;
-const formatpatch = @import("format.zig");
+const message = @import("../object/message.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -46,9 +46,12 @@ pub const Error = error{
     RangeDiffTooLarge,
     /// `left_only` and `right_only` together, which git refuses.
     LeftAndRightOnly,
-    /// A commit whose message is in an encoding other than UTF-8 or
-    /// Latin-1.
+    /// A commit's `encoding`, or `i18n.logOutputEncoding`, names a
+    /// character set `text.encoding.Charset` does not convert.
     UnsupportedEncoding,
+    /// `i18n.logOutputEncoding` or `i18n.commitEncoding` set with no value,
+    /// which git dies on.
+    InvalidEncodingSetting,
     NotACommit,
 } || diff.Error || diff.TextError || diff.ConfigError || diff.Order.ConfiguredError || rev_walk.Error || pretty.Error || notes_mod.Error ||
     mailmap_mod.LoadError || repo_mod.Error || attributes.Error || Io.Writer.Error;
@@ -165,6 +168,9 @@ const Reader = struct {
     order: diff.Order,
     show_root: bool,
     quote_path: bool,
+    /// What git's `git log` writes the patches in: the log's output
+    /// encoding.
+    encoding: []const u8,
 
     fn init(gpa: Allocator, a: Allocator, io: Io, repo: *Repository, options: Options) Error!Reader {
         const config = repo.configuration();
@@ -178,6 +184,7 @@ const Reader = struct {
             .order = try diff.Order.configured(a, io, repo.topDirectory(), config),
             .show_root = config.getBool("log.showroot", true) catch true,
             .quote_path = config.getBool("core.quotepath", true) catch true,
+            .encoding = try message.logOutputEncoding(config),
         };
         errdefer r.deinit();
         if (config.getBool("log.mailmap", true) catch true) r.mailmap = try mailmap_mod.Mailmap.load(gpa, io, repo);
@@ -218,16 +225,15 @@ const Reader = struct {
         const found = try db.read(r.io, oid);
         defer db.allocator().free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
-        const commit = try object.Commit.parse(a, db.objectFormat(), try a.dupe(u8, found.bytes));
+        // as `git log` shows it: in the log's output encoding
+        const converted = try pretty.reencodeCommit(a, try a.dupe(u8, found.bytes), r.encoding);
+        const commit = try object.Commit.parse(a, db.objectFormat(), converted.bytes);
 
         var text: std.ArrayList(u8) = .empty;
-        var who: mailmap_mod.Identity = .{
-            .name = try formatpatch.logText(a, &commit, commit.author.name),
-            .email = try formatpatch.logText(a, &commit, commit.author.email),
-        };
+        var who: mailmap_mod.Identity = .{ .name = commit.author.name, .email = commit.author.email };
         if (r.mailmap) |*m| who = m.map(who.name, who.email);
         try text.print(a, " ## Metadata ##\nAuthor: {s} <{s}>\n\n ## Commit message ##\n", .{ who.name, who.email });
-        try appendMessage(a, &text, try formatpatch.logMessage(a, &commit));
+        try appendMessage(a, &text, commit.message);
         if (r.notes) |*n| {
             var shown: Io.Writer.Allocating = .init(a);
             try notes_mod.formatNote(r.io, n, oid, &shown.writer, .{ .raw = false });
@@ -355,9 +361,9 @@ fn typeChanged(a: object.Mode, b: object.Mode) bool {
 /// whitespace: blank lines at the start dropped, each line's trailing
 /// whitespace too, tabs expanded to eight columns, four spaces before each
 /// line that is not blank, and no blank line at the end.
-fn appendMessage(a: Allocator, text: *std.ArrayList(u8), message: []const u8) Allocator.Error!void {
+fn appendMessage(a: Allocator, text: *std.ArrayList(u8), msg: []const u8) Allocator.Error!void {
     var lines: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.splitScalar(u8, message, '\n');
+    var it = std.mem.splitScalar(u8, msg, '\n');
     while (it.next()) |raw| {
         if (it.index == null and raw.len == 0) break;
         const line = std.mem.trimEnd(u8, raw, ctype.space);
@@ -817,6 +823,8 @@ const Writer = struct {
     abbrev_len: usize,
     dashes: ?usize = null,
     a: Allocator,
+    /// The log's output encoding, which the subjects are written in.
+    encoding: []const u8,
 
     fn pairHeader(s: *Writer, old: ?*const Patch, old_index: usize, new: ?*const Patch, new_index: usize) Error!void {
         const db = s.repo.objectDatabase();
@@ -830,11 +838,8 @@ const Writer = struct {
         try s.w.print(" {c} ", .{status});
         try s.side(new, new_index);
         var subject: std.ArrayList(u8) = .empty;
-        try pretty.formatCommit(s.a, s.io, .{ .db = db, .oid = oid, .format = "%s" }, &subject, .{});
-        const found = try db.read(s.io, oid);
-        defer db.allocator().free(found.bytes);
-        const commit = try object.Commit.parse(s.a, db.objectFormat(), try s.a.dupe(u8, found.bytes));
-        try s.w.print(" {s}\n", .{try formatpatch.logText(s.a, &commit, subject.items)});
+        try pretty.formatCommit(s.a, s.io, .{ .db = db, .oid = oid, .format = "%s" }, &subject, .{ .output_encoding = s.encoding });
+        try s.w.print(" {s}\n", .{subject.items});
     }
 
     fn side(s: *Writer, patch: ?*const Patch, index: usize) Error!void {
@@ -903,6 +908,7 @@ fn output(gpa: Allocator, io: Io, repo: *Repository, result: *RangeDiff, options
         .a = arena.allocator(),
         .width = decimalWidth(1 + @max(old.len, new.len)),
         .abbrev_len = abbrev.defaultLength(config, repo.objectDatabase()),
+        .encoding = try message.logOutputEncoding(config),
     };
     const shown = try gpa.alloc(bool, old.len);
     defer gpa.free(shown);

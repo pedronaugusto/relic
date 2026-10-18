@@ -1,11 +1,23 @@
-//! `working-tree-encoding` against the real git: twin repositories, git
-//! staging and checking out one and relic the other, with the blobs and
-//! the files on the disk compared.
+//! Encodings against the real git. `working-tree-encoding`: twin
+//! repositories, git staging and checking out one and relic the other, with
+//! the blobs and the files on the disk compared. Commits in Latin-1 and
+//! UTF-8: what `git log`, `git shortlog` and `git format-patch` write of
+//! them in each `i18n.logOutputEncoding`, and the commits a cherry-pick and
+//! `git commit-tree` make under `i18n.commitEncoding`.
 
 const std = @import("std");
 const Io = std.Io;
 
 const testgit = @import("git.zig");
+const history = @import("history.zig");
+const repo_mod = @import("../repo/repo.zig");
+const hash = @import("../hash/hash.zig");
+const pretty = @import("../pretty/pretty.zig");
+const shortlog = @import("../pretty/shortlog.zig");
+const formatpatch = @import("../patch/format.zig");
+const sequencer = @import("../commit/sequencer.zig");
+const object = @import("../object/object.zig");
+const message = @import("../object/message.zig");
 const ft = @import("../checkout/filter_test.zig");
 const encoding = @import("../text.zig").encoding;
 
@@ -149,4 +161,178 @@ test "an encoding other than UTF-8, UTF-16 and UTF-32 is refused by name, and tr
     try r.writeFile(io, "a.txt", "plain\n");
     r.report_failures = false;
     try testing.expectError(error.GitFailed, r.run(io, &.{ "add", "-A" }));
+}
+
+/// Write `bytes` as an object of `kind` and return its name.
+fn hashObject(gpa: std.mem.Allocator, io: Io, r: *testgit.Repo, kind: []const u8, bytes: []const u8) ![]u8 {
+    const out = try r.runInput(io, &.{ "hash-object", "-t", kind, "-w", "--stdin" }, bytes);
+    defer r.gpa.free(out);
+    return gpa.dupe(u8, std.mem.trimEnd(u8, out, "\n"));
+}
+
+/// The commits these compare, made as bytes so each says exactly what it
+/// says: `main` at an empty root, `topic` on it with a commit in Latin-1
+/// (its author's name too), one in UTF-8 holding a character Latin-1 does
+/// not have, one naming Latin-1 by another spelling, and one naming UTF-8.
+/// Each adds a file, so each picks cleanly.
+fn encodedHistory(io: Io, r: *testgit.Repo) !void {
+    const gpa = r.gpa;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const empty = try hashObject(a, io, r, "tree", "");
+    const people = "author Fixture <fixture@example.com> 1700000000 +0000\ncommitter Fixture <fixture@example.com> 1700000000 +0000\n";
+    var parent = try hashObject(a, io, r, "commit", try a.print("tree {s}\n{s}\nbase\n", .{ empty, people }));
+    try r.exec(io, &.{ "update-ref", "refs/heads/main", parent });
+    try r.exec(io, &.{ "reset", "-q", "--hard" });
+    const commits = [_]struct { file: []const u8, header: []const u8 }{
+        .{ .file = "a.txt", .header = "author Ren\xe9 Lat <rene@example.com> 1700000100 +0100\ncommitter Fixture <fixture@example.com> 1700000100 +0000\nencoding ISO-8859-1\n\ncaf\xe9 subject\n\nA body \xe9t\xe9 in Latin-1.\n" },
+        .{ .file = "b.txt", .header = "author Fixture <fixture@example.com> 1700000200 +0000\ncommitter Fixture <fixture@example.com> 1700000200 +0000\n\neuro \xe2\x82\xac sign\n\nNot in Latin-1.\n" },
+        .{ .file = "c.txt", .header = "author Fixture <fixture@example.com> 1700000300 +0000\ncommitter Fixture <fixture@example.com> 1700000300 +0000\nencoding latin1\n\nna\xefve spelling\n" },
+        .{ .file = "d.txt", .header = "author J\xc3\xb6rg <jorg@example.com> 1700000400 +0000\ncommitter Fixture <fixture@example.com> 1700000400 +0000\nencoding UTF-8\n\nsaid UTF-8: caf\xc3\xa9\n" },
+    };
+    var entries: std.ArrayList(u8) = .empty;
+    for (commits) |c| {
+        const blob = try hashObject(a, io, r, "blob", c.file);
+        try entries.print(a, "100644 blob {s}\t{s}\n", .{ blob, c.file });
+        const tree_out = try r.runInput(io, &.{"mktree"}, entries.items);
+        const tree = std.mem.trimEnd(u8, tree_out, "\n");
+        parent = try hashObject(a, io, r, "commit", try a.print("tree {s}\nparent {s}\n{s}", .{ tree, parent, c.header }));
+        gpa.free(tree_out);
+    }
+    try r.exec(io, &.{ "update-ref", "refs/heads/topic", parent });
+}
+
+/// The encodings `i18n.logOutputEncoding` is compared in: unset, UTF-8 in
+/// two spellings, and Latin-1 in two.
+const log_encodings = [_]?[]const u8{ null, "UTF-8", "utf8", "ISO-8859-1", "latin1" };
+
+fn setLogEncoding(io: Io, r: *testgit.Repo, e: ?[]const u8) !void {
+    if (e) |name| try r.exec(io, &.{ "config", "i18n.logOutputEncoding", name }) else {
+        r.report_failures = false;
+        defer r.report_failures = true;
+        // unsetting what is not set exits 5; either way it is unset
+        r.exec(io, &.{ "config", "--unset", "i18n.logOutputEncoding" }) catch |err| switch (err) {
+            error.GitFailed => {},
+            else => |e2| return e2,
+        };
+    }
+}
+
+test "commits in Latin-1 and UTF-8 are written as git log, git shortlog and git format-patch write them in each log encoding" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try encodedHistory(io, &r);
+    const listing = try r.run(io, &.{ "rev-list", "main..topic" });
+    defer gpa.free(listing);
+    const formats = [_][]const u8{ "%s|%an|%ae|%e", "%B", "%b%n%aN %cn" };
+    const main_text = try r.line(io, &.{ "rev-parse", "main" });
+    defer gpa.free(main_text);
+    const main_oid = try hash.Oid.parse(.sha1, main_text);
+    const topic_text = try r.line(io, &.{ "rev-parse", "topic" });
+    defer gpa.free(topic_text);
+    const topic = try hash.Oid.parse(.sha1, topic_text);
+    for (log_encodings) |e| {
+        try setLogEncoding(io, &r, e);
+        var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
+        defer repo.deinit(io);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        // git log --format, one commit at a time
+        var lines = std.mem.tokenizeScalar(u8, listing, '\n');
+        while (lines.next()) |hex| {
+            for (formats) |format| {
+                const theirs = try r.run(io, &.{ "log", "-1", try a.print("--format={s}", .{format}), hex });
+                defer gpa.free(theirs);
+                var ours: std.ArrayList(u8) = .empty;
+                try pretty.formatCommit(a, io, .{ .db = repo.objectDatabase(), .oid = try hash.Oid.parse(.sha1, hex), .format = format }, &ours, .{ .output_encoding = try message.logOutputEncoding(repo.configuration()) });
+                try ours.append(a, '\n');
+                testing.expectEqualStrings(theirs, ours.items) catch |err| {
+                    std.debug.print("git log --format={s} {s} in {?s}\n", .{ format, hex, e });
+                    return err;
+                };
+            }
+        }
+        // git shortlog, with and without emails
+        for ([_]bool{ false, true }) |email| {
+            const theirs = try r.run(io, &.{ "shortlog", if (email) "-e" else "-n", "main..topic" });
+            defer gpa.free(theirs);
+            var s = try shortlog.Shortlog.init(gpa, try shortlog.configured(a, repo.configuration(), .{ .email = email, .numbered = !email }));
+            defer s.deinit();
+            lines = std.mem.tokenizeScalar(u8, listing, '\n');
+            while (lines.next()) |hex| try s.add(io, repo.objectDatabase(), try hash.Oid.parse(.sha1, hex));
+            var w: Io.Writer.Allocating = .init(a);
+            try s.write(&w.writer);
+            testing.expectEqualStrings(theirs, w.written()) catch |err| {
+                std.debug.print("git shortlog in {?s}\n", .{e});
+                return err;
+            };
+        }
+        // git format-patch, with a cover letter
+        if (try testgit.gitAtLeast(gpa, io, 2, 43)) {
+            const theirs = try r.run(io, &.{ "format-patch", "--stdout", "--no-signature", "--cover-letter", "main..topic" });
+            defer gpa.free(theirs);
+            const sender: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
+            var series = try formatpatch.format(gpa, io, &repo, .{ .upstream = main_oid, .tip = topic }, .{ .cover_letter = .{ .sender = sender } });
+            defer series.deinit();
+            var w: Io.Writer.Allocating = .init(a);
+            try series.writeMbox(&w.writer);
+            testing.expectEqualStrings(theirs, w.written()) catch |err| {
+                std.debug.print("git format-patch in {?s}\n", .{e});
+                return err;
+            };
+        }
+    }
+}
+
+test "a picked commit and a new one are in i18n.commitEncoding, as git's are" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    for ([_]?[]const u8{ null, "ISO-8859-1" }) |e| {
+        var pair: history.Pair = undefined;
+        try history.Pair.init(gpa, io, &pair, .files, encodedHistory);
+        defer pair.deinit();
+        if (e) |name| for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "i18n.commitEncoding", name });
+        try pair.git.exec(io, &.{ "cherry-pick", "main..topic" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const listing = try pair.ours.run(io, &.{ "rev-list", "--reverse", "main..topic" });
+            defer gpa.free(listing);
+            var commits: std.ArrayList(hash.Oid) = .empty;
+            defer commits.deinit(gpa);
+            var lines = std.mem.tokenizeScalar(u8, listing, '\n');
+            while (lines.next()) |hex| try commits.append(gpa, try hash.Oid.parse(.sha1, hex));
+            var outcome = try sequencer.pick(gpa, io, &repo, commits.items, .{ .who = history.who });
+            defer outcome.deinit();
+        }
+        const theirs = try pair.git.run(io, &.{ "log", "--format=%H%n%B", "main" });
+        defer gpa.free(theirs);
+        const ours = try pair.ours.run(io, &.{ "log", "--format=%H%n%B", "main" });
+        defer gpa.free(ours);
+        testing.expectEqualStrings(theirs, ours) catch |err| {
+            std.debug.print("cherry-pick under i18n.commitEncoding={?s}\n", .{e});
+            return err;
+        };
+
+        // a commit written new: git commit-tree, the message from stdin
+        const text_in = "new caf\xe9\n";
+        const theirs_new = try pair.git.runInput(io, &.{ "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904" }, text_in);
+        defer gpa.free(theirs_new);
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const made = try repo.writeCommit(io, .{ .tree = try hash.Oid.parse(.sha1, "4b825dc642cb6eb9a060e54bf8d69288fbee4904"), .author = history.who, .committer = history.who, .message = text_in }, .{});
+        var hex: [hash.max_hex_len]u8 = undefined;
+        testing.expectEqualStrings(std.mem.trimEnd(u8, theirs_new, "\n"), made.hex(&hex)) catch |err| {
+            const git_bytes = try pair.git.run(io, &.{ "cat-file", "commit", std.mem.trimEnd(u8, theirs_new, "\n") });
+            defer gpa.free(git_bytes);
+            const our_bytes = try pair.ours.run(io, &.{ "cat-file", "commit", made.hex(&hex) });
+            defer gpa.free(our_bytes);
+            std.debug.print("commit-tree under i18n.commitEncoding={?s}\ngit:\n{s}relic:\n{s}", .{ e, git_bytes, our_bytes });
+            return err;
+        };
+    }
 }

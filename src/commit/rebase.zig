@@ -48,6 +48,7 @@ const reset = @import("reset.zig");
 const head_mod = @import("../repo/head.zig");
 const ref_names = @import("../names.zig").ref;
 const message = @import("../object/message.zig");
+const pretty = @import("../pretty/pretty.zig");
 const trailer = @import("../object/trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const todo = @import("todo.zig");
@@ -582,10 +583,8 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
         const empty = try originallyEmpty(&w, oid);
         if (!empty and same.contains(oid.bytes)) continue;
         if (empty and !r.options.keep_empty) continue;
-        const found = try r.repo.objectDatabase().read(r.io, oid);
-        defer r.repo.objectDatabase().allocator().free(found.bytes);
-        var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
-        defer commit.deinit();
+        // the sheet's subjects are in the log's encoding
+        const commit = (try readIn(r, oid, try message.logOutputEncoding(r.repo.configuration()))).commit;
         const subject = try message.onelineSubject(r.arena, commit.message);
         const arg = if (empty)
             try r.arena.print("{s} {s} empty", .{ r.comment, subject })
@@ -618,10 +617,8 @@ fn rearrangeSquash(r: *Run, items: []todo.Item) Error![]todo.Item {
         const commit_oid = item.commit orelse continue;
         if (item.command == .drop) continue;
         if (item.command.isFixup()) return items;
-        const found = try r.repo.objectDatabase().read(r.io, commit_oid);
-        defer r.repo.objectDatabase().allocator().free(found.bytes);
-        var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
-        defer commit.deinit();
+        // git matches the subjects in UTF-8
+        const commit = (try readIn(r, commit_oid, "UTF-8")).commit;
         const subject = try message.onelineSubject(r.arena, message.fromSubject(commit.message));
         subjects[i] = subject;
         var target: ?usize = null;
@@ -1291,10 +1288,7 @@ fn errorWithPatch(r: *Run, commit: Oid, to_amend: bool) Error!void {
     try r.repo.refStore().root().write(r.repo.allocator(), r.io, .rebase_head, commit);
     try writePatch(r, commit);
     if (!r.hasState("message")) {
-        const found = try r.repo.objectDatabase().read(r.io, commit);
-        defer r.repo.objectDatabase().allocator().free(found.bytes);
-        var parsed = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
-        defer parsed.deinit();
+        const parsed = (try readSource(r, commit)).commit;
         try r.state("message", try r.arena.print("{s}\n", .{message.fromSubject(parsed.message)}));
     }
     if (to_amend) try intendToAmend(r);
@@ -1358,12 +1352,20 @@ const Source = struct {
     commit: object.Commit,
 };
 
+/// A commit read into the arena, its message and people in
+/// `i18n.commitEncoding`, as git's sequencer converts every commit it
+/// takes a message or an author from (`logmsg_reencode`).
 fn readSource(r: *Run, oid: Oid) Error!Source {
+    return readIn(r, oid, try message.commitEncoding(r.repo.configuration()));
+}
+
+fn readIn(r: *Run, oid: Oid, output: []const u8) Error!Source {
     const found = try r.repo.objectDatabase().read(r.io, oid);
     defer r.repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
-    return .{ .oid = oid, .bytes = bytes, .commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes) };
+    const shown = try pretty.reencodeCommit(r.arena, bytes, output);
+    return .{ .oid = oid, .bytes = bytes, .commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), shown.bytes) };
 }
 
 /// `do_pick_commit` for the instructions that apply a commit.

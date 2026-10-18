@@ -38,6 +38,9 @@ const binarypatch = @import("binary.zig");
 const mailfmt = @import("../mail/format.zig");
 const unicode_width = @import("../text.zig").unicode_width;
 const message = @import("../object/message.zig");
+const pretty = @import("../pretty/pretty.zig");
+const shortlog = @import("../pretty/shortlog.zig");
+const mailmap_mod = @import("../rev_walk/mailmap.zig");
 const attributes = @import("../patterns.zig").attributes;
 
 const Oid = hash.Oid;
@@ -61,13 +64,14 @@ pub const Error = error{
     BaseNotAncestor,
     /// `base` is one of the commits being formatted.
     BaseInRange,
-    /// A commit's `encoding` header names a character set other than UTF-8,
-    /// US-ASCII or ISO-8859-1, which git would convert with iconv.
+    /// A commit's `encoding` header, or `i18n.logOutputEncoding`, names a
+    /// character set `text.encoding.Charset` does not convert, where git
+    /// converts it with iconv.
     UnsupportedEncoding,
-    /// A cover letter's shortlog in a repository with a `.mailmap`, which
-    /// git applies there and this does not yet.
-    MailmapUnsupported,
-} || rev_walk.Error || diff.Error || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
+    /// `i18n.logOutputEncoding` or `i18n.commitEncoding` set with no value,
+    /// which git dies on.
+    InvalidEncodingSetting,
+} || shortlog.Error || rev_walk.Error || diff.Error || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
     Io.Dir.ReadFileAllocError;
 
 /// A name and an address.
@@ -274,6 +278,9 @@ const Ctx = struct {
     nr: usize = 0,
     message_id: ?[]const u8 = null,
     ref_ids: std.ArrayList([]const u8) = .empty,
+    /// What the mails are written in: `i18n.logOutputEncoding`, as git's
+    /// `get_log_output_encoding` gives it.
+    encoding: []const u8,
 
     /// Which files are binary, as git's `diff_filespec_is_binary` says.
     fn binaryRule(ctx: *const Ctx) diff.BinaryRule {
@@ -327,6 +334,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         .repo = repo,
         .db = db,
         .options = options,
+        .encoding = try message.logOutputEncoding(config),
         .diff_options = diff_options,
         .renames = renames,
         .order = options.order orelse try diff.Order.configured(a, io, repo.topDirectory(), config),
@@ -576,52 +584,21 @@ fn printBases(ctx: *Ctx, out: *std.ArrayList(u8), b: *Bases) Allocator.Error!voi
 /// A commit, parsed in the call's arena, with the bytes its fields borrow
 /// kept there too.
 fn readCommit(ctx: *Ctx, oid: Oid) Error!object.Commit {
+    return parseIn(ctx, oid, null);
+}
+
+/// `readCommit`, its message and people in the mails' encoding, as git's
+/// `logmsg_reencode` gives them for a mail.
+fn shownCommit(ctx: *Ctx, oid: Oid) Error!object.Commit {
+    return parseIn(ctx, oid, ctx.encoding);
+}
+
+fn parseIn(ctx: *Ctx, oid: Oid, output: ?[]const u8) Error!object.Commit {
     const found = try ctx.db.read(ctx.io, oid);
     defer ctx.db.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
-    const bytes = try ctx.a.dupe(u8, found.bytes);
-    return object.Commit.parse(ctx.a, ctx.db.objectFormat(), bytes);
-}
-
-/// The message in UTF-8, as git reencodes it for the log.
-fn utf8Message(ctx: *Ctx, c: *const object.Commit) Error![]const u8 {
-    return logMessage(ctx.a, c);
-}
-
-/// Errors from `logMessage`.
-pub const LogMessageError = error{ UnsupportedEncoding, OutOfMemory };
-
-/// A commit's message in UTF-8, as git reencodes it for the log: as it
-/// is when its `encoding` is UTF-8 or ASCII, converted from Latin-1, and
-/// any other encoding refused. Allocated from `a` when converted.
-pub fn logMessage(a: Allocator, c: *const object.Commit) LogMessageError![]const u8 {
-    return logText(a, c, c.message);
-}
-
-/// Errors from `logText`.
-pub const LogTextError = error{ UnsupportedEncoding, OutOfMemory };
-
-/// `text`, from commit `c`'s header or message, in UTF-8 as `logMessage`
-/// converts it.
-pub fn logText(a: Allocator, c: *const object.Commit, text: []const u8) LogTextError![]const u8 {
-    const enc = c.encoding orelse return text;
-    if (std.ascii.eqlIgnoreCase(enc, "utf-8") or std.ascii.eqlIgnoreCase(enc, "utf8") or
-        std.ascii.eqlIgnoreCase(enc, "us-ascii")) return text;
-    if (std.ascii.eqlIgnoreCase(enc, "iso-8859-1") or std.ascii.eqlIgnoreCase(enc, "latin1") or
-        std.ascii.eqlIgnoreCase(enc, "iso8859-1"))
-    {
-        var out: std.ArrayList(u8) = .empty;
-        for (text) |b| {
-            if (b < 0x80) try out.append(a, b) else {
-                var buf: [4]u8 = undefined;
-                // unreachable: a byte is a code point below U+0100, two bytes in UTF-8
-                const n = std.unicode.utf8Encode(b, &buf) catch unreachable;
-                try out.appendSlice(a, buf[0..n]);
-            }
-        }
-        return out.items;
-    }
-    return error.UnsupportedEncoding;
+    const converted = try pretty.reencodeCommit(ctx.a, try ctx.a.dupe(u8, found.bytes), output);
+    return object.Commit.parse(ctx.a, ctx.db.objectFormat(), converted.bytes);
 }
 
 fn getOneLine(msg: []const u8) usize {
@@ -692,12 +669,12 @@ fn lastLineLength(buf: []const u8) usize {
 }
 
 /// git's `pp_user_info` for the mail formats: `From:` and `Date:`.
-fn userInfo(ctx: *Ctx, out: *std.ArrayList(u8), name: []const u8, email: []const u8, date: ?struct { secs: i64, offset: i32 }) Allocator.Error!void {
+fn userInfo(ctx: *Ctx, out: *std.ArrayList(u8), name: []const u8, email: []const u8, date: ?struct { secs: i64, offset: i32 }, encoding: []const u8) Allocator.Error!void {
     const a = ctx.a;
     var max_length: usize = 78;
     try out.appendSlice(a, "From: ");
     if (ctx.options.encode_email_headers and mailfmt.needsRfc2047(name)) {
-        try mailfmt.appendRfc2047(a, out, name, .address);
+        try mailfmt.appendRfc2047(a, out, name, encoding, .address);
         max_length = 76;
     } else if (mailfmt.needsRfc822Quoting(name)) {
         var q: std.ArrayList(u8) = .empty;
@@ -719,13 +696,13 @@ fn userInfo(ctx: *Ctx, out: *std.ArrayList(u8), name: []const u8, email: []const
 
 /// git's `pp_email_subject`: `Subject:`, the MIME headers when wanted,
 /// the extra headers, a blank line and any in-body headers.
-fn emailSubject(ctx: *Ctx, out: *std.ArrayList(u8), msg: []const u8, need_8bit_cte_in: bool, after_subject: []const u8, in_body: []const []const u8) Allocator.Error![]const u8 {
+fn emailSubject(ctx: *Ctx, out: *std.ArrayList(u8), msg: []const u8, need_8bit_cte_in: bool, after_subject: []const u8, in_body: []const []const u8, encoding: []const u8) Allocator.Error![]const u8 {
     const a = ctx.a;
     var title: std.ArrayList(u8) = .empty;
     const rest = try formatSubject(a, &title, msg, if (ctx.options.keep_subject) "\n" else " ");
     try emailSubjectLead(ctx, out);
     if (ctx.options.encode_email_headers and mailfmt.needsRfc2047(title.items)) {
-        try mailfmt.appendRfc2047(a, out, title.items, .subject);
+        try mailfmt.appendRfc2047(a, out, title.items, encoding, .subject);
     } else {
         try mailfmt.appendWrapped(a, out, title.items, -@as(i32, @intCast(lastLineLength(out.items))), 1, 78);
     }
@@ -737,7 +714,7 @@ fn emailSubject(ctx: *Ctx, out: *std.ArrayList(u8), msg: []const u8, need_8bit_c
         }
     }
     if (need_8bit_cte and ctx.options.attach == null) {
-        try out.appendSlice(a, "MIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: 8bit\n");
+        try out.print(a, "MIME-Version: 1.0\nContent-Type: text/plain; charset={s}\nContent-Transfer-Encoding: 8bit\n", .{encoding});
     }
     try out.appendSlice(a, after_subject);
     try out.append(a, '\n');
@@ -826,8 +803,8 @@ fn identEql(a: Ident, b: Ident) bool {
 /// One commit's mail, up to its signature.
 fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
     const a = ctx.a;
-    var commit = try readCommit(ctx, oid);
-    const msg = try utf8Message(ctx, &commit);
+    const commit = try shownCommit(ctx, oid);
+    const msg = commit.message;
     const author = commit.author;
 
     // the subject as %f, for an attachment's file name
@@ -857,10 +834,10 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
             from_email = sender.email;
         }
     }
-    try userInfo(ctx, out, from_name, from_email, .{ .secs = author.when_secs, .offset = author.offset_minutes });
+    try userInfo(ctx, out, from_name, from_email, .{ .secs = author.when_secs, .offset = author.offset_minutes }, ctx.encoding);
 
     const body_start = skipBlankLines(msg);
-    const rest = try emailSubject(ctx, out, body_start, need_8bit_cte, headers.after_subject, in_body.items);
+    const rest = try emailSubject(ctx, out, body_start, need_8bit_cte, headers.after_subject, in_body.items, ctx.encoding);
     const beginning_of_body = out.items.len;
     try remainder(ctx, out, rest);
     rtrim(out);
@@ -930,8 +907,8 @@ fn fileNameFor(ctx: *Ctx, subject: []const u8) Allocator.Error![]const u8 {
 fn fileName(ctx: *Ctx, commit: ?Oid, subject: ?[]const u8) Error![]const u8 {
     if (ctx.options.numbered_files) return ctx.a.print("{d}", .{ctx.nr});
     if (commit) |oid| {
-        var c = try readCommit(ctx, oid);
-        const msg = try utf8Message(ctx, &c);
+        const c = try shownCommit(ctx, oid);
+        const msg = c.message;
         // %f is the raw first paragraph sanitized, newlines and all
         return fileNameFor(ctx, try sanitizedSubject(ctx.a, rawSubject(skipBlankLines(msg))));
     }
@@ -1384,8 +1361,8 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?O
     }
     // `--from` names a sender with no date, which git prints as the epoch
     if (ctx.options.from) |from| {
-        try userInfo(ctx, out, from.name, from.email, .{ .secs = 0, .offset = 0 });
-    } else try userInfo(ctx, out, cover.sender.name, cover.sender.email, .{ .secs = cover.sender.when_secs, .offset = cover.sender.offset_minutes });
+        try userInfo(ctx, out, from.name, from.email, .{ .secs = 0, .offset = 0 }, "UTF-8");
+    } else try userInfo(ctx, out, cover.sender.name, cover.sender.email, .{ .secs = cover.sender.when_secs, .offset = cover.sender.offset_minutes }, "UTF-8");
 
     var subject: []const u8 = "*** SUBJECT HERE ***";
     var blurb: []const u8 = "*** BLURB HERE ***";
@@ -1397,7 +1374,7 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?O
             blurb = desc;
         } else subject = subject_sb.items;
     };
-    _ = try emailSubject(ctx, out, subject, need_8bit_cte, headers.after_subject, &.{});
+    _ = try emailSubject(ctx, out, subject, need_8bit_cte, headers.after_subject, &.{}, "UTF-8");
     try remainder(ctx, out, blurb);
     try out.append(a, '\n');
 
@@ -1405,13 +1382,19 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?O
         .shortlog => try coverShortlog(ctx, out, list),
         .modern => {
             const n = list.len;
+            // git's `%w(72)[%(count)/%(total)] %s` with no output encoding:
+            // formatted in UTF-8, written in each commit's own encoding
             for (1..n + 1) |i| {
-                var c = try readCommit(ctx, list[n - i]);
-                const msg = try utf8Message(ctx, &c);
+                const found = try ctx.db.read(ctx.io, list[n - i]);
+                defer ctx.db.allocator().free(found.bytes);
+                const utf8 = try pretty.reencodeCommit(a, try a.dupe(u8, found.bytes), "UTF-8");
+                const c = try object.Commit.parse(a, ctx.db.objectFormat(), utf8.bytes);
                 var line: std.ArrayList(u8) = .empty;
                 try line.print(a, "[{d}/{d}] ", .{ i, n });
-                _ = try formatSubject(a, &line, skipBlankLines(msg), " ");
-                try mailfmt.appendWrapped(a, out, line.items, 0, 0, 72);
+                _ = try formatSubject(a, &line, skipBlankLines(c.message), " ");
+                var wrapped: std.ArrayList(u8) = .empty;
+                try mailfmt.appendWrapped(a, &wrapped, line.items, 0, 0, 72);
+                try out.appendSlice(a, try pretty.toOutput(a, wrapped.items, pretty.outputEncoding(null, utf8.encoding)));
                 try out.append(a, '\n');
             }
             try out.append(a, '\n');
@@ -1463,48 +1446,17 @@ fn writeStatOnly(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Chang
     if (any) for (changes) |c| try summary(ctx, out, c);
 }
 
+/// git's `generate_shortlog_cover_letter`: the commits by author, the
+/// mailmap applied, subjects folded at 72 columns, in the log's encoding.
 fn coverShortlog(ctx: *Ctx, out: *std.ArrayList(u8), list: []const Oid) Error!void {
     const a = ctx.a;
-    if (ctx.repo.workDirectory()) |wt| {
-        if (wt.access(ctx.io, ".mailmap", .{})) |_| return error.MailmapUnsupported else |_| {}
-    }
-    const config = ctx.repo.configuration();
-    if (config.get("mailmap.file") != null or config.get("mailmap.blob") != null) return error.MailmapUnsupported;
-    const Group = struct { name: []const u8, subjects: std.ArrayList([]const u8) };
-    var groups: std.ArrayList(Group) = .empty;
-    for (list) |oid| {
-        var c = try readCommit(ctx, oid);
-        const msg = try utf8Message(ctx, &c);
-        var oneline: std.ArrayList(u8) = .empty;
-        _ = try formatSubject(a, &oneline, skipBlankLines(msg), " ");
-        var s: []const u8 = if (oneline.items.len > 0) oneline.items else "<none>";
-        while (s.len > 0 and ctype.isSpace(s[0])) s = s[1..];
-        if (std.mem.startsWith(u8, s, "[PATCH")) {
-            if (std.mem.findScalar(u8, s, ']')) |eob| s = s[eob + 1 ..];
-        }
-        while (s.len > 0 and ctype.isSpace(s[0]) and s[0] != '\n') s = s[1..];
-        var subject: std.ArrayList(u8) = .empty;
-        _ = try formatSubject(a, &subject, s, " ");
-        const name = c.author.name;
-        var found: ?*Group = null;
-        for (groups.items) |*g| if (std.mem.eql(u8, g.name, name)) {
-            found = g;
-        };
-        if (found == null) {
-            var at: usize = 0;
-            while (at < groups.items.len and std.mem.order(u8, groups.items[at].name, name) == .lt) at += 1;
-            try groups.insert(a, at, .{ .name = name, .subjects = .empty });
-            found = &groups.items[at];
-        }
-        try found.?.subjects.append(a, subject.items);
-    }
-    for (groups.items) |g| {
-        try out.print(a, "{s} ({d}):\n", .{ g.name, g.subjects.items.len });
-        var j = g.subjects.items.len;
-        while (j >= 1) : (j -= 1) {
-            try mailfmt.appendWrapped(a, out, g.subjects.items[j - 1], 2, 4, 72);
-            try out.append(a, '\n');
-        }
-        try out.append(a, '\n');
-    }
+    var mailmap = try mailmap_mod.Mailmap.load(ctx.gpa, ctx.io, ctx.repo);
+    defer mailmap.deinit();
+    const options = try shortlog.configured(a, ctx.repo.configuration(), .{ .wrap = .{ .width = 72, .indent1 = 2, .indent2 = 4 }, .mailmap = &mailmap });
+    var log = try shortlog.Shortlog.init(ctx.gpa, options);
+    defer log.deinit();
+    for (list) |oid| try log.add(ctx.io, ctx.db, oid);
+    var w: Io.Writer.Allocating = .fromArrayList(a, out);
+    log.write(&w.writer) catch return error.OutOfMemory;
+    out.* = w.toArrayList();
 }

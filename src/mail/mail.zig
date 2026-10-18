@@ -18,6 +18,7 @@ const Self = @This();
 
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
+const encoding = @import("../text.zig").encoding;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
@@ -175,8 +176,10 @@ pub const InfoOptions = struct {
     scissors: bool = false,
     /// `--quoted-cr`.
     quoted_cr: QuotedCr = .warn,
-    /// `-u`: text is taken into UTF-8. `false` (`-n`) leaves it as sent.
-    utf8: bool = true,
+    /// What text is taken into: git's `metainfo_charset`, which `-u`
+    /// makes `i18n.commitEncoding` (`commit.message.commitEncoding`).
+    /// `null` (`-n`) leaves it as sent.
+    charset: ?[]const u8 = "UTF-8",
     /// `--no-inbody-headers` is `false`.
     inbody_headers: bool = true,
 };
@@ -413,37 +416,16 @@ fn decodeB(a: Allocator, out: *std.ArrayList(u8), in_raw: []const u8) Allocator.
     }
 }
 
-fn sameUtf(src: []const u8, dst: []const u8) bool {
-    if (src.len < 3 or dst.len < 3) return false;
-    if (!std.ascii.eqlIgnoreCase(src[0..3], "utf") or !std.ascii.eqlIgnoreCase(dst[0..3], "utf")) return false;
-    var s = src[3..];
-    var d = dst[3..];
-    if (s.len > 0 and s[0] == '-') s = s[1..];
-    if (d.len > 0 and d[0] == '-') d = d[1..];
-    return std.ascii.eqlIgnoreCase(s, d);
-}
-
-/// Take `text` from `charset` into UTF-8.
+/// git's `convert_to_utf8`: `text` from `charset` into the options'
+/// character set, refused where it will not convert.
 fn convertToUtf8(s: *State, text: []const u8, charset: []const u8) Error![]const u8 {
-    if (!s.options.utf8 or charset.len == 0) return text;
-    if (sameUtf("UTF-8", charset) or std.ascii.eqlIgnoreCase("UTF-8", charset)) return text;
-    if (std.ascii.eqlIgnoreCase(charset, "us-ascii") or std.ascii.eqlIgnoreCase(charset, "ascii")) {
-        for (text) |c| if (c >= 0x80) return error.InvalidCharset;
-        return text;
-    }
-    if (std.ascii.eqlIgnoreCase(charset, "iso-8859-1") or std.ascii.eqlIgnoreCase(charset, "latin1") or
-        std.ascii.eqlIgnoreCase(charset, "iso8859-1") or std.ascii.eqlIgnoreCase(charset, "latin-1"))
-    {
-        var out: std.ArrayList(u8) = .empty;
-        for (text) |b| {
-            if (b < 0x80) try out.append(s.a, b) else {
-                try out.append(s.a, 0xc0 | (b >> 6));
-                try out.append(s.a, 0x80 | (b & 0x3f));
-            }
-        }
-        return out.items;
-    }
-    return error.UnsupportedCharset;
+    const into = s.options.charset orelse return text;
+    if (charset.len == 0 or encoding.same(into, charset)) return text;
+    const converted = encoding.reencode(s.a, text, into, charset) catch |err| switch (err) {
+        error.UnsupportedEncoding => return error.UnsupportedCharset,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    return converted orelse error.InvalidCharset;
 }
 
 /// RFC 2047 encoded words in a header value, decoded.
@@ -464,12 +446,12 @@ fn decodeHeader(s: *State, it: []const u8) Error![]const u8 {
         const cp = std.mem.findScalarPos(u8, it, ep, '?') orelse return error.MalformedEncodedWord;
         if (cp + 3 > it.len) return error.MalformedEncodedWord;
         const charset = it[ep..cp];
-        const encoding = it[cp + 1];
+        const word_encoding = it[cp + 1];
         if (it[cp + 2] != '?') return error.MalformedEncodedWord;
         const end = std.mem.findPos(u8, it, cp + 3, "?=") orelse return error.MalformedEncodedWord;
         const piece = it[cp + 3 .. end];
         var dec: std.ArrayList(u8) = .empty;
-        switch (std.ascii.toLower(encoding)) {
+        switch (std.ascii.toLower(word_encoding)) {
             'b' => try decodeB(a, &dec, piece),
             'q' => try decodeQ(a, &dec, piece, true),
             else => return error.MalformedEncodedWord,

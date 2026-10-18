@@ -13,9 +13,10 @@
 //! A subject is the commit's `%s` with any `[PATCH...]` prefix taken off;
 //! `wrap` folds it as `-w` does, counting columns as git's own table does.
 //! `--group=format:<format>` groups by what `pretty` makes of the format,
-//! for commits added by name. Trailers are read as the repository's
-//! `trailer.*` settings say. A message in an encoding other than UTF-8,
-//! which git would convert first, is refused by name.
+//! Trailers are read as the repository's `trailer.*` settings say. A
+//! commit in another encoding is converted as git converts it, and what is
+//! written is in `format_context.output_encoding`, which `configured` sets
+//! to the log's.
 
 const ErrorNamespace = @This();
 const Self = @This();
@@ -31,9 +32,9 @@ const odb_mod = @import("../odb/odb.zig");
 const message = @import("../object/message.zig");
 const trailer = @import("../object/trailer.zig");
 const mailmap_mod = @import("../rev_walk/mailmap.zig");
-const unicode_width = @import("../text.zig").unicode_width;
 const config_mod = @import("../config/config.zig");
 const pretty = @import("pretty.zig");
+const mailfmt = @import("../mail/format.zig");
 
 const Oid = hash.Oid;
 
@@ -81,11 +82,6 @@ pub const Options = struct {
 
 /// Errors from a shortlog.
 pub const Error = error{
-    /// A format group with a commit given to `addCommit`, which has no
-    /// name to format; such commits come through `add`.
-    FormatGroupNeedsName,
-    /// A commit whose `encoding` header names something other than UTF-8.
-    EncodingUnsupported,
     /// A `-w` whose width is no wider than an indent: git's usage error.
     InvalidWrap,
 } || pretty.Error;
@@ -174,36 +170,25 @@ pub const Shortlog = struct {
         s.* = undefined;
     }
 
-    /// Read the commit `oid` from `db` and add it.
+    /// Read the commit `oid` from `db` and add it: git's
+    /// `shortlog_add_commit`.
     pub fn add(s: *Shortlog, io: Io, db: *odb_mod.Odb, oid: Oid) Self.Error!void {
         const found = try db.read(io, oid);
         defer db.allocator().free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
-        var commit = try object.Commit.parse(s.gpa, db.objectFormat(), found.bytes);
-        defer commit.deinit();
-        try s.addParsed(&commit, .{ .io = io, .db = db, .oid = oid });
-    }
-
-    /// `shortlog_add_commit`: add a commit already read. A format group
-    /// needs the commit's name, and is `error.FormatGroupNeedsName` here.
-    pub fn addCommit(s: *Shortlog, commit: *const object.Commit) Self.Error!void {
-        if (s.formats.len != 0) return error.FormatGroupNeedsName;
-        try s.addParsed(commit, null);
-    }
-
-    const Named = struct { io: Io, db: *odb_mod.Odb, oid: Oid };
-
-    fn addParsed(s: *Shortlog, commit: *const object.Commit, named: ?Named) ErrorNamespace.Error!void {
-        if (commit.encoding) |enc| {
-            if (!std.ascii.eqlIgnoreCase(enc, "utf-8") and !std.ascii.eqlIgnoreCase(enc, "utf8"))
-                return error.EncodingUnsupported;
-        }
         var scratch: std.heap.ArenaAllocator = .init(s.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
 
+        // git formats each piece in UTF-8, the commit converted first, and
+        // writes it in the log's output encoding
+        const ctx = s.options.format_context;
+        const utf8 = try pretty.reencodeCommit(a, found.bytes, "UTF-8");
+        var commit = try object.Commit.parse(a, db.objectFormat(), utf8.bytes);
+        defer commit.deinit();
+        const output = pretty.outputEncoding(ctx.output_encoding, utf8.encoding);
         const oneline: []const u8 = if (s.options.summary) "" else blk: {
-            const subject = try message.onelineSubject(a, commit.message);
+            const subject = try pretty.toOutput(a, try message.onelineSubject(a, commit.message), output);
             break :blk if (subject.len == 0) "<none>" else subject;
         };
 
@@ -212,7 +197,9 @@ pub const Shortlog = struct {
             // git reads trailers from the commit buffer at its first blank
             // line, the blank line itself included, so the title paragraph
             // can be a trailer block of its own.
-            const body = try std.mem.concat(a, u8, &.{ "\n\n", commit.message });
+            var shown = try object.Commit.parse(a, db.objectFormat(), (try pretty.reencodeCommit(a, found.bytes, ctx.output_encoding)).bytes);
+            defer shown.deinit();
+            const body = try std.mem.concat(a, u8, &.{ "\n\n", shown.message });
             for (try trailer.iterate(a, s.options.trailers, body)) |t| {
                 if (!s.wantsKey(t.key)) continue;
                 const value = try s.identOf(a, t.value) orelse t.value;
@@ -222,14 +209,13 @@ pub const Shortlog = struct {
         }
         // `insert_records_from_format`, the formats given first.
         for (s.formats) |format| {
-            const n = named.?;
             var text: std.ArrayList(u8) = .empty;
-            try pretty.formatCommit(a, n.io, .{ .db = n.db, .oid = n.oid, .format = format }, &text, s.options.format_context);
+            try pretty.formatCommit(a, io, .{ .db = db, .oid = oid, .format = format }, &text, ctx);
             if (s.dedup and (try seen.getOrPut(a, text.items)).found_existing) continue;
             try s.insert(text.items, oneline);
         }
-        if (s.author) try s.insertPerson(a, &seen, commit.author, oneline);
-        if (s.committer) try s.insertPerson(a, &seen, commit.committer, oneline);
+        if (s.author) try s.insertPerson(a, &seen, commit.author, output, oneline);
+        if (s.committer) try s.insertPerson(a, &seen, commit.committer, output, oneline);
     }
 
     fn wantsKey(s: *const Shortlog, key: []const u8) bool {
@@ -237,8 +223,8 @@ pub const Shortlog = struct {
         return false;
     }
 
-    fn insertPerson(s: *Shortlog, a: Allocator, seen: *std.StringHashMapUnmanaged(void), who: object.Signature, oneline: []const u8) ErrorNamespace.Error!void {
-        const text = try s.formatPerson(a, trimName(who.name), who.email);
+    fn insertPerson(s: *Shortlog, a: Allocator, seen: *std.StringHashMapUnmanaged(void), who: object.Signature, output: ?[]const u8, oneline: []const u8) ErrorNamespace.Error!void {
+        const text = try pretty.toOutput(a, try s.formatPerson(a, trimName(who.name), who.email), output);
         if (s.dedup and (try seen.getOrPut(a, text)).found_existing) return;
         try s.insert(text, oneline);
     }
@@ -309,7 +295,7 @@ pub const Shortlog = struct {
                 const msg = record.subjects.items[j];
                 if (s.options.wrap) |opt| {
                     wrapped.clearRetainingCapacity();
-                    try addWrappedText(s.gpa, msg, &wrapped, .{ .indent1 = @intCast(opt.indent1), .indent2 = @intCast(opt.indent2), .width = @intCast(opt.width) });
+                    try mailfmt.appendWrapped(s.gpa, &wrapped, msg, @intCast(opt.indent1), @intCast(opt.indent2), @intCast(opt.width));
                     try w.writeAll(wrapped.items);
                     try w.writeByte('\n');
                 } else {
@@ -328,129 +314,15 @@ fn trimName(name: []const u8) []const u8 {
     return name[0..end];
 }
 
-/// `display_mode_esc_sequence_len`: an SGR escape, `ESC [ <digits;> m`.
-fn escapeLength(text: []const u8, at: usize) usize {
-    var p = at;
-    if (p >= text.len or text[p] != 0x1b) return 0;
-    p += 1;
-    if (p >= text.len or text[p] != '[') return 0;
-    p += 1;
-    while (p < text.len and (std.ascii.isDigit(text[p]) or text[p] == ';')) p += 1;
-    if (p >= text.len or text[p] != 'm') return 0;
-    return p + 1 - at;
-}
-
-/// `strbuf_add_wrapped_text`: `text` folded at spaces to `width` columns,
-/// the first line indented by `indent1` and the rest by `indent2`. A text
-/// that is not UTF-8 is counted a byte to a column, as git counts it.
-pub const WrapOptions = struct { indent1: i32 = 0, indent2: i32 = 0, width: i32 = 0 };
-pub fn addWrappedText(gpa: Allocator, text: []const u8, out: *std.ArrayList(u8), options: WrapOptions) Allocator.Error!void {
-    const indent1 = options.indent1;
-    const indent2 = options.indent2;
-    const width = options.width;
-    if (width <= 0) {
-        // `strbuf_add_indented_text`.
-        var indent: usize = @intCast(@max(indent1, 0));
-        var rest = text;
-        while (rest.len > 0) {
-            const eol = if (std.mem.findScalar(u8, rest, '\n')) |nl| nl + 1 else rest.len;
-            try out.appendNTimes(gpa, ' ', indent);
-            try out.appendSlice(gpa, rest[0..eol]);
-            rest = rest[eol..];
-            indent = @intCast(@max(indent2, 0));
-        }
-        return;
-    }
-    const orig_len = out.items.len;
-    var assume_utf8 = true;
-    const at = struct {
-        fn f(t: []const u8, i: usize) u8 {
-            return if (i < t.len) t[i] else 0;
-        }
-    }.f;
-    retry: while (true) {
-        var i: usize = 0;
-        var bol: usize = 0;
-        var indent: i32 = indent1;
-        var w: i32 = indent;
-        var space: ?usize = null;
-        if (indent < 0) {
-            w = -indent;
-            space = 0;
-        }
-        while (true) {
-            while (true) {
-                const skip = escapeLength(text, i);
-                if (skip == 0) break;
-                i += skip;
-            }
-            const c = at(text, i);
-            if (c == 0 or ctype.isSpace(c)) {
-                var new_line = false;
-                if (w <= width or space == null) {
-                    var start = bol;
-                    if (c == 0 and i == start) return;
-                    if (space) |sp| {
-                        start = sp;
-                    } else {
-                        try out.appendNTimes(gpa, ' ', @intCast(@max(indent, 0)));
-                    }
-                    try out.appendSlice(gpa, text[start..i]);
-                    if (c == 0) return;
-                    space = i;
-                    if (c == '\t') {
-                        w |= 0x07;
-                    } else if (c == '\n') {
-                        space.? += 1;
-                        const after = at(text, space.?);
-                        if (after == '\n') {
-                            try out.append(gpa, '\n');
-                            new_line = true;
-                        } else if (!std.ascii.isAlphanumeric(after)) {
-                            new_line = true;
-                        } else {
-                            try out.append(gpa, ' ');
-                        }
-                    }
-                    if (!new_line) {
-                        w += 1;
-                        i += 1;
-                    }
-                } else new_line = true;
-                if (new_line) {
-                    try out.append(gpa, '\n');
-                    const sp = space.?;
-                    i = sp + @intFromBool(ctype.isSpace(at(text, sp)));
-                    bol = i;
-                    space = null;
-                    indent = indent2;
-                    w = indent;
-                }
-                continue;
-            }
-            if (assume_utf8) {
-                const decoded = unicode_width.decode(text[i..]) orelse {
-                    assume_utf8 = false;
-                    out.shrinkRetainingCapacity(orig_len);
-                    continue :retry;
-                };
-                w += unicode_width.width(decoded.char);
-                i += decoded.len;
-            } else {
-                w += 1;
-                i += 1;
-            }
-        }
-    }
-}
-
 /// `base` with what a repository's configuration decides filled in: how
-/// trailers are read, by the comment string and the `trailer.*` settings.
-/// `auto` reads as `#`, which is what git's trailer parser sees for a
-/// commit already made. What it reads is `arena`'s.
-pub fn configured(arena: Allocator, config: *const config_mod.Config, base: Options) (Allocator.Error || error{InvalidCommentString})!Options {
+/// trailers are read, by the comment string and the `trailer.*` settings
+/// (`auto` reads as `#`, which is what git's trailer parser sees for a
+/// commit already made), and the encoding written,
+/// `i18n.logOutputEncoding`. What it reads is `arena`'s.
+pub fn configured(arena: Allocator, config: *const config_mod.Config, base: Options) (Allocator.Error || error{ InvalidCommentString, InvalidEncodingSetting })!Options {
     var options = base;
     options.trailers = try message.trailerSettings(arena, config);
+    options.format_context.output_encoding = try message.logOutputEncoding(config);
     return options;
 }
 
@@ -458,7 +330,7 @@ test "a subject folds where git's -w folds it" {
     const gpa = std.testing.allocator;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    try addWrappedText(gpa, "a b c d e f g h i j k l m n o p q r s t u v w x y z", &out, .{ .indent1 = 2, .indent2 = 4, .width = 12 });
+    try mailfmt.appendWrapped(gpa, &out, "a b c d e f g h i j k l m n o p q r s t u v w x y z", 2, 4, 12);
     try std.testing.expectEqualStrings("  a b c d e\n    f g h i\n    j k l m\n    n o p q\n    r s t u\n    v w x y\n    z", out.items);
 }
 
@@ -558,9 +430,4 @@ test "shortlog groups, sorts, counts and folds as git shortlog does" {
 test "shortlog refuses what it does not do by name" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.InvalidWrap, Shortlog.init(gpa, .{ .wrap = .{ .width = 6 } }));
-    var formatted = try Shortlog.init(gpa, .{ .groups = &.{.{ .format = "%an" }} });
-    defer formatted.deinit();
-    var commit = try object.Commit.parse(gpa, .sha1, "tree " ++ @as([40]u8, @splat('0')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\ns\n");
-    defer commit.deinit();
-    try std.testing.expectError(error.FormatGroupNeedsName, formatted.addCommit(&commit));
 }

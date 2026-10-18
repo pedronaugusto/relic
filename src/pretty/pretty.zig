@@ -9,7 +9,9 @@
 //! names (`%aN`, `%aE`, `%aL`), decorations (`%d`, `%D`, `%(decorate)`),
 //! notes (`%N`) and signatures (`%G?` and the rest) come from what the
 //! `Context` holds, and `%(trailers)` with every option reads trailers as
-//! its `trailers` settings say. What needs more — `%(describe)`, relative
+//! its `trailers` settings say. A commit in another encoding is converted
+//! to UTF-8 first and the output written in `Context.output_encoding`, as
+//! git's `format_commit_message` does. What needs more — `%(describe)`, relative
 //! and human dates, wrapping, padding and colour — is refused as
 //! `error.UnsupportedPlaceholder`.
 
@@ -19,6 +21,7 @@ const Self = @This();
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
 const percent = @import("../text.zig").percent;
+const encoding = @import("../text.zig").encoding;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -46,6 +49,10 @@ pub const Error = error{
     /// check it.
     SignatureNeedsSigner,
     NotACommit,
+    /// A commit's `encoding`, or the output's, names a character set
+    /// `encoding.Charset` does not convert, where git converts it with
+    /// iconv.
+    UnsupportedEncoding,
 } || signing.Error || odb_mod.Error || object.ParseError || Allocator.Error;
 
 /// What formatting needs besides the commit.
@@ -69,7 +76,46 @@ pub const Context = struct {
     /// How `%(trailers)` reads trailers: git's defaults unless given;
     /// `commit.message.trailerSettings` reads a repository's.
     trailers: trailer.Settings = .{},
+    /// The encoding the output is written in: `git log` and `git
+    /// shortlog` give `commit.message.logOutputEncoding`. `null`, git's
+    /// unset, writes it in the commit's own `encoding`, as `git archive`
+    /// and a merge message's list of commits do. The placeholders are
+    /// expanded in UTF-8 either way, the commit converted first.
+    output_encoding: ?[]const u8 = null,
 };
+
+/// A commit's bytes in an output encoding: what `reencodeCommit` gives.
+pub const Reencoded = struct {
+    /// The object's bytes, converted, its `encoding` header naming the
+    /// output's encoding or, for UTF-8, left out; the bytes as they are
+    /// where there was nothing to convert or the conversion stopped.
+    bytes: []const u8,
+    /// The commit's own `encoding` header, `null` for none.
+    encoding: ?[]const u8,
+};
+
+/// git's `logmsg_reencode`: commit object `raw` with its message and
+/// headers converted from the commit's `encoding` (UTF-8 when it names
+/// none) into `output`. `null` or an empty `output` converts nothing.
+/// Text that will not convert is kept as it is, as git keeps it; a
+/// character set `encoding.Charset` does not name is
+/// `error.UnsupportedEncoding`. The bytes are `a`'s or `raw`.
+pub fn reencodeCommit(a: Allocator, raw: []const u8, output: ?[]const u8) encoding.ReencodeError!Reencoded {
+    const own: ?[]const u8 = if (object.findHeader(raw, 0, "encoding")) |h| raw[h.start..h.end] else null;
+    const want = output orelse return .{ .bytes = raw, .encoding = own };
+    if (want.len == 0) return .{ .bytes = raw, .encoding = own };
+    const converted: []const u8 = if (encoding.same(own orelse "UTF-8", want))
+        (if (own == null) return .{ .bytes = raw, .encoding = null } else raw)
+    else
+        // git converts the object as a C string: up to a NUL
+        try encoding.reencode(a, cstr(raw), want, own orelse "UTF-8") orelse return .{ .bytes = raw, .encoding = own };
+    // git's `replace_encoding_header`
+    const h = object.findHeader(converted, 0, "encoding") orelse return .{ .bytes = converted, .encoding = own };
+    const line_start = h.start - "encoding ".len;
+    const line_end = if (h.end < converted.len) h.end + 1 else return .{ .bytes = converted, .encoding = own };
+    const replacement: []const u8 = if (encoding.isUtf8(want)) "" else try std.mem.concat(a, u8, &.{ "encoding ", want, "\n" });
+    return .{ .bytes = try std.mem.concat(a, u8, &.{ converted[0..line_start], replacement, converted[line_end..] }), .encoding = own };
+}
 
 /// The refs that point at each object, as git loads them for a format:
 /// every ref, then `HEAD`, then the shallow commits as `grafted`; a tag
@@ -278,6 +324,8 @@ const Parsed = struct {
     raw: []const u8,
     /// The message after the blank line that ends the headers.
     message: []const u8,
+    /// The commit's own `encoding`, what `%e` writes.
+    encoding: ?[]const u8,
 };
 
 fn getOneLine(msg: []const u8) usize {
@@ -553,7 +601,7 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         'a' => return if (ph.len >= 2) person(a, ctx, out, p.commit.author, ph[1]) else 0,
         'c' => return if (ph.len >= 2) person(a, ctx, out, p.commit.committer, ph[1]) else 0,
         'e' => {
-            if (p.commit.encoding) |e| try out.appendSlice(a, e);
+            if (p.encoding) |e| try out.appendSlice(a, e);
             return 1;
         },
         'B' => {
@@ -620,8 +668,10 @@ pub fn formatCommit(a: Allocator, io: Io, inputs: CommitInputs, out: *std.ArrayL
     defer db.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const raw = try a.dupe(u8, found.bytes);
-    const commit = try object.Commit.parse(a, db.objectFormat(), raw);
-    var st: State = .{ .a = a, .io = io, .db = db, .ctx = ctx, .p = .{ .oid = oid, .commit = commit, .raw = raw, .message = commit.message } };
+    // the placeholders are expanded in UTF-8, the commit converted first
+    const utf8 = try reencodeCommit(a, raw, "UTF-8");
+    const commit = try object.Commit.parse(a, db.objectFormat(), utf8.bytes);
+    var st: State = .{ .a = a, .io = io, .db = db, .ctx = ctx, .p = .{ .oid = oid, .commit = commit, .raw = raw, .message = commit.message, .encoding = utf8.encoding } };
     defer if (st.verdict) |*v| v.deinit();
     var at: usize = 0;
     while (at < format.len) {
@@ -663,6 +713,28 @@ pub fn formatCommit(a: Allocator, io: Io, inputs: CommitInputs, out: *std.ArrayL
         }
         at = pct + 1 + @as(usize, @intFromBool(magic != 0)) + consumed;
     }
+    // then into the output's encoding: git converts the whole buffer it
+    // was handed, what was in it before included
+    const converted = try toOutput(a, out.items, outputEncoding(ctx.output_encoding, utf8.encoding));
+    if (converted.ptr != out.items.ptr) {
+        out.clearRetainingCapacity();
+        try out.appendSlice(a, converted);
+    }
+}
+
+/// The encoding git's `format_commit_message` writes in: `output` unless
+/// it is UTF-8, else for an unset one the commit's own `encoding` unless
+/// that is UTF-8. `null` is UTF-8, no conversion.
+pub fn outputEncoding(output: ?[]const u8, commit_encoding: ?[]const u8) ?[]const u8 {
+    const e = output orelse commit_encoding orelse return null;
+    return if (encoding.same("UTF-8", e)) null else e;
+}
+
+/// `text`, formatted in UTF-8, in `output` (`outputEncoding`'s): as it
+/// is where `output` is `null` or the conversion stops, as git keeps it.
+pub fn toOutput(a: Allocator, text: []const u8, output: ?[]const u8) encoding.ReencodeError![]const u8 {
+    const e = output orelse return text;
+    return try encoding.reencode(a, text, e, "UTF-8") orelse text;
 }
 
 test "placeholders come out as git's do" {

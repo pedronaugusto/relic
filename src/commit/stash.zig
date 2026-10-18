@@ -35,6 +35,8 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
+const message = @import("../object/message.zig");
+const pretty = @import("../pretty/pretty.zig");
 const index_mod = @import("../index/index.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
@@ -88,7 +90,7 @@ pub const Error = error{
     /// An untracked directory holding a repository of its own, which a stash
     /// would record as a submodule. `Refusal` names it.
     NestedRepository,
-} || pathspec_mod.Error || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
+} || pretty.Error || pathspec_mod.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
     diff.Error || hooks.Error || refs_mod.LogReadError || fs.LockError || fs.CommitError ||
     ignore.Error || attributes.Error || convert.Error || error{NameTooLong};
 
@@ -450,7 +452,8 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
 
     const head_bytes = try repo.objectDatabase().read(io, head.oid);
     defer gpa.free(head_bytes.bytes);
-    const head_commit = try object.Commit.parse(arena, repo.objectFormat(), try arena.dupe(u8, head_bytes.bytes));
+    const head_commit_bytes = try arena.dupe(u8, head_bytes.bytes);
+    const head_commit = try object.Commit.parse(arena, repo.objectFormat(), head_commit_bytes);
     var head_map = try worktree.flatten(arena, io, repo.objectDatabase(), head_commit.tree);
 
     if (options.untracked == .none) try requireTracked(arena, &ctx.locked.index, options.paths, options.refusal);
@@ -500,7 +503,9 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     const branch = (try repo.refStore().currentBranch(arena, io)) orelse "(no branch)";
     var abbrev_buf: [hash.max_hex_len]u8 = undefined;
     const abbrev = try abbreviate(io, repo, head.oid, &abbrev_buf);
-    const subject = try oneline(arena, head_commit.message);
+    // git's `pp_commit_easy`: the subject in the log's encoding
+    const shown = try pretty.reencodeCommit(arena, head_commit_bytes, try message.logOutputEncoding(repo.configuration()));
+    const subject = try message.onelineSubject(arena, (try object.Commit.parse(arena, repo.objectFormat(), shown.bytes)).message);
     const label = try arena.print("{s}: {s} {s}", .{ branch, abbrev, subject });
 
     // `I`: the index as it stands.
@@ -514,7 +519,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
         untracked_commit = try writeCommit(io, repo, tree, &.{}, options.who, try arena.print("untracked files on {s}\n", .{label}));
     }
     const work_tree = try workTree(&ctx, updates.items);
-    const message = if (options.message) |m|
+    const stash_message = if (options.message) |m|
         try arena.print("On {s}: {s}", .{ branch, m })
     else
         try arena.print("WIP on {s}", .{label});
@@ -524,7 +529,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     // `inspect` reads a stash back by these places: what it was made on,
     // the index, then the untracked files.
     assert(parents.items.len == 2 + @as(usize, @intFromBool(untracked_commit != null)));
-    const stash_commit = try writeCommit(io, repo, work_tree, parents.items, options.who, message);
+    const stash_commit = try writeCommit(io, repo, work_tree, parents.items, options.who, stash_message);
 
     // `refs/stash` moves, and its log, which is the list, gains the line.
     {
@@ -534,7 +539,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
         try tx.update(ref_name, .{ .direct = stash_commit }, .any);
         try tx.commit(io, .{
             .who = options.who,
-            .message = message,
+            .message = stash_message,
             .policy = .always,
         });
     }
@@ -716,19 +721,17 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
 
 /// A stash commit, written as git writes one: unsigned whatever the
 /// configuration says, because git never signs them.
-fn writeCommit(io: Io, repo: *Repository, tree: Oid, parents: []const Oid, who: object.Signature, message: []const u8) Error!Oid {
-    const bytes = object.Commit.build(repo.allocator(), repo.objectFormat(), .{
+/// A stash's commit, written as git's `commit_tree` writes it: unsigned,
+/// its `encoding` as `i18n.commitEncoding` says.
+fn writeCommit(io: Io, repo: *Repository, tree: Oid, parents: []const Oid, who: object.Signature, text: []const u8) Error!Oid {
+    return repo.writeCommit(io, .{
         .tree = tree,
         .parents = parents,
         .author = who,
         .committer = who,
-        .message = message,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.UnexpectedObjectType,
-    };
-    defer repo.allocator().free(bytes);
-    return repo.objectDatabase().write(io, .commit, bytes);
+        .message = text,
+        .signing = .{ .sign = .never },
+    }, .{});
 }
 
 /// The shortest prefix of `oid`, seven digits or more, that names nothing
@@ -749,25 +752,6 @@ fn abbreviate(io: Io, repo: *Repository, oid: Oid, buf: *[hash.max_hex_len]u8) E
         break;
     }
     return hex[0..len];
-}
-
-/// A commit's subject as git's one-line format prints it: the first
-/// paragraph, its lines joined by spaces, trailing whitespace off each.
-fn oneline(arena: Allocator, message: []const u8) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var lines = std.mem.splitScalar(u8, message, '\n');
-    var started = false;
-    while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, " \t\r\n");
-        if (line.len == 0) {
-            if (started) break;
-            continue;
-        }
-        if (started) try out.append(arena, ' ');
-        try out.appendSlice(arena, line);
-        started = true;
-    }
-    return out.items;
 }
 
 /// `git stash apply stash@{n}`: merge the stash onto the working tree and

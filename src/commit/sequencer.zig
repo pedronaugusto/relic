@@ -35,6 +35,7 @@ const reset = @import("reset.zig");
 const head_mod = @import("../repo/head.zig");
 const ref_names = @import("../names.zig").ref;
 const message = @import("../object/message.zig");
+const pretty = @import("../pretty/pretty.zig");
 const trailer = @import("../object/trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const todo = @import("todo.zig");
@@ -97,7 +98,7 @@ pub const Error = error{
     NothingToSkip,
     /// A name given names no commit.
     NotACommit,
-} || three_way.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
+} || pretty.Error || three_way.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
     config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commit_hooks_mod.Error;
 
 /// Which replay.
@@ -469,12 +470,22 @@ const Replay = struct {
 
 const Picked = enum { committed, conflicted, empty, dropped, staged };
 
-fn readCommit(r: *Replay, oid: Oid) Error!struct { bytes: []const u8, commit: object.Commit } {
+/// A commit read into the arena: its bytes, and the commit with its
+/// message and people in `i18n.commitEncoding`, as git's `get_message`
+/// converts a picked commit (`log` for the log's encoding, which the
+/// instruction sheet's subjects are in).
+fn readCommit(r: *Replay, oid: Oid, in: enum { commit, log }) Error!struct { bytes: []const u8, commit: object.Commit } {
     const found = try r.repo.objectDatabase().read(r.io, oid);
     defer r.repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
-    const commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes);
+    const config = r.repo.configuration();
+    const output = switch (in) {
+        .commit => try message.commitEncoding(config),
+        .log => try message.logOutputEncoding(config),
+    };
+    const shown = try pretty.reencodeCommit(r.arena, bytes, output);
+    const commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), shown.bytes);
     return .{ .bytes = bytes, .commit = commit };
 }
 
@@ -505,7 +516,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     else
         try emptyTree(io, repo);
 
-    const picked = try readCommit(r, oid);
+    const picked = try readCommit(r, oid, .commit);
     const commit = picked.commit;
     const parent = try mainlineParent(commit.parents, r.options.mainline);
 
@@ -764,7 +775,7 @@ fn start(gpa: Allocator, io: Io, repo: *Repository, action: Action, commits: []c
     // The sheet git writes: short names and first-line subjects.
     var items: std.ArrayList(todo.Item) = .empty;
     for (commits) |oid| {
-        const read = try readCommit(&r, oid);
+        const read = try readCommit(&r, oid, .log);
         try items.append(arena, .{ .command = action.command(), .commit = oid, .arg = message.subjectLine(read.commit.message) });
     }
     var head = try head_mod.read(gpa, io, repo);
@@ -909,7 +920,7 @@ fn commitStaged(r: *Replay) Error!Oid {
 
     const picked = try repo.refStore().root().read(gpa, io, .cherry_pick_head);
     var author = r.options.who;
-    if (picked) |oid| author = (try readCommit(r, oid)).commit.author;
+    if (picked) |oid| author = (try readCommit(r, oid, .commit)).commit.author;
     const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 

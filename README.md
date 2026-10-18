@@ -758,6 +758,7 @@ reread the affected refs before retrying.
 
 - **No pseudo-merge bitmap extension or incremental MIDX chains.** `UnsupportedBitmapOptions` and `ChainUnsupported` name these; ordinary pack and MIDX bitmaps are read and written. An unusable optional accelerator falls back to the object walk.
 - **`working-tree-encoding` for UTF-16 and UTF-32 only.** Any other character set is refused by name.
+- **Commit, log and mail character sets: UTF-8, US-ASCII and ISO-8859-1.** A commit's `encoding`, `i18n.logOutputEncoding`, `i18n.commitEncoding` or a mail's `charset` naming another, which git converts through iconv, is refused by name.
 - **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name. **No GSS-API (Kerberos) to a SOCKS5 proxy:** it is never offered, so a proxy that takes nothing else refuses every method and the fetch stops with `ProxyAuthenticationRequired`.
 - **LFS without tus.** The tus adapter is refused by name; custom transfer adapters run as git-lfs runs them.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server. `receive.fsckObjects` and `receive.fsck.*` are read (`fsck.Scope.receive`) for a program that receives pushes itself.

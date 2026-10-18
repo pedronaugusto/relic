@@ -234,6 +234,7 @@ test "options shape the stream as git's do" {
         .{ .args = &.{ "--reencode=no", "-M", "main", "side" }, .options = .{ .tips = &tips, .reencode = .no, .renames = .{} } },
         .{ .args = &.{ "--reencode=no", "-C", "main", "side" }, .options = .{ .tips = &tips, .reencode = .no, .renames = .{ .detect_copies = true } } },
         .{ .args = &.{ "--reencode=no", "--no-data", "main", "side" }, .options = .{ .tips = &tips, .reencode = .no, .no_data = true } },
+        .{ .args = &.{ "--reencode=yes", "main", "side" }, .options = .{ .tips = &tips, .reencode = .yes } },
         .{ .args = &.{ "--reencode=no", "--full-tree", "--use-done-feature", "--progress=2", "--show-original-ids", "main", "side" }, .options = .{
             .tips = &tips,
             .reencode = .no,
