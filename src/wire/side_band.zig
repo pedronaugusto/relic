@@ -15,6 +15,9 @@ const assert = std.debug.assert;
 
 const pkt_line = @import("../codec.zig").pkt_line;
 const progress_mod = @import("../report.zig").progress;
+const color = @import("../config/color.zig");
+const config_mod = @import("../config/config.zig");
+const ctype = @import("../text.zig").ctype;
 
 /// Why a side-band stream stopped.
 pub const Error = error{
@@ -118,16 +121,122 @@ pub const Demux = struct {
     }
 };
 
-/// Hand the caller the remote's progress text with its control characters
-/// made visible, in as many events as the shown text takes.
-fn emitRemote(p: progress_mod.Progress, text: []const u8) void {
-    var shown: [1024]u8 = undefined;
-    var rest = text;
-    while (rest.len != 0) {
-        const part = progress_mod.sanitize(rest, p.remote_control, &shown);
-        if (part.written != 0) p.report(p.context, .{ .remote = shown[0..part.written] });
-        rest = rest[part.read..];
+/// The colours git writes a remote's keywords in: git's defaults under
+/// `color.remote.<keyword>`.
+pub const RemoteColors = struct {
+    hint: color.Color = color.yellow,
+    warning: color.Color = color.bold_yellow,
+    success: color.Color = color.bold_green,
+    @"error": color.Color = color.bold_red,
+
+    /// The colours `output` asks for, as git's `use_sideband_colors`
+    /// reads them: `color.remote`, else `color.ui`, else `auto`, each by
+    /// its last value, one with no value passed over; `null` where git
+    /// writes the remote's text without colour. A keyword's colour is its
+    /// last value, one that does not parse or has none leaving git's
+    /// default, as git's does after saying so.
+    pub fn configured(config: ?*const config_mod.Config, output: color.Output) color.Error!?RemoteColors {
+        const when: color.When = output.asked orelse when: {
+            const c = config orelse break :when .auto;
+            for ([_][]const u8{ "color.remote", "color.ui" }) |name| {
+                const entry = c.find(name) orelse continue;
+                break :when try color.parseWhen(entry.value orelse continue);
+            }
+            break :when .auto;
+        };
+        const want = switch (when) {
+            .never => false,
+            .always => true,
+            .auto => output.terminal,
+        };
+        if (!want) return null;
+        var out: RemoteColors = .{};
+        const c = config orelse return out;
+        inline for (@typeInfo(RemoteColors).@"struct".field_names) |name| {
+            if (c.find("color.remote." ++ name)) |entry| if (entry.value) |value| {
+                @field(out, name) = color.parse(value) catch @field(out, name);
+            };
+        }
+        return out;
     }
+
+    /// The sequences a `Progress` carries, borrowed from `c`.
+    pub fn keywords(c: *const RemoteColors) progress_mod.Keywords {
+        return .{ .hint = c.hint.bytes(), .warning = c.warning.bytes(), .success = c.success.bytes(), .@"error" = c.@"error".bytes() };
+    }
+};
+
+/// The remote's text as the caller is handed it: gathered into a buffer
+/// and reported when it fills or the text ends.
+const Shown = struct {
+    p: progress_mod.Progress,
+    buf: [1024]u8 = undefined,
+    len: usize = 0,
+
+    fn flush(s: *Shown) void {
+        if (s.len != 0) s.p.report(s.p.context, .{ .remote = s.buf[0..s.len] });
+        s.len = 0;
+    }
+
+    /// Bytes as they are; fewer than the buffer holds.
+    fn put(s: *Shown, bytes: []const u8) void {
+        if (s.len + bytes.len > s.buf.len) s.flush();
+        @memcpy(s.buf[s.len..][0..bytes.len], bytes);
+        s.len += bytes.len;
+    }
+
+    /// Text with its control characters made visible.
+    fn sanitized(s: *Shown, text: []const u8) void {
+        var rest = text;
+        while (rest.len != 0) {
+            const part = progress_mod.sanitize(rest, s.p.remote_control, s.buf[s.len..]);
+            s.len += part.written;
+            rest = rest[part.read..];
+            if (part.read == 0 or rest.len != 0) s.flush();
+        }
+    }
+};
+
+/// Hand the caller the remote's progress text with its control characters
+/// made visible, in as many events as the shown text takes; in colour, a
+/// keyword at the start of each line in its colour, as git's
+/// `demultiplex_sideband` writes it: each line of the packet, and what
+/// follows the last line ending, is such a start.
+fn emitRemote(p: progress_mod.Progress, text: []const u8) void {
+    var s: Shown = .{ .p = p };
+    defer s.flush();
+    const keywords = p.remote_keywords orelse return s.sanitized(text);
+    // git reads the packet as a C string
+    var rest = text[0 .. std.mem.findScalar(u8, text, 0) orelse text.len];
+    while (rest.len != 0) {
+        const brk = std.mem.findAny(u8, rest, "\n\r") orelse rest.len;
+        if (brk != 0) colorize(&s, keywords, rest[0..brk]);
+        if (brk == rest.len) break;
+        s.put(rest[brk..][0..1]);
+        rest = rest[brk + 1 ..];
+    }
+}
+
+/// git's `maybe_colorize_sideband` for one line: its leading spaces, then
+/// a keyword git knows, matched without regard to case and not followed by
+/// a letter or digit, in its colour; the rest made visible.
+fn colorize(s: *Shown, keywords: progress_mod.Keywords, line_in: []const u8) void {
+    var line = line_in;
+    var lead: usize = 0;
+    while (lead < line.len and ctype.isSpace(line[lead])) lead += 1;
+    s.put(line[0..lead]);
+    line = line[lead..];
+    inline for (.{ "hint", "warning", "success", "error" }) |word| {
+        if (line.len >= word.len and std.ascii.eqlIgnoreCase(line[0..word.len], word) and
+            (line.len == word.len or !std.ascii.isAlphanumeric(line[word.len])))
+        {
+            s.put(@field(keywords, word));
+            s.put(line[0..word.len]);
+            s.put(color.reset);
+            return s.sanitized(line[word.len..]);
+        }
+    }
+    s.sanitized(line);
 }
 
 const testing = std.testing;

@@ -46,12 +46,25 @@ pub const Progress = struct {
     /// What the remote's text may keep of its control characters: git's
     /// `sideband.allowControlCharacters`, whose default keeps colour.
     remote_control: Control = .color,
+    /// The colours a keyword at the start of a line of the remote's text
+    /// is written in, as git's `maybe_colorize_sideband` writes them;
+    /// `null` writes none. `transport.side_band.RemoteColors` gives git's.
+    remote_keywords: ?Keywords = null,
 
     /// Hand `event` to the caller, when there is one to hand it to.
     pub fn emit(progress: ?Progress, event: Event) void {
         const p = progress orelse return;
         p.report(p.context, event);
     }
+};
+
+/// The escape sequences a remote's keywords are written in, each ended by
+/// a reset; empty writes the keyword as it is.
+pub const Keywords = struct {
+    hint: []const u8 = "",
+    warning: []const u8 = "",
+    success: []const u8 = "",
+    @"error": []const u8 = "",
 };
 
 /// Which control characters a remote's text keeps, as git 2.55's

@@ -1500,3 +1500,101 @@ test "a fetch that prunes and a push that deletes leave no log of the gone remot
         try testing.expect(try gitHasLog(io, &work, "refs/remotes/origin/main"));
     }
 }
+
+test "a remote's keywords come in colour as git push shows them, under color.remote and color.remote.<keyword>" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const side_band = @import("../wire.zig").side_band;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    var bare = try root.dir.openDir(io, "repo.git", .{});
+    defer bare.close(io);
+    const enabled = try testremote.gitInput(gpa, io, bare, &.{ "config", "http.receivepack", "true" }, "");
+    gpa.free(enabled);
+    // what git's t5409 sends, and the cases around a keyword's edges
+    try testgit.fixtureHook(gpa, io, bare, "hooks/pre-receive", "text", "error: error\nERROR: also highlighted.\nhint: hint\nhinting: not highlighted\nsuccess: success\nwarning: warning\nprefixerror: error\n  error: leading space\nerror\nerrorx\n\twarning\ttab\nHint, Success and\x1b[31m colour\nwarning:\rhint:\n");
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+
+    var client = try testgit.Repo.init(gpa, io, &.{});
+    defer client.deinit();
+    try client.exec(io, &.{ "remote", "add", "origin", url });
+    try client.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "pushed" });
+    var repo = try repo_mod.Repository.open(gpa, io, client.dir, .{});
+    defer repo.deinit(io);
+
+    const Heard = struct {
+        text: std.ArrayList(u8) = .empty,
+        fn report(context: ?*anyopaque, event: progress_mod.Event) void {
+            const self_: *@This() = @ptrCast(@alignCast(context.?));
+            switch (event) {
+                .remote => |t| self_.text.appendSlice(testing.allocator, t) catch @panic("out of memory"),
+                else => {},
+            }
+        }
+    };
+    for ([_][]const []const u8{
+        &.{ "-c", "color.remote=always" },
+        &.{ "-c", "color.ui=always", "-c", "color.remote.hint=bold blue", "-c", "color.remote.error=nonsense", "-c", "color.remote.success=normal" },
+        &.{ "-c", "color.remote=never", "-c", "color.ui=always" },
+    }, 0..) |settings, i| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, settings);
+        const git_ref = try gpa.print("HEAD:refs/heads/git-{d}", .{i});
+        defer gpa.free(git_ref);
+        try args.appendSlice(gpa, &.{ "push", "origin", git_ref });
+        var pushed_git = try client.capture(io, args.items);
+        defer pushed_git.deinit(gpa);
+        // `remote: ` and the eight spaces git clears a line with where the
+        // output is not a terminal
+        var theirs: std.ArrayList(u8) = .empty;
+        defer theirs.deinit(gpa);
+        var lines = std.mem.splitScalar(u8, pushed_git.stderr, '\n');
+        while (lines.next()) |line| {
+            if (!std.mem.startsWith(u8, line, "remote: ")) continue;
+            var pieces = std.mem.splitScalar(u8, line["remote: ".len..], '\r');
+            var first = true;
+            while (pieces.next()) |piece| {
+                if (!first) try theirs.append(gpa, '\r');
+                first = false;
+                const rest = if (std.mem.startsWith(u8, piece, "remote: ")) piece["remote: ".len..] else piece;
+                try theirs.appendSlice(gpa, if (std.mem.endsWith(u8, rest, "        ")) rest[0 .. rest.len - 8] else rest);
+            }
+            try theirs.append(gpa, '\n');
+        }
+
+        var config_text: std.ArrayList(u8) = .empty;
+        defer config_text.deinit(gpa);
+        var at: usize = 1;
+        while (at < settings.len) : (at += 2) {
+            const s = settings[at];
+            const eq = std.mem.findScalar(u8, s, '=').?;
+            const dot = std.mem.findScalarLast(u8, s[0..eq], '.').?;
+            const first_dot = std.mem.findScalar(u8, s, '.').?;
+            if (dot == first_dot) {
+                try config_text.print(gpa, "[{s}]\n\t{s} = {s}\n", .{ s[0..dot], s[dot + 1 .. eq], s[eq + 1 ..] });
+            } else try config_text.print(gpa, "[{s} \"{s}\"]\n\t{s} = {s}\n", .{ s[0..first_dot], s[first_dot + 1 .. dot], s[dot + 1 .. eq], s[eq + 1 ..] });
+        }
+        var config = try config_mod.Config.parseText(gpa, config_text.items, .command);
+        defer config.deinit();
+        const colors = try side_band.RemoteColors.configured(&config, .{});
+        var heard: Heard = .{};
+        defer heard.text.deinit(testing.allocator);
+        const relic_ref = try gpa.print("HEAD:refs/heads/relic-{d}", .{i});
+        defer gpa.free(relic_ref);
+        var pushed = try push_mod.push(gpa, io, &repo, "origin", .{
+            .who = test_who,
+            .programs = .{ .environ = &env },
+            .refspecs = &.{relic_ref},
+            .progress = .{ .context = &heard, .report = Heard.report, .remote_keywords = if (colors) |*c| c.keywords() else null },
+        });
+        defer pushed.deinit();
+        try testing.expectEqualStrings(theirs.items, heard.text.items);
+    }
+}
