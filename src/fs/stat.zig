@@ -86,6 +86,12 @@ pub fn full(io: Io, dir: Io.Dir, sub_path: []const u8) FullResult {
         error.FileBusy => return .{ .failed = error.AccessDenied },
         else => |e| return .{ .failed = e },
     };
+    return ofStat(io, dir, sub_path, s);
+}
+
+/// git's view of a stat airlock took of `sub_path` in `dir`, by `stat` or
+/// by a scan of `dir`.
+pub fn ofStat(io: Io, dir: Io.Dir, sub_path: []const u8, s: airlock.Stat) FullResult {
     if (builtin.target.os.tag == .windows) return fullWindows(io, dir, sub_path, s);
     return .{
         .found = .{

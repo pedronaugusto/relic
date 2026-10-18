@@ -495,7 +495,17 @@ pub const StatError = airlock.StatError;
 /// walk over a working tree asks this once per entry, so the difference is a
 /// syscall per file.
 pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
-    switch (platstat.full(io, dir, sub_path)) {
+    return entryOf(platstat.full(io, dir, sub_path));
+}
+
+/// The entry a scan of `dir` (`airlock.scan`) found at `name`, as git takes
+/// it; `null` if it went away since.
+pub fn scannedEntry(io: Io, dir: Io.Dir, name: []const u8, stat: airlock.Stat) Self.StatError!?Entry {
+    return entryOf(platstat.ofStat(io, dir, name, stat));
+}
+
+fn entryOf(result: platstat.FullResult) Self.StatError!?Entry {
+    switch (result) {
         .absent => return null,
         .found => |f| return .{
             .stat = .fromFull(f),

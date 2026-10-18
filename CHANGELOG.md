@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `fs.StatError` is airlock's `StatError`, and `worktree.dir_scan.Scan.initPlain` allocates its buffer (`Allocator.Error`).
+- `fsmonitor.Error` has `NotABoolean` (`fsmonitor.allowRemote`, where git dies).
+
+### Changed
+
+- The stat of every path is `airlock.stat` (git's view kept here: on Windows the mode from the attributes, the creation time as ctime, inode 0, a link's size by `readLink`); `ENOENT` and `ENOTDIR` apart for `:(optional)` paths, as git tells them.
+- `worktree.dir_scan` reads through `airlock.scan`, the batch arm (`getattrlistbulk`) moved there.
+- Pins airlock 0.5.0.
+
+### Fixed
+
+- fsmonitor as git's `check_for_incompatible`: a working tree on another machine's volume has no monitor unless `fsmonitor.allowRemote`, nor one whose volume cannot be asked; on Windows none under `core.virtualFilesystem`; the daemon's socket for a git directory on another machine's volume is `<fsmonitor.socketDir or ~>/.git-fsmonitor-<SHA-1 of the working tree's real path>`, and a socket directory on another machine's volume, or named `msdos` or `ntfs`, has no daemon.
+
 ## [0.21.0] - 2026-10-18
 
 ### Breaking
