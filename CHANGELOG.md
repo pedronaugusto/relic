@@ -14,6 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `pretty.Context.colors` (`pretty.Colors.configured`, read as `git log` reads `color.decorate.<slot>` and `color.diff.commit`): `%C(...)` with `auto,` and `always,`, the old `%Cred`, `%Cgreen`, `%Cblue` and `%Creset`, and `%C(auto)`, under which `%H`, `%h`, `%d`, `%D` and `%(decorate)` are painted as `git log --format` paints them. A colour that does not parse is `error.InvalidColor` where git dies, and passed over where git writes none. Held to `git log --format` under `--color=always` and `--no-color`.
+- `pretty.refs.Context.color`: `%(color:...)` writes its colour, parsed by `config.color` (the listing's own colour check gone), and a line whose last colour is not `reset` ends in one, as git's `need_color_reset_at_eol`; `pretty.refs.BranchColors` (`color.branch.<slot>`, `color.branch` and `color.ui`) paints `git branch`'s own format and decides `%(color:...)` in `listBranches`. Held to `git for-each-ref`, `git branch` and `git tag` under `--color=always`, `color.ui` (which for-each-ref does not read) and every branch slot.
 
 ### Changed
 

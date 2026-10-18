@@ -14,9 +14,11 @@
 //! `ahead-behind` and `is-base`, and the `align` and `if` blocks, under
 //! any of git's four quoting styles.
 //!
-//! Colour is off, as git's is when it is not writing to a terminal: a
-//! `%(color:...)` git accepts writes nothing. Trailers are read as the
-//! repository's `trailer.*` settings say.
+//! `%(color:...)` writes its colour where `Context.color` says the
+//! command colours, and a line that leaves a colour on ends in a reset, as
+//! git's does; `git branch` paints its own format in `color.branch.<slot>`
+//! (`BranchColors`). Trailers are read as the repository's `trailer.*`
+//! settings say.
 
 const ErrorNamespace = @This();
 const unicode_width = @import("../text.zig").unicode_width;
@@ -36,6 +38,7 @@ const refs_mod = @import("../refs/refs.zig");
 const ref_names = @import("../names.zig").ref;
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
+const color = @import("../config/color.zig");
 const rev_walk = @import("../walk/walk.zig");
 const describe_mod = @import("../rev_walk/describe.zig");
 const mailmap_mod = @import("../rev_walk/mailmap.zig");
@@ -198,6 +201,12 @@ pub const Context = struct {
     /// The time now and the local zone, for `relative`, `human` and
     /// `-local` dates.
     clock: gitdate.Clock = .{},
+    /// Whether `%(color:...)` writes its colour, as git's `want_color`
+    /// decides it for the command: `git for-each-ref` reads no setting
+    /// (`color.wanted(null, &.{}, output)`), `git tag` reads `color.ui`
+    /// (`color.wanted(config, &.{}, output)`). `listBranches` decides it
+    /// by `BranchListOptions.colors`.
+    color: bool = false,
 };
 
 /// One `--sort` key.
@@ -480,6 +489,9 @@ const Atom = struct {
     head: ?[]const u8 = null,
     date: ?gitdate.Mode = null,
     trailers: trailer.Options = .{ .no_divider = true },
+    /// `color`: the sequence it writes, empty where the command does not
+    /// colour.
+    color: []const u8 = "",
 };
 
 const SignatureOption = enum { bare, grade, signer, key, fingerprint, primarykeyfingerprint, trustlevel };
@@ -545,58 +557,6 @@ fn maybeBool(text: []const u8) ?bool {
 }
 
 // ---------------------------------------------------------------------------
-// colours
-// ---------------------------------------------------------------------------
-
-/// Whether git's `color_parse` takes `value`: colour names, numbers, `#rgb`
-/// and `#rrggbb`, attributes and their `no` forms, at most two colours.
-fn validColor(value: []const u8) bool {
-    if (value.len == 0) return true;
-    const trimmed = std.mem.trim(u8, value, " \t\r\n");
-    if (std.ascii.eqlIgnoreCase(trimmed, "reset")) return true;
-    var colours: u8 = 0;
-    var words = std.mem.tokenizeAny(u8, value, " \t\r\n");
-    while (words.next()) |word| {
-        if (isColour(word)) {
-            colours += 1;
-            if (colours > 2) return false;
-            continue;
-        }
-        if (isAttribute(word)) continue;
-        return false;
-    }
-    return true;
-}
-
-fn isColour(word: []const u8) bool {
-    const names = [_][]const u8{ "normal", "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "default" };
-    for (names) |name| if (std.ascii.eqlIgnoreCase(word, name)) return true;
-    if (word.len > 6 and std.ascii.eqlIgnoreCase(word[0..6], "bright")) {
-        for (names[1..9]) |name| if (std.ascii.eqlIgnoreCase(word[6..], name)) return true;
-    }
-    if (word.len > 0 and word[0] == '#') {
-        if (word.len != 7 and word.len != 4) return false;
-        for (word[1..]) |c| if (!std.ascii.isHex(c)) return false;
-        return true;
-    }
-    // a number from -1 to 255
-    const n = decimal.whole(i64, word, 10) orelse return false;
-    return n >= -1 and n <= 255;
-}
-
-fn isAttribute(word_in: []const u8) bool {
-    var word = word_in;
-    if (std.ascii.startsWithIgnoreCase(word, "no")) {
-        word = word[2..];
-        if (word.len > 0 and word[0] == '-') word = word[1..];
-    }
-    for ([_][]const u8{ "bold", "dim", "italic", "ul", "blink", "reverse", "strike" }) |name| {
-        if (std.ascii.eqlIgnoreCase(word, name)) return true;
-    }
-    return false;
-}
-
-// ---------------------------------------------------------------------------
 // the listing
 // ---------------------------------------------------------------------------
 
@@ -651,6 +611,9 @@ pub const Item = struct {
 pub const Format = struct {
     parts: []const Part,
     quote: Quote,
+    /// git's `need_color_reset_at_eol`: the last `%(color:...)` is not
+    /// `reset`, and the command colours.
+    reset_at_end: bool = false,
 
     const Part = union(enum) {
         literal: []const u8,
@@ -1011,8 +974,10 @@ pub const Listing = struct {
                 } else return error.BadFieldArgument;
             },
             .color => {
-                const text = arg orelse return error.BadFieldArgument;
-                if (!validColor(text)) return error.BadFieldArgument;
+                // git parses it first, so a bad one is refused where it
+                // writes none
+                const parsed = color.parse(arg orelse return error.BadFieldArgument) catch return error.BadFieldArgument;
+                if (l.context.color) atom.color = try l.a().dupe(u8, parsed.bytes());
             },
             .@"ahead-behind", .@"is-base" => {
                 const text = arg orelse return error.BadFieldArgument;
@@ -1115,6 +1080,7 @@ pub const Listing = struct {
     /// git's `verify_ref_format`: compile `text`, every atom checked.
     pub fn parseFormat(l: *Listing, text: []const u8, quote: Quote) ErrorNamespace.Error!Format {
         var parts: std.ArrayList(Format.Part) = .empty;
+        var reset_at_end = false;
         var cp: usize = 0;
         while (cp < text.len) {
             const sp = findNext(text, cp) orelse break;
@@ -1126,10 +1092,11 @@ pub const Listing = struct {
             if ((quote == .python or quote == .shell or quote == .tcl) and atom.kind == .raw and !atom.raw_length)
                 return error.RawNeedsBinarySafeQuote;
             try parts.append(l.a(), .{ .atom = index });
+            if (std.mem.startsWith(u8, atom.name, "color:")) reset_at_end = !std.mem.eql(u8, atom.name["color:".len..], "reset");
             cp = ep + 1;
         }
         if (cp < text.len) try parts.append(l.a(), .{ .literal = text[cp..] });
-        return .{ .parts = parts.items, .quote = quote };
+        return .{ .parts = parts.items, .quote = quote, .reset_at_end = reset_at_end and l.context.color };
     }
 
     /// git's `find_next`: the next `%(`, past `%%`.
@@ -1422,7 +1389,7 @@ pub const Listing = struct {
                 if (!atom.push_remote) target = (try l.pushOf(short)) orelse return .{};
                 return .{ .s = try l.remoteDetails(atom, target, short, true) };
             },
-            .color => return .{},
+            .color => return .{ .s = atom.color },
             .flag => {
                 var parts: std.ArrayList(u8) = .empty;
                 if (item.is_symref) try parts.appendSlice(ar, ",symref");
@@ -2182,6 +2149,7 @@ pub const Listing = struct {
                 try handle(gpa, &stack, v, atom, format.quote);
             },
         };
+        if (format.reset_at_end) try handle(gpa, &stack, .{ .s = color.reset }, .{ .kind = .color, .name = "", .deref = false, .field = .str }, format.quote);
         if (stack.items.len != 1) return error.UnbalancedBlock;
         try out.appendSlice(gpa, stack.items[0].output.items);
     }
@@ -2694,18 +2662,55 @@ pub const BranchOptions = struct {
     verbose: u2 = 0,
     abbrev: ?u32 = null,
     remotes_only: bool = false,
+    /// The colours the format is painted in, `null` for none.
+    colors: ?*const BranchColors = null,
+};
+
+/// `git branch`'s colours: git's defaults under `color.branch.<slot>`.
+pub const BranchColors = struct {
+    reset: color.Color = .of(color.reset),
+    plain: color.Color = .none,
+    remote: color.Color = color.red,
+    local: color.Color = .none,
+    current: color.Color = color.green,
+    upstream: color.Color = color.blue,
+    worktree: color.Color = color.cyan,
+
+    /// git's `color_branch_slots`.
+    const names = [_]struct { []const u8, std.meta.FieldEnum(BranchColors) }{
+        .{ "reset", .reset },     .{ "plain", .plain },       .{ "remote", .remote },     .{ "local", .local },
+        .{ "current", .current }, .{ "upstream", .upstream }, .{ "worktree", .worktree },
+    };
+
+    /// git's defaults under what `color.branch.<slot>` sets, read in
+    /// order as git's branch reads them.
+    pub fn read(config: *const config_mod.Config) color.Error!BranchColors {
+        var out: BranchColors = .{};
+        try color.readSlots(BranchColors, &out, config, &names, &.{.{ .section = "color", .subsection = "branch" }});
+        return out;
+    }
+
+    /// The colours `output` asks for: `null` where git lists branches
+    /// without colour, as `color.branch` and `color.ui` decide.
+    pub fn configured(config: ?*const config_mod.Config, output: color.Output) color.Error!?BranchColors {
+        if (!try color.wanted(config, &.{"color.branch"}, output)) return null;
+        return if (config) |c| try read(c) else .{};
+    }
 };
 
 /// `git branch`'s format for the refs `l` holds: git's `build_format`,
-/// with colour off. The text is `gpa`'s.
+/// painted in `options.colors`. The text is `gpa`'s.
 pub fn branchFormat(gpa: Allocator, l: *Listing, options: BranchOptions) Error![]u8 {
     const remote_prefix = if (options.remotes_only) "" else "remotes/";
+    // git's `branch_get_color`
+    const paint: BranchColors = if (options.colors) |c| c.* else .{ .reset = .none, .remote = .none, .current = .none, .upstream = .none, .worktree = .none };
+    const reset = paint.reset.bytes();
     var local: std.ArrayList(u8) = .empty;
     defer local.deinit(gpa);
     var remote: std.ArrayList(u8) = .empty;
     defer remote.deinit(gpa);
-    try local.appendSlice(gpa, "%(if)%(HEAD)%(then)* %(else)%(if)%(worktreepath)%(then)+ %(else)  %(end)%(end)");
-    try remote.appendSlice(gpa, "  ");
+    try local.print(gpa, "%(if)%(HEAD)%(then)* {s}%(else)%(if)%(worktreepath)%(then)+ {s}%(else)  {s}%(end)%(end)", .{ paint.current.bytes(), paint.worktree.bytes(), paint.local.bytes() });
+    try remote.print(gpa, "  {s}", .{paint.remote.bytes()});
     var quoted_prefix: std.ArrayList(u8) = .empty;
     defer quoted_prefix.deinit(gpa);
     for (remote_prefix) |c| {
@@ -2727,17 +2732,17 @@ pub fn branchFormat(gpa: Allocator, l: *Listing, options: BranchOptions) Error![
         else
             try gpa.dupe(u8, "%(objectname:short)");
         defer gpa.free(obname);
-        try local.print(gpa, "%(align:{d},left)%(refname:lstrip=2)%(end) {s} ", .{ maxwidth, obname });
+        try local.print(gpa, "%(align:{d},left)%(refname:lstrip=2)%(end){s} {s} ", .{ maxwidth, reset, obname });
         if (options.verbose > 1) {
-            try local.appendSlice(gpa, "%(if:notequals=*)%(HEAD)%(then)%(if)%(worktreepath)%(then)(%(worktreepath)) %(end)%(end)");
-            try local.appendSlice(gpa, "%(if)%(upstream)%(then)[%(upstream:short)%(if)%(upstream:track)%(then): %(upstream:track,nobracket)%(end)] %(end)%(contents:subject)");
+            try local.print(gpa, "%(if:notequals=*)%(HEAD)%(then)%(if)%(worktreepath)%(then)({s}%(worktreepath){s}) %(end)%(end)", .{ paint.worktree.bytes(), reset });
+            try local.print(gpa, "%(if)%(upstream)%(then)[{s}%(upstream:short){s}%(if)%(upstream:track)%(then): %(upstream:track,nobracket)%(end)] %(end)%(contents:subject)", .{ paint.upstream.bytes(), reset });
         } else {
             try local.appendSlice(gpa, "%(if)%(upstream:track)%(then)%(upstream:track) %(end)%(contents:subject)");
         }
-        try remote.print(gpa, "%(align:{d},left){s}%(refname:lstrip=2)%(end)%(if)%(symref)%(then) -> %(symref:short)%(else) {s} %(contents:subject)%(end)", .{ maxwidth, quoted_prefix.items, obname });
+        try remote.print(gpa, "%(align:{d},left){s}%(refname:lstrip=2)%(end){s}%(if)%(symref)%(then) -> %(symref:short)%(else) {s} %(contents:subject)%(end)", .{ maxwidth, quoted_prefix.items, reset, obname });
     } else {
-        try local.appendSlice(gpa, "%(refname:lstrip=2)%(if)%(symref)%(then) -> %(symref:short)%(end)");
-        try remote.print(gpa, "{s}%(refname:lstrip=2)%(if)%(symref)%(then) -> %(symref:short)%(end)", .{quoted_prefix.items});
+        try local.print(gpa, "%(refname:lstrip=2){s}%(if)%(symref)%(then) -> %(symref:short)%(end)", .{reset});
+        try remote.print(gpa, "{s}%(refname:lstrip=2){s}%(if)%(symref)%(then) -> %(symref:short)%(end)", .{ quoted_prefix.items, reset });
     }
     return gpa.print("%(if:notequals=refs/remotes)%(refname:rstrip=-2)%(then){s}%(else){s}%(end)", .{ local.items, remote.items });
 }
@@ -2781,15 +2786,21 @@ pub const BranchListOptions = struct {
     /// `--format`; git's own when `null`.
     format: ?[]const u8 = null,
     omit_empty: bool = false,
+    /// The colours branches are listed in, `null` for none:
+    /// `BranchColors.configured` gives git's. They decide `%(color:...)`
+    /// in a `format` too, over `context.color`.
+    colors: ?*const BranchColors = null,
     context: Context = .{},
 };
 
 /// Errors from `listBranches`.
 pub const ListBranchesError = Error || Io.Writer.Error;
 
-/// List branches as `git branch --list` does, colour off.
+/// List branches as `git branch --list` does.
 pub fn listBranches(gpa: Allocator, io: Io, repo: *Repository, options: BranchListOptions, writer: *Io.Writer) ListBranchesError!void {
-    var l = Listing.init(gpa, io, repo, options.context);
+    var context = options.context;
+    context.color = options.colors != null;
+    var l = Listing.init(gpa, io, repo, context);
     defer l.deinit();
     var kinds: Kinds = switch (options.which) {
         .local => .{ .branches = true },
@@ -2819,6 +2830,7 @@ pub fn listBranches(gpa: Allocator, io: Io, repo: *Repository, options: BranchLi
         .verbose = options.verbose,
         .abbrev = options.abbrev,
         .remotes_only = options.which == .remote,
+        .colors = options.colors,
     });
     const format = try l.parseFormat(text, .none);
     if (!options.no_sort) {

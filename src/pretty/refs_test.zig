@@ -12,6 +12,7 @@ const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
 const gitdate = @import("../text.zig").date;
 const testgit = @import("../testing/git.zig");
+const color = @import("../config/color.zig");
 
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
@@ -57,6 +58,8 @@ const Parsed = struct {
     verbose: u2 = 0,
     abbrev: ?u32 = null,
     lines: u32 = 0,
+    /// `--color=<when>` and `--no-color`.
+    color: ?color.When = null,
 };
 
 fn parseArgs(arena: Allocator, io: Io, git: *testgit.Repo, args: []const []const u8) !Parsed {
@@ -119,6 +122,10 @@ fn parseArgs(arena: Allocator, io: Io, git: *testgit.Repo, args: []const []const
             p.verbose = 2;
         } else if (value(arg, "-n")) |v| {
             p.lines = if (v.len == 0) 1 else try std.fmt.parseUnsigned(u32, v, 10);
+        } else if (value(arg, "--color=")) |v| {
+            p.color = try color.parseWhen(v);
+        } else if (std.mem.eql(u8, arg, "--no-color")) {
+            p.color = .never;
         } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
             // listing is what is compared
         } else {
@@ -184,8 +191,13 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
     defer ours.deinit();
     var context: filter.Context = .{ .clock = clock };
     context.clock.locale_date_full_year = try localeDateFullYear(gpa, io, git);
+    // git's output here is not a terminal: `auto` is no colour
+    const output: color.Output = .{ .asked = p.color };
+    const branch_colors = try filter.BranchColors.configured(repo.configuration(), output);
     switch (command) {
         .for_each_ref => {
+            // for-each-ref reads no colour setting, `color.ui` included
+            context.color = try color.wanted(null, &.{}, output);
             var keys: std.ArrayList(filter.SortKey) = .empty;
             if (!p.no_sort) {
                 try keys.append(arena, .{ .atom = "refname" });
@@ -228,6 +240,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
             .points_at = p.points_at.items,
             .format = p.format,
             .omit_empty = p.omit_empty,
+            .colors = if (branch_colors) |*c| c else null,
             .context = context,
         }, &ours.writer),
         .tag => try filter.listTags(gpa, io, &repo, .{
@@ -243,7 +256,11 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
             .points_at = p.points_at.items,
             .format = p.format,
             .omit_empty = p.omit_empty,
-            .context = context,
+            .context = ctx: {
+                var c = context;
+                c.color = try color.wanted(repo.configuration(), &.{}, output);
+                break :ctx c;
+            },
         }, &ours.writer),
     }
     if (!std.mem.eql(u8, theirs, ours.written())) {
@@ -574,6 +591,58 @@ test "branch and tag listings read as git branch and git tag print them" {
     try git.exec(io, &.{ "checkout", "-q", "main" });
     try git.exec(io, &.{ "checkout", "-q", "--detach" });
     try compare(gpa, io, git, .branch, &.{});
+}
+
+test "colour comes out as git's for-each-ref, branch and tag write it: %(color:...), the reset at the end, color.branch.<slot>, color.ui read or not" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var f = try fixture(gpa, io);
+    defer release(gpa, &f);
+    const git = &f.git;
+    const formats = .{
+        "--format=%(color:red)%(refname:short)",
+        "--format=%(color:bold blue)%(refname)%(color:reset)|%(objectname:short)",
+        "--format=%(align:30,left)%(color:green)%(refname:short)%(end)%(if)%(upstream)%(then)%(color:#ff00aa)%(upstream:short)%(end)",
+        "--format=%(color:reset)x%(color:yellow)",
+    };
+    inline for (formats) |format| {
+        try compare(gpa, io, git, .for_each_ref, &.{ "--color=always", format });
+        try compare(gpa, io, git, .for_each_ref, &.{ "--color=always", "--shell", format });
+        try compare(gpa, io, git, .for_each_ref, &.{format});
+        try compare(gpa, io, git, .tag, &.{ "--color=always", format });
+        try compare(gpa, io, git, .branch, &.{ "--color=always", "-a", format });
+    }
+    inline for (.{ &.{"--color=always"}, &.{ "--color=always", "-a" }, &.{ "--color=always", "-r" }, &.{ "--color=always", "-v" }, &.{ "--color=always", "-vv" }, &.{ "--color=always", "-a", "-v" }, &.{ "--color=always", "-a", "-vv" }, &.{ "--color=always", "-r", "-v" } }) |args| {
+        try compare(gpa, io, git, .branch, args);
+    }
+    // `color.ui` reaches tag and branch, not for-each-ref
+    try git.exec(io, &.{ "config", "color.ui", "always" });
+    try compare(gpa, io, git, .for_each_ref, &.{formats[0]});
+    try compare(gpa, io, git, .tag, &.{formats[0]});
+    try compare(gpa, io, git, .branch, &.{ "-a", "-vv" });
+    try git.exec(io, &.{ "config", "color.branch", "never" });
+    try compare(gpa, io, git, .branch, &.{ "-a", "-v" });
+    try git.exec(io, &.{ "config", "--unset", "color.branch" });
+    for ([_][2][]const u8{
+        .{ "color.branch.current", "magenta ul" },
+        .{ "color.branch.local", "dim" },
+        .{ "color.branch.remote", "#123456" },
+        .{ "color.branch.upstream", "normal" },
+        .{ "color.branch.worktree", "bold" },
+        .{ "color.branch.reset", "reverse" },
+        .{ "color.branch.plain", "red" },
+    }) |setting| try git.exec(io, &.{ "config", setting[0], setting[1] });
+    inline for (.{ &.{}, &.{"-a"}, &.{"-vv"}, &.{ "-a", "-v" } }) |args| try compare(gpa, io, git, .branch, args);
+
+    // a colour that does not parse is refused even where none is written
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var l = filter.Listing.init(gpa, io, &repo, .{});
+    defer l.deinit();
+    try std.testing.expectError(error.BadFieldArgument, l.parseFormat("%(color:bogus)", .none));
+    git.report_failures = false;
+    defer git.report_failures = true;
+    try std.testing.expectError(error.GitFailed, git.run(io, &.{ "for-each-ref", "--format=%(color:bogus)" }));
 }
 
 test "ahead-behind and is-base answer as git's do" {
