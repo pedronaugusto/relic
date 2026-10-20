@@ -9,10 +9,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - `diff.UnifiedInputs.changes` replaces `change`: `diff.unified` writes a whole diff, every change of it, as git's `diff_flush_patch_all_file_pairs` writes its queue.
+- `transport.progress.Control` is git 2.55's set (`color`, `cursor`, `erase`, `all`; `.none`, `.everything`, the default colour alone): `sanitize` keeps the cursor movements (`ESC [ … A`-`H`, `f`) and erasures (`J`, `K`, `M`, `P`, `X`) it allows, as git's `handle_ansi_sequence`, and shows a carriage return inside a line as `^M`, the side band splitting the remote's text at line endings first as git's `demultiplex_sideband` does.
 - `pretty.Decorations.load` takes a `?*const Decorations.Filter`: `null` loads every ref, as `git archive` does.
 
 ### Added
 
+- `transport.side_band.allowedControl`: `sideband.allowControlCharacters` read from the configuration, the `sideband.<url>` section that matches the remote best deciding, as git's `sideband_apply_url_config`; a word git does not know (on which git warns without end) is `error.InvalidControlSetting`. Held to git's t5409 cases.
+- The server's fatal side-band message in colour: under `Progress.remote_keywords`, `Demux.message` paints the keyword it starts with, as git's `demultiplex_sideband` writes channel 3.
 - `pretty.Decorations.Filter` (git's `decoration_filter`) and `Filter.log`, the filter `git log` decorates through (`set_default_decoration_filter`): `--decorate-refs`, `--decorate-refs-exclude`, `--clear-decorations`, `log.excludeDecoration` and `log.initialDecorationSet`, and otherwise only the namespaces git decorates by default (`HEAD`, branches, tags, remote-tracking branches, the stash, replaced objects), so `%d` no longer names `refs/other/*`. Held to `git log --format=%d` under each.
 - `diff.Options.color_moved` and `color_moved_ws` (`diff.ColorMoved`, `diff.ColorMovedWs`; `diff.configured` reads `diff.colorMoved` and `diff.colorMovedWS`, a value git dies on refused): moved lines in colour, found over every file of the diff `diff.unified` writes, or within the body `diff.unifiedBody` writes, as git's `mark_color_as_moved` finds them (`plain`, `blocks` of twenty alphanumerics, `zebra`'s alternate blocks, `dimmed-zebra`'s uninteresting lines; `ignore-space-change`, `ignore-space-at-eol`, `ignore-all-space` and `allow-indentation-change` with the file's tab width) and painted in the `*Moved*` slots. The painter records the diff and replays it once the moved lines are marked. Held to `git diff --color=always` under every mode, each whitespace mode and the moved slots.
 

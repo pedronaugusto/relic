@@ -90,7 +90,7 @@ test "CVE-2024-52005, t5409-colorize-remote-messages 'disallow (color) control s
     const fatal = "\x1b[31merror:\x1b[m \x1b[2Kgone\n";
 
     // git 2.55's default keeps colour and shows the rest.
-    const by_default = try heard(gpa, .color, &messages, fatal);
+    const by_default = try heard(gpa, .{}, &messages, fatal);
     defer gpa.free(by_default.progress);
     defer gpa.free(by_default.message);
     try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n^[]0;evil title^G^[[2Jhidden\r^[[1Aup\n", by_default.progress);
@@ -103,8 +103,39 @@ test "CVE-2024-52005, t5409-colorize-remote-messages 'disallow (color) control s
     try std.testing.expectEqualStrings("^[[31mred^[[m\n^[]0;evil title^G^[[2Jhidden\r^[[1Aup\n", none.progress);
 
     // 'allow all control sequences for a specific URL': as the remote sent them.
-    const all = try heard(gpa, .all, &messages, fatal);
+    const all = try heard(gpa, .everything, &messages, fatal);
     defer gpa.free(all.progress);
     defer gpa.free(all.message);
     try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n\x1b]0;evil title\x07\x1b[2Jhidden\r\x1b[1Aup\n", all.progress);
+
+    // 'control sequences in sideband allowed by default': `erase,cursor,color` keeps those three kinds only.
+    const some = try heard(gpa, .{ .cursor = true, .erase = true }, &messages, fatal);
+    defer gpa.free(some.progress);
+    defer gpa.free(some.message);
+    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n^[]0;evil title^G\x1b[2Jhidden\r\x1b[1Aup\n", some.progress);
+    try std.testing.expectEqualStrings("\x1b[31merror:\x1b[m \x1b[2Kgone", some.message);
+}
+
+test "sideband.allowControlCharacters is read as git 2.55 reads it, the sideband.<url> section matching best deciding" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { config: []const u8, url: ?[]const u8 = null, want: ?progress.Control }{
+        .{ .config = "", .want = .{} },
+        .{ .config = "[sideband]\n\tallowControlCharacters\n", .want = .everything },
+        .{ .config = "[sideband]\n\tallowControlCharacters = no\n", .want = .none },
+        .{ .config = "[sideband]\n\tallowControlCharacters = \n", .want = .none },
+        .{ .config = "[sideband]\n\tallowControlCharacters = erase,cursor,color\n", .want = .{ .cursor = true, .erase = true } },
+        .{ .config = "[sideband]\n\tallowControlCharacters = cursor,false,erase\n", .want = .{ .color = false, .erase = true } },
+        .{ .config = "[sideband]\n\tallowControlCharacters = colorful\n", .want = null },
+        .{ .config = "[sideband]\n\tallowControlCharacters = color,,erase\n", .want = null },
+        .{ .config = "[sideband \"file://\"]\n\tallowControlCharacters = true\n[sideband]\n\tallowControlCharacters = false\n", .url = "file:///srv/r.git", .want = .everything },
+        .{ .config = "[sideband \"file://\"]\n\tallowControlCharacters = true\n", .url = "/srv/r.git", .want = .{} },
+        .{ .config = "[sideband \"https://example.com\"]\n\tallowControlCharacters = cursor\n[sideband \"https://example.com/team\"]\n\tallowControlCharacters = erase\n", .url = "https://example.com/team/r.git", .want = .{ .color = false, .erase = true } },
+    };
+    for (cases) |case| {
+        var config = try config_mod.Config.parseText(gpa, case.config, .local);
+        defer config.deinit();
+        if (case.want) |want| {
+            try std.testing.expectEqual(want, try side_band.allowedControl(gpa, &config, case.url));
+        } else try std.testing.expectError(error.InvalidControlSetting, side_band.allowedControl(gpa, &config, case.url));
+    }
 }

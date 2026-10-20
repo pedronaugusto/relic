@@ -44,8 +44,9 @@ pub const Progress = struct {
     /// operation; whatever it does delays the operation by that much.
     report: *const fn (context: ?*anyopaque, event: Event) void,
     /// What the remote's text may keep of its control characters: git's
-    /// `sideband.allowControlCharacters`, whose default keeps colour.
-    remote_control: Control = .color,
+    /// `sideband.allowControlCharacters` (`transport.side_band.Allowed`
+    /// reads it), whose default keeps colour.
+    remote_control: Control = .{},
     /// The colours a keyword at the start of a line of the remote's text
     /// is written in, as git's `maybe_colorize_sideband` writes them;
     /// `null` writes none. `transport.side_band.RemoteColors` gives git's.
@@ -68,27 +69,35 @@ pub const Keywords = struct {
 };
 
 /// Which control characters a remote's text keeps, as git 2.55's
-/// `sideband.allowControlCharacters` says.
-pub const Control = enum {
-    /// None: each is shown as `^` and a letter, `ESC` as `^[`, `DEL` as
-    /// `^?`.
-    none,
-    /// ANSI colour, `ESC [ <n>;... m`, and none of the rest.
-    color,
-    /// All of them, as the remote sent them.
-    all,
+/// `sideband.allowControlCharacters` says. Each one it does not keep is
+/// shown as `^` and a letter, `ESC` as `^[`, `DEL` as `^?`. The default
+/// keeps colour.
+pub const Control = packed struct(u4) {
+    /// ANSI colour, `ESC [ <n>;... m`.
+    color: bool = true,
+    /// The cursor moved: `ESC [ <n>;... ` and one of `ABCDEFGHf`.
+    cursor: bool = false,
+    /// Characters erased: `ESC [ <n>;... ` and one of `JKMPX`.
+    erase: bool = false,
+    /// Every control character, as the remote sent it.
+    all: bool = false,
+
+    /// None of them.
+    pub const none: Control = .{ .color = false };
+    /// All of them.
+    pub const everything: Control = .{ .color = false, .all = true };
 };
 
 /// How much of `text` one `sanitize` took, and how much it wrote.
 pub const Sanitized = struct { read: usize, written: usize };
 
 /// git's `strbuf_add_sanitized`: as much of `text` as fits in `out`, with
-/// every control character but a tab, a line feed and a carriage return
-/// made visible unless `control` keeps it. A NUL ends the text, as it ends
+/// every control character but a tab and a line feed made visible unless
+/// `control` keeps it. A NUL ends the text, as it ends
 /// git's. Call again with what is left; each call takes at least one byte
 /// when `out` holds two.
 pub fn sanitize(text: []const u8, control: Control, out: []u8) Sanitized {
-    if (control == .all) {
+    if (control.all) {
         const n = @min(text.len, out.len);
         @memcpy(out[0..n], text[0..n]);
         return .{ .read = n, .written = n };
@@ -98,14 +107,14 @@ pub fn sanitize(text: []const u8, control: Control, out: []u8) Sanitized {
     while (r < text.len) {
         const c = text[r];
         if (c == 0) return .{ .read = text.len, .written = w };
-        if (c >= 0x20 and c != 0x7f or c == '\t' or c == '\n' or c == '\r') {
+        if (c >= 0x20 and c != 0x7f or c == '\t' or c == '\n') {
             if (w == out.len) break;
             out[w] = c;
             w += 1;
             r += 1;
             continue;
         }
-        if (control == .color) if (colorSequence(text[r..])) |len| {
+        if (control != Control.none) if (sequence(text[r..], control)) |len| {
             if (w + len <= out.len) {
                 @memcpy(out[w..][0..len], text[r..][0..len]);
                 w += len;
@@ -124,12 +133,15 @@ pub fn sanitize(text: []const u8, control: Control, out: []u8) Sanitized {
     return .{ .read = r, .written = w };
 }
 
-/// The length of the ANSI colour sequence `text` starts with, `ESC [`, then
-/// digits and `;`, then `m`; `null` when it starts with none.
-fn colorSequence(text: []const u8) ?usize {
+/// The length of the ANSI sequence `control` keeps that `text` starts
+/// with, `ESC [`, then digits and `;`, then the letter that ends it, as
+/// git's `handle_ansi_sequence` reads one; `null` when it starts with none.
+fn sequence(text: []const u8, control: Control) ?usize {
     if (text.len < 3 or text[0] != 0x1b or text[1] != '[') return null;
     for (text[2..], 2..) |c, i| {
-        if (c == 'm') return i + 1;
+        if ((control.color and c == 'm') or
+            (control.cursor and std.mem.findScalar(u8, "ABCDEFGHf", c) != null) or
+            (control.erase and std.mem.findScalar(u8, "JKMPX", c) != null)) return i + 1;
         if (!std.ascii.isDigit(c) and c != ';') return null;
     }
     return null;
@@ -137,15 +149,17 @@ fn colorSequence(text: []const u8) ?usize {
 
 test "a remote's control characters are shown, colour kept by default, as git 2.55 shows them" {
     var buf: [64]u8 = undefined;
-    const text = "\x1b[31mred\x1b[m \x1b]0;title\x07 \x1b[2J\x7f\tok\r\n";
-    var got = sanitize(text, .color, &buf);
+    const text = "\x1b[31mred\x1b[m \x1b]0;title\x07 \x1b[2J\x1b[3G\x7f\tok\r\n";
+    var got = sanitize(text, .{}, &buf);
     try std.testing.expectEqual(text.len, got.read);
-    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m ^[]0;title^G ^[[2J^?\tok\r\n", buf[0..got.written]);
+    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m ^[]0;title^G ^[[2J^[[3G^?\tok^M\n", buf[0..got.written]);
     got = sanitize(text, .none, &buf);
-    try std.testing.expectEqualStrings("^[[31mred^[[m ^[]0;title^G ^[[2J^?\tok\r\n", buf[0..got.written]);
-    got = sanitize(text, .all, &buf);
+    try std.testing.expectEqualStrings("^[[31mred^[[m ^[]0;title^G ^[[2J^[[3G^?\tok^M\n", buf[0..got.written]);
+    got = sanitize(text, .{ .color = false, .cursor = true, .erase = true }, &buf);
+    try std.testing.expectEqualStrings("^[[31mred^[[m ^[]0;title^G \x1b[2J\x1b[3G^?\tok^M\n", buf[0..got.written]);
+    got = sanitize(text, .everything, &buf);
     try std.testing.expectEqualStrings(text, buf[0..got.written]);
-    got = sanitize("a\x00hidden", .color, &buf);
+    got = sanitize("a\x00hidden", .{}, &buf);
     try std.testing.expectEqualStrings("a", buf[0..got.written]);
     // A buffer too small for the rest takes what fits, and moves on.
     var small: [2]u8 = undefined;
@@ -153,7 +167,7 @@ test "a remote's control characters are shown, colour kept by default, as git 2.
     var shown: std.ArrayList(u8) = .empty;
     defer shown.deinit(std.testing.allocator);
     while (rest.len != 0) {
-        const part = sanitize(rest, .color, &small);
+        const part = sanitize(rest, .{}, &small);
         try std.testing.expect(part.read != 0);
         try shown.appendSlice(std.testing.allocator, small[0..part.written]);
         rest = rest[part.read..];
