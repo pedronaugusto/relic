@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-20
+
 ### Breaking
 
 - `diff.UnifiedInputs.changes` replaces `change`: `diff.unified` writes a whole diff, every change of it, as git's `diff_flush_patch_all_file_pairs` writes its queue.
