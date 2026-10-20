@@ -24,8 +24,8 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.5.0#7f762143644bc2464e7a7e1544af7c5572f5f5a7",
-            .hash = "airlock-0.5.0-rfvu6Bq4BgClxCu1P8SDSU9WW0WOMd6jYDjtfasSIGEi",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.5.1#00515aeb80284b11dfb5fd11b200a5101cbe8e92",
+            .hash = "airlock-0.5.1-rfvu6M-_BgACLuSq21CrcJ8VScBIULLdh0kqikSUOSyz",
         },
 
         .warp = .{
@@ -66,8 +66,8 @@
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.14#5475b9af9f14be48314ca5727f119e990a8f4474",
-            .hash = "shakedown-0.4.14-BR8U44uOFgB1gB7RXGagu--aja63vtGqEkZctf9plgpk",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.15#dd61d84573f79753f700dda4a03562f23d329d6a",
+            .hash = "shakedown-0.4.15-BR8U49ieFgDnMPNf5Wu5s-cnP4bY2ptJMPmHLB-VJasA",
         },
     },
 }

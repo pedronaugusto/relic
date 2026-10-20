@@ -13,6 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins airlock 0.5.1 and shakedown 0.4.15: a stat over the simulated disk carries the device, owner and group it keeps, so the crash tests' index entries hold every field git's index stores.
 - `smart_http.Error.PinnedPubkeyUnsupported` is a pin under `http.sslVerify=false` alone, which curl checks with nothing else checked and uplink's TLS cannot yet; `SslVersionUnsupported` is SSL 2 or 3 alone.
 
 ## [0.25.0] - 2026-10-20
