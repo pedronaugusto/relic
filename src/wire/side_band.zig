@@ -18,6 +18,8 @@ const progress_mod = @import("../report.zig").progress;
 const color = @import("../config/color.zig");
 const config_mod = @import("../config/config.zig");
 const ctype = @import("../text.zig").ctype;
+const urlmatch = @import("../text.zig").urlmatch;
+const Allocator = std.mem.Allocator;
 
 /// Why a side-band stream stopped.
 pub const Error = error{
@@ -63,9 +65,22 @@ pub const Demux = struct {
         };
     }
 
-    /// What the server said on channel 3, trimmed.
+    /// What the server said on channel 3, trimmed: its control characters
+    /// made visible and, in colour, its keyword in its colour, as git's
+    /// `demultiplex_sideband` writes it.
     pub fn message(d: *const Demux) []const u8 {
         return std.mem.trim(u8, d.message_buffer[0..d.message_len], " \t\r\n");
+    }
+
+    /// The server's last words, as much of them as `message_buffer` holds.
+    fn keepMessage(d: *Demux, text: []const u8) void {
+        const control: progress_mod.Control = if (d.progress) |p| p.remote_control else .{};
+        const keywords: ?progress_mod.Keywords = if (d.progress) |p| p.remote_keywords else null;
+        var s: Shown = .{ .control = control, .buf = &d.message_buffer };
+        // git reads the packet as a C string, and the message as one line
+        const line = text[0 .. std.mem.findScalar(u8, text, 0) orelse text.len];
+        if (keywords) |k| colorize(&s, k, line) else s.sanitized(line);
+        d.message_len = s.len;
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
@@ -105,8 +120,7 @@ pub const Demux = struct {
                         1 => d.pending = data[1..],
                         2 => if (d.progress) |p| emitRemote(p, data[1..]),
                         3 => {
-                            const control: progress_mod.Control = if (d.progress) |p| p.remote_control else .color;
-                            d.message_len = progress_mod.sanitize(data[1..], control, &d.message_buffer).written;
+                            d.keepMessage(data[1..]);
                             d.err = error.RemoteError;
                             return error.ReadFailed;
                         },
@@ -166,21 +180,33 @@ pub const RemoteColors = struct {
     }
 };
 
-/// The remote's text as the caller is handed it: gathered into a buffer
-/// and reported when it fills or the text ends.
+/// The remote's text as it is shown: gathered into a buffer and, for its
+/// progress text, reported when it fills or the text ends; for its last
+/// words kept until the buffer is full.
 const Shown = struct {
-    p: progress_mod.Progress,
-    buf: [1024]u8 = undefined,
+    control: progress_mod.Control,
+    /// Where it is reported; `null` keeps what fits in `buf`.
+    p: ?progress_mod.Progress = null,
+    buf: []u8,
     len: usize = 0,
+    full: bool = false,
 
     fn flush(s: *Shown) void {
-        if (s.len != 0) s.p.report(s.p.context, .{ .remote = s.buf[0..s.len] });
+        const p = s.p orelse {
+            s.full = true;
+            return;
+        };
+        if (s.len != 0) p.report(p.context, .{ .remote = s.buf[0..s.len] });
         s.len = 0;
     }
 
     /// Bytes as they are; fewer than the buffer holds.
     fn put(s: *Shown, bytes: []const u8) void {
-        if (s.len + bytes.len > s.buf.len) s.flush();
+        if (s.full) return;
+        if (s.len + bytes.len > s.buf.len) {
+            s.flush();
+            if (s.full) return;
+        }
         @memcpy(s.buf[s.len..][0..bytes.len], bytes);
         s.len += bytes.len;
     }
@@ -188,8 +214,8 @@ const Shown = struct {
     /// Text with its control characters made visible.
     fn sanitized(s: *Shown, text: []const u8) void {
         var rest = text;
-        while (rest.len != 0) {
-            const part = progress_mod.sanitize(rest, s.p.remote_control, s.buf[s.len..]);
+        while (rest.len != 0 and !s.full) {
+            const part = progress_mod.sanitize(rest, s.control, s.buf[s.len..]);
             s.len += part.written;
             rest = rest[part.read..];
             if (part.read == 0 or rest.len != 0) s.flush();
@@ -198,23 +224,87 @@ const Shown = struct {
 };
 
 /// Hand the caller the remote's progress text with its control characters
-/// made visible, in as many events as the shown text takes; in colour, a
-/// keyword at the start of each line in its colour, as git's
-/// `demultiplex_sideband` writes it: each line of the packet, and what
-/// follows the last line ending, is such a start.
+/// made visible, in as many events as the shown text takes, as git's
+/// `demultiplex_sideband` writes it: line by line, each line ending as the
+/// remote sent it; in colour, a keyword at the start of each line in its
+/// colour, what follows the last line ending being such a start.
 fn emitRemote(p: progress_mod.Progress, text: []const u8) void {
-    var s: Shown = .{ .p = p };
+    var buf: [1024]u8 = undefined;
+    var s: Shown = .{ .control = p.remote_control, .p = p, .buf = &buf };
     defer s.flush();
-    const keywords = p.remote_keywords orelse return s.sanitized(text);
     // git reads the packet as a C string
     var rest = text[0 .. std.mem.findScalar(u8, text, 0) orelse text.len];
     while (rest.len != 0) {
         const brk = std.mem.findAny(u8, rest, "\n\r") orelse rest.len;
-        if (brk != 0) colorize(&s, keywords, rest[0..brk]);
+        if (brk != 0) if (p.remote_keywords) |keywords| colorize(&s, keywords, rest[0..brk]) else s.sanitized(rest[0..brk]);
         if (brk == rest.len) break;
         s.put(rest[brk..][0..1]);
         rest = rest[brk + 1 ..];
     }
+}
+
+/// Errors from reading `sideband.allowControlCharacters`.
+pub const ControlError = Allocator.Error || error{
+    /// A value with a word git does not know, on which git warns without
+    /// end.
+    InvalidControlSetting,
+};
+
+/// What a remote's text keeps of its control characters for `url`: git's
+/// `sideband.allowControlCharacters`, the value under the
+/// `sideband.<url>` section that matches `url` best deciding, as git's
+/// `sideband_apply_url_config` reads it; the plain setting alone where
+/// `url` is `null` or does not normalize. Allocates only while matching.
+pub fn allowedControl(gpa: Allocator, config: *const config_mod.Config, url: ?[]const u8) ControlError!progress_mod.Control {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const normalized: ?urlmatch.Info = if (url) |u| urlmatch.normalize(arena, u, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    } else null;
+    var out: progress_mod.Control = .{};
+    var best: ?urlmatch.Match = null;
+    for (config.entries.items) |entry| {
+        if (!std.ascii.eqlIgnoreCase(entry.section, "sideband") or !std.ascii.eqlIgnoreCase(entry.name, "allowcontrolcharacters")) continue;
+        const matched: urlmatch.Match = if (entry.subsection.len == 0) .any else blk: {
+            const have = normalized orelse continue;
+            const pattern = urlmatch.normalize(arena, entry.subsection, true) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => continue,
+            };
+            break :blk urlmatch.match(have, pattern) orelse continue;
+        };
+        if (best) |b| if (matched.order(b) == .lt) continue;
+        best = matched;
+        out = parseControl(entry.value) orelse return error.InvalidControlSetting;
+    }
+    return out;
+}
+
+/// A value as git's `sideband_allow_control_characters_config` reads it:
+/// a boolean, a bare name being true, or `color`, `cursor`, `erase`,
+/// `true` and `false` separated by commas.
+fn parseControl(value: ?[]const u8) ?progress_mod.Control {
+    const text = value orelse return .everything;
+    if (config_mod.parseBool(text)) |on| return if (on) .everything else .none else |_| {}
+    var out: progress_mod.Control = .none;
+    var rest = text;
+    next: while (rest.len != 0) {
+        inline for (.{ "color", "cursor", "erase", "true", "false" }) |word| {
+            if (std.mem.startsWith(u8, rest, word) and (rest.len == word.len or rest[word.len] == ',')) {
+                if (comptime std.mem.eql(u8, word, "true")) {
+                    out = .everything;
+                } else if (comptime std.mem.eql(u8, word, "false")) {
+                    out = .none;
+                } else @field(out, word) = true;
+                rest = rest[@min(rest.len, word.len + 1)..];
+                continue :next;
+            }
+        }
+        return null;
+    }
+    return out;
 }
 
 /// git's `maybe_colorize_sideband` for one line: its leading spaces, then
@@ -305,4 +395,21 @@ fn fuzzDemux(_: void, case: *shakedown.Case) anyerror!void {
     _ = demux.interface.readSliceShort(&out) catch {
         try testing.expect(demux.err != null);
     };
+}
+
+test "the server's last words in colour: the keyword they start with, as git's maybe_colorize_sideband paints the whole message" {
+    var wire: Io.Writer.Allocating = .init(testing.allocator);
+    defer wire.deinit();
+    try band(&wire.writer, 3, "  Error: no such ref\x07\n");
+    var buffer: [pkt_line.max_line]u8 = undefined;
+    var fixed: Io.Reader = .fixed(wire.written());
+    var in = fixed.limited(.unlimited, &buffer);
+    const colors: RemoteColors = .{};
+    const Ignore = struct {
+        fn report(_: ?*anyopaque, _: progress_mod.Event) void {}
+    };
+    var demux: Demux = .init(&in.interface, &.{}, .{ .report = Ignore.report, .remote_keywords = colors.keywords() });
+    var out: [8]u8 = undefined;
+    try testing.expectError(error.ReadFailed, demux.interface.readSliceShort(&out));
+    try testing.expectEqualStrings("\x1b[1;31mError\x1b[m: no such ref^G", demux.message());
 }

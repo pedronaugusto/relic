@@ -37,7 +37,7 @@ test "a log format in colour is git log --format's: %C(...), %C(auto), the names
     try setup(io, &git);
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    var decorations = try pretty.Decorations.load(gpa, io, &repo);
+    var decorations = try pretty.Decorations.load(gpa, io, &repo, null);
     defer decorations.deinit();
 
     const listed = try git.run(io, &.{ "rev-list", "--all" });
@@ -134,4 +134,71 @@ test "a colour that does not parse is refused where git dies, and passed over wh
     const theirs = try git.run(io, &.{ "log", "-1", "--no-color", "--format=%C(bogus)x%C(auto,bogus)y" });
     defer gpa.free(theirs);
     try std.testing.expectEqualStrings(theirs, try std.mem.concat(arena.allocator(), u8, &.{ out.items, "\n" }));
+}
+
+test "git log's decorations are filtered as git log filters them: the default namespaces, log.excludeDecoration, log.initialDecorationSet, --decorate-refs[-exclude] and --clear-decorations" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try setup(io, &git);
+    try git.exec(io, &.{ "update-ref", "refs/other/thing", "HEAD~1" });
+    try git.exec(io, &.{ "update-ref", "refs/notes/commits", "HEAD~2" });
+    try git.exec(io, &.{ "update-ref", "refs/heads/feature/x", "HEAD~2" });
+    try git.exec(io, &.{ "update-ref", "refs/prefetch/remotes/origin/main", "HEAD" });
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const listed = try git.run(io, &.{ "rev-list", "--all" });
+    defer gpa.free(listed);
+
+    const Case = struct { config: []const u8 = "", given: pretty.Decorations.Filter.Given = .{}, args: []const []const u8 = &.{} };
+    const cases = [_]Case{
+        .{},
+        .{ .config = "[log]\n\tinitialDecorationSet = all\n" },
+        .{ .config = "[log]\n\tinitialDecorationSet = All\n" },
+        .{ .config = "[log]\n\texcludeDecoration = refs/tags\n\texcludeDecoration = *main\n" },
+        .{ .config = "[log]\n\texcludeDecoration = tags/\n\texcludeDecoration\n" },
+        .{ .given = .{ .clear = true }, .args = &.{"--clear-decorations"} },
+        .{ .given = .{ .include = &.{"heads/feature"} }, .args = &.{"--decorate-refs=heads/feature"} },
+        .{ .given = .{ .include = &.{ "refs/other", "HEAD" }, .exclude = &.{"refs/heads/*"} }, .args = &.{ "--decorate-refs=refs/other", "--decorate-refs=HEAD", "--decorate-refs-exclude=refs/heads/*" } },
+        .{ .config = "[log]\n\texcludeDecoration = refs/remotes\n", .given = .{ .exclude = &.{"tags/v?"} }, .args = &.{"--decorate-refs-exclude=tags/v?"} },
+        .{ .config = "[log]\n\texcludeDecoration = refs/remotes\n", .given = .{ .include = &.{"refs/remotes/"} }, .args = &.{"--decorate-refs=refs/remotes/"} },
+    };
+    for (cases) |case| {
+        var config = try config_mod.Config.parseText(gpa, case.config, .local);
+        defer config.deinit();
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const filter = try pretty.Decorations.Filter.log(arena.allocator(), &config, case.given);
+        var decorations = try pretty.Decorations.load(gpa, io, &repo, &filter);
+        defer decorations.deinit();
+
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        var lines = std.mem.tokenizeScalar(u8, case.config, '\n');
+        var settings: std.ArrayList([]const u8) = .empty;
+        defer settings.deinit(gpa);
+        while (lines.next()) |line| {
+            if (line[0] == '[') continue;
+            const text = std.mem.trim(u8, line, "\t");
+            const eq = std.mem.find(u8, text, " = ");
+            try settings.append(gpa, if (eq) |e| try std.mem.concat(arena.allocator(), u8, &.{ "log.", text[0..e], "=", text[e + 3 ..] }) else try std.mem.concat(arena.allocator(), u8, &.{ "log.", text }));
+        }
+        for (settings.items) |s| try args.appendSlice(gpa, &.{ "-c", s });
+        try args.appendSlice(gpa, &.{ "log", "--all", "--format=%H%d" });
+        try args.appendSlice(gpa, case.args);
+        const theirs = try git.run(io, args.items);
+        defer gpa.free(theirs);
+
+        var ours: std.ArrayList(u8) = .empty;
+        var commits = std.mem.tokenizeScalar(u8, listed, '\n');
+        while (commits.next()) |hex| {
+            try pretty.formatCommit(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = try hash.Oid.parse(.sha1, hex), .format = "%H%d" }, &ours, .{ .decorations = &decorations });
+            try ours.append(arena.allocator(), '\n');
+        }
+        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+            std.debug.print("config {s}, args {d}\n", .{ case.config, case.args.len });
+            return err;
+        };
+    }
 }

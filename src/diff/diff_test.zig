@@ -217,7 +217,7 @@ test "an object's bytes go back to the object database's allocator, whatever the
     _ = try diff.numstat(other, io, &pair.db, changes.items, .{});
     for (changes.items) |change| {
         var out: std.Io.Writer.Allocating = .init(other);
-        try diff.unified(other, io, .{ .db = &pair.db, .change = change }, &out.writer, .{});
+        try diff.unified(other, io, .{ .db = &pair.db, .changes = &.{change} }, &out.writer, .{});
     }
 }
 
@@ -233,7 +233,7 @@ test "the unified patch is byte for byte what git prints" {
     for (changes.items) |change| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &out.writer, .{});
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = &.{change} }, &out.writer, .{});
 
         const expected = try pair.repo.run(io, &.{
             "diff",         "--no-color",  "-U3",
@@ -268,7 +268,7 @@ test "gitlink counts and patch text agree with git" {
 
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try diff.unified(gpa, io, .{ .db = &pair.db, .change = changes.items[0] }, &out.writer, .{});
+    try diff.unified(gpa, io, .{ .db = &pair.db, .changes = &.{changes.items[0]} }, &out.writer, .{});
     const expected = try pair.repo.run(io, &.{ "diff", "--no-color", "-U3", pair.old_text, pair.new_text, "--", "vendor/lib" });
     defer gpa.free(expected);
     try std.testing.expectEqualStrings(expected, out.written());
@@ -333,7 +333,7 @@ test "the hunk header carries the enclosing line git puts there" {
     for ([_]u32{ 0, 1, 3, 5 }) |context| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unified(gpa, io, .{ .db = &pair.db, .change = changes.items[0] }, &out.writer, .{ .context = context });
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = &.{changes.items[0]} }, &out.writer, .{ .context = context });
 
         var arg_buf: [8]u8 = undefined;
         const context_arg = try std.mem.print(&arg_buf, "-U{d}", .{context});
@@ -562,7 +562,7 @@ fn expectPatches(pair: *Pair, io: Io, options: diff.Options, flags: []const []co
     for (changes.items) |change| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &out.writer, options);
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = &.{change} }, &out.writer, options);
 
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
@@ -698,10 +698,10 @@ test "the patience patch is byte for byte what git diff --patience prints" {
     for (changes.items) |change| {
         var mine: std.Io.Writer.Allocating = .init(gpa);
         defer mine.deinit();
-        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &mine.writer, .{ .algorithm = .patience });
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = &.{change} }, &mine.writer, .{ .algorithm = .patience });
         var plain: std.Io.Writer.Allocating = .init(gpa);
         defer plain.deinit();
-        try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &plain.writer, .{});
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = &.{change} }, &plain.writer, .{});
         if (!std.mem.eql(u8, mine.written(), plain.written())) differing += 1;
     }
     try std.testing.expect(differing >= 5);
@@ -1062,38 +1062,14 @@ test "a coloured patch is byte for byte what git diff --color=always prints, und
         const options = try diff.configured(&config, .{ .colors = &colors });
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
-        var lines = std.mem.tokenizeScalar(u8, text, '\n');
-        var section: []const u8 = "";
-        var settings: std.ArrayList([]u8) = .empty;
-        defer {
-            for (settings.items) |s| gpa.free(s);
-            settings.deinit(gpa);
-        }
-        // the same settings as `-c` arguments
-        while (lines.next()) |line| {
-            if (line[0] == '[') {
-                section = line[1 .. line.len - 1];
-                continue;
-            }
-            const eq = std.mem.findScalar(u8, line, '=').?;
-            const name = std.mem.trim(u8, line[0..eq], " \t");
-            const value = std.mem.trim(u8, line[eq + 1 ..], " ");
-            var dotted: std.ArrayList(u8) = .empty;
-            for (section) |c| switch (c) {
-                ' ' => try dotted.append(gpa, '.'),
-                '"' => {},
-                else => try dotted.append(gpa, c),
-            };
-            try dotted.print(gpa, ".{s}=", .{name});
-            for (value) |c| if (c != '"') try dotted.append(gpa, c);
-            try settings.append(gpa, try dotted.toOwnedSlice(gpa));
-        }
-        for (settings.items) |s| try args.appendSlice(gpa, &.{ "-c", s });
+        var settings: Settings = try .init(gpa, text);
+        defer settings.deinit(gpa);
+        for (settings.list.items) |s| try args.appendSlice(gpa, &.{ "-c", s });
         try args.appendSlice(gpa, &.{ "diff", "--color=always", "-M", pair.old_text, pair.new_text, "--" });
         for (changes.items) |change| {
             var out: std.Io.Writer.Allocating = .init(gpa);
             defer out.deinit();
-            try diff.unified(gpa, io, .{ .db = &pair.db, .change = change }, &out.writer, options);
+            try diff.unified(gpa, io, .{ .db = &pair.db, .changes = &.{change} }, &out.writer, options);
             try args.append(gpa, change.path());
             if (change.status == .renamed) try args.append(gpa, change.old.?.path);
             const expected = try pair.repo.run(io, args.items);
@@ -1104,6 +1080,132 @@ test "a coloured patch is byte for byte what git diff --color=always prints, und
                 return err;
             };
         }
+    }
+}
+
+/// The settings of a configuration text as `-c` arguments: `name=value`,
+/// the value's quotes dropped.
+const Settings = struct {
+    list: std.ArrayList([]u8) = .empty,
+
+    fn init(gpa: std.mem.Allocator, text: []const u8) !Settings {
+        var out: Settings = .{};
+        errdefer out.deinit(gpa);
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        var section: []const u8 = "";
+        while (lines.next()) |line| {
+            if (line[0] == '[') {
+                section = line[1 .. line.len - 1];
+                continue;
+            }
+            const eq = std.mem.findScalar(u8, line, '=').?;
+            const name = std.mem.trim(u8, line[0..eq], " \t");
+            const value = std.mem.trim(u8, line[eq + 1 ..], " ");
+            var dotted: std.ArrayList(u8) = .empty;
+            errdefer dotted.deinit(gpa);
+            for (section) |c| switch (c) {
+                ' ' => try dotted.append(gpa, '.'),
+                '"' => {},
+                else => try dotted.append(gpa, c),
+            };
+            try dotted.print(gpa, ".{s}=", .{name});
+            for (value) |c| if (c != '"') try dotted.append(gpa, c);
+            const owned = try dotted.toOwnedSlice(gpa);
+            errdefer gpa.free(owned);
+            try out.list.append(gpa, owned);
+        }
+        return out;
+    }
+
+    fn deinit(s: *Settings, gpa: std.mem.Allocator) void {
+        for (s.list.items) |item| gpa.free(item);
+        s.list.deinit(gpa);
+    }
+};
+
+fn setupMoved(io: Io, repo: *testgit.Repo) anyerror!void {
+    const block_a = "static int parse_header(const char *line)\n{\n\treturn line[0] == '#';\n}\n";
+    const block_b = "void flush_everything(struct state *s)\n{\n\twrite_out(s->buffer, s->length);\n}\n";
+    const block_c = "int count_widgets(void)\n{\n    return widget_total + spare_widgets;\n}\n";
+    try repo.writeFile(io, "a.c", "#include <a.h>\n\n" ++ block_a ++ "\nint keep_a;\n\n" ++ block_b ++ "\nint tail_a;\n");
+    try repo.writeFile(io, "c.c", "int x;\nshort;\n" ++ block_c ++ "int middle_of_c;\nint more_c;\nint even_more_c;\nint last_c;\nno newline at the end");
+    try repo.writeFile(io, "d.txt", "one\ntwo\nthree\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    // a's two blocks go to b.c, next to each other; c's block moves
+    // within c, its indentation changed; a short line moves; a last line
+    // without its newline moves to one with it.
+    try repo.writeFile(io, "a.c", "#include <a.h>\n\nint keep_a;\n\nint tail_a;\n");
+    try repo.writeFile(io, "b.c", "#include <b.h>\n" ++ block_b ++ block_a ++ "int b_end;\n");
+    try repo.writeFile(io, "c.c", "int x;\nint middle_of_c;\nint more_c;\nint even_more_c;\nshort;\nint last_c;\n" ++
+        "int count_widgets(void)\n{\n\treturn widget_total  + spare_widgets;\n}\n");
+    try repo.writeFile(io, "d.txt", "no newline at the end\none\ntwo\nthree\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+}
+
+test "moved lines in colour are byte for byte what git diff --color=always prints, over every file of the diff" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(setupMoved, gpa, io);
+    defer pair.deinit(gpa, io);
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{ .renames = .{} });
+    defer changes.deinit();
+
+    const config_mod = @import("../config/config.zig");
+    const variants = [_][]const u8{
+        "[diff]\n\tcolorMoved = true\n",
+        "[diff]\n\tcolorMoved = plain\n",
+        "[diff]\n\tcolorMoved = blocks\n",
+        "[diff]\n\tcolorMoved = zebra\n[color \"diff\"]\n\toldMoved = red reverse\n\tnewMovedAlternative = blue\n",
+        "[diff]\n\tcolorMoved = dimmed-zebra\n",
+        "[diff]\n\tcolorMoved = dimmed_zebra\n\tcolorMovedWS = allow-indentation-change\n",
+        "[diff]\n\tcolorMoved = zebra\n\tcolorMovedWS = ignore-all-space\n",
+        "[diff]\n\tcolorMoved = plain\n\tcolorMovedWS = ignore-space-change,ignore-space-at-eol\n",
+        "[diff]\n\tcolorMoved = zebra\n\tcolorMovedWS = allow-indentation-change\n[core]\n\twhitespace = tabwidth=4\n",
+        "[diff]\n\tcolorMoved = no\n",
+    };
+    for (variants) |text| {
+        var config = try config_mod.Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        const colors = (try diff.Colors.configured(&config, .always)).?;
+        const options = try diff.configured(&config, .{ .colors = &colors });
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        var settings: Settings = try .init(gpa, text);
+        defer settings.deinit(gpa);
+        for (settings.list.items) |s| try args.appendSlice(gpa, &.{ "-c", s });
+        try args.appendSlice(gpa, &.{ "diff", "--color=always", "-M", pair.old_text, pair.new_text });
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = changes.items }, &out.writer, options);
+        const expected = try pair.repo.run(io, args.items);
+        defer gpa.free(expected);
+        std.testing.expectEqualStrings(expected, out.written()) catch |err| {
+            std.debug.print("variant {s}\n", .{text});
+            return err;
+        };
+    }
+}
+
+test "a diff of one body finds its moved lines within it" {
+    const gpa = std.testing.allocator;
+    const colors: diff.Colors = .{};
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    const block = "a line long enough to count\nand another one of them\n";
+    try diff.unifiedBody(gpa, &out.writer, block ++ "x\ny\nz\n", "x\ny\nz\n" ++ block, .{ .colors = &colors, .color_moved = .plain });
+    try std.testing.expect(std.mem.find(u8, out.written(), colors.old_moved.bytes()) != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), colors.new_moved.bytes()) != null);
+}
+
+test "diff.colorMoved and diff.colorMovedWS values git dies on are refused" {
+    const config_mod = @import("../config/config.zig");
+    for ([_][]const u8{ "[diff]\n\tcolorMoved = Zebra\n", "[diff]\n\tcolorMovedWS\n", "[diff]\n\tcolorMovedWS = allow-indentation-change,ignore-all-space\n", "[diff]\n\tcolorMovedWS = sideways\n" }) |text| {
+        var config = try config_mod.Config.parseText(std.testing.allocator, text, .local);
+        defer config.deinit();
+        try std.testing.expectError(error.InvalidDiffSetting, diff.configured(&config, .{}));
     }
 }
 
@@ -1190,7 +1292,7 @@ test "a patch's headers are git diff's: a change of kind split, binary files by 
         defer changes.deinit();
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        for (changes.items) |change| try diff.unified(gpa, io, .{ .db = &pair.db, .change = change, .binary = binary }, &out.writer, v.options);
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = changes.items, .binary = binary }, &out.writer, v.options);
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.appendSlice(gpa, &.{ "diff", "--no-color", "-M" });
