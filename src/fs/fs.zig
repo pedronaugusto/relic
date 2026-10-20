@@ -484,7 +484,7 @@ pub const Entry = struct {
 };
 
 /// Errors from looking at a path.
-pub const StatError = Io.File.OpenError || Io.File.StatError;
+pub const StatError = airlock.StatError;
 
 /// What `sub_path` is, or `null` if it is not there.
 ///
@@ -495,7 +495,17 @@ pub const StatError = Io.File.OpenError || Io.File.StatError;
 /// walk over a working tree asks this once per entry, so the difference is a
 /// syscall per file.
 pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
-    switch (platstat.full(io, dir, sub_path)) {
+    return entryOf(platstat.full(io, dir, sub_path));
+}
+
+/// The entry a scan of `dir` (`airlock.scan`) found at `name`, as git takes
+/// it; `null` if it went away since.
+pub fn scannedEntry(io: Io, dir: Io.Dir, name: []const u8, stat: airlock.Stat) Self.StatError!?Entry {
+    return entryOf(platstat.ofStat(io, dir, name, stat));
+}
+
+fn entryOf(result: platstat.FullResult) Self.StatError!?Entry {
+    switch (result) {
         .absent => return null,
         .found => |f| return .{
             .stat = .fromFull(f),
@@ -503,19 +513,7 @@ pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
             .executable = f.mode & 0o100 != 0,
         },
         .failed => |e| return e,
-        // Either the platform has no such call, or it failed for a reason the
-        // caller should see named rather than guessed at. `std.Io` names it.
-        .unavailable => {},
     }
-    const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return null,
-        else => |e| return e,
-    };
-    return .{
-        .stat = .fromIo(s, platstat.statAt(dir, sub_path)),
-        .kind = s.kind,
-        .executable = isExecutable(s.permissions),
-    };
 }
 
 /// The longest name a directory gives, in bytes: macOS's `d_name`, which
@@ -556,6 +554,19 @@ pub const Names = struct {
     }
 };
 
+/// Whether `sub_path` is there, as git's `stat(path) == 0` says, links
+/// followed: a name that is not there is `false`, and a stat failing any
+/// other way, a name on the way that is not a directory among them, is the
+/// error git sees (`airlock.stat`, which tells ENOTDIR apart where std's
+/// macOS stat does not).
+pub fn existsFollowing(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!bool {
+    _ = airlock.stat(io, dir, sub_path, .{ .follow_symlinks = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    return true;
+}
+
 /// What `sub_path` is now, for telling whether it changed since it was last
 /// looked at, as git's `stat_validity` does: the index's stat, with the
 /// platform's own file id as its inode where the index keeps none
@@ -570,7 +581,6 @@ pub fn validityAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Sta
             return stat;
         },
         .failed => |e| return e,
-        .unavailable => return if (try statAt(io, dir, sub_path)) |found| found.stat else null,
     }
 }
 
@@ -580,17 +590,14 @@ pub fn validityAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Sta
 pub fn sameFile(io: Io, a: Io.Dir, a_path: []const u8, b: Io.Dir, b_path: []const u8) bool {
     const fa = identity(io, a, a_path) orelse return false;
     const fb = identity(io, b, b_path) orelse return false;
-    return fa.id == fb.id and fa.dev == fb.dev;
+    return fa.id == fb.id and fa.device == fb.device;
 }
 
-fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) ?struct { id: u64, dev: u32 } {
-    switch (platstat.full(io, dir, sub_path)) {
-        .found => |f| return .{ .id = f.file_id, .dev = f.extra.dev },
-        .absent, .failed => return null,
-        .unavailable => {},
-    }
-    const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch return null;
-    return .{ .id = @truncate(@as(u128, @bitCast(@as(i128, s.inode)))), .dev = platstat.statAt(dir, sub_path).dev };
+fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) ?struct { id: u64, device: u64 } {
+    return switch (platstat.full(io, dir, sub_path)) {
+        .found => |f| .{ .id = f.file_id, .device = f.device },
+        .absent, .failed => null,
+    };
 }
 
 /// Whether a permission set has the owner's execute bit.
@@ -905,14 +912,7 @@ pub fn permissionsAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?
         .absent => return null,
         .found => |f| return .{ .kind = f.kind, .permissions = f.permissions },
         .failed => |e| return e,
-        // A stat that cannot be taken is named by `std.Io`.
-        .unavailable => {},
     }
-    const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return null,
-        else => |e| return e,
-    };
-    return .{ .kind = s.kind, .permissions = s.permissions };
 }
 
 /// Whether nobody may write the file: no write bit at all, or Windows's
@@ -1034,7 +1034,7 @@ pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) v
     if (shared == .umask or !Io.File.Permissions.has_executable_bit) return;
     const found = switch (platstat.full(io, dir, sub_path)) {
         .found => |f| f,
-        .absent, .unavailable, .failed => return,
+        .absent, .failed => return,
     };
     const old = found.mode & 0o7777;
     var new = shared.calc(old);
@@ -1143,7 +1143,7 @@ pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]co
         else => {
             const found = switch (platstat.full(io, dir, sub_path)) {
                 .found => |f| f,
-                .absent, .unavailable, .failed => return false,
+                .absent, .failed => return false,
             };
             const euid: u32 = switch (builtin.target.os.tag) {
                 .linux => std.os.linux.geteuid(),
@@ -1524,10 +1524,9 @@ test "a stat shortcut believes exactly as many nanoseconds as were measured" {
     try std.testing.expect(!a.matches(bigger, .{ .resolution = .second }));
 }
 
-test "one stat and two stats describe a path the same way" {
-    // Windows has one stat, git for Windows' own, and no second way to take
-    // it: `std.Io`'s describes the file otherwise by design. The next test
-    // holds it to git's.
+test "a stat describes a path as std.Io's stat does, where both report it" {
+    // Windows's stat is git for Windows' own: `std.Io`'s describes the file
+    // otherwise by design. The next test holds it to git's.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1547,12 +1546,9 @@ test "one stat and two stats describe a path the same way" {
         &.{ "plain", "sub" };
     for (names) |name| {
         const one = (try statAt(io, dir, name)).?;
-        // The two-call path, which is what a platform without a full stat
-        // takes. Both must agree, or a walk would see a different working
-        // tree depending on the platform.
         const s = try dir.statFile(io, name, .{ .follow_symlinks = false });
         const two: Entry = .{
-            .stat = .fromIo(s, platstat.statAt(dir, name)),
+            .stat = .fromIo(s, .{ .dev = one.stat.dev, .uid = one.stat.uid, .gid = one.stat.gid }),
             .kind = s.kind,
             .executable = isExecutable(s.permissions),
         };
@@ -1560,9 +1556,6 @@ test "one stat and two stats describe a path the same way" {
         try std.testing.expectEqual(two.executable, one.executable);
         try std.testing.expectEqual(two.stat.size, one.stat.size);
         try std.testing.expectEqual(two.stat.ino, one.stat.ino);
-        try std.testing.expectEqual(two.stat.dev, one.stat.dev);
-        try std.testing.expectEqual(two.stat.uid, one.stat.uid);
-        try std.testing.expectEqual(two.stat.gid, one.stat.gid);
         try std.testing.expectEqual(two.stat.mtime_sec, one.stat.mtime_sec);
         try std.testing.expectEqual(two.stat.mtime_nsec, one.stat.mtime_nsec);
     }

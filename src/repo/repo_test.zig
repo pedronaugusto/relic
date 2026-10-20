@@ -1068,6 +1068,8 @@ test "discovery closes its git directory when the worktree handle cannot be open
         fn closeFiles(_: ?*anyopaque, files: []const Io.File) void {
             for (files) |file| file.close(std.testing.io);
         }
+        // airlock's raw calls ask for a cancel before each try.
+        fn checkCancel(_: ?*anyopaque) Io.Cancelable!void {}
     };
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1088,6 +1090,7 @@ test "discovery closes its git directory when the worktree handle cannot be open
     vtable.fileReadPositional = Recorder.readPositional;
     vtable.fileStat = Recorder.fileStat;
     vtable.fileClose = Recorder.closeFiles;
+    vtable.checkCancel = Recorder.checkCancel;
     const tracked: Io = .{ .userdata = &recorder, .vtable = &vtable };
     try std.testing.expectError(error.ProcessFdQuotaExceeded, repo_mod.Repository.open(std.testing.allocator, tracked, tmp.dir, .{ .discover = false }));
     try std.testing.expectEqual(@as(usize, 1), recorder.closed);

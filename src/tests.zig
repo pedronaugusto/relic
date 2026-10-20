@@ -170,7 +170,6 @@ test {
     _ = @import("text/urlmatch_test.zig");
     _ = @import("diff/patch_id.zig");
     _ = @import("diff/similarity.zig");
-    _ = @import("diff/moved.zig");
     _ = @import("checkout/filter.zig");
     _ = @import("codec/delta.zig");
     _ = @import("commit/rebase.zig");

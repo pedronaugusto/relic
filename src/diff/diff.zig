@@ -27,7 +27,6 @@ const glob = @import("../text.zig").glob;
 const whitespace = @import("../text.zig").whitespace;
 const c_quote = @import("../text.zig").c_quote;
 const paint = @import("paint.zig");
-const moved = @import("moved.zig");
 const binarypatch = @import("binary.zig");
 const abbrev = @import("../odb/abbrev.zig");
 
@@ -39,10 +38,6 @@ pub const Colors = paint.Colors;
 pub const WsErrorHighlight = paint.WsErrorHighlight;
 /// How range-diff writes the diff of two patches.
 pub const DiffOfPatches = paint.DiffOfPatches;
-/// How moved lines are shown in a coloured patch.
-pub const ColorMoved = moved.ColorMoved;
-/// What whitespace moved lines may differ in.
-pub const ColorMovedWs = moved.ColorMovedWs;
 
 /// Which algorithm produces the edit script: parallax's.
 pub const Algorithm = parallax.Algorithm;
@@ -598,11 +593,6 @@ pub const Options = struct {
     whitespace_rule: u32 = whitespace.default_rule,
     /// Which lines a coloured patch marks whitespace errors on.
     ws_error_highlight: WsErrorHighlight = .{},
-    /// How a coloured patch shows the lines that moved, found over every
-    /// file `unified` is given: `diff.colorMoved`.
-    color_moved: ColorMoved = .no,
-    /// What whitespace a moved line may differ in: `diff.colorMovedWS`.
-    color_moved_ws: ColorMovedWs = .{},
     /// range-diff's diff of two patches (`DiffOfPatches`), for
     /// `unifiedBody`; `null` for any other diff.
     diff_of_patches: ?DiffOfPatches = null,
@@ -641,9 +631,8 @@ pub const ConfigError = error{
 /// diff`, `git log -p`, `git show` and `format-patch` make when nothing is
 /// asked: `diff.algorithm`, `diff.context`, `diff.interHunkContext`,
 /// `diff.indentHeuristic` and `diff.suppressBlankEmpty`; and what a
-/// coloured patch marks, `core.whitespace` and `diff.wsErrorHighlight`,
-/// and how it shows moved lines, `diff.colorMoved` and `diff.colorMovedWS`;
-/// and `core.quotePath`.
+/// coloured patch marks, `core.whitespace` and `diff.wsErrorHighlight`, and
+/// `core.quotePath`.
 ///
 /// Every value is read in order, as git's callback reads it: one git dies
 /// on is refused wherever it stands, and the last one decides. An
@@ -653,16 +642,12 @@ pub const ConfigError = error{
 /// as it was given.
 pub fn configured(config: *const config_mod.Config, options: Options) ConfigError!Options {
     var out = options;
-    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.wserrorhighlight", "diff.colormoved", "diff.colormovedws", "core.whitespace", "core.quotepath" });
+    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.wserrorhighlight", "core.whitespace", "core.quotepath" });
     while (it.next()) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.name, "quotepath")) {
             out.quote_path = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
         } else if (std.mem.eql(u8, entry.section, "core")) {
             out.whitespace_rule = whitespace.parse(entry.value orelse return error.InvalidDiffSetting) catch return error.ConflictingWhitespaceRules;
-        } else if (std.ascii.eqlIgnoreCase(entry.name, "colormoved")) {
-            out.color_moved = ColorMoved.parse(entry.value) orelse return error.InvalidDiffSetting;
-        } else if (std.ascii.eqlIgnoreCase(entry.name, "colormovedws")) {
-            out.color_moved_ws = ColorMovedWs.parse(entry.value orelse return error.InvalidDiffSetting) orelse return error.InvalidDiffSetting;
         } else if (std.ascii.eqlIgnoreCase(entry.name, "wserrorhighlight")) {
             out.ws_error_highlight = WsErrorHighlight.parse(entry.value orelse return error.InvalidDiffSetting) orelse return error.InvalidDiffSetting;
         } else if (std.ascii.eqlIgnoreCase(entry.name, "algorithm")) {
@@ -898,24 +883,21 @@ pub fn numstat(
 /// Errors from `unified`.
 pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || error{InvalidDriverBinary};
 
-/// The borrowed object store, the changes whose patch is written, and what
-/// decides which of their files are binary.
+/// The borrowed object store, one change whose patch is written, and what
+/// decides which of its files are binary.
 pub const UnifiedInputs = struct {
     db: *odb_mod.Odb,
-    /// In the order they are written: one diff, as git's
-    /// `diff_flush_patch_all_file_pairs` writes its queue.
-    changes: []const Change,
+    change: Change,
     /// Which files are binary, as git's `diff_filespec_is_binary` says;
     /// the zero value decides by the bytes alone.
     binary: BinaryRule = .{},
 };
 
-/// Append the unified diff of `inputs.changes` to `w`, each with git's
-/// headers, as `git diff`, `git log -p` and `git format-patch` write a
-/// diff (git's `builtin_diff` for each file). A change between a file and
-/// a symbolic link or a gitlink is written as a deletion and a creation,
-/// as git's `run_diff` splits it. In colour, with `Options.color_moved`,
-/// the lines that moved are found over every file of the diff.
+/// Append a unified diff for one change to `w`, with git's headers, as
+/// `git diff`, `git log -p` and `git format-patch` write a file's patch
+/// (git's `builtin_diff`). A change between a file and a symbolic link or
+/// a gitlink is written as a deletion and a creation, as git's `run_diff`
+/// splits it.
 pub fn unified(
     gpa: Allocator,
     io: Io,
@@ -923,46 +905,13 @@ pub fn unified(
     w: *Io.Writer,
     options: Options,
 ) UnifiedError!void {
-    var recorder: ?paint.Recorder = if (movedWanted(options)) .init(gpa, options.color_moved, options.color_moved_ws) else null;
-    defer if (recorder) |*r| r.deinit();
-    const r: ?*paint.Recorder = if (recorder) |*r| r else null;
-    const out = if (r) |rec| &rec.painted.writer else w;
-    for (inputs.changes) |change| {
-        writeChange(gpa, io, inputs.db, inputs.binary, change, out, options, r) catch |err| return recorded(r, err);
-    }
-    if (r) |rec| try rec.finish(w);
-}
-
-/// Whether a patch is recorded for its moved lines: git looks for them
-/// only in colour.
-fn movedWanted(options: Options) bool {
-    return options.color_moved != .no and options.colors != null;
-}
-
-/// An error from writing into a recorder, whose writer fails only when its
-/// allocator does.
-fn recorded(r: ?*paint.Recorder, err: anytype) @TypeOf(err) {
-    if (r != null and err == error.WriteFailed) return error.OutOfMemory;
-    return err;
-}
-
-fn writeChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, binary: BinaryRule, change: Change, w: *Io.Writer, options: Options, r: ?*paint.Recorder) UnifiedError!void {
-    const file: FileInputs = .{ .db = db, .binary = binary, .change = change, .recorder = r };
+    const change = inputs.change;
     if (change.old != null and change.new != null and typeChanged(change.old.?.mode, change.new.?.mode)) {
-        try writeFilePatch(gpa, io, file, w, options, change.old, null);
-        return writeFilePatch(gpa, io, file, w, options, null, change.new);
+        try writeFilePatch(gpa, io, inputs, w, options, change.old, null);
+        return writeFilePatch(gpa, io, inputs, w, options, null, change.new);
     }
-    return writeFilePatch(gpa, io, file, w, options, change.old, change.new);
+    return writeFilePatch(gpa, io, inputs, w, options, change.old, change.new);
 }
-
-/// One change's patch: what `writeFilePatch` reads it from, and where its
-/// moved lines are recorded.
-const FileInputs = struct {
-    db: *odb_mod.Odb,
-    binary: BinaryRule,
-    change: Change,
-    recorder: ?*paint.Recorder,
-};
 
 /// A side's bytes, as the patch compares them: a gitlink's commit as git's
 /// `Subproject commit` line, an object's bytes read from `db`.
@@ -989,7 +938,7 @@ const SideBytes = struct {
 };
 
 /// One file pair's patch, either side absent for a creation or a deletion.
-fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, options: Options, old: ?Entry, new: ?Entry) UnifiedError!void {
+fn writeFilePatch(gpa: Allocator, io: Io, inputs: UnifiedInputs, w: *Io.Writer, options: Options, old: ?Entry, new: ?Entry) UnifiedError!void {
     const db = inputs.db;
     const change = inputs.change;
     const colors = options.colors;
@@ -1075,7 +1024,7 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     if (new) |entry| if (entry.mode == .symlink) {
         body_options.whitespace_rule &= ~whitespace.incomplete_line;
     };
-    try writeBody(gpa, w, old_side.bytes, new_side.bytes, body_options, .{ .old = old_label, .new = new_label }, inputs.recorder);
+    try writeBody(gpa, w, old_side.bytes, new_side.bytes, body_options, .{ .old = old_label, .new = new_label });
 }
 
 /// A path as a patch's headers name it: under `Options.relative_to`, from
@@ -1117,8 +1066,7 @@ pub const UnifiedBodyError = Self.TextError || Io.Writer.Error;
 ///
 /// This is what a caller that wants only the body asks for, and what
 /// `unified` uses. Context lines are the new side's, as git prints them,
-/// which shows where a whitespace option lets the two differ. Moved lines
-/// are found within the body, a diff of one file.
+/// which shows where a whitespace option lets the two differ.
 pub fn unifiedBody(
     gpa: Allocator,
     w: *Io.Writer,
@@ -1126,17 +1074,12 @@ pub fn unifiedBody(
     new: []const u8,
     options: Options,
 ) UnifiedBodyError!void {
-    var recorder: ?paint.Recorder = if (movedWanted(options)) .init(gpa, options.color_moved, options.color_moved_ws) else null;
-    defer if (recorder) |*r| r.deinit();
-    const r: ?*paint.Recorder = if (recorder) |*r| r else null;
-    writeBody(gpa, if (r) |rec| &rec.painted.writer else w, old, new, options, null, r) catch |err| return recorded(r, err);
-    if (r) |rec| try rec.finish(w);
+    return writeBody(gpa, w, old, new, options, null);
 }
 
 /// The hunks, under `---` and `+++` lines naming `files` where there are
-/// any, painted where `options` has colours; the removed and added lines
-/// recorded in `recorder` where there is one.
-fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, options: Options, files: ?FileNames, recorder: ?*paint.Recorder) UnifiedBodyError!void {
+/// any, painted where `options` has colours.
+fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, options: Options, files: ?FileNames) UnifiedBodyError!void {
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
     try checkTextSize(old, new);
@@ -1148,13 +1091,8 @@ fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, op
         .{ .context = rule, .find = findByRule }
     else
         .c_function;
-    var own_painter: ?paint.Painter = if (options.colors != null or options.diff_of_patches != null)
+    var painter: ?paint.Painter = if (options.colors != null or options.diff_of_patches != null)
         .init(options.colors, options.whitespace_rule, options.ws_error_highlight, options.diff_of_patches, old, new)
-    else
-        null;
-    // A recorded painter lives in the recorder, which replays its lines.
-    const painter: ?*paint.Painter = if (own_painter) |*p|
-        (if (recorder) |r| try r.addPainter(p.*) else p)
     else
         null;
     // The names as the `---` and `+++` lines write them; plain, a name with
@@ -1171,7 +1109,7 @@ fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, op
         .heading = heading,
         .files = if (files != null) .{ .old = names[0], .new = names[1] } else null,
         .suppress_blank_empty = options.suppress_blank_empty,
-        .paint = if (painter) |p| p.paint() else null,
+        .paint = if (painter) |*p| p.paint() else null,
     });
 }
 

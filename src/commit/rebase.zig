@@ -1312,10 +1312,12 @@ fn writePatch(r: *Run, commit_oid: Oid) Error!void {
     var changes = try diff.tree(r.gpa, r.io, r.repo.objectDatabase(), .{ .old = parent_tree, .new = commit.tree }, .{ .renames = .{} });
     defer changes.deinit();
     var out: std.Io.Writer.Allocating = .init(r.arena);
-    diff.unified(r.gpa, r.io, .{ .db = r.repo.objectDatabase(), .changes = changes.items }, &out.writer, .{ .abbrev = r.abbrev_len }) catch |err| switch (err) {
-        error.WriteFailed => return error.OutOfMemory,
-        else => |e| return e,
-    };
+    for (changes.items) |change| {
+        diff.unified(r.gpa, r.io, .{ .db = r.repo.objectDatabase(), .change = change }, &out.writer, .{ .abbrev = r.abbrev_len }) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
+    }
     try r.state("patch", out.written());
 }
 

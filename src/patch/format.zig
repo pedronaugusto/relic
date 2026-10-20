@@ -1027,10 +1027,12 @@ fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, s
     }
     var w: Io.Writer.Allocating = .fromArrayList(a, out);
     defer out.* = w.toArrayList();
-    diff.unified(ctx.gpa, ctx.io, .{ .db = ctx.db, .changes = changes, .binary = ctx.binaryRule() }, &w.writer, ctx.diff_options) catch |err| switch (err) {
-        error.WriteFailed => return error.OutOfMemory,
-        else => |e| return e,
-    };
+    for (changes) |c| {
+        diff.unified(ctx.gpa, ctx.io, .{ .db = ctx.db, .change = c, .binary = ctx.binaryRule() }, &w.writer, ctx.diff_options) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
+    }
 }
 
 fn quoted(ctx: *Ctx, path: []const u8) Allocator.Error![]const u8 {

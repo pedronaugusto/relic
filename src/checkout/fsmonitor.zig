@@ -36,13 +36,14 @@ const hash = @import("../hash/hash.zig");
 const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
+const airlock = @import("airlock");
 
 const Index = index_mod.Index;
 
 pub const Error = error{
     /// `core.fsmonitorHookVersion` is neither 1 nor 2.
     InvalidFsmonitorHookVersion,
-} || config_mod.PathSettingError || Io.Cancelable;
+} || config_mod.PathSettingError || config_mod.ValueError || Io.Cancelable;
 
 /// An answer: the token to ask with next time, and what changed.
 pub const Changes = struct {
@@ -76,6 +77,13 @@ pub const Daemon = struct {
     /// The repository's own git directory -- a linked worktree's, not the
     /// common one -- in which the daemon listens.
     git_dir: Io.Dir,
+    /// The daemon's socket where it is not `fsmonitor--daemon.ipc` in
+    /// `git_dir`, absolute: a git directory on another machine's volume has
+    /// it in `fsmonitor.socketDir`, or in the home directory, named
+    /// `.git-fsmonitor-` and the SHA-1 of the working tree's real path
+    /// (git's `fsmonitor_ipc__get_path`). Never on Windows, where the pipe
+    /// is named after the git directory.
+    socket: ?[]const u8 = null,
 };
 
 /// The directories `configured` reads against.
@@ -103,17 +111,121 @@ pub const Source = union(enum) {
 /// that top; the hook's path lives in `arena`.
 pub fn configured(arena: Allocator, io: Io, config: *const config_mod.Config, dirs: Dirs, programs: program.Programs) Self.Error!?Source {
     const entry = config.find("core.fsmonitor") orelse return null;
-    const value = entry.value orelse return .{ .daemon = .{ .git_dir = dirs.git_dir } };
+    const value = entry.value orelse return daemonConfigured(arena, io, config, dirs);
     if (config_mod.parseBool(value)) |on| {
-        return if (on) .{ .daemon = .{ .git_dir = dirs.git_dir } } else null;
+        return if (on) daemonConfigured(arena, io, config, dirs) else null;
     } else |_| {}
     const command = (try config_mod.pathSetting(arena, io, dirs.work_tree, config.context.home, value)) orelse return null;
+    if (!try compatible(io, config, dirs)) return null;
     const version: ?u2 = if (config.get("core.fsmonitorhookversion")) |text| switch (config_mod.parseInteger(text) catch return error.InvalidFsmonitorHookVersion) {
         1 => 1,
         2 => 2,
         else => return error.InvalidFsmonitorHookVersion,
     } else null;
     return .{ .hook = .{ .command = command, .version = version, .programs = programs } };
+}
+
+/// Whether git makes its own checks of the volumes before it asks a monitor
+/// (`HAVE_FSMONITOR_OS_SETTINGS`): where it has a daemon of its own.
+const os_settings = builtin.os.tag == .linux or builtin.os.tag.isDarwin() or builtin.os.tag == .windows;
+
+/// git's `check_for_incompatible` for a hook or the daemon: a working tree
+/// on another machine's volume is no monitor unless `fsmonitor.allowRemote`
+/// is true, nor one whose volume cannot be asked; on Windows neither is a
+/// repository under VFS for Git (`core.virtualFilesystem` set at all).
+fn compatible(io: Io, config: *const config_mod.Config, dirs: Dirs) Self.Error!bool {
+    if (!os_settings) return true;
+    const volume = airlock.Volume.of(io, dirs.work_tree) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
+    if (volume.remote and !try config.getBool("fsmonitor.allowremote", false)) return false;
+    if (builtin.os.tag == .windows and config.find("core.virtualfilesystem") != null) return false;
+    return true;
+}
+
+/// git's daemon, where the checks allow it (`fsm_settings__set_ipc`): the
+/// working tree's (`compatible`), then on Linux and macOS the socket's
+/// (`check_uds_volume`): its directory on another machine's volume, or on
+/// a FAT or NTFS one (`msdos`, `ntfs`), which hold no Unix socket, is no
+/// monitor, and so is a directory that cannot be asked.
+fn daemonConfigured(arena: Allocator, io: Io, config: *const config_mod.Config, dirs: Dirs) Self.Error!?Source {
+    if (!try compatible(io, config, dirs)) return null;
+    if (!os_settings or builtin.os.tag == .windows) return .{ .daemon = .{ .git_dir = dirs.git_dir } };
+    // `fsmonitor__is_fs_remote(gitdir) < 1`: a git directory that cannot be
+    // asked keeps the socket where it is.
+    const git_volume: ?airlock.Volume = airlock.Volume.of(io, dirs.git_dir) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => null,
+    };
+    const moved = if (git_volume) |v| v.remote else false;
+    const socket: ?[]const u8 = if (moved) (try movedSocket(arena, io, config, dirs)) orelse return null else null;
+    const socket_volume = if (socket) |path| try volumeOfPath(io, std.fs.path.dirname(path) orelse "/") else git_volume;
+    if (!takesSockets(socket_volume)) return null;
+    return .{ .daemon = .{ .git_dir = dirs.git_dir, .socket = socket } };
+}
+
+/// Whether a volume holds the daemon's Unix socket, as `check_uds_volume`
+/// asks: one that could not be asked (`null`) does not.
+fn takesSockets(volume: ?airlock.Volume) bool {
+    const v = volume orelse return false;
+    return !v.remote and !std.mem.eql(u8, v.name(), "msdos") and !std.mem.eql(u8, v.name(), "ntfs");
+}
+
+/// The volume of the directory at `path`, or `null` when it cannot be
+/// opened or asked.
+fn volumeOfPath(io: Io, path: []const u8) Io.Cancelable!?airlock.Volume {
+    const dir = Io.Dir.openDirAbsolute(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    defer dir.close(io);
+    return airlock.Volume.of(io, dir) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        else => null,
+    };
+}
+
+/// git's socket for a git directory on another machine's volume:
+/// `<fsmonitor.socketDir>/.git-fsmonitor-<hex>`, or `~/` in place of an
+/// unset or empty directory, the hex the SHA-1 of the working tree's real
+/// path, the whole `interpolate_path`'d. A relative directory is found
+/// from the top of the working tree, where git runs. `null` when the
+/// working tree has no real path.
+fn movedSocket(arena: Allocator, io: Io, config: *const config_mod.Config, dirs: Dirs) Self.Error!?[]const u8 {
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const top_len = dirs.work_tree.realPath(io, &buffer) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    const top = buffer[0..top_len];
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(top);
+    const digest = hasher.final();
+    var hex: [hash.max_hex_len]u8 = undefined;
+    // A bare `fsmonitor.socketDir` is git's "missing value".
+    const dir: []const u8 = if (config.find("fsmonitor.socketdir")) |e| e.value orelse return error.MissingPath else "";
+    const written = try arena.print("{s}/.git-fsmonitor-{s}", .{ if (dir.len != 0) dir else "~", digest.hex(&hex) });
+    const path = try config_mod.interpolatePath(arena, written, config.context.home);
+    if (std.fs.path.isAbsolute(path)) return path;
+    return try std.fs.path.join(arena, &.{ top, path });
+}
+
+test "a socket's volume takes it unless remote, FAT or NTFS, or unknown" {
+    const named = struct {
+        fn volume(remote: bool, name: []const u8) airlock.Volume {
+            var v: airlock.Volume = .{ .remote = remote, .name_bytes = @splat(0), .name_len = @intCast(name.len) };
+            @memcpy(v.name_bytes[0..name.len], name);
+            return v;
+        }
+    }.volume;
+    try std.testing.expect(takesSockets(named(false, "apfs")));
+    try std.testing.expect(!takesSockets(named(true, "smbfs")));
+    try std.testing.expect(!takesSockets(named(false, "msdos")));
+    try std.testing.expect(!takesSockets(named(false, "ntfs")));
+    // git compares the whole name
+    try std.testing.expect(takesSockets(named(false, "ntfs3")));
+    try std.testing.expect(!takesSockets(null));
 }
 
 /// Ask the monitor what changed since the index's token and take every path
@@ -206,7 +318,7 @@ const daemon_name = "fsmonitor--daemon.ipc";
 /// git's IPC branch of `refresh_fsmonitor`: the token, then the version 2
 /// answer. `null` when no daemon answers.
 fn askDaemon(arena: Allocator, io: Io, daemon: Daemon, since: []const u8) Error!?Changes {
-    const out = (try converseWithDaemon(arena, io, daemon.git_dir, since)) orelse return null;
+    const out = (try converseWithDaemon(arena, io, daemon, since)) orelse return null;
     const end = std.mem.findScalar(u8, out, 0) orelse out.len;
     return .{ .token = out[0..end], .paths = try splitPaths(arena, if (end < out.len) out[end + 1 ..] else "") };
 }
@@ -214,11 +326,11 @@ fn askDaemon(arena: Allocator, io: Io, daemon: Daemon, since: []const u8) Error!
 /// git's `fsmonitor_ipc__send_query` short of starting a daemon: connect,
 /// send `since`, read the answer. `null` when there is no daemon to reach
 /// or the conversation fails, as git takes either.
-fn converseWithDaemon(arena: Allocator, io: Io, git_dir: Io.Dir, since: []const u8) Error!?[]const u8 {
+fn converseWithDaemon(arena: Allocator, io: Io, daemon: Daemon, since: []const u8) Error!?[]const u8 {
     const read_buffer = try arena.alloc(u8, pkt_line.max_line);
     var write_buffer: [4096]u8 = undefined;
     if (builtin.os.tag == .windows) {
-        const name = (try pipeName(arena, io, git_dir)) orelse return null;
+        const name = (try pipeName(arena, io, daemon.git_dir)) orelse return null;
         const pipe = Io.Dir.openFileAbsolute(io, name, .{ .mode = .read_write }) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return null,
@@ -229,7 +341,7 @@ fn converseWithDaemon(arena: Allocator, io: Io, git_dir: Io.Dir, since: []const 
         return exchange(arena, &writer.interface, &reader.interface, since);
     }
     if (!Io.net.has_unix_sockets) return null;
-    var stream = (try connectSocket(arena, io, git_dir)) orelse return null;
+    var stream = (try connectSocket(arena, io, daemon)) orelse return null;
     defer stream.close(io);
     var writer = stream.writer(io, &write_buffer);
     var reader = stream.reader(io, read_buffer);
@@ -273,8 +385,8 @@ else
 /// git's `connect_to_server`: a refused connection is a daemon too busy to
 /// take it, tried again every 50 ms for a second; anything else, a socket
 /// that is not there among them, is no daemon.
-fn connectSocket(arena: Allocator, io: Io, git_dir: Io.Dir) Error!?Io.net.Stream {
-    const address: Io.net.UnixAddress = .{ .path = (try socketPath(arena, io, git_dir)) orelse return null };
+fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?Io.net.Stream {
+    const address: Io.net.UnixAddress = .{ .path = (try socketPath(arena, io, daemon)) orelse return null };
     var waited_ms: u32 = 0;
     while (true) {
         return address.connect(io) catch |err| switch (err) {
@@ -295,14 +407,18 @@ fn connectSocket(arena: Allocator, io: Io, git_dir: Io.Dir) Error!?Io.net.Stream
 /// tree, so a deep repository's socket is reached where its absolute name
 /// is past what a socket address holds. This package names it absolutely
 /// where that fits, else from the process's working directory, else on
-/// Linux through the git directory's handle; `null` when none fits.
-fn socketPath(arena: Allocator, io: Io, git_dir: Io.Dir) Error!?[]const u8 {
+/// Linux through the git directory's handle; `null` when none fits. A
+/// socket out of the git directory (`Daemon.socket`) is named absolutely
+/// or from the working directory.
+fn socketPath(arena: Allocator, io: Io, daemon: Daemon) Error!?[]const u8 {
     var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    const dir_len = git_dir.realPath(io, &buffer) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => return null,
+    const absolute = daemon.socket orelse absolute: {
+        const dir_len = daemon.git_dir.realPath(io, &buffer) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
+        break :absolute try std.fs.path.join(arena, &.{ buffer[0..dir_len], daemon_name });
     };
-    const absolute = try std.fs.path.join(arena, &.{ buffer[0..dir_len], daemon_name });
     if (absolute.len <= max_socket_path) return absolute;
     if (std.process.currentPath(io, &buffer)) |cwd_len| {
         const cwd = buffer[0..cwd_len];
@@ -312,8 +428,8 @@ fn socketPath(arena: Allocator, io: Io, git_dir: Io.Dir) Error!?[]const u8 {
         error.Canceled => return error.Canceled,
         else => {},
     }
-    if (builtin.os.tag == .linux) {
-        const through_handle = try arena.print("/proc/self/fd/{d}/" ++ daemon_name, .{git_dir.handle});
+    if (builtin.os.tag == .linux and daemon.socket == null) {
+        const through_handle = try arena.print("/proc/self/fd/{d}/" ++ daemon_name, .{daemon.git_dir.handle});
         if (through_handle.len <= max_socket_path) return through_handle;
     }
     return null;
@@ -412,4 +528,60 @@ test "an answer's paths and a directory's entries are taken out of what is vouch
     for (index.entries.items, &got) |e, *g| g.* = e.fsmonitor_valid;
     try std.testing.expectEqualSlices(bool, &.{ false, true, false, false, true }, &got);
     try std.testing.expect((try splitPaths(gpa, "/")) == null);
+}
+
+test "a git directory on another machine's volume has its socket in fsmonitor.socketDir or the home directory" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const top = buffer[0..try tmp.dir.realPath(io, &buffer)];
+    var digest: [20]u8 = undefined;
+    std.crypto.hash.Sha1.hash(top, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const dirs: Dirs = .{ .git_dir = tmp.dir, .work_tree = tmp.dir };
+    const cases = [_]struct { text: []const u8, want: []const u8 }{
+        .{ .text = "[fsmonitor]\n\tsocketDir = /sockets\n", .want = "/sockets/.git-fsmonitor-" ++ hex },
+        .{ .text = "", .want = "/home/me/.git-fsmonitor-" ++ hex },
+        .{ .text = "[fsmonitor]\n\tsocketDir =\n", .want = "/home/me/.git-fsmonitor-" ++ hex },
+        .{ .text = "[fsmonitor]\n\tsocketDir = ~/s\n", .want = "/home/me/s/.git-fsmonitor-" ++ hex },
+        .{ .text = "[fsmonitor]\n\tsocketDir = run\n", .want = try std.fs.path.join(arena, &.{ top, "run/.git-fsmonitor-" ++ hex }) },
+    };
+    for (cases) |case| {
+        var config = try config_mod.Config.parseText(gpa, case.text, .local);
+        defer config.deinit();
+        config.context.home = "/home/me";
+        try std.testing.expectEqualStrings(case.want, (try movedSocket(arena, io, &config, dirs)).?);
+    }
+    var bare = try config_mod.Config.parseText(gpa, "[fsmonitor]\n\tsocketDir\n", .local);
+    defer bare.deinit();
+    try std.testing.expectError(error.MissingPath, movedSocket(arena, io, &bare, dirs));
+}
+
+test "a working tree whose volume cannot be asked has no monitor, and a local one has its socket in the git directory" {
+    if (!os_settings) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const airlock_testing = @import("airlock.testing");
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dirs: Dirs = .{ .git_dir = tmp.dir, .work_tree = tmp.dir };
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    const programs: program.Programs = .{ .environ = &env };
+    for ([_][]const u8{ "[core]\n\tfsmonitor = true\n", "[core]\n\tfsmonitor = /bin/hook\n" }) |text| {
+        var config = try config_mod.Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        const h = try airlock_testing.Seam.create(gpa, std.testing.io, .{ .plan = &.{airlock_testing.always(.statfs, airlock_testing.io_error)} });
+        defer h.destroy();
+        try std.testing.expectEqual(null, try configured(arena, h.io(), &config, dirs, programs));
+        const source = (try configured(arena, std.testing.io, &config, dirs, programs)).?;
+        if (source == .daemon) try std.testing.expectEqual(null, source.daemon.socket);
+    }
 }
