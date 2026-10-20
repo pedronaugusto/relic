@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-10-20
+
 ### Changed
 
 - Pins conduit 0.9.3, uplink 0.8.4, cloak 0.14.0, warp 0.4.1 and xenoglyph 0.4.1; development: preflight 0.10.2, shakedown 0.4.14.
