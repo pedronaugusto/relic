@@ -2388,13 +2388,15 @@ test "a pack added in front of an alternate's never reads that pack's cached del
 /// A pack read that, once armed, parks until the task it runs on is
 /// canceled: first on a task resolving beside the calling one, then on the
 /// calling task itself, so the cancel reaches the caller while another task
-/// waits in a read.
+/// waits in a read. The calling task resolves too, and could take every
+/// object before another task starts: its read waits for one to park.
 const Park = struct {
     var base: Io = undefined;
     var caller: std.Thread.Id = undefined;
     var armed: std.atomic.Value(bool) = .init(false);
     var beside: std.atomic.Value(bool) = .init(false);
     var on_caller: std.atomic.Value(bool) = .init(false);
+    var caller_parked: std.atomic.Value(bool) = .init(false);
     var beside_canceled: std.atomic.Value(bool) = .init(false);
 
     fn read(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
@@ -2408,7 +2410,9 @@ const Park = struct {
                     };
                     return error.Unexpected;
                 }
-            } else if (beside.load(.acquire) and on_caller.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            } else if (on_caller.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                try waitBeside();
+                caller_parked.store(true, .release);
                 try wait();
                 return error.Unexpected;
             }
@@ -2422,12 +2426,28 @@ const Park = struct {
         for (0..2000) |_| try base.sleep(.fromMilliseconds(10), .awake);
     }
 
+    /// Until a task beside the calling one parks, or twenty seconds.
+    fn waitBeside() Io.Cancelable!void {
+        for (0..20_000) |_| {
+            if (beside.load(.acquire)) return;
+            try base.sleep(.fromMilliseconds(1), .awake);
+        }
+    }
+
     fn receiveOn(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bytes: []const u8) Error!Result {
         caller = std.Thread.getCurrentId();
-        armed.store(true, .release);
         defer armed.store(false, .release);
         var in: Io.Reader = .fixed(bytes);
-        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3 });
+        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3, .progress = .{ .report = arm } });
+    }
+
+    /// Armed once every entry is indexed, so that what parks is a read
+    /// resolving deltas, not one of the stream's.
+    fn arm(_: ?*anyopaque, event: progress_mod.Event) void {
+        switch (event) {
+            .indexed => |n| if (n.done == n.total) armed.store(true, .release),
+            else => {},
+        }
     }
 };
 
@@ -2474,15 +2494,16 @@ test "a receive canceled while it resolves stops every resolving task, even one 
 
     Park.beside.store(false, .release);
     Park.on_caller.store(false, .release);
+    Park.caller_parked.store(false, .release);
     Park.beside_canceled.store(false, .release);
     var future = try io.concurrent(Park.receiveOn, .{ gpa, parked, &repo, pack_dir, bytes });
     for (0..20_000) |_| {
-        if (Park.on_caller.load(.acquire)) break;
+        if (Park.caller_parked.load(.acquire)) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     } else {
         // glint-ignore: Z026 -- the test fails next; a task that will not cancel is reported by the leak check
         _ = future.cancel(io) catch {};
-        std.debug.print("the calling task never read after another task parked (beside: {})\n", .{Park.beside.load(.acquire)});
+        std.debug.print("the calling task did not park after another (beside: {}, caller read: {})\n", .{ Park.beside.load(.acquire), Park.on_caller.load(.acquire) });
         return error.TestUnexpectedResult;
     }
     const started = Io.Clock.awake.now(io);
