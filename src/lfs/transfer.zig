@@ -988,6 +988,8 @@ fn runJobs(state: *Run) Error!void {
     var buffer: [256]Event = undefined;
     var queue: Io.Queue(Event) = .init(&buffer);
     state.events = &queue;
+    // The queue is this frame's: the run does not name it past the return.
+    defer state.events = null;
     var group: Io.Group = .init;
     var spawned: usize = 0;
     while (spawned < workers) : (spawned += 1) {
