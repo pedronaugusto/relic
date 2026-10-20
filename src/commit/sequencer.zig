@@ -100,7 +100,7 @@ pub const Error = error{
     /// A name given names no commit.
     NotACommit,
 } || pretty.Error || three_way.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
-    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commit_hooks_mod.Error;
+    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commit_hooks_mod.Error || diff.BasicConfigError;
 
 /// Which replay.
 pub const Action = enum {
@@ -249,10 +249,12 @@ pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, o
 /// What git's `sequencer_init_config` dies on, which `git cherry-pick`
 /// and `git revert` read before anything else, whatever they are asked
 /// (`--continue`, `--skip`, `--abort` and `--quit` too), and a rebase as
-/// it begins, goes on or skips: every `diff.renameLimit` value
-/// (`git_diff_basic_config`), where the merge itself reads only the last.
+/// it begins, goes on or skips: every value `git_diff_basic_config` dies
+/// on (`diff.checkBasic`), a `diff.renameLimit` among them, where the
+/// merge itself reads only the last.
 pub fn initConfig(repo: *Repository) Error!void {
     _ = diff.RenameSettings.readLimit(repo.configuration()) catch return error.InvalidMergeSetting;
+    try diff.checkBasic(repo.configuration());
 }
 
 /// Whether a cherry-pick or revert is waiting: a sequence in

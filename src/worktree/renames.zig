@@ -1,12 +1,13 @@
-//! `git status`'s renames: the staged changes, HEAD against the index, put
-//! through diff's rename detection (`diff.findRenames`, the one engine) as
-//! git's `wt_status_collect_changes_index` puts them, and what
-//! `status.renames` and `status.renameLimit` ask for.
+//! `git status`'s renames: the staged changes, HEAD against the index, and
+//! the working tree's, the index against the files, each put through diff's
+//! rename detection (`diff.findRenames`, the one engine) as git's
+//! `wt_status_collect_changes_index` and `wt_status_collect_changes_worktree`
+//! put them, and what `status.renames` and `status.renameLimit` ask for.
 //!
 //! Status itself is the checkout layer's, below diff; the pass is here,
-//! above both. Only the staged side is paired: git also pairs a deletion in
-//! the working tree with an intent-to-add file there, which needs the
-//! working tree's bytes in the pairing, and relic's engine pairs objects.
+//! above both. In the working tree a deletion pairs with a file the index
+//! holds as an intent to add, whose bytes the status kept
+//! (`StatusOptions.added_content`) and the engine reads from memory.
 
 const ErrorNamespace = @This();
 const std = @import("std");
@@ -28,44 +29,83 @@ pub const Error = diff.Error || checkout.Error;
 /// `null` for none (an unborn branch).
 pub const Inputs = struct { index: *const index_mod.Index, db: *odb_mod.Odb, head_tree: ?hash.Oid };
 
-/// Pair `status`'s staged deletions with its staged additions, and with
-/// copies its staged modifications as sources too, as git's status pairs
-/// them: a rename's destination becomes `renamed` with its `source` and
-/// `score`, its source's staged deletion goes (and the entry with it when
-/// nothing else is said of the path), a copy's destination becomes
-/// `copied`. A conflicted path takes no part.
-pub fn find(io: Io, status: *checkout.Status, inputs: Inputs, options: diff.RenameOptions) Error!void {
-    var deleted: usize = 0;
-    var added: usize = 0;
-    for (status.entries) |e| {
-        if (e.conflicted) continue;
-        if (e.staged == .deleted) deleted += 1;
-        if (e.staged == .added) added += 1;
-    }
-    if (added == 0 or (deleted == 0 and !options.detect_copies)) return;
+/// Which of a status entry's two changes a pass pairs.
+const Side = enum { staged, unstaged };
 
+/// Pair `status`'s deletions with its additions, and with copies its
+/// modifications as sources too, as git's status pairs them, the staged
+/// side and the working tree's each on its own: a rename's destination
+/// becomes `renamed` with its `source` and `score`, its source's deletion
+/// goes (and the entry with it when nothing else is said of the path), a
+/// copy's destination becomes `copied`. A conflicted path takes no part. In
+/// the working tree the additions are the files the index holds as an
+/// intent to add; a status made without `StatusOptions.added_content` has
+/// not kept their bytes, and its working tree's side is not paired.
+pub fn find(io: Io, status: *checkout.Status, inputs: Inputs, options: diff.RenameOptions) Error!void {
     var arena_state = status.arena.promote(status.gpa);
     defer status.arena = arena_state.state;
     const arena = arena_state.allocator();
+    // git collects the working tree's changes first; the two sides share no
+    // pair, so the order decides nothing.
+    try pass(arena, io, status, inputs, options, .unstaged);
+    try pass(arena, io, status, inputs, options, .staged);
+}
 
-    const head: std.StringHashMapUnmanaged(checkout.TreeEntry) = if (inputs.head_tree) |tree|
+fn changeOf(e: *const checkout.StatusEntry, side: Side) checkout.Change {
+    return switch (side) {
+        .staged => e.staged,
+        .unstaged => e.unstaged,
+    };
+}
+
+fn pass(arena: Allocator, io: Io, status: *checkout.Status, inputs: Inputs, options: diff.RenameOptions, side: Side) Error!void {
+    var deleted: usize = 0;
+    var added: usize = 0;
+    for (status.entries) |*e| {
+        if (e.conflicted) continue;
+        switch (changeOf(e, side)) {
+            .deleted => deleted += 1,
+            .added => if (side == .staged or e.added != null) {
+                added += 1;
+            },
+            else => {},
+        }
+    }
+    if (added == 0 or (deleted == 0 and !options.detect_copies)) return;
+
+    const head: std.StringHashMapUnmanaged(checkout.TreeEntry) = if (side == .unstaged)
+        .empty
+    else if (inputs.head_tree) |tree|
         try checkout.flatten(arena, io, inputs.db, tree)
     else
         .empty;
+    var contents: std.AutoHashMapUnmanaged(hash.Oid, []const u8) = .empty;
     var changes: std.ArrayList(diff.Change) = .empty;
-    for (status.entries) |e| {
+    for (status.entries) |*e| {
         if (e.conflicted) continue;
-        const status_of: diff.Status = switch (e.staged) {
+        const status_of: diff.Status = switch (changeOf(e, side)) {
             .deleted => .deleted,
             .added => .added,
             .modified, .type_changed => if (options.detect_copies) .modified else continue,
             else => continue,
         };
-        const old: ?diff.Entry = if (status_of == .added) null else if (head.get(e.path)) |h| .{ .path = e.path, .mode = h.mode, .oid = h.oid } else continue;
-        const new: ?diff.Entry = if (status_of == .deleted) null else if (inputs.index.find(e.path)) |i| .{ .path = e.path, .mode = i.mode, .oid = i.oid } else continue;
+        // Before: HEAD's file on the staged side, the index's in the
+        // working tree. After: the index's file, or the working tree's.
+        const indexed: ?diff.Entry = if (inputs.index.find(e.path)) |i| .{ .path = e.path, .mode = i.mode, .oid = i.oid } else null;
+        const old: ?diff.Entry = if (status_of == .added) null else switch (side) {
+            .staged => if (head.get(e.path)) |h| .{ .path = e.path, .mode = h.mode, .oid = h.oid } else continue,
+            .unstaged => indexed orelse continue,
+        };
+        const new: ?diff.Entry = if (status_of == .deleted) null else switch (side) {
+            .staged => indexed orelse continue,
+            .unstaged => if (status_of == .modified) indexed.? else if (e.added) |file| blk: {
+                try contents.put(arena, file.oid, file.bytes);
+                break :blk .{ .path = e.path, .mode = file.mode, .oid = file.oid };
+            } else continue,
+        };
         try changes.append(arena, .{ .status = status_of, .old = old, .new = new });
     }
-    try diff.findRenames(arena, io, inputs.db, &changes, options);
+    try diff.findRenames(arena, io, .{ .db = inputs.db, .contents = &contents }, &changes, options);
 
     var gone: std.StringHashMapUnmanaged(void) = .empty;
     var by_path: std.StringHashMapUnmanaged(usize) = .empty;
@@ -74,7 +114,11 @@ pub fn find(io: Io, status: *checkout.Status, inputs: Inputs, options: diff.Rena
         if (c.status != .renamed and c.status != .copied) continue;
         const at = by_path.get(c.new.?.path) orelse continue;
         const entry = &status.entries[at];
-        entry.staged = if (c.status == .renamed) .renamed else .copied;
+        const found: checkout.Change = if (c.status == .renamed) .renamed else .copied;
+        switch (side) {
+            .staged => entry.staged = found,
+            .unstaged => entry.unstaged = found,
+        }
         entry.source = c.old.?.path;
         entry.score = c.similarity;
         if (c.status == .renamed) try gone.put(arena, c.old.?.path, {});
@@ -83,9 +127,12 @@ pub fn find(io: Io, status: *checkout.Status, inputs: Inputs, options: diff.Rena
     var kept: std.ArrayList(checkout.StatusEntry) = .empty;
     for (status.entries) |e| {
         var entry = e;
-        if (gone.contains(e.path) and e.staged == .deleted) {
-            entry.staged = .unmodified;
-            if (entry.unstaged == .unmodified and entry.submodule == null) continue;
+        if (gone.contains(e.path) and changeOf(&e, side) == .deleted) {
+            switch (side) {
+                .staged => entry.staged = .unmodified,
+                .unstaged => entry.unstaged = .unmodified,
+            }
+            if (entry.staged == .unmodified and entry.unstaged == .unmodified and entry.submodule == null) continue;
         }
         try kept.append(arena, entry);
     }

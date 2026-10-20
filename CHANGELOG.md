@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `diff.findRenames` takes `diff.RenameBlobs` in place of the database: the database and the blobs not in it (`diff.rename.Options.contents`), the working tree's files under the names their stored bytes hash to, as git's `hash_filespec` names them.
+- `worktree.status` reports a file the index holds as an intent to add as git does (`ita_invisible_in_index`): nothing staged (a path in `HEAD` is staged as deleted), the file `added` in the working tree, `deleted` when it is gone. It was staged as added.
+- `sequencer.Error` has `diff.BasicConfigError` (`InvalidDiffSetting` and the colour errors), which a cherry-pick, a revert and a rebase now refuse as they begin.
+
+### Added
+
+- `status.renames` in the working tree: `worktree.renames.find` pairs the working tree's deletions with the files the index holds as an intent to add (and with copies its modifications as sources), as git's `wt_status_collect_changes_worktree`, through diff's one rename engine. The status keeps those files' bytes as they would be stored when `StatusOptions.added_content` asks (`StatusEntry.added`: clean filter, encoding, line endings and `ident`, a symlink's target, as git's `diff_populate_filespec`); a working tree's rename or copy is `unstaged = .renamed`/`.copied` with its `source` and `score`.
+- `diff.checkBasic`: what git's `git_diff_basic_config` dies on, every value wherever it stands (`diff.renameLimit`, a driver's `diff.<driver>.*`, `diff.color.<slot>`/`color.diff.<slot>`, `diff.wsErrorHighlight`, `diff.suppressBlankEmpty`, a bare `diff.dirstat`, `diff.indentHeuristic`); `sequencer.initConfig` refuses them all, as git's sequencer dies on them before a cherry-pick, a revert (`--abort` and `--quit` too) or a rebase does anything.
+
 ## [0.24.1] - 2026-10-20
 
 ### Changed

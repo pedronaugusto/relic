@@ -108,6 +108,11 @@ pub const Options = struct {
     /// Renames found before, source to destination or to nothing for a
     /// deletion, counted towards the directories' moves.
     cached_pairs: ?*const GitMap(?[]const u8) = null,
+    /// Blobs read from here rather than from the database: files of a
+    /// working tree, as they would be stored, each under the name its bytes
+    /// hash to, as git's `hash_filespec` names a file it read from the
+    /// working tree.
+    contents: ?*const std.AutoHashMapUnmanaged(Oid, []const u8) = null,
 };
 
 /// What the pairing reports back.
@@ -204,6 +209,9 @@ const Run = struct {
 
     fn blob(r: *Run, oid: Oid) Error![]const u8 {
         if (r.blobs.get(oid)) |bytes| return bytes;
+        if (r.options.contents) |held| {
+            if (held.get(oid)) |bytes| return bytes;
+        }
         const found = try r.db.read(r.io, oid);
         defer r.db.allocator().free(found.bytes);
         if (found.type != .blob) return error.NotABlob;

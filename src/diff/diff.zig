@@ -27,6 +27,7 @@ const glob = @import("../text.zig").glob;
 const whitespace = @import("../text.zig").whitespace;
 const c_quote = @import("../text.zig").c_quote;
 const paint = @import("paint.zig");
+const color_mod = @import("../config/color.zig");
 const moved = @import("moved.zig");
 const binarypatch = @import("binary.zig");
 const abbrev = @import("../odb/abbrev.zig");
@@ -285,7 +286,7 @@ pub fn tree(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, option
     std.mem.sort(Change, changes.items, {}, lessThanChange);
 
     if (options.renames) |rename_options| {
-        try detectRenames(arena, io, db, &changes, &old_entries, rename_options);
+        try detectRenames(arena, io, db, &changes, &old_entries, rename_options, null);
         std.mem.sort(Change, changes.items, {}, lessThanChange);
     }
     try options.order.apply(arena, changes.items);
@@ -441,11 +442,11 @@ fn flatten(
 /// git's `diffcore_rename`, writing the list back as git writes its queue:
 /// a rename or copy where its destination stood, a deletion whose file
 /// went somewhere gone. For changes made elsewhere than between two trees,
-/// such as a status's staged ones; their paths and everything allocated
-/// are `arena`'s.
-pub fn findRenames(arena: Allocator, io: Io, db: *odb_mod.Odb, changes: *std.ArrayList(Change), options: RenameOptions) Self.Error!void {
+/// such as a status's, staged or in the working tree; their paths and
+/// everything allocated are `arena`'s.
+pub fn findRenames(arena: Allocator, io: Io, blobs: RenameBlobs, changes: *std.ArrayList(Change), options: RenameOptions) Self.Error!void {
     std.mem.sort(Change, changes.items, {}, lessThanChange);
-    try detectRenames(arena, io, db, changes, &Flat.empty, options);
+    try detectRenames(arena, io, blobs.db, changes, &Flat.empty, options, blobs.contents);
     std.mem.sort(Change, changes.items, {}, lessThanChange);
 }
 
@@ -456,6 +457,7 @@ fn detectRenames(
     changes: *std.ArrayList(Change),
     old_entries: *const Flat,
     options: RenameOptions,
+    contents: ?*const std.AutoHashMapUnmanaged(Oid, []const u8),
 ) Error!void {
     // git's queue: every change in path order, and with
     // `--find-copies-harder` every unchanged file as well.
@@ -490,6 +492,7 @@ fn detectRenames(
         .minimum_score = if (minimum == 0) 1 else minimum,
         .rename_limit = @intCast(options.limit),
         .rename_empty = true,
+        .contents = contents,
     });
 
     // `diff_resolve_rename_copy`: of the destinations sharing a source, all
@@ -699,6 +702,54 @@ pub fn configuredRelative(config: *const config_mod.Config) ConfigError!bool {
     var it = config.iterate(&.{"diff.relative"});
     while (it.next()) |entry| out = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
     return out;
+}
+
+/// Where `findRenames` reads the blobs it scores: the database, and the
+/// blobs that are not in it, the working tree's files as they would be
+/// stored, under the names their bytes hash to (`rename.Options.contents`).
+pub const RenameBlobs = struct {
+    db: *odb_mod.Odb,
+    contents: ?*const std.AutoHashMapUnmanaged(Oid, []const u8) = null,
+};
+
+/// Errors from `checkBasic`.
+pub const BasicConfigError = error{InvalidDiffSetting} || color_mod.Error;
+
+/// What git's `git_diff_basic_config` dies on, every value looked at
+/// wherever it stands: `diff.renameLimit`; a driver's `diff.<driver>.*`
+/// (`userdiff_config`: `funcname`, `xfuncname`, `command`, `textconv`,
+/// `wordRegex` or `algorithm` with no value, a `binary` neither `auto` nor
+/// a boolean, a `trustExitCode` or `cacheTextConv` not a boolean); a
+/// `diff.color.<slot>` or `color.diff.<slot>` colour; `diff.wsErrorHighlight`;
+/// `diff.suppressBlankEmpty`; `diff.dirstat` with no value (its parts
+/// only warn); `diff.indentHeuristic`. A command that reads it refuses
+/// these before anything else, whether or not it writes a diff: git's
+/// sequencer does (`sequencer.initConfig`).
+pub fn checkBasic(config: *const config_mod.Config) BasicConfigError!void {
+    _ = RenameSettings.readLimit(config) catch return error.InvalidDiffSetting;
+    const needs_value = [_][]const u8{ "funcname", "xfuncname", "command", "textconv", "wordregex", "algorithm" };
+    for (config.entries.items) |entry| {
+        if (!std.mem.eql(u8, entry.section, "diff") or !entry.has_subsection) continue;
+        for (needs_value) |name| {
+            if (std.mem.eql(u8, entry.name, name) and entry.value == null) return error.InvalidDiffSetting;
+        }
+        const value = entry.value orelse continue;
+        if (std.mem.eql(u8, entry.name, "binary") and std.ascii.eqlIgnoreCase(value, "auto")) continue;
+        if (std.mem.eql(u8, entry.name, "binary") or std.mem.eql(u8, entry.name, "trustexitcode") or std.mem.eql(u8, entry.name, "cachetextconv")) {
+            _ = config_mod.parseBool(value) catch return error.InvalidDiffSetting;
+        }
+    }
+    _ = try Colors.read(config);
+    var it = config.iterate(&.{ "diff.wserrorhighlight", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.dirstat", "diff.indentheuristic" });
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.name, "wserrorhighlight")) {
+            _ = WsErrorHighlight.parse(entry.value orelse return error.InvalidDiffSetting) orelse return error.InvalidDiffSetting;
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "dirstat")) {
+            if (entry.value == null) return error.InvalidDiffSetting;
+        } else if (entry.value) |v| {
+            _ = config_mod.parseBool(v) catch return error.InvalidDiffSetting;
+        }
+    }
 }
 
 /// What a rename setting asks for: git's `DIFF_DETECT_*`.

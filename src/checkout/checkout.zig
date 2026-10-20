@@ -714,10 +714,11 @@ pub const Change = enum {
     untracked,
     /// Present in the working tree and excluded by an ignore rule.
     ignored,
-    /// Staged under this path from `StatusEntry.source`, which is gone:
-    /// what `worktree.renames.find` finds among the staged changes.
+    /// Under this path from `StatusEntry.source`, which is gone from that
+    /// side: what `worktree.renames.find` finds among the staged changes,
+    /// or among the working tree's.
     renamed,
-    /// Staged under this path as a copy of `StatusEntry.source`.
+    /// Under this path as a copy of `StatusEntry.source`.
     copied,
 };
 
@@ -741,6 +742,14 @@ pub const StatusEntry = struct {
     /// a submodule, and this is what its working tree holds. It is the `S<c><m><u>` field of
     /// `git status --porcelain=v2`, where every other path has `N...`.
     submodule: ?SubmoduleState = null,
+    /// For a file the index holds as an intent to add, when
+    /// `StatusOptions.added_content` asks: what the working tree holds
+    /// there.
+    added: ?Added = null,
+
+    /// A working-tree file as it would be stored: its mode, its bytes
+    /// through the clean filter and line endings, and the blob they make.
+    pub const Added = struct { mode: object.Mode, oid: Oid, bytes: []const u8 };
 };
 
 /// What a submodule's working tree holds, as its superproject's status sees
@@ -857,6 +866,11 @@ pub const StatusOptions = struct {
     /// keep it -- git writes it when `Index.fsmonitor_changed` says. With `untracked = .no` only the files it does not vouch for
     /// are looked at, and no directory is read.
     fsmonitor: ?fsmonitor.Source = null,
+    /// Whether to keep `StatusEntry.added` for each file the index holds as
+    /// an intent to add: the bytes `worktree.renames.find` pairs the working
+    /// tree's deletions with, read as git's rename detection reads such a
+    /// file (`diff_populate_filespec`, `hash_filespec`).
+    added_content: bool = false,
 
     /// How much of an untracked directory `status` reports: nothing, the
     /// directory itself, or every file under it. These are what `git status`
@@ -970,6 +984,10 @@ fn recordStaged(
             slot.value_ptr.conflicted = true;
             continue;
         }
+        // An intent to add is not staged: HEAD's side does not see it, as
+        // git's `ita_invisible_in_index` has it, and the working tree's
+        // side reports the file added.
+        if (entry.intent_to_add) continue;
         if (options.submodules) |probe| {
             if (probe.ignore_staged) {
                 const was_gitlink = if (head.paths.get(entry.path)) |e| e.mode == .gitlink else false;
@@ -991,7 +1009,10 @@ fn recordStaged(
 
     var head_it = head.paths.iterator();
     while (head_it.next()) |pair| {
-        if (index.find(pair.key_ptr.*) != null or head.expanded.contains(pair.key_ptr.*)) continue;
+        if (index.find(pair.key_ptr.*)) |e| {
+            if (!e.intent_to_add) continue;
+        }
+        if (head.expanded.contains(pair.key_ptr.*)) continue;
         if (options.submodules) |probe| {
             if (probe.ignore_staged and pair.value_ptr.mode == .gitlink) continue;
         }
@@ -1281,7 +1302,7 @@ const StatusScan = struct {
             if (s.monitored and entry_ptr.fsmonitor_valid) continue;
 
             const change = try s.compare(entry_ptr, path, found);
-            if (change != .unmodified) try s.record(path, change) else s.vouch(entry_ptr);
+            if (change != .unmodified) try s.recordFound(entry_ptr, path, found, change) else s.vouch(entry_ptr);
         }
     }
 
@@ -1316,7 +1337,7 @@ const StatusScan = struct {
             try s.seen.put(s.gpa, entry.path, {});
             if (s.options.rules.attrs) |attrs| try attrs.enter(s.io, s.wt, entry.path);
             const change = try s.compare(entry, entry.path, found);
-            if (change != .unmodified) try s.record(entry.path, change) else s.vouch(entry);
+            if (change != .unmodified) try s.recordFound(entry, entry.path, found, change) else s.vouch(entry);
         }
     }
 
@@ -1464,6 +1485,9 @@ const StatusScan = struct {
     }
 
     fn compare(s: *StatusScan, entry: *index_mod.Entry, path: []const u8, found: fs.Entry) Error!Change {
+        // An intent to add is the file added, whatever it holds: git's
+        // `run_diff_files` under `ita_invisible_in_index`.
+        if (entry.intent_to_add) return .added;
         const mode = modeOnDisk(found, entry.mode, s.options.rules);
 
         if (entry.mode.isBlob() != mode.isBlob() or
@@ -1479,18 +1503,39 @@ const StatusScan = struct {
         // did. This is the racy rule doing its work.
         var scratch: std.heap.ArenaAllocator = .init(s.gpa);
         defer scratch.deinit();
-        const a = scratch.allocator();
-        const content = if (found.kind == .sym_link) blk: {
-            var buf: [4096]u8 = undefined;
-            const len = try s.wt.readLink(s.io, path, &buf);
-            break :blk try a.dupe(u8, buf[0..len]);
-        } else if (s.options.rules.attrs) |attrs| blk: {
-            const applied = try attrs.lookup(a, path, .file);
-            break :blk (try s.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
-        } else try s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
+        const content = try s.storedBytes(scratch.allocator(), path, found);
         const oid = hash.Hasher.object(s.db.objectFormat(), "blob", content);
         if (oid.eql(entry.oid)) return .unmodified;
         return .modified;
+    }
+
+    /// What `path` would be stored as: a symlink's target, a file's bytes
+    /// through its clean filter, encoding, line endings and `ident`, as
+    /// git's `diff_populate_filespec` reads a working-tree file.
+    fn storedBytes(s: *StatusScan, a: Allocator, path: []const u8, found: fs.Entry) Error![]const u8 {
+        if (found.kind == .sym_link) {
+            var buf: [4096]u8 = undefined;
+            const len = try s.wt.readLink(s.io, path, &buf);
+            return a.dupe(u8, buf[0..len]);
+        }
+        if (s.options.rules.attrs) |attrs| {
+            const applied = try attrs.lookup(a, path, .file);
+            return (try s.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
+        }
+        return s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
+    }
+
+    /// Record a tracked file's change, and for a file added under an intent
+    /// to add, when `StatusOptions.added_content` asks, what it holds.
+    fn recordFound(s: *StatusScan, entry: *const index_mod.Entry, path: []const u8, found: fs.Entry, change: Change) Error!void {
+        try s.record(path, change);
+        if (change != .added or !s.options.added_content) return;
+        const bytes = try s.storedBytes(s.arena, path, found);
+        s.entries.getPtr(path).?.added = .{
+            .mode = modeOnDisk(found, entry.mode, s.options.rules),
+            .oid = hash.Hasher.object(s.db.objectFormat(), "blob", bytes),
+            .bytes = bytes,
+        };
     }
 
     /// A gitlink's directory is never walked. Its state is the probe's

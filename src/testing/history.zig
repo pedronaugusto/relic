@@ -1245,47 +1245,81 @@ test "a merge message setting git dies on refuses every merge" {
     }
 }
 
-test "a cherry-pick and a rebase read every diff.renameLimit as git's sequencer does, and diff.renames only as the merge does" {
+test "a cherry-pick and a rebase refuse what git's sequencer dies on as it begins, and read diff.renames only as the merge does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const Case = struct { settings: []const [2][]const u8, fails: bool };
+    // `want` is relic's refusal, `null` none; `says` is a word of git's.
+    const Case = struct { settings: []const [2][]const u8, want: ?anyerror, says: []const u8 = "" };
     const cases = [_]Case{
         // `git_diff_basic_config`: a bad value dies wherever it stands.
-        .{ .settings = &.{ .{ "diff.renamelimit", "x" }, .{ "diff.renamelimit", "5" } }, .fails = true },
-        .{ .settings = &.{ .{ "diff.renamelimit", "3000000000" }, .{ "diff.renamelimit", "5" } }, .fails = true },
+        .{ .settings = &.{ .{ "diff.renamelimit", "x" }, .{ "diff.renamelimit", "5" } }, .want = error.InvalidMergeSetting, .says = "renamelimit" },
+        .{ .settings = &.{ .{ "diff.renamelimit", "3000000000" }, .{ "diff.renamelimit", "5" } }, .want = error.InvalidMergeSetting, .says = "renamelimit" },
+        .{ .settings = &.{ .{ "diff.wsErrorHighlight", "bogus" }, .{ "diff.wsErrorHighlight", "all" } }, .want = error.InvalidDiffSetting, .says = "wserrorhighlight" },
+        .{ .settings = &.{ .{ "diff.suppressBlankEmpty", "maybe" }, .{ "diff.suppressBlankEmpty", "true" } }, .want = error.InvalidDiffSetting, .says = "suppressblankempty" },
+        .{ .settings = &.{.{ "diff.suppress-blank-empty", "maybe" }}, .want = error.InvalidDiffSetting, .says = "suppress-blank-empty" },
+        .{ .settings = &.{.{ "diff.indentHeuristic", "maybe" }}, .want = error.InvalidDiffSetting, .says = "indentheuristic" },
+        .{ .settings = &.{ .{ "color.diff.old", "nocolor" }, .{ "color.diff.old", "red" } }, .want = error.InvalidColor, .says = "color.diff.old" },
+        .{ .settings = &.{.{ "diff.color.frag", "red green blue" }}, .want = error.InvalidColor, .says = "diff.color.frag" },
+        .{ .settings = &.{.{ "diff.x.binary", "sometimes" }}, .want = error.InvalidDiffSetting, .says = "diff.x.binary" },
+        .{ .settings = &.{.{ "diff.x.cachetextconv", "sometimes" }}, .want = error.InvalidDiffSetting, .says = "cachetextconv" },
+        .{ .settings = &.{.{ "diff.x.trustExitCode", "sometimes" }}, .want = error.InvalidDiffSetting, .says = "trustexitcode" },
+        // Read, and fine: an unknown slot, a dirstat that only warns, a
+        // driver's `auto`, settings git's sequencer does not read at all.
+        .{ .settings = &.{ .{ "color.diff.nosuchslot", "nocolor" }, .{ "diff.dirstat", "nonsense" }, .{ "diff.x.binary", "auto" }, .{ "diff.context", "-3" } }, .want = null },
         // merge-ort reads the last `diff.renames` alone.
-        .{ .settings = &.{ .{ "diff.renames", "maybe" }, .{ "diff.renames", "true" } }, .fails = false },
-        .{ .settings = &.{ .{ "diff.renamelimit", "5" }, .{ "diff.renamelimit", "7" } }, .fails = false },
+        .{ .settings = &.{ .{ "diff.renames", "maybe" }, .{ "diff.renames", "true" } }, .want = null },
+        .{ .settings = &.{ .{ "diff.renamelimit", "5" }, .{ "diff.renamelimit", "7" } }, .want = null },
     };
-    for (cases) |case| {
+    // A setting with no value: `git config` cannot write one.
+    const bare = [_]struct { []const u8, []const u8, anyerror }{
+        .{ "[diff]\n\twsErrorHighlight\n", "wserrorhighlight", error.InvalidDiffSetting },
+        .{ "[diff]\n\tdirstat\n", "dirstat", error.InvalidDiffSetting },
+        .{ "[color \"diff\"]\n\tmeta\n", "color.diff.meta", error.MissingColorValue },
+        .{ "[diff \"x\"]\n\txfuncname\n", "xfuncname", error.InvalidDiffSetting },
+        .{ "[diff \"x\"]\n\ttextconv\n", "textconv", error.InvalidDiffSetting },
+        .{ "[diff \"x\"]\n\talgorithm\n", "algorithm", error.InvalidDiffSetting },
+    };
+    for (0..cases.len + bare.len) |at| {
+        const case: Case = if (at < cases.len) cases[at] else .{ .settings = &.{}, .want = bare[at - cases.len][2], .says = bare[at - cases.len][1] };
+        errdefer std.debug.print("case {d}\n", .{at});
         var pair: Pair = undefined;
         try Pair.init(gpa, io, &pair, .files, divergedScript);
         defer pair.deinit();
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
             for (case.settings) |setting| try r.exec(io, &.{ "config", "--add", setting[0], setting[1] });
+            if (at >= cases.len) {
+                const config_path = try r.dir.realPathFileAlloc(io, ".git/config", gpa);
+                defer gpa.free(config_path);
+                const old = try r.readFile(io, ".git/config");
+                defer gpa.free(old);
+                const new = try std.mem.concat(gpa, u8, &.{ old, bare[at - cases.len][0] });
+                defer gpa.free(new);
+                try r.writeFile(io, ".git/config", new);
+            }
         }
         pair.git.report_failures = false;
         var theirs = try pair.git.capture(io, &.{ "cherry-pick", "topic~2" });
         defer theirs.deinit(gpa);
-        try std.testing.expectEqual(case.fails, theirs.code != 0);
+        try std.testing.expectEqual(case.want != null, theirs.code != 0);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
             const one = try oidOf(gpa, io, &pair.ours, "topic~2");
-            if (case.fails) {
-                try std.testing.expectError(error.InvalidMergeSetting, sequencer.pick(gpa, io, &repo, &.{one}, .{ .who = who }));
+            if (case.want) |want| {
+                try std.testing.expect(std.mem.find(u8, theirs.stderr, case.says) != null);
+                try std.testing.expectError(want, sequencer.pick(gpa, io, &repo, &.{one}, .{ .who = who }));
                 // `--abort` reads them first too, before it finds nothing to abort.
                 var aborted = try pair.git.capture(io, &.{ "cherry-pick", "--abort" });
                 defer aborted.deinit(gpa);
-                try std.testing.expect(std.mem.find(u8, aborted.stderr, "renamelimit") != null);
-                try std.testing.expectError(error.InvalidMergeSetting, sequencer.abort(gpa, io, &repo, who, null));
+                try std.testing.expect(std.mem.find(u8, aborted.stderr, case.says) != null);
+                try std.testing.expectError(want, sequencer.abort(gpa, io, &repo, who, null));
             } else {
                 var outcome = try sequencer.pick(gpa, io, &repo, &.{one}, .{ .who = who });
                 outcome.deinit();
             }
         }
         try expectSameState(&pair, io, &pick_state, &main_logs);
-        if (!case.fails) continue;
+        const want = case.want orelse continue;
         // A rebase of topic onto main, which the merge backend begins by
         // reading the sequencer's settings.
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
@@ -1294,7 +1328,7 @@ test "a cherry-pick and a rebase read every diff.renameLimit as git's sequencer 
         try std.testing.expect(rebased.code != 0);
         var repo = try pair.open(io);
         defer repo.deinit(io);
-        try std.testing.expectError(error.InvalidMergeSetting, rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" }));
+        try std.testing.expectError(want, rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" }));
     }
 }
 
