@@ -42,6 +42,7 @@ const mailmap_mod = @import("../rev_walk/mailmap.zig");
 const color = @import("../config/color.zig");
 const config_mod = @import("../config/config.zig");
 const diff_colors = @import("../diff/paint.zig");
+const glob = @import("../text.zig").glob;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -214,16 +215,129 @@ pub const Decorations = struct {
 
     pub const LoadError = refs_mod.ReadError || odb_mod.Error || object.ParseError || shallow.ReadError || Allocator.Error;
 
-    /// git's `load_ref_decorations` with no filter.
-    pub fn load(gpa: Allocator, io: Io, repo: *Repository) LoadError!Decorations {
+    /// Which refs decorate: git's `decoration_filter`. A ref an `exclude`
+    /// pattern matches does not; else, where there are `include`
+    /// patterns, only a ref one of them matches does; else a ref an
+    /// `exclude_config` pattern matches does not. A pattern with no glob
+    /// character matches the ref it names and the refs under it; one with
+    /// a glob character is matched against the whole name. A pattern that
+    /// starts with neither `refs/` nor is `HEAD` is under `refs/`.
+    pub const Filter = struct {
+        /// `--decorate-refs`.
+        include: []const []const u8 = &.{},
+        /// `--decorate-refs-exclude`.
+        exclude: []const []const u8 = &.{},
+        /// `log.excludeDecoration`.
+        exclude_config: []const []const u8 = &.{},
+
+        /// What `git log` asks for besides the configuration.
+        pub const Given = struct {
+            include: []const []const u8 = &.{},
+            exclude: []const []const u8 = &.{},
+            /// `--clear-decorations`: the patterns given before it gone,
+            /// and every ref decorates where nothing else says otherwise.
+            clear: bool = false,
+        };
+
+        /// git log's filter, as its `set_default_decoration_filter` makes
+        /// it: `given`, `log.excludeDecoration` (every value; a bare one
+        /// makes git drop them all), and where none of them say anything
+        /// and neither `clear` nor `log.initialDecorationSet=all` asks for
+        /// every ref, only the namespaces git decorates by default: `HEAD`,
+        /// branches, tags, remote-tracking branches, the stash and
+        /// replaced objects. The lists are `arena`'s.
+        pub fn log(arena: Allocator, config: *const config_mod.Config, given: Given) Allocator.Error!Filter {
+            var out: Filter = .{ .include = given.include, .exclude = given.exclude };
+            var excluded: std.ArrayList([]const u8) = .empty;
+            var it = config.iterate(&.{"log.excludedecoration"});
+            while (it.next()) |entry| {
+                const value = entry.value orelse {
+                    excluded.clearRetainingCapacity();
+                    break;
+                };
+                try excluded.append(arena, value);
+            }
+            out.exclude_config = excluded.items;
+            var all = given.clear;
+            if (!all) if (config.find("log.initialdecorationset")) |entry| {
+                all = entry.value != null and std.mem.eql(u8, entry.value.?, "all");
+            };
+            if (all or out.include.len != 0 or out.exclude.len != 0 or out.exclude_config.len != 0) return out;
+            out.include = &default_namespaces;
+            return out;
+        }
+
+        /// git's `ref_namespace` entries that have a decoration.
+        const default_namespaces = [_][]const u8{ "HEAD", "refs/heads/", "refs/tags/", "refs/remotes/", ref_names.stash, "refs/replace/" };
+    };
+
+    /// A filter's pattern as git's `normalize_glob_ref` leaves it.
+    const Pattern = struct {
+        text: []const u8,
+        /// No glob character: the name and what is under it.
+        prefix: bool,
+
+        fn init(a: Allocator, pattern: []const u8) Allocator.Error!Pattern {
+            const under = !std.mem.startsWith(u8, pattern, "refs/") and !std.mem.eql(u8, pattern, "HEAD");
+            var text = try std.mem.concat(a, u8, &.{ if (under) "refs/" else "", pattern });
+            if (std.mem.endsWith(u8, text, "/")) text = text[0 .. text.len - 1];
+            var plain = true;
+            for (pattern) |c| if (c == '*' or c == '?' or c == '[' or c == '\\') {
+                plain = false;
+            };
+            return .{ .text = text, .prefix = plain };
+        }
+
+        /// git's `match_ref_pattern`.
+        fn matches(p: Pattern, gpa: Allocator, name: []const u8) Allocator.Error!bool {
+            if (!p.prefix) return glob.matches(gpa, p.text, name, .{ .pathname = false });
+            if (!std.mem.startsWith(u8, name, p.text)) return false;
+            return name.len == p.text.len or name[p.text.len] == '/';
+        }
+    };
+
+    /// A filter with its patterns normalized.
+    const Patterns = struct {
+        include: []Pattern,
+        exclude: []Pattern,
+        exclude_config: []Pattern,
+
+        fn init(a: Allocator, filter: *const Filter) Allocator.Error!Patterns {
+            return .{ .include = try all(a, filter.include), .exclude = try all(a, filter.exclude), .exclude_config = try all(a, filter.exclude_config) };
+        }
+
+        fn all(a: Allocator, patterns: []const []const u8) Allocator.Error![]Pattern {
+            const out = try a.alloc(Pattern, patterns.len);
+            for (patterns, out) |text, *p| p.* = try .init(a, text);
+            return out;
+        }
+
+        /// git's `ref_filter_match`.
+        fn admits(ps: *const Patterns, gpa: Allocator, name: []const u8) Allocator.Error!bool {
+            for (ps.exclude) |p| if (try p.matches(gpa, name)) return false;
+            if (ps.include.len != 0) {
+                for (ps.include) |p| if (try p.matches(gpa, name)) return true;
+                return false;
+            }
+            for (ps.exclude_config) |p| if (try p.matches(gpa, name)) return false;
+            return true;
+        }
+    };
+
+    /// git's `load_ref_decorations`: every ref `filter` admits (every ref
+    /// with none, as `git archive` loads them), `HEAD` included, and the
+    /// grafts.
+    pub fn load(gpa: Allocator, io: Io, repo: *Repository, filter: ?*const Filter) LoadError!Decorations {
         var d: Decorations = .{ .arena = .init(gpa) };
         errdefer d.deinit();
         const a = d.arena.allocator();
+        const patterns: ?Patterns = if (filter) |f| try .init(a, f) else null;
         const store = repo.refStore();
         var listing = try store.list(gpa, io, "refs/");
         defer listing.deinit();
         const replace = repo.configuration().getBool("core.usereplacerefs", true) catch true;
         for (listing.entries) |entry| {
+            if (patterns) |*ps| if (!try ps.admits(gpa, entry.name)) continue;
             const oid = switch (entry.target) {
                 .direct => |oid| oid,
                 .symbolic => blk: {
@@ -244,7 +358,8 @@ pub const Decorations = struct {
             }
             try d.addRef(io, repo, kindOf(entry.name), try a.dupe(u8, entry.name), oid);
         }
-        if (try store.resolve(gpa, io, "HEAD")) |head| {
+        const head_admitted = if (patterns) |*ps| try ps.admits(gpa, "HEAD") else true;
+        if (if (head_admitted) try store.resolve(gpa, io, "HEAD") else null) |head| {
             defer gpa.free(head.name);
             if (!std.mem.eql(u8, head.name, "HEAD") and std.mem.startsWith(u8, head.name, "refs/")) d.head_branch = try a.dupe(u8, head.name);
             try d.addRef(io, repo, .head, "HEAD", head.oid);
