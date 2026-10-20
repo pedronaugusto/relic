@@ -339,7 +339,9 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
         if (builtin.target.os.tag == .windows) syncFile(io, file, .{ .policy = .per_file }) catch break;
         const s = file.stat(io) catch break;
         const nsec: u64 = @intCast(@mod(s.mtime.toNanoseconds(), std.time.ns_per_s));
-        divisor = std.math.gcd(divisor, nsec);
+        // A zero is divisible by anything: it narrows nothing, and gcd
+        // takes no pair of zeros.
+        if (nsec != 0) divisor = std.math.gcd(divisor, nsec);
         samples += 1;
     }
     if (samples == 0) return .nanosecond;

@@ -29,6 +29,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `fs.probeTimestampResolution` on a file system that keeps whole seconds: every sample reports zero nanoseconds, which it took to `std.math.gcd(0, 0)`, an assertion in safe builds; it reports a second, as it says. Found by the crash tests on shakedown's simulated disk.
 - fsmonitor as git's `check_for_incompatible`: a working tree on another machine's volume has no monitor unless `fsmonitor.allowRemote`, nor one whose volume cannot be asked; on Windows none under `core.virtualFilesystem`; the daemon's socket for a git directory on another machine's volume is `<fsmonitor.socketDir or ~>/.git-fsmonitor-<SHA-1 of the working tree's real path>`, and a socket directory on another machine's volume, or named `msdos` or `ntfs`, has no daemon.
 
 ## [0.22.0] - 2026-10-18
