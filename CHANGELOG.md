@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `diff.UnifiedInputs.changes` replaces `change`: `diff.unified` writes a whole diff, every change of it, as git's `diff_flush_patch_all_file_pairs` writes its queue.
+
+### Added
+
+- `diff.Options.color_moved` and `color_moved_ws` (`diff.ColorMoved`, `diff.ColorMovedWs`; `diff.configured` reads `diff.colorMoved` and `diff.colorMovedWS`, a value git dies on refused): moved lines in colour, found over every file of the diff `diff.unified` writes, or within the body `diff.unifiedBody` writes, as git's `mark_color_as_moved` finds them (`plain`, `blocks` of twenty alphanumerics, `zebra`'s alternate blocks, `dimmed-zebra`'s uninteresting lines; `ignore-space-change`, `ignore-space-at-eol`, `ignore-all-space` and `allow-indentation-change` with the file's tab width) and painted in the `*Moved*` slots. The painter records the diff and replays it once the moved lines are marked. Held to `git diff --color=always` under every mode, each whitespace mode and the moved slots.
+
 ## [0.22.0] - 2026-10-18
 
 ### Breaking

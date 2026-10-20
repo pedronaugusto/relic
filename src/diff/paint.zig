@@ -5,12 +5,14 @@
 //! `diff.wsErrorHighlight` say.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const parallax = @import("parallax");
 const color = @import("../config/color.zig");
 const config_mod = @import("../config/config.zig");
 const whitespace = @import("../text.zig").whitespace;
 const decimal = @import("../text.zig").decimal;
+const moved = @import("moved.zig");
 
 const Color = color.Color;
 
@@ -159,6 +161,11 @@ pub const Painter = struct {
     /// git's line counters, one past the line being written.
     old_line: u32 = 0,
     new_line: u32 = 0,
+    /// Where removed and added lines are recorded rather than written,
+    /// for moved lines to be found over the whole diff, and this
+    /// painter's place among its files.
+    recorder: ?*Recorder = null,
+    index: u32 = 0,
 
     /// A painter for one pair of texts; `null` colours write none.
     pub fn init(colors: ?*const Colors, rule: whitespace.Rule, highlight: WsErrorHighlight, of_patches: ?DiffOfPatches, old: []const u8, new: []const u8) Painter {
@@ -191,6 +198,17 @@ pub const Painter = struct {
         const p: *Painter = @ptrCast(@alignCast(@constCast(context.?))); // safe: `paint` hands its own *Painter
         const c = p.colors;
         const reset = p.reset;
+        if (p.recorder) |r| switch (line.kind) {
+            .old => {
+                p.old_line += 1;
+                return r.record(p.index, line, false);
+            },
+            .new => {
+                p.new_line += 1;
+                return r.record(p.index, line, !p.dual() and p.blankAtEof(line.text));
+            },
+            else => {},
+        };
         try w.writeAll(p.prefix());
         switch (line.kind) {
             .old_file, .new_file => {
@@ -236,26 +254,11 @@ pub const Painter = struct {
             },
             .old => {
                 p.old_line += 1;
-                if (!p.dual()) return p.markup(w, null, c.old.bytes(), line, p.highlight.old, false);
-                const set = switch (first(line.text)) {
-                    '+' => c.new_dimmed.bytes(),
-                    '@' => c.frag.bytes(),
-                    '-' => c.old_dimmed.bytes(),
-                    else => c.context_dimmed.bytes(),
-                };
-                try p.markup(w, c.old.bytes(), set, line, p.highlight.old, false);
+                try p.content(w, line, .{}, false);
             },
             .new => {
                 p.new_line += 1;
-                if (!p.dual()) return p.markup(w, null, c.new.bytes(), line, p.highlight.new, p.blankAtEof(line.text));
-                const set = switch (first(line.text)) {
-                    '-' => c.old_bold.bytes(),
-                    '@' => c.frag.bytes(),
-                    '+' => c.new_bold.bytes(),
-                    else => c.context_bold.bytes(),
-                };
-                // git marks no whitespace on these
-                try p.markup(w, c.new.bytes(), set, line, false, false);
+                try p.content(w, line, .{}, !p.dual() and p.blankAtEof(line.text));
             },
             .incomplete => {
                 const after = switch (line.sign) {
@@ -267,6 +270,45 @@ pub const Painter = struct {
                 try emitLine(w, set, null, false, reset, 0, line.text);
             },
         }
+    }
+
+    /// A removed or added line recorded for moved lines, written once
+    /// they are marked.
+    fn replay(p: *Painter, w: *Io.Writer, line: parallax.Paint.Line, flags: moved.Flags, blank_at_eof: bool) Io.Writer.Error!void {
+        try w.writeAll(p.prefix());
+        try p.content(w, line, flags, blank_at_eof);
+    }
+
+    /// A removed or added line, as git's `emit_diff_symbol_from_struct`
+    /// paints `DIFF_SYMBOL_MINUS` and `_PLUS`: in its moved colour where
+    /// `flags` marks it moved; under dual colour painted by both its signs.
+    fn content(p: *Painter, w: *Io.Writer, line: parallax.Paint.Line, flags: moved.Flags, blank_at_eof: bool) Io.Writer.Error!void {
+        const c = p.colors;
+        if (line.kind == .old) {
+            const base: *const Color = if (!flags.moved) &c.old else if (flags.alternative)
+                (if (flags.uninteresting) &c.old_moved_alternative_dimmed else &c.old_moved_alternative)
+            else if (flags.uninteresting) &c.old_moved_dimmed else &c.old_moved;
+            if (!p.dual()) return p.markup(w, null, base.bytes(), line, p.highlight.old, false);
+            const set = switch (first(line.text)) {
+                '+' => c.new_dimmed.bytes(),
+                '@' => c.frag.bytes(),
+                '-' => c.old_dimmed.bytes(),
+                else => c.context_dimmed.bytes(),
+            };
+            return p.markup(w, base.bytes(), set, line, p.highlight.old, false);
+        }
+        const base: *const Color = if (!flags.moved) &c.new else if (flags.alternative)
+            (if (flags.uninteresting) &c.new_moved_alternative_dimmed else &c.new_moved_alternative)
+        else if (flags.uninteresting) &c.new_moved_dimmed else &c.new_moved;
+        if (!p.dual()) return p.markup(w, null, base.bytes(), line, p.highlight.new, blank_at_eof);
+        const set = switch (first(line.text)) {
+            '-' => c.old_bold.bytes(),
+            '@' => c.frag.bytes(),
+            '+' => c.new_bold.bytes(),
+            else => c.context_bold.bytes(),
+        };
+        // git marks no whitespace on these
+        try p.markup(w, base.bytes(), set, line, false, false);
     }
 
     /// git's `emit_line_ws_markup`: the sign in `set_sign`, reversed, where
@@ -299,6 +341,115 @@ pub const Painter = struct {
         if (!(p.rule & whitespace.blank_at_eof != 0 and p.blank_at_eof_old != 0 and p.blank_at_eof_new != 0 and
             p.blank_at_eof_old <= p.old_line and p.blank_at_eof_new <= p.new_line)) return false;
         return whitespace.blankLine(text);
+    }
+};
+
+/// A coloured patch written in two passes, as git writes one whose moved
+/// lines it colours (`diff_flush_patch_all_file_pairs`): each file's
+/// patch recorded (the bytes painted between removed and added lines, and
+/// those lines with the painter of their file), the moved lines marked
+/// over all of them, then the record replayed in the `*Moved*` slots.
+pub const Recorder = struct {
+    gpa: Allocator,
+    mode: moved.ColorMoved,
+    ws: moved.ColorMovedWs,
+    /// Everything painted but the removed and added lines: the writer the
+    /// files' patches are written to.
+    painted: Io.Writer.Allocating,
+    /// The removed and added lines, each with its ending.
+    texts: std.ArrayList(u8) = .empty,
+    records: std.ArrayList(Record) = .empty,
+    /// One per file, its lines' `Record.painter`.
+    painters: std.ArrayList(Painter) = .empty,
+
+    const Record = struct {
+        kind: moved.Line.Kind,
+        /// Where the bytes painted before it end in `painted`.
+        before: usize,
+        /// The line in `texts`.
+        start: usize,
+        end: usize,
+        /// Whether the line had its ending, or `texts` added it.
+        complete: bool,
+        blank_at_eof: bool,
+        painter: u32,
+    };
+
+    pub fn init(gpa: Allocator, mode: moved.ColorMoved, ws: moved.ColorMovedWs) Recorder {
+        return .{ .gpa = gpa, .mode = mode, .ws = ws, .painted = .init(gpa) };
+    }
+
+    pub fn deinit(r: *Recorder) void {
+        r.painted.deinit();
+        r.texts.deinit(r.gpa);
+        r.records.deinit(r.gpa);
+        r.painters.deinit(r.gpa);
+    }
+
+    /// Where a file's painter lives while its lines are recorded: one file
+    /// at a time.
+    pub fn addPainter(r: *Recorder, painter: Painter) Allocator.Error!*Painter {
+        try r.painters.append(r.gpa, painter);
+        const p = &r.painters.items[r.painters.items.len - 1];
+        p.recorder = r;
+        p.index = @intCast(r.painters.items.len - 1);
+        return p;
+    }
+
+    /// A removed or added line, in place of writing it. A failure is the
+    /// allocator's, as the painted writer's are.
+    fn record(r: *Recorder, painter: u32, line: parallax.Paint.Line, blank_at_eof: bool) Io.Writer.Error!void {
+        const complete = line.text.len != 0 and line.text[line.text.len - 1] == '\n';
+        const start_at = r.texts.items.len;
+        r.texts.appendSlice(r.gpa, line.text) catch return error.WriteFailed;
+        if (!complete) r.texts.append(r.gpa, '\n') catch return error.WriteFailed;
+        r.records.append(r.gpa, .{
+            .kind = if (line.kind == .old) .old else .new,
+            .before = r.painted.written().len,
+            .start = start_at,
+            .end = r.texts.items.len,
+            .complete = complete,
+            .blank_at_eof = blank_at_eof,
+            .painter = painter,
+        }) catch return error.WriteFailed;
+    }
+
+    /// Mark the moved lines and write everything recorded to `w`.
+    pub fn finish(r: *Recorder, w: *Io.Writer) (Allocator.Error || Io.Writer.Error)!void {
+        const records = r.records.items;
+        const lines = try r.gpa.alloc(moved.Line, records.len);
+        defer r.gpa.free(lines);
+        for (records, lines) |rec, *line| line.* = .{
+            .kind = rec.kind,
+            .text = r.texts.items[rec.start..rec.end],
+            .tab_width = whitespace.tabWidth(r.painters.items[rec.painter].rule),
+        };
+        // The diff in order, a run of painted bytes between two lines one
+        // symbol, as git's headers, hunk lines and context are symbols that
+        // are neither.
+        var symbols: std.ArrayList(?u32) = .empty;
+        defer symbols.deinit(r.gpa);
+        var at: usize = 0;
+        for (records, 0..) |rec, i| {
+            if (rec.before != at) try symbols.append(r.gpa, null);
+            at = rec.before;
+            try symbols.append(r.gpa, @intCast(i));
+        }
+        if (r.painted.written().len != at) try symbols.append(r.gpa, null);
+        try moved.mark(r.gpa, r.mode, r.ws, lines, symbols.items);
+
+        const painted = r.painted.written();
+        at = 0;
+        for (records, lines) |rec, line| {
+            try w.writeAll(painted[at..rec.before]);
+            at = rec.before;
+            try r.painters.items[rec.painter].replay(w, .{
+                .kind = if (rec.kind == .old) .old else .new,
+                .text = if (rec.complete) line.text else line.text[0 .. line.text.len - 1],
+                .sign = if (rec.kind == .old) '-' else '+',
+            }, line.flags, rec.blank_at_eof);
+        }
+        try w.writeAll(painted[at..]);
     }
 };
 
