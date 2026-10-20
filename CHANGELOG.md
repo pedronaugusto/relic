@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-20
+
 ### Breaking
 
 - `smart_http.Error` has `RateLimited`, `SslVersionUnsupported` and `PinnedPubkeyUnsupported`; `warning.Warning` has `http_version_unknown`, `ssl_version_unknown`, `cookie_file_stdin`, `save_cookies_without_file`, `http_env_unparsed` and `rate_limited`.
