@@ -9,6 +9,7 @@ pub const fetch_pack = @import("wire/fetch_pack.zig");
 pub const filter_spec = @import("wire/filter_spec.zig");
 pub const hidden = @import("wire/hidden.zig");
 pub const http_settings = @import("wire/http_settings.zig");
+pub const pinned_key = @import("wire/pinned_key.zig");
 pub const policy = @import("wire/policy.zig");
 pub const promisors = @import("wire/promisors.zig");
 pub const protocol = @import("wire/protocol.zig");

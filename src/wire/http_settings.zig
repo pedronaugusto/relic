@@ -122,7 +122,9 @@ pub const Settings = struct {
         origin: []const u8,
         headers: *std.ArrayList([]const u8),
     ) Error!void {
-        const Kind = enum { boolean, integer, string, path };
+        // `pin` is a path read as git reads one, or curl's `sha256//`
+        // hashes, which name no file to be found from the base.
+        const Kind = enum { boolean, integer, string, path, pin };
         const kinds = [_]struct { []const u8, Kind }{
             .{ "version", .string },                        .{ "sslverify", .boolean },
             .{ "sslcipherlist", .string },                  .{ "sslversion", .string },
@@ -138,7 +140,7 @@ pub const Settings = struct {
             .{ "proxysslkey", .string },                    .{ "proxysslcainfo", .string },
             .{ "proxysslcertpasswordprotected", .boolean }, .{ "cookiefile", .path },
             .{ "savecookies", .boolean },                   .{ "useragent", .string },
-            .{ "delegation", .string },                     .{ "pinnedpubkey", .path },
+            .{ "delegation", .string },                     .{ "pinnedpubkey", .pin },
             .{ "keepaliveidle", .integer },                 .{ "keepaliveinterval", .integer },
             .{ "keepalivecount", .integer },                .{ "retryafter", .integer },
             .{ "maxretries", .integer },                    .{ "maxretrytime", .integer },
@@ -158,6 +160,7 @@ pub const Settings = struct {
             },
             .string => text = value orelse return error.InvalidHttpSetting,
             .path => text = try pathValue(arena, io, paths, value),
+            .pin => text = if (value != null and std.mem.startsWith(u8, value.?, "sha256//")) value else try pathValue(arena, io, paths, value),
         };
 
         if (std.mem.eql(u8, name, "proxy")) {

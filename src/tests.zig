@@ -115,6 +115,7 @@ test {
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("testing/clone_config.zig");
         _ = @import("wire/client_cert_test.zig");
+        _ = @import("wire/pinned_key.zig");
         _ = @import("merge/strategy_test.zig");
         _ = @import("transport/bundle_test.zig");
         _ = @import("patch/apply_test.zig");

@@ -42,8 +42,9 @@
 //! transfer that has slowed to a crawl; a 429 to the advertisement is
 //! tried again as `http.maxRetries`, `http.retryAfter` and
 //! `http.maxRetryTime` say; `http.version` keeps HTTP/1.1 or lets TLS agree
-//! HTTP/2. `http.sslVersion` and `http.pinnedPubkey` are checked as far as
-//! uplink can hold them, and refused past that.
+//! HTTP/2. `http.sslVersion` is the lowest TLS version spoken with the
+//! server, and `http.pinnedPubkey` the keys its certificate may hold
+//! (`pinned_key.zig`), both as curl holds the server to them for git.
 
 const Self = @This();
 
@@ -66,6 +67,7 @@ const decimal = @import("../text.zig").decimal;
 const policy = @import("policy.zig");
 const client_cert = @import("client_cert.zig");
 const authorities = @import("authorities.zig");
+const pinned_key = @import("pinned_key.zig");
 const uplink = @import("uplink");
 const cloak = @import("cloak");
 /// Whether relic was built with HTTP: the `http` build option.
@@ -141,11 +143,11 @@ pub const Error = error{
     /// as git says it.
     RateLimited,
     /// `http.sslVersion` names SSL 2 or 3, which curl's TLS libraries no
-    /// longer speak and git fails on, or `tlsv1.3`, which relic cannot be
-    /// held to yet.
+    /// longer speak and git fails on.
     SslVersionUnsupported,
-    /// `http.pinnedPubkey`, which relic cannot check yet: refused rather
-    /// than a server's key left unchecked.
+    /// `http.pinnedPubkey` under `http.sslVerify=false`: curl checks the
+    /// pin with nothing else checked, which uplink's TLS cannot yet, so it
+    /// is refused rather than the server's key left unchecked.
     PinnedPubkeyUnsupported,
 } || connection.Error || credential.Error || client_cert.Error;
 
@@ -352,11 +354,14 @@ const Http = struct {
         http_settings.chooseProxy(&settings, h.options.proxy);
         var tls_options: uplink.tls.ClientOptions = .{};
         if (url.scheme == .https) {
-            try h.checkSslVersion(settings.ssl_version);
-            // curl checks the server's key against the pin; uplink cannot
-            // pin a key yet, so the setting is refused rather than left
-            // unchecked.
-            if (settings.pinned_pubkey != null) return h.fail(error.PinnedPubkeyUnsupported, "http.pinnedPubkey");
+            tls_options.min_version = try h.sslVersion(settings.ssl_version);
+            if (settings.pinned_pubkey) |value| {
+                if (!settings.ssl_verify) return h.fail(error.PinnedPubkeyUnsupported, "http.pinnedPubkey under http.sslVerify=false");
+                tls_options.pins = try pinned_key.read(arena, h.io, value);
+                // No key that can match fails every handshake, as curl
+                // fails it: refused here, by the setting's name.
+                if (tls_options.pins.len == 0) return h.fail(error.TlsFailed, "public key does not match pinned public key (http.pinnedPubkey)");
+            }
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{
                     .cert = cert,
@@ -455,22 +460,23 @@ const Http = struct {
         return .negotiate;
     }
 
-    /// `http.sslVersion` or `GIT_SSL_VERSION` against what curl takes for
-    /// git. Each names the lowest version spoken: `tlsv1` to `tlsv1.2`
-    /// allow what relic speaks, TLS 1.2 and 1.3; SSL 2 and 3 are not
-    /// built into curl's TLS libraries, and git fails on them; `tlsv1.3`
-    /// asks for TLS 1.3 alone, which uplink cannot be told yet, so it is
-    /// refused rather than not kept. A name curl does not have is warned
-    /// of, as git warns, and the default kept.
-    fn checkSslVersion(h: *Http, value: ?[]const u8) Error!void {
-        const text = value orelse return;
-        if (text.len == 0) return;
+    /// The lowest TLS version `http.sslVersion` or `GIT_SSL_VERSION` lets
+    /// the server speak, as curl takes it for git: `tlsv1` to `tlsv1.2`
+    /// allow what relic speaks, TLS 1.2 and 1.3, and `tlsv1.3` TLS 1.3
+    /// alone; SSL 2 and 3 are not built into curl's TLS libraries, and git
+    /// fails on them. A name curl does not have is warned of, as git warns,
+    /// and the default kept.
+    fn sslVersion(h: *Http, value: ?[]const u8) Error!cloak.tls.Version {
+        const text = value orelse return .tls12;
+        if (text.len == 0) return .tls12;
         const allowed = [_][]const u8{ "tlsv1", "tlsv1.0", "tlsv1.1", "tlsv1.2" };
-        for (allowed) |name| if (std.mem.eql(u8, text, name)) return;
-        if (std.mem.eql(u8, text, "sslv2") or std.mem.eql(u8, text, "sslv3") or std.mem.eql(u8, text, "tlsv1.3")) {
+        for (allowed) |name| if (std.mem.eql(u8, text, name)) return .tls12;
+        if (std.mem.eql(u8, text, "tlsv1.3")) return .tls13;
+        if (std.mem.eql(u8, text, "sslv2") or std.mem.eql(u8, text, "sslv3")) {
             return h.fail(error.SslVersionUnsupported, text);
         }
         try warning.note(h.options.warnings, .{ .ssl_version_unknown = text });
+        return .tls12;
     }
 
     /// `http.cookieFile` read into the client's jar, as curl reads it for

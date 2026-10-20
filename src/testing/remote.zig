@@ -529,6 +529,11 @@ pub const TlsFront = struct {
         client_ca: ?[]const u8 = null,
         /// An RSA key for the front's own certificate, in place of an EC one.
         rsa: bool = false,
+        /// The one TLS version spoken, as `s_server` takes it (`-tls1_2`).
+        version: ?[]const u8 = null,
+        /// Write the certificate's public key beside it, as `pub.pem` and
+        /// `pub.der`, for a client to pin.
+        public_key: bool = false,
     };
 
     /// Make a certificate and start serving TLS.
@@ -573,6 +578,14 @@ pub const TlsFront = struct {
         const ca_name = try gpa.print("ca/{s}.0", .{std.mem.trim(u8, hashed.stdout, "\r\n")});
         defer gpa.free(ca_name);
         try dir.dir.copyFile("cert.pem", dir.dir, ca_name, io, .{});
+        if (options.public_key) for ([_][]const u8{ "PEM", "DER" }, [_][]const u8{ "pub.pem", "pub.der" }) |form, name| {
+            var written = try program.run(gpa, io, .{ .environ = &env }, .{
+                .argv = &.{ "openssl", "pkey", "-in", key_path, "-pubout", "-outform", form, "-out", name },
+                .cwd = .{ .dir = dir.dir },
+            }, .{});
+            defer written.deinit(gpa);
+            if (!written.succeeded()) return error.SkipZigTest;
+        };
 
         try dir.dir.createDirPath(io, "www");
         var www = try dir.dir.openDir(io, "www", .{});
@@ -582,6 +595,7 @@ pub const TlsFront = struct {
         // The answers are read as bytes, which Windows would read as text.
         try argv.appendSlice(gpa, &.{ "openssl", "s_server", "-accept", "127.0.0.1:0", "-cert", cert_path, "-key", key_path, "-HTTP", "-http_server_binmode" });
         if (options.client_ca) |ca| try argv.appendSlice(gpa, &.{ "-Verify", "1", "-verify_return_error", "-CAfile", ca });
+        if (options.version) |flag| try argv.append(gpa, flag);
         var running = program.start(gpa, io, .{ .environ = &env }, .{
             .argv = argv.items,
             .cwd = .{ .dir = www },

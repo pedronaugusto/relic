@@ -1170,7 +1170,7 @@ test "a transfer slower than http.lowSpeedLimit for http.lowSpeedTime is given u
     try testing.expectError(error.ConnectionFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } }));
 }
 
-test "http.version and http.sslVersion as git reads them: an unknown value warned of, SSL 2 and 3 refused, TLS 1.3 alone and a pinned key refused until they can be held" {
+test "http.version and http.sslVersion as git reads them: an unknown value warned of, SSL 2 and 3 refused, a pinned key with nothing else checked refused until it can be held" {
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1193,8 +1193,9 @@ test "http.version and http.sslVersion as git reads them: an unknown value warne
     }
     const refused = [_]struct { []const u8, anyerror }{
         .{ "[http]\n\tsslVersion = sslv3\n", error.SslVersionUnsupported },
-        .{ "[http]\n\tsslVersion = tlsv1.3\n", error.SslVersionUnsupported },
-        .{ "[http]\n\tpinnedPubkey = sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", error.PinnedPubkeyUnsupported },
+        .{ "[http]\n\tsslVerify = false\n\tpinnedPubkey = sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", error.PinnedPubkeyUnsupported },
+        // Nothing that can match fails before a connection.
+        .{ "[http]\n\tpinnedPubkey = sha256//AAAA\n", error.TlsFailed },
     };
     for (refused) |case| {
         var config = try config_mod.Config.parseText(gpa, case[0], .local);
@@ -1207,6 +1208,81 @@ test "http.version and http.sslVersion as git reads them: an unknown value warne
     defer warnings.deinit();
     try testing.expectError(error.ConnectionFailed, transport.Session.open(gpa, io, "https://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config, .warnings = &warnings }));
     try testing.expectEqualStrings("unsupported ssl version tlsv1.5: using default", try warnings.items.items[0].message(warnings.arena.allocator()));
+}
+
+test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl holds it for git: the lowest version spoken, the keys its certificate may hold" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const old = try tlsFront(gpa, io, server, .{ .version = "-tls1_2" });
+    defer old.stop(io);
+    const front = try tlsFront(gpa, io, server, .{ .public_key = true });
+    defer front.stop(io);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const keys = std.Io.Dir.path.dirname(front.cert_path).?;
+    const pem = try std.Io.Dir.path.join(arena, &.{ keys, "pub.pem" });
+    const der = try std.Io.Dir.path.join(arena, &.{ keys, "pub.der" });
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(try Io.Dir.cwd().readFileAlloc(io, der, arena, .limited(1 << 16)), &hash, .{});
+    var spelled: [44]u8 = undefined;
+    const right = try arena.print("sha256//{s}", .{std.base64.standard.Encoder.encode(&spelled, &hash)});
+    const wrong = "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    const Case = struct {
+        front: *testremote.TlsFront,
+        key: []const u8,
+        value: []const u8,
+        fetched: bool,
+        // macOS's libcurl has no TLS 1.3 to be held to, and git fails there.
+        git: bool = true,
+    };
+    for ([_]Case{
+        .{ .front = old, .key = "http.sslVersion", .value = "tlsv1.3", .fetched = false },
+        .{ .front = old, .key = "http.sslVersion", .value = "tlsv1.2", .fetched = true },
+        .{ .front = front, .key = "http.sslVersion", .value = "tlsv1.3", .fetched = true, .git = builtin.os.tag != .macos },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = right, .fetched = true },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};{s}", .{ wrong, right }), .fetched = true },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = wrong, .fetched = false },
+        // `;` and anything but another hash is part of the entry.
+        .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};x", .{right}), .fetched = false },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = pem, .fetched = true },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = der, .fetched = true },
+        // A certificate holds the key but is not one.
+        .{ .front = front, .key = "http.pinnedPubkey", .value = front.cert_path, .fetched = false },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = try std.Io.Dir.path.join(arena, &.{ keys, "missing" }), .fetched = false },
+    }) |case| {
+        errdefer std.debug.print("case: {s}={s}\n", .{ case.key, case.value });
+        const url = try arena.print("https://127.0.0.1:{d}/repo.git", .{case.front.port});
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
+            try r.exec(io, &.{ "remote", "add", "origin", url });
+            try testremote.alreadyHas(gpa, io, root.dir, r);
+            try r.exec(io, &.{ "config", "http.sslCAInfo", case.front.cert_path });
+            try r.exec(io, &.{ "config", case.key, case.value });
+        }
+        if (!case.fetched) {
+            by_git.report_failures = false;
+            try testing.expectError(error.GitFailed, by_git.run(io, &.{ "fetch", "-q", "origin" }));
+            try testing.expectError(error.TlsFailed, relicFetch(gpa, io, by_relic.dir, &env));
+            continue;
+        }
+        try relicFetch(gpa, io, by_relic.dir, &env);
+        if (!case.git) continue;
+        gpa.free(try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true));
+        try expectSameFetch(gpa, io, &by_git, &by_relic);
+    }
 }
 
 test "an idle kept connection does not block another client" {

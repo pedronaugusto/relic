@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `http.sslVersion=tlsv1.3` holds the server to TLS 1.3 (uplink's `tls.ClientOptions.min_version`), as curl holds it for git, where it was refused.
+- `http.pinnedPubkey` holds the server's certificate to the keys it names, as curl's `Curl_pin_peer_pubkey` reads them for git: `sha256//<base64>` hashes with `;sha256//` between them, each compared as written, or a file holding the key as DER or a `PUBLIC KEY` PEM block (`wire.pinned_key`, through uplink's `pins`). A value that can match no key fails with `TlsFailed` before connecting; a hash list is no longer made a path from the configuration's directory.
+
+### Changed
+
+- `smart_http.Error.PinnedPubkeyUnsupported` is a pin under `http.sslVerify=false` alone, which curl checks with nothing else checked and uplink's TLS cannot yet; `SslVersionUnsupported` is SSL 2 or 3 alone.
+
 ## [0.25.0] - 2026-10-20
 
 ### Breaking
