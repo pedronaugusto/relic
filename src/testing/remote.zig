@@ -180,6 +180,10 @@ pub const HttpServer = struct {
     log_mutex: Io.Mutex = .init,
     /// How many connections were accepted.
     connections: u32 = 0,
+    /// How many 429s were sent.
+    rate_limited: u32 = 0,
+    /// One line per request that carried a `Cookie`: its value.
+    cookies: std.ArrayList(u8) = .empty,
 
     /// How the server behaves.
     pub const HttpOptions = struct {
@@ -204,6 +208,14 @@ pub const HttpServer = struct {
         /// Where that redirect leads instead: `<redirect_to>/<rest>`, a
         /// whole URL, another server's.
         redirect_to: ?[]const u8 = null,
+        /// Answer the first `times` requests for `info/refs` with 429, and
+        /// this `Retry-After` when there is one.
+        rate_limit: ?struct { times: u32, retry_after: ?[]const u8 = null } = null,
+        /// Send this `Set-Cookie` with every answer of git's backend.
+        set_cookie: ?[]const u8 = null,
+        /// Wait this long before answering a `POST`, as a server that has
+        /// stopped sending does.
+        stall: ?Io.Duration = null,
     };
 
     /// Listen on an ephemeral port and serve the repositories under `root`.
@@ -244,6 +256,7 @@ pub const HttpServer = struct {
         s.env.deinit();
         s.gpa.free(s.root);
         s.log.deinit(s.gpa);
+        s.cookies.deinit(s.gpa);
         s.gpa.destroy(s);
     }
 
@@ -257,6 +270,14 @@ pub const HttpServer = struct {
         s.log_mutex.lockUncancelable(s.io);
         defer s.log_mutex.unlock(s.io);
         return gpa.dupe(u8, s.log.items);
+    }
+
+    /// The `Cookie` values requests carried, one per line. The result is
+    /// the caller's.
+    pub fn cookiesSeen(s: *HttpServer, gpa: Allocator) ![]u8 {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        return gpa.dupe(u8, s.cookies.items);
     }
 
     pub fn connectionCount(s: *HttpServer) u32 {
@@ -343,6 +364,23 @@ pub const HttpServer = struct {
         });
     }
 
+    fn logCookie(s: *HttpServer, value: []const u8) !void {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        try s.cookies.print(s.gpa, "{s}\n", .{value});
+    }
+
+    /// Log a request; whether it is to be answered 429.
+    fn logRequest(s: *HttpServer, method: std.http.Method, target: []const u8, auth: bool, gzip: bool) !bool {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        try s.log.print(s.gpa, "{s} {s} {s}{s}\n", .{ @tagName(method), target, if (auth) "auth" else "-", if (gzip) " gzip" else "" });
+        const limit = s.options.rate_limit orelse return false;
+        if (s.rate_limited >= limit.times or !std.mem.endsWith(u8, target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len], "/info/refs")) return false;
+        s.rate_limited += 1;
+        return true;
+    }
+
     fn answer(s: *HttpServer, request: *std.http.Server.Request) !void {
         const io = s.io;
         const gpa = s.gpa;
@@ -361,11 +399,11 @@ pub const HttpServer = struct {
             if (std.ascii.eqlIgnoreCase(header.name, "authorization")) authorization = try arena.dupe(u8, header.value);
             if (std.ascii.eqlIgnoreCase(header.name, "content-type")) content_type = try arena.dupe(u8, header.value);
             if (std.ascii.eqlIgnoreCase(header.name, "content-encoding")) content_encoding = try arena.dupe(u8, header.value);
+            if (std.ascii.eqlIgnoreCase(header.name, "cookie")) try s.logCookie(header.value);
         }
-        {
-            s.log_mutex.lockUncancelable(io);
-            defer s.log_mutex.unlock(io);
-            try s.log.print(gpa, "{s} {s} {s}{s}\n", .{ @tagName(method), target, if (authorization != null) "auth" else "-", if (content_encoding != null) " gzip" else "" });
+        if (try s.logRequest(method, target, authorization != null, content_encoding != null)) {
+            const after: []const std.http.Header = if (s.options.rate_limit.?.retry_after) |v| &.{.{ .name = "Retry-After", .value = v }} else &.{};
+            return request.respond("", .{ .status = .too_many_requests, .keep_alive = s.options.keep_alive, .extra_headers = after });
         }
 
         const question = std.mem.findScalar(u8, target, '?');
@@ -451,6 +489,8 @@ pub const HttpServer = struct {
                 status = std.fmt.parseInt(u16, value[0..3], 10) catch 500;
             } else try response_headers.append(arena, .{ .name = name, .value = value });
         }
+        if (s.options.set_cookie) |cookie| try response_headers.append(arena, .{ .name = "Set-Cookie", .value = cookie });
+        if (method == .POST) if (s.options.stall) |wait| try io.sleep(wait, .awake);
         try request.respond(output[split + 4 ..], .{
             .status = @fromBackingInt(@intCast(status)),
             .keep_alive = s.options.keep_alive,

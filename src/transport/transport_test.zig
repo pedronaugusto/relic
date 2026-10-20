@@ -28,6 +28,7 @@ const object = @import("../object/object.zig");
 const progress_mod = @import("../report.zig").progress;
 const builtin = @import("builtin");
 const push_mod = @import("push.zig");
+const program = @import("../process.zig").program;
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -998,6 +999,214 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
         try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
         try testing.expectEqualStrings(if (through_env) "GIT_SSL_NO_VERIFY" else "http.sslverify", warnings.items.items[0].ssl_verify_disabled);
     }
+}
+
+/// The lines of a Netscape cookie file that are cookies, a trailing `/`
+/// of a path taken off as git's own test takes it (curl wrote one once),
+/// sorted. The result is `arena`'s.
+fn cookieLines(arena: Allocator, text: []const u8) ![]const u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0 or (line[0] == '#' and !std.mem.startsWith(u8, line, "#HttpOnly_"))) continue;
+        try lines.append(arena, try std.mem.replaceOwned(u8, arena, line, "/\t", "\t"));
+    }
+    std.mem.sort([]const u8, lines.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.less);
+    return std.mem.join(arena, "\n", lines.items);
+}
+
+test "http.cookieFile's cookies are sent, and http.saveCookies writes back the file curl writes for git" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .set_cookie = "name=value" });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
+        try r.exec(io, &.{ "remote", "add", "origin", url });
+        try r.writeFile(io, "cookies.txt", "127.0.0.1\tFALSE\t/\tFALSE\t0\tothername\tothervalue\n");
+        try r.exec(io, &.{ "config", "http.cookieFile", "cookies.txt" });
+        try r.exec(io, &.{ "config", "http.saveCookies", "true" });
+    }
+    const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
+    gpa.free(fetched);
+    const by_git_cookies = try server.cookiesSeen(gpa);
+    defer gpa.free(by_git_cookies);
+    var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+    defer repo.deinit(io);
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+    outcome.deinit();
+    try expectSameFetch(gpa, io, &by_git, &by_relic);
+    const seen = try server.cookiesSeen(gpa);
+    defer gpa.free(seen);
+    // relic's requests carried the cookies git's did.
+    try testing.expectEqualStrings(by_git_cookies, seen[by_git_cookies.len..]);
+    try testing.expect(std.mem.find(u8, seen, "othername=othervalue") != null);
+    const git_file = try by_git.readFile(io, "cookies.txt");
+    defer gpa.free(git_file);
+    const relic_file = try by_relic.readFile(io, "cookies.txt");
+    defer gpa.free(relic_file);
+    try testing.expectEqualStrings(try cookieLines(arena, git_file), try cookieLines(arena, relic_file));
+}
+
+test "a 429 is answered as git answers it: http.maxRetries requests in all, Retry-After or http.retryAfter, neither past http.maxRetryTime" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Case = struct {
+        times: u32,
+        header: ?[]const u8 = null,
+        max_retries: []const u8,
+        retry_after: ?[]const u8 = null,
+        max_retry_time: ?[]const u8 = null,
+        /// null: fetched; else what git's error says, and relic's error.
+        fails: ?struct { []const u8, anyerror } = null,
+        waited: ?u64 = null,
+    };
+    const cases = [_]Case{
+        .{ .times = 2, .max_retries = "3" },
+        .{ .times = 1, .header = "1", .max_retries = "2", .waited = 1 },
+        .{ .times = 1, .max_retries = "0", .fails = .{ "429", error.HttpStatus } },
+        .{ .times = 3, .header = "1", .max_retries = "1", .fails = .{ "please try again in 1 seconds", error.RateLimited } },
+        .{ .times = 3, .max_retries = "2", .fails = .{ "please try again later", error.RateLimited } },
+        .{ .times = 1, .header = "100", .max_retries = "3", .max_retry_time = "3", .fails = .{ "greater than http.maxRetryTime (100 > 3 seconds)", error.RateLimited } },
+        .{ .times = 1, .max_retries = "3", .retry_after = "100", .max_retry_time = "5", .fails = .{ "configured http.retryAfter exceeds http.maxRetryTime (100 > 5 seconds)", error.RateLimited } },
+    };
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    for (cases) |case| {
+        var env = try testremote.environ(gpa);
+        defer env.deinit();
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }, 0..) |r, i| {
+            const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .rate_limit = .{ .times = case.times, .retry_after = case.header } });
+            defer server.stop();
+            const url = try server.url(gpa, "repo.git");
+            defer gpa.free(url);
+            try r.exec(io, &.{ "config", "http.maxRetries", case.max_retries });
+            if (case.retry_after) |v| try r.exec(io, &.{ "config", "http.retryAfter", v });
+            if (case.max_retry_time) |v| try r.exec(io, &.{ "config", "http.maxRetryTime", v });
+            if (i == 0) {
+                var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
+                    .argv = &[_][]const u8{"git"} ++ testgit.default_settings ++ [_][]const u8{ "ls-remote", url },
+                    .cwd = .{ .dir = r.dir },
+                    .stderr = .capture,
+                }, .{});
+                defer outcome.deinit(gpa);
+                if (case.fails) |f| {
+                    try testing.expect(!outcome.succeeded());
+                    try testing.expect(std.mem.find(u8, outcome.stderr, f[0]) != null);
+                } else try testing.expect(outcome.succeeded());
+                continue;
+            }
+            var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
+            defer repo.deinit(io);
+            var warnings: warning.Warnings = .init(gpa);
+            defer warnings.deinit();
+            const opened = transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = repo.configuration(), .warnings = &warnings });
+            if (case.fails) |f| {
+                try testing.expectError(f[1], opened);
+                continue;
+            }
+            var session = try opened;
+            session.deinit(io);
+            if (case.waited) |seconds| {
+                try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+                try testing.expectEqual(seconds, warnings.items.items[0].rate_limited);
+            } else try testing.expectEqual(@as(usize, 0), warnings.items.items.len);
+            try testing.expectEqual(case.times, server.rate_limited);
+        }
+    }
+}
+
+test "a transfer slower than http.lowSpeedLimit for http.lowSpeedTime is given up on, as git gives it up" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .stall = .fromSeconds(4) });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_HTTP_LOW_SPEED_LIMIT", "1000");
+    try env.put("GIT_HTTP_LOW_SPEED_TIME", "1");
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
+        .argv = &[_][]const u8{"git"} ++ testgit.default_settings ++ [_][]const u8{ "fetch", "-q", "origin" },
+        .cwd = .{ .dir = by_git.dir },
+        .stderr = .capture,
+    }, .{});
+    defer outcome.deinit(gpa);
+    try testing.expect(!outcome.succeeded());
+    try testing.expect(std.ascii.findIgnoreCase(outcome.stderr, "too slow") != null);
+    var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+    defer repo.deinit(io);
+    try testing.expectError(error.ConnectionFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } }));
+}
+
+test "http.version and http.sslVersion as git reads them: an unknown value warned of, SSL 2 and 3 refused, TLS 1.3 alone and a pinned key refused until they can be held" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    {
+        var config = try config_mod.Config.parseText(gpa, "[http]\n\tversion = HTTP/3\n\tsslVersion = tlsv1.3\n", .local);
+        defer config.deinit();
+        var warnings: warning.Warnings = .init(gpa);
+        defer warnings.deinit();
+        // On http, the TLS version is not read.
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config, .warnings = &warnings });
+        session.deinit(io);
+        try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+        try testing.expectEqualStrings("unknown value given to http.version: 'HTTP/3'", try warnings.items.items[0].message(warnings.arena.allocator()));
+    }
+    const refused = [_]struct { []const u8, anyerror }{
+        .{ "[http]\n\tsslVersion = sslv3\n", error.SslVersionUnsupported },
+        .{ "[http]\n\tsslVersion = tlsv1.3\n", error.SslVersionUnsupported },
+        .{ "[http]\n\tpinnedPubkey = sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", error.PinnedPubkeyUnsupported },
+    };
+    for (refused) |case| {
+        var config = try config_mod.Config.parseText(gpa, case[0], .local);
+        defer config.deinit();
+        try testing.expectError(case[1], transport.Session.open(gpa, io, "https://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
+    }
+    var config = try config_mod.Config.parseText(gpa, "[http]\n\tsslVersion = tlsv1.5\n", .local);
+    defer config.deinit();
+    var warnings: warning.Warnings = .init(gpa);
+    defer warnings.deinit();
+    try testing.expectError(error.ConnectionFailed, transport.Session.open(gpa, io, "https://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config, .warnings = &warnings }));
+    try testing.expectEqualStrings("unsupported ssl version tlsv1.5: using default", try warnings.items.items[0].message(warnings.arena.allocator()));
 }
 
 test "an idle kept connection does not block another client" {

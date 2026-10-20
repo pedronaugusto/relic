@@ -51,6 +51,23 @@ pub const Warning = union(enum) {
     /// `promisor.storeFields` asks: `filter` or `token`, the remote, the
     /// value before and after.
     promisor_stored: struct { field: []const u8, remote: []const u8, old: []const u8, new: []const u8 },
+    /// `http.version` names neither `HTTP/1.1` nor `HTTP/2`: the value.
+    http_version_unknown: []const u8,
+    /// `http.sslVersion` or `GIT_SSL_VERSION` names a version curl does
+    /// not know, and the default is used: the value.
+    ssl_version_unknown: []const u8,
+    /// `http.cookieFile` is `-`, curl's standard input, which git does not
+    /// read cookies from.
+    cookie_file_stdin,
+    /// `http.saveCookies` without a `http.cookieFile` to save to.
+    save_cookies_without_file,
+    /// One of `GIT_HTTP_LOW_SPEED_LIMIT`, `GIT_HTTP_LOW_SPEED_TIME`,
+    /// `GIT_HTTP_RETRY_AFTER`, `GIT_HTTP_MAX_RETRIES` and
+    /// `GIT_HTTP_MAX_RETRY_TIME` is not a number, and was left out: its name.
+    http_env_unparsed: []const u8,
+    /// A server answered 429, and the request goes again after this many
+    /// seconds.
+    rate_limited: u64,
     /// A remote URL carries a password, and `transfer.credentialsInUrl`
     /// is `warn`: the URL, its password replaced by `<redacted>`.
     credentials_in_url: []const u8,
@@ -75,6 +92,12 @@ pub const Warning = union(enum) {
             .promisor_stored => |s| arena.print("Storing new {s} from server for remote '{s}'.\n    '{s}' -> '{s}'", .{ s.field, s.remote, s.old, s.new }),
             .credentials_in_url => |redacted| arena.print("URL '{s}' uses plaintext credentials", .{redacted}),
             .remote_helper => |text| text,
+            .http_version_unknown => |v| arena.print("unknown value given to http.version: '{s}'", .{v}),
+            .ssl_version_unknown => |v| arena.print("unsupported ssl version {s}: using default", .{v}),
+            .cookie_file_stdin => "refusing to read cookies from http.cookiefile '-'",
+            .save_cookies_without_file => "ignoring http.savecookies for empty http.cookiefile",
+            .http_env_unparsed => |name| arena.print("failed to parse {s}", .{name}),
+            .rate_limited => |seconds| arena.print("rate limited, waiting {d} seconds before retry", .{seconds}),
         };
     }
 };
@@ -115,6 +138,12 @@ pub const Warnings = struct {
             .promisor_stored => |s| .{ .promisor_stored = .{ .field = try a.dupe(u8, s.field), .remote = try a.dupe(u8, s.remote), .old = try a.dupe(u8, s.old), .new = try a.dupe(u8, s.new) } },
             .credentials_in_url => |t| .{ .credentials_in_url = try a.dupe(u8, t) },
             .remote_helper => |t| .{ .remote_helper = try a.dupe(u8, t) },
+            .http_version_unknown => |t| .{ .http_version_unknown = try a.dupe(u8, t) },
+            .ssl_version_unknown => |t| .{ .ssl_version_unknown = try a.dupe(u8, t) },
+            .cookie_file_stdin => .cookie_file_stdin,
+            .save_cookies_without_file => .save_cookies_without_file,
+            .http_env_unparsed => |t| .{ .http_env_unparsed = try a.dupe(u8, t) },
+            .rate_limited => |n| .{ .rate_limited = n },
         };
         try w.items.append(a, owned);
     }

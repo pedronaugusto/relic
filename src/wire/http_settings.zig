@@ -29,6 +29,7 @@ const Environ = std.process.Environ;
 const config_mod = @import("../config/config.zig");
 const url_mod = @import("url.zig");
 const urlmatch = @import("../text.zig").urlmatch;
+const decimal = @import("../text.zig").decimal;
 const Io = std.Io;
 const uplink = @import("uplink");
 const shakedown = @import("shakedown");
@@ -77,6 +78,32 @@ pub const Settings = struct {
     /// Only the TLS ones are kept.
     ca_info_from: ?[]const u8 = null,
     ssl_verify_from: ?[]const u8 = null,
+    /// `http.version`: `HTTP/1.1` or `HTTP/2`, as written; anything else
+    /// git warns of and leaves curl's default.
+    http_version: ?[]const u8 = null,
+    /// `http.sslVersion` or `GIT_SSL_VERSION`, as written: curl's names,
+    /// `sslv2` to `tlsv1.3`; an empty one is curl's default.
+    ssl_version: ?[]const u8 = null,
+    /// `http.pinnedPubkey`: `sha256//<base64>` hashes, `;` between them,
+    /// or a file holding the key.
+    pinned_pubkey: ?[]const u8 = null,
+    /// `http.cookieFile`: where cookies are read from, and written to
+    /// when `http.saveCookies` says so.
+    cookie_file: ?[]const u8 = null,
+    save_cookies: bool = false,
+    /// `http.lowSpeedLimit` and `http.lowSpeedTime`: a transfer slower
+    /// than the limit, in bytes a second, for the time, in seconds, is
+    /// given up on; only when both are above zero.
+    low_speed_limit: i64 = -1,
+    low_speed_time: i64 = -1,
+    /// `http.retryAfter`, `http.maxRetries` and `http.maxRetryTime`: how
+    /// a 429 is answered, in seconds and attempts.
+    retry_after: i64 = 0,
+    max_retries: i64 = 0,
+    max_retry_time: i64 = 300,
+    /// The variables among `GIT_HTTP_LOW_SPEED_*` and `GIT_HTTP_*RETR*`
+    /// that are not a number, which git warns of and leaves as they were.
+    env_unparsed: []const []const u8 = &.{},
 
     /// Take `http.<name>`'s `value` (`null` when it is written without
     /// `=`), from `origin`, as git's `http_options` takes it: a boolean
@@ -121,12 +148,13 @@ pub const Settings = struct {
             if (std.mem.eql(u8, name, entry[0])) kind = entry[1];
         }
         var flag = false;
+        var number: i64 = 0;
         var text: ?[]const u8 = null;
         if (kind) |k| switch (k) {
             .boolean => flag = if (value) |v| config_mod.parseBool(v) catch return error.InvalidHttpSetting else true,
             .integer => {
                 const n = config_mod.parseInteger(value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
-                _ = std.math.cast(i32, n) orelse return error.InvalidHttpSetting;
+                number = std.math.cast(i32, n) orelse return error.InvalidHttpSetting;
             },
             .string => text = value orelse return error.InvalidHttpSetting,
             .path => text = try pathValue(arena, io, paths, value),
@@ -184,6 +212,33 @@ pub const Settings = struct {
                 .never;
         } else if (std.mem.eql(u8, name, "sslcertpasswordprotected")) {
             settings.ssl_cert_password_protected = flag;
+        } else settings.takeTransfer(name, flag, number, text);
+    }
+
+    /// The settings of how a transfer goes rather than where: the HTTP and
+    /// TLS versions, a pinned key, cookies, the slow-transfer limit and
+    /// the answer to a 429.
+    fn takeTransfer(settings: *Settings, name: []const u8, flag: bool, number: i64, text: ?[]const u8) void {
+        if (std.mem.eql(u8, name, "version")) {
+            settings.http_version = text;
+        } else if (std.mem.eql(u8, name, "sslversion")) {
+            settings.ssl_version = text;
+        } else if (std.mem.eql(u8, name, "pinnedpubkey")) {
+            settings.pinned_pubkey = text;
+        } else if (std.mem.eql(u8, name, "cookiefile")) {
+            settings.cookie_file = text;
+        } else if (std.mem.eql(u8, name, "savecookies")) {
+            settings.save_cookies = flag;
+        } else if (std.mem.eql(u8, name, "lowspeedlimit")) {
+            settings.low_speed_limit = number;
+        } else if (std.mem.eql(u8, name, "lowspeedtime")) {
+            settings.low_speed_time = number;
+        } else if (std.mem.eql(u8, name, "retryafter")) {
+            settings.retry_after = number;
+        } else if (std.mem.eql(u8, name, "maxretries")) {
+            settings.max_retries = number;
+        } else if (std.mem.eql(u8, name, "maxretrytime")) {
+            settings.max_retry_time = number;
         }
     }
 
@@ -210,7 +265,7 @@ pub const Settings = struct {
     /// `GIT_SSL_*`, `GIT_HTTP_*`, `GIT_PROXY_SSL_*`, and the proxy
     /// variables unless the configuration named a proxy, `no_proxy`
     /// turning a proxy off for the hosts it names.
-    fn takeEnvironment(settings: *Settings, env: *const Environ.Map, url: url_mod.Url, proxy_set: bool) void {
+    fn takeEnvironment(settings: *Settings, arena: Allocator, env: *const Environ.Map, url: url_mod.Url, proxy_set: bool) Allocator.Error!void {
         if (env.get("GIT_SSL_NO_VERIFY") != null) {
             settings.ssl_verify = false;
             settings.ssl_verify_from = "GIT_SSL_NO_VERIFY";
@@ -233,6 +288,25 @@ pub const Settings = struct {
         if (env.get("GIT_PROXY_SSL_KEY")) |v| settings.proxy_ssl_key = v;
         if (env.get("GIT_PROXY_SSL_CAINFO")) |v| settings.proxy_ssl_ca_info = v;
         if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) settings.proxy_ssl_cert_password_protected = true;
+        if (env.get("GIT_SSL_VERSION")) |v| settings.ssl_version = v;
+        // git's `set_long_from_env`: C's `strtol` over the whole value, a
+        // value that is not one warned of and left alone.
+        var unparsed: std.ArrayList([]const u8) = .empty;
+        const numbers = [_]struct { []const u8, *i64 }{
+            .{ "GIT_HTTP_LOW_SPEED_LIMIT", &settings.low_speed_limit },
+            .{ "GIT_HTTP_LOW_SPEED_TIME", &settings.low_speed_time },
+            .{ "GIT_HTTP_RETRY_AFTER", &settings.retry_after },
+            .{ "GIT_HTTP_MAX_RETRIES", &settings.max_retries },
+            .{ "GIT_HTTP_MAX_RETRY_TIME", &settings.max_retry_time },
+        };
+        for (numbers) |entry| {
+            const v = env.get(entry[0]) orelse continue;
+            const read = decimal.strtol(v, 10, 64);
+            if (read.overflow or read.end == 0 or read.end != v.len) {
+                try unparsed.append(arena, entry[0]);
+            } else entry[1].* = @intCast(read.value); // safe: strtol of 64 bits fits an i64
+        }
+        settings.env_unparsed = unparsed.items;
         if (!proxy_set) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .lowercase);
         if (settings.proxy) |_| {
             // git supplies an explicitly set lowercase list to curl even
@@ -354,7 +428,7 @@ pub fn resolve(arena: Allocator, io: Io, url: url_mod.Url, sources: Sources) Sel
             proxy_set = true;
         }
     };
-    if (environ) |env| s.takeEnvironment(env, url, proxy_set);
+    if (environ) |env| try s.takeEnvironment(arena, env, url, proxy_set);
     if (s.proxy) |p| {
         if (p.len == 0) s.proxy = null;
     }

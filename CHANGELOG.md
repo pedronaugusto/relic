@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `smart_http.Error` has `RateLimited`, `SslVersionUnsupported` and `PinnedPubkeyUnsupported`; `warning.Warning` has `http_version_unknown`, `ssl_version_unknown`, `cookie_file_stdin`, `save_cookies_without_file`, `http_env_unparsed` and `rate_limited`.
+
+### Added
+
+- The `http.*` settings of a transfer act as they do for git (read since 0.13.0): `http.cookieFile`'s cookies are sent (uplink's cookie jar), and `http.saveCookies` writes the jar back when the conversation ends, the session's cookies included, as curl writes it for git (`-` and an empty name warned of, as git warns); `http.lowSpeedLimit` and `http.lowSpeedTime` (and `GIT_HTTP_LOW_SPEED_*`) give up on a transfer slower than the limit for the time; a 429 to the advertisement is tried again as git's `http_request_recoverable` tries it: `http.maxRetries` requests in all (none: the 429 is an error), each after the `Retry-After` the server asks, seconds or a date against the caller's `now`, or else `http.retryAfter`, neither longer than `http.maxRetryTime` (`GIT_HTTP_RETRY_AFTER`, `GIT_HTTP_MAX_RETRIES`, `GIT_HTTP_MAX_RETRY_TIME`; a variable that is not a number warned of); `http.version` keeps HTTP/1.1 or lets TLS agree HTTP/2, another value warned of. `http.sslVersion` (and `GIT_SSL_VERSION`): `tlsv1` to `tlsv1.2` are what relic speaks already, `sslv2` and `sslv3` are refused as git fails on them, an unknown name is warned of; `tlsv1.3` alone and `http.pinnedPubkey` are refused by name until uplink can hold a connection to them. Held to git over a local server.
+
 ## [0.23.0] - 2026-10-20
 
 ### Breaking

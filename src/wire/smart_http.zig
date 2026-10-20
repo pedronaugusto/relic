@@ -35,6 +35,15 @@
 //! password from the person's helpers, as git fills them. Client certificates
 //! come from `http.sslCert` and `http.sslKey`, or `http.proxySSLCert` and
 //! `http.proxySSLKey` for an https proxy, and uplink presents them.
+//!
+//! The rest of a transfer is git's too: `http.cookieFile`'s cookies are
+//! sent and, under `http.saveCookies`, written back when the conversation
+//! ends; `http.lowSpeedLimit` over `http.lowSpeedTime` gives up on a
+//! transfer that has slowed to a crawl; a 429 to the advertisement is
+//! tried again as `http.maxRetries`, `http.retryAfter` and
+//! `http.maxRetryTime` say; `http.version` keeps HTTP/1.1 or lets TLS agree
+//! HTTP/2. `http.sslVersion` and `http.pinnedPubkey` are checked as far as
+//! uplink can hold them, and refused past that.
 
 const Self = @This();
 
@@ -45,6 +54,7 @@ const Io = std.Io;
 const http = std.http;
 
 const config_mod = @import("../config/config.zig");
+const fs = @import("../fs/fs.zig");
 const program = @import("../process.zig").program;
 const pkt_line = @import("../codec.zig").pkt_line;
 const url_mod = @import("url.zig");
@@ -52,6 +62,7 @@ const connection = @import("connection.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const http_settings = @import("http_settings.zig");
+const decimal = @import("../text.zig").decimal;
 const policy = @import("policy.zig");
 const client_cert = @import("client_cert.zig");
 const authorities = @import("authorities.zig");
@@ -124,6 +135,18 @@ pub const Error = error{
     MalformedUrl,
     /// relic was built without HTTP: its `http` build option is off.
     HttpUnavailable,
+    /// The server answered 429 to every request `http.maxRetries` allows,
+    /// or asked for a longer wait than `http.maxRetryTime`, or
+    /// `http.retryAfter` is longer than it: `Connection.message` says which,
+    /// as git says it.
+    RateLimited,
+    /// `http.sslVersion` names SSL 2 or 3, which curl's TLS libraries no
+    /// longer speak and git fails on, or `tlsv1.3`, which relic cannot be
+    /// held to yet.
+    SslVersionUnsupported,
+    /// `http.pinnedPubkey`, which relic cannot check yet: refused rather
+    /// than a server's key left unchecked.
+    PinnedPubkeyUnsupported,
 } || connection.Error || credential.Error || client_cert.Error;
 
 /// How the conversation is made.
@@ -280,6 +303,21 @@ const Http = struct {
     proxy_cert_credentials: ?credential.Session = null,
     /// A failure met inside a writer, which can only say that it failed.
     write_error: ?Error = null,
+    /// `http.cookieFile`'s cookies, sent and kept by the client; written
+    /// back to `cookie_jar_file` when the conversation ends, as curl
+    /// writes its jar for git's `http.saveCookies`.
+    cookies: ?uplink.CookieJar = null,
+    cookie_jar_file: ?[]const u8 = null,
+    /// How a 429 is answered: `http.retryAfter`, `http.maxRetries`,
+    /// `http.maxRetryTime`.
+    rate_limit: RateLimit = .{},
+
+    /// git's answer to a 429, in seconds and attempts.
+    const RateLimit = struct {
+        retry_after: i64 = 0,
+        max_retries: i64 = 0,
+        max_retry_time: i64 = 300,
+    };
 
     /// What `configure` read: the settings, and the client they make.
     const Configured = struct {
@@ -314,6 +352,11 @@ const Http = struct {
         http_settings.chooseProxy(&settings, h.options.proxy);
         var tls_options: uplink.tls.ClientOptions = .{};
         if (url.scheme == .https) {
+            try h.checkSslVersion(settings.ssl_version);
+            // curl checks the server's key against the pin; uplink cannot
+            // pin a key yet, so the setting is refused rather than left
+            // unchecked.
+            if (settings.pinned_pubkey != null) return h.fail(error.PinnedPubkeyUnsupported, "http.pinnedPubkey");
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{
                     .cert = cert,
@@ -372,18 +415,108 @@ const Http = struct {
             }
         };
         h.proxied = proxy != null;
+
+        for (settings.env_unparsed) |name| try warning.note(h.options.warnings, .{ .http_env_unparsed = name });
+        try h.loadCookies(settings);
+        h.rate_limit = .{ .retry_after = settings.retry_after, .max_retries = settings.max_retries, .max_retry_time = settings.max_retry_time };
+        var timeouts: uplink.Timeouts = .{};
+        // git's `get_curl_handle`: both above zero, or neither applies.
+        if (settings.low_speed_limit > 0 and settings.low_speed_time > 0) timeouts.low_speed = .{
+            .bytes_per_second = std.math.cast(u32, settings.low_speed_limit) orelse std.math.maxInt(u32),
+            .window = .fromRaw(@as(u64, @intCast(settings.low_speed_time)) * std.time.ns_per_s), // safe: a positive value of git's int
+        };
         return .{
             .settings = settings,
             .client = .{
                 .proxy = if (proxy) |p| .{ .fixed = p } else .none,
                 .tls = tls_options,
+                .timeouts = timeouts,
+                .http2 = try h.httpVersion(settings.http_version),
+                .cookies = if (h.cookies) |*jar| jar else null,
                 // One connection kept, as curl keeps one for git.
                 .pool = .{ .max_idle_per_route = 1, .max_idle = 1 },
-                // git's redirects and retries are its own, decided here.
+                // git's redirects and retries are its own, decided here:
+                // a 429 is tried again beside a 401, in one loop, as
+                // git's `http_request_recoverable` does.
                 .redirects = .none,
                 .retries = .none,
             },
         };
+    }
+
+    /// `http.version` as git's `get_curl_http_version_opt` reads it:
+    /// `HTTP/1.1` alone, or `HTTP/2` agreed over TLS; another value is
+    /// warned of and curl's default kept, which is HTTP/2 where TLS agrees it.
+    fn httpVersion(h: *Http, value: ?[]const u8) Error!@FieldType(uplink.Client.Options, "http2") {
+        const text = value orelse return .negotiate;
+        if (std.mem.eql(u8, text, "HTTP/1.1")) return .off;
+        if (std.mem.eql(u8, text, "HTTP/2")) return .negotiate;
+        try warning.note(h.options.warnings, .{ .http_version_unknown = text });
+        return .negotiate;
+    }
+
+    /// `http.sslVersion` or `GIT_SSL_VERSION` against what curl takes for
+    /// git. Each names the lowest version spoken: `tlsv1` to `tlsv1.2`
+    /// allow what relic speaks, TLS 1.2 and 1.3; SSL 2 and 3 are not
+    /// built into curl's TLS libraries, and git fails on them; `tlsv1.3`
+    /// asks for TLS 1.3 alone, which uplink cannot be told yet, so it is
+    /// refused rather than not kept. A name curl does not have is warned
+    /// of, as git warns, and the default kept.
+    fn checkSslVersion(h: *Http, value: ?[]const u8) Error!void {
+        const text = value orelse return;
+        if (text.len == 0) return;
+        const allowed = [_][]const u8{ "tlsv1", "tlsv1.0", "tlsv1.1", "tlsv1.2" };
+        for (allowed) |name| if (std.mem.eql(u8, text, name)) return;
+        if (std.mem.eql(u8, text, "sslv2") or std.mem.eql(u8, text, "sslv3") or std.mem.eql(u8, text, "tlsv1.3")) {
+            return h.fail(error.SslVersionUnsupported, text);
+        }
+        try warning.note(h.options.warnings, .{ .ssl_version_unknown = text });
+    }
+
+    /// `http.cookieFile` read into the client's jar, as curl reads it for
+    /// git, and kept to be written back when `http.saveCookies` says so.
+    /// `-` (curl's standard input) git refuses with a warning, as it
+    /// refuses saving to an empty name. A file that cannot be read gives
+    /// no cookies, as curl reads none from it.
+    fn loadCookies(h: *Http, settings: http_settings.Settings) Error!void {
+        var file = settings.cookie_file;
+        if (file) |f| if (std.mem.eql(u8, f, "-")) {
+            try warning.note(h.options.warnings, .cookie_file_stdin);
+            file = null;
+        };
+        if (settings.save_cookies and (file == null or file.?.len == 0)) {
+            try warning.note(h.options.warnings, .save_cookies_without_file);
+        } else if (settings.save_cookies) h.cookie_jar_file = file;
+        // curl turns its cookie engine on for any name, an empty one too.
+        if (file == null) return;
+        h.cookies = .init(h.gpa, .{});
+        if (file.?.len == 0) return;
+        const opened = Io.Dir.cwd().openFile(h.io, file.?, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return,
+        };
+        defer opened.close(h.io);
+        var buffer: [8192]u8 = undefined;
+        var reader = opened.reader(h.io, &buffer);
+        h.cookies.?.load(h.io, &reader.interface) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // curl skips a line too long for its buffer, and stops at a
+            // failed read with what it has.
+            error.ReadFailed, error.StreamTooLong => {},
+        };
+    }
+
+    /// Write the jar to `http.cookieFile`, as curl writes its cookie jar
+    /// when git cleans up: every cookie that has not expired, those of the
+    /// session included. A file that cannot be written is left, as curl
+    /// leaves it.
+    fn saveCookies(h: *Http, io: Io) void {
+        const path = h.cookie_jar_file orelse return;
+        const jar = &(h.cookies orelse return);
+        var out: Io.Writer.Allocating = .init(h.gpa);
+        defer out.deinit();
+        jar.save(io, &out.writer, .{ .session = true }) catch return;
+        fs.atomicWrite(io, Io.Dir.cwd(), path, out.written(), .{ .prefix = ".cookies-" }) catch return;
     }
 
     /// Read a client certificate and its key, as curl reads them for git.
@@ -628,8 +761,9 @@ const Http = struct {
             },
             error.HttpProtocolError => h.fail(error.ProtocolError, "not an HTTP response"),
             error.CertificateBundleUnreadable => h.fail(error.SslCertificateUnreadable, "the system's certificates"),
-            // git sets no timeout of these kinds, so none is set here.
-            error.TimedOut => h.fail(error.ConnectionFailed, "timed out"),
+            // The one timeout git sets: `http.lowSpeedLimit` over
+            // `http.lowSpeedTime`, curl's "operation too slow".
+            error.TimedOut => h.fail(error.ConnectionFailed, if (d.timeout == .low_speed) "operation too slow" else "timed out"),
             error.BodyIncomplete => h.fail(error.ConnectionFailed, "the body was cut short"),
             error.ClientCertificateRejected => h.fail(error.ClientCertificateRejected, if (d.tls_error) |e| @errorName(e) else "the server refused the certificate"),
             error.ClientCertificateSchemeUnsupported => h.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes"),
@@ -653,6 +787,7 @@ const Http = struct {
         var path = try h.pathFor(suffix);
         var redirects: u8 = 0;
         var reauths: u8 = 0;
+        var rate_limited: i64 = 0;
         while (true) {
             h.endRequest();
             const authorization = h.credentials.authorization();
@@ -673,6 +808,11 @@ const Http = struct {
                 redirects += 1;
                 if (redirects > 20) return h.fail(error.HttpStatus, "too many redirects");
                 path = try h.follow(location, path);
+                continue;
+            }
+            if (res.status == .too_many_requests and h.rate_limit.max_retries != 0) {
+                rate_limited += 1;
+                try h.waitToRetry(res, rate_limited);
                 continue;
             }
             if (res.status == .unauthorized) {
@@ -708,6 +848,48 @@ const Http = struct {
             if (redirects > 0 and res.status.class() == .success) try h.rebase(path);
             return res;
         }
+    }
+
+    /// A 429 answered as git's `http_request_recoverable` answers it: up
+    /// to `http.maxRetries` requests in all (with none, the 429 is an
+    /// error like any status), each after the wait the server's
+    /// `Retry-After` asks — seconds, or a date against the caller's `now`
+    /// — or else `http.retryAfter`,
+    /// neither longer than `http.maxRetryTime`. `attempts` is how many
+    /// were answered 429.
+    fn waitToRetry(h: *Http, res: *uplink.Response, attempts: i64) Error!void {
+        const limit = h.rate_limit;
+        // curl's `CURLINFO_RETRY_AFTER`, which git takes when above zero.
+        var asked: i64 = 0;
+        if (res.headers.get("retry-after")) |raw| {
+            const value = std.mem.trim(u8, raw, " \t");
+            const read = decimal.strtol(value, 10, 64);
+            if (read.end != 0) {
+                asked = @intCast(@max(read.value, 0)); // safe: strtol of 64 bits fits an i64
+            } else if (h.options.now) |now| if (uplink.wire.date.parse(value)) |at| {
+                asked = @max(at - now.toSeconds(), 0);
+            };
+        }
+        var buf: [160]u8 = undefined;
+        if (limit.max_retries > 0 and attempts >= limit.max_retries) {
+            const text = if (asked > 0)
+                std.mem.print(&buf, "rate limited, please try again in {d} seconds", .{asked}) catch unreachable // unreachable: two numbers and a sentence fit
+            else
+                "rate limited, please try again later";
+            return h.fail(error.RateLimited, text);
+        }
+        const delay = if (asked > 0) delay: {
+            if (asked > limit.max_retry_time) return h.fail(error.RateLimited, std.mem.print(&buf, "response requested a delay greater than http.maxRetryTime ({d} > {d} seconds)", .{ asked, limit.max_retry_time }) catch unreachable); // unreachable: as above
+            break :delay asked;
+        } else delay: {
+            if (limit.retry_after > limit.max_retry_time) return h.fail(error.RateLimited, std.mem.print(&buf, "configured http.retryAfter exceeds http.maxRetryTime ({d} > {d} seconds)", .{ limit.retry_after, limit.max_retry_time }) catch unreachable); // unreachable: as above
+            break :delay limit.retry_after;
+        };
+        // The 429's body is read so its connection can carry the next.
+        h.endRequest();
+        if (delay <= 0) return;
+        try warning.note(h.options.warnings, .{ .rate_limited = @intCast(delay) });
+        try h.io.sleep(.fromSeconds(delay), .awake);
     }
 
     /// Where a redirect leads: the target and path after it, from a
@@ -982,6 +1164,8 @@ const Http = struct {
         const h = self(context);
         h.endRequest();
         h.client.deinit(io);
+        h.saveCookies(io);
+        if (h.cookies) |*jar| jar.deinit(io);
         h.credentials.deinit();
         if (h.proxy_credentials) |*p| p.deinit();
         h.freeTls();
