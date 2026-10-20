@@ -8,6 +8,7 @@ pub const index_pack = @import("odb/index_pack.zig");
 pub const pack = @import("odb/pack.zig");
 pub const delta = @import("codec.zig").delta;
 pub const midx = @import("odb/midx.zig");
+pub const quarantine = @import("odb/quarantine.zig");
 pub const Options = @import("odb/odb.zig").Options;
 pub const Error = @import("odb/odb.zig").Error;
 pub const Alternates = @import("odb/odb.zig").Alternates;

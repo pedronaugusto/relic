@@ -11,6 +11,7 @@ pub const Program = enum {
     filter_helper,
     lfs_transfer_helper,
     upload_pack_helper,
+    receive_pack_helper,
     hook_fixture,
     fake_ssh_helper,
     lfs_test_tool,

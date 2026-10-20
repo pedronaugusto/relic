@@ -337,6 +337,30 @@ pub const Odb = struct {
         try odb.writeAlternates(io, content.items);
     }
 
+    /// Read the objects of `objects_dir` too, after this database's own and
+    /// its alternates', as an alternate is read but written down nowhere:
+    /// git's `GIT_ALTERNATE_OBJECT_DIRECTORIES`, how a quarantine reads the
+    /// repository it is beside (`quarantine.zig`). `objects_dir`'s own
+    /// alternates come with it. The handle is borrowed.
+    pub fn borrow(odb: *Odb, io: Io, objects_dir: Io.Dir) ErrorNamespace.Error!void {
+        const dir = try objects_dir.openDir(io, ".", .{ .iterate = true });
+        if (try odb.alreadySource(io, dir)) {
+            dir.close(io);
+            return;
+        }
+        const before = odb.backendData().sources.items.len;
+        odb.addSource(io, dir, false, 1) catch |err| {
+            if (odb.backendData().sources.items.len == before) {
+                dir.close(io);
+            } else {
+                for (odb.backendData().sources.items[before..]) |*source| odb.closeSource(io, source);
+                odb.backendData().sources.items.len = before;
+            }
+            return err;
+        };
+        odb.backendData().generation += 1;
+    }
+
     /// Remove every direct line naming `path`, preserving other paths and
     /// comments. A path absent from the file changes nothing.
     pub fn removeAlternate(odb: *Odb, io: Io, path: []const u8) ErrorNamespace.Error!void {

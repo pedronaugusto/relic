@@ -41,6 +41,7 @@ const connection = @import("../wire.zig").connection;
 const pkt_line = @import("../codec.zig").pkt_line;
 
 const upload_pack = @import("upload_pack.zig");
+const receive_pack = @import("receive_pack.zig");
 const bundle = @import("bundle.zig");
 
 const progress = @import("../report.zig").progress;
@@ -83,7 +84,7 @@ pub const Error = error{
     ProgramsNotGranted,
     /// The URL carries a password and `transfer.credentialsInUrl` is `die`.
     CredentialsInUrl,
-} || local.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || send_pack.Error || bundle.Error ||
+} || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || send_pack.Error || bundle.Error ||
     remote_helper.Error;
 
 /// How a remote is reached.
@@ -126,7 +127,8 @@ pub const Options = struct {
     /// The local repository: a remote helper's `GIT_DIR`, and where its
     /// `fetch`, `import`, `push` and `export` read and write.
     repository: ?*repo_mod.Repository = null,
-    /// Who the refs a remote helper's import writes are logged as.
+    /// Who the refs a remote helper's import writes are logged as, and the
+    /// refs a push to a repository on this machine writes there.
     who: ?object.Signature = null,
     /// The repository is a clone's, new: a remote helper is told so.
     cloning: bool = false,
@@ -163,6 +165,9 @@ fn checkCredentialsInUrl(gpa: Allocator, text: []const u8, options: Options) Err
     defer gpa.free(redacted);
     try warning.note(options.warnings, .{ .credentials_in_url = redacted });
 }
+
+/// Who a push to this machine is logged as when the caller names no one.
+const unknown_pusher: object.Signature = .{ .name = "", .email = "", .when_secs = 0, .offset_minutes = 0 };
 
 /// Whether `config` leaves protocol v2 on: `protocol.version` unset or 2.
 pub fn wantsV2(config: ?*const config_mod.Config) bool {
@@ -313,13 +318,29 @@ pub const Session = struct {
                 owned = false;
                 errdefer conn.deinit(io);
                 return fromConnection(gpa, conn, service, kind);
+            } else if (service == .receive_pack) {
+                // A push to this machine goes through receive-pack, as
+                // git's does — relic's own, in this process, which runs the
+                // repository's hooks with the caller's permission.
+                const here = try gpa.create(local.Remote);
+                var owned = true;
+                errdefer if (owned) gpa.destroy(here);
+                here.* = try local.Remote.open(gpa, io, remote_url, .{});
+                errdefer if (owned) here.deinit(io);
+                if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
+                const conn = try receive_pack.connect(gpa, io, here, .{
+                    .who = options.who orelse unknown_pusher,
+                    .programs = options.programs,
+                });
+                owned = false;
+                errdefer conn.deinit(io);
+                return fromConnection(gpa, conn, service, kind);
             } else {
                 const here = try gpa.create(local.Remote);
                 errdefer gpa.destroy(here);
                 here.* = try local.Remote.open(gpa, io, remote_url, .{});
                 errdefer here.deinit(io);
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
-                if (service == .receive_pack) try here.serve(.receive_pack);
                 return .{ .gpa = gpa, .service = service, .impl = .{ .local = here } };
             },
             .ssh => {
@@ -538,17 +559,9 @@ pub const Session = struct {
         assert(request.sources.len == 0 or request.sources.len == request.commands.len);
         assert(request.force.len == 0 or request.force.len == request.commands.len);
         switch (s.impl) {
-            .local => |here| {
-                // A repository on this machine runs no hooks for relic, and
-                // push options are for hooks.
-                if (request.push_options.len != 0) return error.PushOptionsUnsupported;
-                return here.receivePush(gpa, io, .{ .from = db, .commands = request.commands, .objects = request.objects }, .{
-                    .who = request.who,
-                    .atomic = request.atomic,
-                });
-            },
-            // A bundle is only ever fetched from.
-            .bundle => return error.UnsupportedTransport,
+            // A repository on this machine is pushed to through its
+            // receive-pack, and a bundle is only ever fetched from.
+            .local, .bundle => return error.UnsupportedTransport,
             .helper => |helper| {
                 const commands = try gpa.alloc(remote_helper.PushCommand, request.commands.len);
                 defer gpa.free(commands);

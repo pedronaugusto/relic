@@ -1,4 +1,5 @@
-//! Local push owns its received pack until all receiver ref transactions end.
+//! A push to this machine holds its received pack until every ref transaction
+//! of the receiving side ends.
 const std = @import("std");
 const builtin = @import("builtin");
 const seam = @import("airlock.testing");
@@ -6,7 +7,8 @@ const Io = std.Io;
 const testing = std.testing;
 const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
-const local = @import("../transport/local.zig");
+const transport = @import("../transport/transport.zig");
+const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const send_pack = @import("../wire.zig").send_pack;
 const hash = @import("../hash/hash.zig");
@@ -19,12 +21,10 @@ const Push = struct {
     accepted: bool = false,
 
     fn run(push: *Push, io: Io, path: []const u8, from: *odb_mod.Odb, commands: []const send_pack.Command, entries: []const odb_mod.PackEntry, atomic: bool) !void {
-        var remote = try local.Remote.open(testing.allocator, io, path, .{});
-        defer remote.deinit(io);
-        var report = try remote.receivePush(testing.allocator, io, .{ .from = from, .commands = commands, .objects = entries }, .{
-            .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 },
-            .atomic = atomic,
-        });
+        const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
+        var session = try transport.Session.open(testing.allocator, io, path, .{ .service = .receive_pack, .kind = from.objectFormat() }, .{ .who = who });
+        defer session.deinit(io);
+        var report = try session.push(testing.allocator, io, from, .{ .commands = commands, .objects = entries, .atomic = atomic, .who = who });
         defer report.deinit();
         push.accepted = report.refs.len == 1 and report.refs[0].ok();
     }

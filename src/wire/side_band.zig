@@ -329,6 +329,88 @@ fn colorize(s: *Shown, keywords: progress_mod.Keywords, line_in: []const u8) voi
     s.sanitized(line);
 }
 
+/// How a pack goes over the wire: as it is, on git's `side-band` in
+/// packets of 1000 bytes, or on `side-band-64k`.
+pub const Band = enum { none, small, large };
+
+/// The writer a server sends a pack or a report through: on a side-band,
+/// what is written goes out on channel one in packets as long as the band
+/// allows, and `end` writes what is left and the flush; with no band the
+/// bytes go as they are.
+pub const Mux = struct {
+    out: *Io.Writer,
+    band: Band,
+    buffer: [pkt_line.max_data - 1]u8 = undefined,
+    w: Io.Writer = undefined,
+
+    pub fn init(out: *Io.Writer, framing: Band) Mux {
+        return .{ .out = out, .band = framing };
+    }
+
+    /// Where the channel's bytes are written. The `Mux` must not move.
+    pub fn writer(sb: *Mux) *Io.Writer {
+        if (sb.band == .none) return sb.out;
+        sb.w = .{ .buffer = sb.buffer[0..bandLength(sb.band)], .vtable = &.{ .drain = drain } };
+        return &sb.w;
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const sb: *Mux = @alignCast(@fieldParentPtr("w", w)); // safe: this function is installed only on a Mux's w
+        try sb.emit(w.buffered());
+        w.end = 0;
+        var consumed: usize = 0;
+        for (data[0 .. data.len - 1]) |slice| {
+            try sb.emitAll(slice);
+            consumed += slice.len;
+        }
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| try sb.emitAll(pattern);
+        return consumed + pattern.len * splat;
+    }
+
+    fn emitAll(sb: *Mux, bytes: []const u8) Io.Writer.Error!void {
+        try send(sb.out, sb.band, 1, bytes);
+    }
+
+    fn emit(sb: *Mux, bytes: []const u8) Io.Writer.Error!void {
+        try send(sb.out, sb.band, 1, bytes);
+    }
+
+    /// What is buffered, then the flush that ends the band.
+    pub fn end(sb: *Mux) Io.Writer.Error!void {
+        if (sb.band == .none) return;
+        try sb.emit(sb.w.buffered());
+        sb.w.end = 0;
+        try sb.out.writeAll("0000");
+    }
+};
+
+/// The most data one packet of `band` carries after its channel byte.
+fn bandLength(of: Band) usize {
+    return switch (of) {
+        .none, .large => pkt_line.max_data - 1,
+        .small => 999 - 4,
+    };
+}
+
+/// `bytes` on `channel` of `band`, in as many packets as it takes, as
+/// git's `send_sideband` cuts them: channel one carries data, two progress
+/// and messages, three a fatal error. Nothing is written for no bytes.
+pub fn send(out: *Io.Writer, framing: Band, channel: u8, bytes: []const u8) Io.Writer.Error!void {
+    assert(framing != .none);
+    var rest = bytes;
+    while (rest.len != 0) {
+        const n = @min(rest.len, bandLength(framing));
+        var head: [5]u8 = undefined;
+        // unreachable: a packet of the band's length fits four hex digits
+        _ = std.mem.print(head[0..4], "{x:0>4}", .{n + 5}) catch unreachable;
+        head[4] = channel;
+        try out.writeAll(&head);
+        try out.writeAll(rest[0..n]);
+        rest = rest[n..];
+    }
+}
+
 const testing = std.testing;
 
 fn band(w: *Io.Writer, channel: u8, text: []const u8) !void {

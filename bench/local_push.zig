@@ -1,4 +1,5 @@
-//! Local three-object pack push, including receiver ref publication.
+//! Local three-object pack push through relic's receive-pack in process,
+//! including receiver ref publication.
 //! Fixture construction and teardown stay outside the measured operation.
 const std = @import("std");
 const Io = std.Io;
@@ -10,7 +11,7 @@ const shared = @import("shared.zig");
 const Context = struct {
     gpa: std.mem.Allocator,
     io: Io,
-    remote: *api.transport.local.Remote,
+    path: []const u8,
     from: *api.odb.Odb,
     entries: []const api.odb.PackEntry,
     command: api.transport.send_pack.Command,
@@ -18,10 +19,10 @@ const Context = struct {
 
     fn run(c: *Context, units: u64) !void {
         for (0..units) |_| {
-            var report = try c.remote.receivePush(c.gpa, c.io, .{ .from = c.from, .commands = &.{c.command}, .objects = c.entries }, .{
-                .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 },
-                .atomic = true,
-            });
+            const who: api.object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
+            var session = try api.transport.Session.open(c.gpa, c.io, c.path, .{ .service = .receive_pack, .kind = c.from.objectFormat() }, .{ .who = who });
+            defer session.deinit(c.io);
+            var report = try session.push(c.gpa, c.io, c.from, .{ .commands = &.{c.command}, .objects = c.entries, .atomic = true, .who = who });
             defer report.deinit();
             if (report.refs.len != 1 or !report.refs[0].ok()) return error.PushRefused;
             c.command.old = c.command.new;
@@ -53,15 +54,15 @@ pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     defer target.deinit();
     const path = try target.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);
-    var remote = try api.transport.local.Remote.open(gpa, io, path, .{});
-    defer remote.deinit(io);
-    var context: Context = .{ .gpa = gpa, .io = io, .remote = &remote, .from = from.objectDatabase(), .entries = objects.entries, .command = .{ .name = "refs/heads/arrived", .old = api.hash.Oid.zero(.sha1), .new = oid } };
+    var context: Context = .{ .gpa = gpa, .io = io, .path = path, .from = from.objectDatabase(), .entries = objects.entries, .command = .{ .name = "refs/heads/arrived", .old = api.hash.Oid.zero(.sha1), .new = oid } };
     var out_buffer: [4096]u8 = undefined;
     var output = Io.File.stdout().writer(io, &out_buffer);
     const rows = [_]benchmark.Row(Context, WorkloadError){.{ .name = "local_push_three_objects", .unit = "push", .initial = 1, .run = Context.run }};
     try benchmark.run(WorkloadError, gpa, io, &output.interface, &context, &rows, .{ .commit = shared.commit }, run_options);
     try output.interface.flush();
     if (shared.selects(run_options.prefix, rows) and context.checksum == 0) return error.NoWork;
+    var remote = try api.transport.local.Remote.open(gpa, io, path, .{});
+    defer remote.deinit(io);
     const received = try remote.repo.refStore().readOid(gpa, io, "refs/heads/arrived");
     if (received == null or !received.?.eql(oid)) return error.WrongRef;
 }

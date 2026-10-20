@@ -206,7 +206,7 @@ test "how a program ended is conduit's Term, where it is shown" {
 }
 
 test "transport and LFS requests stay within five positional inputs" {
-    inline for (.{ relic.transport.Session.open, relic.transport.Session.fetch, relic.transport.fetch_pack.fetch, relic.transport.send_pack.send, relic.transport.local.Remote.receivePush, relic.transport.bundle.receive, relic.transport.bundle.create, relic.lfs.api.sshInvocation, relic.lfs.push.beforePush }) |operation| {
+    inline for (.{ relic.transport.Session.open, relic.transport.Session.fetch, relic.transport.fetch_pack.fetch, relic.transport.send_pack.send, relic.transport.bundle.receive, relic.transport.bundle.create, relic.lfs.api.sshInvocation, relic.lfs.push.beforePush }) |operation| {
         try std.testing.expect(@typeInfo(@TypeOf(operation)).@"fn".param_types.len <= 5);
     }
 }

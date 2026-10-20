@@ -122,6 +122,18 @@ pub fn dev(b: *std.Build, tools: type) void {
         }),
     });
 
+    // relic's own receive-pack, as a program real git can be pointed at
+    // with `--receive-pack`, so what a push git makes to relic's server
+    // does is compared with what it does to git's own.
+    const receive_pack_helper = b.addExecutable(.{
+        .name = "relic-receive-pack",
+        .root_module = b.createModule(.{
+            .root_source_file = p.path("src/testing/receive_pack.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     // Hook fixtures use a native program on every target. Each copy reads
     // its own sidecar description, so git and relic run the same behaviour.
     const hook_fixture = b.addExecutable(.{
@@ -207,6 +219,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         "A git-lfs-transfer server program to prove the pure-ssh client against",
     ) orelse "");
     build_options.addOptionPath("upload_pack_helper_path", upload_pack_helper.getEmittedBin());
+    build_options.addOptionPath("receive_pack_helper_path", receive_pack_helper.getEmittedBin());
     build_options.addOptionPath("hook_fixture_path", hook_fixture.getEmittedBin());
     build_options.addOptionPath("fake_ssh_helper_path", fake_ssh.getEmittedBin());
     build_options.addOptionPath("lfs_test_tool_path", lfs_tool.getEmittedBin());
@@ -240,6 +253,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     lfs_transfer_helper.root_module.addImport("relic", module);
     hook_fixture.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("relic", module);
+    receive_pack_helper.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("conduit", conduit);
     hook_fixture.root_module.addImport("conduit", conduit);
     test_module.addOptions("build_options", build_options);
@@ -264,6 +278,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     check_step.dependOn(&filter_helper.step);
     check_step.dependOn(&lfs_transfer_helper.step);
     check_step.dependOn(&upload_pack_helper.step);
+    check_step.dependOn(&receive_pack_helper.step);
     check_step.dependOn(&hook_fixture.step);
     check_step.dependOn(&fake_ssh.step);
     check_step.dependOn(&lfs_tool.step);

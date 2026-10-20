@@ -38,6 +38,7 @@ const rev_walk = @import("../walk/walk.zig");
 const local = @import("local.zig");
 const connection = @import("../wire.zig").connection;
 const promisors = @import("../wire.zig").promisors;
+const side_band = @import("../wire.zig").side_band;
 const repo_mod = @import("../repo/repo.zig");
 
 const Oid = hash.Oid;
@@ -491,7 +492,7 @@ pub const Server = struct {
 /// git's `INFINITE_DEPTH`: `--unshallow`.
 const infinite_depth: u32 = 0x7fff_ffff;
 
-const Band = enum { none, small, large };
+const Band = side_band.Band;
 
 /// One fetch's state on the server: what is wanted, what the client has,
 /// and where its history is cut.
@@ -959,7 +960,7 @@ const Negotiation = struct {
         }
         if (n.include_tag) try n.addTags(&entries);
 
-        var framed: Sideband = .init(out, band);
+        var framed: side_band.Mux = .init(out, band);
         _ = n.db().writePackTo(s.io, framed.writer(), entries.items, .{
             .delta = if (n.ofs_delta) .offset else .reference,
         }) catch |err| switch (err) {
@@ -1004,67 +1005,6 @@ const Negotiation = struct {
                 try entries.append(n.arena, .{ .oid = t });
             }
         }
-    }
-};
-
-/// Pack bytes in side-band packets on channel one, or as they are.
-const Sideband = struct {
-    out: *Io.Writer,
-    band: Band,
-    buffer: [pkt_line.max_data - 1]u8 = undefined,
-    w: Io.Writer = undefined,
-
-    fn init(out: *Io.Writer, band: Band) Sideband {
-        return .{ .out = out, .band = band };
-    }
-
-    fn writer(sb: *Sideband) *Io.Writer {
-        if (sb.band == .none) return sb.out;
-        const size: usize = if (sb.band == .large) sb.buffer.len else 999;
-        sb.w = .{ .buffer = sb.buffer[0..size], .vtable = &.{ .drain = drain } };
-        return &sb.w;
-    }
-
-    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const sb: *Sideband = @alignCast(@fieldParentPtr("w", w)); // safe: this function is installed only on a Sideband's w
-        try sb.emit(w.buffered());
-        w.end = 0;
-        var consumed: usize = 0;
-        for (data[0 .. data.len - 1]) |slice| {
-            try sb.emitAll(slice);
-            consumed += slice.len;
-        }
-        const pattern = data[data.len - 1];
-        for (0..splat) |_| try sb.emitAll(pattern);
-        return consumed + pattern.len * splat;
-    }
-
-    fn emitAll(sb: *Sideband, bytes: []const u8) Io.Writer.Error!void {
-        var rest = bytes;
-        while (rest.len != 0) {
-            const n = @min(rest.len, sb.w.buffer.len);
-            try sb.emit(rest[0..n]);
-            rest = rest[n..];
-        }
-    }
-
-    fn emit(sb: *Sideband, bytes: []const u8) Io.Writer.Error!void {
-        if (bytes.len == 0) return;
-        // The band byte and the four length digits count in the length.
-        assert(bytes.len + 5 <= pkt_line.max_line);
-        var head: [5]u8 = undefined;
-        // unreachable: asserted above: the length fits four hex digits
-        _ = std.mem.print(head[0..4], "{x:0>4}", .{bytes.len + 5}) catch unreachable;
-        head[4] = 1;
-        try sb.out.writeAll(&head);
-        try sb.out.writeAll(bytes);
-    }
-
-    fn end(sb: *Sideband) Io.Writer.Error!void {
-        if (sb.band == .none) return;
-        try sb.emit(sb.w.buffered());
-        sb.w.end = 0;
-        try sb.out.writeAll("0000");
     }
 };
 

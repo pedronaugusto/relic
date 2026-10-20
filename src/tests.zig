@@ -114,6 +114,7 @@ test {
         _ = @import("testing/history.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
+        _ = @import("transport/receive_pack_test.zig");
         _ = @import("testing/clone_config.zig");
         _ = @import("wire/client_cert_test.zig");
         _ = @import("wire/pinned_key.zig");
@@ -252,6 +253,7 @@ test {
     _ = @import("wire/smart_http.zig");
     _ = @import("wire/ssh.zig");
     _ = @import("transport/upload_pack.zig");
+    _ = @import("transport/receive_pack.zig");
     _ = @import("text/unicode_width.zig");
     _ = @import("checkout/convert.zig");
     _ = @import("checkout/dir_scan.zig");

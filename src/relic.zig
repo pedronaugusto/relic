@@ -28,6 +28,7 @@
 //! | `odb.pack` | Module within `odb`. |
 //! | `odb.delta` | Module within `odb`. |
 //! | `odb.midx` | Module within `odb`. |
+//! | `odb.quarantine` | Module within `odb`. |
 //! | `refs` | Public concern. |
 //! | `refs.reftable` | Module within `refs`. |
 //! | `refs.reftable.table` | The reftable format: one table read and written. |
@@ -113,6 +114,7 @@
 //! | `transport.connection` | Module within `transport`. |
 //! | `transport.pkt_line` | Module within `transport`. |
 //! | `transport.upload_pack` | Module within `transport`. |
+//! | `transport.receive_pack` | Module within `transport`. |
 //! | `transport.bundle` | Module within `transport`. |
 //! | `transport.bundle_uri` | Module within `transport`. |
 //! | `transport.progress` | Module within `transport`. |

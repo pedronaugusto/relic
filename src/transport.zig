@@ -23,6 +23,7 @@ pub const protocol = @import("wire.zig").protocol;
 pub const connection = @import("wire.zig").connection;
 pub const pkt_line = @import("codec.zig").pkt_line;
 pub const upload_pack = @import("transport/upload_pack.zig");
+pub const receive_pack = @import("transport/receive_pack.zig");
 pub const bundle = @import("transport/bundle.zig");
 pub const bundle_uri = @import("transport/bundle/uri.zig");
 pub const progress = @import("report.zig").progress;
