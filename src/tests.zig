@@ -80,6 +80,7 @@ test {
         _ = @import("testing/helpers.zig");
         _ = @import("testing/fixtures.zig");
         _ = @import("maintenance/maintenance_test.zig");
+        _ = @import("maintenance/gc_test.zig");
         _ = @import("checkout/checkout_test.zig");
         _ = @import("repo/repo_test.zig");
         _ = @import("testing/concurrency.zig");

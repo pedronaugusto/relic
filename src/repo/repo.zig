@@ -1820,8 +1820,20 @@ pub const Repository = struct {
     /// does. The repository must outlive the transaction.
     pub fn beginRefs(repo: *Repository) refs_mod.Transaction {
         var tx = repo.refStore().begin(repo.data().gpa);
-        tx.peeler = .{ .context = repo, .peel = peelForRefs };
+        tx.peeler = repo.refObjects();
         return tx;
+    }
+
+    /// What the ref store asks of this repository's objects: what an
+    /// annotated tag peels to, and whether an object exists. The
+    /// repository must outlive it.
+    pub fn refObjects(repo: *Repository) refs_mod.Peeler {
+        return .{ .context = repo, .peel = peelForRefs, .exists = existsForRefs };
+    }
+
+    fn existsForRefs(io: Io, context: *anyopaque, oid: Oid) bool {
+        const repo: *Repository = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Repository
+        return repo.data().odb.exists(io, oid) catch false;
     }
 
     fn peelForRefs(io: Io, context: *anyopaque, oid: Oid) ?Oid {

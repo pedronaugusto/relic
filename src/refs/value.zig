@@ -95,6 +95,30 @@ pub const Peeler = struct {
     /// The object `oid` peels to when it is an annotated tag, or `null`
     /// when it is not one or cannot be read.
     peel: *const fn (io: Io, context: *anyopaque, oid: Oid) ?Oid,
+    /// Whether the database holds `oid`; `null` takes every object as
+    /// held. `Store.pack` leaves a ref whose object is missing loose, as
+    /// git's `ref_resolves_to_object` does.
+    exists: ?*const fn (io: Io, context: *anyopaque, oid: Oid) bool = null,
+};
+
+/// Which refs `Store.pack` packs, and what becomes of their loose files:
+/// git's `pack-refs` options.
+pub const PackOptions = struct {
+    /// The refs to pack, as wildmatch patterns over the whole name, `*`
+    /// crossing `/`: git's `--include`, `refs/tags/*` when none is given,
+    /// and `*` for `--all`.
+    include: []const []const u8 = &.{"refs/tags/*"},
+    /// The refs to leave loose however `include` reads: `--exclude`.
+    exclude: []const []const u8 = &.{},
+    /// Remove each packed ref's loose file, when it still holds what was
+    /// packed: git's `--prune`, its default.
+    prune: bool = true,
+    /// `--auto`: in the files format only when the loose refs to pack
+    /// outnumber git's measure of the packed file, in a reftable stack as
+    /// git's geometric rule asks.
+    auto: bool = false,
+    /// Peels what a packed tag points at, and says which objects exist.
+    objects: Peeler,
 };
 
 /// What a ref points at.

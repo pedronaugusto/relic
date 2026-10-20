@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `maintenance.packRefs`: git's `pack-refs` (`--include`, `--exclude`, `--all` as `*`, `--no-prune`, `--auto`) through `refs.Store.pack`. Files: under `packed-refs.lock`, the shared, direct loose refs whose objects exist go into `packed-refs` beside what it held, an annotated tag peeled; each loose file then goes under its own lock when it still holds what was packed, with the directories that leaves empty; `--auto` waits for git's `log2(size / 100) * 5` loose refs, at least 16. Reftable: the worktree's stack compacted whole (geometrically with `--auto`), then cleaned of the tables no list names that are no newer than the stack (`reftable_stack_clean`). Held to git byte for byte in both formats, and on shakedown's simulated disk at every crash point.
+- `maintenance.expireReflogs`: git's `reflog expire` (`--all` over this worktree's store, named refs, `--expire`, `--expire-unreachable`, `--rewrite`, `--updateref`), with `gc.reflogExpire`, `gc.reflogExpireUnreachable` and their `gc.<pattern>.*` forms read as git reads them (patterns by wildmatch in the order they first appear, a slot a pattern leaves unset never expiring, `refs/stash` never expiring unless configured, values git dies on refused as `InvalidExpiryDate`), unreachability from the ref's own tip or, for `HEAD`, from every ref's; `maintenance.parseExpiry` (git's `parse_expiry_date`). The defaults are the documented 90 and 30 days: git 2.55's `REFLOG_EXPIRE_OPTIONS_INIT` has the two the other way round. Held to git in both formats and at every crash point.
+- `refs.Store.logNames`: the refs with a log, as git's `refs_for_each_reflog` lists them, in both formats. `refs.Peeler.exists` and `Repository.refObjects` (the peeler `beginRefs` hands its transactions, now able to say an object exists).
+
+### Fixed
+
+- A ref deletion holds `packed-refs.lock` to its end whether or not the ref is packed, as git's does, so a `pack-refs` between its read and its removal cannot pack the ref again; it was given up when no deleted ref was packed.
+- With `core.fsync` covering references, the name of a new `packed-refs` is made durable before anything follows it, so a crash cannot keep the removal of loose refs a pack made and lose the file that now holds them.
+- `refs.Store.expireLog` with `rewrite` asks the keeper about each entry with the old value it will be written with, as git's files backend asks (`expire_reflog_ent`).
+
 ## [0.26.0] - 2026-10-21
 
 ### Breaking

@@ -20,6 +20,7 @@ const stack_engine = @import("reftable/stack/transaction.zig");
 
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
+const glob = @import("../text.zig").glob;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -639,11 +640,15 @@ pub const Store = struct {
     }
 
     /// Take `packed-refs.lock`, waiting as `core.packedRefsTimeout` says.
+    /// When references are synced, the new file's name is too: `pack`
+    /// removes loose files after it, and a crash must not keep their
+    /// removal and lose the name that holds them now.
     fn lockPacked(store: *const Store, io: Io, buffer: []u8) TransactionError!fs.LockFile {
         const data = state_mod.get(store.state);
         return fs.LockFile.open(data.gpa, io, store.commonDir(), .{ .sub_path = "packed-refs", .buffer = buffer }, .{
             .shared = store.sharedPermissions(),
             .sync = store.referenceSync(),
+            .sync_directory = store.referenceSync() != .none,
             .on_contention = data.packed_lock,
         });
     }
@@ -663,6 +668,127 @@ pub const Store = struct {
         try lock.commit(io);
         // The stat would tell the next lookup as much; this is cheaper.
         if (state_mod.get(store.state).packed_refs) |c| c.forget(io);
+    }
+
+    /// Which refs `pack` packs, and what becomes of their loose files.
+    pub const PackOptions = value_mod.PackOptions;
+
+    /// git's `pack-refs`. In the files format: under `packed-refs.lock`,
+    /// every loose ref `options` names that is shared by the worktrees,
+    /// not symbolic and names an object that exists goes into
+    /// `packed-refs`, peeled when it is an annotated tag, beside what the
+    /// file held; then each one's loose file goes when it still holds what
+    /// was packed, as git's pruning transaction checks, under the ref's
+    /// own lock, and the directories that leaves empty with it. Every
+    /// deletion holds `packed-refs.lock` too, so a ref being deleted is
+    /// never packed again.
+    ///
+    /// In a reftable stack: the stack compacted, see `reftable.stack`.
+    pub fn pack(store: *Store, gpa: Allocator, io: Io, options: PackOptions) TransactionError!void {
+        if (store.refFormat() == .reftable) return stack_engine.pack(gpa, io, store, options.auto);
+        var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_instance.deinit();
+        const arena = arena_instance.allocator();
+        if (options.auto and !try store.packingDue(arena, io, options)) return;
+
+        const buffer = try gpa.alloc(u8, 64 * 1024);
+        defer gpa.free(buffer);
+        var lock = try store.lockPacked(io, buffer);
+        defer lock.deinit(io);
+        // Read under the lock, as git's iteration of the loose refs is.
+        var listing = try store.readPacked(gpa, io);
+        defer listing.deinit();
+        const loose = try store.packable(arena, io, options);
+
+        var merged: std.ArrayList(PackedEntry) = .empty;
+        try merged.ensureTotalCapacity(arena, listing.entries.len + loose.len);
+        var at: usize = 0;
+        for (loose) |ref| {
+            while (at < listing.entries.len and std.mem.order(u8, listing.entries[at].name, ref.name) == .lt) : (at += 1) {
+                merged.appendAssumeCapacity(listing.entries[at]);
+            }
+            if (at < listing.entries.len and std.mem.eql(u8, listing.entries[at].name, ref.name)) at += 1;
+            const oid = ref.target.direct;
+            merged.appendAssumeCapacity(.{ .name = ref.name, .oid = oid, .peeled = options.objects.peel(io, options.objects.context, oid) });
+        }
+        merged.appendSliceAssumeCapacity(listing.entries[at..]);
+        try store.writePackedLocked(io, &lock, merged.items);
+        if (!options.prune) return;
+        for (loose) |ref| try store.pruneLoose(io, ref.name, ref.target.direct);
+    }
+
+    /// The loose refs `pack` packs, sorted by name: git's `should_pack_ref`.
+    fn packable(store: *const Store, arena: Allocator, io: Io, options: PackOptions) TransactionError![]Named {
+        var found: std.ArrayList(Named) = .empty;
+        var broken: std.ArrayList(Broken) = .empty;
+        try store.walkLoose(arena, io, &found, &broken, "refs/");
+        var kept: std.ArrayList(Named) = .empty;
+        for (found.items) |ref| {
+            if (names.parseWorktreeRef(ref.name).owner != .shared) continue;
+            const oid = switch (ref.target) {
+                .direct => |oid| oid,
+                .symbolic => continue,
+            };
+            if (options.objects.exists) |exists| if (!exists(io, options.objects.context, oid)) continue;
+            if (try anyMatches(arena, options.exclude, ref.name)) continue;
+            if (!try anyMatches(arena, options.include, ref.name)) continue;
+            try kept.append(arena, ref);
+        }
+        std.mem.sort(Named, kept.items, {}, lessThanNamed);
+        return kept.items;
+    }
+
+    fn anyMatches(arena: Allocator, patterns: []const []const u8, name: []const u8) Allocator.Error!bool {
+        for (patterns) |pattern| {
+            if (try glob.matches(arena, pattern, name, .{ .pathname = false })) return true;
+        }
+        return false;
+    }
+
+    /// git's `should_pack_refs` for `--auto`: whether the loose refs to
+    /// pack reach `log2(size of packed-refs / 100) * 5`, at least 16.
+    fn packingDue(store: *const Store, arena: Allocator, io: Io, options: PackOptions) TransactionError!bool {
+        const size: u64 = if (store.commonDir().statFile(io, "packed-refs", .{})) |stat| stat.size else |err| switch (err) {
+            error.FileNotFound => 0,
+            else => |e| return e,
+        };
+        const limit = @max(16, @as(u64, std.math.log2_int(u64, @max(1, size / 100))) * 5);
+        return (try store.packable(arena, io, options)).len >= limit;
+    }
+
+    /// git's pruning transaction for one packed ref: under the loose
+    /// file's lock, the file goes if it still holds `oid`, and so do the
+    /// directories that leaves empty; the packed entry and the log stay.
+    fn pruneLoose(store: *const Store, io: Io, name: []const u8, oid: Oid) TransactionError!void {
+        if (try store.removeLooseHolding(io, name, oid)) removeEmptyParents(io, store.dirFor(name), name);
+    }
+
+    /// Remove `name`'s loose file under its lock when it holds `oid`;
+    /// whether it went.
+    fn removeLooseHolding(store: *const Store, io: Io, name: []const u8, oid: Oid) TransactionError!bool {
+        const data = state_mod.get(store.state);
+        const dir = store.dirFor(name);
+        var buffer: [max_loose_ref]u8 = undefined;
+        var lock = fs.LockFile.open(data.gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync() }) catch |err| switch (err) {
+            // Another writer has it: the ref is its to change, as git's
+            // pruning gives up on it.
+            error.LockHeld => return false,
+            else => |e| return e,
+        };
+        defer lock.deinit(io);
+        const own = (try store.readLoose(data.gpa, io, name)) orelse return false;
+        switch (own) {
+            .symbolic => |target| {
+                data.gpa.free(target);
+                return false;
+            },
+            .direct => |have| if (!have.eql(oid)) return false,
+        }
+        dir.deleteFile(io, name) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => |e| return e,
+        };
+        return true;
     }
 
     /// Begin a transaction over this store.
@@ -733,6 +859,41 @@ pub const Store = struct {
             return reflog.read(gpa, io, admin, where.bare, store.objectFormat());
         }
         return reflog.read(gpa, io, store.logDir(name, where), where.bare, store.objectFormat());
+    }
+
+    /// The refs that have a log, sorted, in `arena`: git's
+    /// `refs_for_each_reflog` over this worktree's store -- in the files
+    /// format each file under `logs/` named as a ref may be, in a linked
+    /// worktree its own per-worktree logs and the shared ones of the
+    /// common directory.
+    pub fn logNames(store: *const Store, gpa: Allocator, arena: Allocator, io: Io) ReadLogError![]const []const u8 {
+        if (store.refFormat() == .reftable) return stack_engine.logNames(gpa, arena, io, store);
+        var out: std.ArrayList([]const u8) = .empty;
+        const linked = store.gitDir().handle != store.commonDir().handle;
+        try walkLogs(arena, io, store.commonDir(), &out, if (linked) .shared else null);
+        if (linked) try walkLogs(arena, io, store.gitDir(), &out, .current);
+        std.mem.sort([]const u8, out.items, {}, Transaction.lessThanName);
+        return out.items;
+    }
+
+    /// Every log file under `dir`'s `logs/` whose name is a ref name and,
+    /// with `owner`, one that worktree keeps.
+    fn walkLogs(arena: Allocator, io: Io, dir: Io.Dir, out: *std.ArrayList([]const u8), owner: ?names.WorktreeRef.Owner) ReadLogError!void {
+        var logs = dir.openDir(io, "logs", .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return,
+            else => |e| return e,
+        };
+        defer logs.close(io);
+        var walker = try logs.walk(arena);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            const name = try arena.dupe(u8, entry.path);
+            if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, name, std.fs.path.sep, '/');
+            if (!isRefName(name)) continue;
+            if (owner) |want| if (names.parseWorktreeRef(name).owner != want) continue;
+            try out.append(arena, name);
+        }
     }
 
     /// Start a log for `name` where it has none, so that its next update is
@@ -1234,6 +1395,9 @@ pub const Transaction = struct {
     packed_lock: ?fs.LockFile = null,
     packed_lock_buffer: []u8 = &.{},
     packed_listing: ?Store.PackedListing = null,
+    /// Whether a deleted ref is in `packed-refs`, which is then rewritten
+    /// without it.
+    packed_rewrite: bool = false,
 
     /// One ref's change.
     pub const Edit = value_mod.Edit;
@@ -1462,19 +1626,19 @@ pub const Transaction = struct {
     /// `packed-refs.lock` and reads the file under it, and whether each
     /// deleted ref is in it decides whether the file is rewritten -- a ref
     /// that is loose and packed at once is deleted from both, or the packed
-    /// value comes back. When no deleted ref is packed the lock is given up.
+    /// value comes back. When no deleted ref is packed the file is left as
+    /// it is and the lock is still held to the end, as git holds it, so a
+    /// `pack-refs` cannot pack a ref this is deleting.
     fn lockPackedForDeletions(tx: *Transaction, io: Io) TransactionError!void {
         if (!tx.hasDeletions()) return;
         tx.packed_lock_buffer = try tx.gpa.alloc(u8, 64 * 1024);
         tx.packed_lock = try tx.store.lockPacked(io, tx.packed_lock_buffer);
         tx.packed_listing = try tx.store.readPacked(tx.gpa, io);
-        var needed = false;
         for (tx.edits.items) |*edit| {
             if (edit.via != null or edit.new != null) continue;
             edit.was_packed = tx.packed_listing.?.find(edit.name) != null;
-            needed = needed or edit.was_packed;
+            tx.packed_rewrite = tx.packed_rewrite or edit.was_packed;
         }
-        if (!needed) tx.releasePackedLock(io);
     }
 
     fn releasePackedLock(tx: *Transaction, io: Io) void {
@@ -1690,7 +1854,7 @@ pub const Transaction = struct {
             if (edit.via != null or edit.new != null) continue;
             try reflog.delete(tx.gpa, io, tx.store.dirFor(edit.name), edit.name);
         }
-        if (tx.packed_lock != null) try tx.removeFromPacked(io);
+        if (tx.packed_rewrite) try tx.removeFromPacked(io);
         if (tx.packed_announced) {
             tx.packed_announced = false;
             // glint-ignore: Z026 -- packed-refs is rewritten; as git, a hook failing on "committed" changes nothing

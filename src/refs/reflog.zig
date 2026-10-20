@@ -260,7 +260,8 @@ pub const ExpireError = errors: {
 /// `<ref>@{n}` counts.
 /// With `rewrite` each kept entry's old value becomes the new value of the
 /// one kept before it, the null name for the first, so the log still reads
-/// as a chain. A line that is not an entry goes, as git's rewrite drops it,
+/// as a chain, and `keeper` is asked about each entry with that old value.
+/// A line that is not an entry goes, as git's rewrite drops it,
 /// and a log every entry of which goes is left empty, as git leaves it.
 ///
 /// Returns the newest kept entry's new value, or `null` when none was kept
@@ -304,8 +305,11 @@ pub fn expire(
     var lines: Lines = .{ .bytes = bytes };
     while (lines.next()) |line| {
         // A line git cannot parse is one it skips, and the log's other entries stand.
-        const entry = parseLine(line, kind) catch continue;
+        var entry = parseLine(line, kind) catch continue;
         seen += 1;
+        // git's `expire_reflog_ent` asks about a rewritten entry with the
+        // old value it will have: the last kept one's new value.
+        if (rewrite) entry.old = last_kept orelse Oid.zero(kind);
         if (!keeper.keep(entry, count - seen)) continue;
         const w = lock.writer();
         if (rewrite) {

@@ -229,6 +229,33 @@ fn lessThanBroken(_: void, a: refs.Broken, b: refs.Broken) bool {
 /// Errors from `readLog`.
 pub const ReadLogError = refs.ReadError || reflog.ReadError;
 
+/// `Store.logNames` over reftable: each name a log record of the stacks
+/// holds, the marker of an empty log included, as git's reflog iterator
+/// yields them; in a linked worktree its own stack's for its own refs and
+/// the shared stack's for the rest. Sorted, in `arena`.
+pub fn logNames(gpa: Allocator, arena: Allocator, io: Io, store: anytype) ReadLogError![]const []const u8 {
+    var owned: ?Stacks = null;
+    var view = try View.acquire(gpa, io, store, &owned);
+    defer view.release(io, &owned);
+    const stacks = view.stacks;
+    var out: std.ArrayList([]const u8) = .empty;
+    const sources = [_]?*const Stack{ &stacks.main, if (stacks.worktree) |*w| w else null };
+    for (sources, 0..) |maybe, which| {
+        const stack = maybe orelse continue;
+        for (try allLogs(gpa, arena, stack.tables, true)) |record| {
+            if (stacks.worktree != null and ref_names.isCurrentWorktree(record.name) != (which == 1)) continue;
+            if (out.items.len != 0 and std.mem.eql(u8, out.items[out.items.len - 1], record.name)) continue;
+            try out.append(arena, record.name);
+        }
+    }
+    std.mem.sort([]const u8, out.items, {}, lessThanText);
+    return out.items;
+}
+
+fn lessThanText(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
 /// `Store.readLog` over reftable: the entries oldest first, as the files
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
@@ -946,6 +973,55 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     cache.internal.closeUnclaimed(&stack, &.{});
     // glint-ignore: Z026 -- the list no longer names these tables; one a platform will not remove is left for the next compaction
     for (stack.names[first .. last + 1]) |name| dir.deleteFile(io, name) catch {};
+}
+
+/// `Store.pack` over reftable, as git's `reftable_be_optimize`: the
+/// stack of the worktree the store was opened in -- a linked worktree's
+/// own, the main one's otherwise -- compacted whole, or as git's
+/// geometric rule asks with `auto`, and then cleaned of the tables no
+/// list names that are no newer than the stack, which a compaction that
+/// could not remove them left behind.
+pub fn pack(gpa: Allocator, io: Io, store: anytype, auto: bool) refs.TransactionError!void {
+    const parent = if (isLinked(store)) store.gitDir() else store.commonDir();
+    const options = store.reftableOptions();
+    try compactIn(gpa, io, parent, .{ .kind = store.objectFormat(), .which = if (auto) .auto else .all }, options);
+    try clean(gpa, io, parent, store.objectFormat(), options);
+}
+
+/// git's `reftable_stack_clean`: under the stack's lock, remove each
+/// table in the directory that the list does not name and whose newest
+/// update is no newer than the stack's; a newer one is a writer's, about
+/// to be added.
+fn clean(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options) refs.TransactionError!void {
+    var locked = lockStack(gpa, io, parent, options) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer releaseLocked(gpa, io, &locked);
+    var stack = try Stack.load(gpa, io, locked.dir, kind);
+    defer stack.deinit();
+    const max = stack.maxUpdateIndex();
+    var dir = try parent.openDir(io, "reftable", .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .file or !isTableName(entry.name)) continue;
+        const listed = for (stack.names) |name| {
+            if (std.mem.eql(u8, name, entry.name)) break true;
+        } else false;
+        if (listed) continue;
+        // The header: magic, version, a three-byte block size, then the
+        // oldest and the newest update index; a file too short for one is
+        // no table.
+        var header: [24]u8 = undefined;
+        const file = dir.openFile(io, entry.name, .{}) catch continue;
+        defer file.close(io);
+        const got = file.readPositionalAll(io, &header, 0) catch continue;
+        if (got < header.len or !std.mem.eql(u8, header[0..4], "REFT")) continue;
+        if (std.mem.readInt(u64, header[16..24], .big) > max) continue;
+        // glint-ignore: Z026 -- a stale table a platform will not remove is left for the next clean, as git's unlink leaves it
+        dir.deleteFile(io, entry.name) catch {};
+    }
 }
 
 /// Lock `names`, tables to be merged, from the newest back, each by

@@ -1,6 +1,7 @@
 //! Crashes during the writes a repository lives by (design §12c), on
 //! shakedown's simulated disk: a ref update, a received pack and the ref
-//! that publishes it, an index write and a checkout, each stopped before
+//! that publishes it, an index write, a checkout, `pack-refs` and
+//! `reflog expire`, each stopped before
 //! every `Io` call it makes and every state the disk could come back in
 //! after that tried. airlock's syncs and renames reach the simulated disk
 //! through its seam, at the strength each one has.
@@ -29,6 +30,8 @@ const checkout = @import("../checkout/checkout.zig");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs = @import("../refs/refs.zig");
+const gc = @import("../maintenance/gc.zig");
+const date = @import("../text.zig").date;
 const Oid = hash.Oid;
 
 const os = builtin.target.os.tag;
@@ -41,7 +44,7 @@ const granularity: Io.Duration = .fromSeconds(1);
 
 const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
 
-const Kind = enum { ref_update, pack_receive, index_write, checkout };
+const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire };
 
 /// A directory tree held in memory: what is put on the simulated disk
 /// before a run, and what a crash state holds.
@@ -264,6 +267,8 @@ pub const Case = struct {
                 locked.deinit(io);
                 try c.moveRef(io, &repo, "HEAD", .{ .symbolic = "refs/heads/next" });
             },
+            .pack_refs => try gc.packRefs(io, &repo, .{ .include = &.{"*"} }),
+            .reflog_expire => try gc.expireReflogs(gpa, io, &repo, .{ .clock = .{ .now = date.timestamp(testgit.fixture_date) }, .expire = gc.expire_all }),
         }
         repo.deinit(io);
     }
@@ -362,6 +367,12 @@ pub const Case = struct {
             },
             .ref_update => {
                 try expectRef(io, git, "refs/heads/main", &.{ first, second });
+                try expectRef(io, git, "refs/heads/next", &.{second});
+            },
+            // Packing moves no ref and expiring moves none: each is where
+            // it was at every crash.
+            .pack_refs, .reflog_expire => {
+                try expectRef(io, git, "refs/heads/main", &.{first});
                 try expectRef(io, git, "refs/heads/next", &.{second});
             },
             .index_write, .checkout => {
@@ -485,4 +496,20 @@ test "every crash: a checkout of another branch, files" {
 
 test "every crash: a checkout of another branch, reftable" {
     try inFormat(.checkout, .reftable);
+}
+
+test "every crash: pack-refs, files" {
+    try inFormat(.pack_refs, .files);
+}
+
+test "every crash: pack-refs, reftable" {
+    try inFormat(.pack_refs, .reftable);
+}
+
+test "every crash: reflog expire, files" {
+    try inFormat(.reflog_expire, .files);
+}
+
+test "every crash: reflog expire, reftable" {
+    try inFormat(.reflog_expire, .reftable);
 }

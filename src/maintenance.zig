@@ -21,3 +21,12 @@ pub const repackRepository = @import("maintenance/maintenance.zig").repackReposi
 
 pub const BitmapInputs = @import("maintenance/maintenance.zig").BitmapInputs;
 pub const MidxBitmapInputs = @import("maintenance/maintenance.zig").MidxBitmapInputs;
+
+pub const GcError = @import("maintenance/gc.zig").Error;
+pub const PackRefsOptions = @import("maintenance/gc.zig").PackRefsOptions;
+pub const packRefs = @import("maintenance/gc.zig").packRefs;
+pub const Expiry = @import("maintenance/gc.zig").Expiry;
+pub const expire_all = @import("maintenance/gc.zig").expire_all;
+pub const parseExpiry = @import("maintenance/gc.zig").parseExpiry;
+pub const ReflogExpireOptions = @import("maintenance/gc.zig").ReflogExpireOptions;
+pub const expireReflogs = @import("maintenance/gc.zig").expireReflogs;
