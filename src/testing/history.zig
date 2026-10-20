@@ -1245,6 +1245,59 @@ test "a merge message setting git dies on refuses every merge" {
     }
 }
 
+test "a cherry-pick and a rebase read every diff.renameLimit as git's sequencer does, and diff.renames only as the merge does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const Case = struct { settings: []const [2][]const u8, fails: bool };
+    const cases = [_]Case{
+        // `git_diff_basic_config`: a bad value dies wherever it stands.
+        .{ .settings = &.{ .{ "diff.renamelimit", "x" }, .{ "diff.renamelimit", "5" } }, .fails = true },
+        .{ .settings = &.{ .{ "diff.renamelimit", "3000000000" }, .{ "diff.renamelimit", "5" } }, .fails = true },
+        // merge-ort reads the last `diff.renames` alone.
+        .{ .settings = &.{ .{ "diff.renames", "maybe" }, .{ "diff.renames", "true" } }, .fails = false },
+        .{ .settings = &.{ .{ "diff.renamelimit", "5" }, .{ "diff.renamelimit", "7" } }, .fails = false },
+    };
+    for (cases) |case| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, divergedScript);
+        defer pair.deinit();
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            for (case.settings) |setting| try r.exec(io, &.{ "config", "--add", setting[0], setting[1] });
+        }
+        pair.git.report_failures = false;
+        var theirs = try pair.git.capture(io, &.{ "cherry-pick", "topic~2" });
+        defer theirs.deinit(gpa);
+        try std.testing.expectEqual(case.fails, theirs.code != 0);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const one = try oidOf(gpa, io, &pair.ours, "topic~2");
+            if (case.fails) {
+                try std.testing.expectError(error.InvalidMergeSetting, sequencer.pick(gpa, io, &repo, &.{one}, .{ .who = who }));
+                // `--abort` reads them first too, before it finds nothing to abort.
+                var aborted = try pair.git.capture(io, &.{ "cherry-pick", "--abort" });
+                defer aborted.deinit(gpa);
+                try std.testing.expect(std.mem.find(u8, aborted.stderr, "renamelimit") != null);
+                try std.testing.expectError(error.InvalidMergeSetting, sequencer.abort(gpa, io, &repo, who, null));
+            } else {
+                var outcome = try sequencer.pick(gpa, io, &repo, &.{one}, .{ .who = who });
+                outcome.deinit();
+            }
+        }
+        try expectSameState(&pair, io, &pick_state, &main_logs);
+        if (!case.fails) continue;
+        // A rebase of topic onto main, which the merge backend begins by
+        // reading the sequencer's settings.
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
+        var rebased = try pair.git.capture(io, &.{ "rebase", "main" });
+        defer rebased.deinit(gpa);
+        try std.testing.expect(rebased.code != 0);
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try std.testing.expectError(error.InvalidMergeSetting, rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" }));
+    }
+}
+
 /// The names `merge-one-file`'s temporary files give the markers are
 /// random; the same name in both copies makes the rest comparable.
 fn sameTemporaryNames(pair: *Pair, io: Io, path: []const u8) !void {

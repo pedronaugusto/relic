@@ -26,6 +26,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const merge = @import("../merge/merge.zig");
 const three_way = @import("../merge/three_way.zig");
+const diff = @import("../diff/diff.zig");
 const signing_mod = @import("../object/signing.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
 const commit_hooks_mod = @import("commit_hooks.zig");
@@ -234,13 +235,24 @@ pub const Outcome = struct {
 /// Cherry-pick `commits` in order onto `HEAD`.
 pub fn pick(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    try initConfig(repo);
     return start(gpa, io, repo, .pick, commits, options);
 }
 
 /// Revert `commits` in order.
 pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    try initConfig(repo);
     return start(gpa, io, repo, .revert, commits, options);
+}
+
+/// What git's `sequencer_init_config` dies on, which `git cherry-pick`
+/// and `git revert` read before anything else, whatever they are asked
+/// (`--continue`, `--skip`, `--abort` and `--quit` too), and a rebase as
+/// it begins, goes on or skips: every `diff.renameLimit` value
+/// (`git_diff_basic_config`), where the merge itself reads only the last.
+pub fn initConfig(repo: *Repository) Error!void {
+    _ = diff.RenameSettings.readLimit(repo.configuration()) catch return error.InvalidMergeSetting;
 }
 
 /// Whether a cherry-pick or revert is waiting: a sequence in
@@ -956,6 +968,7 @@ fn commitStaged(r: *Replay) Error!Oid {
 /// rest of the sequence.
 pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    try initConfig(repo);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -1009,6 +1022,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 /// Leave out the pick that stopped and carry on with the rest.
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    try initConfig(repo);
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
     if (!repo.refStore().root().exists(repo.allocator(), io, action.headRef())) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
@@ -1026,6 +1040,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// `HEAD` since the sequence last did, in which case `HEAD` is left where it
 /// is, as git leaves it. The state goes either way.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*three_way.Blocked) Self.Error!void {
+    try initConfig(repo);
     const text = (try state_file.read(gpa, io, repo.gitDirectory(), head_path)) orelse {
         if (!repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) and
             !repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.NoSequencerInProgress;
@@ -1042,6 +1057,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
 
 /// Forget the sequence and leave everything else as it is: `--quit`.
 pub fn quit(io: Io, repo: *Repository) Self.Error!void {
+    try initConfig(repo);
     try removeSequencerState(io, repo);
     try removeBranchState(io, repo);
 }

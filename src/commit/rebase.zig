@@ -859,6 +859,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
         if (options.verify) _ = try runner.preRebase(io, options.upstream_name orelse try r.hex(upstream), options.branch);
     }
 
+    // git's `do_interactive_rebase` reads the sequencer's settings first.
+    try sequencer.initConfig(repo);
     // The sheet.
     var items: []todo.Item = try makeScript(&r, upstream, tip.orig_head);
     try repo.gitDirectory().createDirPath(io, state_dir);
@@ -2460,6 +2462,7 @@ fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Erro
 /// staged, as git does, and carry on down the sheet.
 pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    try sequencer.initConfig(repo);
     var r = try loadRun(gpa, io, repo, options);
     errdefer freeRun(&r);
     try commitStagedChanges(&r);
@@ -2586,6 +2589,7 @@ const hooksEnv = ?hooks_mod.Runner.CommitEnv;
 /// carry on: `--skip`.
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    try sequencer.initConfig(repo);
     {
         var r = try loadRun(gpa, io, repo, options);
         defer freeRun(&r);

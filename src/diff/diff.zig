@@ -741,6 +741,18 @@ pub const RenameSettings = struct {
         return out;
     }
 
+    /// `diff.renameLimit` alone, every value in order as git's
+    /// `git_diff_basic_config` reads it, a bad one refused wherever it
+    /// stands, the last deciding: what a cherry-pick, a revert and a
+    /// rebase read when they begin, where `diff.renames` is only the
+    /// merge's own last value. `null` when it is not there.
+    pub fn readLimit(config: *const config_mod.Config) ConfigError!?i32 {
+        var out: ?i32 = null;
+        var it = config.iterate(&.{"diff.renamelimit"});
+        while (it.next()) |entry| out = try parseRenameLimit(entry.value);
+        return out;
+    }
+
     /// The renames a diff, `git log -p` or `format-patch` finds with
     /// nothing asked: on unless `diff.renames` says otherwise, copies too
     /// for `copies`, scored up to `diff.renameLimit` (1000, and none when
