@@ -52,6 +52,8 @@ const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
 const remote_mod = @import("../wire.zig").remote;
 const warning = @import("../report.zig").warning;
+const bundle = @import("bundle.zig");
+const bundle_uri = @import("bundle/uri.zig");
 
 const progress_mod = @import("../report.zig").progress;
 const config_mod = @import("../config/config.zig");
@@ -74,6 +76,9 @@ pub const Error = error{
     MissingObject,
     /// A remote name git would refuse.
     InvalidRemoteName,
+    /// `bundle_uri` with `depth`, `shallow_since` or `shallow_exclude`,
+    /// which git refuses together.
+    BundleUriShallow,
 } || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || object_walk.Error ||
     worktree.Error || Repository.WriteConfigError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError || fsck.LoadError;
@@ -135,6 +140,11 @@ pub const Options = struct {
     /// `--depth`: the history cut to this many commits from each fetched
     /// tip, the boundary written to `.git/shallow`.
     depth: ?u32 = null,
+    /// `--bundle-uri`: a bundle or a bundle list whose objects are taken
+    /// before the server is asked for the rest (`bundle_uri.zig`). One
+    /// that fails is warned of and the clone goes on; a list under a
+    /// heuristic is kept in `fetch.bundleURI` for the fetches after.
+    bundle_uri: ?[]const u8 = null,
     /// `--shallow-since`: the history cut at commits older than this.
     shallow_since: ?Io.Timestamp = null,
     /// `--shallow-exclude`: the history cut where these refs of the
@@ -235,6 +245,7 @@ fn isEmpty(io: Io, dir: Io.Dir) Self.Error!bool {
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Self.Error!Repository {
+    if (options.bundle_uri != null and (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)) return error.BundleUriShallow;
     var deepen: ?fetch_pack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
         .{ .depth = options.depth, .since = if (options.shallow_since) |t| t.toSeconds() else null, .not = options.shallow_exclude }
     else
@@ -309,8 +320,11 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     const single_tag = try singleTagRef(arena, head, single_branch, options);
     try configureRemote(arena, io, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
 
+    const tips = try takeBundles(arena, gpa, io, &repo, settings, options);
+
     var chosen = try chooseRefs(arena, remote_refs.refs, head, single_branch, single_tag, options);
     var received = try receiveObjects(arena, gpa, io, &repo, &session, &chosen, .{
+        .tips = tips,
         .settings = settings,
         .remote_refs = remote_refs.refs,
         .deepen = deepen,
@@ -376,6 +390,8 @@ const Receiving = struct {
     settings: ?*const config_mod.Config,
     remote_refs: []const protocol.RemoteRef,
     deepen: ?fetch_pack.Deepen,
+    /// The refs a bundle URI left, where the offer of haves starts.
+    tips: []const Oid = &.{},
     /// The filter sent, which makes the pack a promisor pack.
     filter: ?[]const u8,
     single_branch: bool,
@@ -412,7 +428,7 @@ fn receiveObjects(
     var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
         .wants = chosen.wants.items,
         .want_names = chosen.want_names.items,
-        .tips = &.{},
+        .tips = ask.tips,
         .include_tag = options.tags,
         .deepen = ask.deepen,
         .filter = ask.filter,
@@ -485,7 +501,12 @@ fn openSession(
     repo: ?*Repository,
     options: Options,
 ) Error!transport.Session {
-    const session = try transport.Session.open(gpa, io, reached, .{ .service = .upload_pack, .kind = null }, .{
+    return transport.Session.open(gpa, io, reached, .{ .service = .upload_pack, .kind = null }, transferOptions(local_copy, settings, repo, options));
+}
+
+/// The transfer settings a clone reaches the remote, and a bundle URI, with.
+fn transferOptions(local_copy: bool, settings: ?*const config_mod.Config, repo: ?*Repository, options: Options) transport.Options {
+    return .{
         .local_copy = local_copy,
         .programs = options.programs,
         .config = settings,
@@ -501,8 +522,21 @@ fn openSession(
         .who = options.who,
         .cloning = true,
         .from_user = options.from_user,
-    });
-    return session;
+    };
+}
+
+/// git's clone takes a bundle URI's objects once it knows the object
+/// format and before it fetches; the refs they leave under `refs/bundles/`
+/// are returned, the fetch's haves.
+fn takeBundles(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, settings: ?*const config_mod.Config, options: Options) Error![]const Oid {
+    const uri = options.bundle_uri orelse return &.{};
+    const got = try bundle_uri.fetch(gpa, io, repo, uri, .{ .transport = transferOptions(false, settings, repo, options), .who = options.who });
+    if (!got.ok) {
+        try warning.note(options.warnings, .{ .bundle_uri_clone_failed = uri });
+    } else if (got.heuristic) {
+        _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fetch.bundleuri", .value = uri } }}, .{});
+    }
+    return bundle.repositoryTips(arena, io, repo);
 }
 
 /// Which branch `HEAD` will name, or the commit it is detached at.

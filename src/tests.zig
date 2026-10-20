@@ -118,6 +118,7 @@ test {
         _ = @import("wire/pinned_key.zig");
         _ = @import("merge/strategy_test.zig");
         _ = @import("transport/bundle_test.zig");
+        _ = @import("transport/bundle/uri_test.zig");
         _ = @import("patch/apply_test.zig");
         _ = @import("patch/format_test.zig");
         _ = @import("patch/am_test.zig");

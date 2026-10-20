@@ -189,6 +189,40 @@ pub const user_agent = "git/2.0 (relic 0.3)";
 /// Open a smart HTTP conversation with the service at `url`.
 pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Self.Error!*Connection {
     if (comptime !http_enabled) return error.HttpUnavailable;
+    const h = try prepare(gpa, io, url, service, options);
+    errdefer Http.deinit(io, h);
+    // The advertisement is asked for here, so that what can go wrong with
+    // the first request — a credential refused, no repository, a dumb
+    // server — is refused by its own name.
+    _ = try h.advertisementInner();
+    return &h.connection;
+}
+
+/// One `GET` of `url`, its body written to `w`: what git-remote-https's
+/// `get` does for a bundle URI. git's `http.*` settings for the URL hold
+/// and its credentials are asked for on a 401, as for a conversation; a
+/// redirect is followed only under `http.followRedirects=true`, since
+/// `initial` follows a conversation's first request and a download is
+/// none. Any status but 200 is `HttpStatus`, as the helper's `get` fails.
+pub fn download(gpa: Allocator, io: Io, url: url_mod.Url, w: *Io.Writer, options: Options) (Self.Error || Io.Writer.Error)!void {
+    if (comptime !http_enabled) return error.HttpUnavailable;
+    var plain = options;
+    plain.protocol_v2 = false;
+    const h = try prepare(gpa, io, url, .upload_pack, plain);
+    defer Http.deinit(io, h);
+    h.downloading = true;
+    h.base_path = url.path;
+    const res = try h.get("");
+    if (res.status != .ok) return error.HttpStatus;
+    const body = res.reader(io);
+    _ = body.streamRemaining(w) catch |err| return switch (err) {
+        error.WriteFailed => error.WriteFailed,
+        error.ReadFailed => h.fail(error.ConnectionFailed, "the body was cut short"),
+    };
+}
+
+/// The conversation's state, its client configured, before any request.
+fn prepare(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Self.Error!*Http {
     const h = try gpa.create(Http);
     errdefer gpa.destroy(h);
     h.* = .{
@@ -222,11 +256,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
     h.post_buffer = try h.arena.allocator().alloc(u8, @intCast(settings.post_buffer));
     h.body_buffer = try h.arena.allocator().alloc(u8, pkt_line.max_line);
     h.post = .{ .vtable = &.{ .drain = Http.drainPost }, .buffer = h.post_buffer };
-    // The advertisement is asked for here, so that what can go wrong with
-    // the first request — a credential refused, no repository, a dumb
-    // server — is refused by its own name.
-    _ = try h.advertisementInner();
-    return &h.connection;
+    return h;
 }
 
 /// Where requests go: a scheme, a host and a port.
@@ -278,6 +308,9 @@ const Http = struct {
     user_agent: []const u8 = user_agent,
     /// `http.followRedirects`.
     follow_redirects: http_settings.FollowRedirects = .initial,
+    /// A lone `GET` (`download`), not a conversation: its redirects are
+    /// followed only when every request's are.
+    downloading: bool = false,
     /// Whether requests go through a proxy.
     proxied: bool = false,
     in_flight: ?uplink.Response = null,
@@ -810,6 +843,7 @@ const Http = struct {
             if (status == 407) return h.rejectProxy();
             if (status == 301 or status == 302 or status == 303 or status == 307 or status == 308) {
                 if (h.follow_redirects == .never) return h.fail(error.HttpStatus, "a redirect, and http.followRedirects is false");
+                if (h.downloading and h.follow_redirects == .initial) return h.fail(error.HttpStatus, "a redirect of a download, which http.followRedirects=initial does not follow");
                 const location = res.headers.get("location") orelse return h.fail(error.HttpStatus, "a redirect with no Location");
                 redirects += 1;
                 if (redirects > 20) return h.fail(error.HttpStatus, "too many redirects");
@@ -851,7 +885,7 @@ const Http = struct {
                 try h.credentials.approve(h.io, h.credentialOptions());
             }
             if (res.status.class() == .success) try h.approveCertificate();
-            if (redirects > 0 and res.status.class() == .success) try h.rebase(path);
+            if (redirects > 0 and res.status.class() == .success and !h.downloading) try h.rebase(path);
             return res;
         }
     }

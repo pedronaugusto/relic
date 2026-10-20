@@ -6,8 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `clone.Error` has `BundleUriShallow` (`bundle_uri` with a depth, `shallow_since` or `shallow_exclude`, which git refuses together); `warning.Warning` has `bundle_uri_clone_failed` and `bundle_uri_fetch_failed`.
+
 ### Added
 
+- Bundle URIs as git 2.55's `bundle-uri.c` fetches them (`transport.bundle_uri`): `clone.Options.bundle_uri` (`--bundle-uri`) takes a bundle's or a bundle list's objects before the server is asked, its refs under `refs/bundles/` offered as haves; a list in git's config format (`bundle.version`, `mode = all|any`, `heuristic = creationToken`, `bundle.<id>.uri` relative to the list, `creationToken`), lists within lists four deep; under `creationToken` the newest bundles first down to one that unbundles, the greatest token kept in `fetch.bundleCreationToken`, the URI kept in `fetch.bundleURI`; every fetch reads `fetch.bundleURI` first. A failure is warned of and the clone or fetch goes on, as git's. Bundles come from a path, a `file://` URL, or http and https through `transport.download` (`smart_http.download`: one `GET` with git's `http.*` settings and credentials, as git-remote-https's `get`, a redirect followed only under `http.followRedirects=true`).
 - `http.sslVersion=tlsv1.3` holds the server to TLS 1.3 (uplink's `tls.ClientOptions.min_version`), as curl holds it for git, where it was refused.
 - `http.pinnedPubkey` holds the server's certificate to the keys it names, as curl's `Curl_pin_peer_pubkey` reads them for git: `sha256//<base64>` hashes with `;sha256//` between them, each compared as written, or a file holding the key as DER or a `PUBLIC KEY` PEM block (`wire.pinned_key`, through uplink's `pins`). A value that can match no key fails with `TlsFailed` before connecting; a hash list is no longer made a path from the configuration's directory.
 

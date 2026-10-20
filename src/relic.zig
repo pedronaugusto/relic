@@ -114,6 +114,7 @@
 //! | `transport.pkt_line` | Module within `transport`. |
 //! | `transport.upload_pack` | Module within `transport`. |
 //! | `transport.bundle` | Module within `transport`. |
+//! | `transport.bundle_uri` | Module within `transport`. |
 //! | `transport.progress` | Module within `transport`. |
 //! | `transport.remote_helper` | Module within `transport`. |
 //! | `transport.policy` | Module within `transport`. |

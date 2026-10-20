@@ -56,6 +56,11 @@ pub const Warning = union(enum) {
     /// `http.sslVersion` or `GIT_SSL_VERSION` names a version curl does
     /// not know, and the default is used: the value.
     ssl_version_unknown: []const u8,
+    /// A clone's `bundle_uri` brought nothing in; the clone went on
+    /// without it.
+    bundle_uri_clone_failed: []const u8,
+    /// `fetch.bundleURI` brought nothing in; the fetch went on without it.
+    bundle_uri_fetch_failed: []const u8,
     /// `http.cookieFile` is `-`, curl's standard input, which git does not
     /// read cookies from.
     cookie_file_stdin,
@@ -94,6 +99,8 @@ pub const Warning = union(enum) {
             .remote_helper => |text| text,
             .http_version_unknown => |v| arena.print("unknown value given to http.version: '{s}'", .{v}),
             .ssl_version_unknown => |v| arena.print("unsupported ssl version {s}: using default", .{v}),
+            .bundle_uri_clone_failed => |v| arena.print("failed to fetch objects from bundle URI '{s}'", .{v}),
+            .bundle_uri_fetch_failed => |v| arena.print("failed to fetch bundles from '{s}'", .{v}),
             .cookie_file_stdin => "refusing to read cookies from http.cookiefile '-'",
             .save_cookies_without_file => "ignoring http.savecookies for empty http.cookiefile",
             .http_env_unparsed => |name| arena.print("failed to parse {s}", .{name}),
@@ -140,6 +147,8 @@ pub const Warnings = struct {
             .remote_helper => |t| .{ .remote_helper = try a.dupe(u8, t) },
             .http_version_unknown => |t| .{ .http_version_unknown = try a.dupe(u8, t) },
             .ssl_version_unknown => |t| .{ .ssl_version_unknown = try a.dupe(u8, t) },
+            .bundle_uri_clone_failed => |t| .{ .bundle_uri_clone_failed = try a.dupe(u8, t) },
+            .bundle_uri_fetch_failed => |t| .{ .bundle_uri_fetch_failed = try a.dupe(u8, t) },
             .cookie_file_stdin => .cookie_file_stdin,
             .save_cookies_without_file => .save_cookies_without_file,
             .http_env_unparsed => |t| .{ .http_env_unparsed = try a.dupe(u8, t) },

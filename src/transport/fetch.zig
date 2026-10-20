@@ -48,6 +48,7 @@ const url_mod = @import("../wire.zig").url;
 const program = @import("../process.zig").program;
 const protocol = @import("../wire.zig").protocol;
 const transport = @import("transport.zig");
+const bundle_uri = @import("bundle/uri.zig");
 const object_walk = @import("../walk/object/walk.zig");
 const index_pack = @import("../odb/index_pack.zig");
 const progress_mod = @import("../report.zig").progress;
@@ -292,6 +293,23 @@ fn selectFilter(arena: Allocator, config: *const config_mod.Config, explicit: ?[
 /// Fetch from `remote_name`, a configured remote or a URL, into `repo`.
 pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Self.Error!Outcome {
     const deepen = try deepenRequest(repo, options);
+    // git's fetch takes `fetch.bundleURI`'s bundles first, whatever it
+    // fetches after, and warns when they fail.
+    if (repo.configuration().get("fetch.bundleuri")) |uri| {
+        const got = try bundle_uri.fetch(gpa, io, repo, uri, .{ .who = options.who, .transport = .{
+            .programs = options.programs,
+            .config = repo.configuration(),
+            .proxy = options.proxy,
+            .prompt = options.prompt,
+            .auth_failure = options.auth_failure,
+            .warnings = options.warnings,
+            .now = gitdate.timestamp(options.who.when_secs),
+            .repository = repo,
+            .who = options.who,
+            .from_user = options.from_user,
+        } });
+        if (!got.ok) try warning.note(options.warnings, .{ .bundle_uri_fetch_failed = uri });
+    }
 
     var outcome: Outcome = .{
         .arena = .init(gpa),

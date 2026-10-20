@@ -172,6 +172,15 @@ pub fn wantsV2(config: ?*const config_mod.Config) bool {
 }
 
 /// An open remote.
+/// `remote_url`'s body written to `w` with the transfer settings `options`
+/// hold: one `GET` over http or https (`smart_http.download`), what a
+/// bundle URI is fetched with. Any other scheme is `UnsupportedTransport`.
+pub fn download(gpa: Allocator, io: Io, remote_url: []const u8, w: *Io.Writer, options: Options) (Error || Io.Writer.Error)!void {
+    const parsed = try url.Url.parse(remote_url);
+    if (parsed.scheme != .http and parsed.scheme != .https) return error.UnsupportedTransport;
+    return smart_http.download(gpa, io, parsed, w, Session.httpOptions(options));
+}
+
 pub const Session = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -331,24 +340,29 @@ pub const Session = struct {
             },
             .http, .https => {
                 // `error.HttpUnavailable` where relic was built without HTTP.
-                const conn = try smart_http.connect(gpa, io, parsed, service, .{
-                    .config = options.config,
-                    .remote_name = options.remote_name,
-                    .base = if (options.repository) |r| r.topDirectory() else null,
-                    .proxy = options.proxy,
-                    .programs = options.programs,
-                    .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
-                    .prompt = options.prompt,
-                    .auth_failure = options.auth_failure,
-                    .warnings = options.warnings,
-                    .now = options.now,
-                    .from_user = options.from_user,
-                });
+                const conn = try smart_http.connect(gpa, io, parsed, service, httpOptions(options));
                 errdefer conn.deinit(io);
                 return fromConnection(gpa, conn, service, kind);
             },
             .git => return error.UnsupportedTransport,
         }
+    }
+
+    /// What a conversation over HTTP is made with.
+    fn httpOptions(options: Options) smart_http.Options {
+        return .{
+            .config = options.config,
+            .remote_name = options.remote_name,
+            .base = if (options.repository) |r| r.topDirectory() else null,
+            .proxy = options.proxy,
+            .programs = options.programs,
+            .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
+            .prompt = options.prompt,
+            .auth_failure = options.auth_failure,
+            .warnings = options.warnings,
+            .now = options.now,
+            .from_user = options.from_user,
+        };
     }
 
     fn checkAllowed(options: Options, name: []const u8) ErrorNamespace.Error!void {
