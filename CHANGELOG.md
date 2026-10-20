@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-10-20
+
 ### Breaking
 
 - `diff.findRenames` takes `diff.RenameBlobs` in place of the database: the database and the blobs not in it (`diff.rename.Options.contents`), the working tree's files under the names their stored bytes hash to, as git's `hash_filespec` names them.
