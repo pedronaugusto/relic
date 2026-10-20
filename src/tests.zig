@@ -154,6 +154,7 @@ test {
     _ = @import("testing/refs_ownership.zig");
     _ = @import("testing/pack_keep.zig");
     _ = @import("testing/fsync.zig");
+    _ = @import("testing/crash.zig");
     _ = @import("testing/object_walk.zig");
     _ = @import("testing/fetch_pack.zig");
     _ = @import("refs/packed.zig");

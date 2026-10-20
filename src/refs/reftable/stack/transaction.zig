@@ -349,7 +349,7 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, options: Options) refs.Tran
     const buffer = try gpa.alloc(u8, 4096);
     errdefer gpa.free(buffer);
     const sync = options.fsync.sync(.reference);
-    const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = sync });
+    const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = sync, .sync_directory = namesDurable(sync) });
     return .{ .dir = dir, .lock = lock, .buffer = buffer, .shared = options.shared, .sync = sync };
 }
 
@@ -807,11 +807,25 @@ fn logMessage(arena: Allocator, text: []const u8, block_size: u32) Allocator.Err
     return out[0 .. end + 1];
 }
 
+/// Whether a table's name, and the list's, are made durable before the
+/// next step: a list may name only tables that survive a crash, and old
+/// tables are removed only once the list without them does. A synced file
+/// is not enough: its rename is the directory's, which a crash may lose
+/// while keeping a later rename beside it, and then `tables.list` names a
+/// table that is not there and every read of the refs fails. git's
+/// reftable syncs each table and the list and leaves the order of the two
+/// renames to the file system; relic syncs the directory after each
+/// whenever `core.fsync` syncs the references (`fs.LockFile`'s
+/// `sync_directory`).
+fn namesDurable(sync: fs.Sync) bool {
+    return sync != .none;
+}
+
 /// Write a new table under its final name, through `<name>.lock`, so no
 /// reader sees half of it.
 fn writeTable(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8, shared: fs.Shared, sync: fs.Sync) refs.TransactionError!void {
     var buffer: [16 * 1024]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = shared, .sync = sync });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = shared, .sync = sync, .sync_directory = namesDurable(sync) });
     defer lock.deinit(io);
     lock.writer().writeAll(bytes) catch return error.WriteFailed;
     try lock.commit(io);
@@ -850,7 +864,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     };
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
-    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference) });
+    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference), .sync_directory = namesDurable(options.fsync.sync(.reference)) });
     defer if (list_lock) |*lock| lock.deinit(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
@@ -906,7 +920,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
 
     // The list again, as it is now: writers may have added tables, and the
     // merged ones are wherever it has them, in the order they were merged.
-    list_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference) });
+    list_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference), .sync_directory = namesDurable(options.fsync.sync(.reference)) });
     const listed = (try fs.readFileAlloc(gpa, io, dir, "tables.list", 1 << 20)) orelse try gpa.alloc(u8, 0);
     defer gpa.free(listed);
     var current: std.ArrayList([]const u8) = .empty;

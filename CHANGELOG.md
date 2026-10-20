@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Pins conduit 0.9.3, uplink 0.8.4, cloak 0.14.0, warp 0.4.1 and xenoglyph 0.4.1; development: preflight 0.10.2, shakedown 0.4.14.
+
+### Fixed
+
+- `Odb.syncBatch` makes the names of loose objects durable under `core.fsyncMethod = fsync` too, as it does under `batch`: each object was synced, but its name is its fan-out directory's, and an index or a ref published after it could survive a crash that lost the object.
+- reftable: a new table's name, and the list's, are made durable (the `reftable` directory synced) before the next step when `core.fsync` syncs the references. A crash could keep the `tables.list` naming a table while losing the table's rename beside it, after which every read of the refs failed (`ReftableMissing`); and a compaction removed the old tables before the list without them was durable.
+
 ## [0.24.0] - 2026-10-20
 
 ### Breaking

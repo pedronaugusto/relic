@@ -1619,7 +1619,11 @@ pub const Odb = struct {
     /// Under `core.fsyncMethod = batch` each object's bytes were ordered before
     /// its name appeared; this is what then makes the names survive a power
     /// cut, for one flush per fan-out directory rather than one per object.
-    /// With nothing written under a batch it does nothing, so a caller may
+    /// Under `fsync` each object was durable before its name appeared, and
+    /// the name is still its directory's: a crash may keep an index or a ref
+    /// that names the object and lose the object's name, so this syncs those
+    /// directories too, before whatever names the objects is published.
+    /// With nothing written under either it does nothing, so a caller may
     /// always call it.
     pub fn syncBatch(odb: *Odb, io: Io) ErrorNamespace.Error!void {
         const data = odb.backendData();
@@ -1646,7 +1650,10 @@ pub const Odb = struct {
     /// `syncBatch`.
     fn noteLooseObject(odb: *Odb, oid: Oid, fan_out_made: bool) void {
         const data = odb.backendData();
-        if (odb.looseSync() != .batch) return;
+        switch (odb.looseSync()) {
+            .batch, .per_file => {},
+            .none, .ordered => return,
+        }
         data.unsynced_fanouts.set(oid.raw()[0]);
         if (fan_out_made) data.unsynced_objects_dir = true;
     }
