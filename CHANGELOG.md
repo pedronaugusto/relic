@@ -14,6 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Odb.syncBatch` makes the names of loose objects durable under `core.fsyncMethod = fsync` too, as it does under `batch`: each object was synced, but its name is its fan-out directory's, and an index or a ref published after it could survive a crash that lost the object.
 - reftable: a new table's name, and the list's, are made durable (the `reftable` directory synced) before the next step when `core.fsync` syncs the references. A crash could keep the `tables.list` naming a table while losing the table's rename beside it, after which every read of the refs failed (`ReftableMissing`); and a compaction removed the old tables before the list without them was durable.
+- A renormalizing merge into a working tree without a `.gitattributes` checked the files it would overwrite through the merged `.gitattributes`, which the merge had put among the working tree's attributes: an entry racily clean (written in the second of the index) was then judged changed (`LocalChangesWouldBeOverwritten`) where git, which refreshes the index through the working tree's and the index's attributes before it merges, finds it clean. The merge reads attributes of its own (git's `attr_index`).
 
 ## [0.24.0] - 2026-10-20
 

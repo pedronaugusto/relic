@@ -4267,6 +4267,10 @@ fn renormalizeWithMergedAttributes(script: *const fn (Io, *testgit.Repo) anyerro
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
             try gitMayFail(io, r, &.{ "merge", "--abort" });
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+            // An index older than every file it names: each entry is racily
+            // clean, as one written in the files' own second is, and its
+            // content is what is compared.
+            try fs.setTimestamps(io, r.dir, ".git/index", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } });
         }
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);

@@ -235,6 +235,15 @@ fn run(
     defer attrs.deinit();
     rules.attrs = &attrs;
     rules.filters = options.filters;
+    // The merge reads attributes of its own: a renormalizing merge puts
+    // the merged `.gitattributes` at the top where the working tree has
+    // none (git's `attr_index`), and those say nothing about what the
+    // working tree holds now. The check of the working tree before
+    // anything is written reads the working tree's and the index's, as
+    // git's refresh before a merge does: an entry racily clean in its
+    // second is compared through those, never through the merge's.
+    var merge_attrs = try repo.loadAttrs(io);
+    defer merge_attrs.deinit();
 
     const merge_config = try MergeConfig.read(repo.configuration());
     const settings = try configuredSettings(repo, merge_config, options);
@@ -263,7 +272,7 @@ fn run(
         .subtree_shift = settings.subtree_shift,
         .rename_limit = merge_config.rename_limit,
         .directory_renames = options.directory_renames orelse merge_config.directory_renames,
-        .attributes = &attrs,
+        .attributes = &merge_attrs,
         .attributes_dir = wt,
         .configured_drivers = try configuredDrivers(arena, repo),
         .default_driver = repo.configuration().get("merge.default"),
