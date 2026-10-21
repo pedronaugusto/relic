@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `lfs.server.S3`: the LFS server's objects in S3-compatible object storage, at `<prefix><repository>/<aa>/<bb>/<oid>` in a bucket (path-style or virtual-host addressing). Its actions are URLs the storage signed (uplink's `wire.sigv4`, AWS Signature Version 4) for `expires` seconds, which git-lfs follows straight to the storage; whether it holds an object is a signed `HEAD` through the caller's uplink client. Held to git-lfs's push, re-push and clone against storage that takes only a signature it recomputes for the exact URL sent.
+
+### Changed
+
+- uplink 0.8.6 (from 0.8.4), for `wire.sigv4`, and the cloak 0.19.0 it takes (from 0.14.0).
+
 ## [0.29.0] - 2026-10-21
 
 ### Breaking

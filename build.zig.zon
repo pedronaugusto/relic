@@ -23,8 +23,8 @@
         },
 
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.8.4#39fb50e81d36a76f010c62d0a099c3c798cedfc6",
-            .hash = "uplink-0.8.4-0eVSJpylFQAjiU2lw7o-UxMTHb4kT5eNrRaqaQZY2FyR",
+            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.8.6#02a9bba4716429e6ae227bdb5419f3b4aabcbbd9",
+            .hash = "uplink-0.8.6-0eVSJlUKFgDuhz6hRXhkD3qFGYwad4Qz7TFH9WXdMY0I",
             .lazy = true,
         },
 
@@ -39,8 +39,8 @@
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.14.0#96937bd116c5b782d05c892b065185946ca5af44",
-            .hash = "cloak-0.14.0-9onwcU2TsgMEExxAm1t0a5U6haDzjUmG1SNikYrqPPoc",
+            .url = "git+https://github.com/pedronaugusto/cloak?ref=v0.19.0#f6a7f419a3710337379b8242a4f5ee79eae58ceb",
+            .hash = "cloak-0.19.0-9onwccHjugMLhhdGp_FNBvJJqhc_1yxkDTStfA03RPoO",
             .lazy = true,
         },
 

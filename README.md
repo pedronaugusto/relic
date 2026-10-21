@@ -385,7 +385,8 @@ listing is kept where git-lfs keeps it, in its JSON, so either tool shows the
 other's locks offline. A repository carrying git-lfs's own hooks works on a
 machine without git-lfs. The other side is here too: `lfs.server` serves the
 batch API and the locking API on uplink's server beside git's smart HTTP, the
-objects in a store the caller gives and every request put to the caller's
+objects in a store the caller gives (a directory, or S3-compatible storage the
+client reaches through signed URLs) and every request put to the caller's
 hook, and git-lfs pushes, clones, pulls and locks against it.
 
 **The hash is the floor under a repository whose files have size.** Both
@@ -717,7 +718,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `lfs.transfer` | Module within `lfs`. |
 | `lfs.custom` | Module within `lfs`. |
 | `lfs.api` | Module within `lfs`. |
-| `lfs.server` | `Backend`, `Store`, `Directory` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store, the locking API, authorization by the caller's hook. |
+| `lfs.server` | `Backend`, `Store`, `Directory`, `S3` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store (a directory, or S3-compatible storage through signed URLs), the locking API, authorization by the caller's hook. |
 | `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |
 | `patch.mail` | `split`, `info` — `git mailsplit` and `git mailinfo`. |
