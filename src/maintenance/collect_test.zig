@@ -381,6 +381,8 @@ test "a failing pre-auto-gc hook stops gc --auto, as git's" {
         try r.exec(io, &.{ "config", "gc.auto", "1" });
         try r.exec(io, &.{ "config", "gc.autoDetach", "false" });
         try testgit.fixtureHook(gpa, io, r.dir, ".git/hooks/pre-auto-gc", "status", "1");
+        // Both sides' objects the same age, however far apart they were made.
+        try shared.ageAll(r, testgit.fixture_date);
     }
     try gitGc(&theirs, &.{ "gc", "--auto", "-q" });
     var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});

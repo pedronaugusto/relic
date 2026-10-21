@@ -1795,13 +1795,17 @@ pub const Odb = struct {
 
     /// The files in this database's own fan-out directories, `00` to `ff`
     /// in order as git's `for_each_loose_file_in_source` takes them, each
-    /// with the object it names when its name is one.
+    /// with the object it names when its name is one. The objects directory
+    /// is listed once and only the fan-outs there are opened, where git
+    /// tries all 256.
     const LooseNames = struct {
         odb: *Odb,
         /// git's `prune_subdir`: each directory, once listed, goes when it
         /// is empty, and stays otherwise.
         remove_empty: bool,
         fan: u16 = 0,
+        /// Which two-digit names the objects directory holds, once listed.
+        present: ?std.bit_set.Static(256) = null,
         dir: ?Io.Dir = null,
         it: ?Io.Dir.Iterator = null,
         hex: [2]u8 = undefined,
@@ -1824,6 +1828,8 @@ pub const Odb = struct {
                     if (l.remove_empty) l.odb.writableSource().dir.deleteDir(io, &l.hex) catch {};
                     continue;
                 }
+                if (l.present == null) l.present = try l.listFans(io);
+                while (l.fan <= 0xff and !l.present.?.isSet(l.fan)) l.fan += 1;
                 if (l.fan > 0xff) return null;
                 l.hex = std.fmt.hex(@as(u8, @intCast(l.fan)));
                 l.fan += 1;
@@ -1831,6 +1837,27 @@ pub const Odb = struct {
                 l.dir = sub;
                 l.it = sub.iterate();
             }
+        }
+
+        fn listFans(l: *const LooseNames, io: Io) ErrorNamespace.Error!std.bit_set.Static(256) {
+            var present: std.bit_set.Static(256) = .empty;
+            var it = l.odb.writableSource().dir.iterate();
+            while (try it.next(io)) |entry| {
+                if (entry.name.len != 2) continue;
+                // git opens the lowercase spelling alone.
+                const hi = lowerHex(entry.name[0]) orelse continue;
+                const lo = lowerHex(entry.name[1]) orelse continue;
+                present.set(@as(usize, hi) * 16 + lo);
+            }
+            return present;
+        }
+
+        fn lowerHex(c: u8) ?u8 {
+            return switch (c) {
+                '0'...'9' => c - '0',
+                'a'...'f' => c - 'a' + 10,
+                else => null,
+            };
         }
 
         fn parse(l: *const LooseNames, name: []const u8) ?Oid {

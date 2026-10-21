@@ -218,6 +218,7 @@ const Keeper = struct {
         k.tips.deinit(k.gpa);
     }
 
+    // glint-ignore: Z012 -- the ref store calls `keep` on the keeper it is handed (`expireLog`'s `anytype`), which is this file's own and never leaves it
     pub fn keep(k: *Keeper, entry: refs_mod.LogEntry, nth: usize) bool {
         _ = nth;
         if (k.failure != null) return true;
