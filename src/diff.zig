@@ -2,6 +2,7 @@
 
 pub const blame = @import("diff/blame.zig");
 pub const driver = @import("diff/driver.zig");
+pub const external = @import("diff/external.zig");
 pub const patch_id = @import("diff/patch_id.zig");
 pub const rename = @import("diff/rename.zig");
 pub const similarity = @import("diff/similarity.zig");

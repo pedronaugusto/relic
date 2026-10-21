@@ -717,6 +717,56 @@ const Walker = struct {
 /// gives it: without `core.symlinks` a file where the index has a link is
 /// the link, written as a file; without `core.fileMode` the index's
 /// executable bit is kept, there being none on the disk to read.
+/// A working tree's files beside the index entries that record them: the
+/// objects those name, how a file is converted, and the rules it is read
+/// by.
+pub const Tracked = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    io: Io,
+    wt: Io.Dir,
+    index: *const Index,
+    db: *Odb,
+    conv: *convert.Session,
+    rules: Rules,
+
+    /// git's `ie_match_stat` with no options: whether the file `found` at
+    /// `path` is what `entry` records -- of its kind and mode, its stat
+    /// matching, and where the stat cannot vouch for it (the racy case) its
+    /// content as it would be stored. An intent to add matches nothing.
+    pub fn matches(t: Tracked, a: Allocator, entry: index_mod.Entry, path: []const u8, found: fs.Entry) Self.Error!bool {
+        if (entry.intent_to_add) return false;
+        if (entry.mode != modeOnDisk(found, entry.mode, t.rules)) return false;
+        return t.sameContent(a, entry, path, found);
+    }
+
+    /// Whether a file of the entry's mode holds what the entry records: its
+    /// stat, or where that cannot vouch for it, its content.
+    pub fn sameContent(t: Tracked, a: Allocator, entry: index_mod.Entry, path: []const u8, found: fs.Entry) Self.Error!bool {
+        if (!t.index.isRacy(entry) and entry.stat.matches(found.stat, t.rules.statCompare())) return true;
+        // The stat says it may have changed; the content says whether it
+        // did. This is the racy rule doing its work.
+        const content = try t.storedBytes(a, path, found);
+        return hash.Hasher.object(t.db.objectFormat(), "blob", content).eql(entry.oid);
+    }
+
+    /// What `path` would be stored as: a symlink's target, a file's bytes
+    /// through its clean filter, encoding, line endings and `ident`, as
+    /// git's `diff_populate_filespec` reads a working-tree file.
+    pub fn storedBytes(t: Tracked, a: Allocator, path: []const u8, found: fs.Entry) Self.Error![]const u8 {
+        if (found.kind == .sym_link) {
+            var buf: [4096]u8 = undefined;
+            const len = try t.wt.readLink(t.io, path, &buf);
+            return a.dupe(u8, buf[0..len]);
+        }
+        if (t.rules.attrs) |attrs| {
+            const applied = try attrs.lookup(a, path, .file);
+            return (try t.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
+        }
+        return t.wt.readFileAlloc(t.io, path, a, .limited(1 << 31));
+    }
+};
+
 fn modeOnDisk(found: fs.Entry, tracked: ?object.Mode, rules: Rules) object.Mode {
     if (found.kind == .sym_link) return .symlink;
     if (!rules.symlinks and tracked == .symlink) return .symlink;
@@ -1599,33 +1649,13 @@ const StatusScan = struct {
             return .type_changed;
         }
         if (entry.mode != mode) return .modified;
-        if (!s.index.isRacy(entry.*) and entry.stat.matches(found.stat, s.options.rules.statCompare())) {
-            return .unmodified;
-        }
-        // The stat says it may have changed; the content says whether it
-        // did. This is the racy rule doing its work.
         var scratch: std.heap.ArenaAllocator = .init(s.gpa);
         defer scratch.deinit();
-        const content = try s.storedBytes(scratch.allocator(), path, found);
-        const oid = hash.Hasher.object(s.db.objectFormat(), "blob", content);
-        if (oid.eql(entry.oid)) return .unmodified;
-        return .modified;
+        return if (try s.trackedFiles().sameContent(scratch.allocator(), entry.*, path, found)) .unmodified else .modified;
     }
 
-    /// What `path` would be stored as: a symlink's target, a file's bytes
-    /// through its clean filter, encoding, line endings and `ident`, as
-    /// git's `diff_populate_filespec` reads a working-tree file.
-    fn storedBytes(s: *StatusScan, a: Allocator, path: []const u8, found: fs.Entry) Error![]const u8 {
-        if (found.kind == .sym_link) {
-            var buf: [4096]u8 = undefined;
-            const len = try s.wt.readLink(s.io, path, &buf);
-            return a.dupe(u8, buf[0..len]);
-        }
-        if (s.options.rules.attrs) |attrs| {
-            const applied = try attrs.lookup(a, path, .file);
-            return (try s.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
-        }
-        return s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
+    fn trackedFiles(s: *StatusScan) Tracked {
+        return .{ .io = s.io, .wt = s.wt, .index = s.index, .db = s.db, .conv = s.conv, .rules = s.options.rules };
     }
 
     /// Record a tracked file's change, and for a file added under an intent
@@ -1633,7 +1663,7 @@ const StatusScan = struct {
     fn recordFound(s: *StatusScan, entry: *const index_mod.Entry, path: []const u8, found: fs.Entry, change: Change) Error!void {
         try s.record(path, change);
         if (change != .added or !s.options.added_content) return;
-        const bytes = try s.storedBytes(s.arena, path, found);
+        const bytes = try s.trackedFiles().storedBytes(s.arena, path, found);
         s.entries.getPtr(path).?.added = .{
             .mode = modeOnDisk(found, entry.mode, s.options.rules),
             .oid = hash.Hasher.object(s.db.objectFormat(), "blob", bytes),

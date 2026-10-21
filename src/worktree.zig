@@ -30,6 +30,7 @@ pub const SubmoduleProbe = @import("checkout/checkout.zig").SubmoduleProbe;
 pub const SubmoduleMove = @import("checkout/checkout.zig").SubmoduleMove;
 pub const SubmoduleMover = @import("checkout/checkout.zig").SubmoduleMover;
 pub const Status = @import("checkout/checkout.zig").Status;
+pub const Tracked = @import("checkout/checkout.zig").Tracked;
 pub const StatusOptions = @import("checkout/checkout.zig").StatusOptions;
 pub const status = @import("checkout/checkout.zig").status;
 pub const TreeEntry = @import("checkout/checkout.zig").TreeEntry;

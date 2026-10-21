@@ -25,6 +25,8 @@ pub const Error = error{
     InvalidDriverBinary,
     /// A `diff.<name>.cachetextconv` that is no boolean, which git dies on.
     InvalidDriverCache,
+    /// A `diff.<name>.trustExitCode` that is no boolean, which git dies on.
+    InvalidDriverTrust,
     /// A function pattern's search took more work than the matcher's
     /// budget allows.
     PatternTooComplex,
@@ -87,6 +89,20 @@ pub const Driver = union(enum) {
         return try d.says(config) orelse attributes.isBinaryForDiff(bytes);
     }
 
+    /// The driver's `diff.<name>.command`, with `diff.<name>.trustExitCode`,
+    /// `null` where it has none: the program `diff.External` runs for a
+    /// file whose path names the driver.
+    pub fn command(d: Driver, config: ?*const config_mod.Config) error{InvalidDriverTrust}!?Command {
+        const driver = d.name() orelse return null;
+        const c = config orelse return null;
+        var key_buf: [512]u8 = undefined;
+        // A name past the buffer is no driver a key could name.
+        const program = c.get(std.mem.print(&key_buf, "diff.{s}.command", .{driver}) catch return null) orelse return null;
+        const trust_key = std.mem.print(&key_buf, "diff.{s}.trustexitcode", .{driver}) catch return null;
+        const trust = c.getBool(trust_key, false) catch return error.InvalidDriverTrust;
+        return .{ .command = program, .trust_exit_code = trust };
+    }
+
     /// The driver's word regex for a word diff: `diff.<name>.wordRegex`,
     /// the last set deciding, else the built-in driver's with git's
     /// `|[^[:space:]]|[\xc0-\xff][\x80-\xbf]+` after it (userdiff's
@@ -113,10 +129,10 @@ pub const Driver = union(enum) {
         const c = config orelse return null;
         var key_buf: [512]u8 = undefined;
         // A name past the buffer is no driver a key could name.
-        const command = c.get(std.mem.print(&key_buf, "diff.{s}.textconv", .{driver}) catch return null) orelse return null;
+        const program = c.get(std.mem.print(&key_buf, "diff.{s}.textconv", .{driver}) catch return null) orelse return null;
         const cache_key = std.mem.print(&key_buf, "diff.{s}.cachetextconv", .{driver}) catch return null;
         const cached = c.getBool(cache_key, false) catch return error.InvalidDriverCache;
-        return .{ .driver = driver, .command = command, .cached = cached };
+        return .{ .driver = driver, .command = program, .cached = cached };
     }
 
     /// The name `Rule.init` takes: the text and binary drivers have no
@@ -138,6 +154,15 @@ pub const Driver = union(enum) {
         }
         return false;
     }
+};
+
+/// An external diff program: `diff.external` or a driver's `command`, and
+/// whether its exit status says if the files differ (`trustExitCode`).
+pub const Command = struct {
+    command: []const u8,
+    /// Whether 1 is "they differ" rather than a failure, as 0 is "they do
+    /// not"; untrusted, anything but 0 is a failure.
+    trust_exit_code: bool = false,
 };
 
 /// A driver's `textconv`: the program a file's bytes are converted by.
@@ -174,6 +199,22 @@ pub const Drivers = struct {
         const attrs = d.attrs orelse return Driver.of(d.config, null);
         if (d.work_dir) |wt| try attrs.enter(io, wt, s.path);
         return Driver.of(d.config, (try attrs.lookup(a, s.path, .file)).get("diff"));
+    }
+
+    /// The driver a path names by its `diff` attribute alone, as git's
+    /// `userdiff_find_by_path` gives it to choose an external command:
+    /// `null` where the attribute is unspecified or names no driver, never
+    /// `default`.
+    pub fn ofPath(d: Drivers, a: Allocator, io: Io, path: []const u8) attributes.Error!?Driver {
+        const attrs = d.attrs orelse return null;
+        if (d.work_dir) |wt| try attrs.enter(io, wt, path);
+        const state = (try attrs.lookup(a, path, .file)).get("diff") orelse return null;
+        return switch (state) {
+            .set => .text,
+            .unset => .binary,
+            .unspecified => null,
+            .value => |name| if (Driver.exists(d.config, name)) .{ .named = name } else null,
+        };
     }
 
     /// Whether `side`, holding `bytes`, is binary, as git's

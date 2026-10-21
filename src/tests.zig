@@ -138,6 +138,7 @@ test {
         _ = @import("testing/textconv.zig");
         _ = @import("testing/hunk_headers.zig");
         _ = @import("testing/word_diff.zig");
+        _ = @import("testing/external_diff.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");

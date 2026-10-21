@@ -645,6 +645,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, `Colors`, `WhitespaceRule` — a file's patch as `git diff` and `git format-patch` write it (git's headers, unique abbreviations, `--binary`, `--full-index`, `--relative`), in colour as `git diff --color` writes it where `Options.colors` is given: `color.diff.<slot>`, whitespace errors by `core.whitespace`, the `whitespace` attribute and `diff.wsErrorHighlight`. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
 | `diff.driver` | `Drivers` — the diff driver each side of a diff takes by its `diff` attribute and mode, and what the driver says: binary or not, its `textconv`, the lines that start its functions. |
+| `diff.external` | `External` — an external diff program (`diff.external`, a driver's `command`) run for a file pair in place of its patch, as `git diff` runs it. |
 | `diff.patch_id` | Patch ids: a name for what a commit changes. |
 | `diff.rename` | Module within `diff`. |
 | `diff.similarity` | Module within `diff`. |

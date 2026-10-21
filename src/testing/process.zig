@@ -90,13 +90,42 @@ pub fn main(init: std.process.Init) !void {
             try out.interface.writeAll(arg);
             try out.interface.writeByte(0);
         }
+    } else if (std.mem.eql(u8, args[1], "ext-diff")) {
+        try extDiff(init.arena.allocator(), io, init.environ_map, args, &out.interface);
     } else if (!std.mem.eql(u8, args[1], "fail") and !std.mem.eql(u8, args[1], "silent")) return error.InvalidMode;
     try out.interface.flush();
     try err.interface.flush();
     if (std.mem.eql(u8, args[1], "fail")) std.process.exit(1);
     if (std.mem.eql(u8, args[1], "reject-filter")) std.process.exit(3);
-    if (args.len > 2 and (std.mem.eql(u8, args[1], "streams") or std.mem.eql(u8, args[1], "stderr")))
+    if (args.len > 2 and (std.mem.eql(u8, args[1], "streams") or std.mem.eql(u8, args[1], "stderr") or std.mem.eql(u8, args[1], "ext-diff")))
         std.process.exit(try std.fmt.parseUnsigned(u8, args[2], 10));
+}
+
+/// An external diff, `ext-diff <status>` then what git hands one: the
+/// path, each side's file, object and mode, and for a rename the other
+/// path and the metadata. It writes them back, a temporary file by its
+/// name within its `git-blob-XXXXXX` directory, each file's bytes, and
+/// which pair of how many, then exits with `status`.
+fn extDiff(arena: std.mem.Allocator, io: Io, environ: *const std.process.Environ.Map, args: []const []const u8, out: *Io.Writer) !void {
+    if (args.len < 10) return error.MissingPath;
+    try out.print("status={s} name={s}\n", .{ args[2], args[3] });
+    for ([_]usize{ 4, 7 }) |at| {
+        const file = args[at];
+        var shown = file;
+        if (std.Io.Dir.path.isAbsolute(file)) {
+            const dir = std.Io.Dir.path.dirname(file) orelse "";
+            const holder = std.Io.Dir.path.basename(dir);
+            const stem = holder[0 .. holder.len - @min(holder.len, 6)];
+            shown = try std.mem.concat(arena, u8, &.{ stem, "XXXXXX/", std.Io.Dir.path.basename(file) });
+        }
+        try out.print("file={s} hex={s} mode={s}\n", .{ shown, args[at + 1], args[at + 2] });
+        if (!std.mem.eql(u8, file, "/dev/null")) {
+            const bytes = try Io.Dir.cwd().readFileAlloc(io, file, arena, .limited(1 << 20));
+            try out.print("<<{s}>>\n", .{bytes});
+        }
+    }
+    for (args[10..]) |extra| try out.print("extra={s}\n", .{extra});
+    try out.print("pair={s}/{s}\n", .{ environ.get("GIT_DIFF_PATH_COUNTER") orelse "?", environ.get("GIT_DIFF_PATH_TOTAL") orelse "?" });
 }
 
 const transforms = [_][]const u8{ "upper", "upper-file", "lower", "tag", "drop-first-line", "crlf" };

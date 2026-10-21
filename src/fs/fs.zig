@@ -1490,39 +1490,76 @@ pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     return std.mem.print(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;
 }
 
+/// Six letters or digits, as git's `git_mkstemps_mode` fills `XXXXXX`.
+fn randomLetters(io: Io, out: *[6]u8) void {
+    const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    var raw: [6]u8 = undefined;
+    io.random(&raw);
+    for (out, raw) |*c, r| c.* = letters[r % letters.len];
+}
+
 /// A file in the temporary directory holding bytes a program reads by
 /// name: `TMPDIR`, `TEMP` or `TMP` from the environment the program runs
 /// in, else `/tmp`, as git's `mks_tempfile_ts` finds it. Its name is
-/// `prefix`, random hex digits and `suffix`.
+/// `prefix`, six random letters or digits and `suffix`.
 pub const TempFile = struct {
     path: []const u8,
+    /// The directory made to hold it, for `Name.directory`.
+    dir: ?[]const u8 = null,
 
     pub const Error = error{
         /// No temporary directory: none named on Windows, where there is
         /// no `/tmp` to fall back on.
         NoTemporaryDirectory,
-    } || Io.File.OpenError || Io.File.WritePositionalError || Io.Dir.RealPathFileAllocError || Allocator.Error;
+    } || Io.File.OpenError || Io.File.WritePositionalError || Io.Dir.RealPathFileAllocError || Io.Dir.CreateDirError || Allocator.Error;
 
-    pub const Name = struct { prefix: []const u8 = "", suffix: []const u8 = "" };
+    /// The file's name: `<prefix><random><suffix>` (git's
+    /// `mks_tempfile_ts`), or with `directory` a directory
+    /// `<prefix><random>` made to hold a file named `suffix` (git's
+    /// `mks_tempfile_dt`).
+    pub const Name = struct { prefix: []const u8 = "", suffix: []const u8 = "", directory: bool = false };
 
     pub fn create(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, name: Name, bytes: []const u8) TempFile.Error!TempFile {
         const dir_path = environ.get("TMPDIR") orelse
             environ.get("TEMP") orelse
             environ.get("TMP") orelse
             (if (builtin.target.os.tag == .windows) return error.NoTemporaryDirectory else "/tmp");
-        var name_buf: [96]u8 = undefined;
-        const random = tempName(io, &name_buf, name.prefix);
-        const file_name = try std.mem.concat(arena, u8, &.{ random, name.suffix });
         // A relative `TMPDIR` is taken from where the process runs, made
         // absolute so the program reading the file finds it from anywhere.
         const dir_abs = if (std.Io.Dir.path.isAbsolute(dir_path)) dir_path else try Io.Dir.cwd().realPathFileAlloc(io, dir_path, arena);
-        const path = try std.Io.Dir.path.join(arena, &.{ dir_abs, file_name });
+        // git's `git_mkstemps_mode`: six letters or digits, a name taken
+        // already tried again, up to `TMP_MAX` times.
+        var attempt: u32 = 0;
+        while (true) : (attempt += 1) {
+            var letters: [6]u8 = undefined;
+            randomLetters(io, &letters);
+            const random = try std.mem.concat(arena, u8, &.{ name.prefix, &letters });
+            const made = make(arena, io, dir_abs, random, name, bytes) catch |err| switch (err) {
+                error.PathAlreadyExists => if (attempt + 1 < 16384) continue else return err,
+                else => |e| return e,
+            };
+            return made;
+        }
+    }
+
+    fn make(arena: Allocator, io: Io, dir_abs: []const u8, random: []const u8, name: Name, bytes: []const u8) TempFile.Error!TempFile {
+        var holder: ?[]const u8 = null;
+        if (name.directory) {
+            holder = try std.Io.Dir.path.join(arena, &.{ dir_abs, random });
+            try Io.Dir.createDirAbsolute(io, holder.?, .default_dir);
+        }
+        // glint-ignore: Z026 -- the write's error is the one to report; a scratch directory left behind is in the temporary directory
+        errdefer if (holder) |h| Io.Dir.deleteDirAbsolute(io, h) catch {};
+        const path = if (holder) |h|
+            try std.Io.Dir.path.join(arena, &.{ h, name.suffix })
+        else
+            try std.Io.Dir.path.join(arena, &.{ dir_abs, try std.mem.concat(arena, u8, &.{ random, name.suffix }) });
         const file = try Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
         defer file.close(io);
         // glint-ignore: Z026 -- the write's error is the one to report; a scratch file left behind is in the temporary directory
         errdefer Io.Dir.deleteFileAbsolute(io, path) catch {};
         try file.writePositionalAll(io, bytes, 0);
-        return .{ .path = path };
+        return .{ .path = path, .dir = holder };
     }
 
     /// Remove the file, as git's `delete_tempfile`: one left behind holds
@@ -1530,6 +1567,8 @@ pub const TempFile = struct {
     pub fn remove(f: *TempFile, io: Io) void {
         // glint-ignore: Z026 -- as git's delete_tempfile: what the file held is already read
         Io.Dir.deleteFileAbsolute(io, f.path) catch {};
+        // glint-ignore: Z026 -- as git's delete_tempfile, which removes the directory it made
+        if (f.dir) |d| Io.Dir.deleteDirAbsolute(io, d) catch {};
     }
 };
 

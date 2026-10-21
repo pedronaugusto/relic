@@ -75,12 +75,10 @@ pub const Error = error{
     AllowedSignersFileMissing,
     /// A signature in none of the formats git knows.
     UnknownSignature,
-    /// No temporary directory to hand the signature through.
-    NoTemporaryDirectory,
     /// `ssh-keygen -lf` named no fingerprint for the SSH signing key, which
     /// git dies on.
     KeyFingerprintFailed,
-} || program.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
+} || program.Error || fs.TempFile.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
     Io.File.WritePositionalError || Io.Dir.DeleteFileError || Io.Dir.OpenError ||
     error{MalformedValue};
 

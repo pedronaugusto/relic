@@ -25,6 +25,7 @@ const odb_mod = @import("../odb/odb.zig");
 const attributes = @import("../patterns.zig").attributes;
 const driver_mod = @import("driver.zig");
 const textconv_mod = @import("textconv.zig");
+const external_mod = @import("external.zig");
 const config_mod = @import("../config/config.zig");
 const glob = @import("../text.zig").glob;
 const pathspec = @import("../patterns.zig").pathspec;
@@ -1009,7 +1010,7 @@ pub fn numstat(
 }
 
 /// Errors from `unified`.
-pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || driver_mod.Error || WordDiffError;
+pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || driver_mod.Error || WordDiffError || external_mod.Error;
 
 /// The borrowed object store, the changes whose patch is written, and the
 /// drivers their files take.
@@ -1027,6 +1028,11 @@ pub const UnifiedInputs = struct {
     /// side whose driver has a `textconv` is diffed as the program's text,
     /// and is never binary. `null` diffs the bytes.
     textconv: ?*const textconv_mod.Textconv = null,
+    /// `--ext-diff`, which `git diff` has by default: a file pair whose
+    /// path names a driver with a `command`, or any where there is
+    /// `External.command`, is the program's output instead of a patch.
+    /// `null` writes every patch.
+    external: ?*const external_mod.External = null,
 };
 
 /// Append the unified diff of `inputs.changes` to `w`, each with git's
@@ -1046,7 +1052,13 @@ pub fn unified(
     defer if (recorder) |*r| r.deinit();
     const r: ?*paint.Recorder = if (recorder) |*r| r else null;
     const out = if (r) |rec| &rec.painted.writer else w;
+    var counter: usize = 0;
     for (inputs.changes) |change| {
+        if (try externalCommand(gpa, io, inputs, change)) |command| {
+            counter += 1;
+            writeExternal(gpa, io, inputs, .{ .command = command, .change = change, .counter = counter }, out, options) catch |err| return recorded(r, err);
+            continue;
+        }
         writeChange(gpa, io, inputs, change, out, options, r) catch |err| return recorded(r, err);
     }
     if (r) |rec| try rec.finish(w);
@@ -1063,6 +1075,86 @@ fn movedWanted(options: Options) bool {
 fn recorded(r: ?*paint.Recorder, err: anytype) @TypeOf(err) {
     if (r != null and err == error.WriteFailed) return error.OutOfMemory;
     return err;
+}
+
+/// The external program a change goes to, as git's `run_diff_cmd` picks
+/// it: the command of the driver its old path names (by the attribute
+/// alone), else `External.command`; `null` for a patch.
+fn externalCommand(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change) UnifiedError!?driver_mod.Command {
+    const ext = inputs.external orelse return null;
+    var lookup: std.heap.ArenaAllocator = .init(gpa);
+    defer lookup.deinit();
+    const path = (change.old orelse change.new.?).path;
+    if (try inputs.drivers.ofPath(lookup.allocator(), io, path)) |d| {
+        if (try d.command(inputs.drivers.config)) |command| return command;
+    }
+    return ext.command;
+}
+
+/// One change given to an external program.
+const ExternalChange = struct { command: driver_mod.Command, change: Change, counter: usize };
+
+/// git's `run_external_diff` for one change: never split by a change of
+/// kind, its names stripped as the patch's are, and for a rename or a copy
+/// the metadata lines without colour.
+fn writeExternal(gpa: Allocator, io: Io, inputs: UnifiedInputs, ec: ExternalChange, w: *Io.Writer, options: Options) UnifiedError!void {
+    const change = ec.change;
+    const old = change.old;
+    const new = change.new;
+    const name = shownPath(options, (old orelse new.?).path);
+    const other: ?[]const u8 = if (old != null and new != null and !std.mem.eql(u8, old.?.path, new.?.path)) shownPath(options, new.?.path) else null;
+    var metainfo: std.Io.Writer.Allocating = .init(gpa);
+    defer metainfo.deinit();
+    if (other != null) try writeMetainfo(gpa, io, inputs, change, &metainfo.writer, options);
+    const side = struct {
+        fn of(entry: ?Entry) ?external_mod.Side {
+            const e = entry orelse return null;
+            return .{ .path = e.path, .oid = e.oid, .mode = e.mode };
+        }
+    }.of;
+    try external_mod.run(inputs.external.?, gpa, io, .{
+        .command = ec.command,
+        .db = inputs.db,
+        .attrs = inputs.drivers.attrs,
+        .name = name,
+        .other = other,
+        .metainfo = if (metainfo.written().len != 0) metainfo.written() else null,
+        .old = side(old),
+        .new = side(new),
+        .counter = ec.counter,
+        .total = inputs.changes.len,
+    }, w);
+}
+
+/// git's `fill_metainfo` without colour, for a rename or a copy: the
+/// similarity and the names, then where the objects differ the `index`
+/// line, in full under `binary_patches` when a side is binary.
+fn writeMetainfo(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, w: *Io.Writer, options: Options) UnifiedError!void {
+    const old = change.old.?;
+    const new = change.new.?;
+    const word = if (change.status == .copied) "copy" else "rename";
+    const from = try quoteTwo(gpa, "", shownPath(options, old.path), options.quote_path);
+    defer gpa.free(from);
+    const to = try quoteTwo(gpa, "", shownPath(options, new.path), options.quote_path);
+    defer gpa.free(to);
+    try w.print("similarity index {d}%\n{s} from {s}\n{s} to {s}\n", .{ change.similarity, word, from, word, to });
+    if (old.oid.eql(new.oid)) return;
+    var full = options.full_index;
+    if (options.binary_patches and !full) {
+        var pair: FilePair = undefined;
+        try pair.init(gpa, io, .{ .db = inputs.db, .drivers = inputs.drivers }, .{ .old = old, .new = new });
+        defer pair.deinit();
+        full = pair.binary;
+    }
+    var old_hex: [hash.max_hex_len]u8 = undefined;
+    var new_hex: [hash.max_hex_len]u8 = undefined;
+    var mode_buf: [6]u8 = undefined;
+    try w.print("index {s}..{s}", .{
+        try abbreviated(io, inputs.db, old.oid, options.abbrev, full, &old_hex),
+        try abbreviated(io, inputs.db, new.oid, options.abbrev, full, &new_hex),
+    });
+    if (old.mode == new.mode) try w.print(" {s:0>6}", .{old.mode.text(&mode_buf)});
+    try w.writeByte('\n');
 }
 
 fn writeChange(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, w: *Io.Writer, options: Options, r: ?*paint.Recorder) UnifiedError!void {
