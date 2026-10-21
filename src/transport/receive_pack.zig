@@ -153,6 +153,8 @@ const Asked = struct {
 
 /// A repository, receiving.
 pub const Server = struct {
+    pub const Error = Self.Error;
+
     gpa: Allocator,
     io: Io,
     remote: *local.Remote,
@@ -171,7 +173,7 @@ pub const Server = struct {
 
     /// Serve `remote` in `version` — v2 is answered in v0, as git's is.
     /// The repository's refs are shown as `receive.hideRefs` leaves them.
-    pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Error!Server {
+    pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Self.Error!Server {
         try remote.serve(.receive_pack);
         var s: Server = .{
             .gpa = gpa,
@@ -212,11 +214,11 @@ pub const Server = struct {
     /// The server's first message: `version 1` when the client asked for
     /// it, then every ref the client may see with the capabilities after
     /// the first, and the repository's shallow boundary.
-    pub fn advertise(s: *Server, w: *Io.Writer) Error!void {
+    pub fn advertise(s: *Server, w: *Io.Writer) Self.Error!void {
         s.writeAdvertisement(w) catch |err| return writeError(err);
     }
 
-    fn writeAdvertisement(s: *Server, w: *Io.Writer) (pkt_line.WriteError || Error)!void {
+    fn writeAdvertisement(s: *Server, w: *Io.Writer) (pkt_line.WriteError || Self.Error)!void {
         if (s.version == .v1) try pkt_line.write(w, "version 1\n");
         var caps: std.ArrayList(u8) = .empty;
         defer caps.deinit(s.gpa);
@@ -266,7 +268,7 @@ pub const Server = struct {
     }
 
     /// The tips of the repositories this one borrows objects from.
-    fn alternateTips(s: *Server) Error!std.ArrayList(Oid) {
+    fn alternateTips(s: *Server) Self.Error!std.ArrayList(Oid) {
         var out: std.ArrayList(Oid) = .empty;
         errdefer out.deinit(s.gpa);
         var alternates = try s.db().listAlternates(s.gpa, s.io);
@@ -284,14 +286,14 @@ pub const Server = struct {
     }
 
     /// A whole conversation over a pipe: the advertisement, then one push.
-    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!void {
+    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
         try s.advertise(out);
         out.flush() catch return error.WriteFailed;
         try s.serveRequest(in, out);
     }
 
     /// One push, its commands to its report and its last hooks.
-    pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!void {
+    pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -341,7 +343,7 @@ pub const Server = struct {
 
     /// git's `read_head_info`: shallow lines and commands to a flush, the
     /// capabilities after a NUL.
-    fn readCommands(s: *Server, arena: Allocator, in: *Io.Reader, shallow: *std.ArrayList(Oid)) Error![]Command {
+    fn readCommands(s: *Server, arena: Allocator, in: *Io.Reader, shallow: *std.ArrayList(Oid)) Self.Error![]Command {
         var commands: std.ArrayList(Command) = .empty;
         while (true) {
             const packet = pkt_line.read(in) catch |err| switch (err) {
@@ -369,7 +371,7 @@ pub const Server = struct {
         return commands.items;
     }
 
-    fn takeCapabilities(s: *Server, list: []const u8) Error!void {
+    fn takeCapabilities(s: *Server, list: []const u8) Self.Error!void {
         var format: []const u8 = "sha1";
         var it = std.mem.tokenizeScalar(u8, list, ' ');
         while (it.next()) |cap| {
@@ -385,7 +387,7 @@ pub const Server = struct {
     }
 
     /// git's `queue_command`: `<old> SP <new> SP <ref>`.
-    fn parseCommand(s: *Server, arena: Allocator, line: []const u8) Error!Command {
+    fn parseCommand(s: *Server, arena: Allocator, line: []const u8) Self.Error!Command {
         const hex = s.kind().hexLen();
         if (line.len < 2 * hex + 2 or line[hex] != ' ' or line[2 * hex + 1] != ' ') return error.ProtocolError;
         return .{
@@ -445,7 +447,7 @@ pub const Server = struct {
     /// commit the client has no parents of, where this repository has
     /// them, moves this repository's boundary, which only
     /// `receive.shallowUpdate` allows.
-    fn checkShallow(s: *Server, arena: Allocator, commands: []Command, theirs: []const Oid, received: *Received) Error!void {
+    fn checkShallow(s: *Server, arena: Allocator, commands: []Command, theirs: []const Oid, received: *Received) Self.Error!void {
         if (theirs.len == 0) return;
         var client: Oid.Set = .empty;
         for (theirs) |oid| if (!s.db().shallow.contains(oid)) try client.put(arena, oid, {});
@@ -477,7 +479,7 @@ pub const Server = struct {
         received: *?Received,
         keeps: *std.ArrayList(keep.Token),
         push_options: []const []const u8,
-    ) Error!void {
+    ) Self.Error!void {
         if (unpack_status != null) {
             for (commands) |*cmd| cmd.error_string = "unpacker error";
             return;
@@ -486,6 +488,12 @@ pub const Server = struct {
         for (commands) |*cmd| {
             if (!cmd.standing() or !s.remote.isHidden(cmd.name)) continue;
             cmd.error_string = if (cmd.new.isZero()) "deny deleting a hidden ref" else "deny updating a hidden ref";
+        }
+        // `receive.procReceiveRefs` hands its refs to a `proc-receive` hook,
+        // which relic does not run: they fail as git fails them with no
+        // hook to run.
+        for (commands) |*cmd| {
+            if (cmd.standing() and s.procReceiveRef(cmd.name)) cmd.error_string = "fail to run proc-receive hook";
         }
         if (!try s.runReceiveHook("pre-receive", commands, false, push_options, if (q.*) |*held| held else null)) {
             for (commands) |*cmd| {
@@ -534,7 +542,7 @@ pub const Server = struct {
 
     /// Every new tip connected, as git's `check_connected` checks the
     /// whole push and, when that fails, each command alone.
-    fn checkConnected(s: *Server, commands: []Command, q: *Quarantine, received: *Received) Error!void {
+    fn checkConnected(s: *Server, commands: []Command, q: *Quarantine, received: *Received) Self.Error!void {
         var tips: std.ArrayList(Oid) = .empty;
         defer tips.deinit(s.gpa);
         for (commands) |cmd| {
@@ -562,7 +570,7 @@ pub const Server = struct {
 
     /// git's `execute_commands_non_atomic`: each command's ref written in
     /// a transaction of its own, a failure that command's alone.
-    fn executeEach(s: *Server, arena: Allocator, commands: []Command, head_ref: ?[]const u8) Error!void {
+    fn executeEach(s: *Server, arena: Allocator, commands: []Command, head_ref: ?[]const u8) Self.Error!void {
         // Deletions first, so a ref deleted and one created in its place
         // as a directory do not meet.
         for ([_]bool{ true, false }) |deletions| {
@@ -584,7 +592,7 @@ pub const Server = struct {
 
     /// git's `execute_commands_atomic`: every ref in one transaction, and
     /// the first refusal refuses them all.
-    fn executeAtomic(s: *Server, arena: Allocator, commands: []Command, head_ref: ?[]const u8) Error!void {
+    fn executeAtomic(s: *Server, arena: Allocator, commands: []Command, head_ref: ?[]const u8) Self.Error!void {
         var tx = s.remote.repo.beginRefs();
         defer tx.deinit(s.io);
         if (s.runner) |*r| tx.hooks = r;
@@ -614,7 +622,7 @@ pub const Server = struct {
 
     /// git's `update`: one command held to the rules and its hook, and
     /// staged in `tx`. The reason it was refused, or `null`.
-    fn update(s: *Server, arena: Allocator, cmd: *Command, tx: *refs_mod.Transaction, head_ref: ?[]const u8) Error!?[]const u8 {
+    fn update(s: *Server, arena: Allocator, cmd: *Command, tx: *refs_mod.Transaction, head_ref: ?[]const u8) Self.Error!?[]const u8 {
         const name = cmd.name;
         const deletion = cmd.new.isZero();
         if (!std.mem.startsWith(u8, name, "refs/") or !ref_names.checkFormat(name["refs/".len..], .{ .allow_onelevel = deletion })) {
@@ -694,14 +702,26 @@ pub const Server = struct {
         return null;
     }
 
-    fn isCommit(s: *Server, oid: Oid) Error!bool {
+    /// Whether `name` is under a `receive.procReceiveRefs` prefix, its
+    /// `<modifiers>:` passed over.
+    fn procReceiveRef(s: *Server, name: []const u8) bool {
+        var it = s.remote.repo.configuration().iterate(&.{"receive.procreceiverefs"});
+        while (it.next()) |entry| {
+            const value = entry.value orelse continue;
+            const prefix = if (std.mem.findScalar(u8, value, ':')) |colon| value[colon + 1 ..] else value;
+            if (prefix.len != 0 and std.mem.startsWith(u8, name, prefix)) return true;
+        }
+        return false;
+    }
+
+    fn isCommit(s: *Server, oid: Oid) Self.Error!bool {
         if (!try s.db().exists(s.io, oid)) return false;
         return (try s.db().readHeader(s.io, oid)).type == .commit;
     }
 
     /// Whether `name` is the branch a working tree of this repository has
     /// checked out: git's `find_shared_symref` over its worktrees.
-    fn checkedOut(s: *Server, arena: Allocator, name: []const u8) Error!bool {
+    fn checkedOut(s: *Server, arena: Allocator, name: []const u8) Self.Error!bool {
         if (!std.mem.startsWith(u8, name, "refs/heads/")) return false;
         if (!s.remote.repo.isBare()) {
             if (try s.remote.repo.refStore().currentBranch(arena, s.io)) |branch| {
@@ -730,7 +750,7 @@ pub const Server = struct {
     /// and the quarantine for `pre-receive`. With `skip_broken`, a refused
     /// command or a deletion of nothing is left out, and with none left
     /// the hook does not run. Whether it succeeded.
-    fn runReceiveHook(s: *Server, event: []const u8, commands: []const Command, skip_broken: bool, push_options: []const []const u8, q: ?*const Quarantine) Error!bool {
+    fn runReceiveHook(s: *Server, event: []const u8, commands: []const Command, skip_broken: bool, push_options: []const []const u8, q: ?*const Quarantine) Self.Error!bool {
         const runner = if (s.runner) |*r| r else return true;
         if (!runner.exists(s.io, event)) return true;
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
@@ -754,7 +774,7 @@ pub const Server = struct {
     }
 
     /// `update <ref> <old> <new>`. Whether it let the command through.
-    fn runUpdateHook(s: *Server, cmd: *const Command) Error!bool {
+    fn runUpdateHook(s: *Server, cmd: *const Command) Self.Error!bool {
         const runner = if (s.runner) |*r| r else return true;
         if (!runner.exists(s.io, "update")) return true;
         var old_hex: [hash.max_hex_len]u8 = undefined;
@@ -765,7 +785,7 @@ pub const Server = struct {
     }
 
     /// `post-update <ref>...`: every ref the push changed.
-    fn runPostUpdate(s: *Server, arena: Allocator, commands: []const Command) Error!void {
+    fn runPostUpdate(s: *Server, arena: Allocator, commands: []const Command) Self.Error!void {
         const runner = if (s.runner) |*r| r else return;
         if (!runner.exists(s.io, "post-update")) return;
         var args: std.ArrayList([]const u8) = .empty;
@@ -780,14 +800,14 @@ pub const Server = struct {
 
     /// What the hooks printed, to the client on channel two, or to this
     /// process's standard error with no side-band, as git sends it.
-    fn sendHookOutput(s: *Server) Error!void {
+    fn sendHookOutput(s: *Server) Self.Error!void {
         const runner = if (s.runner) |*r| r else return;
         defer runner.captured.clearRetainingCapacity();
         if (runner.captured.items.len == 0) return;
         try s.message(runner.captured.items);
     }
 
-    fn message(s: *Server, text: []const u8) Error!void {
+    fn message(s: *Server, text: []const u8) Self.Error!void {
         const out = s.out orelse return;
         if (s.asked.band != .none) {
             side_band.send(out, s.asked.band, 2, text) catch return error.WriteFailed;
@@ -800,19 +820,19 @@ pub const Server = struct {
         stderr.interface.flush() catch {}; // glint-ignore: Z026 -- as above
     }
 
-    fn rpError(s: *Server, comptime fmt: []const u8, args: anytype) Error!void {
+    fn rpError(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {
         try s.rpLine("error: " ++ fmt, args);
     }
 
-    fn rpErrorPlain(s: *Server, comptime fmt: []const u8, args: anytype) Error!void {
+    fn rpErrorPlain(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {
         try s.rpLine("error: " ++ fmt, args);
     }
 
-    fn rpWarning(s: *Server, comptime fmt: []const u8, args: anytype) Error!void {
+    fn rpWarning(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {
         try s.rpLine("warning: " ++ fmt, args);
     }
 
-    fn rpLine(s: *Server, comptime fmt: []const u8, args: anytype) Error!void {
+    fn rpLine(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {
         var buffer: [1024]u8 = undefined;
         const text = std.mem.print(&buffer, fmt ++ "\n", args) catch return;
         try s.message(text);
@@ -823,7 +843,7 @@ pub const Server = struct {
     // ------------------------------------------------------------------
 
     /// git's `report` and `report_v2`, on the side-band when there is one.
-    fn report(s: *Server, commands: []const Command, unpack_status: ?[]const u8) Error!void {
+    fn report(s: *Server, commands: []const Command, unpack_status: ?[]const u8) Self.Error!void {
         if (!s.asked.report_status and !s.asked.report_status_v2) return;
         var buf: Io.Writer.Allocating = .init(s.gpa);
         defer buf.deinit();
@@ -846,7 +866,7 @@ pub const Server = struct {
 
 /// The boundary commits `tip`'s history reaches among `client`, walking
 /// only the commits the pushed pack holds.
-fn shallowRoots(arena: Allocator, io: Io, index: *const pack.Index, repo: *repo_mod.Repository, tip: Oid, client: *const Oid.Set) Error![]const Oid {
+fn shallowRoots(arena: Allocator, io: Io, index: *const pack.Index, repo: *repo_mod.Repository, tip: Oid, client: *const Oid.Set) Self.Error![]const Oid {
     var out: std.ArrayList(Oid) = .empty;
     var seen: Oid.Set = .empty;
     var stack: std.ArrayList(Oid) = .empty;
@@ -869,7 +889,7 @@ fn shallowRoots(arena: Allocator, io: Io, index: *const pack.Index, repo: *repo_
 }
 
 /// git's `read_push_options`: lines to a flush.
-fn readPushOptions(arena: Allocator, in: *Io.Reader, out: *std.ArrayList([]const u8)) Error!void {
+fn readPushOptions(arena: Allocator, in: *Io.Reader, out: *std.ArrayList([]const u8)) Self.Error!void {
     while (true) {
         const packet = pkt_line.read(in) catch |err| switch (err) {
             error.ReadFailed => return error.ReadFailed,
@@ -913,7 +933,7 @@ fn transactionMessage(err: refs_mod.TransactionError) []const u8 {
     };
 }
 
-fn stageError(err: refs_mod.TransactionError) Error!?[]const u8 {
+fn stageError(err: refs_mod.TransactionError) Self.Error!?[]const u8 {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Canceled => error.Canceled,
@@ -921,7 +941,7 @@ fn stageError(err: refs_mod.TransactionError) Error!?[]const u8 {
     };
 }
 
-fn writeError(err: (pkt_line.WriteError || Error)) Error {
+fn writeError(err: (pkt_line.WriteError || Self.Error)) Error {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Canceled => error.Canceled,
@@ -960,7 +980,7 @@ pub fn checkHooks(io: Io, repo: *repo_mod.Repository) local.Error!void {
 /// A push to `remote`'s own receive-pack, in this process: the request
 /// answered whole as it is sent, as over HTTP. The result is the caller's;
 /// closing it closes `remote` too.
-pub fn connect(gpa: Allocator, io: Io, remote: *local.Remote, options: Options) Error!*Connection {
+pub fn connect(gpa: Allocator, io: Io, remote: *local.Remote, options: Options) Self.Error!*Connection {
     const c = try gpa.create(InProcess);
     errdefer gpa.destroy(c);
     var serving = options;

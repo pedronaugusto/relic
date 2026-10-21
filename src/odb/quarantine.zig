@@ -11,6 +11,7 @@
 //! there; refused, the directory is removed (`discard`) and nothing of the
 //! push is left behind.
 
+const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -27,6 +28,8 @@ pub const Error = odb_mod.Error || keep.Error || Io.Dir.RealPathError || Io.Dir.
 
 /// Objects received apart from `main`.
 pub const Quarantine = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// Reads the quarantine, then the repository; writes the quarantine.
     db: Odb,
@@ -44,7 +47,7 @@ pub const Quarantine = struct {
     open: bool = true,
 
     /// Make the directory beside `main`'s objects and open a database on it.
-    pub fn begin(gpa: Allocator, io: Io, main: *Odb) Error!Quarantine {
+    pub fn begin(gpa: Allocator, io: Io, main: *Odb) ErrorNamespace.Error!Quarantine {
         const objects = main.objectsDirectory();
         var q: Quarantine = .{ .gpa = gpa, .db = undefined, .objects = objects, .name_buf = undefined, .name_len = 0, .path = &.{}, .objects_path = &.{}, .shared = main.sharedPermissions() };
         const dir_name = fs.tempName(io, &q.name_buf, "tmp_objdir-incoming-");
@@ -94,7 +97,7 @@ pub const Quarantine = struct {
     /// (returned, one per pack) from before its index is published until
     /// the caller lets it go, so nothing prunes it before a ref names it.
     /// The quarantine is gone afterwards; `main` reads what it held.
-    pub fn migrate(q: *Quarantine, io: Io, main: *Odb, keeps: *std.ArrayList(keep.Token)) Error!void {
+    pub fn migrate(q: *Quarantine, io: Io, main: *Odb, keeps: *std.ArrayList(keep.Token)) ErrorNamespace.Error!void {
         var dir = try q.objects.openDir(io, q.name(), .{ .iterate = true });
         defer dir.close(io);
         var it = dir.iterate();
@@ -140,7 +143,7 @@ pub const Quarantine = struct {
         q.discard(io);
     }
 
-    fn moveLoose(q: *Quarantine, io: Io, dir: Io.Dir, fanout: []const u8) Error!void {
+    fn moveLoose(q: *Quarantine, io: Io, dir: Io.Dir, fanout: []const u8) ErrorNamespace.Error!void {
         var from = try dir.openDir(io, fanout, .{ .iterate = true });
         defer from.close(io);
         try fs.makeDirs(io, q.objects, fanout, q.shared);
@@ -189,7 +192,7 @@ fn packName(kind: hash.Kind, file: []const u8) ?hash.Oid {
 
 /// Move `from_name` to `to_name`, as git's `finalize_object_file`: an
 /// object already there is the same object and is kept.
-fn moveFile(io: Io, from: Io.Dir, from_name: []const u8, to: Io.Dir, to_name: []const u8) Error!void {
+fn moveFile(io: Io, from: Io.Dir, from_name: []const u8, to: Io.Dir, to_name: []const u8) ErrorNamespace.Error!void {
     if (to.access(io, to_name, .{})) |_| {
         return;
     } else |_| {}

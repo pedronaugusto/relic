@@ -231,6 +231,7 @@ test "git pushes to relic's receive-pack as to its own: refs, refusals, hooks an
         .{ "receive.advertisePushOptions", "true" },
         .{ "receive.hideRefs", "refs/hidden" },
         .{ "receive.fsckObjects", "true" },
+        .{ "receive.procReceiveRefs", "refs/for" },
     });
     defer p.deinit();
     // Creations, a tag with them.
@@ -247,6 +248,8 @@ test "git pushes to relic's receive-pack as to its own: refs, refusals, hooks an
     try p.both(&.{ "--atomic", "main:refs/heads/atomic-a", "main~1:refs/heads/atomic-b" });
     // Push options for the hooks.
     try p.both(&.{ "-o", "first", "-o", "second", "main:refs/heads/optioned" });
+    // A ref for a proc-receive hook, which neither repository has.
+    try p.both(&.{ "main:refs/for/main", "main:refs/heads/beside-for" });
     // A hidden ref.
     try p.both(&.{"main:refs/hidden/x"});
     // In protocol v1 and v2 (which receive-pack answers in v0).

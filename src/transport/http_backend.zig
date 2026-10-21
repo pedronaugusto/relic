@@ -32,8 +32,12 @@ const local = @import("local.zig");
 const upload_pack = @import("upload_pack.zig");
 const receive_pack = @import("receive_pack.zig");
 
+const ErrorNamespace = @This();
 const Request = uplink.server.Request;
 const Response = uplink.server.Response;
+
+/// Errors from answering a request: the servers', and the response's.
+pub const Error = upload_pack.Error || receive_pack.Error || Response.Error || pkt_line.WriteError;
 
 /// Who sent a request, and the time, which the caller knows and relic
 /// does not read.
@@ -59,6 +63,8 @@ pub const Options = struct {
 
 /// The repositories under one root, served.
 pub const Backend = struct {
+    pub const Error = ErrorNamespace.Error;
+
     gpa: Allocator,
     /// The root's absolute path.
     root: []const u8,
@@ -132,7 +138,7 @@ pub const Backend = struct {
 
     const Step = enum { advertise, request };
 
-    fn run(b: *Backend, io: Io, remote: *local.Remote, service: Service, version: protocol.Version, user: ?[]const u8, request: *Request, w: *Io.Writer, step: Step) anyerror!void {
+    fn run(b: *Backend, io: Io, remote: *local.Remote, service: Service, version: protocol.Version, user: ?[]const u8, request: *Request, w: *Io.Writer, step: Step) ErrorNamespace.Error!void {
         // The servers read whole packets out of their reader's buffer.
         const buffer = try b.gpa.alloc(u8, pkt_line.max_line);
         defer b.gpa.free(buffer);

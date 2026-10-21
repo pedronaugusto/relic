@@ -606,6 +606,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `odb.pack` | Module within `odb`. |
 | `odb.delta` | Module within `odb`. |
 | `odb.midx` | Module within `odb`. |
+| `odb.quarantine` | `Quarantine` — objects held apart until accepted, git's `tmp_objdir`: begun, read through, migrated or discarded. |
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. `Store.root` and `Store.special` own the root refs (`ORIG_HEAD`, `CHERRY_PICK_HEAD`, ...) and the special refs (`FETCH_HEAD`, `MERGE_HEAD`) in either ref format; `deleteRefs` removes refs by any safe name; `writeInitial` writes a new repository's first refs; `list` keeps what is no ref apart in `broken`; `main-worktree/` and `worktrees/<id>/` read another worktree's refs; `create` lays down a new ref store. Logs in either format through the store: `readLog` (`Log.at` for `HEAD@{n}`), `logExists`, `appendLog` under a `LogPolicy` (`core.logAllRefUpdates`), `createLog`, `expireLog` (git's `reflog expire` and `reflog delete`, `--rewrite` and `--updateref`), `deleteLog`. |
 | `refs.reftable` | Module within `refs`. |
 | `refs.reftable.table` | The reftable format: one table read and written. |
@@ -691,6 +692,8 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `transport.connection` | Module within `transport`. |
 | `transport.pkt_line` | Module within `transport`. |
 | `transport.upload_pack` | `Server` — serving fetches, with shallow and every filter. |
+| `transport.receive_pack` | `Server`, `connect` — serving pushes as git's receive-pack: quarantine, connectivity and fsck, the receive hooks, `receive.*`, report-status v1 and v2. |
+| `transport.http_backend` | `Backend` — git's smart HTTP served on uplink's server: clone, fetch and push over `http://`. |
 | `transport.bundle` | `create`, `write`, `File.open`, `Header.read`, `listHeads`, `writeSummary`, `verify`, `unbundle`, `isBundle`: `git bundle` v2 and v3, its header byte for byte, filtered by any filter git takes, `sparse:oid=` included; a path to a bundle is fetched and cloned from. |
 | `transport.bundle_uri` | `fetch`, `fetchList`, `List`: bundle URIs as git's `bundle-uri.c` takes them, a bundle or a bundle list (`mode`, the `creationToken` heuristic) unbundled before a clone or a fetch asks the server, its refs under `refs/bundles/`. |
 | `transport.progress` | Module within `transport`. |
@@ -763,7 +766,7 @@ reread the affected refs before retrying.
 - **Commit, log and mail character sets: UTF-8, US-ASCII and ISO-8859-1.** A commit's `encoding`, `i18n.logOutputEncoding`, `i18n.commitEncoding` or a mail's `charset` naming another, which git converts through iconv, is refused by name.
 - **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name. **No GSS-API (Kerberos) to a SOCKS5 proxy:** it is never offered, so a proxy that takes nothing else refuses every method and the fetch stops with `ProxyAuthenticationRequired`.
 - **LFS without tus.** The tus adapter is refused by name; custom transfer adapters run as git-lfs runs them.
-- **No receive-pack server.** relic serves fetches; a push goes to git's server. `receive.fsckObjects` and `receive.fsck.*` are read (`fsck.Scope.receive`) for a program that receives pushes itself.
+- **receive-pack without `proc-receive`, push certificates or `updateInstead`.** A ref under `receive.procReceiveRefs` fails as git fails it with no `proc-receive` hook, a signed push is not served, and `receive.denyCurrentBranch=updateInstead` refuses as `refuse` does; a received pack is always kept as a pack, where git under `receive.unpackLimit` writes loose objects.
 - **A promisor fetch's pack takes every `.gitmodules` and `.gitattributes` it lacks as promised,** where git asks whether a promisor pack names the blob. With nothing configured, a fetch still checks what it receives, at git's levels with `.`, `..` and `.git` in a tree refused (`fsck.baseline`), where git checks nothing; `fetch.fsckObjects=false` checks nothing.
 - **No `git://` or dumb HTTP.** Refused by name. A remote helper is spoken to through `connect`, `fetch`, `import`, `push` and `export`; one with only `stateless-connect` or `get` cannot fetch here, `HelperCannotFetch`.
 - **No editor for a note.** Refused by name.
@@ -863,7 +866,8 @@ once with offset deltas, once with reference deltas, and once under SHA-256;
 `diff-tree` and `diff`, with the `@@` header checked at four context widths;
 `worktree list` before and after an add, a lock, a prune and a remove;
 clone, fetch and push against `git http-backend`, git's own ssh transport
-through a stand-in, and relic's upload-pack, with refs, reflogs,
+through a stand-in, relic's upload-pack and receive-pack (hooks, their
+quarantine and `receive.*` included) and relic's HTTP backend, with refs, reflogs,
 `.git/shallow` and `.promisor` files compared; merges, cherry-picks, rebases
 and rerere against the git that made the fixture, state files and reflogs
 included; `for-each-ref`, `branch` and `tag` listings under every atom, sort key and filter; `interpret-trailers` under every option and `trailer.*` rule, and `%(trailers)` in `log` and `for-each-ref`; `describe` (with `--contains`), `shortlog` and `check-mailmap`
