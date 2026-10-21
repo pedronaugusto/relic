@@ -51,6 +51,7 @@ const transfer = @This();
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -528,13 +529,13 @@ const Run = struct {
     store_base: []const u8 = "",
     options: Options,
     limits: Limits,
-    arena: Allocator,
-    arena_mutex: Io.Mutex = .init,
+    /// Where what outlives a job is kept: messages and fresh actions.
+    arena: aegis.BlockingGuarded(Allocator),
     jobs: []Job,
     next: std.atomic.Value(usize) = .init(0),
     events: ?*Io.Queue(Event) = null,
-    fatal: ?Error = null,
-    fatal_mutex: Io.Mutex = .init,
+    /// The first error that stops every worker.
+    fatal: aegis.BlockingGuarded(?Error) = .init(null),
     total_bytes: u64 = 0,
     done_bytes: u64 = 0,
     done_objects: u64 = 0,
@@ -545,21 +546,34 @@ const Run = struct {
     }
 
     fn setFatal(r: *Run, err: Error) void {
-        r.fatal_mutex.lockUncancelable(r.io());
-        defer r.fatal_mutex.unlock(r.io());
-        if (r.fatal == null) r.fatal = err;
+        var guard = r.fatal.acquireUncancelable(r.io());
+        defer guard.deinit(r.io());
+        if (guard.value().* == null) guard.value().* = err;
     }
 
     fn failure(r: *Run) ?Error {
-        r.fatal_mutex.lockUncancelable(r.io());
-        defer r.fatal_mutex.unlock(r.io());
-        return r.fatal;
+        var guard = r.fatal.acquireUncancelable(r.io());
+        defer guard.deinit(r.io());
+        return guard.value().*;
     }
 
     fn dupe(r: *Run, bytes: []const u8) Allocator.Error![]const u8 {
-        r.arena_mutex.lockUncancelable(r.io());
-        defer r.arena_mutex.unlock(r.io());
-        return r.arena.dupe(u8, bytes);
+        var guard = r.arena.acquireUncancelable(r.io());
+        defer guard.deinit(r.io());
+        return guard.value().dupe(u8, bytes);
+    }
+
+    fn print(r: *Run, comptime fmt: []const u8, args: anytype) Allocator.Error![]const u8 {
+        var guard = r.arena.acquireUncancelable(r.io());
+        defer guard.deinit(r.io());
+        return guard.value().print(fmt, args);
+    }
+
+    /// What the server or the program last said about a failure, kept.
+    fn message(r: *Run) Allocator.Error![]const u8 {
+        var guard = r.arena.acquireUncancelable(r.io());
+        defer guard.deinit(r.io());
+        return r.server.client.message(r.io(), guard.value().*);
     }
 
     /// Say something to the calling task: through the queue from a worker,
@@ -771,7 +785,7 @@ fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, obj
         .ssh = try server.client.sshTransfer(io, operation),
         .options = options,
         .limits = limits,
-        .arena = arena,
+        .arena = .init(arena),
         .jobs = &.{},
     };
     var jobs: std.ArrayList(Job) = .empty;
@@ -813,7 +827,10 @@ fn batchChunk(
     const server = state.server;
     const operation = state.operation;
     const gpa = server.gpa;
-    const arena = state.arena;
+    // On the calling task before any worker starts: held throughout.
+    var guard = state.arena.acquireUncancelable(state.io());
+    defer guard.deinit(state.io());
+    const arena = guard.value().*;
     var wanted: std.ArrayList(Object) = .empty;
     defer wanted.deinit(gpa);
     for (chunk) |i| {
@@ -822,7 +839,7 @@ fn batchChunk(
     }
     const answer = batchRequest(state.io(), server, operation, wanted.items, state.options.ref, state.limits, arena) catch |err| switch (err) {
         error.LfsBatchFailed => {
-            const why = try arena.dupe(u8, server.client.message());
+            const why = try server.client.message(state.io(), arena);
             for (chunk) |i| {
                 results[i].status = .failed;
                 results[i].message = why;
@@ -922,7 +939,7 @@ fn runStandalone(
         .operation = operation,
         .options = options,
         .limits = limits,
-        .arena = arena,
+        .arena = .init(arena),
         .jobs = &.{},
     };
     var jobs: std.ArrayList(Job) = .empty;
@@ -951,7 +968,11 @@ fn startAgents(state: *Run, adapter: custom.Adapter) Error!void {
     const server = state.server;
     const programs = server.client.options.programs orelse return error.ProgramsNotGranted;
     const count: u32 = if (adapter.concurrent) state.limits.concurrency else 1;
-    const agents = try state.arena.alloc(*custom.Agent, count);
+    // On the calling task before any worker starts: held throughout.
+    var guard = state.arena.acquireUncancelable(state.io());
+    defer guard.deinit(state.io());
+    const arena = guard.value().*;
+    const agents = try arena.alloc(*custom.Agent, count);
     var started: usize = 0;
     errdefer for (agents[0..started]) |a| a.deinit(state.io());
     while (started < count) : (started += 1) {
@@ -966,7 +987,7 @@ fn startAgents(state: *Run, adapter: custom.Adapter) Error!void {
     state.limits.concurrency = count;
     const base = try server.store().base.realPathFileAlloc(state.io(), ".", server.gpa);
     defer server.gpa.free(base);
-    state.store_base = try state.arena.dupe(u8, base);
+    state.store_base = try arena.dupe(u8, base);
 }
 
 fn stopAgents(state: *Run) void {
@@ -1014,7 +1035,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
         else => |e| return e,
     };
     switch (ended) {
-        .failed => |f| return .{ .fail = try state.arena.print("[{d}] {s}", .{ f.code, f.message }) },
+        .failed => |f| return .{ .fail = try state.print("[{d}] {s}", .{ f.code, f.message }) },
         .done => |path| {
             if (state.operation == .upload) {
                 const v = verify orelse return .ok;
@@ -1092,7 +1113,7 @@ fn runJobs(state: *Run) Error!void {
 test "a transfer worker observes a fatal error under its publication lock" {
     const Controlled = struct {
         const Self = @This();
-        run: *Run,
+        held: aegis.BlockingGuarded(?Error).Guard,
         waited: bool = false,
 
         fn wait(raw: ?*anyopaque, _: *const u32, _: u32) void {
@@ -1100,8 +1121,8 @@ test "a transfer worker observes a fatal error under its publication lock" {
             state.waited = true;
             // Another worker already holds the lock, and publishes its
             // failure before handing it to this worker.
-            state.run.fatal = error.OutOfMemory;
-            state.run.fatal_mutex.state.store(.unlocked, .release);
+            state.held.value().* = error.OutOfMemory;
+            state.held.deinit(std.testing.io);
         }
 
         fn wake(_: ?*anyopaque, _: *const u32, _: u32) void {}
@@ -1113,20 +1134,19 @@ test "a transfer worker observes a fatal error under its publication lock" {
         .operation = .download,
         .options = .{},
         .limits = undefined,
-        .arena = std.testing.allocator,
+        .arena = .init(std.testing.allocator),
         .jobs = &.{},
     };
-    var control: Controlled = .{ .run = &state };
+    var control: Controlled = .{ .held = state.fatal.tryAcquire().? };
     var vtable = std.testing.io.vtable.*;
     vtable.futexWaitUncancelable = Controlled.wait;
     vtable.futexWake = Controlled.wake;
     state.operation_io = .{ .userdata = &control, .vtable = &vtable };
-    state.fatal_mutex.state.store(.locked_once, .release);
     work(&state, 0);
     try std.testing.expect(control.waited);
     try std.testing.expectEqual(@as(usize, 0), state.next.load(.acquire));
     state.setFatal(error.Canceled);
-    try std.testing.expectEqual(error.OutOfMemory, state.fatal.?);
+    try std.testing.expectEqual(error.OutOfMemory, state.failure().?);
 }
 
 fn workerTask(state: *Run, worker: usize) void {
@@ -1208,7 +1228,7 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
                 const again = batchRequest(state.io(), state.server, state.operation, &.{.{ .oid = r.oid, .size = r.size, .name = r.name }}, state.options.ref, state.limits, null) catch |err| switch (err) {
                     error.LfsBatchFailed => {
                         r.status = .failed;
-                        r.message = try state.dupe(state.server.client.message());
+                        r.message = try state.message();
                         return;
                     },
                     else => |e| return e,
@@ -1240,17 +1260,18 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
 }
 
 fn copyAction(state: *Run, a: Action) Error!Action {
-    state.arena_mutex.lockUncancelable(state.io());
-    defer state.arena_mutex.unlock(state.io());
+    var guard = state.arena.acquireUncancelable(state.io());
+    defer guard.deinit(state.io());
+    const arena = guard.value().*;
     var out: Action = .{
-        .href = try state.arena.dupe(u8, a.href),
+        .href = try arena.dupe(u8, a.href),
         .expires_at = a.expires_at,
         .expires_in = a.expires_in,
-        .id = if (a.id) |v| try state.arena.dupe(u8, v) else null,
-        .token = if (a.token) |v| try state.arena.dupe(u8, v) else null,
+        .id = if (a.id) |v| try arena.dupe(u8, v) else null,
+        .token = if (a.token) |v| try arena.dupe(u8, v) else null,
     };
-    const copy = try state.arena.alloc(@TypeOf(a.header.items[0]), a.header.items.len);
-    for (a.header.items, copy) |kv, *to| to.* = .{ .key = try state.arena.dupe(u8, kv.key), .value = try state.arena.dupe(u8, kv.value) };
+    const copy = try arena.alloc(@TypeOf(a.header.items[0]), a.header.items.len);
+    for (a.header.items, copy) |kv, *to| to.* = .{ .key = try arena.dupe(u8, kv.key), .value = try arena.dupe(u8, kv.value) };
     out.header = .{ .items = copy };
     return out;
 }
@@ -1515,7 +1536,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
             // as much as the connection failing.
             error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects, error.ClientCertificateRejected, error.ClientCertificateSchemeUnsupported, error.ProxyRefused, error.ProxyAuthenticationRequired, error.ProxyAuthMethodUnsupported, error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError, error.MalformedResponse => {
                 partial.keep = partial.from > 0;
-                return .{ .done = .{ .retry = .{ .message = try state.dupe(server.client.message()) } } };
+                return .{ .done = .{ .retry = .{ .message = try state.message() } } };
             },
             error.OutOfMemory, error.Canceled => |e| return e,
             else => |e| return .{ .done = .{ .fail = @errorName(e) } },
@@ -1573,7 +1594,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
             // What went out of an attempt that failed is taken back off the
             // count, as git-lfs rewinds its meter.
             state.say(.{ .unsent = sent });
-            return .{ .retry = .{ .message = try state.dupe(server.client.message()) } };
+            return .{ .retry = .{ .message = try state.message() } };
         },
         error.OutOfMemory, error.Canceled => |e| return e,
         else => |e| return .{ .fail = @errorName(e) },
@@ -1618,7 +1639,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
         }) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => |e| return e,
             else => {
-                last = server.client.message();
+                last = try state.message();
                 continue;
             },
         };
@@ -1742,9 +1763,10 @@ fn batchRequest(
 /// with the action's `id`, `token` and expiry, `noop` for an object with
 /// nothing to do.
 fn sshBatch(a: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8) Error!BatchResponse {
-    const conn = t.connection(io, 0) catch |err| return sshBatchFailed(io, server, err, t.message.items);
-    try conn.mutex.lock(io);
-    defer conn.mutex.unlock(io);
+    const line = t.connection(io, 0) catch |err| return sshBatchFailed(io, server, err, try t.failure(io, a));
+    var held = try line.acquire(io);
+    defer held.deinit(io);
+    const conn = held.value();
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(a, &.{ "transfer=ssh", "hash-algo=sha256" });
     if (ref) |r| try args.append(a, try a.print("refname={s}", .{r}));
@@ -1859,9 +1881,10 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
     var scratch_state: std.heap.ArenaAllocator = .init(state.server.gpa);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
-    const conn = t.connection(io, worker) catch |err| return sshRetry(state, err);
-    try conn.mutex.lock(io);
-    defer conn.mutex.unlock(io);
+    const line = t.connection(io, worker) catch |err| return sshRetry(state, err);
+    var held = try line.acquire(io);
+    defer held.deinit(io);
+    const conn = held.value();
     const command = try scratch.print("get-object {s}", .{&r.oid});
     conn.send(io, command, try sshObjectArgs(scratch, r, action)) catch |err| return sshRetry(state, err);
     const head = conn.readHead(scratch, io) catch |err| return sshRetry(state, err);
@@ -1904,9 +1927,10 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
     const file = (try store.open(io, &pointer)) orelse return .{ .fail = "the object is not in the store" };
     defer file.close(io);
-    const conn = t.connection(io, worker) catch |err| return sshRetry(state, err);
-    try conn.mutex.lock(io);
-    defer conn.mutex.unlock(io);
+    const line = t.connection(io, worker) catch |err| return sshRetry(state, err);
+    var held = try line.acquire(io);
+    defer held.deinit(io);
+    const conn = held.value();
     const args = try sshObjectArgs(scratch, r, action);
     var sent: u64 = 0;
     const put = try scratch.print("put-object {s}", .{&r.oid});

@@ -17,6 +17,7 @@ const std = @import("std");
 const ctype = @import("../text.zig").ctype;
 const policy_mod = @import("policy.zig");
 const indexpack_mod = @import("index_pack.zig");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const airlock_testing = @import("airlock.testing");
 const builtin = @import("builtin");
@@ -3427,9 +3428,8 @@ fn groupStarts(gpa: Allocator, ordered: []const Ordered) Allocator.Error![]bool 
 /// The database's allocator for tasks that allocate, one call at a time,
 /// so that it need not be thread-safe itself.
 const LockedAllocator = struct {
-    child: Allocator,
+    child: aegis.BlockingGuarded(Allocator),
     io: Io,
-    mutex: Io.Mutex = .init,
 
     fn allocator(l: *LockedAllocator) Allocator {
         return .{ .ptr = l, .vtable = &vtable };
@@ -3439,30 +3439,30 @@ const LockedAllocator = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
-        l.mutex.lockUncancelable(l.io);
-        defer l.mutex.unlock(l.io);
-        return l.child.rawAlloc(len, alignment, ret_addr);
+        var child = l.child.acquireUncancelable(l.io);
+        defer child.deinit(l.io);
+        return child.value().rawAlloc(len, alignment, ret_addr);
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
-        l.mutex.lockUncancelable(l.io);
-        defer l.mutex.unlock(l.io);
-        return l.child.rawResize(memory, alignment, new_len, ret_addr);
+        var child = l.child.acquireUncancelable(l.io);
+        defer child.deinit(l.io);
+        return child.value().rawResize(memory, alignment, new_len, ret_addr);
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
-        l.mutex.lockUncancelable(l.io);
-        defer l.mutex.unlock(l.io);
-        return l.child.rawRemap(memory, alignment, new_len, ret_addr);
+        var child = l.child.acquireUncancelable(l.io);
+        defer child.deinit(l.io);
+        return child.value().rawRemap(memory, alignment, new_len, ret_addr);
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
-        l.mutex.lockUncancelable(l.io);
-        defer l.mutex.unlock(l.io);
-        l.child.rawFree(memory, alignment, ret_addr);
+        var child = l.child.acquireUncancelable(l.io);
+        defer child.deinit(l.io);
+        child.value().rawFree(memory, alignment, ret_addr);
     }
 };
 
@@ -3651,7 +3651,7 @@ const Build = struct {
         defer failures.deinit(gpa);
         var slots: [3]PackBatch = @splat(.{});
         defer for (&slots) |*slot| slot.deinit(gpa);
-        var locked: LockedAllocator = .{ .child = gpa, .io = io };
+        var locked: LockedAllocator = .{ .child = .init(gpa), .io = io };
         const stage: Stage = .{ .workers = workers, .deflaters = deflaters, .readers = readers, .failures = &failures, .search_gpa = locked.allocator() };
 
         // The first batch read, then each searched while the one before is

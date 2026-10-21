@@ -17,6 +17,7 @@ const safe = @import("safe.zig");
 
 const std = @import("std");
 const builtin = @import("builtin");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -270,13 +271,12 @@ const RepositoryData = struct {
     /// index are synced, and how.
     fsync: fs.Fsync = .default,
     /// What `lfsconfigText` last found, and what it was found from.
-    lfsconfig_cache: ?LfsconfigCache = null,
+    lfsconfig_cache: aegis.BlockingGuarded(?LfsconfigCache) = .init(null),
     /// The engines' `core` settings, from the published configuration.
     settings: Settings = undefined,
     /// The shallow file as it was read or last written: a write over
     /// another writer's change is refused.
     shallow_seen: shallow.Seen = null,
-    lfsconfig_mutex: Io.Mutex = .init,
     /// Commits read through `commitInfo` and `commitTree`, kept.
     commits: commit_cache.Cache = .{},
 };
@@ -1084,7 +1084,7 @@ pub const Repository = struct {
 
     /// Close everything the repository holds.
     pub fn deinit(repo: *Repository, io: Io) void {
-        if (repo.data().lfsconfig_cache) |c| if (c.text) |t| repo.data().gpa.free(t);
+        if (repo.data().lfsconfig_cache.teardown().*) |c| if (c.text) |t| repo.data().gpa.free(t);
         repo.data().commits.deinit(repo.data().gpa);
         repo.refStore().deinit();
         repo.data().gpa.destroy(repo.refStore());
@@ -1457,11 +1457,12 @@ pub const Repository = struct {
     /// `HEAD`'s tree again. A file stamped within two seconds of being
     /// looked at proves nothing yet and is read again.
     pub fn lfsconfigText(repo: *Repository, io: Io) LfsconfigError!?[]u8 {
-        try repo.data().lfsconfig_mutex.lock(io);
-        defer repo.data().lfsconfig_mutex.unlock(io);
+        var guard = try repo.data().lfsconfig_cache.acquire(io);
+        defer guard.deinit(io);
+        const cache = guard.value();
         const seen_at = Io.Clock.real.now(io).nanoseconds;
         const key = try repo.lfsconfigKey(io);
-        if (repo.data().lfsconfig_cache) |cached| {
+        if (cache.*) |cached| {
             if (std.meta.eql(cached.key, key) and cached.settled()) {
                 return if (cached.text) |t| try repo.data().gpa.dupe(u8, t) else null;
             }
@@ -1469,8 +1470,8 @@ pub const Repository = struct {
         const text = try repo.lfsconfigTextUncached(io, key);
         errdefer if (text) |t| repo.data().gpa.free(t);
         const kept = if (text) |t| try repo.data().gpa.dupe(u8, t) else null;
-        if (repo.data().lfsconfig_cache) |old| if (old.text) |t| repo.data().gpa.free(t);
-        repo.data().lfsconfig_cache = .{ .key = key, .text = kept, .seen_at = seen_at };
+        if (cache.*) |old| if (old.text) |t| repo.data().gpa.free(t);
+        cache.* = .{ .key = key, .text = kept, .seen_at = seen_at };
         return text;
     }
 

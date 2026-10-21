@@ -289,7 +289,9 @@ test "lfs.sshtransfer=always is the pure-ssh protocol or nothing, and never is g
                 defer server.deinit(io);
                 if (refused) {
                     try testing.expectError(error.LfsAuthenticateDisabled, lfstransfer.fetch(io, server, &repo, .{}));
-                    try testing.expect(std.mem.startsWith(u8, server.client.message(), "git-lfs-authenticate has been disabled by request (lfs.sshtransfer=always)"));
+                    const said = try server.client.message(io, gpa);
+                    defer gpa.free(said);
+                    try testing.expect(std.mem.startsWith(u8, said, "git-lfs-authenticate has been disabled by request (lfs.sshtransfer=always)"));
                 } else {
                     var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                     defer fetched.deinit();

@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `commit.rebase.abort` and `rebase.quit` take `rebase.Options` and return `?stash.Restored`; `commit.sequencer.quit` takes `who`.
 - `transport.remote.Branch.fetchRemote` takes the configuration, for git's fallback to the only remote.
 - `commit.merging.Kind` has `remote_head` and `remote_ref` for what `FETCH_HEAD` names; `merging.Target` carries `source` and `what`.
+- Every lock relic holds is aegis's `BlockingGuarded`, its data reached only through a guard. `lfs.api.Client.message` takes an `Io` and an allocator and returns a copy, read under its lock (the borrowed buffer it returned could change under a reader). `lfs.ssh.Transfer.connection` returns the connection's `Transfer.Line`, held for a request and its answer in place of `Connection.mutex`; `Transfer.failure` copies what ssh said when one did not start; `Connection.open` returns the connection itself. `refs.reftable.stack.Cache.reloads` is a function of an `Io`.
 
 ### Added
 
@@ -37,6 +38,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A fast-forward merge keeps what is staged beside it, where it refused a staged change as `DirtyIndex`; a staged change the fast-forward would overwrite is still refused. The same holds for a rebase's checkouts, a cherry-pick's fast-forward and bisect's checkouts, all git's two-way merge.
 - `transport.remote.Branch.fetchRemote` and `pushRemote` fall back to the only remote when there is one, before `origin`, as git does.
+- Two tasks of one LFS operation no longer allocate from its arena at once: an API request's URL, and a custom adapter's failure, were made in it without its lock.
 - `stash.apply`, `pop` and `applyEntry` write `AUTO_MERGE` and drop the index's resolve-undo record, as git's stash apply leaves them (merge-ort's `merge_switch_to_result`).
 - receive-pack stages the deletion of a ref that is not there, as git does, so the ref transaction and its hook see it.
 - receive-pack says git's explanations when `receive.denyCurrentBranch` or `receive.denyDeleteCurrent` is unset, and an object `receive.fsckObjects` refuses as git's unpacker says it (`object <oid>: <msg-id>: <text>`, `fsck error in packed object`).

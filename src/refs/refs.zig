@@ -431,8 +431,9 @@ pub const Store = struct {
         var broken: std.ArrayList(Broken) = .empty;
 
         {
-            const packed_listing = try store.acquirePacked(io);
-            defer store.releasePacked(io);
+            var held = try store.acquirePacked(io);
+            defer held.release(io);
+            const packed_listing = held.listing;
             // Sorted, so the names under `prefix` are one run.
             const from = std.sort.lowerBound(PackedEntry, packed_listing.entries, prefix, orderPrefix);
             for (packed_listing.entries[from..]) |entry| {
@@ -630,23 +631,16 @@ pub const Store = struct {
     }
 
     /// The store's snapshot of `packed-refs`, brought up to date, with its
-    /// mutex held: give it back with `releasePacked`.
-    fn acquirePacked(store: *const Store, io: Io) ReadError!*const PackedListing {
-        const c = state_mod.get(store.state).packed_refs.?;
-        c.mutex.lock(io) catch return error.Canceled;
-        errdefer c.mutex.unlock(io);
-        return c.refresh(io, store.commonDir(), store.objectFormat());
-    }
-
-    fn releasePacked(store: *const Store, io: Io) void {
-        state_mod.get(store.state).packed_refs.?.mutex.unlock(io);
+    /// lock held: give it back with `release`.
+    fn acquirePacked(store: *const Store, io: Io) ReadError!packed_cache.Cache.Snapshot {
+        return state_mod.get(store.state).packed_refs.?.snapshot(io, store.commonDir(), store.objectFormat());
     }
 
     /// The object `packed-refs` names for `name`, or `null`.
     fn readPackedOne(store: *const Store, io: Io, name: []const u8) ReadError!?Oid {
-        const listing = try store.acquirePacked(io);
-        defer store.releasePacked(io);
-        const entry = listing.find(name) orelse return null;
+        var held = try store.acquirePacked(io);
+        defer held.release(io);
+        const entry = held.listing.find(name) orelse return null;
         return entry.oid;
     }
 
@@ -1784,8 +1778,9 @@ pub const Transaction = struct {
                 if (first) |found| return try tx.gpa.print("'{s}' exists; cannot create '{s}'", .{ found, name });
             },
             .packed_only => {
-                const listing = try tx.store.acquirePacked(io);
-                defer tx.store.releasePacked(io);
+                var held = try tx.store.acquirePacked(io);
+                defer held.release(io);
+                const listing = held.listing;
                 const from = std.sort.lowerBound(Store.PackedEntry, listing.entries, folder, Store.orderPrefix);
                 if (from < listing.entries.len and std.mem.startsWith(u8, listing.entries[from].name, folder))
                     return try tx.gpa.print("'{s}' exists; cannot create '{s}'", .{ listing.entries[from].name, name });
@@ -2321,7 +2316,7 @@ test "a store parses packed-refs once, and again when the file is replaced" {
     // Another writer: a store of its own over the same directory.
     var other: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
     defer other.deinit();
-    const loads = &state_mod.get(store.state).packed_refs.?.loads;
+    const cache = state_mod.get(store.state).packed_refs.?;
 
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
@@ -2336,7 +2331,7 @@ test "a store parses packed-refs once, and again when the file is replaced" {
     }
     var listing = try store.list(gpa, io, "refs/tags/");
     listing.deinit();
-    try std.testing.expectEqual(@as(u64, 2), loads.*);
+    try std.testing.expectEqual(@as(u64, 2), cache.loads(io));
 
     // The same size, other contents: the new file is another file.
     try other.writePacked(io, &.{
@@ -2344,7 +2339,7 @@ test "a store parses packed-refs once, and again when the file is replaced" {
         .{ .name = "refs/tags/v1", .oid = two, .peeled = null },
     });
     try std.testing.expect((try store.read(gpa, io, "refs/tags/v1")).?.direct.eql(two));
-    try std.testing.expectEqual(@as(u64, 3), loads.*);
+    try std.testing.expectEqual(@as(u64, 3), cache.loads(io));
 
     // Gone is empty.
     try tmp.dir.deleteFile(io, "packed-refs");

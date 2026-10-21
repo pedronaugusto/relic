@@ -42,7 +42,8 @@ test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasField(api_mod.Exchange, "diagnostics"));
     const wire = @typeInfo(@FieldType(api_mod.Exchange, "wire")).pointer.child;
     try std.testing.expect(@typeInfo(wire) == .@"opaque");
-    const pool = @typeInfo(@FieldType(api_mod.Client, "transports")).optional.child;
+    const guarded = @typeInfo(@typeInfo(@TypeOf(@FieldType(api_mod.Client, "transports").Guard.value)).@"fn".return_type.?).pointer.child;
+    const pool = @typeInfo(guarded).optional.child;
     try std.testing.expect(@typeInfo(@typeInfo(pool).pointer.child) == .@"opaque");
 }
 

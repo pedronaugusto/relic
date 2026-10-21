@@ -33,23 +33,23 @@ const loadIn = cache.internal.loadIn;
 const reloadIn = cache.internal.reloadIn;
 const isLinked = cache.internal.isLinked;
 const View = struct {
-    cache: ?*Cache,
+    guard: ?Cache.Guard,
     owned: ?Stacks,
     stacks: *const Stacks,
 
     fn acquire(gpa: Allocator, io: Io, store: anytype, owned: *?Stacks) Error!View {
         if (state_mod.get(store.state).cache) |c| {
-            c.mutex.lock(io) catch return error.Canceled;
-            errdefer c.mutex.unlock(io);
-            const st = try cache.internal.refresh(c, io, store);
-            return .{ .cache = c, .owned = null, .stacks = st };
+            var guard = try c.held.acquire(io);
+            errdefer guard.deinit(io);
+            const st = try cache.internal.refresh(c, &guard, io, store);
+            return .{ .guard = guard, .owned = null, .stacks = st };
         }
         owned.* = try cache.internal.open(gpa, io, store);
-        return .{ .cache = null, .owned = null, .stacks = &owned.*.? };
+        return .{ .guard = null, .owned = null, .stacks = &owned.*.? };
     }
 
     fn release(v: *View, io: Io, owned: *?Stacks) void {
-        if (v.cache) |c| c.mutex.unlock(io);
+        if (v.guard) |*guard| guard.deinit(io);
         if (owned.*) |*st| cache.internal.deinit(st);
         owned.* = null;
     }

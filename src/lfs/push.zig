@@ -179,7 +179,8 @@ pub fn beforePush(
                 error.OutOfMemory, error.Canceled => |e| return e,
                 else => {
                     report.locks = .failed;
-                    report.message = try a.dupe(u8, if (server.client.message().len != 0) server.client.message() else @errorName(err));
+                    const said = try server.client.message(io, a);
+                    report.message = if (said.len != 0) said else @errorName(err);
                     if (state == .enabled) return error.LfsLockCheckFailed;
                     break;
                 },

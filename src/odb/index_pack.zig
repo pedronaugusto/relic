@@ -28,6 +28,7 @@ const Self = @This();
 const retention = @import("keep.zig");
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
@@ -694,20 +695,26 @@ const Indexer = struct {
     thin_bases: std.ArrayList(Oid) = .empty,
     deltas: u32 = 0,
     resolved_count: std.atomic.Value(u64) = .init(0),
-    /// Held by the threads resolving deltas for what they share: `Links`,
-    /// the progress, the diagnostic, reference deltas claimed.
-    lock: Io.Mutex = .init,
+    /// Held by the threads resolving deltas for what they share: the
+    /// first failure and the found blobs, and around `Links`, the
+    /// progress, the warnings and the reference deltas claimed.
+    shared: aegis.BlockingGuarded(Shared) = .init(.{}),
     /// The whole objects deltas hang from, and the next one a thread takes.
     roots: []u32 = &.{},
     next_root: std.atomic.Value(usize) = .init(0),
-    /// The first failure among the threads, which stops the others.
-    failure: ?Error = null,
+    /// Whether a thread failed, which stops the others; the failure is
+    /// `shared`'s.
     failed: std.atomic.Value(bool) = .init(false),
     /// The stream, while `parse` reads from it.
     tee: ?*Tee = null,
-    /// The blobs trees name as `.gitmodules` and `.gitattributes`, under
-    /// `lock`.
-    found: fsck.Found = .{},
+
+    /// What `shared` guards.
+    const Shared = struct {
+        /// The first failure among the threads.
+        failure: ?Error = null,
+        /// The blobs trees name as `.gitmodules` and `.gitattributes`.
+        found: fsck.Found = .{},
+    };
 
     fn init(gpa: Allocator, io: Io, db: Database, file: Io.File, options: Options) Allocator.Error!Indexer {
         const read_buffer = try gpa.alloc(u8, 64 * 1024);
@@ -734,17 +741,24 @@ const Indexer = struct {
         x.gpa.free(x.read_buffer);
         x.inflater.deinit();
         x.gpa.free(x.roots);
-        x.found.deinit(x.gpa);
+        x.shared.teardown().found.deinit(x.gpa);
         x.* = undefined;
     }
 
     /// Fail with `err`, saying where for the caller that asked. With
     /// several threads the first failure is the one returned and said.
+    fn firstFailure(x: *Indexer) ?Error {
+        var guard = x.shared.acquireUncancelable(x.io);
+        defer guard.deinit(x.io);
+        return guard.value().failure;
+    }
+
     fn fail(x: *Indexer, err: Error, diagnostic: Diagnostic) Error {
-        x.lock.lockUncancelable(x.io);
-        defer x.lock.unlock(x.io);
-        if (x.failure != null) return err;
-        x.failure = err;
+        var guard = x.shared.acquireUncancelable(x.io);
+        defer guard.deinit(x.io);
+        const shared = guard.value();
+        if (shared.failure != null) return err;
+        shared.failure = err;
         x.failed.store(true, .release);
         if (x.options.diagnostic) |d| d.* = diagnostic;
         return err;
@@ -935,12 +949,13 @@ const Indexer = struct {
         defer found.deinit(x.gpa);
         const finding = try fsck.inspect(x.gpa, rules, .{ .kind = x.kind, .oid = oid, .type = t, .bytes = bytes }, .{ .found = if (t == .tree) &found else null, .sink = x.fsckSink() });
         if (t == .tree and (found.modules.count() != 0 or found.attributes.count() != 0)) {
-            x.lock.lockUncancelable(x.io);
-            defer x.lock.unlock(x.io);
+            var guard = x.shared.acquireUncancelable(x.io);
+            defer guard.deinit(x.io);
+            const shared = guard.value();
             var it = found.modules.keyIterator();
-            while (it.next()) |k| try x.found.modules.put(x.gpa, k.*, {});
+            while (it.next()) |k| try shared.found.modules.put(x.gpa, k.*, {});
             it = found.attributes.keyIterator();
-            while (it.next()) |k| try x.found.attributes.put(x.gpa, k.*, {});
+            while (it.next()) |k| try shared.found.attributes.put(x.gpa, k.*, {});
         }
         const f = finding orelse return;
         const err: Error = switch (t) {
@@ -959,8 +974,8 @@ const Indexer = struct {
 
     fn noteFinding(context: *anyopaque, finding: fsck.Finding) Allocator.Error!void {
         const x: *Indexer = @ptrCast(@alignCast(context)); // safe: the context is the Indexer the sink was made from
-        x.lock.lockUncancelable(x.io);
-        defer x.lock.unlock(x.io);
+        var guard = x.shared.acquireUncancelable(x.io);
+        defer guard.deinit(x.io);
         try fsck.note(x.options.warnings, finding);
     }
 
@@ -971,7 +986,16 @@ const Indexer = struct {
     /// `fsck_finish` does once the pack is in.
     fn checkFound(x: *Indexer) Error!void {
         const rules = x.options.fsck orelse return;
-        if (x.found.modules.count() == 0 and x.found.attributes.count() == 0) return;
+        // Taken out of `shared`: a finding's warning takes the lock.
+        var named = blk: {
+            var guard = x.shared.acquireUncancelable(x.io);
+            defer guard.deinit(x.io);
+            const taken = guard.value().found;
+            guard.value().found = .{};
+            break :blk taken;
+        };
+        defer named.deinit(x.gpa);
+        if (named.modules.count() == 0 and named.attributes.count() == 0) return;
         var by_name: Oid.Map(u32) = .empty;
         defer by_name.deinit(x.gpa);
         try by_name.ensureTotalCapacity(x.gpa, @intCast(x.entries.items.len));
@@ -980,8 +1004,8 @@ const Indexer = struct {
         defer w.deinit();
         for ([_]fsck.Special{ .modules, .attributes }) |as| {
             const set = switch (as) {
-                .modules => &x.found.modules,
-                .attributes => &x.found.attributes,
+                .modules => &named.modules,
+                .attributes => &named.attributes,
             };
             var it = set.keyIterator();
             while (it.next()) |oid_ptr| {
@@ -1161,13 +1185,13 @@ const Indexer = struct {
         // wait; so once anything failed, the others are canceled.
         if (x.failed.load(.acquire)) {
             group.cancel(x.io);
-            return x.failure.?;
+            return x.firstFailure().?;
         }
         group.await(x.io) catch |err| {
             group.cancel(x.io);
             return err;
         };
-        if (x.failure) |err| return err;
+        if (x.firstFailure()) |err| return err;
 
         // What is left is reference deltas whose base the pack does not
         // carry: a thin pack, completed from the database. A base may also
@@ -1222,8 +1246,8 @@ const Indexer = struct {
     /// reference delta hangs from a name, which a damaged pack may carry
     /// twice.
     fn claimRef(x: *Indexer, at: u32) bool {
-        x.lock.lockUncancelable(x.io);
-        defer x.lock.unlock(x.io);
+        var guard = x.shared.acquireUncancelable(x.io);
+        defer guard.deinit(x.io);
         const entry = &x.entries.items[at];
         if (entry.resolved or entry.claimed) return false;
         entry.claimed = true;
@@ -1444,9 +1468,9 @@ const Worker = struct {
             const index = x.roots[next];
             const entry = x.entries.items[index];
             w.walkFrom(index, entry) catch |err| {
-                x.lock.lockUncancelable(x.io);
-                defer x.lock.unlock(x.io);
-                if (x.failure == null) x.failure = err;
+                var guard = x.shared.acquireUncancelable(x.io);
+                defer guard.deinit(x.io);
+                if (guard.value().failure == null) guard.value().failure = err;
                 x.failed.store(true, .release);
                 return;
             };
@@ -1527,8 +1551,8 @@ const Worker = struct {
             entry.resolved = true;
             try x.checkObject(named.oid, top.type, bytes, entry.offset);
             {
-                x.lock.lockUncancelable(x.io);
-                defer x.lock.unlock(x.io);
+                var guard = x.shared.acquireUncancelable(x.io);
+                defer guard.deinit(x.io);
                 if (x.options.links) |l| try l.take(x.kind, top.type, named.oid, bytes);
                 const done = x.resolved_count.fetchAdd(1, .monotonic) + 1;
                 Progress.emit(x.options.progress, .{ .resolved = .{ .done = done, .total = x.deltas } });

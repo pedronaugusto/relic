@@ -50,7 +50,7 @@ pub const Stack = @import("stack/cache.zig").Stack;
 /// file, size and time means nothing changed; otherwise the list is read,
 /// and only when its text differs is the stack reloaded, keeping the tables
 /// it still names open. That is how git's stack decides to reload. The
-/// cache is behind a mutex, since a daemon reads from many tasks; a
+/// cache is behind a lock, since a daemon reads from many tasks; a
 /// transaction reads its own stacks under its lock and does not touch it.
 pub const Cache = @import("stack/cache.zig").Cache;
 /// `Store.read` over reftable. The returned target of a symbolic ref is

@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -78,25 +79,22 @@ pub fn argValue(args: []const []const u8, key: []const u8) ?[]const u8 {
 }
 
 /// One conversation with `git-lfs-transfer`. It is used by one task at a
-/// time: `mutex` is held for a request and its answer.
+/// time: its `Transfer.Line` is held for a request and its answer.
 pub const Connection = struct {
     pub const Error = ErrorNamespace.Error;
 
     gpa: Allocator,
     conn: *connection.Connection,
-    mutex: Io.Mutex = .init,
     ended: bool = false,
 
     /// Start `invocation` and agree on version 1. A server that does not
     /// start, or does not speak it, is an error, and `message` holds what
     /// ssh said.
-    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Self.Error!*Connection {
+    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Self.Error!Connection {
         // `message` belongs to `gpa`.
         const conn = try connection.Process.start(gpa, io, programs, invocation);
         errdefer conn.deinit(io);
-        const c = try gpa.create(Connection);
-        errdefer gpa.destroy(c);
-        c.* = .{
+        var c: Connection = .{
             .gpa = gpa,
             .conn = conn,
         };
@@ -256,7 +254,7 @@ pub const Connection = struct {
             c.sayQuit(scratch.allocator(), io) catch {};
         }
         c.conn.deinit(io);
-        c.gpa.destroy(c);
+        c.* = undefined;
     }
 };
 
@@ -281,10 +279,17 @@ pub const Transfer = struct {
     /// The directory the control socket is in, removed on `close`.
     control_dir: ?[]const u8,
     arena: std.heap.ArenaAllocator,
-    connections: std.ArrayList(?*Connection) = .empty,
-    mutex: Io.Mutex = .init,
-    /// What ssh said when a connection would not start.
-    message: std.ArrayList(u8) = .empty,
+    held: aegis.BlockingGuarded(Held) = .init(.{}),
+
+    /// A connection, held by one task for a request and its answer.
+    pub const Line = aegis.BlockingGuarded(Connection);
+
+    /// What `held` guards.
+    const Held = struct {
+        lines: std.ArrayList(?*Line) = .empty,
+        /// What ssh said when a connection would not start.
+        message: std.ArrayList(u8) = .empty,
+    };
 
     /// Start the first connection. `first`, `rest` and `control_dir` are
     /// copied. When it does not start, `failure` holds what ssh said.
@@ -293,7 +298,7 @@ pub const Transfer = struct {
         const first = options.first;
         const rest = options.rest;
         const control_dir = options.control_dir;
-        const failure = options.failure;
+        const said = options.failure;
         const t = try gpa.create(Transfer);
         errdefer gpa.destroy(t);
         t.* = .{
@@ -305,15 +310,18 @@ pub const Transfer = struct {
             .arena = .init(gpa),
         };
         errdefer t.arena.deinit();
-        errdefer t.message.deinit(gpa);
         const a = t.arena.allocator();
         t.first = try copyInvocation(a, first);
         t.rest = try copyInvocation(a, rest);
         if (control_dir) |d| t.control_dir = try a.dupe(u8, d);
         errdefer t.removeControlDir(io);
-        const c0 = try Connection.open(gpa, io, programs, t.first, failure);
-        errdefer c0.deinit(io);
-        try t.connections.append(gpa, c0);
+        const line = try gpa.create(Line);
+        errdefer gpa.destroy(line);
+        line.* = .init(try Connection.open(gpa, io, programs, t.first, said));
+        errdefer line.teardown().deinit(io);
+        var lines: std.ArrayList(?*Line) = .empty;
+        try lines.append(gpa, line);
+        t.held = .init(.{ .lines = lines });
         return t;
     }
 
@@ -325,23 +333,39 @@ pub const Transfer = struct {
         return out;
     }
 
-    /// Connection `n`, started the first time it is asked for.
-    pub fn connection(t: *Transfer, io: Io, n: usize) Self.Error!*Connection {
-        try t.mutex.lock(io);
-        defer t.mutex.unlock(io);
-        while (t.connections.items.len <= n) try t.connections.append(t.gpa, null);
-        if (t.connections.items[n]) |c| return c;
-        const c = try Connection.open(t.gpa, io, t.programs, if (n == 0) t.first else t.rest, &t.message);
-        t.connections.items[n] = c;
-        return c;
+    /// Connection `n`'s line, the connection started the first time it is
+    /// asked for. When it does not start, `failure` says what ssh said.
+    pub fn connection(t: *Transfer, io: Io, n: usize) Self.Error!*Line {
+        var guard = try t.held.acquire(io);
+        defer guard.deinit(io);
+        const h = guard.value();
+        while (h.lines.items.len <= n) try h.lines.append(t.gpa, null);
+        if (h.lines.items[n]) |line| return line;
+        const line = try t.gpa.create(Line);
+        errdefer t.gpa.destroy(line);
+        line.* = .init(try Connection.open(t.gpa, io, t.programs, if (n == 0) t.first else t.rest, &h.message));
+        h.lines.items[n] = line;
+        return line;
+    }
+
+    /// What ssh said when a connection last did not start, copied with
+    /// `out`.
+    pub fn failure(t: *Transfer, io: Io, out: Allocator) Allocator.Error![]u8 {
+        var guard = t.held.acquireUncancelable(io);
+        defer guard.deinit(io);
+        return out.dupe(u8, guard.value().message.items);
     }
 
     /// Say `quit` on every connection, close them, and release everything.
     pub fn deinit(t: *Transfer, io: Io) void {
-        for (t.connections.items) |maybe| if (maybe) |c| c.deinit(io);
-        t.connections.deinit(t.gpa);
+        const h = t.held.teardown();
+        for (h.lines.items) |maybe| if (maybe) |line| {
+            line.teardown().deinit(io);
+            t.gpa.destroy(line);
+        };
+        h.lines.deinit(t.gpa);
         t.removeControlDir(io);
-        t.message.deinit(t.gpa);
+        h.message.deinit(t.gpa);
         t.arena.deinit();
         t.gpa.destroy(t);
     }

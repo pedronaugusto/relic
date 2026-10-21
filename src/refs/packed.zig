@@ -19,6 +19,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const aegis = @import("aegis");
+
 const hash = @import("../hash/hash.zig");
 const names = @import("../names.zig").ref;
 const ctype = @import("../text.zig").ctype;
@@ -206,51 +208,74 @@ const Validity = struct {
 
 /// The listing a store last read, and the stat it was read under.
 ///
-/// Behind a mutex, since a daemon reads refs from many tasks. A lookup
+/// Behind a lock, since a daemon reads refs from many tasks. A lookup
 /// holds it from the stat to the end of the bisection; a listing copies
 /// what it needs while it holds it.
 pub const Cache = struct {
     pub const Error = ErrorNamespace.Error;
 
     gpa: Allocator,
-    mutex: Io.Mutex = .init,
-    current: ?Listing = null,
-    seen: Validity = .{ .present = false },
-    /// How many times the file was read, for a test that wants to see the
-    /// cache working.
-    loads: u64 = 0,
+    held: aegis.BlockingGuarded(Held) = .init(.{}),
+
+    /// What the lock guards.
+    pub const Held = struct {
+        current: ?Listing = null,
+        seen: Validity = .{ .present = false },
+        loads: u64 = 0,
+    };
+
+    /// The listing as the disk had it when taken, and the lock that keeps
+    /// it: valid until `release`.
+    pub const Snapshot = struct {
+        guard: aegis.BlockingGuarded(Held).Guard,
+        listing: *const Listing,
+
+        pub fn release(s: *Snapshot, io: Io) void {
+            s.guard.deinit(io);
+        }
+    };
 
     pub fn init(gpa: Allocator) Cache {
         return .{ .gpa = gpa };
     }
 
     pub fn deinit(c: *Cache) void {
-        if (c.current) |*l| l.deinit();
+        if (c.held.teardown().current) |*l| l.deinit();
         c.* = undefined;
     }
 
-    /// The listing as the disk has it now. The caller holds `mutex`, and
-    /// the listing is valid until it gives the mutex up.
-    pub fn refresh(c: *Cache, io: Io, dir: Io.Dir, kind: Kind) ReadError!*const Listing {
+    /// How many times the file was read, for a test that wants to see the
+    /// cache working.
+    pub fn loads(c: *Cache, io: Io) u64 {
+        var guard = c.held.acquireUncancelable(io);
+        defer guard.deinit(io);
+        return guard.value().loads;
+    }
+
+    /// The listing as the disk has it now, with the lock held.
+    pub fn snapshot(c: *Cache, io: Io, dir: Io.Dir, kind: Kind) ReadError!Snapshot {
+        var guard = try c.held.acquire(io);
+        errdefer guard.deinit(io);
+        const h = guard.value();
         const now = try Validity.of(io, dir);
-        if (c.current) |*l| {
-            if (now.eql(c.seen)) return l;
+        if (h.current == null or !now.eql(h.seen)) {
+            var seen: Validity = undefined;
+            const fresh = try readSeen(c.gpa, io, dir, kind, &seen);
+            if (h.current) |*old| old.deinit();
+            h.current = fresh;
+            h.seen = seen;
+            h.loads += 1;
         }
-        var seen: Validity = undefined;
-        const fresh = try readSeen(c.gpa, io, dir, kind, &seen);
-        if (c.current) |*old| old.deinit();
-        c.current = fresh;
-        c.seen = seen;
-        c.loads += 1;
-        return &c.current.?;
+        return .{ .guard = guard, .listing = &h.current.? };
     }
 
     /// Forget the listing, so that the next lookup reads the file.
     pub fn forget(c: *Cache, io: Io) void {
-        c.mutex.lockUncancelable(io);
-        defer c.mutex.unlock(io);
-        if (c.current) |*l| l.deinit();
-        c.current = null;
+        var guard = c.held.acquireUncancelable(io);
+        defer guard.deinit(io);
+        const h = guard.value();
+        if (h.current) |*l| l.deinit();
+        h.current = null;
     }
 };
 

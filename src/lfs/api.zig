@@ -1208,7 +1208,7 @@ pub const Learned = struct {
 ///
 /// It is safe to use from several tasks at once: the transfers of one
 /// operation share it, and what they learn about credentials is held under a
-/// mutex.
+/// lock.
 pub const Client = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -1221,32 +1221,42 @@ pub const Client = struct {
     options: Options,
     /// One HTTP client for each set of connection settings the operation's
     /// URLs need: `transportFor`.
-    transports: ?*Transports = null,
-    transport_mutex: Io.Mutex = .init,
-    /// The passphrases that opened client keys, by the key's path, as
-    /// git-lfs keeps them in memory: a key is asked for once, however
-    /// many hosts it is presented to. Under `mutex`, in `arena`.
-    key_passphrases: std.StringHashMapUnmanaged(aegis.SecretBytes) = .empty,
-    arena: std.heap.ArenaAllocator,
-    mutex: Io.Mutex = .init,
-    endpoints: [2]?Endpoint = .{ null, null },
-    ssh_auth: [2]?SshAuth = .{ null, null },
-    /// git-lfs's pure-ssh protocol for each operation: not tried yet, not
-    /// used, or open.
-    ssh_transfers: [2]SshTransferSlot = .{ .untried, .untried },
-    /// What ssh said when the pure-ssh protocol did not start.
-    ssh_failure: std.ArrayList(u8) = .empty,
-    access: std.ArrayList(struct { url: []const u8, mode: Access }) = .empty,
-    credentials: std.ArrayList(*Cred) = .empty,
-    /// `~/.netrc`, read from the home directory in the environment the
-    /// caller granted, and the hosts whose entry a server refused.
-    netrc: ?netrc_mod.Netrc = null,
-    netrc_refused: std.ArrayList([]const u8) = .empty,
-    /// What the server taught, for `remember`.
-    learned: std.ArrayList(Learned) = .empty,
-    message_mutex: Io.Mutex = .init,
-    message_buf: [512]u8 = undefined,
-    message_len: usize = 0,
+    transports: aegis.BlockingGuarded(?*Transports) = .init(null),
+    /// What the operation's tasks learn and keep between requests.
+    shared: aegis.BlockingGuarded(Shared),
+    /// What the server or the program last said about a failure.
+    said: aegis.BlockingGuarded(Said) = .init(.{}),
+
+    /// What `shared` guards.
+    const Shared = struct {
+        /// Where everything below that is not freed on its own lives.
+        arena: std.heap.ArenaAllocator,
+        /// The passphrases that opened client keys, by the key's path, as
+        /// git-lfs keeps them in memory: a key is asked for once, however
+        /// many hosts it is presented to.
+        key_passphrases: std.StringHashMapUnmanaged(aegis.SecretBytes) = .empty,
+        endpoints: [2]?Endpoint = .{ null, null },
+        ssh_auth: [2]?SshAuth = .{ null, null },
+        /// git-lfs's pure-ssh protocol for each operation: not tried yet,
+        /// not used, or open.
+        ssh_transfers: [2]SshTransferSlot = .{ .untried, .untried },
+        /// What ssh said when the pure-ssh protocol did not start.
+        ssh_failure: std.ArrayList(u8) = .empty,
+        access: std.ArrayList(struct { url: []const u8, mode: Access }) = .empty,
+        credentials: std.ArrayList(*Cred) = .empty,
+        /// `~/.netrc`, read from the home directory in the environment the
+        /// caller granted, and the hosts whose entry a server refused.
+        netrc: ?netrc_mod.Netrc = null,
+        netrc_refused: std.ArrayList([]const u8) = .empty,
+        /// What the server taught, for `remember`.
+        learned: std.ArrayList(Learned) = .empty,
+    };
+
+    /// What `said` guards.
+    const Said = struct {
+        buf: [512]u8 = undefined,
+        len: usize = 0,
+    };
 
     const Cred = struct {
         url: []const u8,
@@ -1263,35 +1273,30 @@ pub const Client = struct {
         const remote = with.remote;
         const where = with.where;
         const options = with.reach;
-        var c: Client = .{
+        return .{
             .gpa = gpa,
             .settings = settings,
             .remote = remote,
             .where = where,
             .options = options,
-            .arena = .init(gpa),
+            .shared = .init(.{ .arena = .init(gpa), .netrc = try loadNetrc(gpa, io, options) }),
         };
-        errdefer c.arena.deinit();
-        try c.loadNetrc(
-            io,
-        );
-        return c;
     }
 
     /// `$HOME/.netrc`, or `_netrc` on Windows when there is no `.netrc`, as
     /// git-lfs reads it. One that does not parse is not used, as git-lfs
     /// does not use it.
-    fn loadNetrc(c: *Client, io: Io) Allocator.Error!void {
-        const programs = c.options.programs orelse return;
-        const home = programs.environ.get("HOME") orelse return;
-        if (home.len == 0) return;
-        var dir = Io.Dir.cwd().openDir(io, home, .{}) catch return;
+    fn loadNetrc(gpa: Allocator, io: Io, options: Options) Allocator.Error!?netrc_mod.Netrc {
+        const programs = options.programs orelse return null;
+        const home = programs.environ.get("HOME") orelse return null;
+        if (home.len == 0) return null;
+        var dir = Io.Dir.cwd().openDir(io, home, .{}) catch return null;
         defer dir.close(io);
-        var text = (fs.readSecretFile(c.gpa, io, dir, ".netrc", 1 << 20) catch null) orelse
-            (if (builtin.target.os.tag == .windows) (fs.readSecretFile(c.gpa, io, dir, "_netrc", 1 << 20) catch null) else null) orelse
-            return;
+        var text = (fs.readSecretFile(gpa, io, dir, ".netrc", 1 << 20) catch null) orelse
+            (if (builtin.target.os.tag == .windows) (fs.readSecretFile(gpa, io, dir, "_netrc", 1 << 20) catch null) else null) orelse
+            return null;
         defer text.deinit();
-        c.netrc = netrc_mod.Netrc.parse(c.gpa, text.expose()) catch |err| switch (err) {
+        return netrc_mod.Netrc.parse(gpa, text.expose()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedNetrc => null,
         };
@@ -1301,11 +1306,11 @@ pub const Client = struct {
     /// server refused it already: git-lfs's netrc helper, which asks for the
     /// host as its `getNetrcHostname` reads the URL's (`netrcHost`) and the
     /// URL's user, decoded.
-    fn netrcAuth(c: *Client, a: Allocator, url: []const u8) Allocator.Error!?struct { header: aegis.SecretBytes, host: []const u8 } {
-        const n = &(c.netrc orelse return null);
+    fn netrcAuth(c: *Client, shared: *Shared, a: Allocator, url: []const u8) Allocator.Error!?struct { header: aegis.SecretBytes, host: []const u8 } {
+        const n = &(shared.netrc orelse return null);
         const parts = UrlParts.parse(url) orelse return null;
         const host = netrcHost(parts.authority) orelse return null;
-        for (c.netrc_refused.items) |h| {
+        for (shared.netrc_refused.items) |h| {
             if (std.mem.eql(u8, h, host)) return null;
         }
         const user = if (parts.user) |u| try percentDecode(a, u) else null;
@@ -1315,31 +1320,32 @@ pub const Client = struct {
 
     /// Release everything, forgetting every credential.
     pub fn deinit(c: *Client, io: Io) void {
-        for (c.credentials.items) |cred| {
+        const shared = c.shared.teardown();
+        for (shared.credentials.items) |cred| {
             cred.session.deinit();
             c.gpa.destroy(cred);
         }
-        c.credentials.deinit(c.gpa);
-        if (c.netrc) |*n| n.deinit();
-        c.netrc_refused.deinit(c.gpa);
-        var passphrases = c.key_passphrases.valueIterator();
+        shared.credentials.deinit(c.gpa);
+        if (shared.netrc) |*n| n.deinit();
+        shared.netrc_refused.deinit(c.gpa);
+        var passphrases = shared.key_passphrases.valueIterator();
         while (passphrases.next()) |p| p.deinit();
-        c.access.deinit(c.gpa);
-        c.learned.deinit(c.gpa);
-        for (&c.ssh_transfers) |*slot| switch (slot.*) {
+        shared.access.deinit(c.gpa);
+        shared.learned.deinit(c.gpa);
+        for (&shared.ssh_transfers) |*slot| switch (slot.*) {
             .open => |t| t.deinit(io),
             else => {},
         };
-        c.ssh_failure.deinit(c.gpa);
+        shared.ssh_failure.deinit(c.gpa);
         // Only HTTP makes transports.
         if (comptime http_enabled) c.freeTransports(io);
-        c.arena.deinit();
+        shared.arena.deinit();
         c.* = undefined;
     }
 
     /// Close the HTTP clients `transportFor` made.
     fn freeTransports(c: *Client, io: Io) void {
-        const handle = c.transports orelse return;
+        const handle = c.transports.teardown().* orelse return;
         const pool: *TransportPool = @ptrCast(@alignCast(handle)); // safe: transportFor installs a TransportPool
         for (pool.items.items) |t| {
             t.client.deinit(io);
@@ -1349,17 +1355,22 @@ pub const Client = struct {
         c.gpa.destroy(pool);
     }
 
-    /// What the server or the program last said about a failure.
-    pub fn message(c: *const Client) []const u8 {
-        return c.message_buf[0..c.message_len];
+    /// What the server or the program last said about a failure, copied
+    /// with `out`.
+    pub fn message(c: *Client, io: Io, out: Allocator) Allocator.Error![]u8 {
+        var guard = c.said.acquireUncancelable(io);
+        defer guard.deinit(io);
+        const said = guard.value();
+        return out.dupe(u8, said.buf[0..said.len]);
     }
 
     /// Keep `text` as what `message` says.
     pub fn setMessage(c: *Client, io: Io, text: []const u8) void {
-        c.message_mutex.lockUncancelable(io);
-        defer c.message_mutex.unlock(io);
-        c.message_len = @min(text.len, c.message_buf.len);
-        @memcpy(c.message_buf[0..c.message_len], text[0..c.message_len]);
+        var guard = c.said.acquireUncancelable(io);
+        defer guard.deinit(io);
+        const said = guard.value();
+        said.len = @min(text.len, said.buf.len);
+        @memcpy(said.buf[0..said.len], text[0..said.len]);
     }
 
     fn fail(c: *Client, comptime fmt: []const u8, io: Io, args: anytype, err: ErrorNamespace.Error) ErrorNamespace.Error {
@@ -1376,14 +1387,20 @@ pub const Client = struct {
     pub fn remember(c: *Client, io: Io, repo: *repo_mod.Repository) repo_mod.Repository.WriteConfigError!void {
         var edits: std.ArrayList(repo_mod.Repository.ConfigEdit) = .empty;
         defer edits.deinit(c.gpa);
-        for (c.learned.items) |l| {
-            // Only git-lfs's own settings are learned: nothing a server
-            // says reaches the repository's format or its other policy.
-            assert(std.mem.startsWith(u8, l.key, "lfs."));
-            if (repo.configuration().get(l.key)) |existing| {
-                if (std.mem.eql(u8, existing, l.value)) continue;
+        {
+            // What was learned lives in the arena until `deinit`: the edits
+            // borrow it after the lock is given back.
+            var guard = c.shared.acquireUncancelable(io);
+            defer guard.deinit(io);
+            for (guard.value().learned.items) |l| {
+                // Only git-lfs's own settings are learned: nothing a server
+                // says reaches the repository's format or its other policy.
+                assert(std.mem.startsWith(u8, l.key, "lfs."));
+                if (repo.configuration().get(l.key)) |existing| {
+                    if (std.mem.eql(u8, existing, l.value)) continue;
+                }
+                try edits.append(c.gpa, .{ .set = .{ .name = l.key, .value = l.value } });
             }
-            try edits.append(c.gpa, .{ .set = .{ .name = l.key, .value = l.value } });
         }
         if (edits.items.len != 0) _ = try repo.writeConfig(io, .local, edits.items, .{});
     }
@@ -1405,50 +1422,52 @@ pub const Client = struct {
 
     /// The endpoint for `operation`, found once.
     pub fn endpoint(c: *Client, io: Io, operation: Operation) Self.Error!Endpoint {
-        try c.mutex.lock(io);
-        defer c.mutex.unlock(io);
-        return c.endpointLocked(operation);
+        var guard = try c.shared.acquire(io);
+        defer guard.deinit(io);
+        const shared = guard.value();
+        return c.endpointLocked(shared, operation);
     }
 
-    fn endpointLocked(c: *Client, operation: Operation) ErrorNamespace.Error!Endpoint {
+    fn endpointLocked(c: *Client, shared: *Shared, operation: Operation) ErrorNamespace.Error!Endpoint {
         const i = @backingInt(operation);
-        if (c.endpoints[i]) |e| return e;
-        const e = try findEndpoint(c.arena.allocator(), c.settings, c.remote, operation, c.where);
-        c.endpoints[i] = e;
+        if (shared.endpoints[i]) |e| return e;
+        const e = try findEndpoint(shared.arena.allocator(), c.settings, c.remote, operation, c.where);
+        shared.endpoints[i] = e;
         return e;
     }
 
     /// The API's URL for `operation`, from `git-lfs-authenticate` when the
     /// remote is an ssh one, and the headers that go with it.
     pub fn apiBase(c: *Client, io: Io, operation: Operation) Self.Error!struct { url: []const u8, headers: []const http.Header } {
-        try c.mutex.lock(io);
-        defer c.mutex.unlock(io);
-        const e = try c.endpointLocked(operation);
-        const auth = try c.sshAuthLocked(io, e, operation);
+        var guard = try c.shared.acquire(io);
+        defer guard.deinit(io);
+        const shared = guard.value();
+        const e = try c.endpointLocked(shared, operation);
+        const auth = try c.sshAuthLocked(shared, io, e, operation);
         return .{ .url = auth.href orelse e.url, .headers = auth.headers };
     }
 
-    fn sshAuthLocked(c: *Client, io: Io, e: Endpoint, operation: Operation) ErrorNamespace.Error!SshAuth {
+    fn sshAuthLocked(c: *Client, shared: *Shared, io: Io, e: Endpoint, operation: Operation) ErrorNamespace.Error!SshAuth {
         const i = @backingInt(operation);
-        if (c.ssh_auth[i]) |a| {
+        if (shared.ssh_auth[i]) |a| {
             // git-lfs keeps an answer until it is five seconds from expiring.
             const now = c.options.now orelse return a;
             if (!a.expiredAt(now)) return a;
-            c.ssh_auth[i] = null;
+            shared.ssh_auth[i] = null;
         }
         const ssh = e.ssh orelse {
-            c.ssh_auth[i] = .{};
+            shared.ssh_auth[i] = .{};
             return .{};
         };
-        const arena = c.arena.allocator();
+        const arena = shared.arena.allocator();
         if (try c.settings.urlGet(arena, "lfs", e.original, "sshtransfer")) |mode| {
             // git-lfs runs git-lfs-authenticate only for `negotiate` and
             // `never`; `always` is the pure-ssh protocol or nothing.
             if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "never")) {
                 return c.fail("git-lfs-authenticate has been disabled by request (lfs.sshtransfer={s}){s}{s}", io, .{
                     mode,
-                    if (c.ssh_failure.items.len != 0) ": " else "",
-                    c.ssh_failure.items,
+                    if (shared.ssh_failure.items.len != 0) ": " else "",
+                    shared.ssh_failure.items,
                 }, error.LfsAuthenticateDisabled);
             }
         }
@@ -1464,7 +1483,7 @@ pub const Client = struct {
                 if (auth.expires_in == 0 and auth.expires_at.isZero()) {
                     auth.expires_in = @max(0, c.settings.getInt("lfs.defaulttokenttl", 0));
                 }
-                c.ssh_auth[i] = auth;
+                shared.ssh_auth[i] = auth;
                 return auth;
             }
             const said = std.mem.trim(u8, outcome.stderr, " \t\r\n");
@@ -1482,7 +1501,7 @@ pub const Client = struct {
             if (missing) {
                 // No git-lfs-authenticate on the server: the guessed
                 // endpoint, as the server discovery specification says.
-                c.ssh_auth[i] = .{};
+                shared.ssh_auth[i] = .{};
                 return .{};
             }
             if (attempt >= retries) {
@@ -1498,18 +1517,19 @@ pub const Client = struct {
     /// otherwise, and the API over HTTP is used, as git-lfs uses it. The
     /// answer is found once per operation.
     pub fn sshTransfer(c: *Client, io: Io, operation: Operation) Self.Error!?*lfsssh.Transfer {
-        try c.mutex.lock(io);
-        defer c.mutex.unlock(io);
+        var guard = try c.shared.acquire(io);
+        defer guard.deinit(io);
+        const shared = guard.value();
         const i = @backingInt(operation);
-        switch (c.ssh_transfers[i]) {
+        switch (shared.ssh_transfers[i]) {
             .open => |t| return t,
             .none => return null,
             .untried => {},
         }
-        c.ssh_transfers[i] = .none;
-        const e = try c.endpointLocked(operation);
+        shared.ssh_transfers[i] = .none;
+        const e = try c.endpointLocked(shared, operation);
         const ssh = e.ssh orelse return null;
-        const arena = c.arena.allocator();
+        const arena = shared.arena.allocator();
         if (try c.settings.urlGet(arena, "lfs", e.original, "sshtransfer")) |mode| {
             if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "always")) return null;
         }
@@ -1527,7 +1547,7 @@ pub const Client = struct {
                 rest = try sshInvocation(arena, programs.environ, c.settings, .{ .ssh = ssh, .remote_command = remote }, .{ .multiplex = .{ .master = false, .control_path = path } });
             }
         }
-        const t = lfsssh.Transfer.open(c.gpa, io, programs, .{ .first = first, .rest = rest, .control_dir = control_dir, .failure = &c.ssh_failure }) catch |err| switch (err) {
+        const t = lfsssh.Transfer.open(c.gpa, io, programs, .{ .first = first, .rest = rest, .control_dir = control_dir, .failure = &shared.ssh_failure }) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => |e2| return e2,
             else => {
                 // Not there, or not speaking it: git-lfs-authenticate and
@@ -1537,32 +1557,32 @@ pub const Client = struct {
                 return null;
             },
         };
-        c.ssh_transfers[i] = .{ .open = t };
+        shared.ssh_transfers[i] = .{ .open = t };
         return t;
     }
 
     /// Forget `git-lfs-authenticate`'s answer, so the next request asks
     /// again: what a refused token calls for.
-    fn dropSshAuth(c: *Client, operation: Operation) void {
-        c.ssh_auth[@backingInt(operation)] = null;
+    fn dropSshAuth(shared: *Shared, operation: Operation) void {
+        shared.ssh_auth[@backingInt(operation)] = null;
     }
 
-    fn accessFor(c: *Client, url: []const u8) ErrorNamespace.Error!Access {
-        const plain = try stripUserinfo(c.arena.allocator(), url);
-        for (c.access.items) |entry| {
+    fn accessFor(c: *Client, shared: *Shared, url: []const u8) ErrorNamespace.Error!Access {
+        const plain = try stripUserinfo(shared.arena.allocator(), url);
+        for (shared.access.items) |entry| {
             if (std.mem.startsWith(u8, plain, entry.url)) return entry.mode;
         }
-        const mode = (try c.settings.urlGet(c.arena.allocator(), "lfs", plain, "access")) orelse return .none;
+        const mode = (try c.settings.urlGet(shared.arena.allocator(), "lfs", plain, "access")) orelse return .none;
         if (std.ascii.eqlIgnoreCase(mode, "basic") or std.ascii.eqlIgnoreCase(mode, "private")) return .basic;
         if (std.ascii.eqlIgnoreCase(mode, "none") or mode.len == 0) return .none;
         return error.LfsAccessUnsupported;
     }
 
-    fn setAccess(c: *Client, url: []const u8, mode: Access) ErrorNamespace.Error!void {
-        const arena = c.arena.allocator();
+    fn setAccess(c: *Client, shared: *Shared, url: []const u8, mode: Access) ErrorNamespace.Error!void {
+        const arena = shared.arena.allocator();
         const plain = try arena.dupe(u8, try stripUserinfo(arena, url));
-        try c.access.insert(c.gpa, 0, .{ .url = plain, .mode = mode });
-        try c.learned.append(c.gpa, .{
+        try shared.access.insert(c.gpa, 0, .{ .url = plain, .mode = mode });
+        try shared.learned.append(c.gpa, .{
             .key = try arena.print("lfs.{s}.access", .{plain}),
             .value = @tagName(mode),
         });
@@ -1571,10 +1591,11 @@ pub const Client = struct {
     /// Record that the server has no locking API, under
     /// `lfs.<url>.locksverify`, as git-lfs records it.
     pub fn learnLocksVerify(c: *Client, io: Io, url: []const u8, value: bool) Self.Error!void {
-        try c.mutex.lock(io);
-        defer c.mutex.unlock(io);
-        const arena = c.arena.allocator();
-        try c.learned.append(c.gpa, .{
+        var guard = try c.shared.acquire(io);
+        defer guard.deinit(io);
+        const shared = guard.value();
+        const arena = shared.arena.allocator();
+        try shared.learned.append(c.gpa, .{
             .key = try arena.print("lfs.{s}.locksverify", .{try stripUserinfo(arena, url)}),
             .value = if (value) "true" else "false",
         });
@@ -1585,9 +1606,9 @@ pub const Client = struct {
     /// API, else the remote's own URL when that is on the API's host, else
     /// the API's. `null` when a URL carries a password, which is then the
     /// credential, borrowed from the URL.
-    fn credentialUrl(c: *Client, request_url: []const u8, operation: Operation) ErrorNamespace.Error!struct { url: ?[]const u8, inline_auth: ?Userinfo = null } {
-        const arena = c.arena.allocator();
-        const e = try c.endpointLocked(operation);
+    fn credentialUrl(c: *Client, shared: *Shared, request_url: []const u8, operation: Operation) ErrorNamespace.Error!struct { url: ?[]const u8, inline_auth: ?Userinfo = null } {
+        const arena = shared.arena.allocator();
+        const e = try c.endpointLocked(shared, operation);
         const api_url = UrlParts.parse(e.url) orelse return .{ .url = request_url };
         const req = UrlParts.parse(request_url) orelse return .{ .url = request_url };
         if (!std.mem.eql(u8, req.scheme, api_url.scheme) or !std.mem.eql(u8, req.authority, api_url.authority)) {
@@ -1605,22 +1626,22 @@ pub const Client = struct {
         return .{ .url = e.url };
     }
 
-    fn credentialFor(c: *Client, url: []const u8) ErrorNamespace.Error!*Cred {
+    fn credentialFor(c: *Client, shared: *Shared, url: []const u8) ErrorNamespace.Error!*Cred {
         // One credential per URL for the operation, which is git-lfs's
         // in-memory cache: a helper is asked once, however many requests
         // follow.
         const key = credentialKey(url);
-        for (c.credentials.items) |cred| {
+        for (shared.credentials.items) |cred| {
             if (std.mem.eql(u8, credentialKey(cred.url), key)) return cred;
         }
-        const arena = c.arena.allocator();
+        const arena = shared.arena.allocator();
         const owned_url = try arena.dupe(u8, url);
         const parsed = url_mod.Url.parse(owned_url) catch return error.MalformedUrl;
         const parts = try c.credentialParts(arena, owned_url);
         const cred = try c.gpa.create(Cred);
         errdefer c.gpa.destroy(cred);
         cred.* = .{ .url = owned_url, .session = .forParts(c.gpa, parsed, parts) };
-        try c.credentials.append(c.gpa, cred);
+        try shared.credentials.append(c.gpa, cred);
         return cred;
     }
 
@@ -1729,9 +1750,10 @@ pub const Client = struct {
         while (true) {
             const access_url = request.access_url orelse url;
             var attempt: Attempt = blk: {
-                try c.mutex.lock(io);
-                defer c.mutex.unlock(io);
-                break :blk try c.authorize(scratch, io, url, access_url, operation, request.authenticated or has_auth, refusal);
+                var guard = try c.shared.acquire(io);
+                defer guard.deinit(io);
+                const shared = guard.value();
+                break :blk try c.authorize(shared, scratch, io, url, access_url, operation, request.authenticated or has_auth, refusal);
             };
             defer attempt.deinit();
 
@@ -1751,8 +1773,9 @@ pub const Client = struct {
                 continue;
             }
             if (status.class() == .success) if (attempt.cred) |cr| {
-                try c.mutex.lock(io);
-                defer c.mutex.unlock(io);
+                // The credential is the shared list's.
+                var guard = try c.shared.acquire(io);
+                defer guard.deinit(io);
                 if (!cr.approved) {
                     cr.approved = true;
                     try cr.session.setChallenges(&.{});
@@ -1837,9 +1860,10 @@ pub const Client = struct {
     /// none when the request carries its own (`carried`); under basic
     /// access a URL's own, else `.netrc`'s, else the helpers', told the
     /// last refusal's challenges; under none, only a password written in
-    /// the URL. Holds `c.mutex`.
+    /// the URL. Holds `c.shared`.
     fn authorize(
         c: *Client,
+        shared: *Shared,
         scratch: Allocator,
         io: Io,
         url: []const u8,
@@ -1848,7 +1872,7 @@ pub const Client = struct {
         carried: bool,
         refusal: Refusal,
     ) ErrorNamespace.Error!Attempt {
-        var attempt: Attempt = .{ .access = try c.accessFor(access_url) };
+        var attempt: Attempt = .{ .access = try c.accessFor(shared, access_url) };
         if (carried) return attempt;
         if (attempt.access != .basic) {
             // A password in the URL is sent whatever the access mode, as
@@ -1858,12 +1882,12 @@ pub const Client = struct {
             }
             return attempt;
         }
-        const found = try c.credentialUrl(url, operation);
+        const found = try c.credentialUrl(shared, url, operation);
         if (found.inline_auth) |u| {
             attempt.header = try basicHeader(c.gpa, u.user, u.password);
             return attempt;
         }
-        if (try c.netrcAuth(scratch, found.url.?)) |n| {
+        if (try c.netrcAuth(shared, scratch, found.url.?)) |n| {
             // `.netrc` comes before every helper, as in git-lfs, and what
             // it gives is not stored with them.
             attempt.header = n.header;
@@ -1871,7 +1895,7 @@ pub const Client = struct {
             return attempt;
         }
         const cred_url = found.url orelse return attempt;
-        const cr = try c.credentialFor(cred_url);
+        const cr = try c.credentialFor(shared, cred_url);
         if (cr.session.authorization() == null) {
             // The server's challenges go to the helpers as `wwwauth[]`,
             // unless git-lfs's `credential.<url>.skipwwwauth` says not.
@@ -1918,8 +1942,9 @@ pub const Client = struct {
         refusal.challenges = try ex.challenges(scratch);
         refusal.said = ex.refusalText(scratch, io);
         ex.deinit(io);
-        try c.mutex.lock(io);
-        defer c.mutex.unlock(io);
+        var guard = try c.shared.acquire(io);
+        defer guard.deinit(io);
+        const shared = guard.value();
         if (attempt.cred) |cr| {
             cr.approved = false;
             // git-lfs asks a helper that said `continue=1` again, and
@@ -1927,19 +1952,19 @@ pub const Client = struct {
             if (cr.session.multistage) cr.session.nextRound() else try cr.session.reject(io, c.credentialOptions());
         }
         if (attempt.netrc_host) |h| {
-            try c.netrc_refused.append(c.gpa, try c.arena.allocator().dupe(u8, h));
+            try shared.netrc_refused.append(c.gpa, try shared.arena.allocator().dupe(u8, h));
             return;
         }
         if (has_auth) {
             // A header the server itself handed over — an action's, or
             // git-lfs-authenticate's — that it no longer takes.
-            c.dropSshAuth(operation);
+            dropSshAuth(shared, operation);
             c.describeRefusal(.refused, 401, url, refusal.said, null);
             return c.fail("HTTP 401 from {s}", io, .{stripQuery(url)}, error.AuthenticationFailed);
         }
         if (attempt.access == .none) {
             if (!offers.basic and offers.other) return error.LfsAccessUnsupported;
-            try c.setAccess(access_url, .basic);
+            try c.setAccess(shared, access_url, .basic);
             return;
         }
         refusal.attempts += 1;
@@ -2151,14 +2176,15 @@ pub const Client = struct {
             decompress,
         });
 
-        try c.transport_mutex.lock(io);
-        defer c.transport_mutex.unlock(io);
-        if (c.transports == null) {
+        var guard = try c.transports.acquire(io);
+        defer guard.deinit(io);
+        const handle = guard.value();
+        if (handle.* == null) {
             const pool = try c.gpa.create(TransportPool);
             pool.* = .{};
-            c.transports = @ptrCast(pool); // safe: the opaque handle owns this TransportPool until deinit
+            handle.* = @ptrCast(pool); // safe: the opaque handle owns this TransportPool until deinit
         }
-        const pool: *TransportPool = @ptrCast(@alignCast(c.transports.?)); // safe: the handle above owns a TransportPool
+        const pool: *TransportPool = @ptrCast(@alignCast(handle.*.?)); // safe: the handle above owns a TransportPool
         for (pool.items.items) |t| {
             if (std.mem.eql(u8, t.key, key)) return &t.client;
         }
@@ -2259,15 +2285,16 @@ pub const Client = struct {
             };
         };
         if (session != null) if (passphrase) |p| {
-            c.mutex.lockUncancelable(io);
-            defer c.mutex.unlock(io);
-            const a = c.arena.allocator();
+            var guard = c.shared.acquireUncancelable(io);
+            defer guard.deinit(io);
+            const shared = guard.value();
+            const a = shared.arena.allocator();
             // A passphrase kept is never replaced, so one handed out stays.
-            if (!c.key_passphrases.contains(key_path)) {
+            if (!shared.key_passphrases.contains(key_path)) {
                 const key = try a.dupe(u8, key_path);
                 var kept = try secretCopy(c.gpa, p);
                 errdefer kept.deinit();
-                try c.key_passphrases.put(a, key, kept);
+                try shared.key_passphrases.put(a, key, kept);
             }
         };
         return auth;
@@ -2275,9 +2302,10 @@ pub const Client = struct {
 
     /// The passphrase that opened the key at `path` before, if one did.
     fn knownPassphrase(c: *Client, io: Io, path: []const u8) ?[]const u8 {
-        c.mutex.lockUncancelable(io);
-        defer c.mutex.unlock(io);
-        return if (c.key_passphrases.getPtr(path)) |p| p.expose() else null;
+        var guard = c.shared.acquireUncancelable(io);
+        defer guard.deinit(io);
+        const shared = guard.value();
+        return if (shared.key_passphrases.getPtr(path)) |p| p.expose() else null;
     }
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
@@ -2359,7 +2387,11 @@ pub const Client = struct {
             const base = try c.apiBase(io, operation);
             const e = try c.endpoint(io, operation);
             if (e.isLocal()) return c.fail("{s} is a repository on this machine and has no LFS API", io, .{e.url}, error.LfsEndpointUnknown);
-            const url = try joinUrl(c.arena.allocator(), base.url, suffix);
+            const url = blk: {
+                var guard = try c.shared.acquire(io);
+                defer guard.deinit(io);
+                break :blk try joinUrl(guard.value().arena.allocator(), base.url, suffix);
+            };
             const ex = c.send(io, .{
                 .method = method,
                 .url = url,
@@ -2389,8 +2421,8 @@ pub const Client = struct {
         const status = ex.status();
         const said = c.noteStatusText(io, ex, what);
         if (status == .forbidden) {
-            c.mutex.lockUncancelable(io);
-            defer c.mutex.unlock(io);
+            var guard = c.shared.acquireUncancelable(io);
+            defer guard.deinit(io);
             c.describeRefusal(.forbidden, 403, ex.url, said, null);
         }
         return if (status == .unauthorized or status == .forbidden) error.AuthenticationFailed else error.HttpStatus;
@@ -3145,7 +3177,7 @@ test "Retry-After is a number of seconds, or a date counted from the time the ca
 
 test "LFS proxy parsing preserves allocation resource failures" {
     var client: Client = undefined;
-    client.message_mutex = .init;
+    client.said = .init(.{});
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, client.useProxy(failing.allocator(), testing.io, "http://pro%78y:3128"));
 }
@@ -3154,8 +3186,7 @@ test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var client: Client = undefined;
-    client.message_mutex = .init;
-    client.message_len = 0;
+    client.said = .init(.{});
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         const text = try arena.allocator().print("{s}://us%65r:p%40ss@127.0.0.1", .{scheme});
         const proxy = try client.useProxy(arena.allocator(), testing.io, text);

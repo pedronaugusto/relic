@@ -481,23 +481,23 @@ test "a repository's stack is kept between reads and read again only when it cha
         const head = (try repo.head(io)).?;
         gpa.free(head.name);
     }
-    try std.testing.expectEqual(@as(u64, 0), cache.reloads);
+    try std.testing.expectEqual(@as(u64, 0), cache.reloads(io));
 
     // git adds a table, then compacts the stack away under the reader: the
     // next read sees both.
     try git.exec(io, &.{ "branch", "later" });
     try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/later") != null);
-    try std.testing.expectEqual(@as(u64, 1), cache.reloads);
+    try std.testing.expectEqual(@as(u64, 1), cache.reloads(io));
     try git.exec(io, &.{ "branch", "-D", "later" });
     try git.exec(io, &.{"pack-refs"});
     try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/later") == null);
     const main = (try repo.refStore().read(gpa, io, "refs/heads/main")).?;
     try std.testing.expect(main == .direct);
-    try std.testing.expect(cache.reloads >= 2);
-    const settled = cache.reloads;
+    try std.testing.expect(cache.reloads(io) >= 2);
+    const settled = cache.reloads(io);
     var listing = try repo.refStore().list(gpa, io, "refs/");
     defer listing.deinit();
-    try std.testing.expectEqual(settled, cache.reloads);
+    try std.testing.expectEqual(settled, cache.reloads(io));
 }
 
 test "a log entry goes into the stack, where git looks for it, and no file is written" {

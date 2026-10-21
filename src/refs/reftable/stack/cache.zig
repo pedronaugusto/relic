@@ -30,6 +30,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -365,19 +366,23 @@ fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) []const u8 {
 /// file, size and time means nothing changed; otherwise the list is read,
 /// and only when its text differs is the stack reloaded, keeping the tables
 /// it still names open. That is how git's stack decides to reload. The
-/// cache is behind a mutex, since a daemon reads from many tasks; a
+/// cache is behind a lock, since a daemon reads from many tasks; a
 /// transaction reads its own stacks under its lock and does not touch it.
 pub const Cache = struct {
     pub const Error = ErrorNamespace.Error;
 
     gpa: Allocator,
-    mutex: Io.Mutex = .init,
-    stacks: ?Stacks = null,
-    main_seen: ?Validity = null,
-    worktree_seen: ?Validity = null,
-    /// How many times a read found the stack changed and reloaded it, for
-    /// a caller or a test that wants to see the cache working.
-    reloads: u64 = 0,
+    held: aegis.BlockingGuarded(Held) = .init(.{}),
+
+    /// What the lock guards.
+    pub const Held = struct {
+        stacks: ?Stacks = null,
+        main_seen: ?Validity = null,
+        worktree_seen: ?Validity = null,
+        reloads: u64 = 0,
+    };
+
+    pub const Guard = aegis.BlockingGuarded(Held).Guard;
 
     /// An empty cache; nothing is read until the first lookup.
     pub fn init(gpa: Allocator) Cache {
@@ -386,38 +391,48 @@ pub const Cache = struct {
 
     /// Close every table and release the cache.
     pub fn deinit(c: *Cache) void {
-        if (c.stacks) |*st| st.deinit();
+        if (c.held.teardown().stacks) |*st| st.deinit();
         c.* = undefined;
     }
 
-    /// Bring the stacks up to date with the disk.
-    fn refresh(c: *Cache, io: Io, store: anytype) ErrorNamespace.Error!*const Stacks {
+    /// How many times a read found the stack changed and reloaded it, for
+    /// a caller or a test that wants to see the cache working.
+    pub fn reloads(c: *Cache, io: Io) u64 {
+        var guard = c.held.acquireUncancelable(io);
+        defer guard.deinit(io);
+        return guard.value().reloads;
+    }
+
+    /// Bring the stacks up to date with the disk, under the guard taken
+    /// from this cache.
+    fn refresh(c: *Cache, guard: *const Guard, io: Io, store: anytype) ErrorNamespace.Error!*const Stacks {
+        const h = guard.value();
         const main_now = try Validity.of(io, store.commonDir());
         const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir()) else null;
-        if (c.stacks) |*st| {
-            if (Validity.same(c.main_seen, main_now) and
-                (!isLinked(store) or Validity.same(c.worktree_seen, worktree_now)))
+        if (h.stacks) |*st| {
+            if (Validity.same(h.main_seen, main_now) and
+                (!isLinked(store) or Validity.same(h.worktree_seen, worktree_now)))
             {
                 return st;
             }
             // The stat moved; the list may not have. Reload only what did.
-            c.reloads += 1;
-            if (!Validity.same(c.main_seen, main_now)) {
+            h.reloads += 1;
+            if (!Validity.same(h.main_seen, main_now)) {
                 const fresh = try reloadIn(c.gpa, io, store.commonDir(), store.objectFormat(), &st.main);
                 st.main.arena.deinit();
                 st.main = fresh;
             }
-            if (isLinked(store) and !Validity.same(c.worktree_seen, worktree_now)) {
+            if (isLinked(store) and !Validity.same(h.worktree_seen, worktree_now)) {
                 const fresh = try reloadIn(c.gpa, io, store.gitDir(), store.objectFormat(), &st.worktree.?);
                 st.worktree.?.arena.deinit();
                 st.worktree = fresh;
             }
         } else {
-            c.stacks = try Stacks.open(c.gpa, io, store);
+            h.stacks = try Stacks.open(c.gpa, io, store);
         }
-        c.main_seen = main_now;
-        c.worktree_seen = worktree_now;
-        return &c.stacks.?;
+        h.main_seen = main_now;
+        h.worktree_seen = worktree_now;
+        return &h.stacks.?;
     }
 };
 
@@ -445,7 +460,7 @@ const Validity = struct {
     }
 };
 
-/// The stacks one read works on: the cache's, under its mutex, or a set
+/// The stacks one read works on: the cache's, under its lock, or a set
 /// read for this call when the store has no cache.
 /// The per-worktree stack and the shared one, for a store. In the main
 /// worktree they are one stack.
