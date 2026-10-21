@@ -695,3 +695,105 @@ test "core.multiPackIndex=false leaves the multi-pack index unread, as git's" {
     listed = try native.objectDatabase().listPacks(gpa, io, .own);
     for (listed) |p| try std.testing.expect(p.in_midx);
 }
+
+/// Two islands that share a base: `refs/virtual/1/` and `refs/virtual/2/`,
+/// each with its own version of one large file over the base's.
+fn islandFixture(repo: *testgit.Repo) !void {
+    var base: std.ArrayList(u8) = .empty;
+    defer base.deinit(gpa);
+    for (0..400) |i| try base.print(gpa, "line {d} of the shared text\n", .{i});
+    try repo.writeFile(io, "big.txt", base.items);
+    try commitAt(repo, testgit.fixture_date, "base");
+    for ([_][]const u8{ "1", "2" }) |island| {
+        try repo.exec(io, &.{ "checkout", "-q", "--detach", "HEAD" });
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        try text.appendSlice(gpa, base.items);
+        try text.print(gpa, "island {s}'s own line\n", .{island});
+        try repo.writeFile(io, "big.txt", text.items);
+        try commitAt(repo, testgit.fixture_date + 60, island);
+        var ref: [64]u8 = undefined;
+        try repo.exec(io, &.{ "update-ref", try std.mem.print(&ref, "refs/virtual/{s}/heads/main", .{island}), "HEAD" });
+        try repo.exec(io, &.{ "checkout", "-q", "main" });
+    }
+    try repo.exec(io, &.{ "config", "pack.island", "refs/virtual/([0-9]+)/" });
+}
+
+/// The deltas of the repository's packs whose base is in fewer of the
+/// islands than the object, each island's objects by `git rev-list`.
+fn crossIslandDeltas(repo: *testgit.Repo) !usize {
+    var marks: std.StringHashMapUnmanaged(u2) = .empty;
+    defer {
+        var keys = marks.keyIterator();
+        while (keys.next()) |k| gpa.free(k.*);
+        marks.deinit(gpa);
+    }
+    for ([_][]const u8{ "refs/virtual/1/heads/main", "refs/virtual/2/heads/main" }, 0..) |tip, island| {
+        const listed = try repo.run(io, &.{ "rev-list", "--objects", tip });
+        defer gpa.free(listed);
+        var lines = std.mem.splitScalar(u8, listed, '\n');
+        while (lines.next()) |line| {
+            if (line.len < 40) continue;
+            const slot = try marks.getOrPut(gpa, line[0..40]);
+            if (!slot.found_existing) {
+                slot.key_ptr.* = try gpa.dupe(u8, line[0..40]);
+                slot.value_ptr.* = 0;
+            }
+            slot.value_ptr.* |= @as(u2, 1) << @intCast(island);
+        }
+    }
+    var crossing: usize = 0;
+    var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var it = pack_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        var path_buf: [256]u8 = undefined;
+        const listing = try repo.run(io, &.{ "verify-pack", "-v", try std.mem.print(&path_buf, ".git/objects/pack/{s}", .{entry.name}) });
+        defer gpa.free(listing);
+        var lines = std.mem.splitScalar(u8, listing, '\n');
+        while (lines.next()) |line| {
+            var words = std.mem.tokenizeScalar(u8, line, ' ');
+            var fields: [8][]const u8 = undefined;
+            var n: usize = 0;
+            while (words.next()) |w| : (n += 1) if (n < fields.len) {
+                fields[n] = w;
+            };
+            if (n < 7 or fields[0].len != 40) continue;
+            const target = marks.get(fields[0]) orelse continue;
+            const base = marks.get(fields[6]) orelse 0;
+            if (target & ~base != 0) crossing += 1;
+        }
+    }
+    return crossing;
+}
+
+test "repack -i keeps every delta within its object's islands, as git's" {
+    for ([_]bool{ false, true }) |islands| {
+        var theirs = try testgit.Repo.init(gpa, io, &.{});
+        defer theirs.deinit();
+        var ours = try testgit.Repo.init(gpa, io, &.{});
+        defer ours.deinit();
+        try islandFixture(&theirs);
+        try islandFixture(&ours);
+        try theirs.exec(io, if (islands) &.{ "repack", "-q", "-a", "-d", "-f", "-i" } else &.{ "repack", "-q", "-a", "-d", "-f" });
+        var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+        defer native.deinit(io);
+        var pack_options = native.objectDatabase().packOptions();
+        pack_options.threads = 1;
+        pack_options.reuse_packed = false;
+        _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .delta_islands = islands, .pack = pack_options });
+        const theirs_crossing = try crossIslandDeltas(&theirs);
+        const ours_crossing = try crossIslandDeltas(&ours);
+        if (islands) {
+            try std.testing.expectEqual(@as(usize, 0), theirs_crossing);
+            try std.testing.expectEqual(@as(usize, 0), ours_crossing);
+        } else {
+            // Without islands each makes a delta across them, so the
+            // islands are what keeps them apart above.
+            try std.testing.expect(theirs_crossing != 0);
+            try std.testing.expect(ours_crossing != 0);
+        }
+        try ours.exec(io, &.{ "fsck", "--no-progress" });
+    }
+}

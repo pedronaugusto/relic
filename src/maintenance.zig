@@ -95,3 +95,5 @@ pub const MigrateError = @import("maintenance/migrate.zig").Error;
 pub const MigrateOptions = @import("maintenance/migrate.zig").Options;
 pub const MigrateOutcome = @import("maintenance/migrate.zig").Outcome;
 pub const migrateRefs = @import("maintenance/migrate.zig").migrate;
+pub const IslandsError = @import("maintenance/islands.zig").Error;
+pub const loadIslands = @import("maintenance/islands.zig").load;

@@ -5,6 +5,7 @@ pub const bitmap = @import("odb/bitmap.zig");
 pub const commit_graph = @import("odb/commit_graph.zig");
 pub const rev_index = @import("odb/rev_index.zig");
 pub const mtimes = @import("odb/mtimes.zig");
+pub const islands = @import("odb/islands.zig");
 pub const index_pack = @import("odb/index_pack.zig");
 pub const pack = @import("odb/pack.zig");
 pub const delta = @import("codec.zig").delta;

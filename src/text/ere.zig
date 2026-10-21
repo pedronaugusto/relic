@@ -183,6 +183,8 @@ pub const Regex = struct {
     /// The pattern itself, for one with a back-reference, which the
     /// program cannot match; `null` for the rest.
     tree: ?*const RNode = null,
+    /// The pattern itself, whatever it holds: what `findGroups` matches.
+    pattern: *const RNode,
     icase: bool = false,
     newline: bool = true,
     first_bytes: [4]u64 = @splat(std.math.maxInt(u64)),
@@ -202,14 +204,14 @@ pub const Regex = struct {
         if (p.at != text.len) return error.InvalidPattern;
         if (p.backrefs) {
             const program = try a.dupe(Inst, &.{.match});
-            return .{ .arena = arena, .program = program, .tree = tree, .icase = flags.icase, .newline = flags.newline };
+            return .{ .arena = arena, .program = program, .tree = tree, .pattern = tree, .icase = flags.icase, .newline = flags.newline };
         }
         var c: Compiler = .{ .a = a, .icase = flags.icase };
         try c.prog.ensureTotalCapacity(a, @min(text.len + 1, max_program));
         try c.emit(tree);
         try c.push(.match);
         const first = firstOf(tree);
-        return .{ .arena = arena, .program = c.prog.items, .newline = flags.newline, .first_bytes = if (flags.icase) @splat(std.math.maxInt(u64)) else first.bytes, .nullable = first.empty };
+        return .{ .arena = arena, .program = c.prog.items, .pattern = tree, .icase = flags.icase, .newline = flags.newline, .first_bytes = if (flags.icase) @splat(std.math.maxInt(u64)) else first.bytes, .nullable = first.empty };
     }
 
     pub fn deinit(r: *Regex) void {
@@ -238,6 +240,17 @@ pub const Regex = struct {
         return r.findWith(&vm, line, not_bol);
     }
 
+    /// The groups `regexec` reports: the leftmost-longest match in `line`,
+    /// or `null`, and in `groups` what each of the first fifteen groups took
+    /// on the way that made it, `null` for one that took no part.
+    pub fn findGroups(r: *const Regex, line: []const u8, groups: *[max_groups]?Match) FindWithError!?Match {
+        return Backtrack.findGroups(r.pattern, line, r.icase, r.newline, groups);
+    }
+
+    /// How many groups `findGroups` reports, the whole match at 0 among
+    /// them: git's sixteen `regmatch_t`.
+    pub const max_groups = 16;
+
     /// `find` with scratch space the caller keeps between calls.
     pub fn findWith(r: *const Regex, vm: *Vm, line: []const u8, not_bol: bool) FindWithError!?Match {
         if (r.tree) |tree| return Backtrack.find(tree, line, not_bol, r.icase, r.newline);
@@ -255,8 +268,10 @@ const Backtrack = struct {
     not_bol: bool,
     icase: bool,
     newline: bool,
-    /// What groups one to nine last took on the way being tried.
-    caps: [10]?Match = @splat(null),
+    /// What the groups last took on the way being tried, and on the way
+    /// that ended furthest.
+    caps: [Regex.max_groups]?Match = @splat(null),
+    best: [Regex.max_groups]?Match = @splat(null),
     end: ?usize = null,
     steps: usize = 0,
     depth: usize = 0,
@@ -286,6 +301,23 @@ const Backtrack = struct {
             b.step(tree, start, null);
             if (b.over) return error.PatternTooComplex;
             if (b.end) |end| return .{ .start = start, .end = end };
+        }
+        return null;
+    }
+
+    fn findGroups(tree: *const RNode, line: []const u8, icase: bool, newline: bool, groups: *[Regex.max_groups]?Match) Regex.FindWithError!?Match {
+        var b: Backtrack = .{ .line = line, .not_bol = false, .icase = icase, .newline = newline };
+        var start: usize = 0;
+        while (start <= line.len) : (start += 1) {
+            b.end = null;
+            b.caps = @splat(null);
+            b.step(tree, start, null);
+            if (b.over) return error.PatternTooComplex;
+            if (b.end) |end| {
+                groups.* = b.best;
+                groups[0] = .{ .start = start, .end = end };
+                return groups[0];
+            }
         }
         return null;
     }
@@ -345,7 +377,10 @@ const Backtrack = struct {
 
     fn cont(b: *Backtrack, at: usize, k: ?*const Cont) void {
         const c = k orelse {
-            if (b.end == null or at > b.end.?) b.end = at;
+            if (b.end == null or at > b.end.?) {
+                b.end = at;
+                b.best = b.caps;
+            }
             return;
         };
         switch (c.item) {
@@ -1366,4 +1401,17 @@ test "patterns compile or are refused as git's compat/regex reads them" {
             try testing.expect(!case[2]);
         }
     }
+}
+
+test "findGroups reports what each group took, null for one that took no part, as regexec does" {
+    var r = try Regex.compile(testing.allocator, "^refs/virtual/([0-9]+)/(heads|tags)/(x)?", .{ .newline = false });
+    defer r.deinit();
+    var groups: [Regex.max_groups]?Match = undefined;
+    const line = "refs/virtual/12/heads/main";
+    const whole = (try r.findGroups(line, &groups)).?;
+    try testing.expectEqualStrings("refs/virtual/12/heads/", line[whole.start..whole.end]);
+    try testing.expectEqualStrings("12", line[groups[1].?.start..groups[1].?.end]);
+    try testing.expectEqualStrings("heads", line[groups[2].?.start..groups[2].?.end]);
+    try testing.expectEqual(@as(?Match, null), groups[3]);
+    try testing.expectEqual(@as(?Match, null), try r.findGroups("refs/heads/main", &groups));
 }

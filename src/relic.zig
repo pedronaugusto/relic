@@ -25,6 +25,7 @@
 //! | `odb.commit_graph.bloom` | Module within `odb.commit_graph`. |
 //! | `odb.rev_index` | Module within `odb`. |
 //! | `odb.mtimes` | Module within `odb`. |
+//! | `odb.islands` | Delta islands, the pack writer's side: which islands each object is in, and whether one may be a delta of another. |
 //! | `odb.index_pack` | Module within `odb`. |
 //! | `odb.pack` | Module within `odb`. |
 //! | `odb.delta` | Module within `odb`. |

@@ -25,6 +25,8 @@ const gc = @import("gc.zig");
 const reach = @import("reach.zig");
 const ops = @import("maintenance.zig");
 const server_info = @import("server_info.zig");
+const islands_mod = @import("islands.zig");
+const islands_odb = @import("../odb/islands.zig");
 const Repository = repo_mod.Repository;
 const Odb = odb_mod.Odb;
 
@@ -92,6 +94,10 @@ pub const Options = struct {
     /// which carries the bitmap `write_bitmaps` asks for in place of a
     /// pack's.
     write_midx: bool = false,
+    /// `-i`, `--delta-islands`; `null` takes `repack.useDeltaIslands`: no
+    /// object of the new pack a delta of one in fewer of the islands
+    /// `pack.island` describes (`maintenance/islands.zig`).
+    delta_islands: ?bool = null,
     /// `-n` is `false`; `null` takes `repack.updateServerInfo`, true.
     update_server_info: ?bool = null,
     /// How each pack is built. `repack.cruftWindow`, `cruftDepth` and
@@ -121,7 +127,7 @@ pub const Report = struct {
 };
 
 /// Failures of `repack`.
-pub const Error = reach.Error || ops.BitmapError || ops.MidxError || Repository.WriteShallowError || server_info.Error || error{
+pub const Error = reach.Error || ops.BitmapError || ops.MidxError || islands_mod.Error || Repository.WriteShallowError || server_info.Error || error{
     /// `-d` in a repository with `extensions.preciousObjects`: git refuses.
     PreciousObjects,
     /// Two of `-A` (or `--unpack-unreachable`), `-k` and `--cruft`, or
@@ -167,6 +173,8 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     // `pack.writeReverseIndex`, as pack-objects reads it.
     pack_options.reverse_index = pack_options.reverse_index or rev_index.wanted(config);
 
+    var islands: ?islands_odb.Islands = if (options.delta_islands orelse try config.getBool("repack.usedeltaislands", false)) try islands_mod.load(gpa, io, repo) else null;
+    defer if (islands) |*i| i.deinit();
     try db.refresh(io);
     const pack_dir = try db.openPackDirectory(io);
     defer pack_dir.close(io);
@@ -179,12 +187,15 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
         .options = options,
         .mode = mode,
         .pack_options = pack_options,
+        .main_options = pack_options,
         .pack_kept = options.pack_kept_objects orelse try lastBool(config, &.{"repack.packkeptobjects"}) orelse (bitmaps == true and !options.write_midx),
         .max_pack = if (options.max_pack_bytes orelse try sizeSetting(config, "pack.packsizelimit")) |limit| @max(limit, 1 << 20) else null,
         .pack_dir = pack_dir,
         .existing = try collectExisting(gpa, arena, io, db, options.keep_packs),
     };
     defer run.deinit();
+    // `--delta-islands` goes to the pack of what is reachable alone.
+    if (islands) |*i| run.main_options.islands = i;
     for (run.existing.promisor.items) |name| try addPackObjects(gpa, db, name, &run.promised);
     for (run.existing.kept.items) |name| try addPackObjects(gpa, db, name, &run.kept_objects);
 
@@ -228,6 +239,8 @@ const Run = struct {
     options: Options,
     mode: Mode,
     pack_options: odb_mod.PackOptions,
+    /// The reachable objects' pack's: `pack_options` with the islands.
+    main_options: odb_mod.PackOptions,
     pack_kept: bool,
     max_pack: ?u64,
     pack_dir: Io.Dir,
@@ -308,7 +321,7 @@ const Run = struct {
             }
         }
         if (entries.items.len == 0) return null;
-        const reports = try writeLimited(db, run.io, run.pack_dir, entries.items, run.pack_options, run.max_pack);
+        const reports = try writeLimited(db, run.io, run.pack_dir, entries.items, run.main_options, run.max_pack);
         defer db.allocator().free(reports);
         for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
         run.report.packs_written += @intCast(reports.len);
@@ -356,7 +369,7 @@ const Run = struct {
         }
         const entries = try run.rollUp(g.packs, g.split, true);
         if (entries.len == 0) return null;
-        const reports = try writeLimited(run.db, run.io, run.pack_dir, entries, run.pack_options, run.max_pack);
+        const reports = try writeLimited(run.db, run.io, run.pack_dir, entries, run.main_options, run.max_pack);
         defer run.db.allocator().free(reports);
         for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
         run.report.packs_written += @intCast(reports.len);

@@ -17,6 +17,7 @@ const delta = @import("../codec.zig").delta;
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
 const policy_mod = @import("policy.zig");
+const islands_mod = @import("islands.zig");
 const indexpack_mod = @import("index_pack.zig");
 const aegis = @import("aegis");
 const shakedown = @import("shakedown");
@@ -2355,6 +2356,7 @@ pub const Odb = struct {
                 .ofs_delta => |back| order.nameAt(at.pack, at.offset -| back) orelse continue,
             };
             if (options.delta == .none or item.size >= options.big_file_bytes) continue;
+            if (options.islands) |islands| if (!islands.allows(item.oid, base_oid)) continue;
             const base = positions.get(base_oid) orelse continue;
             if (base >= pos) continue;
             const length = (if (reuse.reused[base] != null) chain[base] else 0) + 1;
@@ -3593,6 +3595,10 @@ pub const PackOptions = struct {
     mtimes: ?*const Oid.Map(u32) = null,
     /// `pack.indexVersion`: `pack.WriteOptions.index_version`.
     index_version: u2 = 2,
+    /// `pack-objects --delta-islands`: no object written as a delta of one
+    /// in fewer islands; a stored delta that would be is written again.
+    /// Borrowed for the write.
+    islands: ?*const islands_mod.Islands = null,
     /// The files' names before `-<name>`: `pack.WriteOptions.prefix`. The
     /// database finds a pack by any name; what it reports and removes by
     /// name assumes `pack`.
@@ -3731,6 +3737,7 @@ fn runTasks(
 const WindowSlot = struct {
     /// Where the object is in pack order, which says where it was written.
     pos: usize,
+    oid: Oid,
     type: object.Type,
     bytes: []u8,
     depth: u32,
@@ -3787,11 +3794,12 @@ const Window = struct {
         pack_options: PackOptions,
         max_depth: u32,
         raw_len: usize,
-        pos: usize,
+        at: struct { pos: usize, oid: Oid },
         t: object.Type,
         bytes: []u8,
         keep_retired: bool,
     ) Error!Build.Choice {
+        const pos = at.pos;
         var options = pack_options;
         options.depth = max_depth;
         const deltifiable = options.delta != .none and options.window != 0 and
@@ -3804,7 +3812,7 @@ const Window = struct {
             // the first must beat the one before it.
             var limit: usize = bytes.len / 2;
             if (limit > raw_len) limit -= raw_len else limit = 0;
-            if (try findDelta(gpa, w.slots.items, t, bytes, options, limit, &w.scratch)) |chosen| {
+            if (try findDelta(gpa, w.slots.items, .{ .type = t, .oid = at.oid, .bytes = bytes }, options, limit, &w.scratch)) |chosen| {
                 const slot = w.slots.items[chosen.slot];
                 depth = slot.depth + 1;
                 choice = .{ .base = slot.pos, .delta = chosen.bytes };
@@ -3812,7 +3820,7 @@ const Window = struct {
             errdefer if (choice.delta) |d| gpa.free(d);
             try w.slots.ensureUnusedCapacity(gpa, 1);
             if (keep_retired) try w.retired.ensureUnusedCapacity(gpa, w.slots.items.len + 1);
-            w.slots.appendAssumeCapacity(.{ .pos = pos, .type = t, .bytes = bytes, .depth = depth, .encoder = null });
+            w.slots.appendAssumeCapacity(.{ .pos = pos, .oid = at.oid, .type = t, .bytes = bytes, .depth = depth, .encoder = null });
             choice.kept = true;
             w.bytes += bytes.len;
             // The oldest go first, by count and then by weight, so the
@@ -3946,7 +3954,7 @@ const Build = struct {
     /// Choose how object `pos`, whose bytes are `bytes`, is written: the
     /// serial writer's `Window.choose`.
     fn choose(b: *Build, pos: usize, t: object.Type, bytes: []u8) Error!Choice {
-        return b.window.choose(b.gpa, b.options, b.depthFor(pos), b.odb.backendData().kind.rawLen(), pos, t, bytes, false);
+        return b.window.choose(b.gpa, b.options, b.depthFor(pos), b.odb.backendData().kind.rawLen(), .{ .pos = pos, .oid = b.ordered[pos].oid }, t, bytes, false);
     }
 
     /// How deep a delta the search may make object `pos`.
@@ -4248,7 +4256,7 @@ const Build = struct {
         for (part.start..part.end) |pos| {
             if (b.reusedAt(pos) != null) continue;
             const p = &batch.pending.items[pos - batch.start];
-            p.choice = try part.window.choose(gpa, b.options, b.depthFor(pos), raw_len, pos, p.type, p.bytes.?, true);
+            p.choice = try part.window.choose(gpa, b.options, b.depthFor(pos), raw_len, .{ .pos = pos, .oid = b.ordered[pos].oid }, p.type, p.bytes.?, true);
         }
     }
 
@@ -4481,12 +4489,13 @@ const ChosenDelta = struct { slot: usize, bytes: []u8 };
 fn findDelta(
     gpa: Allocator,
     window: []WindowSlot,
-    object_type: object.Type,
-    target: []const u8,
+    of: struct { type: object.Type, oid: Oid, bytes: []const u8 },
     options: PackOptions,
     initial_limit: usize,
     scratch: *[2]std.ArrayList(u8),
 ) Error!?ChosenDelta {
+    const object_type = of.type;
+    const target = of.bytes;
     var chosen: ?ChosenDelta = null;
     var at = window.len;
     while (at != 0) {
@@ -4495,6 +4504,7 @@ fn findDelta(
         // Types are contiguous in pack order, so the first mismatch also
         // means every older window entry is the wrong type.
         if (slot.type != object_type) break;
+        if (options.islands) |islands| if (!islands.allows(of.oid, slot.oid)) continue;
         const limit = deltaCandidateLimit(initial_limit, options.depth, slot.depth, chosen, window);
         if (!worthTryingDelta(slot, target.len, options.depth, limit)) continue;
         const encoder = try slot.getEncoder(gpa);
