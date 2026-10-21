@@ -119,7 +119,7 @@ fn converse(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, 
             else => return refuse(out, "'argument' token or flush expected", .{}),
         };
         const line = switch (packet) {
-            .data => |d| std.mem.trimEnd(u8, d, "\n"),
+            .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
             else => break,
         };
         if (args.items.len + 1 > max_args) return refuse(out, "Too many options (>{d})", .{max_args - 1});
@@ -406,7 +406,7 @@ pub fn fetch(gpa: Allocator, io: Io, request: Request, out: *Io.Writer, options:
     const in = try conn.response();
     const first = pkt_line.read(in) catch return error.ProtocolError;
     const line = switch (first) {
-        .data => |d| std.mem.trimEnd(u8, d, "\n"),
+        .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
         else => return error.ProtocolError,
     };
     if (!std.mem.eql(u8, line, "ACK")) {
