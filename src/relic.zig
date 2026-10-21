@@ -160,6 +160,7 @@
 //! | `patch.range_diff` | Module within `patch`. |
 //! | `grep` | Public concern. |
 //! | `archive` | Public concern. |
+//! | `archive.remote` | Module within `archive`. |
 //! | `pretty` | Public concern. |
 //! | `pretty.refs` | Module within `pretty`. |
 //! | `pretty.shortlog` | Module within `pretty`. |
