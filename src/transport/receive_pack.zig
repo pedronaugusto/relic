@@ -33,6 +33,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -124,7 +125,7 @@ const Settings = struct {
     advertise_push_options: bool,
     ofs_delta: bool,
     shallow_update: bool,
-    max_input_size: ?u64,
+    max_input_size: ?aegis.units.Bytes(u64),
     /// `receive.certNonceSeed`: the secret a push certificate's nonce is
     /// made with; with none, no certificate is asked for.
     cert_nonce_seed: ?[]const u8,
@@ -143,7 +144,7 @@ const Settings = struct {
             .advertise_push_options = config.getBool("receive.advertisepushoptions", false) catch false,
             .ofs_delta = config.getBool("repack.usedeltabaseoffset", true) catch true,
             .shallow_update = config.getBool("receive.shallowupdate", false) catch false,
-            .max_input_size = if (max > 0) @intCast(max) else null,
+            .max_input_size = if (max > 0) .fromRaw(@intCast(max)) else null,
             .cert_nonce_seed = config.get("receive.certnonceseed"),
             .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
         };

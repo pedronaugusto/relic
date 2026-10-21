@@ -29,6 +29,7 @@ const retention = @import("keep.zig");
 
 const std = @import("std");
 const aegis = @import("aegis");
+const Bytes = aegis.units.Bytes(u64);
 const shakedown = @import("shakedown");
 const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
@@ -126,9 +127,9 @@ pub const Options = struct {
     /// Where what the rules make warnings goes, as git prints them.
     warnings: ?*warning.Warnings = null,
     /// The most bytes the stream may carry, or `null` for no bound.
-    max_pack_bytes: ?u64 = null,
+    max_pack_bytes: ?Bytes = null,
     /// The largest object, or delta, held in memory.
-    max_object_bytes: u64 = 1 << 31,
+    max_object_bytes: Bytes = .literal("2GiB"),
     /// How deep a delta chain may go.
     max_delta_depth: u32 = pack.default_max_depth,
     /// `core.deltaBaseCacheLimit`: how many bytes of the bases along a
@@ -136,7 +137,7 @@ pub const Options = struct {
     /// go and rebuilt from the pack if another delta needs them, as git's
     /// index-pack prunes them, so a chain of large objects costs time and
     /// not its whole length in memory. git's default, 96 MiB.
-    delta_base_cache_limit: u64 = 96 << 20,
+    delta_base_cache_limit: Bytes = .literal("96MiB"),
     progress: ?Progress = null,
     /// Where the object behind a refusal is named, when the caller wants it.
     diagnostic: ?*Diagnostic = null,
@@ -633,7 +634,7 @@ const Tee = struct {
         try t.file.writePositionalAll(t.io, chunk, t.written);
         t.written += chunk.len;
         if (t.options.max_pack_bytes) |most| {
-            if (t.written > most) return error.PackTooLarge;
+            if (Bytes.fromRaw(t.written).compare(most) == .gt) return error.PackTooLarge;
         }
         const n = chunk.len;
         const held = t.tail_len + n;
@@ -747,6 +748,11 @@ const Indexer = struct {
 
     /// Fail with `err`, saying where for the caller that asked. With
     /// several threads the first failure is the one returned and said.
+    /// Whether an object of `size` bytes is past `Options.max_object_bytes`.
+    fn tooLarge(x: *const Indexer, size: u64) bool {
+        return Bytes.fromRaw(size).compare(x.options.max_object_bytes) == .gt;
+    }
+
     fn firstFailure(x: *Indexer) ?Error {
         var guard = x.shared.acquireUncancelable(x.io);
         defer guard.deinit(x.io);
@@ -812,7 +818,7 @@ const Indexer = struct {
                 .whole => try x.inflateWhole(&entry),
                 .ofs_delta, .ref_delta => {
                     x.deltas += 1;
-                    if (entry.size > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = offset });
+                    if (x.tooLarge(entry.size)) return x.fail(error.ObjectTooLarge, .{ .offset = offset });
                     try x.inflate(entry.size, .discard, null);
                 },
             }
@@ -925,7 +931,7 @@ const Indexer = struct {
             try x.inflate(entry.size, .{ .hash = &hasher }, null);
             entry.oid = hasher.final();
         } else {
-            if (entry.size > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+            if (x.tooLarge(entry.size)) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
             const bytes = try x.gpa.alloc(u8, @intCast(entry.size));
             defer x.gpa.free(bytes);
             try x.inflate(entry.size, .{ .buffer = bytes }, &hasher);
@@ -1013,7 +1019,7 @@ const Indexer = struct {
                 const finding = if (by_name.get(oid)) |at| blk: {
                     const entry = x.entries.items[at];
                     if (entry.type != .blob) break :blk try fsck.checkFoundObject(rules, oid, as, false, x.fsckSink());
-                    if (entry.size > x.options.max_object_bytes) break :blk try fsck.checkBlob(x.gpa, rules, .{ .oid = oid, .as = as, .bytes = null }, .{ .sink = x.fsckSink() });
+                    if (x.tooLarge(entry.size)) break :blk try fsck.checkBlob(x.gpa, rules, .{ .oid = oid, .as = as, .bytes = null }, .{ .sink = x.fsckSink() });
                     const bytes = try x.readBack(&w, at, by_name);
                     defer x.gpa.free(bytes);
                     break :blk try fsck.checkBlob(x.gpa, rules, .{ .oid = oid, .as = as, .bytes = bytes }, .{ .sink = x.fsckSink() });
@@ -1042,7 +1048,7 @@ const Indexer = struct {
             const header = try x.db.readHeader(x.io, entry.oid);
             const sized = entry.kind != .whole or header.size == entry.size;
             if (header.type != entry.type or !sized) return x.fail(error.HashCollision, .{ .oid = entry.oid, .offset = entry.offset });
-            if (header.size > x.options.max_object_bytes) continue;
+            if (x.tooLarge(header.size)) continue;
             if (w == null) {
                 w = try .init(x);
                 try by_name.ensureTotalCapacity(x.gpa, @intCast(x.entries.items.len));
@@ -1486,7 +1492,7 @@ const Worker = struct {
     fn load(w: *Worker, at: u32) Error![]u8 {
         const x = w.x;
         const entry = x.entries.items[at];
-        if (entry.size > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+        if (x.tooLarge(entry.size)) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
         const bytes = try x.gpa.alloc(u8, @intCast(entry.size));
         errdefer x.gpa.free(bytes);
         w.reader.seekTo(entry.data_at) catch |err| switch (err) {
@@ -1539,7 +1545,7 @@ const Worker = struct {
             const patch = try w.load(at);
             defer x.gpa.free(patch);
             const sizes = try delta.header(patch);
-            if (sizes.target > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+            if (x.tooLarge(sizes.target)) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
             const bytes = delta.apply(x.gpa, top.bytes, patch) catch |err| return x.fail(err, .{ .offset = entry.offset });
             var keep = false;
             defer if (!keep) x.gpa.free(bytes);
@@ -1575,7 +1581,7 @@ const Worker = struct {
     fn prune(w: *Worker, keep: usize) void {
         const x = w.x;
         for (w.stack.items, 0..) |*frame, i| {
-            if (w.held <= x.options.delta_base_cache_limit) return;
+            if (Bytes.fromRaw(w.held).compare(x.options.delta_base_cache_limit) != .gt) return;
             if (i == keep or frame.dropped or frame.at == null) continue;
             w.held -= frame.bytes.len;
             x.gpa.free(frame.bytes);
@@ -2288,7 +2294,7 @@ fn receiveChain(chain: usize, seed: u8) !usize {
 
     var in: Io.Reader = .fixed(bytes);
     var peak: Peak = .{ .child = gpa };
-    const result = try receive(peak.allocator(), io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .delta_base_cache_limit = 100 * 1024, .threads = 1 });
+    const result = try receive(peak.allocator(), io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .delta_base_cache_limit = .literal("100KiB"), .threads = 1 });
     try testing.expectEqual(@as(u32, @intCast(chain + 2)), result.objects);
     const expected = try gpa.alloc(u8, base_len + chain + "side".len);
     defer gpa.free(expected);

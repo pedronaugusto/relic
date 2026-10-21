@@ -13,6 +13,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -77,7 +78,7 @@ pub const Options = struct {
     /// `false`.
     notes: bool = true,
     /// `--max-memory`: the most the cost matrix may take, in bytes.
-    max_memory: usize = 4 << 30,
+    max_memory: aegis.units.Bytes(usize) = .fromRaw(4 << 30),
     /// Whether a pair's line is followed by the diff between its patches;
     /// `--no-patch` is `false`.
     patch: bool = true,
@@ -488,7 +489,7 @@ fn getCorrespondences(gpa: Allocator, old: []Patch, new: []Patch, options: Optio
     const n = old.len + new.len;
     const cells = std.math.mul(usize, n, n) catch return error.RangeDiffTooLarge;
     const bytes = std.math.mul(usize, cells, @sizeOf(i32)) catch return error.RangeDiffTooLarge;
-    if (bytes >= options.max_memory) return error.RangeDiffTooLarge;
+    if (aegis.units.Bytes(usize).fromRaw(bytes).compare(options.max_memory) != .lt) return error.RangeDiffTooLarge;
     const cost = try gpa.alloc(i32, cells);
     defer gpa.free(cost);
     const a2b = try gpa.alloc(i32, n);

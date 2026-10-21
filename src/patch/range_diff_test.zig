@@ -247,7 +247,7 @@ test "a cost matrix past the limit is refused, as git refuses it" {
     defer out.deinit();
     const old = try range(gpa, io, &git, "base", "old");
     const new = try range(gpa, io, &git, "base", "new");
-    try std.testing.expectError(error.RangeDiffTooLarge, range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .max_memory = 100 }));
+    try std.testing.expectError(error.RangeDiffTooLarge, range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .max_memory = .fromRaw(100) }));
     try std.testing.expectError(error.LeftAndRightOnly, range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .left_only = true, .right_only = true }));
 }
 
