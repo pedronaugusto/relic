@@ -23,6 +23,7 @@ pub const LogReadError = @import("refs/refs.zig").LogReadError;
 pub const WatchScope = @import("refs/refs.zig").WatchScope;
 pub const WatchScopes = @import("refs/refs.zig").WatchScopes;
 pub const Store = @import("refs/refs.zig").Store;
+pub const Locks = @import("refs/refs.zig").Locks;
 pub const RootRefs = @import("refs/refs.zig").RootRefs;
 pub const SpecialRefs = @import("refs/refs.zig").SpecialRefs;
 pub const CreateOptions = @import("refs/refs.zig").CreateOptions;

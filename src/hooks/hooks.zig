@@ -262,7 +262,13 @@ pub const Configured = struct {
     command: ?[]const u8,
     /// `hook.<name>.enabled = false`.
     disabled: bool,
+    /// `hook.<name>.parallel = true`: it may run beside the event's other
+    /// hooks. One that may not keeps the event's hooks to one at a time.
+    parallel: bool = false,
 };
+
+/// `hook.<event>.jobs`: how many of an event's hooks run at once.
+pub const EventJobs = struct { event: []const u8, jobs: u32 };
 
 /// Permission to run a repository's hooks, and where they are.
 ///
@@ -283,6 +289,12 @@ pub const Runner = struct {
     /// Events whose configured hooks `hook.<event>.enabled = false` turns
     /// off. A hook file for the event still runs, as it does in git.
     disabled_events: []const []const u8,
+    /// `hook.jobs`: how many of an event's hooks run at once, one unless
+    /// set (`-1`, as many as there are processors).
+    jobs: u32 = 1,
+    /// `hook.<event>.jobs`, which an event's own count overrides
+    /// `hook.jobs` with.
+    event_jobs: []const EventJobs = &.{},
     arena: std.heap.ArenaAllocator.State,
     /// What stopped the last operation `error.HookRejected` ended.
     failure: Failure = .{},
@@ -327,7 +339,8 @@ pub const Runner = struct {
         };
 
         var disabled_events: std.ArrayList([]const u8) = .empty;
-        const configured = try readConfigured(arena, place.config, &disabled_events);
+        var event_jobs: std.ArrayList(EventJobs) = .empty;
+        const configured = try readConfigured(arena, place.config, &disabled_events, &event_jobs);
 
         return .{
             .gpa = gpa,
@@ -337,6 +350,8 @@ pub const Runner = struct {
             .cwd = cwd,
             .configured = configured,
             .disabled_events = disabled_events.items,
+            .jobs = jobsOf(place.config.get("hook.jobs")) orelse 1,
+            .event_jobs = event_jobs.items,
             .arena = arena_instance.state,
         };
     }
@@ -359,8 +374,13 @@ pub const Runner = struct {
         /// Set on top of the environment, after git's own list is cleared.
         set: []const program.Var = &.{},
         /// Whether standard output goes where standard error goes. Every
-        /// hook's does except `pre-push`'s.
+        /// hook's does except `pre-push`'s; with more than one at once, as in
+        /// git, `pre-push`'s too.
         stdout_to_stderr: bool = true,
+        /// How many of the event's hooks run at once, over what the
+        /// configuration says: git's `run_hooks_opt.jobs`, which `1` keeps
+        /// to one at a time.
+        jobs: ?u32 = null,
     };
 
     /// Run every hook for `event`, in git's order: the configured ones,
@@ -377,6 +397,12 @@ pub const Runner = struct {
             if (std.mem.eql(u8, name, event)) break true;
         } else false;
 
+        // The event's hooks in git's order -- the configured ones, then the
+        // file -- and how many may run at once, as git's `get_hook_jobs`
+        // decides it.
+        var planned: std.ArrayList(Planned) = .empty;
+        defer planned.deinit(runner.gpa);
+        var jobs = request.jobs orelse runner.jobsFor(event);
         for (runner.configured) |hook| {
             if (!std.mem.eql(u8, hook.event, event)) continue;
             if (hook.disabled or event_disabled) continue;
@@ -384,29 +410,124 @@ pub const Runner = struct {
                 runner.refused = hook.name;
                 return error.HookCommandMissing;
             };
-            try runner.runOne(io, event, &ran, request, command, true);
+            if (request.jobs == null and !hook.parallel) jobs = 1;
+            try planned.append(runner.gpa, .{ .command = command, .shell = true });
         }
 
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var lfs_native = false;
         switch (try runner.findFile(io, event, &path_buf)) {
             .missing => {},
             .not_executable => ran.passed_over = true,
             .found => |path| {
-                if (runner.options.lfs) |lfs_hooks| {
-                    if (gitLfsHookFile(io, event, path)) {
-                        ran.count += 1;
-                        ran.lfs_native = true;
-                        if (!lfs_hooks.run(io, lfs_hooks.context, event, request.args, request.input) and ran.failure == null) {
-                            ran.failure = .init(event, .{ .exited = 1 });
-                        }
-                        return ran;
-                    }
-                }
-                try runner.runOne(io, event, &ran, request, path, false);
+                if (runner.options.lfs != null and gitLfsHookFile(io, event, path)) {
+                    lfs_native = true;
+                } else try planned.append(runner.gpa, .{ .command = path, .shell = false });
             },
+        }
+
+        if (jobs > 1 and planned.items.len > 1) {
+            try runner.runAtOnce(io, event, &ran, request, planned.items, jobs);
+        } else for (planned.items) |p| try runner.runOne(io, event, &ran, request, p.command, p.shell);
+
+        if (lfs_native) {
+            const lfs_hooks = runner.options.lfs.?;
+            ran.count += 1;
+            ran.lfs_native = true;
+            if (!lfs_hooks.run(io, lfs_hooks.context, event, request.args, request.input) and ran.failure == null) {
+                ran.failure = .init(event, .{ .exited = 1 });
+            }
         }
         return ran;
     }
+
+    /// One hook to run: its command line, or its file.
+    const Planned = struct { command: []const u8, shell: bool };
+
+    /// `hook.<event>.jobs`, else `hook.jobs`.
+    fn jobsFor(runner: *const Runner, event: []const u8) u32 {
+        for (runner.event_jobs) |e| if (std.mem.eql(u8, e.event, event)) return e.jobs;
+        return runner.jobs;
+    }
+
+    /// git's `run_processes_parallel` for an event's hooks: `jobs` of them
+    /// at once, each one's standard output and error kept as one stream
+    /// and given out whole in the order they started, so that none
+    /// interleaves another; a failure the first, in that order, that
+    /// failed. An `Io` with no concurrency runs them one after another.
+    fn runAtOnce(runner: *Runner, io: Io, event: []const u8, ran: *Ran, request: Request, planned: []const Planned, jobs: u32) ErrorNamespace.Error!void {
+        const gpa = runner.gpa;
+        const results = try gpa.alloc(AtOnce, planned.len);
+        defer {
+            for (results) |*r| if (r.outcome) |*o| o.deinit(gpa);
+            gpa.free(results);
+        }
+        @memset(results, .{});
+        var merged = request;
+        merged.stdout_to_stderr = true;
+        var work: AtOnceWork = .{ .runner = runner, .io = io, .request = merged, .planned = planned, .results = results };
+        var group: Io.Group = .init;
+        var spawned: usize = 1;
+        while (spawned < @min(jobs, planned.len)) : (spawned += 1) {
+            group.concurrent(io, AtOnceWork.run, .{&work}) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => break,
+            };
+        }
+        work.run();
+        group.await(io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr = Io.File.stderr().writer(io, &stderr_buf);
+        for (results) |*r| {
+            if (r.err) |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                if (!cannotStart(err)) return err;
+                ran.count += 1;
+                if (ran.failure == null) ran.failure = .init(event, null);
+                continue;
+            }
+            const outcome = &(r.outcome orelse continue);
+            ran.count += 1;
+            switch (runner.options.output) {
+                .capture => try runner.captured.appendSlice(gpa, outcome.stdout),
+                // glint-ignore: Z026 -- a hook's output that cannot reach this process's standard error is lost, as git's is
+                .inherit => stderr.interface.writeAll(outcome.stdout) catch {},
+                .ignore => {},
+            }
+            if (!outcome.succeeded() and ran.failure == null) ran.failure = .init(event, outcome.term);
+        }
+        // glint-ignore: Z026 -- as above: standard error that cannot be written to loses the output, not the hooks' result
+        stderr.interface.flush() catch {};
+    }
+
+    const AtOnce = struct { outcome: ?program.Outcome = null, err: ?program.Error = null };
+
+    /// What the tasks of `runAtOnce` share: each takes the next hook.
+    const AtOnceWork = struct {
+        runner: *Runner,
+        io: Io,
+        request: Request,
+        planned: []const Planned,
+        results: []AtOnce,
+        next: std.atomic.Value(usize) = .init(0),
+
+        fn run(w: *AtOnceWork) void {
+            while (true) {
+                const at = w.next.fetchAdd(1, .monotonic);
+                if (at >= w.planned.len) return;
+                w.results[at] = w.runCaptured(w.planned[at]) catch |err| .{ .err = err };
+            }
+        }
+
+        fn runCaptured(w: *AtOnceWork, p: Planned) program.Error!AtOnce {
+            const gpa = w.runner.gpa;
+            var prepared: Prepared = .{};
+            defer prepared.deinit(gpa);
+            const invocation = try w.runner.prepare(w.io, &prepared, w.request, p.command, p.shell, .capture);
+            return .{ .outcome = try program.run(gpa, w.io, w.runner.programs, invocation, .{ .input = w.request.input }) };
+        }
+    };
 
     /// Whether any hook would run for `event`.
     pub fn exists(runner: *Runner, io: Io, event: []const u8) bool {
@@ -461,7 +582,7 @@ pub const Runner = struct {
         };
         var prepared: Prepared = .{};
         defer prepared.deinit(runner.gpa);
-        var invocation = try runner.prepare(io, &prepared, request, path, false);
+        var invocation = try runner.prepare(io, &prepared, request, path, false, runner.options.output);
         invocation.stdout = .capture;
         invocation.stderr = switch (stderr) {
             .pipe => .capture,
@@ -488,7 +609,7 @@ pub const Runner = struct {
     /// How `command` runs for `request`: in the hooks' directory, with
     /// `GIT_PREFIX` and git's repository variables cleared, its output
     /// where `Options.output` sends it.
-    fn prepare(runner: *Runner, io: Io, prepared: *Prepared, request: Request, command: []const u8, shell: bool) Allocator.Error!program.Invocation {
+    fn prepare(runner: *Runner, io: Io, prepared: *Prepared, request: Request, command: []const u8, shell: bool, output: Output) Allocator.Error!program.Invocation {
         const gpa = runner.gpa;
         if (!shell and builtin.target.os.tag == .windows) {
             // git for Windows reads the `#!` line itself and starts the
@@ -508,12 +629,12 @@ pub const Runner = struct {
             .cwd = .{ .path = runner.cwd },
             .set = prepared.set.items,
             .unset = &program.repository_variables,
-            .stderr = switch (runner.options.output) {
+            .stderr = switch (output) {
                 .inherit => .inherit,
                 .capture => .to_stdout,
                 .ignore => .ignore,
             },
-            .stdout = switch (runner.options.output) {
+            .stdout = switch (output) {
                 .inherit => if (request.stdout_to_stderr) .to_stderr else .inherit,
                 .capture => .capture,
                 .ignore => .ignore,
@@ -534,7 +655,7 @@ pub const Runner = struct {
         var prepared: Prepared = .{};
         defer prepared.deinit(gpa);
         const capture = runner.options.output == .capture;
-        var outcome = program.run(gpa, io, runner.programs, try runner.prepare(io, &prepared, request, command, shell), .{
+        var outcome = program.run(gpa, io, runner.programs, try runner.prepare(io, &prepared, request, command, shell, runner.options.output), .{
             .input = request.input,
         }) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -856,12 +977,16 @@ fn readConfigured(
     arena: Allocator,
     config: *const config_mod.Config,
     disabled_events: *std.ArrayList([]const u8),
+    event_jobs: *std.ArrayList(EventJobs),
 ) (Allocator.Error || error{MalformedValue})![]const Configured {
     const Pair = struct { name: []const u8, event: []const u8 };
     var pairs: std.ArrayList(Pair) = .empty;
     var commands: std.StringHashMapUnmanaged([]const u8) = .empty;
     var disabled: std.StringHashMapUnmanaged(void) = .empty;
     var parallel: std.StringHashMapUnmanaged(void) = .empty;
+    // Every name a `parallel` was given for, read or not: git's sign that
+    // the name is a hook's.
+    var parallel_named: std.StringHashMapUnmanaged(void) = .empty;
 
     for (config.entries.items) |entry| {
         if (!std.ascii.eqlIgnoreCase(entry.section, "hook")) continue;
@@ -884,7 +1009,23 @@ fn readConfigured(
             const on = config_mod.parseBool(value) catch continue;
             if (on) _ = disabled.remove(name) else try disabled.put(arena, name, {});
         } else if (std.ascii.eqlIgnoreCase(entry.name, "parallel")) {
-            try parallel.put(arena, name, {});
+            // git's "must be a boolean, ignoring": a value it cannot read
+            // leaves what was there.
+            const on = config_mod.parseBool(value) catch {
+                try parallel_named.put(arena, name, {});
+                continue;
+            };
+            try parallel_named.put(arena, name, {});
+            if (on) try parallel.put(arena, name, {}) else _ = parallel.remove(name);
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "jobs")) {
+            // `hook.<event>.jobs`, the last that reads deciding.
+            const n = jobsOf(entry.value) orelse continue;
+            for (event_jobs.items) |*e| {
+                if (std.mem.eql(u8, e.event, name)) {
+                    e.jobs = n;
+                    break;
+                }
+            } else try event_jobs.append(arena, .{ .event = try arena.dupe(u8, name), .jobs = n });
         }
     }
 
@@ -895,6 +1036,7 @@ fn readConfigured(
             .event = p.event,
             .command = commands.get(p.name),
             .disabled = disabled.contains(p.name),
+            .parallel = parallel.contains(p.name),
         };
     }
 
@@ -902,12 +1044,23 @@ fn readConfigured(
     // turns the event's configured hooks off.
     var it = disabled.keyIterator();
     while (it.next()) |key| {
-        const is_hook = commands.contains(key.*) or parallel.contains(key.*) or for (pairs.items) |p| {
+        const is_hook = commands.contains(key.*) or parallel_named.contains(key.*) or for (pairs.items) |p| {
             if (std.mem.eql(u8, p.name, key.*)) break true;
         } else false;
         if (!is_hook) try disabled_events.append(arena, key.*);
     }
     return out;
+}
+
+/// A `hook.jobs` or `hook.<event>.jobs` value as git's
+/// `resolve_hook_config_jobs` takes it: a count above zero, or `-1` for as
+/// many as there are processors; `null` for what it ignores.
+fn jobsOf(value: ?[]const u8) ?u32 {
+    const text = value orelse return null;
+    const n = config_mod.parseInteger(text) catch return null;
+    if (n == -1) return @intCast(std.Thread.getCpuCount() catch 1);
+    if (n > 0 and n <= std.math.maxInt(u32)) return @intCast(n);
+    return null;
 }
 
 /// The configured hook named after an event, which git refuses, or `null`.
@@ -1283,4 +1436,51 @@ test "git-lfs's hooks are known by their text from every release, and nothing el
     try testing.expect(!isGitLfsHook("post-checkout", "#!/bin/sh\ngit lfs pre-push \"$@\"\n"));
     try testing.expect(!isGitLfsHook("post-merge", "#!/bin/sh\ngit lfs post-merge \"$@\"\necho more\n"));
     try testing.expect(!isGitLfsHook("pre-commit", current));
+}
+
+test "an event's hooks run hook.jobs at once when each may, their output whole in the order they started, as git's" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const hooks_config = "[hook \"first\"]\n\tevent = pre-commit\n\tcommand = \"echo first start >&2; sleep 0.5; echo first end\"\n" ++
+        "[hook \"second\"]\n\tevent = pre-commit\n\tcommand = \"echo second start >&2; sleep 0.5; echo second end\"\n";
+    const Case = struct { extra: []const u8, at_once: bool };
+    const cases = [_]Case{
+        .{ .extra = "", .at_once = false },
+        .{ .extra = "[hook]\n\tjobs = 2\n", .at_once = false },
+        .{ .extra = "[hook]\n\tjobs = 2\n[hook \"first\"]\n\tparallel = true\n[hook \"second\"]\n\tparallel = true\n", .at_once = true },
+        .{ .extra = "[hook]\n\tjobs = -1\n[hook \"first\"]\n\tparallel = true\n[hook \"second\"]\n\tparallel = true\n", .at_once = true },
+        .{ .extra = "[hook]\n\tjobs = 2\n[hook \"first\"]\n\tparallel = true\n", .at_once = false },
+        .{ .extra = "[hook \"pre-commit\"]\n\tjobs = 2\n[hook \"first\"]\n\tparallel = true\n[hook \"second\"]\n\tparallel = true\n", .at_once = true },
+        .{ .extra = "[hook]\n\tjobs = 2\n[hook \"pre-commit\"]\n\tjobs = 1\n[hook \"first\"]\n\tparallel = true\n[hook \"second\"]\n\tparallel = true\n", .at_once = false },
+    };
+    for (cases, 0..) |case, n| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        const text = try std.mem.concat(gpa, u8, &.{ hooks_config, case.extra });
+        defer gpa.free(text);
+        try repo.writeFile(io, ".git/config-hooks", text);
+        try repo.exec(io, &.{ "config", "include.path", "config-hooks" });
+        const git_said = try gitStderr(gpa, io, &repo, &.{ "hook", "run", "pre-commit" });
+        defer gpa.free(git_said);
+
+        var environ = try testEnviron(gpa);
+        defer environ.deinit();
+        var opened = try openRunner(gpa, io, &repo, &environ, text);
+        defer opened.git_dir.close(io);
+        defer opened.config.deinit();
+        defer opened.runner.deinit();
+        const started = std.Io.Clock.awake.now(io);
+        const ran = try opened.runner.run(io, "pre-commit", .{});
+        const took = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+        try testing.expectEqual(@as(u32, 2), ran.count);
+        testing.expectEqual(case.at_once, took < 900) catch |err| {
+            std.debug.print("hooks case {d}: {d} ms\n", .{ n, took });
+            return err;
+        };
+        testing.expectEqualStrings(git_said, opened.runner.captured.items) catch |err| {
+            std.debug.print("hooks case {d}\n", .{n});
+            return err;
+        };
+    }
 }
