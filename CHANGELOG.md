@@ -127,6 +127,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `fast.importer`: a pack of no more objects than `fastimport.unpackLimit` (else `transfer.unpackLimit`, else 100) is written as loose objects and dropped, as git's `end_packfile` unpacks a small one, at the end and at each `checkpoint`. Held to `git count-objects -v` after `git fast-import`.
 ### Changed
 
+- The module tables are checked as relic compiles: every namespace it exports, three levels down, has one row in `src/relic.zig`'s table and one in the README's, and neither has a row for anything else, or relic does not build, on any target. The README reaches the module as the `README.md` import; the surface test no longer reads it.
 - A pass over the loose objects (`prune`, `prune-packed`, `repack`, `gc`) lists the objects directory once and opens only the fan-outs there, where it tried all 256; the order is git's, `00` to `ff`.
 - A hook's output, when the caller captures it (`hooks.Output.capture`, receive-pack's), is its standard output and standard error as one stream in the order the hook wrote them, as git relays it, where it was all of the one and then all of the other: conduit's `2>&1` (`program.Invocation.stderr = .to_stdout`).
 - receive-pack sends the hooks' output and its own messages on the side band as they are written, as git's does, where they waited in its buffer for the end of the push.

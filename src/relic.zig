@@ -1,7 +1,7 @@
 //! relic — read and write a git repository from Zig.
 //!
-//! The table below describes the exported namespaces; its contract is checked against
-//! the API.
+//! The table below describes the exported namespaces; it is checked against
+//! the API, and the README's against both, wherever relic compiles.
 //!
 //! | Module | Purpose |
 //! |---|---|
@@ -193,3 +193,68 @@ pub const clean = @import("clean.zig");
 pub const fast = @import("fast.zig");
 
 pub const maintenance = @import("maintenance.zig");
+
+// Every namespace relic exports, three levels down, has exactly one row in
+// the table above and one in the README's, and neither table has a row for
+// anything else: a module added or removed without its rows does not
+// compile, on any target.
+comptime {
+    @setEvalBranchQuota(10_000_000);
+    const own = tableNames(@embedFile("relic.zig"), "//! | `");
+    const readme = @embedFile("README.md");
+    const begin = std.mem.find(u8, readme, "<!-- BEGIN MODULES -->") orelse @compileError("README.md: no <!-- BEGIN MODULES --> marker");
+    const end = std.mem.find(u8, readme, "<!-- END MODULES -->") orelse @compileError("README.md: no <!-- END MODULES --> marker");
+    const documented = tableNames(readme[begin..end], "| `");
+    const count = checkNamespaces(@This(), "", 3, own, documented);
+    if (own.len != count) @compileError(std.fmt.comptimePrint("src/relic.zig's module table has {d} rows for {d} namespaces", .{ own.len, count }));
+    if (documented.len != count) @compileError(std.fmt.comptimePrint("README.md's module table has {d} rows for {d} namespaces", .{ documented.len, count }));
+}
+
+const std = @import("std");
+
+/// The module names a table's rows begin with: each line starting with
+/// `row`, its name to the closing backtick.
+fn tableNames(comptime text: []const u8, comptime row: []const u8) []const []const u8 {
+    var names: []const []const u8 = &.{};
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, row)) continue;
+        const rest = line[row.len..];
+        const close = std.mem.findScalar(u8, rest, '`') orelse continue;
+        names = names ++ .{rest[0..close]};
+    }
+    return names;
+}
+
+fn isNamespace(comptime ns: type, comptime name: []const u8) bool {
+    if (name.len == 0 or !std.ascii.isLower(name[0])) return false;
+    const value = @field(ns, name);
+    if (@TypeOf(value) != type) return false;
+    return switch (@typeInfo(value)) {
+        .@"struct" => |s| s.field_names.len == 0 and !s.is_tuple,
+        else => false,
+    };
+}
+
+fn rowsOf(comptime names: []const []const u8, comptime path: []const u8) usize {
+    var count: usize = 0;
+    for (names) |name| {
+        if (std.mem.eql(u8, name, path)) count += 1;
+    }
+    return count;
+}
+
+/// Each namespace under `ns` to `depth` levels, held to one row in each
+/// table; how many there are.
+fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, comptime own: []const []const u8, comptime documented: []const []const u8) usize {
+    var count: usize = 0;
+    for (@typeInfo(ns).@"struct".decl_names) |name| {
+        if (!isNamespace(ns, name)) continue;
+        const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
+        if (rowsOf(own, path) != 1) @compileError("`" ++ path ++ "` needs one row in src/relic.zig's module table: //! | `" ++ path ++ "` | <purpose> |");
+        if (rowsOf(documented, path) != 1) @compileError("`" ++ path ++ "` needs one row in README.md's module table, between its BEGIN MODULES and END MODULES markers");
+        count += 1;
+        if (depth > 1) count += checkNamespaces(@field(ns, name), path, depth - 1, own, documented);
+    }
+    return count;
+}

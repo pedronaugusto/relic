@@ -35,8 +35,9 @@ pub fn build(b: *std.Build) void {
 
 /// What the `relic` module imports, from `p`, relic's own build, for `target`
 /// and `optimize`: aegis, conduit, sweep, parallax, airlock, warp and xenoglyph, the
-/// `relic_options` that say whether `http` is on, and with it uplink, cloak
-/// and strand, each once the build has fetched it. The tests and the
+/// `relic_options` that say whether `http` is on, `README.md` for its module
+/// table, and with `http` uplink, cloak and strand, each once the build has
+/// fetched it. The tests and the
 /// benchmarks build their roots on the same.
 fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, http: bool) []const std.Build.Module.Import {
     const features = p.addOptions();
@@ -46,6 +47,9 @@ fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
     }
     imports.append(p.allocator, .{ .name = "relic_options", .module = features.createModule() }) catch @panic("out of memory");
+    // `src/relic.zig` checks the README's module table against the API as
+    // it compiles.
+    imports.append(p.allocator, .{ .name = "README.md", .module = p.createModule(.{ .root_source_file = p.path("README.md") }) }) catch @panic("out of memory");
     if (http) for (http_packages) |name| if (lazyModule(p, name, target, optimize)) |m| {
         imports.append(p.allocator, .{ .name = name, .module = m }) catch @panic("out of memory");
     };

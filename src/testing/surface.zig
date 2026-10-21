@@ -31,49 +31,25 @@ fn isNamespace(comptime ns: type, comptime name: []const u8) bool {
     };
 }
 
-fn tableCount(comptime path: []const u8, text: []const u8) usize {
-    const needle = "| `" ++ path ++ "` |";
-    var count: usize = 0;
-    var rest = text;
-    while (std.mem.find(u8, rest, needle)) |at| {
-        count += 1;
-        rest = rest[at + needle.len ..];
-    }
-    return count;
-}
-
-fn checkTree(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, readme: []const u8) !usize {
-    var count: usize = 0;
+/// Each namespace under `ns` to `depth` levels is its own, and offers no
+/// test access. Their table rows are `src/relic.zig`'s to check, which it
+/// does as it compiles.
+fn checkTree(comptime ns: type, comptime depth: usize) !void {
     inline for (@typeInfo(ns).@"struct".decl_names) |name| {
         if (comptime isNamespace(ns, name)) {
-            const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
-            try std.testing.expectEqual(@as(usize, 1), comptime tableCount(path, @embedFile("../relic.zig")));
-            try std.testing.expectEqual(@as(usize, 1), tableCount(path, readme));
             try std.testing.expect(!@hasDecl(@field(ns, name), "test_access"));
             inline for (@typeInfo(ns).@"struct".decl_names) |other| {
                 if (comptime isNamespace(ns, other) and !std.mem.eql(u8, name, other))
                     try std.testing.expect(@field(ns, name) != @field(ns, other));
             }
-            count += 1;
-            if (depth > 1) count += try checkTree(@field(ns, name), path, depth - 1, readme);
+            if (depth > 1) try checkTree(@field(ns, name), depth - 1);
         }
     }
-    return count;
 }
 
-fn rows(text: []const u8) usize {
-    return std.mem.count(u8, text, "\n| `") + std.mem.count(u8, text, "\n//! | `");
-}
-
-test "module tables equal the exported namespace tree" {
+test "every exported namespace is its own and offers no test access" {
     @setEvalBranchQuota(500000);
-    const readme = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "README.md", std.testing.allocator, .limited(1 << 20));
-    defer std.testing.allocator.free(readme);
-    const count = try checkTree(relic, "", 3, readme);
-    try std.testing.expectEqual(count, comptime rows(@embedFile("../relic.zig")));
-    const start = std.mem.find(u8, readme, "<!-- BEGIN MODULES -->").?;
-    const end = std.mem.find(u8, readme, "<!-- END MODULES -->").?;
-    try std.testing.expectEqual(count, rows(readme[start..end]));
+    try checkTree(relic, 3);
 }
 
 fn covers(comptime facade: type, comptime implementation: type) !void {
