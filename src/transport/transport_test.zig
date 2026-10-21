@@ -1575,7 +1575,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     try tmp.dir.createDirPath(io, "repo");
     var repo_dir = try tmp.dir.openDir(io, "repo", .{});
     defer repo_dir.close(io);
-    var made = try repo_mod.Repository.create(gpa, io, repo_dir, .{});
+    var made = try repo_mod.Repository.create(gpa, io, repo_dir, .{ .default_branch = "main" });
     made.deinit(io);
     const config = try gpa.print("[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tsshCommand = {s}\n[remote \"origin\"]\n\turl = ssh://example.invalid/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", .{ssh});
     defer gpa.free(config);

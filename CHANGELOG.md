@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `repo.Repository.CreateOptions.object_format`, `ref_format` and `default_branch` are optional: `null` takes `init.defaultObjectFormat`, `init.defaultRefFormat` (else a reftable under `feature.experimental`) and `init.defaultBranch` (with the template's own configuration) from the configuration levels `CreateOptions` now names as `OpenOptions` does (`system_config`, `xdg_config`, `global_config`, `config_overrides`, `config_pairs`, `home`), else SHA-1, files and git 2.55's `master` -- where the branch was `main`. An initial branch no branch can have is `error.InvalidBranchName`. Held to `git init` under each.
 - `index.Index.split_base` is `Index.split` (`index.Split`: the shared index's checksum and its entries). A split index read is written back split, as git keeps it, where it was written whole.
 - `maintenance.Expiry`, `maintenance.expire_all` and `maintenance.parseExpiry` are `text.date.Expiry`, `expire_all` and `parseExpiry`: git's `parse_expiry_date` is date reading, and the index's shared files expire by it too.
 - `index.Index.version` is 0 for an index made here, not 2; `WriteOptions.version` `.auto` keeps the version the index carries (a version 4 index stays 4), as git's `do_write_index` does, and `WriteOptions.new_version` is the one an index made here is first written in.

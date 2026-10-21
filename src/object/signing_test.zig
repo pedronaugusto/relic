@@ -597,7 +597,7 @@ test "a failed signing program leaves its stderr after the repository closes" {
     defer diagnostic.deinit();
     inline for (.{ "commit", "tag" }) |target| {
         {
-            var repo = try Repository.create(gpa, io, tmp.dir, .{});
+            var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
             defer repo.deinit(io);
             try repo.editConfig(io, &.{.{ .name = "gpg.program", .value = executable }}, .{});
             const tree = hash.Hasher.object(.sha1, "tree", "");
@@ -638,7 +638,7 @@ test "a history refusal before writing clears an earlier diagnostic" {
     inline for (.{ "commit", "merge", "sequencer", "rebase" }) |operation| {
         var tmp = testing.tmpDir(.{});
         defer tmp.cleanup();
-        var repo = try Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         defer repo.deinit(io);
         try repo.editConfig(io, &.{.{ .name = "commit.gpgSign", .value = "true" }}, .{});
         var diagnostic = repo_mod.Diagnostic.init(gpa);

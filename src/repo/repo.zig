@@ -12,6 +12,7 @@ const program = @import("../process.zig").program;
 
 const fs = @import("../fs/fs.zig");
 const names_path = @import("../names/path.zig");
+const names_ref = @import("../names.zig").ref;
 const discover_directory = @import("../discover/directory.zig");
 const safe = @import("safe.zig");
 
@@ -411,12 +412,15 @@ pub const Repository = struct {
 
     /// How a repository is created.
     pub const CreateOptions = struct {
-        /// The hash every object name is written with.
-        object_format: hash.Kind = .sha1,
-        /// The branch `HEAD` points at before the first commit. git's own
-        /// default comes from `init.defaultBranch`, which this package does not
-        /// read because it reads no environment; the caller passes it.
-        default_branch: []const u8 = "main",
+        /// The hash every object name is written with. `null` takes
+        /// `init.defaultObjectFormat` from the configuration levels below,
+        /// else SHA-1, as git's `repository_format_configure` does.
+        object_format: ?hash.Kind = null,
+        /// The branch `HEAD` points at before the first commit. `null` takes
+        /// `init.defaultBranch` from the levels below and the template's own
+        /// configuration, as git's `repo_default_branch_name` reads it after
+        /// the template is copied, else git 2.55's `master`.
+        default_branch: ?[]const u8 = null,
         /// A repository with no working tree.
         bare: bool = false,
         /// Whether `core.filemode` is recorded as true. The caller decides,
@@ -427,8 +431,19 @@ pub const Repository = struct {
         odb: odb_mod.Options = .{},
         /// Where the refs are kept: loose files and `packed-refs`, or a
         /// reftable stack, which is `git init --ref-format=reftable` and which
-        /// git 3.0 makes the default.
-        ref_format: refs_mod.Format = .files,
+        /// git 3.0 makes the default. `null` takes `init.defaultRefFormat`
+        /// from the levels below, else a reftable under `feature.experimental`,
+        /// else files.
+        ref_format: ?refs_mod.Format = null,
+        /// The configuration levels git's `init` reads its defaults from, as
+        /// `OpenOptions` names them: the repository being made has none yet.
+        system_config: ?config_mod.Sources.Path = null,
+        xdg_config: ?config_mod.Sources.Path = null,
+        global_config: ?config_mod.Sources.Path = null,
+        config_overrides: []const []const u8 = &.{},
+        config_pairs: []const config_mod.Sources.Pair = &.{},
+        /// The user's home directory, for an include path beginning `~/`.
+        home: ?[]const u8 = null,
         /// The template directory git copies into a new repository: what
         /// `--template`, `GIT_TEMPLATE_DIR`, `init.templateDir`
         /// (`templateDir` reads it) or git's own installed one names, opened by
@@ -1121,6 +1136,21 @@ pub const Repository = struct {
         }
         fs.adjustShared(io, git_dir, ".", shared);
 
+        // git's `repository_format_configure` reads the levels above the
+        // repository; `repo_default_branch_name` reads the template's too.
+        var user = try config_mod.Config.open(gpa, io, .{
+            .system = options.system_config,
+            .xdg = options.xdg_config,
+            .global = options.global_config,
+            .command = options.config_overrides,
+            .pairs = options.config_pairs,
+        }, .{ .home = options.home });
+        defer user.deinit();
+        const object_format = options.object_format orelse initObjectFormat(&user);
+        const ref_format = options.ref_format orelse initRefFormat(&user);
+        const branch = try initBranch(gpa, io, git_dir, options);
+        defer gpa.free(branch);
+
         try fs.makeDirs(io, git_dir, "objects/pack", shared);
         try fs.makeDirs(io, git_dir, "objects/info", shared);
         try git_dir.createDirPath(io, "info");
@@ -1128,12 +1158,12 @@ pub const Repository = struct {
         // The refs as the format lays them down, then `HEAD` on the unborn
         // branch, written as the first ref and logged nowhere, as git's
         // `init` writes it.
-        try refs_mod.create(io, git_dir, options.ref_format, .{ .shared = shared });
+        try refs_mod.create(io, git_dir, ref_format, .{ .shared = shared });
         {
-            const target = try std.mem.concat(gpa, u8, &.{ "refs/heads/", options.default_branch });
+            const target = try std.mem.concat(gpa, u8, &.{ "refs/heads/", branch });
             defer gpa.free(target);
-            var store = try refs_mod.Store.init(gpa, options.object_format, git_dir, git_dir, .{
-                .format = options.ref_format,
+            var store = try refs_mod.Store.init(gpa, object_format, git_dir, git_dir, .{
+                .format = ref_format,
                 .reftable = .{ .shared = shared },
                 .shared = shared,
             });
@@ -1144,7 +1174,7 @@ pub const Repository = struct {
             try tx.commit(io, null);
         }
 
-        try initConfig(gpa, io, git_dir, options, shared, logs_set);
+        try initConfig(gpa, io, git_dir, options, .{ .object_format = object_format, .ref_format = ref_format }, shared, logs_set);
 
         const work_dir: ?Io.Dir = if (options.bare) null else try dir.openDir(io, ".", .{ .iterate = true });
         const discovered: Discovered = .{
@@ -1156,16 +1186,65 @@ pub const Repository = struct {
         return finish(gpa, io, discovered, .{ .discover = false, .odb = options.odb });
     }
 
+    /// `init.defaultObjectFormat`, the last one deciding, an unknown name
+    /// SHA-1 (git warns), as git's `read_default_format_config` reads it.
+    fn initObjectFormat(config: *const config_mod.Config) hash.Kind {
+        const name = config.get("init.defaultobjectformat") orelse return .sha1;
+        return hash.Kind.parse(name) catch .sha1;
+    }
+
+    /// `init.defaultRefFormat`, and `feature.experimental` for a reftable
+    /// while no known format is named yet, in the configuration's order, as
+    /// git's `read_default_format_config` reads them; files when none.
+    fn initRefFormat(config: *const config_mod.Config) refs_mod.Format {
+        var chosen: ?refs_mod.Format = null;
+        var it = config.iterate(&.{ "init.defaultrefformat", "feature.experimental" });
+        while (it.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.name, "defaultrefformat")) {
+                chosen = refs_mod.Format.parse(entry.value orelse "");
+            } else if (chosen == null) {
+                const on = if (entry.value) |v| config_mod.parseBool(v) catch false else true;
+                if (on) chosen = .reftable;
+            }
+        }
+        return chosen orelse .files;
+    }
+
+    /// The initial branch: `CreateOptions.default_branch`, else
+    /// `init.defaultBranch` as the configuration with the template's own
+    /// says, else `master`; a name no branch can have is refused, as git's
+    /// "invalid branch name".
+    fn initBranch(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions) ErrorNamespace.Error![]u8 {
+        const name = if (options.default_branch) |given| try gpa.dupe(u8, given) else blk: {
+            var config = try config_mod.Config.open(gpa, io, .{
+                .system = options.system_config,
+                .xdg = options.xdg_config,
+                .global = options.global_config,
+                .local = .{ .dir = git_dir, .sub_path = "config" },
+                .command = options.config_overrides,
+                .pairs = options.config_pairs,
+            }, .{ .home = options.home });
+            defer config.deinit();
+            const entry = config.find("init.defaultbranch") orelse break :blk try gpa.dupe(u8, "master");
+            break :blk try gpa.dupe(u8, entry.value orelse return error.MalformedValue);
+        };
+        errdefer gpa.free(name);
+        const ref = try std.mem.concat(gpa, u8, &.{ "refs/heads/", name });
+        defer gpa.free(ref);
+        if (!names_ref.checkFormat(ref, .{})) return error.InvalidBranchName;
+        return name;
+    }
+
     /// The configuration of a new repository: the values git's `init` sets
     /// one by one, as `git config` would, in its order, in the template's
     /// file when there is one and a new one when not.
-    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions, shared: fs.Shared, logs_set: bool) ErrorNamespace.Error!void {
+    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions, format: struct { object_format: hash.Kind, ref_format: refs_mod.Format }, shared: fs.Shared, logs_set: bool) ErrorNamespace.Error!void {
         var edits: std.ArrayList(ConfigEdit) = .empty;
         defer edits.deinit(gpa);
-        const version = if (options.object_format == .sha1 and options.ref_format == .files) "0" else "1";
+        const version = if (format.object_format == .sha1 and format.ref_format == .files) "0" else "1";
         try edits.append(gpa, .{ .set = .{ .name = "core.repositoryformatversion", .value = version } });
-        if (options.object_format != .sha1) try edits.append(gpa, .{ .set = .{ .name = "extensions.objectformat", .value = options.object_format.name() } });
-        if (options.ref_format != .files) try edits.append(gpa, .{ .set = .{ .name = "extensions.refstorage", .value = options.ref_format.name() } });
+        if (format.object_format != .sha1) try edits.append(gpa, .{ .set = .{ .name = "extensions.objectformat", .value = format.object_format.name() } });
+        if (format.ref_format != .files) try edits.append(gpa, .{ .set = .{ .name = "extensions.refstorage", .value = format.ref_format.name() } });
         try edits.append(gpa, .{ .set = .{ .name = "core.filemode", .value = if (options.file_mode) "true" else "false" } });
         try edits.append(gpa, .{ .set = .{ .name = "core.bare", .value = if (options.bare) "true" else "false" } });
         if (!options.bare and !logs_set) try edits.append(gpa, .{ .set = .{ .name = "core.logallrefupdates", .value = "true" } });
@@ -2104,7 +2183,7 @@ test "reading a signing policy allocates nothing of the configuration's" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try Self.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try Self.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, .{});
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
@@ -2137,7 +2216,7 @@ test "a malformed core setting is refused when it is published, as git dies read
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try Self.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try Self.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     // The engines' settings are read once, as a configuration is published.
     inline for (.{ "core.ignorecase", "core.filemode", "core.symlinks", "core.trustctime" }) |setting| {
@@ -2180,7 +2259,7 @@ test "a malformed case policy is refused when it is published, and the rule load
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var r = try Self.Repository.create(gpa, io, tmp.dir, .{});
+    var r = try Self.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer r.deinit(io);
     try std.testing.expectError(error.NotABoolean, r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "maybe" }}, .{}));
     try r.editConfig(io, &.{.{ .name = "core.ignorecase", .value = "true" }}, .{});
@@ -2204,7 +2283,7 @@ test "required filter discovery keeps full names, and reads the policy without t
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var r = try Self.Repository.create(gpa, io, tmp.dir, .{});
+    var r = try Self.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer r.deinit(io);
     const long_name = &@as([300]u8, @splat('x'));
     try r.editConfig(io, &.{.{ .name = "filter." ++ long_name ++ ".required", .value = "true" }}, .{});

@@ -3205,7 +3205,7 @@ test "learned LFS policy writes the shared source without replacing worktree con
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         repo.deinit(io);
     }
     try tmp.dir.writeFile(io, .{

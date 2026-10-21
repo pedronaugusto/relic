@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     {
         var dir = try root.createDirPathOpen(io, relative, .{});
         defer dir.close(io);
-        if (relic.repo.Repository.create(gpa, io, dir, .{ .bare = true })) |made| {
+        if (relic.repo.Repository.create(gpa, io, dir, .{ .default_branch = "main", .bare = true })) |made| {
             var repo = made;
             repo.deinit(io);
         } else |err| switch (err) {

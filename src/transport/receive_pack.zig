@@ -2089,7 +2089,7 @@ test "a certificate's nonce is judged as git's check_nonce judges it: by its HMA
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .bare = true });
     repo.deinit(io);
     const config = try tmp.dir.readFileAlloc(io, "config", gpa, .unlimited);
     defer gpa.free(config);
@@ -2195,7 +2195,7 @@ test "fuzz: whatever a client sends is answered or refused" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .bare = true });
     repo.deinit(io);
     const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);

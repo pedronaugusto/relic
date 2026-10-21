@@ -2021,7 +2021,7 @@ test "fuzz: any tree reads as notes or a named error, and edits keep exactly the
     // the fuzzer checks `std.testing.allocator` for leaks after each input.
     var repo_gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     {
-        var repo = try Repository.create(repo_gpa.allocator(), io, tmp.dir, .{ .bare = true });
+        var repo = try Repository.create(repo_gpa.allocator(), io, tmp.dir, .{ .default_branch = "main", .bare = true });
         defer repo.deinit(io);
         try shakedown.check(std.testing.allocator, &repo, fuzzNotes, .{});
     }

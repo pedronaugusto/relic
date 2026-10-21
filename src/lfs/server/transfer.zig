@@ -556,7 +556,7 @@ test "a connection is served whole: an object up, checked and down, a lock taken
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "repo.git");
     var repo_dir = try tmp.dir.openDir(io, "repo.git", .{});
-    var made = try repo_mod.Repository.create(gpa, io, repo_dir, .{ .bare = true });
+    var made = try repo_mod.Repository.create(gpa, io, repo_dir, .{ .default_branch = "main", .bare = true });
     made.deinit(io);
     repo_dir.close(io);
     try tmp.dir.createDirPath(io, "objects");

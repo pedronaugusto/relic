@@ -1200,7 +1200,7 @@ test "sequencer signing policy refuses malformed values, and reads one without t
     defer tmp.cleanup();
     var no_resize = shakedown.alloc.NoResize.init(gpa);
     var failing = std.testing.FailingAllocator.init(no_resize.allocator(), .{ .fail_index = std.math.maxInt(usize) });
-    var r = try Repository.create(failing.allocator(), io, tmp.dir, .{});
+    var r = try Repository.create(failing.allocator(), io, tmp.dir, .{ .default_branch = "main" });
     defer r.deinit(io);
     try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "maybe" }}, .{});
     try std.testing.expectError(error.NotABoolean, Read.run(&r, .{}));

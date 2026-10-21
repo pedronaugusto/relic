@@ -808,7 +808,7 @@ test "revision parsing preserves allocation resource failures" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     const commit = try repo.objectDatabase().write(io, .commit, "tree " ++ @as([40]u8, @splat('0')) ++ "\nparent " ++ @as([40]u8, @splat('1')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nsubject\n");
     var hex: [hash.max_hex_len]u8 = undefined;
@@ -843,7 +843,7 @@ test "revision parsing preserves I/O and cancellation resource failures" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Fault.read;

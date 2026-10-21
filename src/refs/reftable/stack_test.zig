@@ -313,7 +313,7 @@ test "a held tables.list.lock refuses the transaction and changes nothing" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
     defer repo.deinit(io);
     const before = try tmp.dir.readFileAlloc(io, ".git/reftable/tables.list", gpa, .limited(4096));
     defer gpa.free(before);
@@ -338,7 +338,7 @@ test "a name and a directory of names conflict with what is already there" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
     defer repo.deinit(io);
     const one = try hash_mod.Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     {
@@ -549,7 +549,7 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     {
-        var made = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+        var made = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
         made.deinit(io);
     }
     {

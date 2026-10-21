@@ -34,7 +34,7 @@ test "peeling refuses an annotated tag chain beyond the limit" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
 
     var target = try repo.objectDatabase().write(io, .blob, "target\n");
@@ -61,7 +61,7 @@ test "a repository this creates is one git uses" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     try std.testing.expectEqual(hash.Kind.sha1, repo.objectFormat());
     try std.testing.expect(!repo.isBare());
@@ -86,7 +86,7 @@ test "a whole commit cycle, and git agrees with every part of it" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
 
     var git: testgit.Repo = .{ .gpa = gpa, .tmp = tmp, .dir = tmp.dir };
@@ -165,7 +165,7 @@ test "a sha256 repository this creates is one git uses" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var repo = repo_mod.Repository.create(gpa, io, tmp.dir, .{ .object_format = .sha256 }) catch |err| switch (err) {
+    var repo = repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .object_format = .sha256 }) catch |err| switch (err) {
         else => return err,
     };
     defer repo.deinit(io);
@@ -215,7 +215,7 @@ test "discovery finds the repository from a subdirectory" {
     defer tmp.cleanup();
 
     {
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         repo.deinit(io);
     }
     try tmp.dir.createDirPath(io, "a/b/c");
@@ -243,7 +243,7 @@ test "an unknown ref storage and an unknown extension are refused by name" {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
         {
-            var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+            var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
             repo.deinit(io);
         }
         try tmp.dir.writeFile(io, .{
@@ -259,7 +259,7 @@ test "an unknown ref storage and an unknown extension are refused by name" {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
         {
-            var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+            var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
             repo.deinit(io);
         }
         try tmp.dir.writeFile(io, .{
@@ -275,7 +275,7 @@ test "an unknown ref storage and an unknown extension are refused by name" {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
         {
-            var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+            var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
             repo.deinit(io);
         }
         try tmp.dir.writeFile(io, .{
@@ -295,7 +295,7 @@ test "failed opens leave the full refused setting in caller-owned diagnostics" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     {
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         repo.deinit(io);
     }
     var diagnostic = repo_mod.Diagnostic.init(gpa);
@@ -724,7 +724,7 @@ test "an includeIf gitdir:./ starts from the including file's directory, and -c 
     var work = try home.dir.openDir(io, "work/repo", .{});
     defer work.close(io);
     {
-        var init = try repo_mod.Repository.create(gpa, io, work, .{});
+        var init = try repo_mod.Repository.create(gpa, io, work, .{ .default_branch = "main" });
         init.deinit(io);
     }
     var environ = try testgit.isolatedEnviron(gpa, home_path);
@@ -788,7 +788,7 @@ test "includeIf gitdir: and onbranch: globs hold where git's wildmatch says they
     var work = try home.dir.openDir(io, "work/repo", .{});
     defer work.close(io);
     {
-        var init = try repo_mod.Repository.create(gpa, io, work, .{});
+        var init = try repo_mod.Repository.create(gpa, io, work, .{ .default_branch = "main" });
         init.deinit(io);
     }
     var environ = try testgit.isolatedEnviron(gpa, home_path);
@@ -823,7 +823,7 @@ test "a config refresh keeps only its own refused setting" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
@@ -846,7 +846,7 @@ test "opening uses the format validated before worktree settings are read" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     {
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
         repo.deinit(io);
     }
     try tmp.dir.writeFile(io, .{
@@ -879,7 +879,7 @@ test "opening refuses a repository version that is not an integer" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     {
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         repo.deinit(io);
     }
     try tmp.dir.writeFile(io, .{ .sub_path = ".git/config", .data = "[core]\nrepositoryformatversion = invalid\n" });
@@ -901,7 +901,7 @@ test "a refresh preserves a refused extension beyond sixty-four bytes" {
     defer diagnostic.deinit();
     const name = "anextensionwhosenameislongerthantherepositorysoldsixtyfourbytebufferandkeepsgoing";
     {
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         defer repo.deinit(io);
         try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\n" ++ name ++ " = true\n" });
         try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
@@ -914,7 +914,7 @@ test "a signing write keeps only its own refused setting" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
@@ -944,7 +944,7 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     var diagnostic = repo_mod.Diagnostic.init(failing.allocator());
@@ -972,7 +972,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
     for ([_]refs_mod.Format{ .files, .reftable }) |format| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = format });
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = format });
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
@@ -1006,7 +1006,7 @@ test "a signing refusal names the tag setting that required it" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
@@ -1025,7 +1025,7 @@ test "a refresh updates reftable write settings together with the configuration"
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
     defer repo.deinit(io);
     const cache = refs_state.get(repo.refStore().state).cache;
     const prefix = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[reftable]\n";
@@ -1055,7 +1055,7 @@ test "a reftable HEAD read failure does not become a detached branch" {
     for ([_]hash.Kind{ .sha1, .sha256 }) |kind| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .object_format = kind, .ref_format = .reftable });
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .object_format = kind, .ref_format = .reftable });
         defer repo.deinit(io);
         try std.testing.expectEqualStrings("main", repo.configuration().context.branch.?);
         const before = try repo.gitDirectory().readFileAlloc(io, "reftable/tables.list", gpa, .limited(4096));
@@ -1088,7 +1088,7 @@ test "a malformed signing policy is refused before an unsigned object is written
     inline for (.{ "commit.gpgSign", "tag.gpgSign", "tag.forceSignAnnotated" }) |setting| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
@@ -1203,7 +1203,7 @@ test "a commondir that cannot be opened is not replaced by the worktree director
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         repo.deinit(io);
     }
     var git_dir = try tmp.dir.openDir(io, ".git", .{});
@@ -1241,7 +1241,7 @@ test "a signer configuration refusal names its setting in caller-owned output" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     var environ: std.process.Environ.Map = .init(gpa);
     defer environ.deinit();
@@ -1269,7 +1269,7 @@ test "a malformed worktree configuration policy is refused instead of disabling 
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
@@ -1298,7 +1298,7 @@ test "repository writes preserve signature and hash refusals" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     const tree = hash.Hasher.object(.sha1, "tree", "");
     var invalid = fixture_who;
@@ -1350,7 +1350,7 @@ test "required filter discovery refuses malformed required policy" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer r.deinit(io);
     try r.editConfig(io, &.{.{ .name = "filter.needed.required", .value = "maybe" }}, .{});
     try std.testing.expectError(error.NotABoolean, Read.run(&r));
@@ -1368,7 +1368,7 @@ test "repository configuration edits publish policy only after validating the wh
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{});
+    var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer r.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
@@ -1409,7 +1409,7 @@ test "repository configuration edits keep their owners when allocation stops" {
             const io = std.testing.io;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .ref_format = .reftable, .odb = .{ .probe_timestamp_resolution = false } });
+            var r = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable, .odb = .{ .probe_timestamp_resolution = false } });
             defer r.deinit(io);
             try r.editConfig(io, &.{.{ .name = "fixture.kept", .value = "before" }}, .{});
             r.editConfig(io, &.{
@@ -1523,7 +1523,8 @@ test "the git directory of a working tree is found without opening the repositor
 fn probedOptions(gpa: std.mem.Allocator, io: Io, config_text: []const u8) repo_mod.Repository.CreateOptions {
     _ = gpa;
     _ = io;
-    var options: repo_mod.Repository.CreateOptions = .{};
+    // The harness's `git init` is `-b main`.
+    var options: repo_mod.Repository.CreateOptions = .{ .default_branch = "main" };
     options.file_mode = std.mem.find(u8, config_text, "filemode = true") != null;
     options.ignore_case = std.mem.find(u8, config_text, "ignorecase = true") != null;
     options.symlinks = std.mem.find(u8, config_text, "symlinks = false") == null;
@@ -2117,5 +2118,78 @@ test "core.ignoreStat marks what an add and a write take the stat of, as git's d
             std.debug.print("ignoreStat step {t}\n", .{step});
             return err;
         };
+    }
+}
+
+test "init takes its branch, object format and ref format from the user's configuration, as git init does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const testremote = @import("../testing/remote.zig");
+    const Case = struct { global: []const u8, overrides: []const []const u8 = &.{} };
+    const cases = [_]Case{
+        .{ .global = "" },
+        .{ .global = "[init]\n\tdefaultBranch = trunk\n" },
+        .{ .global = "[init]\n\tdefaultObjectFormat = sha256\n" },
+        .{ .global = "[init]\n\tdefaultRefFormat = reftable\n" },
+        .{ .global = "[feature]\n\texperimental = true\n" },
+        .{ .global = "[feature]\n\texperimental = true\n[init]\n\tdefaultRefFormat = files\n" },
+        .{ .global = "[init]\n\tdefaultRefFormat = bogus\n[feature]\n\texperimental = true\n" },
+        .{ .global = "[init]\n\tdefaultObjectFormat = bogus\n" },
+        .{ .global = "[init]\n\tdefaultBranch = trunk\n", .overrides = &.{"init.defaultBranch=fromcli"} },
+        .{ .global = "[init]\n\tdefaultBranch = a..b\n" },
+    };
+    for (cases, 0..) |case, n| {
+        var root = std.testing.tmpDir(.{ .iterate = true });
+        defer root.cleanup();
+        const home = try testremote.absolutePath(gpa, io, root.dir);
+        defer gpa.free(home);
+        var env = try testgit.isolatedEnviron(gpa, home);
+        defer env.deinit();
+        try root.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = case.global });
+
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        for (case.overrides) |o| try args.appendSlice(gpa, &.{ "-c", o });
+        try args.appendSlice(gpa, &.{ "init", "-q", "by-git" });
+        const git_init = testremote.gitInputEnv(gpa, io, root.dir, &env, args.items, "", false);
+        if (git_init) |out| gpa.free(out) else |_| {}
+
+        try root.dir.createDirPath(io, "by-relic");
+        var dir = try root.dir.openDir(io, "by-relic", .{ .iterate = true });
+        defer dir.close(io);
+        const made = repo_mod.Repository.create(gpa, io, dir, .{
+            .global_config = .{ .dir = root.dir, .sub_path = ".gitconfig" },
+            .config_overrides = case.overrides,
+            .home = home,
+        });
+        if (made) |repo_const| {
+            var repo = repo_const;
+            repo.deinit(io);
+        } else |err| {
+            errdefer std.debug.print("init case {d}: relic {t}\n", .{ n, err });
+            try std.testing.expectError(error.GitFailed, git_init);
+            try std.testing.expectEqual(error.InvalidBranchName, err);
+            continue;
+        }
+        _ = git_init catch |err| {
+            std.debug.print("init case {d}: git failed, relic made one\n", .{n});
+            return err;
+        };
+        for ([_][]const []const u8{
+            &.{ "symbolic-ref", "HEAD" },
+            &.{ "rev-parse", "--show-object-format" },
+            &.{ "rev-parse", "--show-ref-format" },
+        }) |query| {
+            var theirs_dir = try root.dir.openDir(io, "by-git", .{});
+            defer theirs_dir.close(io);
+            const theirs = try testremote.gitInputEnv(gpa, io, theirs_dir, &env, query, "", true);
+            defer gpa.free(theirs);
+            const ours = try testremote.gitInputEnv(gpa, io, dir, &env, query, "", true);
+            defer gpa.free(ours);
+            std.testing.expectEqualStrings(theirs, ours) catch |err| {
+                std.debug.print("init case {d}: {s}\n", .{ n, query[0] });
+                return err;
+            };
+        }
     }
 }

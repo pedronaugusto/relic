@@ -1919,7 +1919,7 @@ test "unshallowing a whole repository and a filtered fetch are refused by name" 
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try Repository.create(gpa, io, tmp.dir, .{});
+    var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
     try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true }));
     try testing.expectError(error.NotAPromisorRemote, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));
