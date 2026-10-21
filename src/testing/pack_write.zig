@@ -348,7 +348,7 @@ test "objects repacked from packs are read by several tasks, and the pack is the
     const Repack = struct {
         fn write(c: *Corpus, a: std.mem.Allocator, opened: Io, read: Io, threads: u16) !pack_mod.WriteReport {
             // One block cached, so that reading is reading the file.
-            var db = try odb_mod.Odb.openAt(a, opened, c.objects, .sha1, .{ .probe_timestamp_resolution = false, .pack_read_cache_bytes = 0 });
+            var db = try odb_mod.Odb.openAt(a, opened, c.objects, .sha1, .{ .probe_timestamp_resolution = false, .pack_read_cache_bytes = .fromRaw(0) });
             defer db.deinit(opened);
             var collected = try db.collectAll(opened, .{});
             defer collected.deinit();

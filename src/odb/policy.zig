@@ -1,4 +1,6 @@
 const std = @import("std");
+const aegis = @import("aegis");
+const Bytes = aegis.units.Bytes(usize);
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const object = @import("../object/object.zig");
@@ -15,7 +17,7 @@ pub const Options = struct {
     /// chain length and is almost never what you want.
     /// Consult reachability bitmaps for object sets and counts.
     use_bitmaps: bool = true,
-    delta_cache_bytes: usize = 16 * 1024 * 1024,
+    delta_cache_bytes: Bytes = .literal("16MiB"),
     /// Whether packs are reached through a memory map where the platform has
     /// one. Off by default: a map is faster on a cold cache, and it turns an
     /// IO error into a signal nobody can catch and holds the file open
@@ -30,14 +32,14 @@ pub const Options = struct {
     /// per object.
     fsync: fs.Fsync = .default,
     /// The buffer size a streaming read uses.
-    read_buffer_size: usize = 64 * 1024,
+    read_buffer_size: Bytes = .literal("64KiB"),
     /// How many bytes of each pack positional reads keep, in aligned blocks
     /// of `pack.read_block_bytes`: `pack.Pack.open`'s `read_cache_bytes`,
     /// for every pack this database opens. A block is allocated when it is
     /// first read, and a pack never holds more than its own size, so the
     /// database holds at most this much, or the pack's size if smaller, per
     /// pack it reads. Not used for a mapped pack.
-    pack_read_cache_bytes: usize = default_pack_read_cache_bytes,
+    pack_read_cache_bytes: Bytes = .fromRaw(default_pack_read_cache_bytes),
     /// How deep a delta chain may be before it is refused.
     max_delta_depth: u32 = pack.default_max_depth,
     /// The deepest `objects/info/alternates` read, the database's own being
@@ -46,7 +48,7 @@ pub const Options = struct {
     max_alternate_depth: u8 = 5,
     /// The largest inflated loose object, including its header, this will
     /// read into memory. Exceeding it is `error.StreamTooLong`.
-    max_object_bytes: usize = 1 << 31,
+    max_object_bytes: Bytes = .fromRaw(1 << 31),
     /// Whether to measure, at open, how fine a modification time the
     /// filesystem under `objects` records.
     ///

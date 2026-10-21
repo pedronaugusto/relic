@@ -43,7 +43,7 @@ pub fn get(state: *State) *Data {
 pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!*State {
     const data = try gpa.create(Data);
     errdefer gpa.destroy(data);
-    var cache = try pack.Cache.init(gpa, options.delta_cache_bytes);
+    var cache = try pack.Cache.init(gpa, options.delta_cache_bytes.raw());
     errdefer cache.deinit();
     data.* = .{ .gpa = gpa, .kind = kind, .options = options, .cache = cache };
     return @ptrCast(data); // safe: the opaque owner retains the allocated Data pointer.

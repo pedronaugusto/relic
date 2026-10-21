@@ -179,6 +179,11 @@ pub const Odb = struct {
         return storage.get(db.state);
     }
 
+    /// Whether an object of `size` bytes is past `Options.max_object_bytes`.
+    fn tooLarge(db: *const Odb, size: u64) bool {
+        return aegis.units.Bytes(u64).fromRaw(size).compare(db.backendData().options.max_object_bytes.convert(u64)) == .gt;
+    }
+
     /// The hash format selected at construction.
     pub fn objectFormat(db: *const Odb) Kind {
         return db.backendData().kind;
@@ -490,7 +495,7 @@ pub const Odb = struct {
         return pack.Pack.open(odb.backendData().gpa, io, pack_dir, .{ .base = base, .kind = odb.backendData().kind }, .{
             .access = if (odb.backendData().options.map_packs) .map else .read,
             .max_depth = odb.backendData().options.max_delta_depth,
-            .read_cache_bytes = odb.backendData().options.pack_read_cache_bytes,
+            .read_cache_bytes = odb.backendData().options.pack_read_cache_bytes.raw(),
         }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => null,
             else => err,
@@ -702,12 +707,12 @@ pub const Odb = struct {
     }
 
     fn inflateWhole(odb: *Odb, io: Io, file: Io.File) ErrorNamespace.Error![]u8 {
-        const input_buffer = try odb.backendData().gpa.alloc(u8, odb.backendData().options.read_buffer_size);
+        const input_buffer = try odb.backendData().gpa.alloc(u8, odb.backendData().options.read_buffer_size.raw());
         defer odb.backendData().gpa.free(input_buffer);
         var file_reader = file.reader(io, input_buffer);
         var window: [(1 << 15) + 4096]u8 = undefined;
         var decompress: warp.Inflate.Reader = .init(&file_reader.interface, &window, .{});
-        const bytes = decompress.interface.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes)) catch |err| switch (err) {
+        const bytes = decompress.interface.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes.raw())) catch |err| switch (err) {
             error.OutOfMemory, error.StreamTooLong => |e| return e,
             error.ReadFailed => return looseInflateError(&file_reader),
         };
@@ -923,7 +928,7 @@ pub const Odb = struct {
                 },
                 .list => |list| blk: {
                     const len = std.math.cast(usize, parsed.header.size) orelse return error.StreamTooLong;
-                    if (parsed.header.size > odb.backendData().options.max_object_bytes) return error.StreamTooLong;
+                    if (odb.tooLarge(parsed.header.size)) return error.StreamTooLong;
                     list.clearRetainingCapacity();
                     try list.resize(odb.backendData().gpa, len);
                     break :blk list.items;
@@ -2618,7 +2623,7 @@ pub const Odb = struct {
                 const head = entries[end].header orelse continue;
                 if (head.type != .tree) continue;
                 try trees.append(gpa, .{ .oid = entries[end].oid });
-                if (workers == 1 or entries[end].in_pack or head.size > odb.backendData().options.max_object_bytes) continue;
+                if (workers == 1 or entries[end].in_pack or odb.tooLarge(head.size)) continue;
                 const len = std.math.cast(usize, head.size) orelse continue;
                 trees.items[trees.items.len - 1].bytes = try gpa.alloc(u8, len);
                 held += len;
@@ -5134,9 +5139,9 @@ test "loose inflate distinguishes policy resource failures from corruption" {
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
     const oid = try odb.write(io, .blob, "hello\n");
-    odb.backendData().options.max_object_bytes = 1;
+    odb.backendData().options.max_object_bytes = .fromRaw(1);
     try std.testing.expectError(error.StreamTooLong, odb.read(io, oid));
-    odb.backendData().options.max_object_bytes = 100;
+    odb.backendData().options.max_object_bytes = .fromRaw(100);
     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
     // a loose object is read-only, as git's are
     try objects.deleteFile(io, odb.loosePath(oid, &path_buf));

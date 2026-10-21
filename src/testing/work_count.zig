@@ -272,7 +272,7 @@ test "a warm pass over a small pack reads no more than a cold one, at every pinn
         // With every block of the pack kept, and with one block for all of
         // them.
         for ([_]usize{ odb_mod.Options.default_pack_read_cache_bytes, 0 }) |cache_bytes| {
-            const scan = try scanColdWarm(gpa, git_dir, .{ .pack_read_cache_bytes = cache_bytes });
+            const scan = try scanColdWarm(gpa, git_dir, .{ .pack_read_cache_bytes = .fromRaw(cache_bytes) });
             if (brokenChainBound(scan, rounds)) |what| {
                 std.debug.print("date {d}, {d}-byte read cache: not {s}: {f}\n", .{ when, cache_bytes, what, scan });
                 failed += 1;
