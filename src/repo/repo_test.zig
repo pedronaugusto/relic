@@ -2259,3 +2259,34 @@ test "core.filesRefLockTimeout: how long a loose ref's lock is waited for, as gi
         };
     }
 }
+
+test "core.hideDotFiles and core.unsetenvvars, read on Windows as git for Windows reads them" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for ([_]struct { setting: ?[]const u8, hidden: bool }{
+        .{ .setting = null, .hidden = true },
+        .{ .setting = "dotGitOnly", .hidden = true },
+        .{ .setting = "false", .hidden = false },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        var overrides: std.ArrayList([]const u8) = .empty;
+        defer overrides.deinit(gpa);
+        var buf: [64]u8 = undefined;
+        if (case.setting) |s| try overrides.append(gpa, try std.mem.print(&buf, "core.hideDotFiles={s}", .{s}));
+        var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .config_overrides = overrides.items });
+        defer repo.deinit(io);
+        const found = (try fs_mod.permissionsAt(io, tmp.dir, ".git")).?;
+        try std.testing.expectEqual(case.hidden, @as(u32, @backingInt(found.permissions)) & 0x2 != 0);
+    }
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
+    defer repo.deinit(io);
+    var env = try std.testing.environ.createMap(gpa);
+    defer env.deinit();
+    const with = repo.programsWith(.{ .environ = &env });
+    try std.testing.expectEqual(@as(usize, 1), with.unset.len);
+    try std.testing.expectEqualStrings("PERL5LIB", with.unset[0]);
+}

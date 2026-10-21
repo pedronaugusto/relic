@@ -1020,7 +1020,7 @@ test "a worktree that moved is repaired and git follows it" {
     try std.testing.expect(linked.isLinkedWorktree());
 
     // And repair on its own is idempotent.
-    try worktrees_mod.repair(io, repo.commonDirectory(), "moving", moved);
+    try worktrees_mod.repair(io, repo.commonDirectory(), "moving", moved, .dot_git_only);
     const again = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(again);
     try std.testing.expectEqualStrings(listed, again);

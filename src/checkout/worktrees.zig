@@ -245,6 +245,8 @@ pub const AddOptions = struct {
     /// The branch `HEAD` will point at, without `refs/heads/`. Exactly one
     /// of this and `detach_at` is used; `detach_at` wins.
     branch: ?[]const u8 = null,
+    /// git for Windows' `core.hideDotFiles`, for the worktree's `.git` file.
+    hide_dot_files: fs.HideDotFiles = .dot_git_only,
 };
 
 /// Where a new worktree lives.
@@ -356,10 +358,7 @@ pub fn add(
     // directory a worktree at all.
     var admin_abs_buf: [4096]u8 = undefined;
     const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
-    var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.mem.print(&pointer_buf, gitfile.prefix ++ "{s}\n", .{admin_abs}) catch
-        return error.InvalidWorktreeName;
-    try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
+    try gitfile.write(io, dest_dir, admin_abs, options.hide_dot_files);
 
     return .{ .name = owned_name, .admin_dir = admin, .work_dir = opened_work_dir };
 }
@@ -656,6 +655,7 @@ pub fn repair(
     common_dir: Io.Dir,
     name: []const u8,
     dest_dir: Io.Dir,
+    hide: fs.HideDotFiles,
 ) Self.Error!void {
     try checkId(name);
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
@@ -673,10 +673,7 @@ pub fn repair(
 
     var admin_abs_buf: [4096]u8 = undefined;
     const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
-    var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.mem.print(&pointer_buf, gitfile.prefix ++ "{s}\n", .{admin_abs}) catch
-        return error.InvalidWorktreeName;
-    try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
+    try gitfile.write(io, dest_dir, admin_abs, hide);
 }
 
 /// Move a worktree's files to `new_dest` and repair the two paths.
@@ -684,7 +681,13 @@ pub fn repair(
 /// The move itself is a rename, so it fails across filesystems rather than
 /// copying: a worktree that has to cross a device is one the caller should
 /// remove and add again.
-pub const MoveInputs = struct { name: []const u8, new_parent: Io.Dir, new_name: []const u8 };
+pub const MoveInputs = struct {
+    name: []const u8,
+    new_parent: Io.Dir,
+    new_name: []const u8,
+    /// git for Windows' `core.hideDotFiles`, for the worktree's `.git` file.
+    hide_dot_files: fs.HideDotFiles = .dot_git_only,
+};
 
 pub fn move(
     gpa: Allocator,
@@ -713,7 +716,7 @@ pub fn move(
 
     var moved = try new_parent.openDir(io, new_name, .{ .iterate = true });
     defer moved.close(io);
-    try repair(io, common_dir, name, moved);
+    try repair(io, common_dir, name, moved, inputs.hide_dot_files);
 }
 
 test "every entry point refuses a worktree id that is not one name under worktrees/" {

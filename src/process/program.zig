@@ -41,6 +41,10 @@ pub const Programs = struct {
     /// Usually the process's own, `std.process.Init.environ_map`. It is
     /// read, never changed.
     environ: *const Environ.Map,
+    /// Names taken out of every program's environment, before its own
+    /// `Invocation.unset` and `set`: git for Windows' `core.unsetenvvars`,
+    /// which `Repository.programsWith` fills from the configuration.
+    unset: []const []const u8 = &.{},
     /// Override process creation for every program relic runs. The hook
     /// receives the fully prepared argv, environment, cwd and streams.
     /// Supply `terminate` as well when a timeout must end descendants.
@@ -215,6 +219,7 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
     errdefer environ.deinit();
     // conduit's rule for an override: a later one wins, and a removal is
     // not an empty value
+    for (programs.unset) |name| try conduit.environ.apply(&environ, &.{.{ .name = name, .value = null }});
     for (invocation.unset) |name| try conduit.environ.apply(&environ, &.{.{ .name = name, .value = null }});
     for (invocation.set) |v| try conduit.environ.apply(&environ, &.{.{ .name = v.name, .value = v.value }});
 
@@ -432,6 +437,23 @@ test "a command line reaches the shell as git hands it one, and its arguments st
     defer outcome.deinit(gpa);
     try testing.expect(outcome.succeeded());
     try testing.expectEqualStrings("set|kept||a b|$HOME;x|", outcome.stdout);
+}
+
+test "what Programs.unset names is gone from every program, before its own set" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var env = try std.testing.environ.createMap(gpa);
+    defer env.deinit();
+    try env.put("RELIC_PERLISH", "taken");
+    try env.put("RELIC_KEPT", "kept");
+    var outcome = try run(gpa, io, .{ .environ = &env, .unset = &.{"RELIC_PERLISH"} }, .{
+        .argv = &.{"printf '%s|%s|%s' \"${RELIC_PERLISH-none}\" \"$RELIC_KEPT\" \"${RELIC_AGAIN-none}\""},
+        .shell = true,
+        .set = &.{.{ .name = "RELIC_AGAIN", .value = "set" }},
+    }, .{});
+    defer outcome.deinit(gpa);
+    try std.testing.expectEqualStrings("none|kept|set", outcome.stdout);
 }
 
 test "a command line with nothing to interpret runs directly" {

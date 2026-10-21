@@ -129,6 +129,9 @@ pub const Rules = struct {
     /// setting means, and the outcome records it.
     symlinks: bool = builtin.target.os.tag != .windows,
 
+    /// git for Windows' `core.hideDotFiles`: which files and directories a
+    /// checkout makes are hidden. Nothing outside Windows.
+    hide_dot_files: fs.HideDotFiles = .dot_git_only,
     /// `core.ignoreStat`: an entry an add or a write takes the stat of is
     /// marked `assume_valid`, which nothing compares against the disk.
     ignore_stat: bool = false,
@@ -2119,7 +2122,7 @@ const CheckoutWrite = struct {
         // checkout one file at a time leaves them.
         // glint-ignore: Z026 -- the path's own error is the one returned; flushing only keeps the paths before it written
         errdefer batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules) catch {};
-        var leading: LeadingDirs = .{};
+        var leading: LeadingDirs = .{ .hide = c.options.rules.hide_dot_files };
         for (paths) |path| {
             const want = c.wanted.get(path).?;
             if (try c.unchanged(path, want)) {
@@ -2215,6 +2218,8 @@ const CheckoutWrite = struct {
 const LeadingDirs = struct {
     buf: [4096]u8 = undefined,
     len: usize = 0,
+    /// `core.hideDotFiles`, for each directory this makes.
+    hide: fs.HideDotFiles = .none,
 
     /// Make `dir` and the directories above it. A symbolic link or a file
     /// standing as one is replaced when `force`, as git's forced checkout
@@ -2234,8 +2239,11 @@ const LeadingDirs = struct {
                     }
                     try fs.deleteFile(io, wt, sub);
                     try wt.createDir(io, sub, .default_dir);
+                    fs.hideIfAsked(io, wt, sub, l.hide);
                 }
-            } else wt.createDir(io, sub, .default_dir) catch |err| switch (err) {
+            } else if (wt.createDir(io, sub, .default_dir)) |_| {
+                fs.hideIfAsked(io, wt, sub, l.hide);
+            } else |err| switch (err) {
                 // Made since the look by someone else: a directory is as
                 // good, anything else is looked at again next time.
                 error.PathAlreadyExists => {
@@ -2243,7 +2251,7 @@ const LeadingDirs = struct {
                     if (now.kind != .directory) return error.NotDir;
                 },
                 else => |e| return e,
-            };
+            }
             start = end + 1;
         }
         l.remember(dir);
@@ -2295,9 +2303,9 @@ pub fn realLeadingPath(io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
 
 /// Make the directories above `path` for a write that replaces whatever is
 /// at it, refusing a symbolic link among them.
-fn makeLeadingDirs(io: Io, wt: Io.Dir, path: []const u8) Error!void {
+fn makeLeadingDirs(io: Io, wt: Io.Dir, path: []const u8, hide: fs.HideDotFiles) Error!void {
     const parent = std.Io.Dir.path.dirnamePosix(path) orelse return;
-    var leading: LeadingDirs = .{};
+    var leading: LeadingDirs = .{ .hide = hide };
     try leading.make(io, wt, parent, false, null);
 }
 
@@ -2458,6 +2466,7 @@ const WriteBatch = struct {
                 if (first == null) first = err;
                 continue;
             };
+            fs.hideIfAsked(io, wt, job.path, rules.hide_dot_files);
             try recordStat(index, job.path, job.want, stat, rules);
             outcome.written += 1;
         }
@@ -2491,6 +2500,7 @@ fn recordStat(index: *Index, path: []const u8, want: TreeEntry, stat: ?fs.Stat, 
 
 /// Stat what was just written and put it in the index.
 fn recordWritten(io: Io, wt: Io.Dir, index: *Index, path: []const u8, want: TreeEntry, rules: Rules) Error!void {
+    fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     const after = try fs.statAt(io, wt, path);
     const tree = try index.cacheTree();
     tree.invalidate(path);
@@ -2598,7 +2608,7 @@ pub fn writePaths(
 
     var waiting: std.StringHashMapUnmanaged(PathWrite) = .empty;
     defer waiting.deinit(gpa);
-    var leading: LeadingDirs = .{};
+    var leading: LeadingDirs = .{ .hide = options.rules.hide_dot_files };
     for (writes) |w| {
         const want = w.blob orelse continue;
         if (std.Io.Dir.path.dirnamePosix(w.path)) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
@@ -2735,11 +2745,12 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
     const oid = options.oid;
     const rules = options.rules;
     if (safe_path.checkEntry(path, .worktree, mode == .symlink, options.rules.protect) != null) return error.UnsafePath;
-    try makeLeadingDirs(io, wt, path);
+    try makeLeadingDirs(io, wt, path, rules.hide_dot_files);
+    defer fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     var written: Written = .{ .stat = .none };
     switch (mode) {
         .gitlink => {
-            var leading: LeadingDirs = .{};
+            var leading: LeadingDirs = .{ .hide = rules.hide_dot_files };
             try leading.make(io, wt, path, false, null);
         },
         .symlink => {
@@ -2776,14 +2787,15 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
     const bytes = options.bytes;
     const rules = options.rules;
     if (safe_path.checkEntry(path, .worktree, mode == .symlink, options.rules.protect) != null) return error.UnsafePath;
-    try makeLeadingDirs(io, wt, path);
+    try makeLeadingDirs(io, wt, path, rules.hide_dot_files);
+    defer fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     if (try fs.statAt(io, wt, path)) |found| {
         if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
     }
     var written: Written = .{ .stat = .none };
     switch (mode) {
         .gitlink => {
-            var leading: LeadingDirs = .{};
+            var leading: LeadingDirs = .{ .hide = rules.hide_dot_files };
             try leading.make(io, wt, path, false, null);
         },
         .symlink => {
@@ -3286,8 +3298,9 @@ fn restoreSparse(
     entry: *const index_mod.Entry,
     options: CheckoutOptions,
 ) Error!void {
-    var leading: LeadingDirs = .{};
+    var leading: LeadingDirs = .{ .hide = options.rules.hide_dot_files };
     if (std.Io.Dir.path.dirnamePosix(entry.path)) |parent| try leading.make(io, wt, parent, false, options.refusal);
+    defer fs.hideIfAsked(io, wt, entry.path, options.rules.hide_dot_files);
     switch (entry.mode) {
         // The submodule's commit is in its own repository, not this one.
         .gitlink => return leading.make(io, wt, entry.path, false, options.refusal),

@@ -475,7 +475,7 @@ fn connect(
     const to_git_dir = try relativePath(arena, git_dir_abs, work_abs);
     // `gitfile.target` refuses a `.git` file with no path in it.
     assert(to_git_dir.len != 0);
-    try gitfile.write(arena, io, work, to_git_dir);
+    try gitfile.write(io, work, to_git_dir, repo.settings().hide_dot_files);
     try setCoreWorktree(io, repo, git_dir, try relativePath(arena, work_abs, git_dir_abs));
 }
 

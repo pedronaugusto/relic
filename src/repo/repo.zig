@@ -290,11 +290,43 @@ const RepositoryData = struct {
     untracked_ident: ?[]u8 = null,
     /// `extensions.submodulePathConfig`, from the repository's format.
     submodule_path_config: bool = false,
+    /// git for Windows' `core.unsetenvvars`, each name owned: what
+    /// `Repository.programsWith` takes out of every program's environment.
+    unset_env_vars: [][]u8 = &.{},
 };
 
 /// The `core` settings engines take, read once from a published
 /// configuration with git's defaults: what the working tree is like and how
 /// far to believe it.
+/// git for Windows' `core.unsetenvvars`: its names, split at each comma as
+/// git's `do_unset_environment_variables` splits them, `PERL5LIB` unset;
+/// none outside Windows. Owned.
+fn unsetEnvVarsOf(gpa: Allocator, config: *const config_mod.Config) Allocator.Error![][]u8 {
+    if (builtin.target.os.tag != .windows) return &.{};
+    const value = config.get("core.unsetenvvars") orelse "PERL5LIB";
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer freeNames(gpa, names.items);
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |name| if (name.len != 0) try names.append(gpa, try gpa.dupe(u8, name));
+    return names.toOwnedSlice(gpa);
+}
+
+fn freeNames(gpa: Allocator, names: [][]u8) void {
+    for (names) |n| gpa.free(n);
+    if (names.len != 0) gpa.free(names);
+}
+
+/// git for Windows' `core.hideDotFiles` (`mingw_core_config`): `dotGitOnly`
+/// in any case, else a boolean; `dotGitOnly` unset. Outside Windows git
+/// reads none of it and nothing is hidden.
+fn hideDotFilesOf(config: *const config_mod.Config) ErrorNamespace.Error!fs.HideDotFiles {
+    if (builtin.target.os.tag != .windows) return .none;
+    const entry = config.find("core.hidedotfiles") orelse return .dot_git_only;
+    const value = entry.value orelse return .all;
+    if (std.ascii.eqlIgnoreCase(value, "dotgitonly")) return .dot_git_only;
+    return if (try config_mod.parseBool(value)) .all else .none;
+}
+
 pub const Settings = struct {
     /// `core.ignoreCase`: the working tree folds case.
     ignore_case: bool,
@@ -318,6 +350,9 @@ pub const Settings = struct {
     /// `core.lockfilePid`: each lock names its holder in a `~pid.lock`
     /// beside it while it is held.
     lockfile_pid: bool,
+    /// git for Windows' `core.hideDotFiles`: what is made hidden. Read on
+    /// Windows alone, as git reads it; elsewhere nothing is hidden.
+    hide_dot_files: fs.HideDotFiles,
     /// `core.maxTreeDepth`: how deep a tree may nest (git's default 2048).
     max_tree_depth: u32,
     /// `core.protectNTFS` (on everywhere) and `core.protectHFS` (on macOS):
@@ -355,6 +390,7 @@ pub const Settings = struct {
             .trust_ctime = try config.getBool("core.trustctime", true),
             .ignore_stat = try config.getBool("core.ignorestat", false),
             .lockfile_pid = try config.getBool("core.lockfilepid", false),
+            .hide_dot_files = try hideDotFilesOf(config),
             .max_tree_depth = @intCast(depth),
             .protect = .{
                 .ntfs = try config.getBool("core.protectntfs", true),
@@ -820,6 +856,8 @@ pub const Repository = struct {
         repo.data().fsync = try fsyncOf(repo.configuration());
         repo.data().settings = try Settings.of(repo.configuration());
         repo.data().submodule_path_config = format.submodule_path_config;
+        repo.data().unset_env_vars = try unsetEnvVarsOf(gpa, repo.configuration());
+        errdefer freeNames(gpa, repo.data().unset_env_vars);
         if (repo.data().work_dir) |work| repo.data().untracked_ident = try untrackedIdent(gpa, io, work);
         errdefer if (repo.data().untracked_ident) |ident| gpa.free(ident);
         var odb_options = options.odb;
@@ -987,6 +1025,15 @@ pub const Repository = struct {
         return .{ .shared = repo.data().shared, .sync = repo.data().fsync.sync(.index), .write_pid = repo.data().settings.lockfile_pid };
     }
 
+    /// `base` with git for Windows' `core.unsetenvvars` taken out of every
+    /// program's environment (`PERL5LIB` unless set), as git's
+    /// `mingw_spawnve_fd` takes them. Elsewhere `base` as it is.
+    pub fn programsWith(repo: *const Repository, base: program.Programs) program.Programs {
+        var with = base;
+        with.unset = repo.data().unset_env_vars;
+        return with;
+    }
+
     /// How a configuration file of this repository is locked.
     pub fn configLock(repo: *const Repository) config_write.LockOptions {
         return .{ .shared = repo.data().shared, .pid_file = repo.data().settings.lockfile_pid };
@@ -1136,12 +1183,26 @@ pub const Repository = struct {
     /// Writes `HEAD`, `config`, `objects/`, `refs/heads`, `refs/tags` and
     /// `info/`, which is what a repository needs to be one.
     pub fn create(gpa: Allocator, io: Io, dir: Io.Dir, options: CreateOptions) Self.Error!Repository {
+        // git's `repository_format_configure` reads the levels above the
+        // repository; `repo_default_branch_name` reads the template's too.
+        var user = try config_mod.Config.open(gpa, io, .{
+            .system = options.system_config,
+            .xdg = options.xdg_config,
+            .global = options.global_config,
+            .command = options.config_overrides,
+            .pairs = options.config_pairs,
+        }, .{ .home = options.home });
+        defer user.deinit();
+
         const git_path = if (options.bare) "." else ".git";
         if (!options.bare) {
             dir.createDir(io, ".git", .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => return error.RepositoryExists,
                 else => |e| return e,
             };
+            // git for Windows' `mingw_mkdir` hides it, as
+            // `core.hideDotFiles` says.
+            fs.hideIfAsked(io, dir, ".git", try hideDotFilesOf(&user));
         } else if (discover_directory.isGitDirectory(io, dir)) {
             return error.RepositoryExists;
         }
@@ -1165,16 +1226,6 @@ pub const Repository = struct {
         }
         fs.adjustShared(io, git_dir, ".", shared);
 
-        // git's `repository_format_configure` reads the levels above the
-        // repository; `repo_default_branch_name` reads the template's too.
-        var user = try config_mod.Config.open(gpa, io, .{
-            .system = options.system_config,
-            .xdg = options.xdg_config,
-            .global = options.global_config,
-            .command = options.config_overrides,
-            .pairs = options.config_pairs,
-        }, .{ .home = options.home });
-        defer user.deinit();
         const object_format = options.object_format orelse initObjectFormat(&user);
         const ref_format = options.ref_format orelse initRefFormat(&user);
         const choices = try initChoices(gpa, io, git_dir, options);
@@ -1383,6 +1434,7 @@ pub const Repository = struct {
         if (repo.data().work_dir) |w| w.close(io);
         const gpa = repo.data().gpa;
         if (repo.data().untracked_ident) |ident| gpa.free(ident);
+        freeNames(gpa, repo.data().unset_env_vars);
         gpa.destroy(repo.data());
         repo.* = undefined;
     }
@@ -1467,6 +1519,7 @@ pub const Repository = struct {
         var fresh = try repo.readConfig(io, sources, context, format, if (worktree_file) pending.contents() else null);
         errdefer fresh.deinit();
         const policy = try repo.checkConfig(&fresh, format, diagnostic);
+        errdefer freeNames(repo.data().gpa, policy.unset_env_vars);
         pending.commit(io) catch |err| switch (err) {
             error.WriteFailed => return error.WriteFailed,
             else => |e| return e,
@@ -1545,6 +1598,8 @@ pub const Repository = struct {
         packing: odb_policy.Packing,
         submodule_path_config: bool,
         locks: refs_mod.Locks,
+        /// Owned until installed.
+        unset_env_vars: [][]u8,
     };
 
     /// Whether `next` may be published, and the policy it sets: the same
@@ -1570,6 +1625,7 @@ pub const Repository = struct {
             .packing = try packingOf(next),
             .submodule_path_config = format.submodule_path_config,
             .locks = try refLocks(next),
+            .unset_env_vars = try unsetEnvVarsOf(repo.data().gpa, next),
         };
     }
 
@@ -1591,6 +1647,8 @@ pub const Repository = struct {
         repo.data().fsync = policy.fsync;
         repo.data().settings = policy.settings;
         repo.data().submodule_path_config = policy.submodule_path_config;
+        freeNames(repo.data().gpa, repo.data().unset_env_vars);
+        repo.data().unset_env_vars = policy.unset_env_vars;
     }
 
     /// The `core` settings the engines take, as the published configuration
@@ -1645,6 +1703,7 @@ pub const Repository = struct {
             .check_stat = repo.data().settings.check_stat,
             .trust_ctime = repo.data().settings.trust_ctime,
             .ignore_stat = repo.data().settings.ignore_stat,
+            .hide_dot_files = repo.data().settings.hide_dot_files,
             .timestamp_resolution = repo.data().odb.timestamp_resolution,
             .file_mode = repo.data().settings.file_mode,
             .symlinks = repo.data().settings.symlinks,

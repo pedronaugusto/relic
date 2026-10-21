@@ -832,6 +832,63 @@ fn writePidFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, share
     return name;
 }
 
+/// git for Windows' `core.hideDotFiles`: which of what git makes is given
+/// the hidden attribute. Nothing outside Windows.
+pub const HideDotFiles = enum {
+    /// `false`.
+    none,
+    /// `true`: every file and directory whose name starts with a dot.
+    all,
+    /// `dotGitOnly`, the default: `.git` alone, the directory or the file.
+    dot_git_only,
+
+    /// git's `needs_hiding`: whether `path`'s last name is one to hide.
+    pub fn hides(h: HideDotFiles, path: []const u8) bool {
+        if (h == .none) return false;
+        const trimmed = std.mem.trimEnd(u8, path, "/\\");
+        const start = baseStart(trimmed);
+        const name = trimmed[start..];
+        return switch (h) {
+            .none => false,
+            .all => name.len != 0 and name[0] == '.',
+            .dot_git_only => std.ascii.eqlIgnoreCase(name, ".git"),
+        };
+    }
+};
+
+/// Give `sub_path` Windows' hidden attribute where `hide` asks for it, as
+/// git for Windows' `set_hidden_flag` does after it makes a file or a
+/// directory; a failure is said and the file kept. Nothing elsewhere.
+pub fn hideIfAsked(io: Io, dir: Io.Dir, sub_path: []const u8, hide: HideDotFiles) void {
+    if (builtin.target.os.tag != .windows or !hide.hides(sub_path)) return;
+    const found = (permissionsAt(io, dir, sub_path) catch |err| return std.log.warn("could not hide '{s}': {t}", .{ sub_path, err })) orelse return;
+    const hidden: u32 = @as(u32, @backingInt(found.permissions)) | 0x2; // FILE_ATTRIBUTE_HIDDEN
+    setFilePermissions(io, dir, sub_path, @fromBackingInt(@intCast(hidden))) catch |err|
+        std.log.warn("could not hide '{s}': {t}", .{ sub_path, err });
+}
+
+/// Take Windows' hidden attribute off `sub_path` where `hide` would give
+/// it, before a write that replaces the file, which Windows refuses over a
+/// hidden one: git for Windows' `set_hidden_flag(path, 0)`.
+pub fn showIfAsked(io: Io, dir: Io.Dir, sub_path: []const u8, hide: HideDotFiles) void {
+    if (builtin.target.os.tag != .windows or !hide.hides(sub_path)) return;
+    const found = (permissionsAt(io, dir, sub_path) catch return) orelse return;
+    const shown: u32 = @as(u32, @backingInt(found.permissions)) & ~@as(u32, 0x2);
+    setFilePermissions(io, dir, sub_path, @fromBackingInt(@intCast(if (shown == 0) 0x80 else shown))) catch |err|
+        std.log.warn("could not show '{s}': {t}", .{ sub_path, err });
+}
+
+test "core.hideDotFiles hides what git's needs_hiding says" {
+    try std.testing.expect(HideDotFiles.dot_git_only.hides(".git"));
+    try std.testing.expect(HideDotFiles.dot_git_only.hides("sub/.git"));
+    try std.testing.expect(HideDotFiles.dot_git_only.hides("sub/.GIT/"));
+    try std.testing.expect(!HideDotFiles.dot_git_only.hides(".gitignore"));
+    try std.testing.expect(!HideDotFiles.dot_git_only.hides("repo.git"));
+    try std.testing.expect(HideDotFiles.all.hides("dir/.gitignore"));
+    try std.testing.expect(!HideDotFiles.all.hides("dir/file"));
+    try std.testing.expect(!HideDotFiles.none.hides(".git"));
+}
+
 /// Where the last path component of `path` starts.
 fn baseStart(path: []const u8) usize {
     const slash = std.mem.findScalarLast(u8, path, '/');

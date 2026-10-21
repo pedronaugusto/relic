@@ -45,13 +45,25 @@ pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) ErrorName
     return try gpa.dupe(u8, path);
 }
 
+/// Errors from `write`.
+pub const WriteError = Io.File.OpenError || Io.Writer.Error;
+
 /// Write `<dir>/.git` naming `path`: `gitdir: <path>` and a line feed, as
-/// git writes it.
-pub fn write(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) (Allocator.Error || Io.Dir.WriteFileError)!void {
+/// git writes it, hidden where `core.hideDotFiles` asks -- shown first when
+/// it is there, as git for Windows' `mingw_open` does, since Windows will
+/// not replace a hidden file.
+pub fn write(io: Io, dir: Io.Dir, path: []const u8, hide: fs.HideDotFiles) WriteError!void {
     std.debug.assert(path.len != 0);
-    const line = try std.mem.concat(gpa, u8, &.{ prefix, path, "\n" });
-    defer gpa.free(line);
-    try dir.writeFile(io, .{ .sub_path = ".git", .data = line });
+    fs.showIfAsked(io, dir, ".git", hide);
+    var file = try dir.createFile(io, ".git", .{});
+    defer file.close(io);
+    var buffer: [256]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    try writer.interface.writeAll(prefix);
+    try writer.interface.writeAll(path);
+    try writer.interface.writeAll("\n");
+    try writer.interface.flush();
+    fs.hideIfAsked(io, dir, ".git", hide);
 }
 
 /// The directory `path` names, opened: absolute, as git writes it for a
@@ -85,7 +97,7 @@ test "a .git file is read as git reads it" {
     try tmp.dir.createDirPath(io, "inner");
     var opened = try open(io, tmp.dir, read_back, .{});
     opened.close(io);
-    try write(gpa, io, tmp.dir, "elsewhere/.git");
+    try write(io, tmp.dir, "elsewhere/.git", .dot_git_only);
     const written = (try read(gpa, io, tmp.dir, ".git")).?;
     defer gpa.free(written);
     try testing.expectEqualStrings("elsewhere/.git", written);
