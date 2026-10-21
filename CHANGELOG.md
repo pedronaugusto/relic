@@ -9,11 +9,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - `warning.Warning` has `advertised_bundles_failed` and `bundle_uri` (git's words on the way through a bundle URI: a download that failed, a file that is neither a bundle nor a list, a `creationToken` that does not parse, a recursion past four lists, a server's list that does not read).
+- `commit.Error` and `rebase.Error` take `notes.Error`, with its new `InvalidRewriteSetting`; `warning.Warning` has `notes`.
 
 ### Added
 
 - Protocol v2's `bundle-uri` command, as git 2.55 asks and answers it. A clone under `transfer.bundleURI=true` with no `bundle_uri` asks a server that advertises the command for its list (`transport.Session.bundleUri`, `protocol.bundleUri`), relative URIs taken against the remote's URL, and takes its bundles before the fetch (git's `transport_get_remote_bundle_uri` and `fetch_bundle_list`); a repository read directly answers as its upload-pack would. `upload_pack` advertises and answers it under `uploadpack.advertiseBundleURIs` (`Options.advertise_bundle_uris`), every `bundle.*` setting as a `key=value` line (`upload_pack.bundleSettings`, `advertisesBundleUris`).
 - The warnings git prints inside a bundle URI's fetch reach `Warnings`.
+- Notes follow rewritten commits as git 2.55's `copy_note_for_rewrite` copies them (`notes.copyForRewrite`): after `commit --amend` and every amend a rebase makes (`notes.rewrite.amend`, `Notes added by 'git commit --amend'`), and at a rebase's end for every commit in `rewritten-list` (`notes.rewrite.rebase`, as git's `notes copy --for-rewrite=rebase`), into each ref `notes.rewriteRef` names (globs matched over every ref, one outside `refs/notes/` warned of and left out), met as `notes.rewriteMode` says. `GIT_NOTES_REWRITE_REF` and `GIT_NOTES_REWRITE_MODE` are not read.
+
+### Fixed
+
+- A `rebase --continue` that amends the stopped commit tells `post-rewrite amend`, as the `git commit --amend` git runs there does.
 
 ## [0.27.0] - 2026-10-21
 

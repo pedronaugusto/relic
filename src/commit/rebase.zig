@@ -42,6 +42,7 @@ const three_way = @import("../merge/three_way.zig");
 const signing_mod = @import("../object/signing.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
 const commit_hooks_mod = @import("commit_hooks.zig");
+const notes = @import("notes.zig");
 const filter = @import("../checkout/filter.zig");
 const strategy = @import("../merge/strategy.zig");
 const reset = @import("reset.zig");
@@ -116,7 +117,7 @@ pub const Error = error{
     MergeCommit,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || sequencer.Error || merging.Error || program.Error || patch_id.Error || rev_walk.Error || worktrees.Error;
+} || sequencer.Error || merging.Error || program.Error || patch_id.Error || rev_walk.Error || worktrees.Error || notes.Error;
 
 /// A message a person would be shown in an editor, and what they would
 /// see.
@@ -1580,10 +1581,10 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         if (msg_source == .squash_edit) {
             _ = try runner.postCommit(io, edit_env);
         } else try commit_hooks.postCommit(arena, io, null);
-        // An amend in place tells `post-rewrite` so, as `commit --amend`
-        // does, with its author when it is `git commit`'s.
-        if (amending) _ = try runner.postRewriteBy(io, .amend, &.{.{ .old = head_oid, .new = made }}, if (msg_source == .squash_edit) author else null);
     }
+    // An amend in place is `commit --amend`'s, with its author when it is
+    // `git commit`'s.
+    if (amending) try postRewriteAmend(r, commit_hooks.runner, .{ .old = head_oid, .new = made }, if (msg_source == .squash_edit) author else null);
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
     try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
     if (msg_source == .squash_edit) {
@@ -1662,6 +1663,15 @@ fn editedCleanup(r: *Run) Error!message.Cleanup {
     return message.cleanupMode(try message.cleanupSetting(r.repo.configuration()), true);
 }
 
+/// git's `commit_post_rewrite`, after the post-commit of every amend a
+/// rebase makes: the amended commit's notes follow it as
+/// `notes.rewrite.amend` says, then `post-rewrite amend` is told, with
+/// `author` exported where `git commit` exports it.
+fn postRewriteAmend(r: *Run, runner: ?*hooks_mod.Runner, rewrite: hooks_mod.Runner.Rewrite, author: ?object.Signature) Error!void {
+    try notes.copyForRewrite(r.gpa, r.io, r.repo, &.{rewrite}, .{ .command = .amend, .who = r.options.who });
+    if (runner) |h| _ = try h.postRewriteBy(r.io, .amend, &.{rewrite}, author);
+}
+
 /// `reword`: amend `HEAD` with the message a person makes of it.
 fn reword(r: *Run, reflog_action: []const u8) Error!void {
     var head = try r.head();
@@ -1699,10 +1709,8 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     try head_mod.advance(r.io, r.repo, head, made, .{ .who = r.options.who, .message = log });
     // The amend is `git commit --amend`, which takes `AUTO_MERGE` away.
     try r.repo.refStore().root().delete(r.repo.allocator(), r.io, .auto_merge);
-    if (commit_hooks.runner) |runner| {
-        _ = try runner.postCommit(r.io, e);
-        _ = try runner.postRewriteBy(r.io, .amend, &.{.{ .old = head.oid.?, .new = made }}, current.commit.author);
-    }
+    if (commit_hooks.runner) |runner| _ = try runner.postCommit(r.io, e);
+    try postRewriteAmend(r, commit_hooks.runner, .{ .old = head.oid.?, .new = made }, current.commit.author);
 }
 
 //=========================================================================
@@ -2399,8 +2407,18 @@ fn finish(r: *Run) Error!Outcome {
             });
         }
     }
-    // `post-rewrite`, told on its standard input what `rewritten-list`
-    // says, once the branch has moved.
+    // `git notes copy --for-rewrite=rebase` with `rewritten-list`, whose
+    // failure git does not mind; then `post-rewrite`, told on its standard
+    // input what that list says, once the branch has moved.
+    if (rewritten.items.len != 0) {
+        const pairs = try r.arena.alloc(hooks_mod.Runner.Rewrite, rewritten.items.len);
+        for (pairs, rewritten.items) |*pair, one| pair.* = .{ .old = one.old, .new = one.new };
+        notes.copyForRewrite(r.gpa, io, repo, pairs, .{ .command = .rebase, .who = r.options.who }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => {},
+        };
+    }
     if (r.options.hooks) |runner| {
         if (try r.readState("rewritten-list")) |list| {
             if (list.len != 0) _ = try runner.run(io, "post-rewrite", .{ .args = &.{"rebase"}, .input = list });
@@ -2581,6 +2599,8 @@ fn commitStagedChanges(r: *Run) Error!void {
     // The commit is `git commit`'s, which records resolutions as it ends.
     try rerere.afterCommit(r.gpa, io, repo);
     if (hook_env) |e| _ = try commit_hooks.runner.?.postCommit(io, e);
+    // An amend is `git commit --amend`'s.
+    if (amend) try postRewriteAmend(r, commit_hooks.runner, .{ .old = head_oid, .new = made }, author);
 }
 
 const hooksEnv = ?hooks_mod.Runner.CommitEnv;

@@ -26,6 +26,7 @@ const trailer = @import("../object/trailer.zig");
 
 const signing = @import("../object/signing.zig");
 const commit_hooks = @import("commit_hooks.zig");
+const notes = @import("notes.zig");
 
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
@@ -76,7 +77,7 @@ pub const Error = error{
     /// sign-offs: git's "you did not edit the message".
     TemplateUntouched,
 } || trailer.Error || hooks.Error || commit_hooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
-    index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
+    index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError || notes.Error ||
     error{NameTooLong};
 
 /// How a commit is made.
@@ -248,13 +249,16 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     try locked_index.commit(io);
 
     var outcome: Outcome = .{ .commit = new, .tree = tree, .previous = current };
-    if (options.hooks) |runner| {
-        outcome.post_commit = try runner.postCommit(io, env);
-        if (options.amend and options.post_rewrite) {
-            _ = try runner.postRewrite(io, .amend, &.{.{ .old = current.?, .new = new }});
-        }
-    }
+    if (options.hooks) |runner| outcome.post_commit = try runner.postCommit(io, env);
+    if (options.amend and options.post_rewrite) try postRewrite(io, repo, options.hooks, .{ .old = current.?, .new = new }, request.committer);
     return outcome;
+}
+
+/// git's `commit_post_rewrite` after an amend: the amended commit's notes
+/// follow it as `notes.rewrite.amend` says, then `post-rewrite` is told.
+fn postRewrite(io: Io, repo: *Repository, runner: ?*hooks.Runner, rewrite: hooks.Runner.Rewrite, who: object.Signature) Error!void {
+    try notes.copyForRewrite(repo.allocator(), io, repo, &.{rewrite}, .{ .command = .amend, .who = who });
+    if (runner) |h| _ = try h.postRewrite(io, .amend, &.{rewrite});
 }
 
 fn validateMessage(arena: Allocator, cleaned: []const u8, cleanup: message.Cleanup, comment: []const u8, options: Options) Error!void {

@@ -86,6 +86,10 @@ pub const Warning = union(enum) {
     credentials_in_url: []const u8,
     /// What git warns of in a remote helper's answers: the text.
     remote_helper: []const u8,
+    /// What git warns of while reading which notes follow a rewritten
+    /// commit: a `notes.rewriteRef` outside `refs/notes/`, or naming no
+    /// ref. The text.
+    notes: []const u8,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -105,6 +109,7 @@ pub const Warning = union(enum) {
             .promisor_stored => |s| arena.print("Storing new {s} from server for remote '{s}'.\n    '{s}' -> '{s}'", .{ s.field, s.remote, s.old, s.new }),
             .credentials_in_url => |redacted| arena.print("URL '{s}' uses plaintext credentials", .{redacted}),
             .remote_helper => |text| text,
+            .notes => |text| text,
             .http_version_unknown => |v| arena.print("unknown value given to http.version: '{s}'", .{v}),
             .ssl_version_unknown => |v| arena.print("unsupported ssl version {s}: using default", .{v}),
             .bundle_uri_clone_failed => |v| arena.print("failed to fetch objects from bundle URI '{s}'", .{v}),
@@ -155,6 +160,7 @@ pub const Warnings = struct {
             .promisor_stored => |s| .{ .promisor_stored = .{ .field = try a.dupe(u8, s.field), .remote = try a.dupe(u8, s.remote), .old = try a.dupe(u8, s.old), .new = try a.dupe(u8, s.new) } },
             .credentials_in_url => |t| .{ .credentials_in_url = try a.dupe(u8, t) },
             .remote_helper => |t| .{ .remote_helper = try a.dupe(u8, t) },
+            .notes => |t| .{ .notes = try a.dupe(u8, t) },
             .http_version_unknown => |t| .{ .http_version_unknown = try a.dupe(u8, t) },
             .ssl_version_unknown => |t| .{ .ssl_version_unknown = try a.dupe(u8, t) },
             .bundle_uri_clone_failed => |t| .{ .bundle_uri_clone_failed = try a.dupe(u8, t) },

@@ -1504,6 +1504,7 @@ test "a pick's pseudo-refs are found and removed in a reftable repository, as gi
 }
 
 const rebase = @import("../commit/rebase.zig");
+const commit_mod = @import("../commit/commit.zig");
 
 const rebase_state = [_][]const u8{
     "rebase-merge/author-script",             "rebase-merge/done",
@@ -4494,6 +4495,56 @@ test "merge and cherry-pick with subtree and whitespace options end as git's do"
                     return err;
                 };
                 for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(io, r, &.{ "cherry-pick", "--abort" });
+            }
+        }
+    }.inFormat);
+}
+
+test "notes follow rewritten commits as notes.rewriteRef says: a rebase with its fixup and squash, and an amend" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            try testgit.requireGit(gpa, io);
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, sheetScript);
+            defer pair.deinit();
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                try r.exec(io, &.{ "notes", "add", "-m", "on first", "side~4" });
+                try r.exec(io, &.{ "notes", "add", "-m", "on the fixup", "side~1" });
+                try r.exec(io, &.{ "notes", "add", "-m", "on the squash", "side" });
+                try r.exec(io, &.{ "notes", "--ref=other", "add", "-m", "other on third", "side~2" });
+                try r.exec(io, &.{ "notes", "--ref=left", "add", "-m", "never copied", "side~2" });
+                try r.exec(io, &.{ "config", "notes.rewriteRef", "refs/notes/c*" });
+                try r.exec(io, &.{ "config", "--add", "notes.rewriteRef", "refs/notes/other" });
+                try r.exec(io, &.{ "config", "--add", "notes.rewriteRef", "refs/heads/side" });
+            }
+            const notes_refs = [_][]const u8{ "refs/notes/commits", "refs/notes/other", "refs/notes/left", "HEAD" };
+
+            try useFixtureEditor(&pair, "GIT_SEQUENCE_EDITOR", "silent");
+            try pair.git.exec(io, &.{ "rebase", "-q", "-i", "--autosquash", "main" });
+            _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
+            {
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .interactive = true, .autosquash = true });
+                defer outcome.deinit();
+                try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+            }
+            try expectSameState(&pair, io, &rebase_state, &notes_refs);
+            const shown = try pair.ours.run(io, &.{ "notes", "show", "HEAD~2" });
+            defer gpa.free(shown);
+            try std.testing.expectEqualStrings("on first\n\non the fixup\n\non the squash\n", shown);
+
+            // An amend, then one `notes.rewrite.amend` keeps the notes from.
+            for ([_]bool{ true, false }) |follow| {
+                if (!follow) for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "notes.rewrite.amend", "false" });
+                const text = if (follow) "third, amended" else "third, again";
+                try pair.git.exec(io, &.{ "commit", "-q", "--amend", "-m", text });
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                _ = try commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = if (follow) "third, amended\n" else "third, again\n" }, .{ .amend = true });
+                try expectSameState(&pair, io, &.{}, &notes_refs);
             }
         }
     }.inFormat);

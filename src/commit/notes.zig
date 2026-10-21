@@ -15,9 +15,11 @@
 //! strategies, a manual merge leaving `NOTES_MERGE_PARTIAL`,
 //! `NOTES_MERGE_REF` and `.git/NOTES_MERGE_WORKTREE` for `mergeCommit` or
 //! `mergeAbort`. Each commit is made with git's message and the ref moved
-//! with git's log line. A note is always given as content: git's editor
-//! session (`-e`, or no message at all) is refused by name, as is `GIT_NOTES_REF`,
-//! which a caller names with `ref` instead.
+//! with git's log line. The notes of commits an amend or a rebase rewrote
+//! follow them where `notes.rewriteRef` says (`copyForRewrite`). A note is
+//! always given as content: git's editor session (`-e`, or no message at
+//! all) is refused by name, as is `GIT_NOTES_REF`, which a caller names with
+//! `ref` instead.
 //!
 //! `formatNote` writes a note the way `git log` shows it under a commit.
 
@@ -41,6 +43,10 @@ const message = @import("../object/message.zig");
 const diff = @import("../diff/diff.zig");
 const blob_merge = @import("../merge/blob_merge.zig");
 const head_mod = @import("../repo/head.zig");
+const hooks_mod = @import("../hooks/hooks.zig");
+const config_mod = @import("../config/config.zig");
+const glob_mod = @import("../text.zig").glob;
+const warning = @import("../report.zig").warning;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -78,6 +84,10 @@ pub const Error = error{
     MalformedNotesTree,
     /// `notes.mergeStrategy` names no strategy.
     InvalidStrategy,
+    /// `notes.rewrite.<command>` that is no boolean, a `notes.rewriteMode`
+    /// git does not know, or `notes.rewriteMode` or `notes.rewriteRef`
+    /// with no value: git stops on each.
+    InvalidRewriteSetting,
 } || Allocator.Error || odb_mod.Error || object.ParseError || object.TreeParseError || refs_mod.ReadError ||
     refs_mod.TransactionError || repo_mod.WriteError || rev_parse.Error || rev_walk.Error || diff.Error ||
     head_mod.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
@@ -961,6 +971,94 @@ pub const RefOptions = struct {
     /// `remove --ignore-missing`.
     ignore_missing: bool = false,
 };
+
+/// What a rewrite copies notes with: who commits the notes refs it changes,
+/// and where git's warnings go.
+pub const RewriteOptions = struct {
+    /// What rewrote them: `notes.rewrite.<command>` says whether notes follow.
+    command: hooks_mod.Runner.RewriteCommand,
+    who: object.Signature,
+    warnings: ?*warning.Warnings = null,
+};
+
+/// git's `copy_note_for_rewrite` after `options.command` rewrote commits: each old
+/// commit's note goes onto its new one in every ref `notes.rewriteRef`
+/// names, met as `notes.rewriteMode` says (`concatenate` by default),
+/// unless `notes.rewrite.<command>` is false. With no `notes.rewriteRef`
+/// nothing is copied. Each ref that changed is committed with git's
+/// message: `Notes added by 'git commit --amend'` for an amend, and for a
+/// rebase that of the `git notes copy --for-rewrite=rebase` git runs. A
+/// value git stops on is `InvalidRewriteSetting`; `GIT_NOTES_REWRITE_REF`
+/// and `GIT_NOTES_REWRITE_MODE` are not read, as no environment is here.
+pub fn copyForRewrite(
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    rewrites: []const hooks_mod.Runner.Rewrite,
+    options: RewriteOptions,
+) Self.Error!void {
+    if (rewrites.len == 0) return;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var enabled = true;
+    var combine: Combine = .concatenate;
+    var refs: std.ArrayList([]const u8) = .empty;
+    // `notes_rewrite_config`, in the configuration's order.
+    for (repo.configuration().entries.items) |e| {
+        if (!std.mem.eql(u8, e.section, "notes")) continue;
+        if (e.has_subsection) {
+            if (std.mem.eql(u8, e.subsection, "rewrite") and std.mem.eql(u8, e.name, @tagName(options.command)))
+                enabled = if (e.value) |v| config_mod.parseBool(v) catch return error.InvalidRewriteSetting else true;
+        } else if (std.mem.eql(u8, e.name, "rewritemode")) {
+            const v = e.value orelse return error.InvalidRewriteSetting;
+            combine = for (std.enums.values(Combine)) |c| {
+                if (std.ascii.eqlIgnoreCase(v, @tagName(c))) break c;
+            } else return error.InvalidRewriteSetting;
+        } else if (std.mem.eql(u8, e.name, "rewriteref")) {
+            const v = e.value orelse return error.InvalidRewriteSetting;
+            if (std.mem.startsWith(u8, v, "refs/notes/")) {
+                try addRefsByGlob(arena, io, repo, &refs, v, options.warnings);
+            } else try warning.note(options.warnings, .{ .notes = try arena.print("Refusing to rewrite notes in {s} (outside of refs/notes/)", .{v}) });
+        }
+    }
+    if (!enabled) return;
+    const msg = switch (options.command) {
+        .amend => "Notes added by 'git commit --amend'",
+        .rebase => "Notes added by 'git notes copy'",
+    };
+    for (refs.items) |ref| {
+        // `load_notes_trees`: each tree's own way to meet a note is
+        // `ignore`; the copies say theirs.
+        var t = try Notes.open(gpa, io, repo, ref, .ignore);
+        defer t.deinit();
+        for (rewrites) |r| t.copy(io, r.old, r.new, .{ .force = true, .combine = combine }) catch |err| switch (err) {
+            // git goes on past a note it cannot combine.
+            error.CombineFailed => {},
+            else => |other| return other,
+        };
+        _ = try t.commit(io, msg, options.who);
+    }
+}
+
+/// git's `string_list_add_refs_by_glob`: the refs `glob` matches by
+/// wildmatch over their whole name, or the name itself when it has no glob
+/// character (warned of when it names nothing); each once.
+fn addRefsByGlob(arena: Allocator, io: Io, repo: *Repository, refs: *std.ArrayList([]const u8), glob: []const u8, warnings: ?*warning.Warnings) Self.Error!void {
+    if (std.mem.findAny(u8, glob, "?*[") == null) {
+        if (try repo.refStore().readOid(arena, io, glob) == null) try warning.note(warnings, .{ .notes = try arena.print("notes ref {s} is invalid", .{glob}) });
+        for (refs.items) |have| if (std.mem.eql(u8, have, glob)) return;
+        return refs.append(arena, glob);
+    }
+    var listing = try repo.refStore().list(arena, io, "refs/");
+    defer listing.deinit();
+    for (listing.entries) |ref| {
+        if (!try glob_mod.matches(arena, glob, ref.name, .{ .pathname = false })) continue;
+        for (refs.items) |have| {
+            if (std.mem.eql(u8, have, ref.name)) break;
+        } else try refs.append(arena, try arena.dupe(u8, ref.name));
+    }
+}
 
 /// `git notes copy`: `from`'s note onto `to`.
 pub const CopyRefOptions = struct { from: Oid, to: Oid, ref: ?[]const u8 = null, who: object.Signature, force: bool = false };
