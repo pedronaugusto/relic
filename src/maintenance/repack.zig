@@ -477,7 +477,10 @@ const Run = struct {
             for (loose.entries) |entry| {
                 if (run.promised.contains(entry.oid)) continue;
                 if ((try skip.fetchPut(gpa, entry.oid, {})) != null) continue;
-                try entries.append(run.arena, entry);
+                // The listing's paths go with it: the entry keeps a copy.
+                var kept = entry;
+                kept.hint = try run.arena.dupe(u8, entry.hint);
+                try entries.append(run.arena, kept);
             }
         }
         return entries.items;

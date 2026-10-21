@@ -128,6 +128,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - `index.Index.remove` reads `path` before it frees an entry, so an entry's own path may be passed.
+- `repack --geometric` no longer reads freed memory when it rolls loose objects into the new pack: each entry keeps its own copy of the path its delta search sorts by (an intermittent crash in the promisor-pack case).
 - A push's pack loses its `.keep` once the refs hold its objects, as git's receive-pack removes it, not at the end of the push: a collection run by a hook or the auto maintenance after it packs it with the rest.
 - A push to a repository on this machine, and a fetch from one, no longer hold the pack whole: the receive-pack or upload-pack in this process (`transport.in_process`, one for both) serves each request on a task beside the client, the request and the answer crossing through bounded pipes, so a pack goes over as it is written. A server that stops reading has the rest of the request taken, so the client reads its answer; a client canceled cancels the server's task. Where the caller's `Io` runs no second task, a request is held whole and answered after it, as before.
 - A ref list a server advertises, receive-pack's and upload-pack's, and a local fetch's, leaves out a symbolic ref that goes round in a circle, as git leaves a broken ref out, where it ended the conversation with `SymbolicRefLoop`.
