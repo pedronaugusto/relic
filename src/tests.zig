@@ -176,6 +176,7 @@ test {
     _ = @import("index/sparse_index_test.zig");
     _ = @import("index/untracked.zig");
     _ = @import("index/untracked_test.zig");
+    _ = @import("index/split_test.zig");
     _ = @import("refs/reftable/stack_test.zig");
     _ = @import("testing/url_ownership.zig");
     _ = @import("testing/refs_ownership.zig");

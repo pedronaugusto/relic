@@ -231,3 +231,30 @@ pub fn encodedLength(bytes: []const u8, max_bits: u64) Error!usize {
     if (std.mem.readInt(u32, bytes[end..][0..4], .big) != last) return error.CorruptBitmap;
     return end + 4;
 }
+
+/// Encode the bitmap with `positions` set, which must rise, as git's
+/// `ewah_set` builds one bit at a time: it ends at its last set bit.
+pub fn writePositions(gpa: Allocator, positions: []const u32) Allocator.Error![]u8 {
+    var bit_count: u32 = 0;
+    if (positions.len != 0) bit_count = positions[positions.len - 1] + 1;
+    const words = try gpa.alloc(u64, (@as(usize, bit_count) + 63) / 64);
+    defer gpa.free(words);
+    @memset(words, 0);
+    for (positions) |p| words[p / 64] |= @as(u64, 1) << @intCast(p % 64); // safe: below 64
+    return write(gpa, words, bit_count) catch |err| switch (err) {
+        error.InvalidBitmapInput => unreachable, // unreachable: the words hold every bit counted
+        error.OutOfMemory => |e| return e,
+    };
+}
+
+test "a bitmap of positions reads back as them" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u32{ &.{}, &.{0}, &.{ 1, 5, 64, 200 }, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 70 } }) |positions| {
+        const bytes = try writePositions(gpa, positions);
+        defer gpa.free(bytes);
+        var back = try read(gpa, bytes);
+        defer back.bits.deinit();
+        try std.testing.expectEqualSlices(u32, positions, back.bits.positions);
+        try std.testing.expectEqual(bytes.len, back.len);
+    }
+}

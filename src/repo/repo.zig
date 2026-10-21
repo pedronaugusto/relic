@@ -43,6 +43,7 @@ const reftable_stack = @import("../refs/reftable/stack.zig");
 const signing = @import("../object/signing.zig");
 const message = @import("../object/message.zig");
 const encoding = @import("../text.zig").encoding;
+const date_mod = @import("../text.zig").date;
 const diagnostic_mod = @import("../report.zig").diagnostic;
 const repository_format = @import("../discover.zig").format;
 const gitfile = @import("../discover.zig").gitfile;
@@ -320,6 +321,9 @@ pub const Settings = struct {
     /// The walk a new untracked cache serves, as git's
     /// `new_untracked_cache_flags` reads `status.showUntrackedFiles`.
     untracked_flags: u32,
+    /// `core.splitIndex`: `true` splits the index on its next write,
+    /// `false` writes it whole, `null` keeps what it is.
+    split_index: ?bool,
 
     pub const UntrackedCacheSetting = enum { keep, write, remove };
 
@@ -352,6 +356,10 @@ pub const Settings = struct {
                 const on = config_mod.parseBool(value) catch break :untracked fallback;
                 break :untracked if (on) .write else .remove;
             },
+            .split_index = if (config.find("core.splitindex")) |entry|
+                (if (entry.value) |value| (config_mod.parseBool(value) catch null) else true)
+            else
+                null,
             .untracked_flags = if (config.get("status.showuntrackedfiles")) |mode|
                 (if (std.mem.eql(u8, mode, "all")) 0 else untracked_mod.show_other_directories | untracked_mod.hide_empty_directories)
             else
@@ -991,6 +999,50 @@ pub const Repository = struct {
             .entry_offset_blocks = blocks,
             .lock = repo.indexLock(),
         };
+    }
+
+    /// git's split index on a write: `core.splitIndex` turns it on or off;
+    /// a split index with no shared index yet, or one where more entries
+    /// than `splitIndex.maxPercentChange` allows (20 percent unless set; 0
+    /// always, 100 never) are not in it, has a new shared index written
+    /// first, and the old ones `splitIndex.sharedIndexExpire` (two weeks)
+    /// has passed are removed. Returns the name of the shared index the
+    /// main file goes on standing on, which git freshens after the write.
+    fn writeSharedIfDue(repo: *Repository, io: Io, index: *index_mod.Index, options: index_mod.WriteOptions) WriteIndexError!?[hash.max_hex_len + 16]u8 {
+        if (repo.data().settings.split_index) |on| if (on) index.useSplit() else index.dropSplit();
+        const split = index.split orelse return null;
+        const config = repo.configuration();
+        const max_percent: i64 = blk: {
+            const value = try config.getInt("splitindex.maxpercentchange", -1);
+            break :blk if (value >= 0 and value <= 100) value else 20;
+        };
+        const entries: i64 = @intCast(index.entries.items.len);
+        const not_shared: i64 = @intCast(index.notShared());
+        const too_many = switch (max_percent) {
+            0 => true,
+            100 => false,
+            else => entries * max_percent < not_shared * 100,
+        };
+        if (split.base) |base| if (!too_many) {
+            var name: [hash.max_hex_len + 16]u8 = @splat(0);
+            var hex: [hash.max_hex_len]u8 = undefined;
+            // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
+            _ = std.mem.print(&name, "sharedindex.{s}", .{base.hex(&hex)}) catch unreachable;
+            return name;
+        };
+        const written_at = try index.writeShared(io, repo.data().git_dir, options);
+        const text = config.get("splitindex.sharedindexexpire") orelse "2.weeks.ago";
+        const expire = date_mod.parseExpiry(text, .{ .now = written_at }) orelse return error.MalformedValue;
+        index.removeSharedBefore(io, repo.data().git_dir, expire);
+        return null;
+    }
+
+    /// git's `freshen_shared_index`: the shared index a write stood on is
+    /// dated now, so that it outlives its expiry while it is in use.
+    fn freshenShared(repo: *Repository, io: Io, name: *const [hash.max_hex_len + 16]u8) void {
+        const path = std.mem.sliceTo(name, 0);
+        fs.setTimestamps(io, repo.data().git_dir, path, .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err|
+            std.log.warn("could not freshen shared index '{s}': {t}", .{ path, err });
     }
 
     /// Which writes are synced, and how.
@@ -1693,14 +1745,20 @@ pub const Repository = struct {
         pub fn commit(locked: *LockedIndex, io: Io) WriteIndexError!void {
             const repo = locked.repo;
             var options = try repo.indexWriteOptions(&locked.index);
-            const wt = repo.data().work_dir orelse return locked.index.commitTo(io, &locked.lock, options);
-            var attrs = try repo.loadAttrs(io);
-            defer attrs.deinit();
-            var rules = try repo.worktreeRules();
-            rules.attrs = &attrs;
-            var check: worktree.RacyCheck = .{ .gpa = repo.data().gpa, .io = io, .wt = wt, .rules = rules };
-            options.racy = check.racy();
+            var attrs: ?attributes.Attrs = null;
+            defer if (attrs) |*a| a.deinit();
+            var check: worktree.RacyCheck = undefined;
+            if (repo.data().work_dir) |wt| {
+                attrs = try repo.loadAttrs(io);
+                var rules = try repo.worktreeRules();
+                rules.attrs = &attrs.?;
+                check = .{ .gpa = repo.data().gpa, .io = io, .wt = wt, .rules = rules };
+                options.racy = check.racy();
+            }
+            const freshen = try repo.writeSharedIfDue(io, &locked.index, options);
             try locked.index.commitTo(io, &locked.lock, options);
+            // Only once the file that stands on it is in place, as git's.
+            if (freshen) |name| repo.freshenShared(io, &name);
         }
 
         /// Give the lock up, the index file as it was unless `commit` put

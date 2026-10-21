@@ -178,7 +178,7 @@ pub const UntrackedCache = struct {
         try writeVarint(out, walk.count);
         try out.writeAll(walk.body.written());
         for ([_]*std.ArrayList(u32){ &walk.valid, &walk.check_only, &walk.oid_valid }) |bits| {
-            const bitmap = try positionsBitmap(gpa, bits.items);
+            const bitmap = try ewah.writePositions(gpa, bits.items);
             defer gpa.free(bitmap);
             try out.writeAll(bitmap);
         }
@@ -248,24 +248,6 @@ pub const UntrackedCache = struct {
 fn writeVarint(out: *Io.Writer, value: usize) Io.Writer.Error!void {
     var buf: [16]u8 = undefined;
     try out.writeAll(varint.writeOffset(&buf, value));
-}
-
-/// The bitmap with `positions` set, rising, as git's `ewah_set` builds it.
-fn positionsBitmap(gpa: Allocator, positions: []const u32) Allocator.Error![]u8 {
-    if (positions.len == 0) return encode(gpa, &.{}, 0);
-    const bit_count = positions[positions.len - 1] + 1;
-    const words = try gpa.alloc(u64, (bit_count + 63) / 64);
-    defer gpa.free(words);
-    @memset(words, 0);
-    for (positions) |p| words[p / 64] |= @as(u64, 1) << @intCast(p % 64);
-    return encode(gpa, words, bit_count);
-}
-
-fn encode(gpa: Allocator, words: []const u64, bit_count: u32) Allocator.Error![]u8 {
-    return ewah.write(gpa, words, bit_count) catch |err| switch (err) {
-        error.InvalidBitmapInput => unreachable, // unreachable: the words hold every bit counted
-        error.OutOfMemory => |e| return e,
-    };
 }
 
 /// Read the extension as git's `read_untracked_extension` does: `null` for

@@ -93,6 +93,13 @@ pub const WriteError = error{
     /// Two entries out of order, or one path and stage twice: an index git
     /// refuses to read, and this package too.
     UnsortedIndex,
+    /// A split index asked of a sparse one: git's "cannot use split index
+    /// with a sparse index".
+    SparseSplitIndex,
+    /// The shared index just written could not be found again.
+    FileNotFound,
+    /// The shared index just written could not be looked at.
+    FileSystem,
 } || fs.LockError || fs.CommitError || Allocator.Error;
 
 /// One tracked path.
@@ -126,6 +133,10 @@ pub const Entry = struct {
     /// without it. `worktree.fsmonitor.refresh` decides when it is believed.
     fsmonitor_valid: bool = false,
     stat: fs.Stat = .none,
+    /// git's `ce->index`: one more than the position in a split index's
+    /// shared index this entry was read from or last written to, or 0. A
+    /// write compares the entry with that one to tell what is shared.
+    shared_at: u32 = 0,
 
     /// The mode an index entry's raw bits are taken as: the spellings
     /// `Mode.fromRaw` knows, else git's `canon_mode`. No value is refused,
@@ -231,6 +242,23 @@ pub const Dropped = struct {
     /// Whether any was dropped.
     pub fn any(d: Dropped) bool {
         return d.cache_tree or d.resolve_undo or d.fsmonitor or d.untracked_cache;
+    }
+};
+
+/// A split index: the shared index it stands on, as git's `split_index`
+/// keeps it.
+pub const Split = struct {
+    /// The shared index's checksum, which names `sharedindex.<hex>`; `null`
+    /// until one is written.
+    base: ?Oid = null,
+    /// The shared index's entries in its order, as read or last written:
+    /// what `Entry.shared_at` counts in. Owned by the index.
+    shared: std.ArrayList(Entry) = .empty,
+
+    fn deinit(s: *Split, gpa: Allocator) void {
+        for (s.shared.items) |e| gpa.free(e.path);
+        s.shared.deinit(gpa);
+        s.* = undefined;
     }
 };
 
@@ -731,11 +759,11 @@ pub const Index = struct {
     /// records, measured when it was read. It decides how much of an entry's
     /// nanosecond field the racy rule is allowed to believe.
     timestamp_resolution: fs.Resolution = .nanosecond,
-    /// The shared index a split index was built from, when there was one.
-    split_base: ?Oid = null,
-    /// Whether the file read was a split index. What is written back is
-    /// always a complete index: no entry is lost, and git re-splits on its
-    /// next write if `core.splitIndex` is still set.
+    /// The split index this was read as, or is to be written as: git's
+    /// `split_index`. `null` is written whole.
+    split: ?Split = null,
+    /// Whether the file read was a split index: its `link` extension came
+    /// before the shared index was merged in.
     was_split: bool = false,
     /// Whether the file read carried an all-zero trailer, which is what
     /// `index.skipHash` writes.
@@ -782,6 +810,7 @@ pub const Index = struct {
         if (index.cache_tree) |*t| t.deinit();
         if (index.resolve_undo) |*r| r.deinit();
         if (index.untracked) |*u| u.deinit();
+        if (index.split) |*s| s.deinit(index.gpa);
         for (index.unknown.items) |e| index.gpa.free(e.data);
         index.unknown.deinit(index.gpa);
         if (index.fsmonitor_token) |t| index.gpa.free(t);
@@ -817,16 +846,16 @@ pub const Index = struct {
         // because it is the filesystem the cutoff came from.
         index.timestamp_resolution = timestamp_resolution orelse fs.probeTimestampResolution(io, dir);
 
-        if (index.split_base) |base| {
+        if (index.split) |split| if (split.base) |base| {
             try index.mergeShared(gpa, io, git_dir, base);
-        }
+        };
         return index;
     }
 
     /// Read an index from bytes already in memory.
     ///
     /// A split index read this way keeps its `link` extension unresolved:
-    /// `split_base` names the shared file and the entries are only the
+    /// `split.base` names the shared file and the entries are only the
     /// overlay. `read` is the call that merges them.
     pub fn parse(gpa: Allocator, kind: Kind, bytes: []const u8) Self.ReadError!Index {
         const raw_len = kind.rawLen();
@@ -1015,7 +1044,8 @@ pub const Index = struct {
         // unreachable: the slice is cut to the format's raw length
         const base = Oid.fromRaw(index.kind, data[0..raw_len]) catch unreachable;
         index.was_split = true;
-        if (!base.isZero()) index.split_base = base;
+        if (index.split) |*old| old.deinit(gpa);
+        index.split = .{ .base = if (base.isZero()) null else base };
 
         var rest = data[raw_len..];
         if (rest.len == 0) {
@@ -1086,6 +1116,7 @@ pub const Index = struct {
             if (replaced) {
                 var overlay = index.entries.items[replacement - 1];
                 overlay.path = try gpa.dupe(u8, base_entry.path);
+                overlay.shared_at = pos + 1;
                 merged.appendAssumeCapacity(overlay);
                 continue;
             }
@@ -1093,11 +1124,13 @@ pub const Index = struct {
                 .path = try gpa.dupe(u8, base_entry.path),
                 .oid = base_entry.oid,
                 .mode = base_entry.mode,
+                .raw_mode = base_entry.raw_mode,
                 .stage = base_entry.stage,
                 .assume_valid = base_entry.assume_valid,
                 .skip_worktree = base_entry.skip_worktree,
                 .intent_to_add = base_entry.intent_to_add,
                 .stat = base_entry.stat,
+                .shared_at = pos + 1,
             });
         }
         for (index.entries.items[replacement..]) |extra| {
@@ -1105,6 +1138,7 @@ pub const Index = struct {
             try merged.ensureUnusedCapacity(gpa, 1);
             var copy = extra;
             copy.path = try gpa.dupe(u8, extra.path);
+            copy.shared_at = 0;
             merged.appendAssumeCapacity(copy);
         }
 
@@ -1123,6 +1157,9 @@ pub const Index = struct {
         for (index.entries.items) |e| gpa.free(e.path);
         index.entries.deinit(gpa);
         index.entries = merged;
+        // The shared entries stay: what the next write compares against.
+        index.split.?.shared = shared.entries;
+        shared.entries = .empty;
 
         if (index.split_delete) |*b| b.deinit();
         if (index.split_replace) |*b| b.deinit();
@@ -1421,6 +1458,7 @@ pub const Index = struct {
         const found = index.find(from) orelse return false;
         var moved = found.*;
         moved.path = to;
+        moved.shared_at = 0;
         if (index.cache_tree) |*tree| {
             tree.invalidate(from);
             tree.invalidate(to);
@@ -1537,6 +1575,13 @@ pub const Index = struct {
 
     /// The version `write` would use under `options`.
     pub fn versionFor(index: *const Index, options: WriteOptions) u32 {
+        return index.versionOver(index.entries.items, options);
+    }
+
+    /// The version a file holding `entries` is written in: under `auto`,
+    /// 2 or 3 as they need, git's demotion, counted over what the file
+    /// holds -- a split index's own entries, not its shared ones.
+    fn versionOver(index: *const Index, entries: []const Entry, options: WriteOptions) u32 {
         return switch (options.version) {
             .v2 => 2,
             .v3 => 3,
@@ -1544,12 +1589,165 @@ pub const Index = struct {
             .auto => blk: {
                 const carried = if (index.version != 0) index.version else options.new_version;
                 if (carried != 2 and carried != 3) break :blk carried;
-                for (index.entries.items) |e| {
+                for (entries) |e| {
                     if (e.needsExtendedFlags()) break :blk 3;
                 }
                 break :blk 2;
             },
         };
+    }
+
+    /// Make this a split index, as git's `add_split_index` does: its next
+    /// write writes a shared index first.
+    pub fn useSplit(index: *Index) void {
+        if (index.split == null) index.split = .{};
+    }
+
+    /// Write it whole again, as git's `remove_split_index` has it.
+    pub fn dropSplit(index: *Index) void {
+        if (index.split) |*s| s.deinit(index.gpa);
+        index.split = null;
+        for (index.entries.items) |*e| e.shared_at = 0;
+    }
+
+    /// How many entries no shared index holds: what
+    /// `splitIndex.maxPercentChange` weighs, as git's
+    /// `too_many_not_shared_entries` counts them.
+    pub fn notShared(index: *const Index) usize {
+        var count: usize = 0;
+        for (index.entries.items) |e| count += @intFromBool(e.shared_at == 0);
+        return count;
+    }
+
+    /// git's `write_shared_index`: every entry written, with no extension
+    /// but the offset tables `options` asks for, into `sharedindex.<hex>`
+    /// in `git_dir`, named by its checksum, which becomes the split
+    /// index's base; each entry is then shared at its place. Returns the
+    /// new file's modification time, which is the time its expiry counts
+    /// from.
+    pub fn writeShared(index: *Index, io: Io, git_dir: Io.Dir, options: WriteOptions) Self.WriteError!Io.Timestamp {
+        if (index.sparse) return error.SparseSplitIndex;
+        var bytes: Io.Writer.Allocating = .init(index.gpa);
+        defer bytes.deinit();
+        index.writeBody(&bytes.writer, options, .{ .entries = index.entries.items, .extensions = false }) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
+        const written = bytes.written();
+        const raw_len = index.kind.rawLen();
+        // unreachable: the slice is cut to the format's raw length
+        const checksum = Oid.fromRaw(index.kind, written[written.len - raw_len ..]) catch unreachable;
+        var hex: [hash.max_hex_len]u8 = undefined;
+        var name_buf: [hash.max_hex_len + 16]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
+        const name = std.mem.print(&name_buf, "sharedindex.{s}", .{checksum.hex(&hex)}) catch unreachable;
+        const buffer = try index.gpa.alloc(u8, 64 * 1024);
+        defer index.gpa.free(buffer);
+        var lock = try fs.LockFile.open(index.gpa, io, git_dir, .{ .sub_path = name, .buffer = buffer }, options.lock);
+        defer lock.deinit(io);
+        try lock.writer().writeAll(written);
+        try lock.commit(io);
+
+        var shared: std.ArrayList(Entry) = try .initCapacity(index.gpa, index.entries.items.len);
+        errdefer {
+            for (shared.items) |e| index.gpa.free(e.path);
+            shared.deinit(index.gpa);
+        }
+        for (index.entries.items, 0..) |*e, at| {
+            var copy = e.*;
+            copy.path = try index.gpa.dupe(u8, e.path);
+            shared.appendAssumeCapacity(copy);
+            e.shared_at = @intCast(at + 1); // safe: an index holds fewer than 2^32 entries
+        }
+        if (index.split) |*old| old.deinit(index.gpa);
+        index.split = .{ .base = checksum, .shared = shared };
+        const stat = git_dir.statFile(io, name, .{}) catch |err| return switch (err) {
+            error.FileNotFound => error.FileNotFound,
+            else => error.FileSystem,
+        };
+        return stat.mtime;
+    }
+
+    /// git's `clean_shared_index_files`: every other `sharedindex.*` in
+    /// `git_dir` whose modification time is not after `expire`, in
+    /// seconds, goes. An expiry of 0 is never.
+    pub fn removeSharedBefore(index: *const Index, io: Io, git_dir: Io.Dir, expire: i64) void {
+        if (expire == 0) return;
+        const base = (index.split orelse return).base orelse return;
+        var hex: [hash.max_hex_len]u8 = undefined;
+        const current = base.hex(&hex);
+        var dir = git_dir.openDir(io, ".", .{ .iterate = true }) catch |err| return std.log.warn("unable to open git dir: {t}", .{err});
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch |err| return std.log.warn("unable to read git dir: {t}", .{err})) |entry| {
+            const rest = if (std.mem.startsWith(u8, entry.name, "sharedindex.")) entry.name["sharedindex.".len..] else continue;
+            if (std.mem.eql(u8, rest, current)) continue;
+            const stat = dir.statFile(io, entry.name, .{}) catch |err| {
+                std.log.warn("could not stat '{s}': {t}", .{ entry.name, err });
+                continue;
+            };
+            if (stat.mtime.toSeconds() > expire) continue;
+            dir.deleteFile(io, entry.name) catch |err| std.log.warn("unable to unlink: {s}: {t}", .{ entry.name, err });
+        }
+    }
+
+    /// The main file of a split index, as git's
+    /// `prepare_to_write_split_index` lays it out: an entry the shared
+    /// index holds at its place, unchanged and not racy, stays there; one
+    /// changed is a replacement, written first with no name; the shared
+    /// entries no entry holds any more are deleted; the rest are written
+    /// after the replacements.
+    fn writeSplitTo(index: *Index, w: *Io.Writer, options: WriteOptions, split: *const Split, base: Oid) WriteToError!void {
+        if (index.sparse) return error.SparseSplitIndex;
+        const gpa = index.gpa;
+        const shared = split.shared.items;
+        const matched = try gpa.alloc(bool, shared.len);
+        defer gpa.free(matched);
+        @memset(matched, false);
+        var replace: std.ArrayList(u32) = .empty;
+        defer replace.deinit(gpa);
+        var written: std.ArrayList(Entry) = .empty;
+        defer written.deinit(gpa);
+        var fresh: std.ArrayList(Entry) = .empty;
+        defer fresh.deinit(gpa);
+        for (index.entries.items) |entry| {
+            const at = entry.shared_at;
+            if (at == 0 or at > shared.len or matched[at - 1] or !std.mem.eql(u8, shared[at - 1].path, entry.path)) {
+                try fresh.append(gpa, entry);
+                continue;
+            }
+            matched[at - 1] = true;
+            // A racily clean entry goes into this file, where its stat can
+            // be smudged, as git's does.
+            if (sameOnDisk(entry, shared[at - 1]) and !index.isRacy(entry)) continue;
+            try replace.append(gpa, at - 1);
+            try written.append(gpa, entry);
+        }
+        // Positions rise, since the entries and the shared index are both
+        // in path order.
+        var delete: std.ArrayList(u32) = .empty;
+        defer delete.deinit(gpa);
+        for (matched, 0..) |m, at| if (!m) try delete.append(gpa, @intCast(at)); // safe: a shared index holds fewer than 2^32 entries
+        const nameless = written.items.len;
+        try written.appendSlice(gpa, fresh.items);
+
+        var link: std.ArrayList(u8) = .empty;
+        defer link.deinit(gpa);
+        try link.appendSlice(gpa, base.raw());
+        for ([_][]const u32{ delete.items, replace.items }) |positions| {
+            const bitmap = try ewah.writePositions(gpa, positions);
+            defer gpa.free(bitmap);
+            try link.appendSlice(gpa, bitmap);
+        }
+        return index.writeBody(w, options, .{ .entries = written.items, .nameless = nameless, .link = link.items });
+    }
+
+    /// Whether two entries say the same on the disk but for their names:
+    /// git's `compare_ce_content`.
+    fn sameOnDisk(a: Entry, b: Entry) bool {
+        return std.meta.eql(a.stat, b.stat) and a.oid.eql(b.oid) and a.diskMode() == b.diskMode() and
+            a.stage == b.stage and a.assume_valid == b.assume_valid and
+            a.skip_worktree == b.skip_worktree and a.intent_to_add == b.intent_to_add;
     }
 
     /// Write the index to `sub_path` in `dir`, through `<sub_path>.lock`.
@@ -1589,7 +1787,26 @@ pub const Index = struct {
     /// Used by `write`, and by a caller that wants the bytes without a file —
     /// a test comparing them against git's, for instance.
     pub fn writeTo(index: *Index, w: *Io.Writer, options: WriteOptions) WriteToError!void {
-        const version = index.versionFor(options);
+        if (index.split) |*split| if (split.base) |base| return index.writeSplitTo(w, options, split, base);
+        return index.writeBody(w, options, .{ .entries = index.entries.items });
+    }
+
+    /// What `writeBody` lays down.
+    const Body = struct {
+        entries: []const Entry,
+        /// How many of `entries`, from the first, go with no name: a split
+        /// index's replacements, which take their shared entries' names.
+        nameless: usize = 0,
+        /// The `link` extension's bytes, for a split index.
+        link: ?[]const u8 = null,
+        /// Whether the extensions that carry content go too: not into a
+        /// shared index, which git writes with none of them.
+        extensions: bool = true,
+    };
+
+    fn writeBody(index: *Index, w: *Io.Writer, options: WriteOptions, spec: Body) WriteToError!void {
+        const entries = spec.entries;
+        const version = index.versionOver(entries, options);
         std.debug.assert(version >= 2);
         std.debug.assert(version <= 4);
         index.version = version;
@@ -1600,7 +1817,7 @@ pub const Index = struct {
             if (Entry.order(index.entries.items[i - 1], index.entries.items[i]) != .lt) return error.UnsortedIndex;
         };
         if (version == 2) {
-            for (index.entries.items) |entry| {
+            for (entries) |entry| {
                 if (entry.needsExtendedFlags()) return error.ExtendedFlagsRequireVersion3;
             }
         }
@@ -1617,7 +1834,7 @@ pub const Index = struct {
         var header: [12]u8 = undefined;
         @memcpy(header[0..4], magic);
         std.mem.writeInt(u32, header[4..8], version, .big);
-        std.mem.writeInt(u32, header[8..12], @intCast(index.entries.items.len), .big);
+        std.mem.writeInt(u32, header[8..12], @intCast(entries.len), .big);
         try out.writeAll(&header);
 
         // How the entries are divided for `IEOT`, and where each block
@@ -1625,21 +1842,22 @@ pub const Index = struct {
         // table can only be built while the file is.
         const blocks: u32 = blk: {
             const want = options.entry_offset_blocks orelse index.entry_offset_blocks;
-            const count: u32 = @intCast(index.entries.items.len);
+            const count: u32 = @intCast(entries.len);
             break :blk @min(want, count);
         };
         var table: std.ArrayList(OffsetBlock) = .empty;
         defer table.deinit(index.gpa);
         const per_block: usize = if (blocks > 1)
-            (index.entries.items.len + blocks - 1) / blocks
+            (entries.len + blocks - 1) / blocks
         else
             0;
         var block_start: usize = body.written().len;
         var block_count: u32 = 0;
 
         var previous_path: []const u8 = "";
-        for (index.entries.items, 0..) |entry, i| {
-            if (entry.path.len > std.math.maxInt(u16)) return error.PathTooLong;
+        for (entries, 0..) |entry, i| {
+            const name = if (i < spec.nameless) "" else entry.path;
+            if (name.len > std.math.maxInt(u16)) return error.PathTooLong;
             // A new block starts here. Its first entry shares no prefix with
             // the last entry of the block before it, so that a reader can
             // decode the blocks independently -- which is the only reason
@@ -1651,8 +1869,8 @@ pub const Index = struct {
                 block_count = 0;
                 starts_block = true;
             }
-            try index.writeEntry(out, entry, version, previous_path, starts_block, options);
-            previous_path = entry.path;
+            try index.writeEntry(out, entry, name, version, previous_path, starts_block, options);
+            previous_path = name;
             block_count += 1;
         }
         if (per_block != 0 and block_count != 0) {
@@ -1663,7 +1881,7 @@ pub const Index = struct {
         // number `EOIE` carries.
         const extensions_at: u32 = @intCast(body.written().len);
 
-        try index.writeExtensions(out, table.items, extensions_at, options);
+        try index.writeExtensions(out, table.items, extensions_at, options, spec);
 
         try w.writeAll(body.written());
         if (options.skip_hash) {
@@ -1682,8 +1900,8 @@ pub const Index = struct {
     /// then the path, prefix-compressed against `previous` from version 4
     /// on unless the entry starts an `IEOT` block, and NUL-padded to eight
     /// bytes before it.
-    fn writeEntry(index: *const Index, out: *Io.Writer, entry: Entry, version: u32, previous: []const u8, starts_block: bool, options: WriteOptions) Io.Writer.Error!void {
-        std.debug.assert(entry.path.len <= std.math.maxInt(u16));
+    fn writeEntry(index: *const Index, out: *Io.Writer, entry: Entry, name: []const u8, version: u32, previous: []const u8, starts_block: bool, options: WriteOptions) Io.Writer.Error!void {
+        std.debug.assert(name.len <= std.math.maxInt(u16));
         std.debug.assert(version >= 3 or !entry.needsExtendedFlags());
         const raw_len = index.kind.rawLen();
         var fixed: [40 + hash.max_raw_len + 4]u8 = @splat(0);
@@ -1710,7 +1928,7 @@ pub const Index = struct {
         @memcpy(fixed[40..][0..raw_len], entry.oid.raw());
 
         const extended = entry.needsExtendedFlags() and version >= 3;
-        var flags: u16 = @intCast(@min(entry.path.len, 0x0fff));
+        var flags: u16 = @intCast(@min(name.len, 0x0fff));
         flags |= @as(u16, entry.stage) << 12;
         if (entry.assume_valid) flags |= 0x8000;
         if (extended) flags |= 0x4000;
@@ -1726,25 +1944,25 @@ pub const Index = struct {
         try out.writeAll(fixed[0..fixed_len]);
 
         if (version >= 4) {
-            const shared = if (starts_block) 0 else commonPrefixLen(previous, entry.path);
+            const shared = if (starts_block) 0 else commonPrefixLen(previous, name);
             var varint_buf: [16]u8 = undefined;
             const strip = varint.writeOffset(&varint_buf, previous.len - shared);
             try out.writeAll(strip);
-            try out.writeAll(entry.path[shared..]);
+            try out.writeAll(name[shared..]);
             try out.writeByte(0);
         } else {
-            try out.writeAll(entry.path);
+            try out.writeAll(name);
             // One to eight NULs: enough to pad the entry to a multiple
             // of eight bytes, and never fewer than the one that
             // terminates the name.
-            const padded = (fixed_len + entry.path.len + 1 + 7) & ~@as(usize, 7);
-            try out.splatByteAll(0, padded - fixed_len - entry.path.len);
+            const padded = (fixed_len + name.len + 1 + 7) & ~@as(usize, 7);
+            try out.splatByteAll(0, padded - fixed_len - name.len);
         }
     }
 
     /// The extensions after the entries, in git's order, `EOIE` last when
     /// asked for: it carries `extensions_at`, where the entries end.
-    fn writeExtensions(index: *Index, out: *Io.Writer, table: []const OffsetBlock, extensions_at: u32, options: WriteOptions) (Io.Writer.Error || WriteError)!void {
+    fn writeExtensions(index: *Index, out: *Io.Writer, table: []const OffsetBlock, extensions_at: u32, options: WriteOptions, spec: Body) (Io.Writer.Error || WriteError)!void {
         const raw_len = index.kind.rawLen();
         // `EOIE` also carries a hash over the header of every extension
         // written before it -- the four signature bytes and the four size
@@ -1768,44 +1986,11 @@ pub const Index = struct {
             try writeExtension(out, "IEOT", ieot_body.written());
             hashExtensionHeader(&ext_hasher, "IEOT", ieot_body.written().len);
         }
-        if (options.write_cache_tree) {
-            if (index.cache_tree) |*tree| {
-                var tree_body: Io.Writer.Allocating = .init(index.gpa);
-                defer tree_body.deinit();
-                try tree.write(&tree_body.writer);
-                try writeExtension(out, "TREE", tree_body.written());
-                hashExtensionHeader(&ext_hasher, "TREE", tree_body.written().len);
-            }
+        if (spec.link) |link| {
+            try writeExtension(out, "link", link);
+            hashExtensionHeader(&ext_hasher, "link", link.len);
         }
-        if (index.resolve_undo) |*undo| {
-            var undo_body: Io.Writer.Allocating = .init(index.gpa);
-            defer undo_body.deinit();
-            try undo.write(&undo_body.writer);
-            try writeExtension(out, "REUC", undo_body.written());
-            hashExtensionHeader(&ext_hasher, "REUC", undo_body.written().len);
-        }
-        if (index.untracked) |*cache| {
-            var untracked_body: Io.Writer.Allocating = .init(index.gpa);
-            defer untracked_body.deinit();
-            try cache.write(index.gpa, index.kind, &untracked_body.writer);
-            try writeExtension(out, "UNTR", untracked_body.written());
-            hashExtensionHeader(&ext_hasher, "UNTR", untracked_body.written().len);
-        }
-        // `FSMN` after the untracked cache, as git writes them: version 2,
-        // the token, and the entries not vouched for.
-        if (index.fsmonitor_token) |token| {
-            var fsmn_body: Io.Writer.Allocating = .init(index.gpa);
-            defer fsmn_body.deinit();
-            try index.writeFsmonitor(&fsmn_body.writer, token);
-            try writeExtension(out, "FSMN", fsmn_body.written());
-            hashExtensionHeader(&ext_hasher, "FSMN", fsmn_body.written().len);
-        }
-        // `sdir` is empty, and last of the ones that carry the index's
-        // content, which is where git writes it.
-        if (index.sparse) {
-            try writeExtension(out, "sdir", "");
-            hashExtensionHeader(&ext_hasher, "sdir", 0);
-        }
+        if (spec.extensions) try index.writeContentExtensions(out, &ext_hasher, options);
 
         // `EOIE` is last, and is not part of its own hash.
         if (options.end_of_index_entries orelse index.had_end_of_index_entries) {
@@ -1814,6 +1999,50 @@ pub const Index = struct {
             const digest = ext_hasher.final();
             @memcpy(eoie_body[4..][0..raw_len], digest.raw());
             try writeExtension(out, "EOIE", eoie_body[0 .. 4 + raw_len]);
+        }
+    }
+
+    /// The extensions that carry the index's content, after `link`: the
+    /// cache tree, resolve-undo, the untracked cache, the file monitor's
+    /// token and `sdir`, in git's order.
+    fn writeContentExtensions(index: *Index, out: *Io.Writer, ext_hasher: *hash.Hasher, options: WriteOptions) (Io.Writer.Error || WriteError)!void {
+        if (options.write_cache_tree) {
+            if (index.cache_tree) |*tree| {
+                var tree_body: Io.Writer.Allocating = .init(index.gpa);
+                defer tree_body.deinit();
+                try tree.write(&tree_body.writer);
+                try writeExtension(out, "TREE", tree_body.written());
+                hashExtensionHeader(ext_hasher, "TREE", tree_body.written().len);
+            }
+        }
+        if (index.resolve_undo) |*undo| {
+            var undo_body: Io.Writer.Allocating = .init(index.gpa);
+            defer undo_body.deinit();
+            try undo.write(&undo_body.writer);
+            try writeExtension(out, "REUC", undo_body.written());
+            hashExtensionHeader(ext_hasher, "REUC", undo_body.written().len);
+        }
+        if (index.untracked) |*cache| {
+            var untracked_body: Io.Writer.Allocating = .init(index.gpa);
+            defer untracked_body.deinit();
+            try cache.write(index.gpa, index.kind, &untracked_body.writer);
+            try writeExtension(out, "UNTR", untracked_body.written());
+            hashExtensionHeader(ext_hasher, "UNTR", untracked_body.written().len);
+        }
+        // `FSMN` after the untracked cache, as git writes them: version 2,
+        // the token, and the entries not vouched for.
+        if (index.fsmonitor_token) |token| {
+            var fsmn_body: Io.Writer.Allocating = .init(index.gpa);
+            defer fsmn_body.deinit();
+            try index.writeFsmonitor(&fsmn_body.writer, token);
+            try writeExtension(out, "FSMN", fsmn_body.written());
+            hashExtensionHeader(ext_hasher, "FSMN", fsmn_body.written().len);
+        }
+        // `sdir` is empty, and last of the ones that carry the index's
+        // content, which is where git writes it.
+        if (index.sparse) {
+            try writeExtension(out, "sdir", "");
+            hashExtensionHeader(ext_hasher, "sdir", 0);
         }
     }
 
