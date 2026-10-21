@@ -135,6 +135,7 @@ test {
         _ = @import("testing/follow.zig");
         _ = @import("testing/textconv.zig");
         _ = @import("testing/hunk_headers.zig");
+        _ = @import("testing/word_diff.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");
@@ -297,6 +298,7 @@ test {
     _ = @import("names/path.zig");
     _ = @import("worktree/sparse_checkout.zig");
     _ = @import("diff/driver.zig");
+    _ = @import("diff/words.zig");
     _ = @import("lfs/custom.zig");
     _ = @import("merge/octopus.zig");
     _ = @import("transport/remote_helper.zig");

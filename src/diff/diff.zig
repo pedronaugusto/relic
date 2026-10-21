@@ -17,6 +17,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const parallax = @import("parallax");
+const words = @import("words.zig");
+const ere = @import("../text.zig").ere;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
@@ -668,7 +670,23 @@ pub const Options = struct {
     /// in the headers, as well as its control characters, quotes and
     /// backslashes.
     quote_path: bool = true,
+    /// `--word-diff` and `--color-words`: the changed lines written as the
+    /// words that changed in them; `.none` writes the lines.
+    word_diff: WordDiff = .none,
+    /// `--word-diff-regex` and `--color-words=<regex>`: what a word is,
+    /// over every driver's `wordRegex`. With none, the old side's driver's,
+    /// else the new side's, else `configured_word_regex`, else runs of
+    /// bytes that are no space.
+    word_regex: ?[]const u8 = null,
+    /// `diff.wordRegex`, as `configured` reads it.
+    configured_word_regex: ?[]const u8 = null,
 };
+
+/// How a word diff shows the words that changed: `[-...-]{+...+}`
+/// (`plain`), a line each after `-`, `+` or ` ` with `~` for a newline
+/// (`porcelain`), or colour alone (`color`). git's `--word-diff=color` and
+/// `--color-words` turn colour on as well, which is `Options.colors`.
+pub const WordDiff = words.Style;
 
 /// A caller's rule for the text after a hunk's `@@`: given a line without
 /// its newline, the part to show when the line starts a function, as a
@@ -711,9 +729,11 @@ pub const ConfigError = error{
 /// as it was given.
 pub fn configured(config: *const config_mod.Config, options: Options) ConfigError!Options {
     var out = options;
-    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.wserrorhighlight", "diff.colormoved", "diff.colormovedws", "core.whitespace", "core.quotepath" });
+    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.wserrorhighlight", "diff.colormoved", "diff.colormovedws", "diff.wordregex", "core.whitespace", "core.quotepath" });
     while (it.next()) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.name, "quotepath")) {
+        if (std.ascii.eqlIgnoreCase(entry.name, "wordregex")) {
+            out.configured_word_regex = entry.value orelse return error.InvalidDiffSetting;
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "quotepath")) {
             out.quote_path = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
         } else if (std.mem.eql(u8, entry.section, "core")) {
             out.whitespace_rule = whitespace.parse(entry.value orelse return error.InvalidDiffSetting) catch return error.ConflictingWhitespaceRules;
@@ -989,7 +1009,7 @@ pub fn numstat(
 }
 
 /// Errors from `unified`.
-pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || driver_mod.Error;
+pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || driver_mod.Error || WordDiffError;
 
 /// The borrowed object store, the changes whose patch is written, and the
 /// drivers their files take.
@@ -1035,7 +1055,7 @@ pub fn unified(
 /// Whether a patch is recorded for its moved lines: git looks for them
 /// only in colour.
 fn movedWanted(options: Options) bool {
-    return options.color_moved != .no and options.colors != null;
+    return options.color_moved != .no and options.colors != null and options.word_diff == .none;
 }
 
 /// An error from writing into a recorder, whose writer fails only when its
@@ -1176,6 +1196,12 @@ pub const FilePair = struct {
         return .{ .context = pair, .find = findFunction };
     }
 
+    /// The word regex of the drivers: the old side's, else the new side's
+    /// (git's `userdiff_word_regex`), `null` for neither.
+    pub fn wordRegex(pair: *const FilePair) ?[]const u8 {
+        return pair.drivers[0].wordRegex(pair.config) orelse pair.drivers[1].wordRegex(pair.config);
+    }
+
     /// Whether every function line was looked for: a search past the
     /// matcher's budget is `error.PatternTooComplex`, after the body that
     /// went on without it.
@@ -1251,7 +1277,8 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
         body_options.whitespace_rule &= ~whitespace.incomplete_line;
     };
     if (options.function_line == null and options.function_context_names) body_options.function_line = try pair.functionLine();
-    try writeBody(gpa, w, pair.texts[0], pair.texts[1], body_options, .{ .old = old_label, .new = new_label }, inputs.recorder);
+    const word_regex = if (options.word_diff == .none) null else options.word_regex orelse pair.wordRegex() orelse options.configured_word_regex;
+    try writeBody(true, gpa, w, pair.texts[0], pair.texts[1], body_options, .{ .files = .{ .old = old_label, .new = new_label }, .recorder = inputs.recorder, .word_regex = word_regex });
     try pair.finish();
 }
 
@@ -1337,6 +1364,12 @@ const FileNames = struct { old: []const u8, new: []const u8 };
 /// Errors from `unifiedBody`.
 pub const UnifiedBodyError = Self.TextError || Io.Writer.Error;
 
+/// Errors from a word diff, which `unified` writes.
+pub const WordDiffError = UnifiedBodyError || words.Error || error{
+    /// A word regex that does not compile, which git dies on.
+    InvalidWordRegex,
+};
+
 /// Append the `@@` hunks for two blobs, with no `diff --git` header.
 ///
 /// This is what a caller that wants only the body asks for, and what
@@ -1353,14 +1386,26 @@ pub fn unifiedBody(
     var recorder: ?paint.Recorder = if (movedWanted(options)) .init(gpa, options.color_moved, options.color_moved_ws) else null;
     defer if (recorder) |*r| r.deinit();
     const r: ?*paint.Recorder = if (recorder) |*r| r else null;
-    writeBody(gpa, if (r) |rec| &rec.painted.writer else w, old, new, options, null, r) catch |err| return recorded(r, err);
+    writeBody(false, gpa, if (r) |rec| &rec.painted.writer else w, old, new, options, .{ .recorder = r }) catch |err| return recorded(r, err);
     if (r) |rec| try rec.finish(w);
 }
 
+/// What a body is written with besides its options: the `---` and `+++`
+/// lines' names, where the removed and added lines are recorded, and the
+/// word diff's regex text.
+const BodyExtras = struct {
+    files: ?FileNames = null,
+    recorder: ?*paint.Recorder = null,
+    word_regex: ?[]const u8 = null,
+};
+
 /// The hunks, under `---` and `+++` lines naming `files` where there are
-/// any, painted where `options` has colours; the removed and added lines
-/// recorded in `recorder` where there is one.
-fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, options: Options, files: ?FileNames, recorder: ?*paint.Recorder) UnifiedBodyError!void {
+/// any, painted where `options` has colours, or with `words` as a word
+/// diff where `options` asks; the removed and added lines recorded in
+/// `recorder` where there is one.
+fn writeBody(comptime words_allowed: bool, gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, options: Options, extras: BodyExtras) (if (words_allowed) WordDiffError else UnifiedBodyError)!void {
+    const files = extras.files;
+    const recorder = extras.recorder;
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
     try checkTextSize(old, new);
@@ -1372,7 +1417,8 @@ fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, op
         .{ .context = rule, .find = findByRule }
     else
         .c_function;
-    var own_painter: ?paint.Painter = if (options.colors != null or options.diff_of_patches != null)
+    const word_diff = words_allowed and options.word_diff != .none;
+    var own_painter: ?paint.Painter = if (options.colors != null or options.diff_of_patches != null or word_diff)
         .init(options.colors, options.whitespace_rule, options.ws_error_highlight, options.diff_of_patches, old, new)
     else
         null;
@@ -1390,13 +1436,45 @@ fn writeBody(gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, op
         const tab = painter == null and std.mem.findScalar(u8, name, ' ') != null;
         out.* = try std.mem.concat(gpa, u8, &.{ name, if (tab) "\t" else "" });
     };
-    try parallax.writeUnified(w, diff, .{
+    const unified_options: parallax.UnifiedOptions = .{
         .hunks = .{ .context = options.context, .inter_hunk_context = options.inter_hunk_context },
         .heading = heading,
         .files = if (files != null) .{ .old = names[0], .new = names[1] } else null,
         .suppress_blank_empty = options.suppress_blank_empty,
         .paint = if (painter) |p| p.paint() else null,
-    });
+    };
+    if (words_allowed) {
+        if (word_diff) return writeWords(gpa, w, diff, unified_options, options, extras.word_regex);
+    }
+    try parallax.writeUnified(w, diff, unified_options);
+}
+
+/// The hunks as a word diff: the file and hunk lines by `unified_options`'
+/// painter, the content lines' words by `words.Painter`.
+fn writeWords(gpa: Allocator, w: *Io.Writer, diff: parallax.Diff, unified_options: parallax.UnifiedOptions, options: Options, word_regex: ?[]const u8) WordDiffError!void {
+    var regex: ?ere.Regex = if (word_regex) |text|
+        ere.Regex.compile(gpa, text, .{ .syntax = .extended, .newline = true }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidWordRegex,
+        }
+    else
+        null;
+    defer if (regex) |*re| re.deinit();
+    var painter: words.Painter = .{
+        .gpa = gpa,
+        .style = options.word_diff,
+        .regex = if (regex) |*re| re else null,
+        .colors = options.colors,
+        .inner = unified_options.paint.?,
+    };
+    defer painter.deinit();
+    var with_words = unified_options;
+    with_words.paint = painter.paint();
+    parallax.writeUnified(w, diff, with_words) catch |err| {
+        if (painter.failed) |failed| return failed;
+        return err;
+    };
+    try painter.finish(w);
 }
 
 /// A caller's `FunctionLine` asked of a line, as git's `ff_regexp` asks a

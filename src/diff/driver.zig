@@ -87,6 +87,25 @@ pub const Driver = union(enum) {
         return try d.says(config) orelse attributes.isBinaryForDiff(bytes);
     }
 
+    /// The driver's word regex for a word diff: `diff.<name>.wordRegex`,
+    /// the last set deciding, else the built-in driver's with git's
+    /// `|[^[:space:]]|[\xc0-\xff][\x80-\xbf]+` after it (userdiff's
+    /// `PATTERNS`; the matcher reads bytes, as git's does outside a UTF-8
+    /// locale); `null` for none.
+    pub fn wordRegex(d: Driver, config: ?*const config_mod.Config) ?[]const u8 {
+        const driver = d.name() orelse return null;
+        if (config) |c| {
+            var key_buf: [512]u8 = undefined;
+            // A name past the buffer is no driver a key could name.
+            const key = std.mem.print(&key_buf, "diff.{s}.wordregex", .{driver}) catch return null;
+            if (c.get(key)) |value| return value;
+        }
+        inline for (builtins) |b| {
+            if (std.mem.eql(u8, b.name, driver)) return b.words ++ word_tail;
+        }
+        return null;
+    }
+
     /// The driver's `diff.<name>.textconv`, `null` where it has none, as
     /// userdiff's `userdiff_get_textconv` gives it.
     pub fn conversion(d: Driver, config: ?*const config_mod.Config) error{InvalidDriverCache}!?Conversion {
@@ -164,39 +183,50 @@ pub const Drivers = struct {
     }
 };
 
-const Builtin = struct { name: []const u8, pattern: []const u8, icase: bool = false };
+/// What userdiff's `PATTERNS` puts after each built-in driver's words:
+/// any other byte that is no space, and a UTF-8 sequence whole.
+const word_tail = "|[^[:space:]]|[\xc0-\xff][\x80-\xbf]+";
+
+const Builtin = struct {
+    name: []const u8,
+    pattern: []const u8,
+    icase: bool = false,
+    /// The words a word diff cuts lines into, before git's `|[^[:space:]]`
+    /// and UTF-8 tail.
+    words: []const u8,
+};
 
 /// userdiff.c's drivers: the lines of each pattern are tried in turn, a
 /// `!` line refusing what it matches; every one is extended, and those
 /// marked are blind to case.
 const builtins = [_]Builtin{
-    .{ .name = "ada", .pattern = "!^(.*[ \t])?(is[ \t]+new|renames|is[ \t]+separate)([ \t].*)?$\n!^[ \t]*with[ \t].*$\n^[ \t]*((procedure|function)[ \t]+.*)$\n^[ \t]*((package|protected|task)[ \t]+.*)$", .icase = true },
-    .{ .name = "bash", .pattern = "^[ \t]*((([a-zA-Z_][a-zA-Z0-9_]*[ \t]*\\([ \t]*\\))|(function[ \t]+[a-zA-Z_][a-zA-Z0-9_]*(([ \t]*\\([ \t]*\\))|([ \t]+)))).*$)" },
-    .{ .name = "bibtex", .pattern = "(@[a-zA-Z]{1,}[ \t]*\\{{0,1}[ \t]*[^ \t\"@',\\#}{~%]*).*$" },
-    .{ .name = "cpp", .pattern = "!^[ \t]*[A-Za-z_][A-Za-z_0-9]*:[[:space:]]*($|/[/*])\n^((::[[:space:]]*)?[A-Za-z_].*)$" },
-    .{ .name = "csharp", .pattern = "!(^|[ \t]+)(do|while|for|foreach|if|else|new|default|return|switch|case|throw|catch|using|lock|fixed)([ \t(]+|$)\n^[ \t]*(([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+([ \t]+([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+)+[ \t]*\\([^;]*)$\n^[ \t]*(([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+([ \t]+([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+)+[^;=:,()]*)$\n^[ \t]*(((static|public|internal|private|protected|new|unsafe|sealed|abstract|partial)[ \t]+)*(class|enum|interface|struct|record)[ \t]+.*)$\n^[ \t]*(namespace[ \t]+.*)$" },
-    .{ .name = "css", .pattern = "![:;][[:space:]]*$\n^[:[@.#]?[_a-z0-9].*$", .icase = true },
-    .{ .name = "dts", .pattern = "!;\n!=\n^[ \t]*((/[ \t]*\\{|&?[a-zA-Z_]).*)" },
-    .{ .name = "elixir", .pattern = "^[ \t]*((def(macro|module|impl|protocol|p)?|test)[ \t].*)$" },
-    .{ .name = "fortran", .pattern = "!^([C*]|[ \t]*!)\n!^[ \t]*MODULE[ \t]+PROCEDURE[ \t]\n^[ \t]*((END[ \t]+)?(PROGRAM|MODULE|BLOCK[ \t]+DATA|([^!'\" \t]+[ \t]+)*(SUBROUTINE|FUNCTION))[ \t]+[A-Z].*)$", .icase = true },
-    .{ .name = "fountain", .pattern = "^((\\.[^.]|(int|ext|est|int\\.?/ext|i/e)[. ]).*)$", .icase = true },
-    .{ .name = "golang", .pattern = "^[ \t]*(func[ \t]*.*(\\{[ \t]*)?)\n^[ \t]*(type[ \t].*(struct|interface)[ \t]*(\\{[ \t]*)?)" },
-    .{ .name = "html", .pattern = "^[ \t]*(<[Hh][1-6]([ \t].*)?>.*)$" },
-    .{ .name = "ini", .pattern = "^[ \t]*\\[[^]]+\\]" },
-    .{ .name = "java", .pattern = "!^[ \t]*(catch|do|for|if|instanceof|new|return|switch|throw|while)\n^[ \t]*(([a-z-]+[ \t]+)*(class|enum|interface|record)[ \t]+.*)$\n^[ \t]*(([A-Za-z_<>&][][?&<>.,A-Za-z_0-9]*[ \t]+)+[A-Za-z_][A-Za-z_0-9]*[ \t]*\\([^;]*)$" },
-    .{ .name = "kotlin", .pattern = "^[ \t]*(([a-z]+[ \t]+)*(fun|class|interface)[ \t]+.*)$" },
-    .{ .name = "markdown", .pattern = "^ {0,3}#{1,6}[ \t].*" },
-    .{ .name = "matlab", .pattern = "^[[:space:]]*((classdef|function)[[:space:]].*)$|^(%%%?|##)[[:space:]].*$" },
-    .{ .name = "objc", .pattern = "!^[ \t]*(do|for|if|else|return|switch|while)\n^[ \t]*([-+][ \t]*\\([ \t]*[A-Za-z_][A-Za-z_0-9* \t]*\\)[ \t]*[A-Za-z_].*)$\n^[ \t]*(([A-Za-z_][A-Za-z_0-9]*[ \t]+)+[A-Za-z_][A-Za-z_0-9]*[ \t]*\\([^;]*)$\n^(@(implementation|interface|protocol)[ \t].*)$" },
-    .{ .name = "pascal", .pattern = "^(((class[ \t]+)?(procedure|function)|constructor|destructor|interface|implementation|initialization|finalization)[ \t]*.*)$\n^(.*=[ \t]*(class|record).*)$" },
-    .{ .name = "perl", .pattern = "^package .*\n^sub [[:alnum:]_':]+[ \t]*(\\([^)]*\\)[ \t]*)?(:[^;#]*)?(\\{[ \t]*)?(#.*)?$\n^(BEGIN|END|INIT|CHECK|UNITCHECK|AUTOLOAD|DESTROY)[ \t]*(\\{[ \t]*)?(#.*)?$\n^=head[0-9] .*" },
-    .{ .name = "php", .pattern = "^[\t ]*(((public|protected|private|static|abstract|final)[\t ]+)*function.*)$\n^[\t ]*((((final|abstract)[\t ]+)?class|enum|interface|trait).*)$" },
-    .{ .name = "python", .pattern = "^[ \t]*((class|(async[ \t]+)?def)[ \t].*)$" },
-    .{ .name = "r", .pattern = "^[ \t]*([a-zA-z][a-zA-Z0-9_.]*[ \t]*(<-|=)[ \t]*function.*)$" },
-    .{ .name = "ruby", .pattern = "^[ \t]*((class|module|def)[ \t].*)$" },
-    .{ .name = "rust", .pattern = "^[\t ]*((pub(\\([^\\)]+\\))?[\t ]+)?((async|const|unsafe|extern([\t ]+\"[^\"]+\"))[\t ]+)?(struct|enum|union|mod|trait|fn|impl|macro_rules!)[< \t]+[^;]*)$" },
-    .{ .name = "scheme", .pattern = "^(\\(.*)$\n^[\t ]*(\\(((define|def(struct|syntax|class|method|rules|record|proto|alias)?)[-*/ \t]|(library|module|struct|class)[*+ \t]).*)$\n^  ?(\\([Dd][Ee][Ff].*)$" },
-    .{ .name = "tex", .pattern = "^(\\\\((sub)*section|chapter|part)\\*{0,1}\\{.*)$" },
+    .{ .name = "ada", .pattern = "!^(.*[ \t])?(is[ \t]+new|renames|is[ \t]+separate)([ \t].*)?$\n!^[ \t]*with[ \t].*$\n^[ \t]*((procedure|function)[ \t]+.*)$\n^[ \t]*((package|protected|task)[ \t]+.*)$", .icase = true, .words = "[a-zA-Z][a-zA-Z0-9_]*|[-+]?[0-9][0-9#_.aAbBcCdDeEfF]*([eE][+-]?[0-9_]+)?|=>|\\.\\.|\\*\\*|:=|/=|>=|<=|<<|>>|<>" },
+    .{ .name = "bash", .pattern = "^[ \t]*((([a-zA-Z_][a-zA-Z0-9_]*[ \t]*\\([ \t]*\\))|(function[ \t]+[a-zA-Z_][a-zA-Z0-9_]*(([ \t]*\\([ \t]*\\))|([ \t]+)))).*$)", .words = "[a-zA-Z_][a-zA-Z0-9_]*|\\$[a-zA-Z0-9_]+|\\$\\{|\\|\\||&&|<<|>>|==|!=|<=|>=|[-+*/%&|^]=|:=|:-|:\\+|:\\?|##|%%|\\^\\^|,,|[-a-zA-Z0-9_]+|\\(|\\)|\\{|\\}|\\[|\\]" },
+    .{ .name = "bibtex", .pattern = "(@[a-zA-Z]{1,}[ \t]*\\{{0,1}[ \t]*[^ \t\"@',\\#}{~%]*).*$", .words = "[={}\"]|[^={}\" \t]+" },
+    .{ .name = "cpp", .pattern = "!^[ \t]*[A-Za-z_][A-Za-z_0-9]*:[[:space:]]*($|/[/*])\n^((::[[:space:]]*)?[A-Za-z_].*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[0-9][0-9.]*([Ee][-+]?[0-9]+)?[fFlLuU]*|0[xXbB][0-9a-fA-F]+[lLuU]*|\\.[0-9][0-9]*([Ee][-+]?[0-9]+)?[fFlL]?|[-+*/<>%&^|=!]=|--|\\+\\+|<<=?|>>=?|&&|\\|\\||::|->\\*?|\\.\\*|<=>" },
+    .{ .name = "csharp", .pattern = "!(^|[ \t]+)(do|while|for|foreach|if|else|new|default|return|switch|case|throw|catch|using|lock|fixed)([ \t(]+|$)\n^[ \t]*(([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+([ \t]+([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+)+[ \t]*\\([^;]*)$\n^[ \t]*(([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+([ \t]+([][[:alnum:]@_.](<[][[:alnum:]@_, \t<>]+>)?)+)+[^;=:,()]*)$\n^[ \t]*(((static|public|internal|private|protected|new|unsafe|sealed|abstract|partial)[ \t]+)*(class|enum|interface|struct|record)[ \t]+.*)$\n^[ \t]*(namespace[ \t]+.*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+[fFlL]?|0[xXbB]?[0-9a-fA-F]+[lL]?|[-+*/<>%&^|=!]=|--|\\+\\+|<<=?|>>=?|&&|\\|\\||::|->" },
+    .{ .name = "css", .pattern = "![:;][[:space:]]*$\n^[:[@.#]?[_a-z0-9].*$", .icase = true, .words = "-?[_a-zA-Z][-_a-zA-Z0-9]*|-?[0-9]+|\\#[0-9a-fA-F]+" },
+    .{ .name = "dts", .pattern = "!;\n!=\n^[ \t]*((/[ \t]*\\{|&?[a-zA-Z_]).*)", .words = "[a-zA-Z0-9,._+?#-]+|[-+*/%&^|!~]|>>|<<|&&|\\|\\|" },
+    .{ .name = "elixir", .pattern = "^[ \t]*((def(macro|module|impl|protocol|p)?|test)[ \t].*)$", .words = "[@:]?[a-zA-Z0-9@_?!]+|[-+]?0[xob][0-9a-fA-F]+|[-+]?[0-9][0-9_.]*([eE][-+]?[0-9_]+)?|:?(\\+\\+|--|\\.\\.|~~~|<>|\\^\\^\\^|<?\\|>|<<<?|>?>>|<<?~|~>?>|<~>|<=|>=|===?|!==?|=~|&&&?|\\|\\|\\|?|=>|<-|\\\\\\\\|->)|:?%[A-Za-z0-9_.]\\{\\}?" },
+    .{ .name = "fortran", .pattern = "!^([C*]|[ \t]*!)\n!^[ \t]*MODULE[ \t]+PROCEDURE[ \t]\n^[ \t]*((END[ \t]+)?(PROGRAM|MODULE|BLOCK[ \t]+DATA|([^!'\" \t]+[ \t]+)*(SUBROUTINE|FUNCTION))[ \t]+[A-Z].*)$", .icase = true, .words = "[a-zA-Z][a-zA-Z0-9_]*|\\.([Ee][Qq]|[Nn][Ee]|[Gg][TtEe]|[Ll][TtEe]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Aa][Nn][Dd]|[Oo][Rr]|[Nn]?[Ee][Qq][Vv]|[Nn][Oo][Tt])\\.|[-+]?[0-9.]+([AaIiDdEeFfLlTtXx][Ss]?[-+]?[0-9.]*)?(_[a-zA-Z0-9][a-zA-Z0-9_]*)?|//|\\*\\*|::|[/<>=]=" },
+    .{ .name = "fountain", .pattern = "^((\\.[^.]|(int|ext|est|int\\.?/ext|i/e)[. ]).*)$", .icase = true, .words = "[^ \t-]+" },
+    .{ .name = "golang", .pattern = "^[ \t]*(func[ \t]*.*(\\{[ \t]*)?)\n^[ \t]*(type[ \t].*(struct|interface)[ \t]*(\\{[ \t]*)?)", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.eE]+i?|0[xX]?[0-9a-fA-F]+i?|[-+*/<>%&^|=!:]=|--|\\+\\+|<<=?|>>=?|&\\^=?|&&|\\|\\||<-|\\.{3}" },
+    .{ .name = "html", .pattern = "^[ \t]*(<[Hh][1-6]([ \t].*)?>.*)$", .words = "[^<>= \t]+" },
+    .{ .name = "ini", .pattern = "^[ \t]*\\[[^]]+\\]", .words = "[^ \t]+" },
+    .{ .name = "java", .pattern = "!^[ \t]*(catch|do|for|if|instanceof|new|return|switch|throw|while)\n^[ \t]*(([a-z-]+[ \t]+)*(class|enum|interface|record)[ \t]+.*)$\n^[ \t]*(([A-Za-z_<>&][][?&<>.,A-Za-z_0-9]*[ \t]+)+[A-Za-z_][A-Za-z_0-9]*[ \t]*\\([^;]*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+[fFlL]?|0[xXbB]?[0-9a-fA-F]+[lL]?|[-+*/<>%&^|=!]=|--|\\+\\+|<<=?|>>>?=?|&&|\\|\\|" },
+    .{ .name = "kotlin", .pattern = "^[ \t]*(([a-z]+[ \t]+)*(fun|class|interface)[ \t]+.*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|0[xXbB][0-9a-fA-F_]+[lLuU]*|[0-9][0-9_]*([.][0-9_]*)?([Ee][-+]?[0-9]+)?[fFlLuU]*|[.][0-9][0-9_]*([Ee][-+]?[0-9]+)?[fFlLuU]?|[-+*/<>%&^|=!]==?|--|\\+\\+|<<=|>>=|&&|\\|\\||->|\\.\\*|!!|[?:.][.:]" },
+    .{ .name = "markdown", .pattern = "^ {0,3}#{1,6}[ \t].*", .words = "[^<>= \t]+" },
+    .{ .name = "matlab", .pattern = "^[[:space:]]*((classdef|function)[[:space:]].*)$|^(%%%?|##)[[:space:]].*$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+|[=~<>]=|\\.[*/\\^']|\\|\\||&&" },
+    .{ .name = "objc", .pattern = "!^[ \t]*(do|for|if|else|return|switch|while)\n^[ \t]*([-+][ \t]*\\([ \t]*[A-Za-z_][A-Za-z_0-9* \t]*\\)[ \t]*[A-Za-z_].*)$\n^[ \t]*(([A-Za-z_][A-Za-z_0-9]*[ \t]+)+[A-Za-z_][A-Za-z_0-9]*[ \t]*\\([^;]*)$\n^(@(implementation|interface|protocol)[ \t].*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+[fFlL]?|0[xXbB]?[0-9a-fA-F]+[lL]?|[-+*/<>%&^|=!]=|--|\\+\\+|<<=?|>>=?|&&|\\|\\||::|->" },
+    .{ .name = "pascal", .pattern = "^(((class[ \t]+)?(procedure|function)|constructor|destructor|interface|implementation|initialization|finalization)[ \t]*.*)$\n^(.*=[ \t]*(class|record).*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+|0[xXbB]?[0-9a-fA-F]+|<>|<=|>=|:=|\\.\\." },
+    .{ .name = "perl", .pattern = "^package .*\n^sub [[:alnum:]_':]+[ \t]*(\\([^)]*\\)[ \t]*)?(:[^;#]*)?(\\{[ \t]*)?(#.*)?$\n^(BEGIN|END|INIT|CHECK|UNITCHECK|AUTOLOAD|DESTROY)[ \t]*(\\{[ \t]*)?(#.*)?$\n^=head[0-9] .*", .words = "[[:alpha:]_'][[:alnum:]_']*|0[xb]?[0-9a-fA-F_]*|[0-9a-fA-F_]+(\\.[0-9a-fA-F_]+)?([eE][-+]?[0-9_]+)?|=>|-[rwxoRWXOezsfdlpSugkbctTBMAC>]|~~|::|&&=|\\|\\|=|//=|\\*\\*=|&&|\\|\\||//|\\+\\+|--|\\*\\*|\\.\\.\\.?|[-+*/%.^&<>=!|]=|=~|!~|<<|<>|<=>|>>" },
+    .{ .name = "php", .pattern = "^[\t ]*(((public|protected|private|static|abstract|final)[\t ]+)*function.*)$\n^[\t ]*((((final|abstract)[\t ]+)?class|enum|interface|trait).*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+|0[xXbB]?[0-9a-fA-F]+|[-+*/<>%&^|=!.]=|--|\\+\\+|<<=?|>>=?|===|&&|\\|\\||::|->" },
+    .{ .name = "python", .pattern = "^[ \t]*((class|(async[ \t]+)?def)[ \t].*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+[jJlL]?|0[xX]?[0-9a-fA-F]+[lL]?|[-+*/<>%&^|=!]=|//=?|<<=?|>>=?|\\*\\*=?" },
+    .{ .name = "r", .pattern = "^[ \t]*([a-zA-z][a-zA-Z0-9_.]*[ \t]*(<-|=)[ \t]*function.*)$", .words = "[^ \t]+" },
+    .{ .name = "ruby", .pattern = "^[ \t]*((class|module|def)[ \t].*)$", .words = "(@|@@|\\$)?[a-zA-Z_][a-zA-Z0-9_]*|[-+0-9.e]+|0[xXbB]?[0-9a-fA-F]+|\\?(\\\\C-)?(\\\\M-)?.|//=?|[-+*/<>%&^|=!]=|<<=?|>>=?|===|\\.{1,3}|::|[!=]~" },
+    .{ .name = "rust", .pattern = "^[\t ]*((pub(\\([^\\)]+\\))?[\t ]+)?((async|const|unsafe|extern([\t ]+\"[^\"]+\"))[\t ]+)?(struct|enum|union|mod|trait|fn|impl|macro_rules!)[< \t]+[^;]*)$", .words = "[a-zA-Z_][a-zA-Z0-9_]*|[0-9][0-9_a-fA-Fiosuxz]*(\\.([0-9]*[eE][+-]?)?[0-9_fF]*)?|[-+*\\/<>%&^|=!:]=|<<=?|>>=?|&&|\\|\\||->|=>|\\.{2}=|\\.{3}|::" },
+    .{ .name = "scheme", .pattern = "^(\\(.*)$\n^[\t ]*(\\(((define|def(struct|syntax|class|method|rules|record|proto|alias)?)[-*/ \t]|(library|module|struct|class)[*+ \t]).*)$\n^  ?(\\([Dd][Ee][Ff].*)$", .words = "\\|([^|\\\\]|\\\\.)*\\||([^][)(}{ \t])+" },
+    .{ .name = "tex", .pattern = "^(\\\\((sub)*section|chapter|part)\\*{0,1}\\{.*)$", .words = "\\\\[a-zA-Z@]+|\\\\.|([a-zA-Z0-9]|[^\x01-\x7f])+" },
 };
 
 /// How one file's function lines are found.
