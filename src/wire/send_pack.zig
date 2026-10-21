@@ -216,9 +216,10 @@ pub fn send(
     for (request.shallow) |oid| pkt_line.print("shallow {f}\n", .{oid}, w) catch |err| return conn.writeFailed(err);
     writeCommands(w, adv, request, band, status_v2, status) catch |err| return conn.writeFailed(err);
     if (needs_pack) {
-        _ = db.writePackTo(io, w, request.objects, .{
-            .delta = if (adv.has("ofs-delta")) .offset else .reference,
-        }) catch |err| switch (err) {
+        // The settings git's pack-objects reads, its delta form the server's.
+        var pack_options = db.packOptions();
+        pack_options.delta = if (adv.has("ofs-delta")) .offset else .reference;
+        _ = db.writePackTo(io, w, request.objects, pack_options) catch |err| switch (err) {
             error.WriteFailed => return conn.failure(),
             else => |e| return e,
         };

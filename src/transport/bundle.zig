@@ -446,7 +446,9 @@ pub const CreateRequest = struct {
     /// names its blob by any revision expression.
     filter: ?[]const u8 = null,
     /// How the pack is written.
-    pack: odb_mod.PackOptions = .{},
+    /// How the pack is built; `null` takes the repository's settings,
+    /// `Odb.packOptions`.
+    pack: ?odb_mod.PackOptions = null,
 };
 
 /// Errors from writing a bundle.
@@ -586,7 +588,7 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
 
     var collected = try object_walk.missing(gpa, io, repo.objectDatabase(), wants.items, .{ .exclude = haves.items, .filter = filter });
     defer collected.deinit();
-    _ = try repo.objectDatabase().writePackTo(io, w, collected.entries, request.pack);
+    _ = try repo.objectDatabase().writePackTo(io, w, collected.entries, request.pack orelse repo.objectDatabase().packOptions());
     try w.flush();
 }
 

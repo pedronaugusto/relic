@@ -222,7 +222,8 @@ pub const RunOptions = struct {
     hooks: ?*hooks_mod.Runner = null,
     /// What runs `gc.recentObjectsHook`.
     programs: ?program.Programs = null,
-    pack: odb_mod.PackOptions = .{},
+    /// `null` takes the repository's settings, `Odb.packOptions`.
+    pack: ?odb_mod.PackOptions = null,
 };
 
 /// How one task went.
@@ -502,7 +503,7 @@ fn packLoose(io: Io, repo: *Repository, options: RunOptions) Self.Error!void {
 /// The packs a task writes as the pack-objects git runs for it builds
 /// them: `pack.writeReverseIndex` read.
 fn packOptions(repo: *Repository, options: RunOptions) odb_mod.PackOptions {
-    var pack_options = options.pack;
+    var pack_options = options.pack orelse repo.objectDatabase().packOptions();
     pack_options.reverse_index = pack_options.reverse_index or rev_index.wanted(repo.configuration());
     return pack_options;
 }

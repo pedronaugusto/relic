@@ -122,7 +122,9 @@ fn compare(format: testgit.RefFormat, cases: []const Case, configure: ?*const fn
         defer native.deinit(io);
         var options = case.options;
         options.programs = .{ .environ = &ours.isolated.? };
-        options.pack.threads = 1;
+        var pack_options = options.pack orelse native.objectDatabase().packOptions();
+        pack_options.threads = 1;
+        options.pack = pack_options;
         _ = try collect.collect(gpa, io, &native, options);
         inline for (.{ shared.state, housekeeping }) |describe| {
             const expected = try describe(&theirs);
@@ -251,7 +253,9 @@ test "gc prunes the worktrees gone longer than gc.worktreePruneExpire and the pa
     var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
     defer native.deinit(io);
     var options = clock();
-    options.pack.threads = 1;
+    var pack_options = options.pack orelse native.objectDatabase().packOptions();
+    pack_options.threads = 1;
+    options.pack = pack_options;
     const report = try collect.collect(gpa, io, &native, options);
     const expected = try leftoversState(&theirs);
     defer gpa.free(expected);

@@ -71,6 +71,27 @@ pub const Options = struct {
     /// What `core.sharedRepository` asks of the permissions of what is
     /// written: the objects, the packs and their directories.
     shared: fs.Shared = .umask,
+    /// What the configuration says packs and loose objects are written
+    /// with, and whether a multi-pack index is read.
+    packing: Packing = .{},
+};
+
+/// The settings git's pack-objects and object writer read: `pack.window`,
+/// `pack.depth`, `pack.windowMemory`, `pack.compression` (else
+/// `core.compression`), `pack.indexVersion`, `core.looseCompression` (else
+/// `core.compression`), and `core.multiPackIndex`.
+pub const Packing = struct {
+    window: u32 = 10,
+    /// At most 4095, as git forces it.
+    depth: u32 = 50,
+    /// `pack.windowMemory`; unset, relic's own bound, and 0 none.
+    window_bytes: usize = 32 << 20,
+    compression: pack.Compression = .default,
+    index_version: u2 = 2,
+    /// git's default for a loose object is level 1.
+    loose_compression: pack.Compression = .fast,
+    /// `core.multiPackIndex`: off, no multi-pack index is read.
+    multi_pack_index: bool = true,
 };
 
 /// Errors from the object database.

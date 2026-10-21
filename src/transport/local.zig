@@ -185,7 +185,9 @@ pub const Remote = struct {
     /// every annotated tag that points at something in the pack comes too,
     /// as a server's `include-tag` sends it. `null` when there is nothing to
     /// copy. `into` is refreshed to read the new pack.
-    pub const CopyOptions = struct { pack_dir: Io.Dir, haves: []const Oid = &.{}, include_tags: bool = false, pack: odb_mod.PackOptions = .{} };
+    /// `pack` `null` takes the source repository's settings, as the upload-pack
+    /// git runs there builds the pack.
+    pub const CopyOptions = struct { pack_dir: Io.Dir, haves: []const Oid = &.{}, include_tags: bool = false, pack: ?odb_mod.PackOptions = null };
     pub fn copyObjects(
         r: *Remote,
         io: Io,
@@ -196,7 +198,7 @@ pub const Remote = struct {
         const pack_dir = with.pack_dir;
         const haves = with.haves;
         const include_tags = with.include_tags;
-        const options = with.pack;
+        const options = with.pack orelse r.repo.objectDatabase().packOptions();
         var collected = try object_walk.missing(r.gpa, io, r.repo.objectDatabase(), wants, .{ .exclude = haves });
         defer collected.deinit();
         if (collected.entries.len == 0) return null;

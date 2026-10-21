@@ -250,7 +250,9 @@ fn compare(format: testgit.RefFormat, cases: []const Case, configure: ?*const fn
         defer native.deinit(io);
         var options = case.options;
         options.programs = .{ .environ = &ours.isolated.? };
-        options.pack.threads = 1;
+        var pack_options = options.pack orelse native.objectDatabase().packOptions();
+        pack_options.threads = 1;
+        options.pack = pack_options;
         _ = try repack_mod.repack(gpa, io, &native, options);
         const expected = try state(&theirs);
         defer gpa.free(expected);
@@ -548,4 +550,148 @@ test "repack refuses what git refuses" {
     try repo.exec(io, &.{ "config", "extensions.preciousObjects", "true" });
     _ = try native.refreshConfig(io, .{});
     try std.testing.expectError(error.PreciousObjects, repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true }));
+}
+
+/// Each pack's entries as `git verify-pack -v` reads them: whether the
+/// whole objects' zlib streams carry the level `want` says, and the
+/// deepest delta chain.
+const PackShape = struct { levels_ok: bool, max_depth: u32, whole: usize };
+
+fn packShape(repo: *testgit.Repo, want_header: u8) !PackShape {
+    var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var shape: PackShape = .{ .levels_ok = true, .max_depth = 0, .whole = 0 };
+    var it = pack_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        var path_buf: [256]u8 = undefined;
+        // A kept pack stays as it was written.
+        const kept = if (pack_dir.access(io, try std.mem.print(&path_buf, "{s}.keep", .{entry.name[0 .. entry.name.len - 4]}), .{})) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => |e| return e,
+        };
+        if (kept) continue;
+        const listing = try repo.run(io, &.{ "verify-pack", "-v", try std.mem.print(&path_buf, ".git/objects/pack/{s}", .{entry.name}) });
+        defer gpa.free(listing);
+        const pack_name = try std.mem.print(&path_buf, "{s}.pack", .{entry.name[0 .. entry.name.len - 4]});
+        const bytes = try pack_dir.readFileAlloc(io, pack_name, gpa, .limited(1 << 26));
+        defer gpa.free(bytes);
+        var lines = std.mem.splitScalar(u8, listing, '\n');
+        while (lines.next()) |line| {
+            var words = std.mem.tokenizeScalar(u8, line, ' ');
+            var fields: [7][]const u8 = undefined;
+            var n: usize = 0;
+            while (words.next()) |w| : (n += 1) if (n < fields.len) {
+                fields[n] = w;
+            };
+            if (n < 5 or fields[0].len < 40) continue;
+            if (n >= 7) {
+                shape.max_depth = @max(shape.max_depth, try std.fmt.parseInt(u32, fields[5], 10));
+                continue;
+            }
+            // A whole object: past its type-and-size header, the zlib
+            // stream's first byte and its level's.
+            var pos = try std.fmt.parseInt(usize, fields[4], 10);
+            while (bytes[pos] & 0x80 != 0) pos += 1;
+            pos += 1;
+            shape.whole += 1;
+            if (bytes[pos] != 0x78 or bytes[pos + 1] != want_header) shape.levels_ok = false;
+        }
+    }
+    return shape;
+}
+
+test "pack.window, pack.depth, pack.compression and pack.indexVersion shape the packs as git's settings shape git's" {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const Setting = struct { config: []const [2][]const u8, header: u8, depth: u32, index_v1: bool };
+    const settings = [_]Setting{
+        .{ .config = &.{ .{ "pack.window", "0" }, .{ "pack.compression", "9" } }, .header = 0xDA, .depth = 0, .index_v1 = false },
+        .{ .config = &.{ .{ "pack.window", "0" }, .{ "core.compression", "1" } }, .header = 0x01, .depth = 0, .index_v1 = false },
+        .{ .config = &.{ .{ "pack.window", "0" }, .{ "pack.compression", "-1" }, .{ "pack.indexVersion", "1" } }, .header = 0x9C, .depth = 0, .index_v1 = true },
+        .{ .config = &.{.{ "pack.depth", "1" }}, .header = 0x9C, .depth = 1, .index_v1 = false },
+    };
+    for (settings, 0..) |setting, n| {
+        var theirs = try fixture(.files, now);
+        defer theirs.deinit();
+        var ours = try fixture(.files, now);
+        defer ours.deinit();
+        for ([_]*testgit.Repo{ &theirs, &ours }) |r| {
+            // Many versions of one file, for deltas to be found.
+            for (0..12) |i| {
+                var text: [64]u8 = undefined;
+                try commitAt(r, now - 50 * day + @as(i64, @intCast(i)), try std.mem.print(&text, "line\nline {d}\nline\nline\nline\nline\n", .{i}));
+            }
+            for (setting.config) |kv| try r.exec(io, &.{ "config", kv[0], kv[1] });
+        }
+        // `-F`: every object deflated again, at the setting, none copied.
+        try theirs.exec(io, &.{ "repack", "-q", "-a", "-d", "-F" });
+        var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+        defer native.deinit(io);
+        var pack_options = native.objectDatabase().packOptions();
+        pack_options.threads = 1;
+        pack_options.reuse_packed = false;
+        _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .pack = pack_options });
+        for ([_]*testgit.Repo{ &theirs, &ours }, 0..) |r, side| {
+            const shape = try packShape(r, setting.header);
+            std.testing.expect(shape.levels_ok and shape.max_depth <= setting.depth and shape.whole != 0) catch |err| {
+                std.debug.print("setting {d}, side {d}: {any}\n", .{ n, side, shape });
+                return err;
+            };
+            var pack_dir = try r.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+            defer pack_dir.close(io);
+            var it = pack_dir.iterate();
+            while (try it.next(io)) |entry| if (std.mem.endsWith(u8, entry.name, ".idx")) {
+                // The kept pack stays as the fixture wrote it.
+                var keep_buf: [128]u8 = undefined;
+                const keep = try std.mem.print(&keep_buf, "{s}.keep", .{entry.name[0 .. entry.name.len - 4]});
+                if (pack_dir.access(io, keep, .{})) |_| continue else |_| {}
+                var head: [4]u8 = undefined;
+                _ = try pack_dir.readFile(io, entry.name, &head);
+                try std.testing.expectEqual(setting.index_v1, !std.mem.eql(u8, &head, "\xfftOc"));
+            };
+        }
+        try ours.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+    }
+}
+
+test "core.looseCompression and core.compression set a loose object's level as git's" {
+    for ([_]struct { []const u8, []const u8, u8 }{ .{ "core.looseCompression", "9", 0xDA }, .{ "core.compression", "0", 0x01 }, .{ "core.compression", "-1", 0x9C } }) |case| {
+        var git = try testgit.Repo.init(gpa, io, &.{});
+        defer git.deinit();
+        try git.exec(io, &.{ "config", case[0], case[1] });
+        var native = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        defer native.deinit(io);
+        const oid = try native.objectDatabase().write(io, .blob, "a blob of its own level\n");
+        var hex: [hash.max_hex_len]u8 = undefined;
+        const name = oid.hex(&hex);
+        var path_buf: [128]u8 = undefined;
+        var head: [2]u8 = undefined;
+        _ = try git.dir.readFile(io, try std.mem.print(&path_buf, ".git/objects/{s}/{s}", .{ name[0..2], name[2..] }), &head);
+        // git's own, for the same setting.
+        const theirs = try blob(&git, "a blob git wrote at its level\n");
+        defer gpa.free(theirs);
+        var their_head: [2]u8 = undefined;
+        _ = try git.dir.readFile(io, try std.mem.print(&path_buf, ".git/objects/{s}/{s}", .{ theirs[0..2], theirs[2..] }), &their_head);
+        try std.testing.expectEqualSlices(u8, &their_head, &head);
+        try std.testing.expectEqual(case[2], head[1]);
+    }
+}
+
+test "core.multiPackIndex=false leaves the multi-pack index unread, as git's" {
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try commitAt(&git, testgit.fixture_date, "one");
+    try git.exec(io, &.{ "repack", "-q", "-d", "--write-midx" });
+    try git.exec(io, &.{ "config", "core.multiPackIndex", "false" });
+    var native = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer native.deinit(io);
+    var listed = try native.objectDatabase().listPacks(gpa, io, .own);
+    defer gpa.free(listed);
+    for (listed) |p| try std.testing.expect(!p.in_midx);
+    try git.exec(io, &.{ "config", "core.multiPackIndex", "true" });
+    _ = try native.refreshConfig(io, .{});
+    try native.objectDatabase().refresh(io);
+    gpa.free(listed);
+    listed = try native.objectDatabase().listPacks(gpa, io, .own);
+    for (listed) |p| try std.testing.expect(p.in_midx);
 }

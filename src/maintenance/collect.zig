@@ -76,7 +76,8 @@ pub const Options = struct {
     /// What runs `gc.recentObjectsHook`.
     programs: ?program.Programs = null,
     /// How each pack is built.
-    pack: odb_mod.PackOptions = .{},
+    /// `null` takes the repository's settings, `Odb.packOptions`.
+    pack: ?odb_mod.PackOptions = null,
 };
 
 /// Whether `gc` ran, or why not.
@@ -197,11 +198,11 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    var plan: repack_mod.Options = .{ .delete = true, .local = true, .programs = options.programs, .pack = options.pack };
+    var plan: repack_mod.Options = .{ .delete = true, .local = true, .programs = options.programs, .pack = options.pack orelse repo.objectDatabase().packOptions() };
     if (options.aggressive) {
-        plan.pack.reuse_packed = false;
-        if (s.aggressive_depth > 0) plan.pack.depth = std.math.cast(u32, s.aggressive_depth) orelse std.math.maxInt(u32);
-        if (s.aggressive_window > 0) plan.pack.window = std.math.cast(u32, s.aggressive_window) orelse std.math.maxInt(u32);
+        plan.pack.?.reuse_packed = false;
+        if (s.aggressive_depth > 0) plan.pack.?.depth = std.math.cast(u32, s.aggressive_depth) orelse std.math.maxInt(u32);
+        if (s.aggressive_window > 0) plan.pack.?.window = std.math.cast(u32, s.aggressive_window) orelse std.math.maxInt(u32);
     }
     const detach = options.detach orelse (options.auto and s.detach_auto);
     if (options.auto) {

@@ -91,7 +91,9 @@ fn compare(format: testgit.RefFormat, cases: []const Case) !void {
         var options = case.options;
         options.clock = .{ .now = Io.Clock.real.now(io) };
         options.programs = .{ .environ = &ours.isolated.? };
-        options.pack.threads = 1;
+        var pack_options = options.pack orelse native.objectDatabase().packOptions();
+        pack_options.threads = 1;
+        options.pack = pack_options;
         const report = try run_mod.run(gpa, io, &native, options);
         try std.testing.expect(report.succeeded());
 
@@ -352,4 +354,76 @@ test "the prefetch task fetches each remote into refs/prefetch/ as git's" {
     const our_head = try repos[1].readFile(io, ".git/FETCH_HEAD");
     defer gpa.free(our_head);
     try std.testing.expectEqualStrings(their_head, our_head);
+}
+
+/// Each commit of the commit graph with its changed-path filter: none,
+/// or its version and bytes in hex.
+fn graphFilters(repo: *testgit.Repo) ![]u8 {
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var graph = (try native.objectDatabase().commitGraph(io)) orelse return out.toOwnedSlice(gpa);
+    defer graph.deinit();
+    var lines: std.ArrayList([]u8) = .empty;
+    defer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    for (0..graph.count) |i| {
+        var hex: [@import("../hash/hash.zig").max_hex_len]u8 = undefined;
+        const name = graph.nameAt(@intCast(i)).hex(&hex);
+        const filter = try graph.changedPaths(@intCast(i));
+        try lines.append(gpa, if (filter) |f| (if (f.bytes.len == 0) try gpa.print("{s} none", .{name}) else try gpa.print("{s} v{d} {x}", .{ name, f.settings.version, f.bytes })) else try gpa.print("{s} none", .{name}));
+    }
+    std.mem.sort([]u8, lines.items, {}, struct {
+        fn less(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    for (lines.items) |l| try out.print(gpa, "{s}\n", .{l});
+    return out.toOwnedSlice(gpa);
+}
+
+test "the commit-graph task writes the changed-path filters git's does: changedPaths, maxNewFilters, changedPathsVersion, readChangedPaths" {
+    const GraphCase = struct { config: []const [2][]const u8, seed_filters: bool = false };
+    const cases = [_]GraphCase{
+        .{ .config = &.{} },
+        .{ .config = &.{.{ "commitGraph.changedPaths", "true" }} },
+        .{ .config = &.{ .{ "commitGraph.changedPaths", "true" }, .{ "commitGraph.maxNewFilters", "2" } } },
+        .{ .config = &.{ .{ "commitGraph.changedPaths", "true" }, .{ "commitGraph.changedPathsVersion", "2" } } },
+        .{ .config = &.{.{ "commitGraph.readChangedPaths", "false" }}, .seed_filters = true },
+        .{ .config = &.{.{ "commitGraph.maxNewFilters", "1" }}, .seed_filters = true },
+    };
+    for (cases, 0..) |case, n| {
+        var repos: [2]testgit.Repo = undefined;
+        for (&repos) |*r| {
+            r.* = try testgit.Repo.init(gpa, io, &.{});
+            for (0..3) |i| {
+                var text: [32]u8 = undefined;
+                try shared.commitAt(r, testgit.fixture_date + @as(i64, @intCast(i)) * 60, try std.mem.print(&text, "version {d}\n", .{i}));
+            }
+            // A graph with filters for the first three commits.
+            if (case.seed_filters) try r.exec(io, &.{ "commit-graph", "write", "--reachable", "--changed-paths" });
+            for (3..6) |i| {
+                var text: [32]u8 = undefined;
+                try shared.commitAt(r, testgit.fixture_date + @as(i64, @intCast(i)) * 60, try std.mem.print(&text, "version {d}\n", .{i}));
+            }
+            for (case.config) |kv| try r.exec(io, &.{ "config", kv[0], kv[1] });
+        }
+        defer for (&repos) |*r| r.deinit();
+        try repos[0].exec(io, &.{ "maintenance", "run", "--quiet", "--task=commit-graph" });
+        var native = try repo_mod.Repository.open(gpa, io, repos[1].dir, .{});
+        defer native.deinit(io);
+        const report = try run_mod.run(gpa, io, &native, .{ .clock = .{ .now = Io.Clock.real.now(io) }, .tasks = &.{.commit_graph} });
+        try std.testing.expect(report.succeeded());
+        const expected = try graphFilters(&repos[0]);
+        defer gpa.free(expected);
+        const actual = try graphFilters(&repos[1]);
+        defer gpa.free(actual);
+        std.testing.expectEqualStrings(expected, actual) catch |err| {
+            std.debug.print("commit-graph case {d}\n", .{n});
+            return err;
+        };
+    }
 }

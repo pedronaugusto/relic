@@ -32,12 +32,55 @@ pub const CommitGraphOptions = struct {
     expire_time: ?Io.Timestamp = null,
     generations: bool = true,
     changed_paths: ?graph_mod.bloom.Settings = null,
+    /// `--max-new-filters`, `commitGraph.maxNewFilters`: at most this many
+    /// changed-path filters computed, the commits taken by generation and
+    /// then date, as git's `compute_bloom_filters` takes them; a filter the
+    /// graph holds with the same settings is kept without counting, and a
+    /// commit past the limit gets none. `null` computes every one.
+    max_new_filters: ?u32 = null,
     /// Existing commits are retained, as in git without --split=replace.
     append: bool = true,
     /// How the files are synced; `null` as the database's `core.fsync`
     /// says for the commit-graph.
     sync: ?fs.Sync = null,
 };
+
+/// A filter `old` holds for `oid` with `settings`, which git keeps rather
+/// than computes again.
+fn heldFilter(old: ?*const graph_mod.Graph, oid: Oid, settings: graph_mod.bloom.Settings) graph_mod.Graph.Error!?[]const u8 {
+    const graph = old orelse return null;
+    const position = graph.find(oid) orelse return null;
+    const held = (try graph.changedPaths(position)) orelse return null;
+    if (held.settings.version != settings.version or held.settings.hashes != settings.hashes or held.settings.bits_per_entry != settings.bits_per_entry) return null;
+    return held.bytes;
+}
+
+/// With `max_new_filters`, the commits whose filters are computed: by
+/// generation, then date, those the graph holds no filter for, up to the
+/// limit. `null` when every one is.
+fn newFilters(arena: Allocator, old: ?*const graph_mod.Graph, selected: []const GraphNode, options: CommitGraphOptions) Self.Error!?Oid.Set {
+    const settings = options.changed_paths orelse return null;
+    const limit = options.max_new_filters orelse return null;
+    const order = try arena.dupe(GraphNode, selected);
+    const by_generation = struct {
+        fn less(generations: bool, a: GraphNode, b: GraphNode) bool {
+            const ga = if (generations) a.generation else a.level;
+            const gb = if (generations) b.generation else b.level;
+            if (ga != gb) return ga < gb;
+            return a.time < b.time;
+        }
+    }.less;
+    std.mem.sort(GraphNode, order, options.generations, by_generation);
+    var chosen: Oid.Set = .empty;
+    var computed: u32 = 0;
+    for (order) |node| {
+        if (computed >= limit) break;
+        if ((try heldFilter(old, node.oid, settings)) != null) continue;
+        try chosen.put(arena, node.oid, {});
+        computed += 1;
+    }
+    return chosen;
+}
 
 const GraphNode = struct {
     oid: Oid,
@@ -134,18 +177,23 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     }
     var positions: Oid.Map(u32) = .empty;
     for (selected.items, 0..) |node, i| try positions.put(arena, node.oid, base_count + @as(u32, @intCast(i)));
+    const anew = try newFilters(arena, if (old) |*g| g else null, selected.items, options);
     var inputs: std.ArrayList(graph_mod.WriteCommit) = .empty;
     for (selected.items) |node| {
         const parents = try arena.alloc(u32, node.parents.len);
         for (node.parents, parents) |parent, *position| position.* = positions.get(parent) orelse (if (retained) |g| g.find(parent) else null) orelse return error.InvalidGraphInput;
         var changed: []const u8 = &.{};
         if (options.changed_paths) |settings| {
-            const parent_tree: ?Oid = if (node.parents.len == 0) null else nodes.items[by_name.get(node.parents[0]).?].tree;
-            var changes = try diff.tree(gpa, io, db, .{ .old = parent_tree, .new = node.tree }, .{});
-            defer changes.deinit();
-            const paths = try arena.alloc([]const u8, changes.items.len);
-            for (changes.items, paths) |change, *path| path.* = change.path();
-            changed = try graph_mod.bloom.build(arena, paths, settings);
+            if (try heldFilter(if (old) |*g| g else null, node.oid, settings)) |held| {
+                changed = try arena.dupe(u8, held);
+            } else if (anew == null or anew.?.contains(node.oid)) {
+                const parent_tree: ?Oid = if (node.parents.len == 0) null else nodes.items[by_name.get(node.parents[0]).?].tree;
+                var changes = try diff.tree(gpa, io, db, .{ .old = parent_tree, .new = node.tree }, .{});
+                defer changes.deinit();
+                const paths = try arena.alloc([]const u8, changes.items.len);
+                for (changes.items, paths) |change, *path| path.* = change.path();
+                changed = try graph_mod.bloom.build(arena, paths, settings);
+            }
         }
         try inputs.append(arena, .{ .oid = node.oid, .tree = node.tree, .parents = parents, .time = node.time, .level = node.level, .generation = node.generation, .changed_paths = changed });
     }
@@ -252,6 +300,12 @@ fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Gr
             };
             if (kept) continue;
             const filename = try arena.print("graph-{s}.graph", .{layer.checksum().hex(&hex)});
+            // A single `info/commit-graph` is no layer of the chain; std's
+            // `setTimestamps` reports a missing file as no error it names.
+            graph_dir.access(io, filename, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
             fs.setTimestamps(io, graph_dir, filename, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now) * std.time.ns_per_s } } }) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
@@ -893,18 +947,38 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
     if (generation_version != 1 and generation_version != 2) return error.UnsupportedGenerationVersion;
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
+    // `commitGraph.changedPathsVersion`, else -1, or 0 when
+    // `commitGraph.readChangedPaths` is false: git's repo settings. A
+    // version it does not know writes no graph, as git only warns.
+    const version: i64 = if (config.has("commitgraph.changedpathsversion"))
+        try config.getInt("commitgraph.changedpathsversion", -1)
+    else if (try config.getBool("commitgraph.readchangedpaths", true)) -1 else 0;
+    if (version < -1 or version > 2) return null;
     var settings: ?graph_mod.bloom.Settings = null;
-    var old = try graph_mod.Graph.openUsable(gpa, io, repo.objectDatabase().objectsDirectory(), repo.objectFormat());
-    defer if (old) |*g| g.deinit();
-    if (old) |*g| if (g.count > 0) if (try g.changedPaths(g.count - 1)) |filter| {
-        settings = filter.settings;
-    };
-    if (settings) |*value| {
-        const version = try config.getInt("commitgraph.changedpathsversion", value.version);
-        if (version != 1 and version != 2) return error.UnsupportedBloomVersion;
-        value.version = @intCast(version);
+    // Version 0 reads no filters, so none is carried into the new graph.
+    if (version != 0) {
+        var old = try graph_mod.Graph.openUsable(gpa, io, repo.objectDatabase().objectsDirectory(), repo.objectFormat());
+        defer if (old) |*g| g.deinit();
+        if (old) |*g| if (g.count > 0) if (try g.changedPaths(g.count - 1)) |filter| {
+            settings = filter.settings;
+        };
     }
-    return writeCommitGraph(gpa, io, repo.objectDatabase(), tips, .{ .split = if (purpose == .gc) .none else .merge, .generations = generation_version == 2, .changed_paths = settings });
+    // `commit-graph write`, which the maintenance task runs, reads
+    // `commitGraph.changedPaths` and `commitGraph.maxNewFilters`; gc's and
+    // fetch's writes do not.
+    var max_new_filters: ?u32 = null;
+    if (purpose == .maintenance) {
+        if (settings == null and try config.getBool("commitgraph.changedpaths", false)) settings = .{};
+        const limit = try config.getInt("commitgraph.maxnewfilters", -1);
+        if (limit >= 0) max_new_filters = std.math.cast(u32, limit) orelse std.math.maxInt(u32);
+    }
+    // The version is the configuration's unless it is -1; git writes 2
+    // when it is 2 and 1 for anything else.
+    if (settings) |*value| {
+        if (version != -1) value.version = @intCast(version);
+        value.version = if (value.version == 2) 2 else 1;
+    }
+    return writeCommitGraph(gpa, io, repo.objectDatabase(), tips, .{ .split = if (purpose == .gc) .none else .merge, .generations = generation_version == 2, .changed_paths = settings, .max_new_filters = max_new_filters });
 }
 
 fn clearMidxBitmaps(gpa: Allocator, io: Io, dir: Io.Dir, keep: ?[]const u8) MidxError!void {

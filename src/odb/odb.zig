@@ -207,6 +207,30 @@ pub const Odb = struct {
         db.backendData().options.fsync = fsync;
     }
 
+    /// Take `packing`, the configuration's settings for what is written,
+    /// for every write from here on.
+    pub fn configurePacking(db: *Odb, packing: policy_mod.Packing) void {
+        const data = db.backendData();
+        // The loose objects' compressor is made at its level; a new level
+        // makes a new one at the next write.
+        if (data.options.packing.loose_compression != packing.loose_compression) if (data.deflate_state) |state| {
+            state.compress.deinit();
+            data.gpa.destroy(state.compress);
+            data.gpa.free(state.buffer);
+            data.gpa.free(state.input);
+            data.deflate_state = null;
+        };
+        data.options.packing = packing;
+    }
+
+    /// The `PackOptions` this database's configuration gives a pack, as
+    /// git's pack-objects reads its settings: what a write takes unless
+    /// its caller says otherwise.
+    pub fn packOptions(db: *const Odb) PackOptions {
+        const p = db.backendData().options.packing;
+        return .{ .window = p.window, .depth = p.depth, .window_bytes = p.window_bytes, .compression = p.compression, .index_version = p.index_version };
+    }
+
     /// The allocator that owns returned object bytes.
     pub fn allocator(db: *const Odb) Allocator {
         return db.backendData().gpa;
@@ -489,7 +513,8 @@ pub const Odb = struct {
             try source.packs.append(odb.backendData().gpa, .{ .pack = opened, .name = name, .id = odb.backendData().next_pack_id });
             odb.backendData().next_pack_id += 1;
         }
-        try odb.loadMidx(io, source_index);
+        // `core.multiPackIndex` off: no index is read, as git reads none.
+        if (odb.backendData().options.packing.multi_pack_index) try odb.loadMidx(io, source_index);
     }
 
     /// The pack named `base` in `pack_dir`, or `null` when its `.idx` or
@@ -1278,7 +1303,7 @@ pub const Odb = struct {
         const gpa = odb.allocator();
         const compress = try gpa.create(warp.Deflate);
         errdefer gpa.destroy(compress);
-        compress.* = try .init(gpa, .{ .level = 1 });
+        compress.* = try .init(gpa, .{ .level = odb.backendData().options.packing.loose_compression.level() });
         errdefer compress.deinit();
         const buffer = try gpa.alloc(u8, deflate_output_buffer_len);
         errdefer gpa.free(buffer);
@@ -2171,6 +2196,7 @@ pub const Odb = struct {
                 .stream => null,
             },
             .prefix = options.prefix,
+            .index_version = options.index_version,
         };
         var writer = switch (target) {
             .dir => |pack_dir| try pack.Writer.open(gpa, io, pack_dir, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
@@ -3565,6 +3591,8 @@ pub const PackOptions = struct {
     /// the `.mtimes` beside the pack (`pack.WriteOptions.mtimes`). Ignored
     /// for a pack streamed to a caller. Borrowed for the write.
     mtimes: ?*const Oid.Map(u32) = null,
+    /// `pack.indexVersion`: `pack.WriteOptions.index_version`.
+    index_version: u2 = 2,
     /// The files' names before `-<name>`: `pack.WriteOptions.prefix`. The
     /// database finds a pack by any name; what it reports and removes by
     /// name assumes `pack`.

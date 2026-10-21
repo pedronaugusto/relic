@@ -979,9 +979,10 @@ const Negotiation = struct {
         if (n.include_tag) try n.addTags(&entries);
 
         var framed: side_band.Mux = .init(out, band);
-        _ = n.db().writePackTo(s.io, framed.writer(), entries.items, .{
-            .delta = if (n.ofs_delta) .offset else .reference,
-        }) catch |err| switch (err) {
+        // The settings git's pack-objects reads, its delta form the client's.
+        var pack_options = n.db().packOptions();
+        pack_options.delta = if (n.ofs_delta) .offset else .reference;
+        _ = n.db().writePackTo(s.io, framed.writer(), entries.items, pack_options) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.WriteFailed,

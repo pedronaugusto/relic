@@ -1798,20 +1798,29 @@ pub const WriteError = error{
 /// git's `pack.compression` falls back to `core.compression`, which is
 /// zlib's default. A pack is written once and read many times, which is why
 /// the default here is that one rather than the level a loose object gets.
-pub const Compression = enum {
+pub const Compression = enum(u4) {
+    /// zlib's level 0: stored.
+    none = 0,
     /// zlib's level 1, which is what a loose object gets here.
-    fast,
+    fast = 1,
     /// zlib's level 6, which is git's own default for a pack.
-    default,
+    default = 6,
     /// zlib's level 9.
-    best,
+    best = 9,
+    /// Any other level from 0 to 9.
+    _,
 
-    fn level(c: Compression) u4 {
-        return switch (c) {
-            .fast => 1,
-            .default => 6,
-            .best => 9,
-        };
+    /// git's `core.compression`, `pack.compression` and
+    /// `core.looseCompression`: -1 zlib's default, else 0 to 9; `null` for
+    /// anything else, which git dies on.
+    pub fn fromLevel(value: i64) ?Compression {
+        if (value == -1) return .default;
+        if (value < 0 or value > 9) return null;
+        return @fromBackingInt(@intCast(@as(u4, @intCast(value))));
+    }
+
+    pub fn level(c: Compression) u4 {
+        return @backingInt(c);
     }
 };
 
@@ -1841,6 +1850,8 @@ pub const WriteOptions = struct {
     /// which `maintenance`'s loose-objects task gives as `loose`. At most
     /// sixteen bytes.
     prefix: []const u8 = "pack",
+    /// `pack.indexVersion`: `IndexWriteOptions.version`.
+    index_version: u2 = 2,
 };
 
 /// What a finished pack turned out to be.
@@ -2381,7 +2392,7 @@ pub const Writer = struct {
     }
 
     fn writeIndex(w: *Writer, io: Io, pack_checksum: Oid, idx_name: []const u8) WriteError!u64 {
-        return writeIndexFile(w.gpa, io, w.dir, idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.fsync.sync(.pack_metadata) });
+        return writeIndexFile(w.gpa, io, w.dir, idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.fsync.sync(.pack_metadata), .version = w.options.index_version });
     }
 };
 
@@ -2408,6 +2419,10 @@ pub const IndexWriteOptions = struct {
     entries: []IndexEntry,
     pack_checksum: Oid,
     sync: fs.Sync = .none,
+    /// `pack.indexVersion`: 1 writes git's version 1 (the fanout, then each
+    /// offset beside its name) unless an offset is past two gigabytes, which
+    /// only version 2 holds, as git's `need_large_offset` decides.
+    version: u2 = 2,
 };
 
 pub fn writeIndexFile(
@@ -2450,10 +2465,15 @@ pub fn writeIndexFile(
     };
     const out = &fw.interface;
 
-    var head: [8]u8 = undefined;
-    @memcpy(head[0..4], idx_magic);
-    std.mem.writeInt(u32, head[4..8], 2, .big);
-    try Emit.go(out, &hasher, &written, &head);
+    var largest: u64 = 0;
+    for (entries) |e| largest = @max(largest, e.offset);
+    const version: u32 = if (options.version >= 2 or largest > std.math.maxInt(u31)) 2 else 1;
+    if (version == 2) {
+        var head: [8]u8 = undefined;
+        @memcpy(head[0..4], idx_magic);
+        std.mem.writeInt(u32, head[4..8], 2, .big);
+        try Emit.go(out, &hasher, &written, &head);
+    }
 
     // The fanout: for each first byte, how many names are at or below it.
     var fanout: [256]u32 = @splat(0);
@@ -2470,18 +2490,27 @@ pub fn writeIndexFile(
         try Emit.go(out, &hasher, &written, &bytes);
     }
 
-    for (entries) |e| try Emit.go(out, &hasher, &written, e.oid.raw()[0..raw_len]);
-    for (entries) |e| {
-        var bytes: [4]u8 = undefined;
-        std.mem.writeInt(u32, &bytes, e.crc, .big);
-        try Emit.go(out, &hasher, &written, &bytes);
+    if (version == 1) {
+        for (entries) |e| {
+            var bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &bytes, @intCast(e.offset), .big);
+            try Emit.go(out, &hasher, &written, &bytes);
+            try Emit.go(out, &hasher, &written, e.oid.raw()[0..raw_len]);
+        }
+    } else {
+        for (entries) |e| try Emit.go(out, &hasher, &written, e.oid.raw()[0..raw_len]);
+        for (entries) |e| {
+            var bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &bytes, e.crc, .big);
+            try Emit.go(out, &hasher, &written, &bytes);
+        }
     }
 
     // Anything past two gigabytes goes in the 64-bit table, and its row
     // in the 32-bit table is that row's position with the high bit set.
     var large: std.ArrayList(u64) = .empty;
     defer large.deinit(gpa);
-    for (entries) |e| {
+    if (version == 2) for (entries) |e| {
         var bytes: [4]u8 = undefined;
         if (e.offset <= std.math.maxInt(u31)) {
             std.mem.writeInt(u32, &bytes, @intCast(e.offset), .big);
@@ -2490,7 +2519,7 @@ pub fn writeIndexFile(
             try large.append(gpa, e.offset);
         }
         try Emit.go(out, &hasher, &written, &bytes);
-    }
+    };
     for (large.items) |value| {
         var bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &bytes, value, .big);
@@ -2502,7 +2531,7 @@ pub fn writeIndexFile(
     written += raw_len;
     // The layout `Index.parse` reads back: header, fanout, names, CRCs,
     // offsets, large offsets, two checksums.
-    std.debug.assert(written == 8 + 1024 + entries.len * (raw_len + 8) + large.items.len * 8 + 2 * raw_len);
+    std.debug.assert(written == if (version == 1) 1024 + entries.len * (raw_len + 4) + 2 * raw_len else 8 + 1024 + entries.len * (raw_len + 8) + large.items.len * 8 + 2 * raw_len);
     try out.writeAll(own.raw()[0..raw_len]);
     try out.flush();
     try fs.syncFile(io, file, .{ .policy = sync });

@@ -25,6 +25,8 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
+const odb_policy = @import("../odb/policy.zig");
+const pack_mod = @import("../odb/pack.zig");
 const index_mod = @import("../index/index.zig");
 const refs_mod = @import("../refs/refs.zig");
 const config_mod = @import("../config/config.zig");
@@ -750,6 +752,7 @@ pub const Repository = struct {
         var odb_options = options.odb;
         odb_options.shared = repo.data().shared;
         odb_options.fsync = repo.data().fsync;
+        odb_options.packing = try packingOf(repo.configuration());
         repo.data().odb = try odb_mod.Odb.open(gpa, io, repo.data().common_dir, format.kind, odb_options);
         errdefer repo.data().odb.deinit(io);
         repo.data().shallow_seen = try shallow.seen(io, repo.data().common_dir);
@@ -858,6 +861,38 @@ pub const Repository = struct {
     /// under `writeout-only`, and batched only where `core.fsync` names them,
     /// as git's `close_loose_object` syncs them. A value git ignores is
     /// ignored.
+    /// git's pack-objects and object-writer settings: `pack.window` and
+    /// `pack.depth` (below 0 is 0; a depth past 4095 is 4095),
+    /// `pack.windowMemory` (0 is no bound), `pack.compression` and
+    /// `core.looseCompression`, each falling back to `core.compression`
+    /// (-1 is zlib's default; anything else outside 0 to 9 refused, as git
+    /// dies), `pack.indexVersion` (past 2 refused) and `core.multiPackIndex`.
+    fn packingOf(config: *const config_mod.Config) ErrorNamespace.Error!odb_policy.Packing {
+        var packing: odb_policy.Packing = .{};
+        if (config.has("pack.window")) packing.window = std.math.cast(u32, @max(try config.getInt("pack.window", 10), 0)) orelse std.math.maxInt(u32);
+        if (config.has("pack.depth")) packing.depth = @intCast(std.math.clamp(try config.getInt("pack.depth", 50), 0, 4095));
+        if (config.has("pack.windowmemory")) {
+            const bytes = try config.getInt("pack.windowmemory", 0);
+            packing.window_bytes = if (bytes <= 0) std.math.maxInt(usize) else std.math.cast(usize, bytes) orelse std.math.maxInt(usize);
+        }
+        const core_level: ?i64 = if (config.has("core.compression")) try config.getInt("core.compression", -1) else null;
+        if (config.has("pack.compression") or core_level != null) {
+            const level = if (config.has("pack.compression")) try config.getInt("pack.compression", -1) else core_level.?;
+            packing.compression = pack_mod.Compression.fromLevel(level) orelse return error.MalformedValue;
+        }
+        if (config.has("core.loosecompression") or core_level != null) {
+            const level = if (config.has("core.loosecompression")) try config.getInt("core.loosecompression", -1) else core_level.?;
+            packing.loose_compression = pack_mod.Compression.fromLevel(level) orelse return error.MalformedValue;
+        }
+        if (config.has("pack.indexversion")) {
+            const version = try config.getInt("pack.indexversion", 2);
+            if (version < 0 or version > 2) return error.MalformedValue;
+            packing.index_version = @intCast(@max(version, 1));
+        }
+        packing.multi_pack_index = try config.getBool("core.multipackindex", true);
+        return packing;
+    }
+
     fn fsyncOf(config: *const config_mod.Config) ErrorNamespace.Error!fs.Fsync {
         var fsync: fs.Fsync = .default;
         if (config.find("core.fsync")) |entry| {
@@ -1255,6 +1290,7 @@ pub const Repository = struct {
         shared: fs.Shared,
         fsync: fs.Fsync,
         settings: Settings,
+        packing: odb_policy.Packing,
     };
 
     /// Whether `next` may be published, and the policy it sets: the same
@@ -1277,6 +1313,7 @@ pub const Repository = struct {
             .shared = try sharedOf(next),
             .fsync = try fsyncOf(next),
             .settings = try Settings.of(next),
+            .packing = try packingOf(next),
         };
     }
 
@@ -1291,6 +1328,7 @@ pub const Repository = struct {
         repo.refStore().configureWrites(policy.shared, policy.fsync);
         repo.refStore().configureNames(policy.settings.precompose_unicode);
         repo.data().odb.configureWrites(policy.shared, policy.fsync);
+        repo.data().odb.configurePacking(policy.packing);
         repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;
         repo.data().settings = policy.settings;

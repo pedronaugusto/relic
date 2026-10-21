@@ -96,7 +96,8 @@ pub const Options = struct {
     update_server_info: ?bool = null,
     /// How each pack is built. `repack.cruftWindow`, `cruftDepth` and
     /// `cruftThreads` change it for a cruft pack.
-    pack: odb_mod.PackOptions = .{},
+    /// `null` takes the repository's settings, `Odb.packOptions`.
+    pack: ?odb_mod.PackOptions = null,
     /// What runs `gc.recentObjectsHook`, for a cruft expiration and
     /// `--unpack-unreachable`.
     programs: ?program.Programs = null,
@@ -162,7 +163,7 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     if (bitmaps == null and !options.write_midx and !(mode != .loose and repo.isBare())) bitmaps = false;
     if (bitmaps == true and mode == .loose and !options.write_midx) return error.IncrementalBitmaps;
     if (bitmaps != false and options.local and db.hasAlternates()) bitmaps = false;
-    var pack_options = options.pack;
+    var pack_options = options.pack orelse db.packOptions();
     // `pack.writeReverseIndex`, as pack-objects reads it.
     pack_options.reverse_index = pack_options.reverse_index or rev_index.wanted(config);
 
