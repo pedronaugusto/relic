@@ -57,6 +57,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `receive.keepAlive` (default 5 seconds; zero or less, none): from the pack's end, or from the commands of a push that only deletes, receive-pack sends git's keepalive, an empty packet on side-band channel one, whenever the client has heard nothing for that long, as git's muxers send it while index-pack, the connectivity check and the hooks run.
 - `receive.updateServerInfo`: after a push's last hook, receive-pack writes the dumb HTTP files again (`info/refs`, `objects/info/packs`) through `maintenance.updateServerInfo`, as git's does, what that comes to not the push's to answer for.
 - receive-pack's aliased updates, as git's `check_aliased_updates`: a command on a symbolic ref whose target another command of the push updates is left to that one when the two agree, and both are refused (`inconsistent aliased update`, with git's message naming both and their values) when they do not; a symbolic ref that leads nowhere a ref can be is refused (`broken symref`).
+- `transport.http_backend` serves the dumb protocol's files as git's http-backend does, unless `http.getanyfile` is off (403): `HEAD`, `info/refs` without a service (every ref, an annotated tag's peeled object after it) and `objects/info/packs` made as they are asked for, the alternates files, and loose objects, packs and pack indexes from the repository with git's cache headers; held to git's dumb client cloning and fetching.
 
 ### Changed
 

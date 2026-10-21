@@ -158,3 +158,62 @@ fn expectSameRefs(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, o
         }
     }
 }
+
+test "git clones and fetches over the dumb protocol from relic's server, its packs and loose objects, unless http.getanyfile is off" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    // git's dumb client, not its smart one.
+    try env.put("GIT_SMART_HTTP", "0");
+
+    var source = try testremote.historyRepo(gpa, io, 4);
+    defer source.deinit();
+    const served_path = try gpa.print("{s}/served.git", .{root_path});
+    defer gpa.free(served_path);
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    try git(gpa, io, root.dir, &env, &.{ "clone", "-q", "--bare", source_path, served_path });
+    var served_dir = try Io.Dir.cwd().openDir(io, served_path, .{});
+    defer served_dir.close(io);
+    try served_dir.writeFile(io, .{ .sub_path = "git-daemon-export-ok", .data = "" });
+
+    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = .{ .user = Served.user, .now = Served.now } }) };
+    var server = uplink.Server.init(gpa, .{}, .init(&served, Served.serve));
+    defer server.deinit(io);
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var task = try io.concurrent(runServer, .{ &server, io, &listener });
+    defer {
+        server.shutdown(io);
+        task.await(io);
+    }
+    const url = try gpa.print("http://127.0.0.1:{d}/served.git", .{listener.socket.address.getPort()});
+    defer gpa.free(url);
+
+    // A clone from the packs.
+    const clone_path = try gpa.print("{s}/clone", .{root_path});
+    defer gpa.free(clone_path);
+    try git(gpa, io, root.dir, &env, &.{ "clone", "-q", url, clone_path });
+    var clone = try Io.Dir.cwd().openDir(io, clone_path, .{});
+    defer clone.close(io);
+    try expectSameRefs(gpa, io, &env, clone, served_dir, "refs/remotes/origin/", "refs/heads/");
+    try git(gpa, io, clone, &env, &.{ "fsck", "--strict" });
+    // A fetch of loose objects, and of a tag, peeled in info/refs.
+    try git(gpa, io, source.dir, &env, &.{ "commit", "-q", "--allow-empty", "-m", "loose" });
+    try git(gpa, io, source.dir, &env, &.{ "tag", "-a", "-m", "annotated", "dumb-tag" });
+    try git(gpa, io, source.dir, &env, &.{ "-c", "receive.unpackLimit=1000", "push", "-q", served_path, "HEAD:refs/heads/main", "dumb-tag" });
+    try git(gpa, io, clone, &env, &.{ "fetch", "-q", "--tags", "origin" });
+    try expectSameRefs(gpa, io, &env, clone, served_dir, "refs/remotes/origin/", "refs/heads/");
+    try git(gpa, io, clone, &env, &.{ "fsck", "--strict" });
+    // Nothing is served with http.getanyfile off.
+    try git(gpa, io, served_dir, &env, &.{ "config", "http.getanyfile", "false" });
+    const refused_path = try gpa.print("{s}/refused", .{root_path});
+    defer gpa.free(refused_path);
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", url, refused_path }, "", false));
+}
