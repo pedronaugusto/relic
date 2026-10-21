@@ -177,6 +177,9 @@ pub const RenameOptions = struct {
     detect_copies: bool = false,
     /// `--find-copies-harder`: an unmodified file is a copy source too.
     find_copies_harder: bool = false,
+    /// git's `single_follow`: only this path may be the destination of a
+    /// rename or a copy, as `git log --follow` asks.
+    single_follow: ?[]const u8 = null,
 };
 
 /// How a tree comparison behaves.
@@ -539,6 +542,7 @@ fn detectRenames(
     const minimum: u32 = @as(u32, options.threshold) * similarity.max_score / 100;
     _ = try rename.detect(arena, io, db, &queue, .{
         .copies = options.detect_copies,
+        .single_follow = options.single_follow,
         .minimum_score = if (minimum == 0) 1 else minimum,
         .rename_limit = @intCast(options.limit),
         .rename_empty = true,

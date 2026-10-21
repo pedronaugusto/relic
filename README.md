@@ -651,6 +651,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `rev_walk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found`, terms and pathspecs. |
 | `rev_walk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
 | `rev_walk.fork_point` | `forkPoint` — `git merge-base --fork-point`: where a branch forked from a ref, through the ref's log. |
+| `rev_walk.follow` | `follow` — `git log --follow -- <path>`: the commits that changed a file, followed back through its renames as git follows them. |
 | `rev_walk.last_modified` | `lastModified` — `git last-modified`: for each path of a commit's tree, the commit that last changed it. |
 | `rev_walk.path_walk` | `PathWalk` — git's path-walk: the objects a history reaches, in batches by the path that reaches them. |
 | `rev_walk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |

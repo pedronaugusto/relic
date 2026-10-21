@@ -3,6 +3,7 @@
 pub const bisect = @import("rev_walk/bisect.zig");
 pub const describe = @import("rev_walk/describe.zig");
 pub const fork_point = @import("rev_walk/fork_point.zig");
+pub const follow = @import("rev_walk/follow.zig");
 pub const last_modified = @import("rev_walk/last_modified.zig");
 pub const path_walk = @import("rev_walk/path_walk.zig");
 pub const mailmap = @import("rev_walk/mailmap.zig");

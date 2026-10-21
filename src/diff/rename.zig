@@ -98,6 +98,9 @@ pub const Options = struct {
     /// Whether an empty file can be the source or destination of a rename;
     /// a diff says yes and a merge no.
     rename_empty: bool = true,
+    /// git's `single_follow`: the one path that may be a destination, for
+    /// `git log --follow`; every other addition stays one.
+    single_follow: ?[]const u8 = null,
     /// The only sources worth pairing, when the caller knows which.
     relevant_sources: ?*std.StringHashMapUnmanaged(i64) = null,
     /// The directories removed on this side, and why each matters.
@@ -132,6 +135,7 @@ pub fn detect(arena: Allocator, io: Io, db: *odb_mod.Odb, queue: *std.ArrayList(
     for (queue.items) |p| {
         if (!p.one.valid()) {
             if (!p.two.valid()) continue;
+            if (options.single_follow) |only| if (!std.mem.eql(u8, only, p.two.path)) continue;
             if (!options.rename_empty and p.two.oid.eql(empty)) continue;
             try r.dst.append(arena, .{ .p = p });
         } else if (!options.rename_empty and p.one.oid.eql(empty)) {

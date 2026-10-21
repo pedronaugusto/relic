@@ -69,6 +69,7 @@
 //! | `rev_walk.bisect` | Module within `rev_walk`. |
 //! | `rev_walk.describe` | Module within `rev_walk`. |
 //! | `rev_walk.fork_point` | Module within `rev_walk`. |
+//! | `rev_walk.follow` | Module within `rev_walk`. |
 //! | `rev_walk.last_modified` | Module within `rev_walk`. |
 //! | `rev_walk.path_walk` | Module within `rev_walk`. |
 //! | `rev_walk.mailmap` | Module within `rev_walk`. |
