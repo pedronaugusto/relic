@@ -681,6 +681,68 @@ pub const Options = struct {
     word_regex: ?[]const u8 = null,
     /// `diff.wordRegex`, as `configured` reads it.
     configured_word_regex: ?[]const u8 = null,
+    /// What the headers put before each side's path: `--src-prefix` and
+    /// `--dst-prefix`, which `Prefixes.configured` reads as git does.
+    prefixes: Prefixes = .{},
+};
+
+/// The prefixes a patch's headers put before each side's path.
+pub const Prefixes = struct {
+    src: []const u8 = "a/",
+    dst: []const u8 = "b/",
+
+    /// What a diff compares, which `diff.mnemonicPrefix` names its sides by.
+    pub const Compared = enum {
+        /// Two commits or trees: `a/` and `b/` whatever the setting.
+        commits,
+        /// `git diff`: `i/` and `w/`.
+        index_worktree,
+        /// `git diff --cached`: `c/` and `i/`.
+        commit_index,
+        /// `git diff <commit>`: `c/` and `w/`.
+        commit_worktree,
+        /// `git diff <blob> <file>`: `o/` and `w/`.
+        object_worktree,
+        /// `git diff --no-index`: `1/` and `2/`.
+        no_index,
+        /// `git format-patch`, two commits, which passes `diff.noPrefix`
+        /// over.
+        patches,
+    };
+
+    /// The prefixes as git's `repo_diff_setup` and the commands set them:
+    /// `diff.noPrefix` none at all; else without `diff.mnemonicPrefix`
+    /// `diff.srcPrefix` and `diff.dstPrefix`, or `a/` and `b/`; else the
+    /// letters for what is compared. The last of each setting decides, a
+    /// value git dies on refused.
+    pub fn configured(config: *const config_mod.Config, compared: Compared) ConfigError!Prefixes {
+        var no_prefix = false;
+        var mnemonic = false;
+        var src: ?[]const u8 = null;
+        var dst: ?[]const u8 = null;
+        var it = config.iterate(&.{ "diff.noprefix", "diff.mnemonicprefix", "diff.srcprefix", "diff.dstprefix" });
+        while (it.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.name, "noprefix")) {
+                no_prefix = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
+            } else if (std.ascii.eqlIgnoreCase(entry.name, "mnemonicprefix")) {
+                mnemonic = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
+            } else if (std.ascii.eqlIgnoreCase(entry.name, "srcprefix")) {
+                src = entry.value orelse return error.InvalidDiffSetting;
+            } else {
+                dst = entry.value orelse return error.InvalidDiffSetting;
+            }
+        }
+        if (no_prefix and compared != .patches) return .{ .src = "", .dst = "" };
+        if (!mnemonic) return .{ .src = src orelse "a/", .dst = dst orelse "b/" };
+        return switch (compared) {
+            .commits, .patches => .{},
+            .index_worktree => .{ .src = "i/", .dst = "w/" },
+            .commit_index => .{ .src = "c/", .dst = "i/" },
+            .commit_worktree => .{ .src = "c/", .dst = "w/" },
+            .object_worktree => .{ .src = "o/", .dst = "w/" },
+            .no_index => .{ .src = "1/", .dst = "2/" },
+        };
+    }
 };
 
 /// How a word diff shows the words that changed: `[-...-]{+...+}`
@@ -1318,9 +1380,9 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     const fully = options.quote_path;
     const old_path = shownPath(options, (old orelse new.?).path);
     const new_path = shownPath(options, (new orelse old.?).path);
-    const old_name = try quoteTwo(gpa, "a/", old_path, fully);
+    const old_name = try quoteTwo(gpa, options.prefixes.src, old_path, fully);
     defer gpa.free(old_name);
-    const new_name = try quoteTwo(gpa, "b/", new_path, fully);
+    const new_name = try quoteTwo(gpa, options.prefixes.dst, new_path, fully);
     defer gpa.free(new_name);
 
     const old_oid = if (old) |e| e.oid else Oid.zero(db.objectFormat());

@@ -360,3 +360,24 @@ test "format-patch takes an order file and --relative, given or from diff.orderF
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--relative=dir/" }, "base..HEAD", range, .{ .directory = "dir/" });
     try compare(gpa, io, &git, &repo, &.{"--no-signature"}, "base..HEAD", range, .{});
 }
+
+test "format-patch takes diff.srcPrefix, diff.dstPrefix and diff.mnemonicPrefix, and passes diff.noPrefix over, as git does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const Setting = struct { key: []const u8, value: []const u8 };
+    const variants = [_][]const Setting{
+        &.{.{ .key = "diff.noPrefix", .value = "true" }},
+        &.{ .{ .key = "diff.srcPrefix", .value = "from/" }, .{ .key = "diff.dstPrefix", .value = "to/" } },
+        &.{ .{ .key = "diff.mnemonicPrefix", .value = "true" }, .{ .key = "diff.srcPrefix", .value = "from/" } },
+    };
+    for (variants) |settings| {
+        var git = try testgit.Repo.init(gpa, io, &.{});
+        defer git.deinit();
+        try buildHistory(io, &git);
+        for (settings) |s| try git.exec(io, &.{ "config", s.key, s.value });
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        const range: formatpatch.Range = .{ .upstream = try oidOf(gpa, io, &git, "base"), .tip = try oidOf(gpa, io, &git, "HEAD") };
+        try compare(gpa, io, &git, &repo, &.{"--no-signature"}, "base..HEAD", range, .{});
+    }
+}

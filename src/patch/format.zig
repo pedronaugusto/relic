@@ -209,8 +209,9 @@ pub const Options = struct {
     /// `--ignore-if-in-upstream`.
     ignore_if_in_upstream: bool = false,
     renames: Renames = .configured,
-    /// Context, algorithm and whitespace for the patches. `null` takes
-    /// `diff.algorithm` and `diff.context`.
+    /// Context, algorithm, whitespace and prefixes for the patches. `null`
+    /// takes `diff.algorithm`, `diff.context` and the prefixes git's
+    /// format-patch reads (`diff.Prefixes.configured` with `.patches`).
     diff: ?diff.Options = null,
     /// `--topo-order`: the commits in the order of `git rev-list
     /// --topo-order`, reversed, rather than by date.
@@ -302,7 +303,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     if (options.keep_subject and options.numbered == true) return error.KeepSubjectWithNumbered;
     if (options.keep_subject and (options.rfc != null or !std.mem.eql(u8, options.subject_prefix, "PATCH"))) return error.KeepSubjectWithPrefix;
 
-    var diff_options = options.diff orelse try diff.configured(config, .{});
+    var diff_options = options.diff orelse try diff.configured(config, .{ .prefixes = try diff.Prefixes.configured(config, .patches) });
     const renames: ?diff.RenameOptions = switch (options.renames) {
         .off => null,
         .on => |r| r,

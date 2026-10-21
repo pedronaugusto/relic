@@ -24,6 +24,7 @@ pub const FunctionLine = @import("diff/diff.zig").FunctionLine;
 pub const FilePair = @import("diff/diff.zig").FilePair;
 pub const WordDiff = @import("diff/diff.zig").WordDiff;
 pub const WordDiffError = @import("diff/diff.zig").WordDiffError;
+pub const Prefixes = @import("diff/diff.zig").Prefixes;
 pub const ConfigError = @import("diff/diff.zig").ConfigError;
 pub const configured = @import("diff/diff.zig").configured;
 pub const findRenames = @import("diff/diff.zig").findRenames;
