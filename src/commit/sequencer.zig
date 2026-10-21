@@ -100,7 +100,8 @@ pub const Error = error{
     /// A name given names no commit.
     NotACommit,
 } || pretty.Error || three_way.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
-    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commit_hooks_mod.Error || diff.BasicConfigError;
+    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commit_hooks_mod.Error || diff.BasicConfigError ||
+    merging.Error;
 
 /// Which replay.
 pub const Action = enum {
@@ -1057,11 +1058,12 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     try removeSequencerState(io, repo);
 }
 
-/// Forget the sequence and leave everything else as it is: `--quit`.
-pub fn quit(io: Io, repo: *Repository) Self.Error!void {
+/// Forget the sequence and leave everything else as it is: `--quit`. A
+/// merge's autostash goes on the stash list, by `who`.
+pub fn quit(io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
     try initConfig(repo);
     try removeSequencerState(io, repo);
-    try removeBranchState(io, repo);
+    try removeBranchState(io, repo, who);
 }
 
 /// Where `HEAD` is; git names it by its object name when it resets to it.
@@ -1122,15 +1124,15 @@ pub fn resetMerge(
     else
         "reset: moving to HEAD";
     try head_mod.advance(io, repo, head, to, .{ .who = who, .message = log });
-    try removeBranchState(io, repo);
+    try removeBranchState(io, repo, who);
 }
 
 /// `remove_branch_state`: the pseudo-refs and files a command in progress
 /// leaves, all of them.
-fn removeBranchState(io: Io, repo: *Repository) Error!void {
+fn removeBranchState(io: Io, repo: *Repository, who: object.Signature) Error!void {
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
     try repo.refStore().root().delete(repo.allocator(), io, .revert_head);
-    try merging.removeMergeState(io, repo);
+    try merging.removeMergeState(io, repo, who);
 }
 
 test "fuzz: any bytes are an opts file or a named error" {

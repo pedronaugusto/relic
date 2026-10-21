@@ -55,6 +55,7 @@ const abbrev = @import("../odb/abbrev.zig");
 const todo = @import("todo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const merging = @import("merging.zig");
+const stash = @import("stash.zig");
 const sequencer = @import("sequencer.zig");
 const patch_id = @import("../diff/patch_id.zig");
 const rev_walk = @import("../walk/walk.zig");
@@ -227,6 +228,12 @@ pub const Options = struct {
     messages: ?Messages = null,
     /// Where a refusal writes the path that caused it.
     blocked: ?*three_way.Blocked = null,
+    /// `--autostash`, `--no-autostash`, or `rebase.autoStash` when `null`:
+    /// the changes in the index and the working tree are put aside in
+    /// `rebase-merge/autostash` as the rebase starts, and brought back when
+    /// it finishes, is aborted, or fails to begin. `Outcome.autostash` and
+    /// `Outcome.restored`.
+    autostash: ?bool = null,
 };
 
 /// Why a rebase stopped.
@@ -264,6 +271,11 @@ pub const Outcome = struct {
     conflicts: []const three_way.Conflict = &.{},
     /// When the rebase finished: every commit it rewrote and what it became.
     rewritten: []const Rewritten = &.{},
+    /// The stash this start made of the changes in the rebase's way: git's
+    /// "Created autostash".
+    autostash: ?Oid = null,
+    /// What became of the autostash when the rebase finished.
+    restored: ?stash.Restored = null,
 
     pub const Result = enum {
         /// The branch already sat on the target; nothing was done.
@@ -321,6 +333,9 @@ const Run = struct {
     msg: std.ArrayList(u8) = .empty,
     have_message: bool = false,
     conflicts: []const three_way.Conflict = &.{},
+    /// The autostash this run made, and what became of one at its end.
+    autostash: ?Oid = null,
+    restored: ?stash.Restored = null,
 
     fn state(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
         try state_file.write(r.io, r.repo.gitDirectory(), path(name), bytes);
@@ -398,6 +413,8 @@ fn finishOutcome(r: *Run, result: Outcome.Result, stopped: ?Stop, at: ?Oid) Outc
         .stopped = stopped,
         .stopped_at = at,
         .conflicts = if (stopped == .conflict) r.conflicts else &.{},
+        .autostash = r.autostash,
+        .restored = r.restored,
     };
 }
 
@@ -821,6 +838,9 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
         gpa.destroy(arena_state);
     }
     var r = try newRun(gpa, io, arena_state, repo, options);
+    // `git_rebase_config` reads `rebase.autoStash` with `git_config_bool`,
+    // which dies on a value that is no boolean, asked for or not.
+    const configured_autostash = try repo.configuration().getBool("rebase.autostash", false);
 
     if (inProgress(io, repo)) return error.RebaseInProgress;
     if (state_file.exists(io, repo.gitDirectory(), "rebase-apply")) return error.ApplyBackendInProgress;
@@ -830,7 +850,52 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     const tip = try resolveTip(&r);
     const onto = options.onto orelse upstream;
     const onto_name = options.onto_name orelse try r.hex(onto);
-    try requireClean(&r);
+    if (options.autostash orelse configured_autostash) {
+        r.autostash = try stash.createAutostash(io, repo, autostash_place, .{ .who = options.who, .filters = options.filters, .programs = options.programs });
+    }
+    const begun = begin(&r, upstream, tip, onto, onto_name) catch |err| {
+        // git's `cleanup_autostash`: a rebase that does not begin gives the
+        // work back, and leaves no state.
+        _ = try restoreAutostash(&r, true);
+        try removeState(&r);
+        return err;
+    };
+    if (!begun) {
+        // `finish_rebase`, with nothing to finish.
+        try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
+        try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
+        r.restored = try restoreAutostash(&r, true);
+        try removeState(&r);
+        return finishOutcome(&r, .up_to_date, null, null);
+    }
+    return runLoop(&r);
+}
+
+/// Where a rebase keeps its autostash.
+const autostash_place: stash.Autostash = .{ .file = path("autostash") };
+
+/// Bring back the autostash, applied or, without `apply`, only put on the
+/// stash list.
+fn restoreAutostash(r: *Run, apply: bool) Error!?stash.Restored {
+    return stash.restoreAutostash(r.io, r.repo, autostash_place, .{
+        .who = r.options.who,
+        .apply = apply,
+        .hooks = r.options.hooks,
+        .filters = r.options.filters,
+        .programs = r.options.programs,
+    });
+}
+
+/// Everything a rebase does before its first instruction: the sheet
+/// written and `onto` checked out, detached. `false` when the branch
+/// already sits on `onto` and there is nothing to do, the branch named to
+/// rebase switched to.
+fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Error!bool {
+    const gpa = r.gpa;
+    const io = r.io;
+    const repo = r.repo;
+    const options = r.options;
+    try requireClean(r);
 
     // Already on top of `onto`, with a straight line from it: nothing to do.
     const branch_base = blk: {
@@ -844,15 +909,12 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
         const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = upstream, .b = tip.orig_head }, .{});
         defer gpa.free(bases);
         if (bases.len != 1 or !bases[0].eql(onto)) break :up_to_date;
-        if (!try isLinear(&r, onto, tip.orig_head)) break :up_to_date;
+        if (!try isLinear(r, onto, tip.orig_head)) break :up_to_date;
         if (options.branch) |name| {
             // Switch to the branch, as git does before it says so.
-            try checkoutTip(&r, tip, name);
+            try checkoutTip(r, tip, name);
         }
-        // `finish_rebase`, with nothing to finish.
-        try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
-        try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
-        return finishOutcome(&r, .up_to_date, null, null);
+        return false;
     }
 
     // `pre-rebase` may refuse, before anything is written.
@@ -863,62 +925,53 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     // git's `do_interactive_rebase` reads the sequencer's settings first.
     try sequencer.initConfig(repo);
     // The sheet.
-    var items: []todo.Item = try makeScript(&r, upstream, tip.orig_head);
+    var items: []todo.Item = try makeScript(r, upstream, tip.orig_head);
     try repo.gitDirectory().createDirPath(io, state_dir);
     try r.state("interactive", "");
-    try writeBasicState(&r, tip, onto);
+    try writeBasicState(r, tip, onto);
     if (items.len == 0) {
         const noop = try r.arena.alloc(todo.Item, 1);
         noop[0] = .{ .command = .noop };
         items = noop;
     }
-    if (options.update_refs) items = try addUpdateRefCommands(&r, items, true);
-    if (options.autosquash) items = try rearrangeSquash(&r, items);
-    items = try addExecCommands(&r, items, options.exec);
-    if (countCommands(items) == 0) {
-        try removeState(&r);
-        return error.NothingToDo;
-    }
+    if (options.update_refs) items = try addUpdateRefCommands(r, items, true);
+    if (options.autosquash) items = try rearrangeSquash(r, items);
+    items = try addExecCommands(r, items, options.exec);
+    if (countCommands(items) == 0) return error.NothingToDo;
     // What a person would be given, and a backup of it.
-    const shown = try sheetText(&r, gpa, items, upstream, onto, tip.orig_head, true);
+    const shown = try sheetText(r, gpa, items, upstream, onto, tip.orig_head, true);
     defer gpa.free(shown);
     try r.state("git-rebase-todo", shown);
-    const backup = try sheetText(&r, gpa, items, upstream, onto, tip.orig_head, false);
+    const backup = try sheetText(r, gpa, items, upstream, onto, tip.orig_head, false);
     defer gpa.free(backup);
     try r.state("git-rebase-todo.backup", backup);
 
     // What they left: the caller's sheet, or the one written.
     const sheet = try message.stripSpace(r.arena, options.todo orelse shown, r.comment);
-    if (sheet.len == 0) {
-        try removeState(&r);
-        return error.NothingToDo;
-    }
+    if (sheet.len == 0) return error.NothingToDo;
     var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
     const list = try todo.parse(r.arena, sheet, context.resolver(), .{ .comment = r.comment, .rebase = true });
     try r.items.appendSlice(r.arena, list.items.items);
     // The refs to move follow the sheet as it was left.
-    try filterUpdateRefs(&r);
+    try filterUpdateRefs(r);
     // A sheet that runs a program is refused before anything moves, not
     // halfway through it.
     if (options.programs == null) {
         for (r.items.items) |item| {
-            if (item.command == .exec) {
-                try removeState(&r);
-                return error.ExecNotPermitted;
-            }
+            if (item.command == .exec) return error.ExecNotPermitted;
         }
     }
 
     // Full names from here on, and the picks that can stay as they are
     // taken off the front.
     var base = onto;
-    if (r.allow_ff) base = try skipUnnecessaryPicks(&r, base);
-    try saveTodo(&r, 0);
+    if (r.allow_ff) base = try skipUnnecessaryPicks(r, base);
+    try saveTodo(r, 0);
     try r.state("end", try r.arena.print("{d}\n", .{r.done_nr + countCommands(r.items.items)}));
 
     // Detach at `onto`.
-    try checkoutOnto(&r, base, tip.orig_head, onto_name);
-    return runLoop(&r);
+    try checkoutOnto(r, base, tip.orig_head, onto_name);
+    return true;
 }
 
 fn isLinear(r: *Run, from: Oid, to: Oid) Error!bool {
@@ -2431,6 +2484,8 @@ fn finish(r: *Run) Error!Outcome {
             try head_mod.moveBranch(io, repo, rec.ref, .{ .expected = .{ .matches = rec.before }, .new = rec.after }, .{ .who = r.options.who, .message = "rewritten during rebase" });
         }
     }
+    // The autostash comes back once `post-rewrite` has run, as git's does.
+    r.restored = try restoreAutostash(r, true);
     try removeState(r);
     var out = finishOutcome(r, .done, null, null);
     out.rewritten = rewritten.items;
@@ -2622,15 +2677,18 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         try locked_index.commit(io);
         try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
         try repo.refStore().root().delete(repo.allocator(), io, .revert_head);
-        try merging.removeMergeState(io, repo);
+        try merging.removeMergeState(io, repo, options.who);
     }
     return proceed(gpa, io, repo, options);
 }
 
 /// Stop the rebase and put the branch, `HEAD`, the index and the working
-/// tree back where they were when it began: `--abort`.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
-    var r = try loadBareRun(gpa, io, repo, .{ .who = who });
+/// tree back where they were when it began: `--abort`. The autostash is
+/// then brought back: what became of it, or `null` when there was none.
+/// Of `options`, `who`, `hooks`, `filters` and `programs` are read.
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!?stash.Restored {
+    const who = options.who;
+    var r = try loadBareRun(gpa, io, repo, options);
     defer freeRun(&r);
     try rerere.clear(gpa, io, repo);
     const tip = try readBasicState(&r);
@@ -2650,17 +2708,23 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     }
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
     try repo.refStore().root().delete(repo.allocator(), io, .revert_head);
-    try merging.removeMergeState(io, repo);
+    try merging.removeMergeState(io, repo, who);
     try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
+    const restored = try restoreAutostash(&r, true);
     try removeState(&r);
+    return restored;
 }
 
 /// Forget the rebase and leave `HEAD`, the index and the working tree as
-/// they are: `--quit`.
-pub fn quit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
-    var r = try loadBareRun(gpa, io, repo, .{ .who = .{ .name = "", .email = "", .when_secs = 0, .offset_minutes = 0 } });
+/// they are: `--quit`. The autostash goes on the stash list unapplied:
+/// `.stored`, or `null` when there was none. Of `options`, `who` and
+/// `hooks` are read.
+pub fn quit(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!?stash.Restored {
+    var r = try loadBareRun(gpa, io, repo, options);
     defer freeRun(&r);
+    const restored = try restoreAutostash(&r, false);
     try removeState(&r);
+    return restored;
 }
 
 //=========================================================================

@@ -27,6 +27,9 @@ const trailer = @import("../object/trailer.zig");
 const signing = @import("../object/signing.zig");
 const commit_hooks = @import("commit_hooks.zig");
 const notes = @import("notes.zig");
+const stash = @import("stash.zig");
+const filter = @import("../checkout/filter.zig");
+const program = @import("../process.zig").program;
 
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
@@ -78,7 +81,7 @@ pub const Error = error{
     TemplateUntouched,
 } || trailer.Error || hooks.Error || commit_hooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError || notes.Error ||
-    error{NameTooLong};
+    stash.Error || error{NameTooLong};
 
 /// How a commit is made.
 pub const Options = struct {
@@ -114,6 +117,10 @@ pub const Options = struct {
     /// unedited is `error.TemplateUntouched`. git drops the template when a
     /// message is given with `-m`, which is what leaving this `null` is.
     template: ?[]const u8 = null,
+    /// The filter drivers and the permission to run their programs, for
+    /// bringing back a `MERGE_AUTOSTASH` a squashed merge left.
+    filters: ?*const filter.Drivers = null,
+    programs: ?program.Programs = null,
 };
 
 /// Who, when, and what to say. The times are the caller's, because nothing
@@ -133,6 +140,9 @@ pub const Outcome = struct {
     /// How `post-commit` went. It cannot undo the commit; its status is
     /// the caller's to report.
     post_commit: hooks.Ran = .{},
+    /// What became of `MERGE_AUTOSTASH`, which git's `merge --squash`
+    /// leaves for the commit to bring back.
+    restored: ?stash.Restored = null,
 };
 
 /// `git commit -m <message>`: run the hooks, write the tree the index
@@ -251,6 +261,8 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     var outcome: Outcome = .{ .commit = new, .tree = tree, .previous = current };
     if (options.hooks) |runner| outcome.post_commit = try runner.postCommit(io, env);
     if (options.amend and options.post_rewrite) try postRewrite(io, repo, options.hooks, .{ .old = current.?, .new = new }, request.committer);
+    const restoring: stash.RestoreOptions = .{ .who = request.committer, .hooks = options.hooks, .filters = options.filters, .programs = options.programs };
+    outcome.restored = try stash.restoreAutostash(io, repo, .{ .ref = .merge_autostash }, restoring);
     return outcome;
 }
 

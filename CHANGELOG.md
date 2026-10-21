@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `commit.merging.conclude` returns `Concluded` (the commit, and what became of `MERGE_AUTOSTASH`); `merging.abort` takes `AbortOptions` and returns `?stash.Restored`; `merging.removeMergeState` takes who saves a leftover `MERGE_AUTOSTASH`.
+- `commit.rebase.abort` and `rebase.quit` take `rebase.Options` and return `?stash.Restored`; `commit.sequencer.quit` takes `who`.
+
+### Added
+
+- `rebase.autoStash` and `merge.autoStash` (`Options.autostash`, `--autostash`/`--no-autostash`, the setting when `null`, a value that is no boolean refused where git dies): the changes in the index and the working tree put aside as git's `create_autostash` puts them (`rebase-merge/autostash`, the `MERGE_AUTOSTASH` root ref, made before the merge locks the index) and brought back where git brings them back: a rebase's finish, its up-to-date end, `--abort`, and a start that fails (the state removed with it); a merge's fast-forward and commit, `conclude`, `abort`, and a failed merge; `commit.commit` after a squashed merge. `Outcome.autostash` is the stash made, and `stash.Restored` git's three messages: applied, kept on the list after a conflict or refusal, or stored unapplied (`rebase.quit`, `removeMergeState`). Held to git 2.55 in both ref formats, each side finishing what the other stopped.
+- `commit.stash.create` and `stash.store` (`git stash create`, `git stash store`) beside `push`, one path making all three; `stash.createAutostash`, `stash.restoreAutostash` and `stash.restoreStash` for an operation's autostash.
+
+### Fixed
+
+- `stash.apply`, `pop` and `applyEntry` write `AUTO_MERGE` and drop the index's resolve-undo record, as git's stash apply leaves them (merge-ort's `merge_switch_to_result`).
+
 ## [0.29.1] - 2026-10-21
 
 ### Added

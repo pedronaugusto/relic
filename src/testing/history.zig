@@ -282,7 +282,7 @@ test "a conflicted merge stops exactly where git's does" {
                 {
                     var repo = try pair.open(io);
                     defer repo.deinit(io);
-                    try merging.abort(gpa, io, &repo, who, null);
+                    _ = try merging.abort(gpa, io, &repo, .{ .who = who });
                 }
                 try expectSameState(&pair, io, &merge_state, &main_logs);
             }
@@ -591,7 +591,7 @@ test "a signed-off merge with its own message, and one stopped before committing
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                try merging.abort(gpa, io, &repo, who, null);
+                _ = try merging.abort(gpa, io, &repo, .{ .who = who });
             }
 
             try pair.git.exec(io, &.{ "merge", "--signoff", "-m", "Bring in the clean work\n\nBecause it is ready.", "clean" });
@@ -1669,7 +1669,7 @@ test "a clean rebase, an up-to-date one, and one onto another base land where gi
 }
 
 /// Run `git rebase -i` with `sheet` as the edited todo list.
-fn gitRebaseInteractive(io: Io, repo: *testgit.Repo, sheet: []const u8, args: []const []const u8) !void {
+pub fn gitRebaseInteractive(io: Io, repo: *testgit.Repo, sheet: []const u8, args: []const []const u8) !void {
     try repo.writeFile(io, ".git/relic-todo", sheet);
     const env = @constCast(repo.environ.?); // safe: the fixture owns a mutable environment map, borrowed for this synchronous git command.
     const editor = try testgit.fixtureCommand(repo.gpa, suite.path(.process_fixture), "copy-file .git/relic-todo");
@@ -1962,7 +1962,7 @@ test "a rebase stopped on one side is skipped and aborted by the other" {
             {
                 var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
                 defer repo.deinit(io);
-                try rebase.abort(gpa, io, &repo, who);
+                _ = try rebase.abort(gpa, io, &repo, .{ .who = who });
             }
             try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
         }
@@ -1995,7 +1995,7 @@ test "a rebase with a sheet it cannot read is still aborted or quit, and its lab
                 {
                     var repo = try pair.open(io);
                     defer repo.deinit(io);
-                    if (quitting) try rebase.quit(gpa, io, &repo) else try rebase.abort(gpa, io, &repo, who);
+                    if (quitting) _ = try rebase.quit(gpa, io, &repo, .{ .who = who }) else _ = try rebase.abort(gpa, io, &repo, .{ .who = who });
                 }
                 try expectSameState(&pair, io, &rebase_state, &.{"HEAD"});
                 try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "for-each-ref", "refs/rewritten/" });
@@ -2512,7 +2512,7 @@ test "a file meeting a directory, a symlink meeting a file and a double rename s
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                try merging.abort(gpa, io, &repo, who, null);
+                _ = try merging.abort(gpa, io, &repo, .{ .who = who });
             }
             try expectSameState(&pair, io, &merge_state, &main_logs);
         }
@@ -2911,7 +2911,7 @@ test "rerere records a cherry-pick's and a rebase's resolutions and replays them
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                try rebase.abort(gpa, io, &repo, who);
+                _ = try rebase.abort(gpa, io, &repo, .{ .who = who });
             }
             try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
             try expectSameRerere(&pair, io);
@@ -2991,7 +2991,7 @@ test "diff.algorithm and the strategy options choose the line diff of a merge, a
                 {
                     var repo = try pair.open(io);
                     defer repo.deinit(io);
-                    try merging.abort(gpa, io, &repo, who, null);
+                    _ = try merging.abort(gpa, io, &repo, .{ .who = who });
                 }
 
                 // A cherry-pick of both of topic's commits stops on the first.
@@ -3336,7 +3336,7 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
                     } else if (std.mem.eql(u8, op, "--skip")) {
                         var outcome = try sequencer.skip(gpa, io, &repo, .{ .who = who });
                         outcome.deinit();
-                    } else try sequencer.quit(io, &repo);
+                    } else try sequencer.quit(io, &repo, who);
                 }
                 try expectSameRerere(&pair, io);
                 for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
@@ -3357,7 +3357,7 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                try merging.abort(gpa, io, &repo, who, null);
+                _ = try merging.abort(gpa, io, &repo, .{ .who = who });
             }
             try expectSameRerere(&pair, io);
 
@@ -3374,7 +3374,7 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
             {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
-                try rebase.quit(gpa, io, &repo);
+                _ = try rebase.quit(gpa, io, &repo, .{ .who = who });
             }
             try expectSameRerere(&pair, io);
         }

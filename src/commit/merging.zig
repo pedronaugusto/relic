@@ -45,6 +45,7 @@ const diagnostic = @import("../report.zig").diagnostic;
 const config = @import("../config/config.zig");
 const ctype = @import("../text.zig").ctype;
 const pretty = @import("../pretty/pretty.zig");
+const stash = @import("stash.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -104,7 +105,8 @@ pub const Error = error{
     UnresolvedConflicts,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || three_way.Error || head_mod.Error || rev_walk.Error || pretty.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commit_hooks.Error;
+} || three_way.Error || head_mod.Error || rev_walk.Error || pretty.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commit_hooks.Error ||
+    stash.Error;
 
 /// When a merge may be a fast-forward: `merge.ff` and `--ff`, `--no-ff`,
 /// `--ff-only`.
@@ -254,6 +256,11 @@ pub const Options = struct {
     /// Keep the inner merges' messages in `Outcome.messages`, as git does at
     /// `GIT_MERGE_VERBOSITY=5`.
     inner_messages: bool = false,
+    /// `--autostash`, `--no-autostash`, or `merge.autoStash` when `null`:
+    /// the changes in the index and the working tree are put aside before
+    /// the merge and brought back at its end, or, when it stops, once it is
+    /// concluded or aborted. `Outcome.autostash` and `Outcome.restored`.
+    autostash: ?bool = null,
 };
 
 /// What a merge did.
@@ -273,6 +280,11 @@ pub const Outcome = struct {
     /// Conflicted paths a resolution rerere recorded before resolved: in
     /// the working tree, and staged when `rerere_autoupdate` says so.
     reused: []const []const u8 = &.{},
+    /// The stash the merge made of the changes in its way: git's "Created
+    /// autostash". While the merge is stopped it waits in `MERGE_AUTOSTASH`.
+    autostash: ?Oid = null,
+    /// What became of `MERGE_AUTOSTASH` when the merge finished.
+    restored: ?stash.Restored = null,
 
     pub const Result = enum {
         /// The commit was already part of the branch; nothing changed.
@@ -333,19 +345,26 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     // `diff.renameLimit` value, where the merge itself reads the last.
     const settings = try MessageSettings.read(arena, repo.configuration());
     _ = diff.RenameSettings.read(repo.configuration()) catch return error.InvalidMergeSetting;
+    // `git_merge_config` reads `merge.autoStash` with `git_config_bool`,
+    // which dies on a value that is no boolean, asked for or not.
+    const configured_autostash = try repo.configuration().getBool("merge.autostash", false);
+    options.autostash = given.autostash orelse configured_autostash;
 
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const ours = head.oid orelse return error.UnbornBranch;
     const fast_forward = options.fast_forward orelse configuredFastForward(repo);
 
-    var locked_index = try repo.lockIndex(io);
-    defer locked_index.deinit(io);
-    const index = &locked_index.index;
-    for (index.entries.items) |entry| {
-        if (entry.stage != 0) {
-            if (options.blocked) |b| b.set(entry.path);
-            return error.UnmergedIndex;
+    // The index is locked only once the work in the way is put aside,
+    // which takes the lock itself.
+    {
+        var index = try repo.openIndex(io);
+        defer index.deinit();
+        for (index.entries.items) |entry| {
+            if (entry.stage != 0) {
+                if (options.blocked) |b| b.set(entry.path);
+                return error.UnmergedIndex;
+            }
         }
     }
 
@@ -367,7 +386,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const already_merged = settings.log != 0 and targets.len == 1 and
         try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = reduced.heads[0].oid, .descendant = ours }, .{});
     const merge_message = if (reduced.heads.len == 0 or already_merged) "" else try mergeMessage(arena, io, repo, .{ .targets = reduced.heads, .head = head, .given = options.message, .settings = settings });
-    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &locked_index, .{ .head = head, .reduced = reduced, .reflog_action = reflog_action, .fast_forward = fast_forward, .message = merge_message, .hint_cleanup = hint_cleanup }, options);
+    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, .{ .head = head, .reduced = reduced, .reflog_action = reflog_action, .fast_forward = fast_forward, .message = merge_message, .hint_cleanup = hint_cleanup }, options);
 
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
@@ -380,24 +399,88 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     }
 
+    const forward = fast_forward != .never and bases.len == 1 and bases[0].eql(ours);
+    if (!forward and fast_forward == .only) return error.NotFastForward;
+    const stashed = try putAside(io, repo, options);
+    var out = mergeOne(gpa, io, repo, &arena_instance, .{
+        .head = head,
+        .target = target,
+        .bases = bases,
+        .forward = forward,
+        .message = merge_message,
+        .hint_cleanup = hint_cleanup,
+        .reflog_action = reflog_action,
+        .fast_forward = fast_forward,
+    }, options) catch |err| {
+        try giveBack(io, repo, stashed, options);
+        return err;
+    };
+    out.autostash = stashed;
+    return out;
+}
+
+/// git's `create_autostash_ref`: when asked, the changes in the merge's way
+/// put aside under `MERGE_AUTOSTASH`, before the merge locks the index.
+fn putAside(io: Io, repo: *Repository, options: Options) Error!?Oid {
+    if (!options.autostash.?) return null;
+    return stash.createAutostash(io, repo, autostash_place, .{ .who = options.who, .filters = options.filters, .programs = options.programs });
+}
+
+/// A merge that failed after putting the work in its way aside gives it
+/// back, as git's does.
+fn giveBack(io: Io, repo: *Repository, stashed: ?Oid, options: Options) Error!void {
+    if (stashed == null) return;
+    _ = try stash.restoreAutostash(io, repo, autostash_place, restoreOptions(options));
+}
+
+/// How `MERGE_AUTOSTASH` is brought back for a merge made with `options`.
+fn restoreOptions(options: Options) stash.RestoreOptions {
+    return .{ .who = options.who, .hooks = options.hooks, .filters = options.filters, .programs = options.programs };
+}
+
+/// Where a merge keeps its autostash.
+const autostash_place: stash.Autostash = .{ .ref = .merge_autostash };
+
+/// One target, decided on: what `mergeOne` merges.
+const One = struct {
+    head: head_mod.Head,
+    target: Target,
+    bases: []const Oid,
+    /// A fast-forward, rather than a merge.
+    forward: bool,
+    message: []const u8,
+    hint_cleanup: message.Cleanup,
+    reflog_action: []const u8,
+    fast_forward: FastForward,
+};
+
+/// Fast-forward to one target or merge it, under the index's lock.
+fn mergeOne(gpa: Allocator, io: Io, repo: *Repository, arena_instance: *std.heap.ArenaAllocator, one: One, options: Options) Error!Outcome {
+    const arena = arena_instance.allocator();
+    const head = one.head;
+    const ours = head.oid.?;
+    const target = one.target;
+    var locked_index = try repo.lockIndex(io);
+    defer locked_index.deinit(io);
+    const index = &locked_index.index;
     const our_tree = try repo.commitTree(io, ours);
     const their_tree = try repo.commitTree(io, target.oid);
 
-    if (fast_forward != .never and bases.len == 1 and bases[0].eql(ours)) {
+    if (one.forward) {
         var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = our_tree, .ours = our_tree, .theirs = their_tree }, .{ .blocked = options.blocked });
         defer outcome.deinit();
         try locked_index.commit(io);
-        const log_message = try arena.print("{s}: Fast-forward", .{reflog_action});
+        const log_message = try arena.print("{s}: Fast-forward", .{one.reflog_action});
         try head_mod.advance(io, repo, head, target.oid, .{ .who = options.who, .message = log_message });
         if (options.hooks) |runner| _ = try runner.postMerge(io, .{ .squash = false });
-        try removeMergeState(io, repo);
-        return .{ .gpa = gpa, .arena = arena_instance.state, .result = .fast_forward, .commit = target.oid };
+        const restored = try stash.restoreAutostash(io, repo, autostash_place, restoreOptions(options));
+        try removeMergeState(io, repo, options.who);
+        return .{ .gpa = gpa, .arena = arena_instance.state, .result = .fast_forward, .commit = target.oid, .restored = restored };
     }
-    if (fast_forward == .only) return error.NotFastForward;
 
     // The bases oldest first, as git hands them to its recursive merge.
-    const reversed = try arena.alloc(Oid, bases.len);
-    for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
+    const reversed = try arena.alloc(Oid, one.bases.len);
+    for (one.bases, 0..) |base, i| reversed[one.bases.len - 1 - i] = base;
     const style = options.conflict_style orelse try merge.configuredStyle(repo.configuration());
     var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = index, .ours = ours, .theirs = target.oid, .bases = reversed }, .{
         .blob = .{
@@ -414,15 +497,15 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     defer outcome.deinit();
     try locked_index.commit(io);
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
-    return commitOrStop(gpa, io, repo, &arena_instance, &outcome, .{
+    return commitOrStop(gpa, io, repo, arena_instance, &outcome, .{
         .head = head,
         .parents = &.{ ours, target.oid },
         .merged = &.{target.oid},
-        .message = merge_message,
-        .hint_cleanup = hint_cleanup,
-        .reflog_action = reflog_action,
+        .message = one.message,
+        .hint_cleanup = one.hint_cleanup,
+        .reflog_action = one.reflog_action,
         .strategy = "ort",
-        .fast_forward = fast_forward,
+        .fast_forward = one.fast_forward,
     }, options);
 }
 
@@ -488,16 +571,13 @@ fn octopus(
     io: Io,
     repo: *Repository,
     arena_instance: *std.heap.ArenaAllocator,
-    locked: *Repository.LockedIndex,
     asked: Octopus,
     options: Options,
 ) Error!Outcome {
     const head = asked.head;
     const reduced = asked.reduced;
-    const reflog_action = asked.reflog_action;
     const fast_forward = asked.fast_forward;
     const arena = arena_instance.allocator();
-    const index = &locked.index;
     const ours = head.oid.?;
     const heads = try arena.alloc(Oid, reduced.heads.len);
     for (reduced.heads, heads) |target, *oid| oid.* = target.oid;
@@ -511,6 +591,32 @@ fn octopus(
     } else return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     if (fast_forward == .only) return error.NotFastForward;
 
+    const stashed = try putAside(io, repo, options);
+    var out = octopusHeads(gpa, io, repo, arena_instance, asked, heads, options) catch |err| {
+        try giveBack(io, repo, stashed, options);
+        return err;
+    };
+    out.autostash = stashed;
+    return out;
+}
+
+/// Merge the octopus's heads, under the index's lock.
+fn octopusHeads(
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    arena_instance: *std.heap.ArenaAllocator,
+    asked: Octopus,
+    heads: []const Oid,
+    options: Options,
+) Error!Outcome {
+    const head = asked.head;
+    const fast_forward = asked.fast_forward;
+    const arena = arena_instance.allocator();
+    const ours = head.oid.?;
+    var locked = try repo.lockIndex(io);
+    defer locked.deinit(io);
+    const index = &locked.index;
     var outcome = try three_way.applyOctopus(gpa, io, repo, .{ .index = index, .head = ours, .heads = heads }, .{
         .blob = .{ .conflict_style = options.conflict_style orelse try merge.configuredStyle(repo.configuration()) },
         .filters = options.filters,
@@ -520,7 +626,7 @@ fn octopus(
     defer outcome.deinit();
     try locked.commit(io);
     var parents: std.ArrayList(Oid) = .empty;
-    if (!reduced.head_subsumed or fast_forward == .never) try parents.append(arena, ours);
+    if (!asked.reduced.head_subsumed or fast_forward == .never) try parents.append(arena, ours);
     try parents.appendSlice(arena, heads);
     return commitOrStop(gpa, io, repo, arena_instance, &outcome, .{
         .head = head,
@@ -528,7 +634,7 @@ fn octopus(
         .merged = heads,
         .message = asked.message,
         .hint_cleanup = asked.hint_cleanup,
-        .reflog_action = reflog_action,
+        .reflog_action = asked.reflog_action,
         .strategy = "octopus",
         .fast_forward = fast_forward,
     }, options);
@@ -629,8 +735,9 @@ fn commitOrStop(
         try head_mod.advance(io, repo, made.head, commit, .{ .who = options.who, .message = log_message });
         // `post-merge` runs before the merge's files go, as in git.
         if (options.hooks) |runner| _ = try runner.postMerge(io, .{ .squash = false });
-        try removeMergeState(io, repo);
-        return .{ .gpa = gpa, .arena = arena_instance.state, .result = .merged, .commit = commit, .messages = messages };
+        const restored = try stash.restoreAutostash(io, repo, autostash_place, restoreOptions(options));
+        try removeMergeState(io, repo, options.who);
+        return .{ .gpa = gpa, .arena = arena_instance.state, .result = .merged, .commit = commit, .messages = messages, .restored = restored };
     }
 
     // Stopped: with conflicts, or before committing as asked.
@@ -679,12 +786,25 @@ pub const ConcludeOptions = struct {
     signing: signing_mod.Request = .{},
     /// Caller-owned output for a refused write or failed signing program.
     diagnostic: ?*repo_mod.Diagnostic = null,
+    /// The filter drivers and the permission to run their programs, for
+    /// bringing back `MERGE_AUTOSTASH`.
+    filters: ?*const filter.Drivers = null,
+    programs: ?program.Programs = null,
+};
+
+/// What concluding a merge did.
+pub const Concluded = struct {
+    /// The merge commit.
+    commit: Oid,
+    /// What became of `MERGE_AUTOSTASH`, when the merge had one.
+    restored: ?stash.Restored = null,
 };
 
 /// Commit the merge `MERGE_HEAD` describes, from the index as it stands:
 /// what `git commit` and `git merge --continue` do once the conflicts are
-/// resolved.
-pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOptions) Self.Error!Oid {
+/// resolved. Then `MERGE_AUTOSTASH` is brought back, as `git commit`
+/// brings it back.
+pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOptions) Self.Error!Concluded {
     diagnostic.reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -746,13 +866,37 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
     try rerere.afterCommit(gpa, io, repo);
     try h.postCommit(arena, io, author);
-    return commit;
+    const restored = try stash.restoreAutostash(io, repo, autostash_place, .{
+        .who = options.who,
+        .hooks = options.hooks,
+        .filters = options.filters,
+        .programs = options.programs,
+    });
+    return .{ .commit = commit, .restored = restored };
 }
+
+/// How a merge is aborted.
+pub const AbortOptions = struct {
+    /// Who the reflog line is by, and the stash list's if the autostash
+    /// goes there.
+    who: object.Signature,
+    /// Where a refusal writes the path that caused it.
+    blocked: ?*three_way.Blocked = null,
+    /// Told about the update to `refs/stash`, or `null`.
+    hooks: ?*hooks_mod.Runner = null,
+    /// The filter drivers and the permission to run their programs, for
+    /// bringing back `MERGE_AUTOSTASH`.
+    filters: ?*const filter.Drivers = null,
+    programs: ?program.Programs = null,
+};
 
 /// Undo a merge that stopped: `git merge --abort`, which is `git reset
 /// --merge`. Changes a person made before the merge, to paths the merge did
-/// not touch, survive it.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*three_way.Blocked) Self.Error!void {
+/// not touch, survive it. `MERGE_AUTOSTASH` is then brought back: what
+/// became of it, or `null` when there was none.
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, options: AbortOptions) Self.Error!?stash.Restored {
+    const who = options.who;
+    const blocked = options.blocked;
     if (!inProgress(io, repo)) return error.NoMergeInProgress;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -762,21 +906,36 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     const index = &locked_index.index;
     try reset.toTree(gpa, io, repo, .{ .index = index, .tree = try repo.commitTree(io, current), .mode = .merge, .blocked = blocked });
     try locked_index.commit(io);
-    try removeMergeState(io, repo);
+    // git takes `MERGE_AUTOSTASH` out of the way of the `git reset --merge`
+    // its `--abort` runs, which would put it on the list, and applies it
+    // once the reset is done.
+    const stashed = try repo.refStore().root().read(gpa, io, .merge_autostash);
+    if (stashed != null) try repo.refStore().root().delete(gpa, io, .merge_autostash);
+    try removeMergeState(io, repo, who);
     // `git reset` records where it moved from and logs the move, even to
     // where it already was.
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, current);
     try head_mod.advance(io, repo, head, current, .{ .who = who, .message = "reset: moving to HEAD" });
+    const commit = stashed orelse return null;
+    return try stash.restoreStash(io, repo, commit, .{
+        .who = who,
+        .hooks = options.hooks,
+        .filters = options.filters,
+        .programs = options.programs,
+    });
 }
 
 /// Remove what a merge in progress leaves: `MERGE_HEAD`, `MERGE_MSG`,
-/// `MERGE_MODE`, `MERGE_RR` and `AUTO_MERGE`.
-pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
+/// `MERGE_MODE`, `MERGE_RR` and `AUTO_MERGE`, and put `MERGE_AUTOSTASH`
+/// on the stash list without applying it, by `who`, as git's
+/// `remove_merge_branch_state` saves it.
+pub fn removeMergeState(io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
     try repo.refStore().special().delete(io, .merge_head);
     for ([_][]const u8{ "MERGE_RR", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
         try state_file.remove(io, repo.gitDirectory(), name);
     }
     try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
+    _ = try stash.restoreAutostash(io, repo, autostash_place, .{ .who = who, .apply = false });
 }
 
 fn configuredFastForward(repo: *Repository) FastForward {

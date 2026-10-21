@@ -113,6 +113,7 @@ test {
         _ = @import("walk/shallow_test.zig");
         _ = @import("transport/partial_test.zig");
         _ = @import("testing/history.zig");
+        _ = @import("testing/autostash.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");

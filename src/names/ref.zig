@@ -202,6 +202,9 @@ pub const Root = enum {
     notes_merge_partial,
     /// The notes ref a manual notes merge is merging into.
     notes_merge_ref,
+    /// The stash a merge made of the work in its way, brought back at its
+    /// end.
+    merge_autostash,
 
     /// The ref's name as git spells it.
     pub fn name(root: Root) []const u8 {
@@ -215,6 +218,7 @@ pub const Root = enum {
             .bisect_expected_rev => "BISECT_EXPECTED_REV",
             .notes_merge_partial => "NOTES_MERGE_PARTIAL",
             .notes_merge_ref => "NOTES_MERGE_REF",
+            .merge_autostash => "MERGE_AUTOSTASH",
         };
     }
 };

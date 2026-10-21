@@ -664,7 +664,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `commit.rebase` | Module within `commit`. |
 | `commit.sequencer` | Module within `commit`. |
 | `commit.merging` | Module within `commit`. |
-| `commit.stash` | `push`, `apply`, `pop`, `list`, `show`, `drop`, `clear`. |
+| `commit.stash` | `push`, `create`, `store`, `apply`, `pop`, `list`, `show`, `drop`, `clear`; the autostash a merge or a rebase makes and brings back. |
 | `commit.in_progress` | `read`: which operations a worktree is in the middle of, as `git status` says. |
 | `commit.message` | Module within `commit`. |
 | `commit.trailer` | `process`, `processFile`, `format`, `iterate`, `amend`, `Settings.load` — `git interpret-trailers` byte for byte: the trailer block found as git finds it, `--trailer` added by `--where`, `--if-exists` and `--if-missing`, `--trim-empty`, `--only-trailers`, `--only-input`, `--unfold`, `--parse`, `--no-divider`, `--in-place`; `trailer.separators`, `.where`, `.ifExists`, `.ifMissing` and every `trailer.<name>.key`, `.command` and `.cmd`. `%(trailers)` and `git commit --trailer` go through it. |

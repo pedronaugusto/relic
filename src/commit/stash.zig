@@ -53,13 +53,16 @@ const parallax = @import("parallax");
 const convert = @import("../checkout/convert.zig");
 const filter = @import("../checkout/filter.zig");
 const program = @import("../process.zig").program;
+const state_file = @import("../repo/state.zig");
+const reset = @import("reset.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 const Index = index_mod.Index;
 
 /// The ref every stash hangs from.
-const ref_name = @import("../names.zig").ref.stash;
+const ref_names = @import("../names.zig").ref;
+const ref_name = ref_names.stash;
 
 /// Errors from stashing.
 pub const Error = error{
@@ -92,7 +95,8 @@ pub const Error = error{
     NestedRepository,
 } || pretty.Error || pathspec_mod.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
     diff.Error || hooks.Error || refs_mod.LogReadError || fs.LockError || fs.CommitError ||
-    ignore.Error || attributes.Error || convert.Error || error{NameTooLong};
+    ignore.Error || attributes.Error || convert.Error || state_file.Error || Io.Dir.ReadFileAllocError ||
+    reset.Error || refs_mod.ReadError || error{NameTooLong};
 
 /// Where a refusal writes the path it is about.
 pub const Refusal = struct {
@@ -435,6 +439,82 @@ const TreeEntry = worktree.TreeEntry;
 /// the index back to `HEAD`, as git does. `null` when there is nothing to
 /// stash, which git reports as "No local changes to save".
 pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
+    return save(io, repo, options, .push);
+}
+
+/// How `create` makes a stash.
+pub const CreateOptions = struct {
+    /// As for `push`.
+    who: object.Signature,
+    /// The stash is then `On <branch>: <message>`, and `WIP on …` when
+    /// `null`.
+    message: ?[]const u8 = null,
+    refusal: ?*Refusal = null,
+    filters: ?*const filter.Drivers = null,
+    programs: ?program.Programs = null,
+};
+
+/// `git stash create`: the stash `push` would make of the index and the
+/// tracked files, and nothing more. `refs/stash` does not move and the
+/// working tree is left as it is. `null` when there is nothing to stash.
+pub fn create(io: Io, repo: *Repository, options: CreateOptions) Self.Error!?Oid {
+    return save(io, repo, .{
+        .who = options.who,
+        .message = options.message,
+        .refusal = options.refusal,
+        .filters = options.filters,
+        .programs = options.programs,
+    }, .create);
+}
+
+/// How `store` puts a stash on the list.
+pub const StoreOptions = struct {
+    /// Who the line in the list is by, and when.
+    who: object.Signature,
+    /// The line's message: `-m`. git's `Created via "git stash store".`
+    /// when `null`.
+    message: ?[]const u8 = null,
+    /// Told about the update to `refs/stash`, or `null`.
+    hooks: ?*hooks.Runner = null,
+};
+
+/// `git stash store`: put a stash commit on the list, as `stash@{0}`. A
+/// commit not shaped like a stash is refused.
+pub fn store(io: Io, repo: *Repository, commit: Oid, options: StoreOptions) Self.Error!void {
+    _ = try inspect(io, repo, commit);
+    try storeRef(io, repo, commit, .{
+        .who = options.who,
+        .message = options.message orelse "Created via \"git stash store\".",
+        .hooks = options.hooks,
+    });
+}
+
+/// `refs/stash` moves to `commit`, and its log, which is the list, gains
+/// the line, made if it was not there: git's `do_store_stash`.
+fn storeRef(io: Io, repo: *Repository, commit: Oid, options: StoreOptions) Error!void {
+    var tx = repo.beginRefs();
+    defer tx.deinit(io);
+    tx.hooks = options.hooks;
+    try tx.update(ref_name, .{ .direct = commit }, .any);
+    try tx.commit(io, .{
+        .who = options.who,
+        .message = options.message.?,
+        .policy = .always,
+    });
+}
+
+/// What `save` does besides writing the stash's commits.
+const Saving = enum {
+    /// `push`: the list gains the stash, and what it took is put back to
+    /// `HEAD`.
+    push,
+    /// `create`: nothing.
+    create,
+};
+
+/// The one path every stash is made by: `push`'s whole, `create`'s
+/// commits alone.
+fn save(io: Io, repo: *Repository, options: PushOptions, saving: Saving) Self.Error!?Oid {
     const gpa = repo.allocator();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -495,7 +575,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
 
     // A log that is gone with its ref still there is cleared first, as git
     // does, so the new stash starts a list rather than joining a broken one.
-    if (!try repo.refStore().logExists(gpa, io, ref_name)) {
+    if (saving == .push and !try repo.refStore().logExists(gpa, io, ref_name)) {
         if (try repo.refStore().read(arena, io, ref_name)) |_| try clear(io, repo, .{ .hooks = options.hooks });
     }
 
@@ -530,20 +610,9 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     // the index, then the untracked files.
     assert(parents.items.len == 2 + @as(usize, @intFromBool(untracked_commit != null)));
     const stash_commit = try writeCommit(io, repo, work_tree, parents.items, options.who, stash_message);
+    if (saving == .create) return stash_commit;
 
-    // `refs/stash` moves, and its log, which is the list, gains the line.
-    {
-        var tx = repo.beginRefs();
-        defer tx.deinit(io);
-        tx.hooks = options.hooks;
-        try tx.update(ref_name, .{ .direct = stash_commit }, .any);
-        try tx.commit(io, .{
-            .who = options.who,
-            .message = stash_message,
-            .policy = .always,
-        });
-    }
-
+    try storeRef(io, repo, stash_commit, .{ .who = options.who, .message = stash_message, .hooks = options.hooks });
     try resetAfterPush(&ctx, &head_map, head_commit.tree, index_tree, untracked_files.items, options);
     try ctx.locked.commit(io);
     return stash_commit;
@@ -842,6 +911,11 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
 
     const checkout_options = ctx.checkoutOptions();
     _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
+    // git's `merge_switch_to_result`: the index is `unpack_trees`' result,
+    // which remembers no resolutions, and `AUTO_MERGE` names the tree the
+    // merge wrote, conflicts and all.
+    ctx.locked.index.dropResolveUndo();
+    try repo.refStore().root().write(gpa, io, .auto_merge, try merge.conflictedTree(gpa, io, db, &result));
 
     const result_alloc = result_arena.allocator();
     var conflicts: std.ArrayList([]const u8) = .empty;
@@ -1090,4 +1164,139 @@ pub fn clear(io: Io, repo: *Repository, options: DropOptions) Self.Error!void {
         // Deleting the ref deletes its log, which is the list.
         try tx.commit(io, null);
     }
+}
+
+/// Where an operation keeps the stash it made of the work in its way.
+pub const Autostash = union(enum) {
+    /// A file in the git directory holding the stash's name: a rebase's
+    /// `rebase-merge/autostash`.
+    file: []const u8,
+    /// A root ref: a merge's `MERGE_AUTOSTASH`.
+    ref: ref_names.Root,
+};
+
+/// How an autostash is made.
+pub const AutostashOptions = struct {
+    /// As for `push`.
+    who: object.Signature,
+    filters: ?*const filter.Drivers = null,
+    programs: ?program.Programs = null,
+};
+
+/// Put the index's and the working tree's changes aside before an
+/// operation that needs them clean, as git's `create_autostash` does: the
+/// stash `create` makes, with the message `autostash`, its name kept at
+/// `place`, then the index and the working tree reset to `HEAD`. Untracked
+/// files stay where they are. `null`, with nothing done, when nothing
+/// differs from `HEAD`. A ref at `place` must not be there already.
+pub fn createAutostash(io: Io, repo: *Repository, place: Autostash, options: AutostashOptions) Self.Error!?Oid {
+    const made = (try create(io, repo, .{
+        .who = options.who,
+        .message = "autostash",
+        .filters = options.filters,
+        .programs = options.programs,
+    })) orelse return null;
+    // The name is kept before anything is reset, so the work is never only
+    // in an object nothing names.
+    switch (place) {
+        .file => |sub_path| {
+            var buf: [hash.max_hex_len + 1]u8 = undefined;
+            const hex = made.hex(buf[0..hash.max_hex_len]);
+            buf[hex.len] = '\n';
+            try state_file.write(io, repo.gitDirectory(), sub_path, buf[0 .. hex.len + 1]);
+        },
+        .ref => |root| {
+            var tx = repo.beginRefs();
+            defer tx.deinit(io);
+            try tx.change(root.name(), .{ .direct = made }, .must_not_exist, .{ .no_deref = true });
+            try tx.commit(io, null);
+        },
+    }
+    var locked = try repo.lockIndex(io);
+    defer locked.deinit(io);
+    const head_tree = (try repo.headTree(io)) orelse return error.NoInitialCommit;
+    try reset.toTree(repo.allocator(), io, repo, .{ .index = &locked.index, .tree = head_tree, .mode = .hard });
+    try locked.commit(io);
+    return made;
+}
+
+/// What became of an autostash at the operation's end, which git tells
+/// in one of three messages.
+pub const Restored = enum {
+    /// It applied cleanly and is gone: "Applied autostash."
+    applied,
+    /// Applying it conflicted or was refused, so it is on the list as
+    /// `stash@{0}`, with whatever conflicts it left in the index and the
+    /// working tree: "Your local changes are stashed, however applying them
+    /// resulted in conflicts."
+    conflicted,
+    /// It went on the list without being applied: "Autostash exists;
+    /// creating a new stash entry."
+    stored,
+};
+
+/// How an autostash is brought back.
+pub const RestoreOptions = struct {
+    /// Who the line in the list is by, when it goes there.
+    who: object.Signature,
+    /// `false` puts it on the list without trying it, as git's
+    /// `save_autostash` does when an operation is given up and its work
+    /// left as it stands.
+    apply: bool = true,
+    /// Told about the update to `refs/stash`, or `null`.
+    hooks: ?*hooks.Runner = null,
+    filters: ?*const filter.Drivers = null,
+    programs: ?program.Programs = null,
+};
+
+/// Bring back the autostash kept at `place`, and forget the place: git's
+/// `apply_autostash`. It is applied as `apply` applies a stash, `--index`
+/// as `stash.index` says; where that conflicts or is refused, or `apply`
+/// is off, it goes on the list with the message `autostash`. `null` when
+/// there is none.
+pub fn restoreAutostash(io: Io, repo: *Repository, place: Autostash, options: RestoreOptions) Self.Error!?Restored {
+    const gpa = repo.allocator();
+    const commit: Oid = switch (place) {
+        .file => |sub_path| blk: {
+            const text = (try state_file.read(gpa, io, repo.gitDirectory(), sub_path)) orelse return null;
+            defer gpa.free(text);
+            // git's `read_oneliner`, which skips an empty file, then
+            // `strbuf_trim`.
+            const name = std.mem.trim(u8, text, &std.ascii.whitespace);
+            if (name.len == 0) return null;
+            break :blk Oid.parse(repo.objectFormat(), name) catch return error.NotAStash;
+        },
+        .ref => |root| (try repo.refStore().root().read(gpa, io, root)) orelse return null,
+    };
+    const restored = try restoreStash(io, repo, commit, options);
+    switch (place) {
+        .file => |sub_path| try state_file.remove(io, repo.gitDirectory(), sub_path),
+        .ref => |root| try repo.refStore().root().delete(gpa, io, root),
+    }
+    return restored;
+}
+
+/// Bring back an autostash already taken from where it was kept, by its
+/// name, as `restoreAutostash` does: git's `apply_autostash_oid`.
+pub fn restoreStash(io: Io, repo: *Repository, commit: Oid, options: RestoreOptions) Self.Error!Restored {
+    const restored: Restored = if (!options.apply) .stored else if (try applyAutostash(io, repo, commit, options)) .applied else .conflicted;
+    if (restored != .applied) try store(io, repo, commit, .{ .who = options.who, .message = "autostash", .hooks = options.hooks });
+    return restored;
+}
+
+/// Whether the autostash applied cleanly. A refusal is as much a failure
+/// as a conflict: git's `git stash apply` exits non-zero for either, and
+/// the stash is kept.
+fn applyAutostash(io: Io, repo: *Repository, commit: Oid, options: RestoreOptions) Error!bool {
+    const stash = try inspect(io, repo, commit);
+    var applied = applyEntry(io, repo, stash, .{ .hooks = options.hooks, .filters = options.filters, .programs = options.programs }) catch |err| switch (err) {
+        error.UnmergedIndex,
+        error.IndexConflict,
+        error.LocalChangesWouldBeOverwritten,
+        error.UntrackedWouldBeOverwritten,
+        => return false,
+        else => |e| return e,
+    };
+    defer applied.deinit();
+    return applied.isClean();
 }
