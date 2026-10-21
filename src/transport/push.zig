@@ -103,7 +103,7 @@ pub const Error = error{
     InvalidPushCertNonce,
     /// `push.gpgSign` is neither a boolean nor `if-asked`.
     InvalidPushGpgSign,
-} || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error || branch_mod.Error;
+} || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error || branch_mod.Error || refs_mod.Store.ReadLogError;
 
 /// What a `pre-push` hook is shown: one line of its input.
 pub const PrePushUpdate = struct {
@@ -169,6 +169,11 @@ pub const Options = struct {
     /// `--follow-tags`: the annotated tags the remote lacks, on commits it
     /// will have, pushed too; `null` takes `push.followTags`.
     follow_tags: ?bool = null,
+    /// `--force-if-includes`: a lease that expects the remote-tracking
+    /// ref's value also asks that the remote's value be in the local ref's
+    /// log, or reachable from what it names; `null` takes
+    /// `push.useForceIfIncludes`. Without a lease it does nothing.
+    force_if_includes: ?bool = null,
     /// `--set-upstream`: each branch pushed to a branch tracks it after.
     /// `push.autoSetupRemote` sets it for a default push of a branch with
     /// no upstream.
@@ -335,6 +340,7 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     }
     settled.push_options = options.push_options orelse try remote_mod.resetList(arena, repo.configuration(), "push.pushoption");
     settled.follow_tags = options.follow_tags orelse try repo.configuration().getBool("push.followtags", false);
+    settled.force_if_includes = options.force_if_includes orelse try repo.configuration().getBool("push.useforceifincludes", false);
 
     var results: std.ArrayList(RefResult) = .empty;
     for (remote.push_urls) |url| {
@@ -583,7 +589,7 @@ fn judgeAll(
             .new = u.new,
             .status = .ok,
         };
-        try judge(gpa, io, repo, remote, result, u.force or options.force, options.leases);
+        try judge(gpa, io, repo, remote, result, .{ .force = u.force or options.force, .leases = options.leases, .if_includes = options.force_if_includes.? });
         if (result.rejected()) any_refused = true;
     }
     if (options.atomic and any_refused) {
@@ -996,21 +1002,23 @@ fn judge(
     repo: *Repository,
     remote: *const remote_mod.Remote,
     result: *RefResult,
-    force: bool,
-    leases: []const Lease,
+    how: struct { force: bool, leases: []const Lease, if_includes: bool },
 ) Error!void {
     const deletion = result.new.isZero();
     if (!deletion and result.old.eql(result.new)) {
         result.status = .up_to_date;
         return;
     }
-    var forced = force;
+    var forced = how.force;
     var reject: ?RefResult.Status = null;
-    for (leases) |lease| {
+    for (how.leases) |lease| {
         if (!std.mem.eql(u8, lease.ref, result.remote_ref)) continue;
-        const expected = lease.expect orelse (try trackingValue(gpa, io, repo, remote, result.remote_ref)) orelse Oid.zero(repo.objectFormat());
+        const tracking = if (lease.expect == null) try trackingValue(gpa, io, repo, remote, result.remote_ref) else null;
+        const expected = lease.expect orelse tracking orelse Oid.zero(repo.objectFormat());
         if (!result.old.eql(expected)) {
             reject = .rejected_stale;
+        } else if (how.if_includes and tracking != null and !try includesRemote(gpa, io, repo, remote, result)) {
+            reject = .rejected_remote_updated;
         } else forced = true;
     }
     if (reject == null and !deletion and !result.old.isZero()) {
@@ -1039,6 +1047,38 @@ fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
     const peeled = repo.peel(io, oid) catch return null;
     const header = repo.objectDatabase().readHeader(io, peeled) catch return null;
     return if (header.type == .commit) peeled else null;
+}
+
+/// git's `check_if_includes_upstream` and `is_reachable_in_reflog`:
+/// whether the remote's value of `result`'s ref is in the log of the
+/// local ref of that name, or reachable from a commit an entry of it
+/// names, going back no further than the remote-tracking ref's newest
+/// entry. Without such a local ref, nothing is asked.
+fn includesRemote(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, result: *const RefResult) Error!bool {
+    const store = repo.refStore();
+    if ((try store.readOid(gpa, io, result.remote_ref)) == null) return true;
+    const theirs = commitOf(io, repo, result.old) orelse return false;
+    const tracking = (try remote.trackingRef(gpa, result.remote_ref)) orelse return false;
+    defer gpa.free(tracking);
+    var tracking_log = try store.readLog(gpa, io, tracking);
+    defer tracking_log.deinit();
+    const since: i64 = if (tracking_log.entries.len == 0) 0 else tracking_log.entries[tracking_log.entries.len - 1].who.when_secs;
+    var local_log = try store.readLog(gpa, io, result.remote_ref);
+    defer local_log.deinit();
+    var seen: std.ArrayList(Oid) = .empty;
+    defer seen.deinit(gpa);
+    var i = local_log.entries.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = local_log.entries[i];
+        if (entry.new.eql(theirs)) return true;
+        if (commitOf(io, repo, entry.new)) |commit| try seen.append(gpa, commit);
+        if (entry.who.when_secs < since) break;
+    }
+    for (seen.items) |commit| {
+        if (try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = theirs, .descendant = commit }, .{})) return true;
+    }
+    return false;
 }
 
 fn trackingValue(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, remote_ref: []const u8) Error!?Oid {
@@ -1351,6 +1391,39 @@ test "push.pushOption gives the push options when none are named, an empty one c
     var named = try twins.pushBoth(&.{ "--push-option", "named", "origin", "main:refs/heads/again" }, .{ .who = test_who, .refspecs = &.{"main:refs/heads/again"}, .push_options = &.{"named"} });
     defer named.deinit();
     try expectSameHookLogs(&twins, io);
+}
+
+test "--force-if-includes and push.useForceIfIncludes refuse a lease the local ref's log never saw, as git's push refuses it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    // Someone else moves the remote's main, and both fetch it without
+    // taking it in.
+    for ([_][]const u8{ "remote-git.git", "remote-relic.git" }) |name| {
+        var dir = try twins.root.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        const made = try twins.gitOut(dir, &.{ "commit-tree", "main^{tree}", "-p", "main", "-m", "elsewhere" });
+        defer gpa.free(made);
+        try twins.git(dir, &.{ "update-ref", "refs/heads/main", std.mem.trimEnd(u8, made, "\n") });
+    }
+    try inBothWorks(&twins, &.{ "fetch", "-q", "origin" });
+    const lease: []const Lease = &.{.{ .ref = "refs/heads/main" }};
+    var refused = try twins.pushBoth(&.{ "--force-with-lease", "--force-if-includes", "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"}, .leases = lease, .force_if_includes = true });
+    defer refused.deinit();
+    try testing.expectEqual(RefResult.Status.rejected_remote_updated, refused.refs[0].status);
+    // Without it the lease alone holds, and the push goes.
+    try inBothWorks(&twins, &.{ "config", "push.useForceIfIncludes", "true" });
+    var by_setting = try twins.pushBoth(&.{ "--force-with-lease", "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"}, .leases = lease });
+    defer by_setting.deinit();
+    try testing.expectEqual(RefResult.Status.rejected_remote_updated, by_setting.refs[0].status);
+    // Once the local ref has been at the remote's value, a rewrite on top
+    // of it goes.
+    try inBothWorks(&twins, &.{ "reset", "-q", "--hard", "origin/main" });
+    try inBothWorks(&twins, &.{ "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten" });
+    var forced = try twins.pushBoth(&.{ "--force-with-lease", "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"}, .leases = lease });
+    defer forced.deinit();
+    try testing.expectEqual(RefResult.Status.ok, forced.refs[0].status);
 }
 
 test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stale lease, and atomic all or none" {
