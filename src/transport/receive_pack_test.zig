@@ -828,3 +828,83 @@ test "a push to a repository on this machine and a fetch back cross as they are 
         try testing.expectEqualStrings(sent, got);
     }
 }
+
+test "the alternates' refs are shown as .have and fetched against as git's are, by core.alternateRefsCommand and core.alternateRefsPrefixes" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{});
+    defer p.deinit();
+    // A repository both borrow from, with branches and a tag of its own.
+    const root = Io.Dir.path.dirname(p.ours).?;
+    const lender = try gpa.print("{s}/lender.git", .{root});
+    defer gpa.free(lender);
+    var root_dir = try Io.Dir.cwd().openDir(io, root, .{});
+    defer root_dir.close(io);
+    const source_path = try p.source.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(source_path);
+    try p.git(root_dir, &.{ "clone", "-q", "--bare", source_path, lender });
+    var lender_dir = try Io.Dir.cwd().openDir(io, lender, .{});
+    defer lender_dir.close(io);
+    try p.git(lender_dir, &.{ "branch", "keep/old", "main~2" });
+    const objects = try gpa.print("{s}/objects\n", .{lender});
+    defer gpa.free(objects);
+    try p.fileBoth("objects/info/alternates", objects, 0o644);
+
+    const Have = struct {
+        fn lines(pair: *Pair, ours: bool) ![]u8 {
+            var env = try pair.env.clone(pair.gpa);
+            defer env.deinit();
+            const argv: []const []const u8 = if (ours) &.{ pair.helper, "--advertise-refs", pair.ours } else &.{ "git", "receive-pack", "--advertise-refs", pair.theirs };
+            var outcome = try program.run(pair.gpa, pair.io, .{ .environ = &env }, .{ .argv = argv }, .{});
+            defer outcome.deinit(pair.gpa);
+            var out: std.ArrayList(u8) = .empty;
+            var it = std.mem.splitSequence(u8, outcome.stdout, " .have");
+            _ = it.next();
+            var count: usize = 0;
+            while (it.next()) |_| count += 1;
+            try out.print(pair.gpa, "{d} .have\n", .{count});
+            var lines_it = std.mem.tokenizeScalar(u8, outcome.stdout, '\n');
+            while (lines_it.next()) |line| if (std.mem.endsWith(u8, line, " .have") and line.len > 46) try out.print(pair.gpa, "{s}\n", .{line[4..]});
+            return out.toOwnedSlice(pair.gpa);
+        }
+    };
+    const settings = [_][]const []const u8{
+        &.{},
+        &.{ "core.alternateRefsPrefixes", "refs/heads/keep refs/tags" },
+        &.{ "core.alternateRefsCommand", "git --git-dir=\"$1\" for-each-ref --format=\"%(objectname)\" refs/heads/keep" },
+    };
+    for (settings) |setting| {
+        if (setting.len != 0) try p.gitBoth(&.{ "config", setting[0], setting[1] });
+        const theirs = try Have.lines(&p, false);
+        defer gpa.free(theirs);
+        const ours = try Have.lines(&p, true);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+        testing.expect(!std.mem.startsWith(u8, ours, "0 .have")) catch |err| {
+            std.debug.print("setting {d}: theirs {s} ours {s}\n", .{ setting.len, theirs, ours });
+            return err;
+        };
+        if (setting.len != 0) try p.gitBoth(&.{ "config", "--unset", setting[0] });
+    }
+
+    // A fetch into a repository whose alternate holds it all: nothing comes.
+    for ([_]bool{ false, true }) |ours| {
+        const name = try gpa.print("{s}/borrower-{s}", .{ root, if (ours) "relic" else "git" });
+        defer gpa.free(name);
+        try p.git(root_dir, &.{ "init", "-q", "--bare", name });
+        var dir = try Io.Dir.cwd().openDir(io, name, .{});
+        defer dir.close(io);
+        try dir.writeFile(io, .{ .sub_path = "objects/info/alternates", .data = objects });
+        if (ours) {
+            var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+            defer repo.deinit(io);
+            const who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
+            var fetched = try fetch_mod.fetch(gpa, io, &repo, source_path, .{ .refspecs = &.{"refs/heads/main:refs/heads/main"}, .who = who, .programs = .{ .environ = &p.env } });
+            fetched.deinit();
+        } else try p.git(dir, &.{ "fetch", "-q", source_path, "refs/heads/main:refs/heads/main" });
+        const counted = try testremote.gitInputEnv(gpa, io, dir, &p.env, &.{ "count-objects", "-v" }, "", true);
+        defer gpa.free(counted);
+        try testing.expect(std.mem.startsWith(u8, counted, "count: 0\n"));
+        try testing.expect(std.mem.find(u8, counted, "\nin-pack: 0\n") != null);
+    }
+}

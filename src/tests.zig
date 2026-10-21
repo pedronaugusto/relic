@@ -282,6 +282,7 @@ test {
     _ = @import("wire/ssh.zig");
     _ = @import("transport/upload_pack.zig");
     _ = @import("transport/receive_pack.zig");
+    _ = @import("transport/alternate_refs.zig");
     _ = @import("transport/http_backend.zig");
     _ = @import("lfs/server.zig");
     _ = @import("lfs/server/transfer.zig");

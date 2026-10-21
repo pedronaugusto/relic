@@ -59,6 +59,7 @@ const fsck = @import("../object/fsck.zig");
 const promisors = @import("../wire.zig").promisors;
 const accelerators = @import("../maintenance/maintenance.zig");
 const maintenance_mod = @import("../maintenance/run.zig");
+const alternate_refs = @import("alternate_refs.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -85,7 +86,7 @@ pub const Error = error{
     /// An object below a fetched ref is not in the repository after the
     /// pack arrived. `Outcome` is not returned; `Options.missing` names it.
     MissingObject,
-} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || fsck.LoadError || config_mod.Config.SetError ||
+} || alternate_refs.Error || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || fsck.LoadError || config_mod.Config.SetError ||
     rev_walk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
 /// How a fetch runs.
@@ -464,7 +465,7 @@ fn bringObjects(
     // Deepening asks again for what is here: its history is what is
     // wanted.
     const wants = try wantsInOrder(arena, io, repo, b.remote_refs, b.map, b.deepen != null);
-    const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, b.remote_refs);
+    const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, b.remote_refs, b.options);
 
     var pack_dir = try repo.objectDatabase().openPackDirectory(io);
     defer pack_dir.close(io);
@@ -884,10 +885,11 @@ fn pruneStale(
 }
 
 /// What negotiation starts from: every local ref's object and `HEAD`'s,
+/// what the alternates' refs name (git's `insert_one_alternate_object`),
 /// and those of them the server also advertised.
 const Tips = struct { ours: []const Oid, common: []const Oid };
 
-fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, local_refs: []const refs_mod.Named, remote_refs: []const protocol.RemoteRef) Error!Tips {
+fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, local_refs: []const refs_mod.Named, remote_refs: []const protocol.RemoteRef, options: Options) Error!Tips {
     var tips: std.ArrayList(Oid) = .empty;
     var common: std.ArrayList(Oid) = .empty;
     for (local_refs) |entry| switch (entry.target) {
@@ -898,6 +900,13 @@ fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, 
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => |target| gpa.free(target),
     };
+    const borrowed = try alternate_refs.read(gpa, io, repo, options.programs, options.warnings);
+    defer gpa.free(borrowed);
+    for (borrowed) |oid| {
+        // Only what is here to be had: an object an alternate's ref names
+        // and no longer has is passed over, as git parses it first.
+        if (try repo.objectDatabase().exists(io, oid)) try tips.append(arena, oid);
+    }
     var tip_set: Oid.Set = .empty;
     defer tip_set.deinit(gpa);
     for (tips.items) |tip| try tip_set.put(gpa, tip, {});

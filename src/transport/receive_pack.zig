@@ -69,6 +69,7 @@ const three_way = @import("../merge/three_way.zig");
 const signing = @import("../object/signing.zig");
 const local = @import("local.zig");
 const in_process = @import("in_process.zig");
+const alternate_refs = @import("alternate_refs.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -382,22 +383,17 @@ pub const Server = struct {
         } else try pkt_line.print("{f} {s}\n", .{ oid, name }, w);
     }
 
-    /// The tips of the repositories this one borrows objects from.
+    /// The tips of the repositories this one borrows objects from, as
+    /// `alternate_refs` reads them.
     fn alternateTips(s: *Server) Self.Error!std.ArrayList(Oid) {
-        var out: std.ArrayList(Oid) = .empty;
-        errdefer out.deinit(s.gpa);
-        var alternates = try s.db().listAlternates(s.gpa, s.io);
-        defer alternates.deinit();
-        for (alternates.paths) |path| {
-            // An alternate is `<repository>/objects`; its refs are beside.
-            const repo_path = std.Io.Dir.path.dirname(path) orelse continue;
-            var other = local.Remote.open(s.gpa, s.io, repo_path, .{}) catch continue;
-            defer other.deinit(s.io);
-            var refs = other.listRefs(s.gpa, s.io, &.{"refs/"}) catch continue;
-            defer refs.deinit();
-            for (refs.refs) |ref| try out.append(s.gpa, ref.oid);
-        }
-        return out;
+        const tips = alternate_refs.read(s.gpa, s.io, &s.remote.repo, s.options.programs, null) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            // What cannot be read is not shown, as git shows nothing of an
+            // alternate it cannot read.
+            else => return .empty,
+        };
+        return .fromOwnedSlice(tips);
     }
 
     /// A whole conversation over a pipe: the advertisement, then one push.
