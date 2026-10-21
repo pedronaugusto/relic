@@ -318,8 +318,8 @@ test "locks are taken, listed, verified and given back over git-lfs-transfer, as
         try Io.Dir.cwd().createDirPath(io, s.root);
         var root = try Io.Dir.cwd().openDir(io, s.root, .{});
         defer root.close(io);
-        try root.createDirPath(io, "org/repo.git");
-        try root.writeFile(io, .{ .sub_path = "org/repo.git/transfer-locks", .data = "7\tb.bin\tbob\n" });
+        try root.createDirPath(io, "org/repo.git/lfs");
+        try root.writeFile(io, .{ .sub_path = "org/repo.git/lfs/locks.json", .data = "[{\"id\":\"7\",\"path\":\"b.bin\",\"locked_at\":\"2026-09-24T10:00:00Z\",\"owner\":{\"name\":\"bob\"}}]\n" });
         if (i == 0) {
             try s.fx.gitIn(d, &.{ "lfs", "lock", "a.bin" });
             try s.fx.gitIn(d, &.{ "lfs", "locks" });
@@ -372,7 +372,7 @@ test "locks are taken, listed, verified and given back over git-lfs-transfer, as
     defer for (logs) |p| free(p);
     try expectSame(logs[0], logs[1]);
     try testing.expect(std.mem.find(u8, logs[1][0], "> lock\n") != null);
-    try testing.expect(std.mem.find(u8, logs[1][0], "> unlock 8\n") != null);
+    try testing.expect(std.mem.find(u8, logs[1][0], "> unlock <id>\n") != null);
 }
 
 test "each transfer worker has its own git-lfs-transfer, sharing the first's ssh session, as git-lfs's do" {
