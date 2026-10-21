@@ -2063,3 +2063,90 @@ test "server options go with each v2 request as git sends them, from the remote'
     defer repo.deinit(io);
     try testing.expectError(error.ServerOptionsNeedV2, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .server_options = &.{"any"} }));
 }
+
+/// The haves git's upload-pack heard, and where each round ended, as its
+/// packet trace shows them.
+fn havesHeard(gpa: Allocator, io: Io, trace_path: []const u8) ![]u8 {
+    const traced = try Io.Dir.cwd().readFileAlloc(io, trace_path, gpa, .unlimited);
+    defer gpa.free(traced);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.tokenizeScalar(u8, traced, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.find(u8, line, "upload-pack< ") orelse continue;
+        const said = std.mem.trimEnd(u8, line[at + "upload-pack< ".len ..], " ");
+        if (std.mem.startsWith(u8, said, "have ") or std.mem.eql(u8, said, "done") or std.mem.eql(u8, said, "0000")) try out.print(gpa, "{s}\n", .{said});
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "a fetch offers the haves git's negotiators offer: consecutive, skipping and noop, restricted and included, in v2 and v0" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tools = testing.tmpDir(.{ .iterate = true });
+    defer tools.cleanup();
+    const fake = try testremote.fakeSsh(gpa, io, tools.dir);
+    defer gpa.free(fake);
+    const tools_path = try testremote.absolutePath(gpa, io, tools.dir);
+    defer gpa.free(tools_path);
+    // The remote: five commits, then three more the fetch wants.
+    var source = try testremote.historyRepo(gpa, io, 5);
+    defer source.deinit();
+    try testremote.addCommits(gpa, io, &source, 5, 3);
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const url = try gpa.print("example.invalid:{s}", .{source_path});
+    defer gpa.free(url);
+
+    const Case = struct { version: []const u8, settings: []const [2][]const u8 = &.{} };
+    const cases = [_]Case{
+        .{ .version = "2" },
+        .{ .version = "0" },
+        .{ .version = "2", .settings = &.{.{ "fetch.negotiationAlgorithm", "skipping" }} },
+        .{ .version = "0", .settings = &.{.{ "fetch.negotiationAlgorithm", "skipping" }} },
+        .{ .version = "2", .settings = &.{.{ "feature.experimental", "true" }} },
+        .{ .version = "2", .settings = &.{.{ "fetch.negotiationAlgorithm", "noop" }} },
+        .{ .version = "0", .settings = &.{.{ "fetch.negotiationAlgorithm", "noop" }} },
+        .{ .version = "2", .settings = &.{.{ "remote.origin.negotiationRestrict", "refs/heads/other" }} },
+        .{ .version = "0", .settings = &.{.{ "remote.origin.negotiationRestrict", "heads/o*" }} },
+        .{ .version = "2", .settings = &.{ .{ "remote.origin.negotiationInclude", "refs/heads/other" }, .{ "fetch.negotiationAlgorithm", "skipping" } } },
+        .{ .version = "0", .settings = &.{.{ "remote.origin.negotiationInclude", "refs/heads/other" }} },
+    };
+    for (cases, 0..) |case, n| {
+        var heard: [2][]u8 = undefined;
+        for (0..2) |i| {
+            // The same history here in each: the remote's first five
+            // commits and thirty of its own, on two branches.
+            var twin = try testgit.Repo.init(gpa, io, &.{});
+            defer twin.deinit();
+            try testremote.addCommits(gpa, io, &twin, 0, 5);
+            try testremote.addCommits(gpa, io, &twin, 100, 20);
+            try twin.exec(io, &.{ "branch", "other", "HEAD~12" });
+            try testremote.addCommits(gpa, io, &twin, 200, 10);
+            try twin.exec(io, &.{ "remote", "add", "origin", url });
+            try twin.exec(io, &.{ "config", "core.sshCommand", fake });
+            try twin.exec(io, &.{ "config", "protocol.version", case.version });
+            for (case.settings) |kv| try twin.exec(io, &.{ "config", kv[0], kv[1] });
+            const trace = try gpa.print("{s}/haves-{d}-{d}", .{ tools_path, n, i });
+            defer gpa.free(trace);
+            var env = try testremote.environ(gpa);
+            defer env.deinit();
+            try env.put("GIT_TRACE_PACKET", trace);
+            if (i == 0) {
+                const out = try testremote.gitInputEnv(gpa, io, twin.dir, &env, &.{ "fetch", "-q", "origin", "main" }, "", true);
+                gpa.free(out);
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, twin.dir, .{});
+                defer repo.deinit(io);
+                var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{"main"} });
+                defer outcome.deinit();
+            }
+            heard[i] = try havesHeard(gpa, io, trace);
+        }
+        defer for (heard) |text| gpa.free(text);
+        testing.expectEqualStrings(heard[0], heard[1]) catch |err| {
+            std.debug.print("protocol v{s}, {any}\ngit:\n{s}\nrelic:\n{s}\n", .{ case.version, case.settings, heard[0], heard[1] });
+            return err;
+        };
+    }
+}

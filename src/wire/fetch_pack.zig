@@ -86,6 +86,26 @@ pub const Request = struct {
     session_id: ?[]const u8 = null,
     /// `server-option=` lines, which only a v2 server takes.
     server_options: []const []const u8 = &.{},
+    /// How the haves are chosen: `fetch.negotiationAlgorithm`.
+    negotiation: Negotiation = .consecutive,
+    /// Commits offered whatever the negotiator chooses, as git's
+    /// `--negotiation-include` offers them: once before the others in v0,
+    /// in every round in v2.
+    include_haves: []const Oid = &.{},
+};
+
+/// git's `fetch.negotiationAlgorithm`: how a fetch chooses the commits it
+/// offers as haves.
+pub const Negotiation = enum {
+    /// git's default: every commit from the tips back, newest first, less
+    /// what the server is known to have.
+    consecutive,
+    /// git's `skipping`: newest first, but ever longer leaps back through
+    /// a run the server has not acknowledged, so a history that shares
+    /// little with the server's is found in fewer rounds.
+    skipping,
+    /// No haves at all: the server sends everything the wants reach.
+    noop,
 };
 
 /// How deep the history is to be: git's `--depth`, `--deepen`,
@@ -161,7 +181,7 @@ pub fn fetch(
     const db = inputs.db;
     const request = inputs.request;
     try protocol.checkServerOptions(adv, request.server_options);
-    var negotiator: Negotiator = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa) };
+    var negotiator: Negotiator = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa), .algorithm = request.negotiation };
     defer negotiator.deinit();
     for (request.common_tips) |tip| try negotiator.knownCommon(tip);
     for (request.tips) |tip| try negotiator.addTip(tip);
@@ -301,6 +321,11 @@ fn writeFetchV2(
     if (request.filter) |spec| try pkt_line.print("filter {s}", .{spec}, w);
     for (request.wants) |oid| try pkt_line.print("want {f}\n", .{oid}, w);
     for (common) |oid| try pkt_line.print("have {f}\n", .{oid}, w);
+    // git's `add_haves`: the included ones every round, not counted.
+    for (request.include_haves) |oid| {
+        if (!try negotiator.haveSent(oid)) continue;
+        try pkt_line.print("have {f}\n", .{oid}, w);
+    }
     var added: usize = 0;
     while (added < haves_to_send) {
         const oid = (try negotiator.next()) orelse break;
@@ -511,6 +536,7 @@ fn fetchV0(
     var got_ready = false;
     var acked_any = false;
     var acked: Oid = undefined;
+    count += try offerIncluded(&round.writer, request, negotiator);
     negotiate: while (try negotiator.next()) |oid| {
         pkt_line.print("have {f}\n", .{oid}, &round.writer) catch return error.OutOfMemory;
         in_vain += 1;
@@ -575,13 +601,29 @@ fn fetchV0(
 
     var receive = receive_options;
     receive.progress = progress;
+    return receivePackV0(io, conn, in, db, band, receive);
+}
+
+/// git's `find_common`'s haves from `--negotiation-include`: offered first
+/// whatever each is, only a commit told to the negotiator, counted toward
+/// the flush but not as offered in vain. How many.
+fn offerIncluded(w: *Io.Writer, request: Request, negotiator: *Negotiator) Error!usize {
+    for (request.include_haves) |oid| {
+        pkt_line.print("have {f}\n", .{oid}, w) catch return error.OutOfMemory;
+        _ = try negotiator.haveSent(oid);
+    }
+    return request.include_haves.len;
+}
+
+/// A v0 server's pack, on its own or on the side band.
+fn receivePackV0(io: Io, conn: *Connection, in: *Io.Reader, db: *Odb, band: Band, receive: index_pack.Options) Error!index_pack.Result {
     if (band == .none) {
         return db.receivePack(io, in, receive) catch |err| switch (err) {
             error.ReadFailed => conn.failure(),
             else => |e| e,
         };
     }
-    return receiveSideband(io, conn, in, db, progress, receive);
+    return receiveSideband(io, conn, in, db, receive.progress, receive);
 }
 
 /// Send `bytes` as the next request and take the response to read.
@@ -695,17 +737,24 @@ fn writeWantsV0(
     try pkt_line.flush(w);
 }
 
-/// git's default negotiator: this repository's commits, newest first, less
-/// whatever is known to be common.
+/// git's negotiators: this repository's commits, newest first, less
+/// whatever is known to be common -- every one of them (`consecutive`),
+/// some of them in ever longer leaps (`skipping`), or none (`noop`).
 const Negotiator = struct {
     gpa: Allocator,
     io: Io,
     db: *Odb,
     arena: std.heap.ArenaAllocator,
+    algorithm: Negotiation = .consecutive,
     nodes: Oid.Map(Node) = .empty,
     queue: std.PriorityQueue(Queued, void, Queued.newerFirst) = .empty,
-    /// Commits queued and not yet taken that are not known to be common.
-    non_common: usize = 0,
+    /// The order commits are queued in, which breaks a tie between equal
+    /// dates as git's priority queue breaks it.
+    queued: u64 = 0,
+    /// Commits queued and not yet taken that are not known to be common,
+    /// counted as git counts them: `skipping` can take it below what is
+    /// queued, and stops only at zero.
+    non_common: i64 = 0,
 
     const Node = struct {
         seen: bool = false,
@@ -716,15 +765,20 @@ const Negotiator = struct {
         loaded: bool = false,
         time: i64 = 0,
         parents: []const Oid = &.{},
+        /// `skipping`'s: how many commits below this one go unoffered, and
+        /// what that was when it was set.
+        ttl: u16 = 0,
+        original_ttl: u16 = 0,
     };
 
     const Queued = struct {
         time: i64,
+        order: u64,
         oid: Oid,
 
         fn newerFirst(_: void, a: Queued, b: Queued) std.math.Order {
             if (a.time != b.time) return std.math.order(b.time, a.time);
-            return a.oid.order(b.oid);
+            return std.math.order(a.order, b.order);
         }
     };
 
@@ -772,79 +826,228 @@ const Negotiator = struct {
         }
     }
 
-    fn push(n: *Negotiator, oid: Oid, node: *Node) NegotiateError!void {
-        if (node.seen) return;
-        node.seen = true;
-        if (!node.common) n.non_common += 1;
-        try n.queue.push(n.gpa, .{ .time = node.time, .oid = oid });
+    fn enqueue(n: *Negotiator, oid: Oid, node: *const Node) NegotiateError!void {
+        try n.queue.push(n.gpa, .{ .time = node.time, .order = n.queued, .oid = oid });
+        n.queued += 1;
     }
 
-    fn setCommon(n: *Negotiator, node: *Node) void {
-        if (node.common) return;
-        node.common = true;
-        if (node.seen and !node.popped) n.non_common -= 1;
+    /// The node for `oid`, its commit not read unless it was already.
+    fn nodeFor(n: *Negotiator, oid: Oid) NegotiateError!*Node {
+        const gop = try n.nodes.getOrPut(n.gpa, oid);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        return gop.value_ptr;
     }
 
     /// Start the walk from a tip of this repository.
     fn addTip(n: *Negotiator, tip: Oid) NegotiateError!void {
         const found = (try n.load(tip)) orelse return;
-        try n.push(found.oid, found.node);
+        switch (n.algorithm) {
+            .noop => {},
+            .consecutive => try n.revListPush(found.oid, .{ .seen = true }),
+            .skipping => if (!found.node.seen) {
+                found.node.seen = true;
+                n.non_common += 1;
+                try n.enqueue(found.oid, found.node);
+            },
+        }
     }
 
     /// A tip the server has too: offered first, and nothing below it.
     fn knownCommon(n: *Negotiator, tip: Oid) NegotiateError!void {
         const found = (try n.load(tip)) orelse return;
         if (found.node.seen) return;
-        found.node.common_ref = true;
-        try n.push(found.oid, found.node);
+        switch (n.algorithm) {
+            .noop => {},
+            .consecutive => {
+                try n.revListPush(found.oid, .{ .common_ref = true, .seen = true });
+                try n.markCommon(found.oid, .{ .ancestors_only = true, .dont_parse = true });
+            },
+            .skipping => {
+                found.node.common_ref = true;
+                found.node.seen = true;
+                n.non_common += 1;
+                try n.enqueue(found.oid, found.node);
+            },
+        }
     }
 
     /// The next commit to offer, or `null` when nothing is left that the
     /// server might not have.
     fn next(n: *Negotiator) NegotiateError!?Oid {
-        while (true) {
-            if (n.non_common == 0) return null;
-            const item = n.queue.pop() orelse return null;
-            var node = n.nodes.getPtr(item.oid).?;
-            node.popped = true;
-            const common = node.common;
-            if (!common) n.non_common -= 1;
-            const below_common = common or node.common_ref;
-            const parents = node.parents;
-            for (parents) |parent| {
-                const found = (try n.load(parent)) orelse continue;
-                if (below_common) n.setCommon(found.node);
-                try n.push(found.oid, found.node);
+        return switch (n.algorithm) {
+            .consecutive => n.nextConsecutive(),
+            .skipping => n.nextSkipping(),
+            .noop => null,
+        };
+    }
+
+    /// The flags `revListPush` and `markCommon` set: git's `COMMON`,
+    /// `COMMON_REF` and `SEEN`.
+    const Marks = struct { common: bool = false, common_ref: bool = false, seen: bool = false };
+
+    /// git's default negotiator's `rev_list_push`: `oid` marked and, its
+    /// commit read, queued, unless it bears any of the marks already.
+    fn revListPush(n: *Negotiator, oid: Oid, mark: Marks) NegotiateError!void {
+        const node = try n.nodeFor(oid);
+        if ((mark.common and node.common) or (mark.common_ref and node.common_ref) or (mark.seen and node.seen)) return;
+        if (mark.common) node.common = true;
+        if (mark.common_ref) node.common_ref = true;
+        if (mark.seen) node.seen = true;
+        const found = (try n.load(oid)) orelse return;
+        try n.enqueue(found.oid, found.node);
+        if (!found.node.common) n.non_common += 1;
+    }
+
+    /// git's default negotiator's `mark_common`: `oid` (unless only its
+    /// ancestors are asked for) and its ancestors common; one not reached
+    /// yet queued as reached, and the ancestors of one whose commit is not
+    /// read left unmarked when `dont_parse` says not to read it.
+    fn markCommon(n: *Negotiator, start: Oid, how: struct { ancestors_only: bool, dont_parse: bool }) NegotiateError!void {
+        {
+            const node = try n.nodeFor(start);
+            if (node.common) return;
+            if (!how.ancestors_only) {
+                node.common = true;
+                if (node.seen and !node.popped) n.non_common -= 1;
             }
-            // `load` may have moved the node.
-            node = n.nodes.getPtr(item.oid).?;
-            if (common) continue;
+        }
+        var stack: std.ArrayList(Oid) = .empty;
+        defer stack.deinit(n.gpa);
+        try stack.append(n.gpa, start);
+        while (stack.pop()) |oid| {
+            const node = try n.nodeFor(oid);
+            if (!node.seen) {
+                try n.revListPush(oid, .{ .seen = true });
+                continue;
+            }
+            if (!node.loaded and !how.dont_parse) _ = try n.load(oid);
+            const parents = (n.nodes.getPtr(oid).?).parents;
+            for (parents) |parent| {
+                const p = try n.nodeFor(parent);
+                if (p.common) continue;
+                p.common = true;
+                if (p.seen and !p.popped) n.non_common -= 1;
+                try stack.append(n.gpa, parent);
+            }
+        }
+    }
+
+    /// git's default negotiator's `get_rev`.
+    fn nextConsecutive(n: *Negotiator) NegotiateError!?Oid {
+        while (true) {
+            if (n.queue.count() == 0 or n.non_common == 0) return null;
+            const item = n.queue.pop().?;
+            _ = try n.load(item.oid);
+            const node = n.nodes.getPtr(item.oid).?;
+            node.popped = true;
+            if (!node.common) n.non_common -= 1;
+            const entry = node.*;
+            const mark: Marks = if (entry.common or entry.common_ref) .{ .common = true, .seen = true } else .{ .seen = true };
+            for (entry.parents) |parent| {
+                if (!(try n.nodeFor(parent)).seen) try n.revListPush(parent, mark);
+                if (mark.common) try n.markCommon(parent, .{ .ancestors_only = true, .dont_parse = false });
+            }
+            if (entry.common) continue;
             return item.oid;
+        }
+    }
+
+    /// git's `skipping` negotiator's `get_rev`: a commit is offered when
+    /// its leap runs out, or when nothing below it is left to walk.
+    fn nextSkipping(n: *Negotiator) NegotiateError!?Oid {
+        while (true) {
+            if (n.queue.count() == 0 or n.non_common == 0) return null;
+            const item = n.queue.pop().?;
+            const node = n.nodes.getPtr(item.oid).?;
+            node.popped = true;
+            if (!node.common) n.non_common -= 1;
+            const entry = node.*;
+            var send = !entry.common and entry.ttl == 0;
+            var parent_pushed = false;
+            for (entry.parents) |parent| {
+                const found = (try n.load(parent)) orelse continue;
+                if (try n.pushParent(entry, found.oid, found.node)) parent_pushed = true;
+            }
+            if (!entry.common and !parent_pushed) send = true;
+            if (send) return item.oid;
+        }
+    }
+
+    /// git's `push_parent`: `parent` queued below `entry`, and marked
+    /// common below a common one or given the next leap below another.
+    /// `false` for a parent already taken, which clock skew put first.
+    fn pushParent(n: *Negotiator, entry: Node, oid: Oid, parent: *Node) NegotiateError!bool {
+        if (parent.seen) {
+            if (parent.popped) return false;
+        } else {
+            parent.seen = true;
+            // As git's `rev_list_push` with no mark: counted whatever it is.
+            n.non_common += 1;
+            try n.enqueue(oid, parent);
+        }
+        if (entry.common or entry.common_ref) {
+            try n.markCommonSkipping(oid);
+            return true;
+        }
+        const original: u16 = if (entry.ttl != 0) entry.original_ttl else entry.original_ttl * 3 / 2 + 1;
+        const ttl: u16 = if (entry.ttl != 0) entry.ttl - 1 else original;
+        // `enqueue` and `markCommonSkipping` may have moved the node.
+        const now = n.nodes.getPtr(oid).?;
+        if (now.original_ttl < original) {
+            now.original_ttl = original;
+            now.ttl = ttl;
+        }
+        return true;
+    }
+
+    /// git's `skipping` negotiator's `mark_common`: `oid` and what the
+    /// walk has reached below it, common; each counted off as git counts
+    /// it, taken or not.
+    fn markCommonSkipping(n: *Negotiator, oid: Oid) NegotiateError!void {
+        const start = n.nodes.getPtr(oid) orelse return;
+        if (start.common) return;
+        start.common = true;
+        var stack: std.ArrayList(Oid) = .empty;
+        defer stack.deinit(n.gpa);
+        try stack.append(n.gpa, oid);
+        while (stack.pop()) |current| {
+            const node = n.nodes.getPtr(current).?;
+            if (!node.popped) n.non_common -= 1;
+            if (!node.loaded) continue;
+            for (node.parents) |parent| {
+                const p = n.nodes.getPtr(parent) orelse continue;
+                if (!p.seen or p.common) continue;
+                p.common = true;
+                try stack.append(n.gpa, parent);
+            }
         }
     }
 
     /// The server has `oid`. Returns whether it was already known to be
     /// common.
     fn ack(n: *Negotiator, oid: Oid) NegotiateError!bool {
+        if (n.algorithm == .noop) return false;
         const found = (try n.load(oid)) orelse return false;
         const known = found.node.common;
-        n.setCommon(found.node);
-        // Everything below it the walk has already reached is common too;
-        // what it has not reached yet is marked as it is taken.
-        var stack: std.ArrayList(Oid) = .empty;
-        defer stack.deinit(n.gpa);
-        try stack.append(n.gpa, found.oid);
-        while (stack.pop()) |current| {
-            const node = n.nodes.getPtr(current) orelse continue;
-            if (!node.seen) continue;
-            for (node.parents) |parent| {
-                const parent_node = n.nodes.getPtr(parent) orelse continue;
-                if (parent_node.common) continue;
-                n.setCommon(parent_node);
-                try stack.append(n.gpa, parent);
-            }
+        switch (n.algorithm) {
+            .noop => {},
+            .skipping => try n.markCommonSkipping(found.oid),
+            .consecutive => try n.markCommon(found.oid, .{ .ancestors_only = false, .dont_parse = true }),
         }
         return known;
+    }
+
+    /// git's `have_sent`: `oid`, offered whatever the negotiator chose,
+    /// is taken as common, and what is below it with it. Whether it is a
+    /// commit, which is all a v2 request offers.
+    fn haveSent(n: *Negotiator, oid: Oid) NegotiateError!bool {
+        const found = (try n.load(oid)) orelse return false;
+        switch (n.algorithm) {
+            .noop => {},
+            .skipping => try n.markCommonSkipping(found.oid),
+            .consecutive => try n.markCommon(found.oid, .{ .ancestors_only = false, .dont_parse = false }),
+        }
+        return true;
     }
 };
 

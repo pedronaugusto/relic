@@ -92,6 +92,9 @@ pub const Warning = union(enum) {
     /// `core.alternateRefsCommand` printed a line that is not an object's
     /// name, and what it printed after was not read: the line.
     alternate_refs_line: []const u8,
+    /// A negotiation tip's pattern matched no ref, and was ignored: the
+    /// setting or option it came from, and the pattern.
+    negotiation_tip_unmatched: struct { from: []const u8, pattern: []const u8 },
     /// What git warns of while reading which notes follow a rewritten
     /// commit: a `notes.rewriteRef` outside `refs/notes/`, or naming no
     /// ref. The text.
@@ -126,6 +129,7 @@ pub const Warning = union(enum) {
             .verify_signatures_ignored_for_rebase => "ignoring --verify-signatures for rebase",
             .push_cert_not_asked => "not sending a push certificate since the receiving end does not support --signed push",
             .alternate_refs_line => |text| arena.print("invalid line while parsing alternate refs: {s}", .{text}),
+            .negotiation_tip_unmatched => |t| arena.print("ignoring {s}={s} because it does not match any refs", .{ t.from, t.pattern }),
             .http_version_unknown => |v| arena.print("unknown value given to http.version: '{s}'", .{v}),
             .ssl_version_unknown => |v| arena.print("unsupported ssl version {s}: using default", .{v}),
             .bundle_uri_clone_failed => |v| arena.print("failed to fetch objects from bundle URI '{s}'", .{v}),
@@ -181,6 +185,7 @@ pub const Warnings = struct {
             .verify_signatures_ignored_for_rebase => .verify_signatures_ignored_for_rebase,
             .push_cert_not_asked => .push_cert_not_asked,
             .alternate_refs_line => |t| .{ .alternate_refs_line = try a.dupe(u8, t) },
+            .negotiation_tip_unmatched => |t| .{ .negotiation_tip_unmatched = .{ .from = try a.dupe(u8, t.from), .pattern = try a.dupe(u8, t.pattern) } },
             .http_version_unknown => |t| .{ .http_version_unknown = try a.dupe(u8, t) },
             .ssl_version_unknown => |t| .{ .ssl_version_unknown = try a.dupe(u8, t) },
             .bundle_uri_clone_failed => |t| .{ .bundle_uri_clone_failed = try a.dupe(u8, t) },

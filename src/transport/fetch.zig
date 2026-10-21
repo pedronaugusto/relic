@@ -25,6 +25,7 @@ const std = @import("std");
 const gitdate = @import("../text.zig").date;
 const httpsettings_mod = @import("../wire.zig").http_settings;
 const keep_mod = @import("../odb/keep.zig");
+const odb_mod = @import("../odb/odb.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -37,6 +38,8 @@ const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
 const rev_walk = @import("../walk/walk.zig");
 const fetch_pack = @import("../wire.zig").fetch_pack;
+const glob = @import("../text.zig").glob;
+const rev_parse = @import("../rev_walk/rev_parse.zig");
 const shallow_mod = @import("../walk/shallow.zig");
 const rev_index = @import("../odb/rev_index.zig");
 const partial = @import("partial.zig");
@@ -86,6 +89,12 @@ pub const Error = error{
     /// An object below a fetched ref is not in the repository after the
     /// pack arrived. `Outcome` is not returned; `Options.missing` names it.
     MissingObject,
+    /// A negotiation tip names an object this repository does not have:
+    /// git's "the object <name> does not exist".
+    NegotiationTipMissing,
+    /// `fetch.negotiationAlgorithm` names none git knows: git's "unknown
+    /// fetch negotiation algorithm".
+    UnknownNegotiationAlgorithm,
 } || alternate_refs.Error || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || fsck.LoadError || config_mod.Config.SetError ||
     rev_walk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
@@ -141,6 +150,15 @@ pub const Options = struct {
     /// `.git/shallow`. Without it those refs are left, and each is a
     /// warning, as git leaves and warns.
     update_shallow: bool = false,
+    /// `--negotiation-restrict`: the only refs (a name, or a pattern
+    /// over every ref) whose history a fetch offers as haves; `null` takes
+    /// `remote.<name>.negotiationRestrict`, and none of either offers
+    /// every ref's.
+    negotiation_restrict: ?[]const []const u8 = null,
+    /// `--negotiation-include`: refs whose objects are offered whatever
+    /// the negotiator chooses; `null` takes
+    /// `remote.<name>.negotiationInclude`.
+    negotiation_include: ?[]const []const u8 = null,
     /// `--server-option`s, sent with every protocol v2 request; `null`
     /// takes `remote.<name>.serverOption`, as git does.
     server_options: ?[]const []const u8 = null,
@@ -407,6 +425,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .checks = checks,
         .promisor = promisor,
         .options = options,
+        .remote = &remote,
     });
     defer brought.deinit(io);
     const backfill = brought.backfill;
@@ -441,6 +460,7 @@ const Bringing = struct {
     checks: ?*const fsck.Rules,
     promisor: bool,
     options: Options,
+    remote: *const remote_mod.Remote,
 };
 
 /// One pack a fetch brought: its name, if one came, how many objects, and
@@ -526,7 +546,16 @@ fn bringObjects(
     // Deepening asks again for what is here: its history is what is
     // wanted.
     const wants = try wantsInOrder(arena, io, repo, b.remote_refs, b.map, b.deepen != null);
-    const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, b.remote_refs, b.options);
+    const restrict = try resolveTips(arena, gpa, io, repo, b.options.negotiation_restrict orelse b.remote.negotiation_restrict, "--negotiation-restrict", b.options.warnings);
+    // git's v0 takes what is common from every ref the server advertised,
+    // v2 from those `ls-refs` listed.
+    var advertised: ?protocol.RefList = if (session.protocolVersion()) |v| switch (v) {
+        .v0, .v1 => try session.listRefs(gpa, io, &.{}),
+        .v2 => null,
+    } else null;
+    defer if (advertised) |*list| list.deinit();
+    const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, if (advertised) |list| list.refs else b.remote_refs, b.options, .{ .restrict = restrict, .deepen = b.deepen != null });
+    const include = try resolveTips(arena, gpa, io, repo, b.options.negotiation_include orelse b.remote.negotiation_include, "--negotiation-include", b.options.warnings);
 
     var pack_dir = try repo.objectDatabase().openPackDirectory(io);
     defer pack_dir.close(io);
@@ -546,6 +575,8 @@ fn bringObjects(
         .deepen = b.deepen,
         .shallow = boundary,
         .filter = b.filter,
+        .negotiation = try negotiationAlgorithm(repo.configuration()),
+        .include_haves = include orelse &.{},
     } }, .{
         .warnings = b.options.warnings,
         .progress = b.options.progress,
@@ -951,31 +982,162 @@ fn pruneStale(
 /// and those of them the server also advertised.
 const Tips = struct { ours: []const Oid, common: []const Oid };
 
-fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, local_refs: []const refs_mod.Named, remote_refs: []const protocol.RemoteRef, options: Options) Error!Tips {
+/// git's `fetch.negotiationAlgorithm`, `feature.experimental` making
+/// `skipping` the default, as `prepare_repo_settings` reads them.
+fn negotiationAlgorithm(config: *const config_mod.Config) Error!fetch_pack.Negotiation {
+    const experimental = config.getBool("feature.experimental", false) catch false;
+    const default: fetch_pack.Negotiation = if (experimental) .skipping else .consecutive;
+    const text = config.get("fetch.negotiationalgorithm") orelse return default;
+    for ([_]fetch_pack.Negotiation{ .skipping, .noop, .consecutive }) |algorithm| {
+        if (std.ascii.eqlIgnoreCase(text, @tagName(algorithm))) return algorithm;
+    }
+    if (std.ascii.eqlIgnoreCase(text, "default")) return default;
+    return error.UnknownNegotiationAlgorithm;
+}
+
+/// git's `add_negotiation_tips`: each name's object (a name that names
+/// nothing passed over), or every ref a pattern matches -- under `refs/`
+/// unless it starts there, `*` crossing `/` -- with git's warning for a
+/// pattern that matches none. `null` for no names.
+fn resolveTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, names: []const []const u8, from: []const u8, warnings: ?*warning.Warnings) Error!?[]const Oid {
+    if (names.len == 0) return null;
+    var oids: std.ArrayList(Oid) = .empty;
+    var listing: ?refs_mod.Store.Listing = null;
+    defer if (listing) |*l| l.deinit();
+    for (names) |name| {
+        const glob_like = for (name) |c| {
+            if (glob.isSpecial(c)) break true;
+        } else false;
+        if (!glob_like) {
+            const oid = rev_parse.resolve(gpa, io, repo, name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => continue,
+            };
+            if (!try repo.objectDatabase().exists(io, oid)) return error.NegotiationTipMissing;
+            try oids.append(arena, oid);
+            continue;
+        }
+        if (listing == null) listing = try repo.refStore().list(gpa, io, "refs/");
+        const pattern = if (std.mem.startsWith(u8, name, "refs/")) name else try arena.print("refs/{s}", .{name});
+        const before = oids.items.len;
+        for (listing.?.entries) |entry| {
+            if (!try glob.matches(gpa, pattern, entry.name, .{ .pathname = false })) continue;
+            const oid = switch (entry.target) {
+                .direct => |oid| oid,
+                .symbolic => (try repo.refStore().readOid(arena, io, entry.name)) orelse continue,
+            };
+            try oids.append(arena, oid);
+        }
+        if (oids.items.len == before) try warning.note(warnings, .{ .negotiation_tip_unmatched = .{ .from = from, .pattern = name } });
+    }
+    return oids.items;
+}
+
+/// Where the haves start: every ref's tip and `HEAD`, or the
+/// `restrict`ed tips alone, and the alternates' refs either way; and the
+/// remote's refs this repository has, offered first.
+fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, local_refs: []const refs_mod.Named, remote_refs: []const protocol.RemoteRef, options: Options, how: struct { restrict: ?[]const Oid, deepen: bool }) Error!Tips {
     var tips: std.ArrayList(Oid) = .empty;
-    var common: std.ArrayList(Oid) = .empty;
     for (local_refs) |entry| switch (entry.target) {
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => {},
     };
+    const refs_end = tips.items.len;
     if (try repo.refStore().read(gpa, io, "HEAD")) |head| switch (head) {
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => |target| gpa.free(target),
     };
     const borrowed = try alternate_refs.read(gpa, io, repo, options.programs, options.warnings);
     defer gpa.free(borrowed);
+    var alternates: usize = 0;
     for (borrowed) |oid| {
         // Only what is here to be had: an object an alternate's ref names
         // and no longer has is passed over, as git parses it first.
-        if (try repo.objectDatabase().exists(io, oid)) try tips.append(arena, oid);
+        if (!try repo.objectDatabase().exists(io, oid)) continue;
+        try tips.append(arena, oid);
+        alternates += 1;
     }
-    var tip_set: Oid.Set = .empty;
-    defer tip_set.deinit(gpa);
-    for (tips.items) |tip| try tip_set.put(gpa, tip, {});
+    // What is complete here: the refs' history, and the alternates'.
+    var complete_from: std.ArrayList(Oid) = .empty;
+    try complete_from.appendSlice(arena, tips.items[0..refs_end]);
+    try complete_from.appendSlice(arena, tips.items[tips.items.len - alternates ..]);
+    const common = if (how.deepen) &.{} else try knownCommon(arena, gpa, io, repo, complete_from.items, remote_refs);
+    // git's `mark_tips`: the restricted tips in place of the refs, the
+    // alternates' as before.
+    if (how.restrict) |only| {
+        var ours: std.ArrayList(Oid) = .empty;
+        try ours.appendSlice(arena, only);
+        try ours.appendSlice(arena, tips.items[tips.items.len - alternates ..]);
+        return .{ .ours = ours.items, .common = common };
+    }
+    return .{ .ours = tips.items, .common = common };
+}
+
+/// git's `mark_complete_and_common_ref`: the commits complete here -- the
+/// refs' and the alternates' tips, and their history back to the newest
+/// date among the remote's refs this repository has -- and of the remote's
+/// refs, in its order, those whose commit is one of them: what the
+/// negotiation takes the server to have.
+fn knownCommon(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, from: []const Oid, remote_refs: []const protocol.RemoteRef) Error![]const Oid {
+    const db = repo.objectDatabase();
+    var cutoff: ?i64 = null;
     for (remote_refs) |ref| {
-        if (tip_set.contains(ref.oid)) try common.append(arena, ref.oid);
+        if (!try db.exists(io, ref.oid)) continue;
+        if ((try db.readHeader(io, ref.oid)).type != .commit) continue;
+        const when = (try readCommit(arena, gpa, io, db, ref.oid)).time;
+        if (cutoff == null or cutoff.? < when) cutoff = when;
     }
-    return .{ .ours = tips.items, .common = common.items };
+    const Item = struct {
+        time: i64,
+        order: u64,
+        oid: Oid,
+        fn newerFirst(_: void, a: @This(), b: @This()) std.math.Order {
+            if (a.time != b.time) return std.math.order(b.time, a.time);
+            return std.math.order(a.order, b.order);
+        }
+    };
+    var queue: std.PriorityQueue(Item, void, Item.newerFirst) = .empty;
+    defer queue.deinit(gpa);
+    var complete: Oid.Map([]const Oid) = .empty;
+    defer complete.deinit(gpa);
+    var order: u64 = 0;
+    for (from) |tip| {
+        const oid = commitOf(io, repo, tip) orelse continue;
+        if (complete.contains(oid)) continue;
+        const c = try readCommit(arena, gpa, io, db, oid);
+        try complete.put(gpa, oid, c.parents);
+        try queue.push(gpa, .{ .time = c.time, .order = order, .oid = oid });
+        order += 1;
+    }
+    // `mark_recent_complete_commits`: the most recent first, to the cutoff.
+    if (cutoff) |cut| if (cut != 0) while (queue.peek()) |item| {
+        if (item.time < cut) break;
+        _ = queue.pop();
+        for (complete.get(item.oid).?) |parent| {
+            if (complete.contains(parent) or !try db.exists(io, parent)) continue;
+            const c = try readCommit(arena, gpa, io, db, parent);
+            try complete.put(gpa, parent, c.parents);
+            try queue.push(gpa, .{ .time = c.time, .order = order, .oid = parent });
+            order += 1;
+        }
+    };
+    var common: std.ArrayList(Oid) = .empty;
+    for (remote_refs) |ref| {
+        const oid = commitOf(io, repo, ref.oid) orelse continue;
+        if (complete.contains(oid)) try common.append(arena, oid);
+    }
+    return common.items;
+}
+
+/// A commit's date and parents (as the shallow boundary and grafts give
+/// them), the parents `arena`'s.
+fn readCommit(arena: Allocator, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error!struct { time: i64, parents: []const Oid } {
+    const found = try db.read(io, oid);
+    defer db.allocator().free(found.bytes);
+    var commit = try object.Commit.parse(gpa, db.objectFormat(), found.bytes);
+    defer commit.deinit();
+    return .{ .time = commit.committer.when_secs, .parents = try arena.dupe(Oid, rev_walk.parentsOf(db, oid, commit.parents)) };
 }
 
 /// How a fetched pack is received: checked by `checks`, its missing
