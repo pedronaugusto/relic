@@ -724,3 +724,24 @@ test "a push kept waiting hears a keepalive every receive.keepAlive seconds, as 
     try testing.expectEqual(@as(usize, 0), try p.keepalives(p.theirs, false, &.{"main:refs/heads/again"}));
     try testing.expectEqual(@as(usize, 0), try p.keepalives(p.ours, true, &.{"main:refs/heads/again2"}));
 }
+
+test "receive.updateServerInfo writes the dumb HTTP files after a push, as git's receive-pack does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{ .{ "receive.updateServerInfo", "true" }, .{ "receive.unpackLimit", "1" } });
+    defer p.deinit();
+    try p.both(&.{ "main~1:refs/heads/main", "v1" });
+    try p.both(&.{ "main:refs/heads/main", "main:refs/heads/side" });
+    var files: [2][2][]u8 = undefined;
+    for ([_][]const u8{ p.theirs, p.ours }, 0..) |target, i| {
+        var dir = try Io.Dir.cwd().openDir(io, target, .{});
+        defer dir.close(io);
+        files[i][0] = try dir.readFileAlloc(io, "info/refs", gpa, .unlimited);
+        files[i][1] = try dir.readFileAlloc(io, "objects/info/packs", gpa, .unlimited);
+    }
+    defer for (files) |pair| for (pair) |text| gpa.free(text);
+    try testing.expectEqualStrings(files[0][0], files[1][0]);
+    // The same packs, by number: their names are each repository's own.
+    try testing.expectEqual(std.mem.count(u8, files[0][1], "P pack-"), std.mem.count(u8, files[1][1], "P pack-"));
+    try testing.expect(std.mem.count(u8, files[1][1], "P pack-") >= 1);
+}

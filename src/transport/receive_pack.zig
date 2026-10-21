@@ -62,6 +62,7 @@ const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const decimal = @import("../text.zig").decimal;
 const progress_mod = @import("../report.zig").progress;
+const server_info = @import("../maintenance/server_info.zig");
 const checkout = @import("../checkout/checkout.zig");
 const three_way = @import("../merge/three_way.zig");
 const signing = @import("../object/signing.zig");
@@ -136,6 +137,9 @@ const Settings = struct {
     /// `receive.keepAlive`: the seconds of quiet after which a keepalive
     /// is sent on the side band; zero or less sends none.
     keepalive_secs: i64,
+    /// `receive.updateServerInfo`: the dumb HTTP files written again after
+    /// every push.
+    update_server_info: bool,
     /// `receive.unpackLimit`, else `transfer.unpackLimit`, else git's 100:
     /// a pack of fewer objects is stored loose.
     unpack_limit: u64,
@@ -155,6 +159,7 @@ const Settings = struct {
             .cert_nonce_seed = config.get("receive.certnonceseed"),
             .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
             .keepalive_secs = config.getInt("receive.keepalive", 5) catch 5,
+            .update_server_info = config.getBool("receive.updateserverinfo", false) catch false,
             .unpack_limit = limit: {
                 for ([_][]const u8{ "receive.unpacklimit", "transfer.unpacklimit" }) |key| {
                     const value = config.getInt(key, -1) catch -1;
@@ -466,6 +471,15 @@ pub const Server = struct {
         try s.report(commands, unpack_status);
         _ = try s.runReceiveHook(arena, "post-receive", commands, true, push_options.items, null);
         try s.runPostUpdate(arena, commands);
+        if (s.settings.update_server_info) {
+            // As git's: what it comes to is not the push's to answer for.
+            server_info.updateServerInfo(s.gpa, s.io, &s.remote.repo) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                // git ignores what update_server_info returns after a push
+                else => {},
+            };
+        }
         if (keeper) |*task| {
             task.cancel(s.io);
             keeper = null;
