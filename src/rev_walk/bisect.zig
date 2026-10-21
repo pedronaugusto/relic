@@ -949,7 +949,7 @@ fn switchTo(c: *Ctx, target: Oid, branch: ?[]const u8, given: []const u8) Error!
     defer locked_index.deinit(c.io);
     const index = &locked_index.index;
     const from_tree = if (h.oid) |oid| try c.repo.commitTree(c.io, oid) else try c.repo.objectDatabase().write(c.io, .tree, "");
-    var outcome = try three_way.apply(c.gpa, c.io, c.repo, .{ .index = index, .base = from_tree, .ours = from_tree, .theirs = try c.repo.commitTree(c.io, target) }, .{ .blocked = c.options.blocked });
+    var outcome = try three_way.fastForward(c.gpa, c.io, c.repo, .{ .index = index, .old = from_tree, .new = try c.repo.commitTree(c.io, target) }, .{ .blocked = c.options.blocked });
     outcome.deinit();
     try locked_index.commit(c.io);
     const msg = try c.a.print("checkout: moving from {s} to {s}", .{ old_desc, given });

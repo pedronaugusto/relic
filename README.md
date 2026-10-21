@@ -645,6 +645,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `rev_walk` | `Walk` and `Walk.count`, `mergeBase`, `mergeBases`, `mergeBasesMany`, `isAncestor`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary, and history simplified by paths (`Walk.paths`) as git simplifies it by default. |
 | `rev_walk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found`, terms and pathspecs. |
 | `rev_walk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
+| `rev_walk.fork_point` | `forkPoint` — `git merge-base --fork-point`: where a branch forked from a ref, through the ref's log. |
 | `rev_walk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
 | `rev_walk.rev_parse` | git's revision grammar, `@{<date>}` with git's approximate dates included. |
 | `rev_walk.shallow` | A shallow repository's boundary: `.git/shallow`. |
@@ -682,6 +683,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `transport.push` | Module within `transport`. |
 | `transport.clone` | Module within `transport`. |
 | `transport.fetch` | Module within `transport`. |
+| `transport.pull` | `pull` — `git pull`: the fetch, then a fast-forward, a merge of `FETCH_HEAD` or a rebase from the fork point, as `pull.ff`, `pull.rebase` and `branch.<name>.rebase` say. |
 | `transport.refspec` | Module within `transport`. |
 | `transport.remote` | Module within `transport`. |
 | `transport.url` | Module within `transport`. |

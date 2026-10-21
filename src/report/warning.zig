@@ -90,6 +90,12 @@ pub const Warning = union(enum) {
     /// commit: a `notes.rewriteRef` outside `refs/notes/`, or naming no
     /// ref. The text.
     notes: []const u8,
+    /// A pull's fetch moved the branch checked out, and the working tree
+    /// was brought along from the commit it was at: its name.
+    pull_moved_head: []const u8,
+    /// A pull that rebases was asked to verify signatures, which only a
+    /// merge does.
+    verify_signatures_ignored_for_rebase,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -110,6 +116,8 @@ pub const Warning = union(enum) {
             .credentials_in_url => |redacted| arena.print("URL '{s}' uses plaintext credentials", .{redacted}),
             .remote_helper => |text| text,
             .notes => |text| text,
+            .pull_moved_head => |hex| arena.print("fetch updated the current branch head.\nfast-forwarding your working tree from\ncommit {s}.", .{hex}),
+            .verify_signatures_ignored_for_rebase => "ignoring --verify-signatures for rebase",
             .http_version_unknown => |v| arena.print("unknown value given to http.version: '{s}'", .{v}),
             .ssl_version_unknown => |v| arena.print("unsupported ssl version {s}: using default", .{v}),
             .bundle_uri_clone_failed => |v| arena.print("failed to fetch objects from bundle URI '{s}'", .{v}),
@@ -161,6 +169,8 @@ pub const Warnings = struct {
             .credentials_in_url => |t| .{ .credentials_in_url = try a.dupe(u8, t) },
             .remote_helper => |t| .{ .remote_helper = try a.dupe(u8, t) },
             .notes => |t| .{ .notes = try a.dupe(u8, t) },
+            .pull_moved_head => |t| .{ .pull_moved_head = try a.dupe(u8, t) },
+            .verify_signatures_ignored_for_rebase => .verify_signatures_ignored_for_rebase,
             .http_version_unknown => |t| .{ .http_version_unknown = try a.dupe(u8, t) },
             .ssl_version_unknown => |t| .{ .ssl_version_unknown = try a.dupe(u8, t) },
             .bundle_uri_clone_failed => |t| .{ .bundle_uri_clone_failed = try a.dupe(u8, t) },

@@ -545,7 +545,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         const ff = if (parent) |p| (head.oid != null and p.eql(head.oid.?)) else head.oid == null;
         if (ff) {
             const their_tree = commit.tree;
-            var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = head_tree, .ours = head_tree, .theirs = their_tree }, .{ .blocked = r.options.blocked });
+            var outcome = try three_way.fastForward(gpa, io, repo, .{ .index = index, .old = head_tree, .new = their_tree }, .{ .blocked = r.options.blocked });
             defer outcome.deinit();
             try locked_index.commit(io);
             const log = try arena.print("{s}: fast-forward", .{r.action.name()});

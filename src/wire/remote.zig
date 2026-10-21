@@ -253,24 +253,38 @@ pub const Branch = struct {
         return branch;
     }
 
-    /// The remote a fetch on this branch uses: `branch.<name>.remote`, else
-    /// `origin`.
-    pub fn fetchRemote(branch: *const Branch) []const u8 {
-        return branch.remote orelse "origin";
+    /// The remote a fetch on this branch uses, git's `remote_for_branch`:
+    /// `branch.<name>.remote`, else `fallback`. `config` must be the one
+    /// the branch was read from; the result borrows it or the branch.
+    pub fn fetchRemote(branch: *const Branch, config: *const Config) []const u8 {
+        return branch.remote orelse fallback(config);
     }
 
     /// The remote a push from this branch uses: `branch.<name>.pushRemote`,
-    /// else `remote.pushDefault`, else `branch.<name>.remote`, else
-    /// `origin`. `config` must be the one the branch was read from; the
-    /// result borrows it or the branch.
+    /// else `remote.pushDefault`, else `fetchRemote`. `config` must be the
+    /// one the branch was read from; the result borrows it or the branch.
     pub fn pushRemote(branch: *const Branch, config: *const Config) []const u8 {
         if (branch.push_remote) |name| return name;
         if (config.get("remote.pushdefault")) |name| {
             if (name.len != 0) return name;
         }
-        return branch.remote orelse "origin";
+        return branch.fetchRemote(config);
     }
 };
+
+/// The remote of a detached `HEAD`, or of a branch that names none: the
+/// only remote configured when there is just one, else `origin`, as git's
+/// `remote_for_branch` falls back. The name borrows `config`.
+pub fn fallback(config: *const Config) []const u8 {
+    var only: ?[]const u8 = null;
+    for (config.entries.items) |entry| {
+        if (!std.ascii.eqlIgnoreCase(entry.section, "remote") or entry.subsection.len == 0) continue;
+        if (only) |name| {
+            if (!std.mem.eql(u8, name, entry.subsection)) return "origin";
+        } else only = entry.subsection;
+    }
+    return only orelse "origin";
+}
 
 fn valueOf(arena: Allocator, config: *const Config, key: []const u8) Error!?[]const u8 {
     const value = config.get(key) orelse return null;
@@ -429,7 +443,7 @@ test "branch settings choose the fetch and push remotes in git's order" {
     defer config.deinit();
     var main = try Branch.get(gpa, &config, "main");
     defer main.deinit();
-    try testing.expectEqualStrings("upstream", main.fetchRemote());
+    try testing.expectEqualStrings("upstream", main.fetchRemote(&config));
     try testing.expectEqualStrings("mine", main.pushRemote(&config));
     try testing.expectEqualStrings("refs/heads/main", main.merge[0]);
     var topic = try Branch.get(gpa, &config, "topic");
@@ -437,7 +451,7 @@ test "branch settings choose the fetch and push remotes in git's order" {
     try testing.expectEqualStrings("fork", topic.pushRemote(&config));
     var none = try Branch.get(gpa, &config, "none");
     defer none.deinit();
-    try testing.expectEqualStrings("origin", none.fetchRemote());
+    try testing.expectEqualStrings("origin", none.fetchRemote(&config));
 }
 
 test "URL rewriting agrees with git ls-remote --get-url, for fetch and for push" {

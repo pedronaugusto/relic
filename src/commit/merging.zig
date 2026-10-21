@@ -80,8 +80,11 @@ pub const Error = error{
     UnrelatedHistories,
     /// `--ff-only` was asked for and the merge is not a fast-forward.
     NotFastForward,
-    /// The name given does not name a commit.
+    /// The name given does not name a commit, or a line of `FETCH_HEAD`
+    /// marked for merging does not.
     NotACommit,
+    /// There is no `FETCH_HEAD` to merge.
+    NoFetchHead,
     /// A commit to merge has no signature, or one that is not good:
     /// `--verify-signatures`. `Options.unverified` names it.
     MissingSignature,
@@ -122,16 +125,84 @@ pub const Error = error{
 pub const FastForward = enum { allow, never, only };
 
 /// What the merged commit is, which decides the words the message uses.
-pub const Kind = enum { branch, remote_branch, tag, commit };
+pub const Kind = enum {
+    branch,
+    remote_branch,
+    tag,
+    commit,
+    /// A remote's `HEAD`, which the message names by the remote alone.
+    remote_head,
+    /// Another ref of a remote, which the message lists among commits.
+    remote_ref,
+};
 
 /// A commit to merge and the name it was asked for by.
 pub const Target = struct {
     oid: Oid,
     /// As the person typed it: `topic`, `origin/main`, a hex name. The
-    /// message quotes it and the reflog names it. Borrowed.
+    /// message quotes it, the reflog names it and its side of a conflict
+    /// is labelled with it. Borrowed.
     name: []const u8,
     kind: Kind,
+    /// Where it came from, as `FETCH_HEAD` says: `.` for this repository,
+    /// or the URL of the remote it was fetched from. Borrowed.
+    source: []const u8 = ".",
+    /// The words the message names it with, as `FETCH_HEAD` has them --
+    /// `'main'` of `branch 'main' of <url>` -- when they are not `name`
+    /// quoted. Borrowed.
+    what: ?[]const u8 = null,
 };
+
+/// What `fetchHead` reads into.
+pub const FetchHeadOptions = struct { arena: Allocator };
+
+/// What `git merge FETCH_HEAD` merges, git's `handle_fetch_head`: every
+/// line of `FETCH_HEAD` marked for merging, in order, each named by its
+/// object's full name and described as the line describes it. A line that
+/// is not one, or names no commit, is `error.NotACommit`; no `FETCH_HEAD`
+/// is `error.NoFetchHead`. Everything lives in `options.arena`.
+pub fn fetchHead(io: Io, repo: *Repository, options: FetchHeadOptions) Self.Error![]const Target {
+    const arena = options.arena;
+    const text = (try repo.refStore().special().readAll(arena, io, .fetch_head)) orelse return error.NoFetchHead;
+    const hex_len = repo.objectFormat().hexLen();
+    var out: std.ArrayList(Target) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (lines.index == null and line.len == 0) break;
+        if (line.len < hex_len + 2) return error.NotACommit;
+        const oid = Oid.parse(repo.objectFormat(), line[0..hex_len]) catch return error.NotACommit;
+        if (!std.mem.eql(u8, line[hex_len .. hex_len + 2], "\t\t")) continue;
+        var target = try describedTarget(line[hex_len + 2 ..]);
+        target.name = line[0..hex_len];
+        try out.append(arena, try targetOf(io, repo, oid, target));
+    }
+    return out.items;
+}
+
+/// A `FETCH_HEAD` description read as `fmt-merge-msg`'s `handle_line`
+/// reads it: `<kind> <what> of <source>`, or a remote's `HEAD` named by
+/// the source alone.
+fn describedTarget(description: []const u8) Error!Target {
+    var target: Target = .{ .oid = undefined, .name = undefined, .kind = .remote_head, .source = description };
+    const at = std.mem.find(u8, description, " of ") orelse return target;
+    const item = description[0..at];
+    target.source = description[at + 4 ..];
+    const kinds = [_]struct { prefix: []const u8, kind: Kind }{
+        .{ .prefix = "branch ", .kind = .branch },
+        .{ .prefix = "tag ", .kind = .tag },
+        .{ .prefix = "remote-tracking branch ", .kind = .remote_branch },
+    };
+    for (kinds) |k| {
+        if (std.mem.startsWith(u8, item, k.prefix)) {
+            target.kind = k.kind;
+            target.what = item[k.prefix.len..];
+            return target;
+        }
+    }
+    target.kind = .remote_ref;
+    target.what = item;
+    return target;
+}
 
 /// Find what `name` means the way `git merge <name>` does: a full ref, then
 /// `refs/<name>`, `refs/tags/<name>`, `refs/heads/<name>`,
@@ -153,12 +224,12 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self
                     .remote_branch
                 else
                     .commit;
-                return targetOf(io, repo, resolved.oid, name, kind);
+                return targetOf(io, repo, resolved.oid, .{ .oid = undefined, .name = name, .kind = kind });
             }
         }
     }
     const oid = repo.objectDatabase().findPrefix(io, name) catch return error.NotACommit;
-    return targetOf(io, repo, oid, name, .commit);
+    return targetOf(io, repo, oid, .{ .oid = undefined, .name = name, .kind = .commit });
 }
 
 /// What `git merge` with no commit merges: the upstreams of the current
@@ -201,15 +272,17 @@ pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, options: UpstreamOpt
             .remote_branch
         else
             .commit;
-        target.* = try targetOf(io, repo, resolved.oid, name, kind);
+        target.* = try targetOf(io, repo, resolved.oid, .{ .oid = undefined, .name = name, .kind = kind });
     }
     return out;
 }
 
-fn targetOf(io: Io, repo: *Repository, oid: Oid, name: []const u8, kind: Kind) Error!Target {
+fn targetOf(io: Io, repo: *Repository, oid: Oid, described: Target) Error!Target {
     const header = try repo.objectDatabase().readHeader(io, oid);
+    var target = described;
+    target.oid = oid;
     switch (header.type) {
-        .commit => return .{ .oid = oid, .name = name, .kind = kind },
+        .commit => return target,
         .tag => return error.AnnotatedTag,
         else => return error.NotACommit,
     }
@@ -279,6 +352,10 @@ pub const Options = struct {
     /// Where a refused signature check writes the commit and who its
     /// signature claims to be by.
     unverified: ?*Unverified = null,
+    /// The text before `: <what happened>` in the reflog: git's
+    /// `GIT_REFLOG_ACTION`, which `git pull` sets. `null` writes `merge`
+    /// and the names merged.
+    reflog_action: ?[]const u8 = null,
 };
 
 /// A commit whose signature a merge refused, and who the signature claims
@@ -426,7 +503,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         try action.append(arena, ' ');
         try action.appendSlice(arena, target.name);
     }
-    const reflog_action = action.items;
+    const reflog_action = options.reflog_action orelse action.items;
     // git makes the message with the targets it merges, before anything
     // else: a list `merge.log` asks for is read now, and fails now. A single
     // target `HEAD` already has is no target, as git's `reduce_parents`
@@ -476,13 +553,24 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     return out;
 }
 
-/// git's `verify_merge_signature` for each commit to merge, when asked: a
+/// `verifySignatures` for a caller that merges by other means, as `git
+/// pull` checks the commit an unborn branch takes: each of `heads` refused
+/// as a merge would refuse it, when `options.verify_signatures` is `true`.
+/// `merge.verifySignatures` is not read.
+pub fn verify(gpa: Allocator, io: Io, repo: *Repository, heads: []const Target, options: Options) Self.Error!void {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    _ = try verifySignatures(gpa, arena_instance.allocator(), io, repo, heads, options);
+}
+
+/// git's `verify_merge_signature` for each commit to merge, when
+/// `options.verify_signatures` asks: a
 /// good signature from a trusted key, or the merge is refused. The trust is
 /// git's own check, marginal at least, only when `gpg.minTrustLevel` is not
 /// set; when it is, the signature's check against it decides. What was
 /// verified lives in `arena`.
 fn verifySignatures(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, heads: []const Target, options: Options) Error![]const Verified {
-    if (!options.verify_signatures.?) return &.{};
+    if (!(options.verify_signatures orelse false)) return &.{};
     const programs = options.signing.programs orelse return error.SigningRequiresPrograms;
     var signer = try signing_mod.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), programs);
     defer signer.deinit();
@@ -557,7 +645,7 @@ fn mergeOne(gpa: Allocator, io: Io, repo: *Repository, arena_instance: *std.heap
     const their_tree = try repo.commitTree(io, target.oid);
 
     if (one.forward) {
-        var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = our_tree, .ours = our_tree, .theirs = their_tree }, .{ .blocked = options.blocked });
+        var outcome = try three_way.fastForward(gpa, io, repo, .{ .index = index, .old = our_tree, .new = their_tree }, .{ .blocked = options.blocked });
         defer outcome.deinit();
         try locked_index.commit(io);
         const log_message = try arena.print("{s}: Fast-forward", .{one.reflog_action});
@@ -1114,13 +1202,7 @@ fn mergeMessage(arena: Allocator, io: Io, repo: *Repository, inputs: MessageInpu
 /// rest.
 fn shortlog(arena: Allocator, io: Io, repo: *Repository, out: *std.ArrayList(u8), target: Target, inputs: MessageInputs) Error!void {
     const limit = inputs.settings.log;
-    // The name `handle_line` gives the origin: a ref by its name, a tag
-    // and a commit as the title says them.
-    const name = switch (target.kind) {
-        .branch, .remote_branch => target.name,
-        .tag => try arena.print("tag '{s}'", .{target.name}),
-        .commit => try arena.print("commit '{s}'", .{target.name}),
-    };
+    const name = try originName(arena, target);
     var walk: rev_walk.Walk = .init(repo.allocator(), repo.objectDatabase());
     defer walk.deinit();
     try walk.push(target.oid);
@@ -1141,7 +1223,7 @@ fn shortlog(arena: Allocator, io: Io, repo: *Repository, out: *std.ArrayList(u8)
         try out.print(arena, "\n* {s}: ({d} commits)\n", .{ name, count })
     else
         try out.print(arena, "\n* {s}:\n", .{name});
-    if (target.kind == .branch and inputs.settings.branch_description) try branchDescription(arena, repo, out, target.name);
+    if (target.kind == .branch and std.mem.eql(u8, target.source, ".") and inputs.settings.branch_description) try branchDescription(arena, repo, out, target.name);
     for (subjects.items, 0..) |subject, i| {
         if (i >= limit) try out.appendSlice(arena, "  ...\n") else try out.print(arena, "  {s}\n", .{subject});
     }
@@ -1164,12 +1246,59 @@ fn branchDescription(arena: Allocator, repo: *Repository, out: *std.ArrayList(u8
     if (out.items[out.items.len - 1] != '\n') try out.append(arena, '\n');
 }
 
-/// `git fmt-merge-msg`'s title: `Merge branch 'topic'`, and ` into <branch>`
-/// unless the branch is one `merge.suppressDest` names -- `main` and
-/// `master` when it names none. Several targets are grouped as git groups
-/// them: the branches, remote-tracking branches and tags together, in that
-/// order, and each commit on its own, the groups in the order they first
-/// come: `Merge branches 'a' and 'b', tag 'v1'; commit 'abc1234'`.
+/// The name `fmt-merge-msg`'s `handle_line` gives what a target came
+/// from, which heads its list: a local branch by its name, a tag and a
+/// commit as the title says them, and anything fetched with ` of <url>`
+/// after it -- a remote's `HEAD` and its other refs by the URL alone.
+fn originName(arena: Allocator, target: Target) Error![]const u8 {
+    const item = try itemText(arena, target);
+    const origin = switch (target.kind) {
+        .remote_head, .remote_ref => return unquoted(target.source),
+        .commit => return arena.print("commit {s}", .{item}),
+        .branch, .remote_branch => item,
+        .tag => try arena.print("tag {s}", .{item}),
+    };
+    if (std.mem.eql(u8, target.source, ".")) return unquoted(origin);
+    return arena.print("{s} of {s}", .{ origin, target.source });
+}
+
+/// The words a target is listed by: `FETCH_HEAD`'s, or its name quoted.
+fn itemText(arena: Allocator, target: Target) Error![]const u8 {
+    return target.what orelse try arena.print("'{s}'", .{target.name});
+}
+
+/// `text` without the quotes around it, when it has them.
+fn unquoted(text: []const u8) []const u8 {
+    if (text.len >= 2 and text[0] == '\'' and text[text.len - 1] == '\'') return text[1 .. text.len - 1];
+    return text;
+}
+
+/// One place merged targets came from, and what of it the title lists:
+/// `fmt-merge-msg`'s `src_data`.
+const Source = struct {
+    /// `.`, a remote's URL, or a local commit's `commit '<name>'`.
+    key: []const u8,
+    /// A remote's `HEAD`, or a local commit, is among them.
+    head: bool = false,
+    branches: std.ArrayList([]const u8) = .empty,
+    remote_branches: std.ArrayList([]const u8) = .empty,
+    tags: std.ArrayList([]const u8) = .empty,
+    others: std.ArrayList([]const u8) = .empty,
+
+    fn listed(s: *const Source) bool {
+        return s.branches.items.len + s.remote_branches.items.len + s.tags.items.len + s.others.items.len != 0;
+    }
+};
+
+/// git's `fmt-merge-msg` title, `fmt_merge_msg_title`: the targets grouped
+/// by where they came from, each source in the order it first comes and
+/// apart from the next by `; `. Within one, a remote's `HEAD`, then its
+/// branches, remote-tracking branches, tags and other refs (listed as
+/// commits), and ` of <url>` for a remote; a source with only its `HEAD`
+/// is its URL, and a local commit is a source of its own, `commit
+/// 'abc1234'`. ` into <branch>` follows unless the branch is one
+/// `merge.suppressDest` names -- `main` and `master` when it names none:
+/// `Merge branches 'a' and 'b', tag 'v1'; commit 'abc1234'`.
 fn title(arena: Allocator, out: *std.ArrayList(u8), targets: []const Target, head: head_mod.Head, settings: MessageSettings) Error!void {
     const current = head.shortName() orelse "HEAD";
     var suppressed = false;
@@ -1178,35 +1307,60 @@ fn title(arena: Allocator, out: *std.ArrayList(u8), targets: []const Target, hea
     for (patterns) |pattern| {
         if (try glob_mod.matches(arena, pattern, current, .{})) suppressed = true;
     }
-
+    const sources = try groupSources(arena, targets);
     try out.appendSlice(arena, "Merge ");
-    var local_done = false;
-    for (targets, 0..) |target, i| {
-        if (i != 0 and (target.kind == .commit or !local_done)) try out.appendSlice(arena, "; ");
-        if (target.kind == .commit) {
-            try out.print(arena, "commit '{s}'", .{target.name});
+    for (sources, 0..) |*source, i| {
+        if (i != 0) try out.appendSlice(arena, "; ");
+        if (!source.listed()) {
+            try out.appendSlice(arena, source.key);
             continue;
         }
-        if (local_done) continue;
-        local_done = true;
         var separator: []const u8 = "";
-        const groups = [_]struct { kind: Kind, one: []const u8, many: []const u8 }{
-            .{ .kind = .branch, .one = "branch ", .many = "branches " },
-            .{ .kind = .remote_branch, .one = "remote-tracking branch ", .many = "remote-tracking branches " },
-            .{ .kind = .tag, .one = "tag ", .many = "tags " },
+        if (source.head) {
+            try out.appendSlice(arena, "HEAD");
+            separator = ", ";
+        }
+        const groups = [_]struct { names: []const []const u8, one: []const u8, many: []const u8 }{
+            .{ .names = source.branches.items, .one = "branch ", .many = "branches " },
+            .{ .names = source.remote_branches.items, .one = "remote-tracking branch ", .many = "remote-tracking branches " },
+            .{ .names = source.tags.items, .one = "tag ", .many = "tags " },
+            .{ .names = source.others.items, .one = "commit ", .many = "commits " },
         };
         for (groups) |group| {
-            var names: std.ArrayList([]const u8) = .empty;
-            for (targets) |t| if (t.kind == group.kind) try names.append(arena, t.name);
-            if (names.items.len == 0) continue;
+            if (group.names.len == 0) continue;
             try out.appendSlice(arena, separator);
             separator = ", ";
-            try out.appendSlice(arena, if (names.items.len == 1) group.one else group.many);
-            for (names.items, 0..) |name, n| {
-                if (n == names.items.len - 1 and n != 0) try out.appendSlice(arena, " and ") else if (n != 0) try out.appendSlice(arena, ", ");
-                try out.print(arena, "'{s}'", .{name});
+            try out.appendSlice(arena, if (group.names.len == 1) group.one else group.many);
+            for (group.names, 0..) |name, n| {
+                if (n == group.names.len - 1 and n != 0) try out.appendSlice(arena, " and ") else if (n != 0) try out.appendSlice(arena, ", ");
+                try out.appendSlice(arena, name);
             }
         }
+        if (!std.mem.eql(u8, source.key, ".")) try out.print(arena, " of {s}", .{source.key});
     }
     if (!suppressed) try out.print(arena, " into {s}", .{current});
+}
+
+/// The targets by where they came from, in the order each source first
+/// comes: `handle_line`'s `srcs`.
+fn groupSources(arena: Allocator, targets: []const Target) Error![]Source {
+    var sources: std.ArrayList(Source) = .empty;
+    for (targets) |target| {
+        const item = try itemText(arena, target);
+        const key = if (target.kind == .commit) try arena.print("commit {s}", .{item}) else target.source;
+        const source = for (sources.items) |*s| {
+            if (std.mem.eql(u8, s.key, key)) break s;
+        } else blk: {
+            try sources.append(arena, .{ .key = key });
+            break :blk &sources.items[sources.items.len - 1];
+        };
+        switch (target.kind) {
+            .commit, .remote_head => source.head = true,
+            .branch => try source.branches.append(arena, item),
+            .remote_branch => try source.remote_branches.append(arena, item),
+            .tag => try source.tags.append(arena, item),
+            .remote_ref => try source.others.append(arena, item),
+        }
+    }
+    return sources.items;
 }

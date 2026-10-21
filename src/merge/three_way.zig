@@ -301,6 +301,55 @@ fn run(
     }, options);
 }
 
+/// The index and trees of a fast-forward.
+pub const MoveInputs = struct {
+    index: *Index,
+    /// The tree the index and the working tree are at: `null` is the
+    /// empty tree, an unborn branch's.
+    old: ?Oid,
+    new: Oid,
+};
+
+/// git's `checkout_fast_forward`, a two-way `read-tree -m -u`: the index
+/// and the working tree moved from the tree `old` to the tree `new`, what
+/// the index stages beyond `old` kept. A path the move changes must be in
+/// the index as `old` has it, and moves, or as `new` has it, and is left;
+/// staged as neither, it is `error.DirtyIndex`. Everything the move would
+/// overwrite is checked first, by the rules a merge keeps. Nothing about
+/// `HEAD` or any ref moves here.
+pub fn fastForward(
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    inputs: MoveInputs,
+    options: Options,
+) Self.Error!Outcome {
+    const index = inputs.index;
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    if (repo.workDirectory() == null) return error.BareRepository;
+    for (index.entries.items) |entry| {
+        if (entry.stage != 0) {
+            if (options.blocked) |b| b.set(entry.path);
+            return error.UnmergedIndex;
+        }
+    }
+    const exact = try indexDiffers(arena, io, repo.objectDatabase(), index, inputs.old) == null;
+    var rules = try repo.worktreeRules();
+    rules.required_filters = try repo.requiredFilters(arena);
+    var attrs = try repo.loadAttrs(io);
+    defer attrs.deinit();
+    rules.attrs = &attrs;
+    rules.filters = options.filters;
+    return carry(gpa, io, repo, index, &arena_instance, inputs.old, rules, .{
+        .tree = inputs.new,
+        .conflicted = &.{},
+        .two_way = true,
+        .index_exact = exact,
+    }, options);
+}
+
 /// Merge the commits `heads` into the commit `head` as git's octopus
 /// strategy does, `octopus.mergeCommits`, and leave the result in `index`
 /// and the working tree. Only the last head may leave conflicts; a conflict
@@ -351,7 +400,48 @@ const Merged = struct {
     renormalize_read_attributes: bool = false,
     merged_attributes_blob: ?Oid = null,
     renames_clean: bool = true,
+    /// A two-way move, `fastForward`'s: the index may stage more than the
+    /// tree it starts from.
+    two_way: bool = false,
+    /// Whether the index was exactly the tree the merge starts from, and so
+    /// once clean is exactly the merged tree.
+    index_exact: bool = true,
 };
+
+/// What `desiredChanges` compares.
+const MoveSides = struct { ours: ?Oid, merged: Merged };
+
+/// Each path the merged tree changes against `ours`, with what the merged
+/// tree has there: a walk past every subtree the two share, so a pick
+/// costs what it changes. A two-way move leaves out a path whose index
+/// entry is already the merged tree's, and refuses one staged as neither
+/// side has it, as git's `twoway_merge` keeps and rejects them.
+fn desiredChanges(gpa: Allocator, arena: Allocator, io: Io, db: *odb_mod.Odb, index: *const Index, sides: MoveSides, blocked: ?*Blocked) Error!Desired {
+    var tree_changes = try diff.tree(gpa, io, db, .{ .old = sides.ours, .new = sides.merged.tree }, .{});
+    defer tree_changes.deinit();
+    var desired: Desired = .empty;
+    for (tree_changes.items) |change| {
+        const want: ?TreeEntry = if (change.new) |e| .{ .mode = e.mode, .oid = e.oid } else null;
+        if (sides.merged.two_way) {
+            const had: ?TreeEntry = if (change.old) |e| .{ .mode = e.mode, .oid = e.oid } else null;
+            const current = index.find(change.path());
+            if (sameEntry(current, want)) continue;
+            if (!sameEntry(current, had)) {
+                if (blocked) |b| b.set(change.path());
+                return error.DirtyIndex;
+            }
+        }
+        try desired.put(arena, try arena.dupe(u8, change.path()), want);
+    }
+    return desired;
+}
+
+/// git's `same`: both absent, or both there with one mode and object.
+fn sameEntry(current: ?*const index_mod.Entry, tree: ?TreeEntry) bool {
+    const c = current orelse return tree == null;
+    const t = tree orelse return false;
+    return c.mode == t.mode and c.oid.eql(t.oid);
+}
 
 /// Remove the directory at `path` if it is empty, as git's `rmdir` for a
 /// submodule's checkout: one with files in it, or already gone, stays as
@@ -372,7 +462,7 @@ fn carry(
     repo: *Repository,
     index: *Index,
     arena_instance: *std.heap.ArenaAllocator,
-    ours: Oid,
+    ours: ?Oid,
     rules: worktree.Rules,
     merged: Merged,
     options: Options,
@@ -380,15 +470,7 @@ fn carry(
     const arena = arena_instance.allocator();
     const wt = repo.workDirectory() orelse return error.BareRepository;
     const db = repo.objectDatabase();
-    // What the merge changes: the merged tree against ours, a walk past
-    // every subtree the two share, so a pick costs what it changes.
-    var tree_changes = try diff.tree(gpa, io, db, .{ .old = ours, .new = merged.tree }, .{});
-    defer tree_changes.deinit();
-    var desired: Desired = .empty;
-    for (tree_changes.items) |change| {
-        const path = try arena.dupe(u8, change.path());
-        try desired.put(arena, path, if (change.new) |e| .{ .mode = e.mode, .oid = e.oid } else null);
-    }
+    const desired = try desiredChanges(gpa, arena, io, db, index, .{ .ours = ours, .merged = merged }, options.blocked);
     const messages = try ort.dupeMessages(arena, merged.messages);
     // A conflict's stages, by path.
     var conflicted: std.array_hash_map.String(ort.Conflicted) = .empty;
@@ -457,8 +539,10 @@ fn carry(
     const auto_merge: Oid = merged.tree;
     if (conflicts.len == 0) {
         if (merged.renames_clean) merged_tree = merged.tree;
-        cache_tree.root.entry_count = @intCast(index.entries.items.len);
-        cache_tree.root.oid = merged.tree;
+        if (merged.index_exact) {
+            cache_tree.root.entry_count = @intCast(index.entries.items.len);
+            cache_tree.root.oid = merged.tree;
+        }
     }
     // The merge's index is `unpack_trees`' result in git, which remembers
     // no resolutions.
@@ -759,32 +843,36 @@ const MergeConfig = struct {
 /// `error.DirtyIndex` unless `index` is exactly the tree `ours`, nothing
 /// staged beyond it.
 fn requireIndexIs(arena: Allocator, io: Io, db: *odb_mod.Odb, index: *Index, ours: Oid, blocked: ?*Blocked) Error!void {
+    const path = try indexDiffers(arena, io, db, index, ours) orelse return;
+    if (blocked) |b| b.set(path);
+    return error.DirtyIndex;
+}
+
+/// The first path where `index` is not the tree `ours` (`null` the empty
+/// tree), or `null` when it is that tree exactly.
+fn indexDiffers(arena: Allocator, io: Io, db: *odb_mod.Odb, index: *Index, ours: ?Oid) Error!?[]const u8 {
+    const tree = ours orelse return if (index.entries.items.len == 0) null else index.entries.items[0].path;
     var plain = true;
     for (index.entries.items) |entry| {
         if (entry.intent_to_add) plain = false;
     }
     if (plain) {
         const cache_tree = try index.cacheTree();
-        if (cache_tree.root.isValid() and cache_tree.root.oid != null and cache_tree.root.oid.?.eql(ours) and
-            cache_tree.root.entry_count == @as(i64, @intCast(index.entries.items.len))) return;
+        if (cache_tree.root.isValid() and cache_tree.root.oid != null and cache_tree.root.oid.?.eql(tree) and
+            cache_tree.root.entry_count == @as(i64, @intCast(index.entries.items.len))) return null;
     }
-    var our_entries = try worktree.flatten(arena, io, db, ours);
+    var our_entries = try worktree.flatten(arena, io, db, tree);
     for (index.entries.items) |entry| {
         const want = our_entries.get(entry.path);
-        if (want == null or want.?.mode != entry.mode or !want.?.oid.eql(entry.oid) or entry.intent_to_add) {
-            if (blocked) |b| b.set(entry.path);
-            return error.DirtyIndex;
-        }
+        if (want == null or want.?.mode != entry.mode or !want.?.oid.eql(entry.oid) or entry.intent_to_add) return entry.path;
     }
     if (index.entries.items.len != our_entries.count()) {
         var it = our_entries.keyIterator();
         while (it.next()) |path| {
-            if (index.find(path.*) == null) {
-                if (blocked) |b| b.set(path.*);
-                return error.DirtyIndex;
-            }
+            if (index.find(path.*) == null) return path.*;
         }
     }
+    return null;
 }
 
 /// The `.gitattributes` files of `tree` in the folders above `paths`, by

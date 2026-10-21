@@ -53,6 +53,7 @@ const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const program = @import("../process.zig").program;
 const pathspec_mod = @import("../patterns.zig").pathspec;
+const remote_mod = @import("../wire.zig").remote;
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -323,9 +324,7 @@ fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
         const key = try arena.print("branch.{s}.remote", .{branch});
         if (try configString(arena, repo.configuration(), key)) |remote| return remote;
     }
-    const remotes = try repo.configuration().subsections(arena, "remote");
-    if (remotes.len == 1) return remotes[0];
-    return "origin";
+    return remote_mod.fallback(repo.configuration());
 }
 
 /// What a relative url is resolved against: the default remote's url, or,
