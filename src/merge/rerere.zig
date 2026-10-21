@@ -647,7 +647,9 @@ fn stagePath(r: *Run, index: *Index, path: []const u8) Error!void {
     // A stage-0 entry replaces the path's stages, which git remembers.
     _ = try index.resolveStages(path);
     _ = index.remove(path);
-    try index.add(.{ .path = path, .oid = oid, .mode = mode, .stat = if (found) |f| f.stat else .none });
+    var entry: index_mod.Entry = .{ .path = path, .oid = oid, .mode = mode };
+    if (found) |f| r.rules.fillStat(&entry, f.stat);
+    try index.add(entry);
     const tree = try index.cacheTree();
     tree.invalidate(path);
 }

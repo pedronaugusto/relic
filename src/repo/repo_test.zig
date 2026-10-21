@@ -2068,3 +2068,54 @@ test "the index is written in the version, trailer and offset extensions git's s
         try std.testing.expectEqual(theirs.entries.items.len, ours.entries.items.len);
     }
 }
+
+test "core.ignoreStat marks what an add and a write take the stat of, as git's does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const Step = enum { add_all, add_changed, checkout_index };
+    for ([_]Step{ .add_all, .add_changed, .checkout_index }) |step| {
+        var listed: [2][]u8 = undefined;
+        for (0..2, [_]bool{ true, false }) |side, by_git| {
+            var repo = try testgit.Repo.init(gpa, io, &.{});
+            defer repo.deinit();
+            for ([_][]const u8{ "a", "b", "dir/c" }) |path| try repo.writeFile(io, path, path);
+            // Dated back, so that racy timing -- which a git built without
+            // nanosecond times reckons by the second -- decides nothing.
+            const past: i96 = (std.Io.Clock.real.now(io).toSeconds() - 3600) * std.time.ns_per_s;
+            for ([_][]const u8{ "a", "b", "dir/c" }) |path| try fs_mod.setTimestamps(io, repo.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = past } } });
+            if (step != .add_all) {
+                try repo.exec(io, &.{ "add", "-A" });
+                try repo.writeFile(io, "b", "changed\n");
+                if (step == .checkout_index) try repo.dir.deleteFile(io, "a");
+            }
+            try repo.exec(io, &.{ "config", "core.ignoreStat", "true" });
+            if (by_git) switch (step) {
+                .add_all, .add_changed => try repo.exec(io, &.{ "add", "-A" }),
+                .checkout_index => try repo.exec(io, &.{ "checkout-index", "-f", "-u", "--", "a" }),
+            } else {
+                var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+                defer native.deinit(io);
+                var locked = try native.lockIndex(io);
+                defer locked.deinit(io);
+                const rules = try native.worktreeRules();
+                switch (step) {
+                    .add_all, .add_changed => _ = try worktree.addAll(gpa, io, repo.dir, .{ .index = &locked.index, .db = native.objectDatabase() }, .{ .rules = rules }),
+                    .checkout_index => {
+                        const entry = locked.index.find("a").?.*;
+                        _ = try worktree.writePaths(gpa, io, repo.dir, .{ .index = &locked.index, .db = native.objectDatabase(), .writes = &.{.{
+                            .path = "a",
+                            .blob = .{ .mode = entry.mode, .oid = entry.oid },
+                        }} }, .{ .rules = rules, .force = true });
+                    },
+                }
+                try locked.commit(io);
+            }
+            listed[side] = try repo.run(io, &.{ "ls-files", "-v" });
+        }
+        defer for (listed) |l| gpa.free(l);
+        std.testing.expectEqualStrings(listed[0], listed[1]) catch |err| {
+            std.debug.print("ignoreStat step {t}\n", .{step});
+            return err;
+        };
+    }
+}

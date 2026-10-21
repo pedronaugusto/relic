@@ -309,6 +309,9 @@ pub const Settings = struct {
     /// `core.trustCtime`: whether a changed status-change time says the
     /// file may have changed (git's default: true).
     trust_ctime: bool,
+    /// `core.ignoreStat`: what an add or a write takes the stat of is
+    /// assumed unchanged from then on.
+    ignore_stat: bool,
     /// `core.maxTreeDepth`: how deep a tree may nest (git's default 2048).
     max_tree_depth: u32,
     /// `core.protectNTFS` (on everywhere) and `core.protectHFS` (on macOS):
@@ -344,6 +347,7 @@ pub const Settings = struct {
             .symlinks = try config.getBool("core.symlinks", builtin.target.os.tag != .windows),
             .check_stat = check,
             .trust_ctime = try config.getBool("core.trustctime", true),
+            .ignore_stat = try config.getBool("core.ignorestat", false),
             .max_tree_depth = @intCast(depth),
             .protect = .{
                 .ntfs = try config.getBool("core.protectntfs", true),
@@ -1512,6 +1516,7 @@ pub const Repository = struct {
             .precompose_unicode = repo.data().settings.precompose_unicode,
             .check_stat = repo.data().settings.check_stat,
             .trust_ctime = repo.data().settings.trust_ctime,
+            .ignore_stat = repo.data().settings.ignore_stat,
             .timestamp_resolution = repo.data().odb.timestamp_resolution,
             .file_mode = repo.data().settings.file_mode,
             .symlinks = repo.data().settings.symlinks,

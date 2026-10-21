@@ -129,6 +129,18 @@ pub const Rules = struct {
     /// setting means, and the outcome records it.
     symlinks: bool = builtin.target.os.tag != .windows,
 
+    /// `core.ignoreStat`: an entry an add or a write takes the stat of is
+    /// marked `assume_valid`, which nothing compares against the disk.
+    ignore_stat: bool = false,
+
+    /// Put the stat an add or a write found into `entry`: git's
+    /// `fill_stat_cache_info`, which under `ignore_stat` marks the entry
+    /// assume-valid.
+    pub fn fillStat(r: Rules, entry: *index_mod.Entry, stat: fs.Stat) void {
+        entry.stat = stat;
+        if (r.ignore_stat) entry.assume_valid = true;
+    }
+
     /// How a cached stat is compared with the disk under these rules.
     pub fn statCompare(r: Rules) fs.Stat.Compare {
         return .{ .check = r.check_stat, .trust_ctime = r.trust_ctime, .resolution = r.timestamp_resolution };
@@ -512,7 +524,7 @@ const Walker = struct {
                 const tree = try w.index.cacheTree();
                 tree.invalidate(path);
                 entry.oid = checked_out;
-                entry.stat = found.stat;
+                w.options.rules.fillStat(entry, found.stat);
                 w.outcome.modified += 1;
                 w.outcome.gitlinks_moved += 1;
                 return;
@@ -546,12 +558,13 @@ const Walker = struct {
         try w.markSeen(path);
         const tree = try w.index.cacheTree();
         tree.invalidate(path);
-        try w.fresh.append(w.gpa, .{
+        var added: index_mod.Entry = .{
             .path = try w.arena.allocator().dupe(u8, path),
             .oid = checked_out,
             .mode = .gitlink,
-            .stat = found.stat,
-        });
+        };
+        w.options.rules.fillStat(&added, found.stat);
+        try w.fresh.append(w.gpa, added);
         w.outcome.added += 1;
         w.outcome.nested_repositories += 1;
     }
@@ -617,7 +630,7 @@ const Walker = struct {
             if (entry.oid.eql(blob) and entry.mode == mode) {
                 // The content did not change after all; refresh the stat so
                 // the next call takes the shortcut.
-                entry.stat = found.stat;
+                w.options.rules.fillStat(entry, found.stat);
                 entry.intent_to_add = false;
                 w.outcome.unchanged += 1;
                 return;
@@ -629,16 +642,17 @@ const Walker = struct {
         if (tracked) |entry| {
             entry.oid = blob;
             entry.mode = mode;
-            entry.stat = found.stat;
+            w.options.rules.fillStat(entry, found.stat);
             entry.intent_to_add = false;
             w.outcome.modified += 1;
         } else {
-            try w.fresh.append(w.gpa, .{
+            var added: index_mod.Entry = .{
                 .path = try w.arena.allocator().dupe(u8, path),
                 .oid = blob,
                 .mode = mode,
-                .stat = found.stat,
-            });
+            };
+            w.options.rules.fillStat(&added, found.stat);
+            try w.fresh.append(w.gpa, added);
             w.outcome.added += 1;
         }
     }
@@ -2104,7 +2118,7 @@ const CheckoutWrite = struct {
         // A path that fails here leaves every path before it written, as a
         // checkout one file at a time leaves them.
         // glint-ignore: Z026 -- the path's own error is the one returned; flushing only keeps the paths before it written
-        errdefer batch.flush(c.io, c.wt, c.index, c.outcome) catch {};
+        errdefer batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules) catch {};
         var leading: LeadingDirs = .{};
         for (paths) |path| {
             const want = c.wanted.get(path).?;
@@ -2117,7 +2131,7 @@ const CheckoutWrite = struct {
             }
             try c.one(&batch, &leading, path, want);
         }
-        try batch.flush(c.io, c.wt, c.index, c.outcome);
+        try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
     }
 
     /// Whether `path` is left as it is: kept with its local changes, or,
@@ -2164,7 +2178,7 @@ const CheckoutWrite = struct {
                     .delayed => return,
                     .bytes => |bytes| {
                         if (try batch.add(path, want, bytes, executable)) {
-                            try batch.flush(c.io, c.wt, c.index, c.outcome);
+                            try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
                         }
                         return;
                     },
@@ -2174,7 +2188,7 @@ const CheckoutWrite = struct {
             },
             .tree => return error.UnsupportedEntry,
         }
-        try recordWritten(c.io, c.wt, c.index, path, want);
+        try recordWritten(c.io, c.wt, c.index, path, want, c.options.rules);
     }
 
     /// Write the files a filter delayed, as it hands them over.
@@ -2186,7 +2200,7 @@ const CheckoutWrite = struct {
             const want = c.wanted.get(ready.path).?;
             try writeSmudged(c.io, c.wt, ready.path, ready.content, want.mode == .exec and c.options.rules.file_mode);
             c.outcome.written += 1;
-            try recordWritten(c.io, c.wt, c.index, ready.path, want);
+            try recordWritten(c.io, c.wt, c.index, ready.path, want, c.options.rules);
         }
     }
 };
@@ -2414,7 +2428,7 @@ const WriteBatch = struct {
         return b.bytes >= max_bytes or b.jobs.items.len >= max_files;
     }
 
-    fn flush(b: *WriteBatch, io: Io, wt: Io.Dir, index: *Index, outcome: *CheckoutOutcome) Error!void {
+    fn flush(b: *WriteBatch, io: Io, wt: Io.Dir, index: *Index, outcome: *CheckoutOutcome, rules: Rules) Error!void {
         if (b.jobs.items.len == 0) return;
         defer {
             b.jobs.clearRetainingCapacity();
@@ -2444,7 +2458,7 @@ const WriteBatch = struct {
                 if (first == null) first = err;
                 continue;
             };
-            try recordStat(index, job.path, job.want, stat);
+            try recordStat(index, job.path, job.want, stat, rules);
             outcome.written += 1;
         }
         if (first) |err| return err;
@@ -2467,28 +2481,22 @@ const WriteBatch = struct {
 };
 
 /// Put a path just written into the index with the stat it was found with.
-fn recordStat(index: *Index, path: []const u8, want: TreeEntry, stat: ?fs.Stat) Error!void {
+fn recordStat(index: *Index, path: []const u8, want: TreeEntry, stat: ?fs.Stat, rules: Rules) Error!void {
     const tree = try index.cacheTree();
     tree.invalidate(path);
-    try index.add(.{
-        .path = path,
-        .oid = want.oid,
-        .mode = want.mode,
-        .stat = stat orelse .none,
-    });
+    var entry: index_mod.Entry = .{ .path = path, .oid = want.oid, .mode = want.mode };
+    if (stat) |found| rules.fillStat(&entry, found);
+    try index.add(entry);
 }
 
 /// Stat what was just written and put it in the index.
-fn recordWritten(io: Io, wt: Io.Dir, index: *Index, path: []const u8, want: TreeEntry) Error!void {
+fn recordWritten(io: Io, wt: Io.Dir, index: *Index, path: []const u8, want: TreeEntry, rules: Rules) Error!void {
     const after = try fs.statAt(io, wt, path);
     const tree = try index.cacheTree();
     tree.invalidate(path);
-    try index.add(.{
-        .path = path,
-        .oid = want.oid,
-        .mode = want.mode,
-        .stat = if (after) |s| s.stat else .none,
-    });
+    var entry: index_mod.Entry = .{ .path = path, .oid = want.oid, .mode = want.mode };
+    if (after) |found| rules.fillStat(&entry, found.stat);
+    try index.add(entry);
 }
 
 /// Put the tree's own `.gitattributes` files into `attrs`, each at the depth
@@ -2620,7 +2628,7 @@ pub fn writePaths(
             },
             .tree => return error.UnsupportedEntry,
         }
-        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid });
+        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid }, options.rules);
     }
 
     var late: std.heap.ArenaAllocator = .init(gpa);
@@ -2631,7 +2639,7 @@ pub fn writePaths(
         const want = w.blob.?;
         try writeSmudged(io, wt, w.path, ready.content, want.mode == .exec and options.rules.file_mode);
         outcome.written += 1;
-        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid });
+        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid }, options.rules);
     }
     outcome.native_fallbacks = conv.fallbackCount();
     return outcome;
@@ -3258,7 +3266,7 @@ pub fn applySparse(
             }
             _ = scratch.reset(.retain_capacity);
             try restoreSparse(scratch.allocator(), io, wt, db, &conv, entry, options);
-            if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
+            if (try fs.statAt(io, wt, entry.path)) |after| options.rules.fillStat(entry, after.stat);
             entry.skip_worktree = false;
             outcome.restored += 1;
         }

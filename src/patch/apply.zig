@@ -1631,7 +1631,7 @@ fn modeFromStat(st: *State, found: fs.Entry, ce: ?index_mod.Entry) Mode {
 fn checkoutTarget(st: *State, ce: index_mod.Entry) Error!?fs.Entry {
     const wt = st.wt.?;
     var written = try worktree.writeEntry(st.gpa, st.io, wt, .{ .db = st.repo.objectDatabase(), .conv = &st.conv, .path = ce.path, .mode = ce.mode, .oid = ce.oid, .rules = st.rules });
-    if (st.index.?.find(ce.path)) |e| e.stat = written.stat;
+    if (st.index.?.find(ce.path)) |e| st.rules.fillStat(e, written.stat);
     _ = &written;
     return fs.statAt(st.io, wt, ce.path);
 }
@@ -1839,7 +1839,7 @@ fn addIndexFile(st: *State, path: []const u8, mode: Mode, buf: []const u8, stat:
         if (buf.len < prefix.len + hex_len) return error.UnsupportedEntry;
         e.oid = Oid.parse(st.repo.objectFormat(), buf[prefix.len..][0..hex_len]) catch return error.UnsupportedEntry;
     } else {
-        if (!st.cached) e.stat = stat;
+        if (!st.cached) st.rules.fillStat(&e, stat);
         e.oid = try writeBlob(st, buf);
     }
     (try ix.cacheTree()).invalidate(path);
