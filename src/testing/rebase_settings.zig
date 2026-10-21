@@ -11,7 +11,7 @@ const Io = std.Io;
 
 const testgit = @import("git.zig");
 const history = @import("history.zig");
-const rebase = @import("../commit/rebase.zig");
+const rebase = @import("../rebase/rebase.zig");
 
 const Pair = history.Pair;
 const who = history.who;

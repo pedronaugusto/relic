@@ -40,7 +40,7 @@ const rev_walk = @import("../walk/walk.zig");
 const fork_point = @import("../rev_walk/fork_point.zig");
 const three_way = @import("../merge/three_way.zig");
 const merging = @import("../commit/merging.zig");
-const rebase = @import("../commit/rebase.zig");
+const rebase = @import("../rebase/rebase.zig");
 const fetch_mod = @import("fetch.zig");
 
 const Oid = hash.Oid;

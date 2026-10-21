@@ -191,7 +191,7 @@ test {
     _ = @import("diff/moved.zig");
     _ = @import("checkout/filter.zig");
     _ = @import("codec/delta.zig");
-    _ = @import("commit/rebase.zig");
+    _ = @import("rebase/rebase.zig");
     _ = @import("commit/sequencer.zig");
     _ = @import("commit/stash.zig");
     _ = @import("config/user_config.zig");

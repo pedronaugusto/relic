@@ -16,7 +16,7 @@ const history = @import("history.zig");
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
 const merging = @import("../commit/merging.zig");
-const rebase = @import("../commit/rebase.zig");
+const rebase = @import("../rebase/rebase.zig");
 const stash = @import("../commit/stash.zig");
 const commit_mod = @import("../commit/commit.zig");
 

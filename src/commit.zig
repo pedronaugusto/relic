@@ -2,7 +2,7 @@
 
 pub const notes = @import("commit/notes.zig");
 pub const todo = @import("commit/todo.zig");
-pub const rebase = @import("commit/rebase.zig");
+pub const rebase = @import("rebase/rebase.zig");
 pub const replay = @import("commit/replay.zig");
 pub const history = @import("commit/history.zig");
 pub const sequencer = @import("commit/sequencer.zig");

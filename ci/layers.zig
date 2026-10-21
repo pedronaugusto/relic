@@ -30,6 +30,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "pretty", .patterns = &.{"src/pretty/**"} },
     .{ .name = "commit", .patterns = &.{"src/commit/**"} },
     .{ .name = "patch", .patterns = &.{"src/patch/**"} },
+    .{ .name = "rebase", .patterns = &.{"src/rebase/**"} },
     .{ .name = "fast", .patterns = &.{ "src/fast.zig", "src/fast/**" } },
     .{ .name = "transport", .patterns = &.{"src/transport/**"} },
     .{ .name = "submodule", .patterns = &.{"src/submodule/**"} },

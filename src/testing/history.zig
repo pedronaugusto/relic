@@ -1503,7 +1503,7 @@ test "a pick's pseudo-refs are found and removed in a reftable repository, as gi
     try std.testing.expectError(error.GitFailed, r.exec(io, &.{ "rev-parse", "--verify", "-q", "REBASE_HEAD" }));
 }
 
-const rebase = @import("../commit/rebase.zig");
+const rebase = @import("../rebase/rebase.zig");
 const commit_mod = @import("../commit/commit.zig");
 
 pub const rebase_state = [_][]const u8{

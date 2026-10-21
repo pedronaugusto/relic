@@ -16,7 +16,7 @@ const testgit = @import("git.zig");
 const testremote = @import("remote.zig");
 const history = @import("history.zig");
 const merging = @import("../commit/merging.zig");
-const rebase = @import("../commit/rebase.zig");
+const rebase = @import("../rebase/rebase.zig");
 const pull = @import("../transport/pull.zig");
 
 const Pair = history.Pair;
