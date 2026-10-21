@@ -115,6 +115,10 @@ pub const Error = error{
     GitmodulesUnmerged,
     /// The superproject has no working tree.
     BareRepository,
+    /// Under `extensions.submodulePathConfig`, no `submodule.<name>.gitdir`
+    /// names the submodule's repository, or none of git's defaults for one
+    /// passes its check. `Refusal.setting` names the setting.
+    NoSubmoduleGitDir,
     /// The `Transport` failed; it says why.
     TransportFailed,
     /// Under `UpdateOptions.init`, the submodule's path holds something
@@ -923,6 +927,7 @@ pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Sel
         if (repo.configuration().get(update_key) == null) {
             if (module.update) |strategy| try edits.set(update_key, strategy.name());
         }
+        if (repo.submodulePathConfig()) try setDefaultGitDir(arena, io, repo, module.name, &edits);
     }
     try edits.commit(io, repo);
     return outcome;
@@ -1079,7 +1084,8 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
             }
             try wt.deleteTree(io, entry.path);
             outcome.cleared += 1;
-            var module_dir = repo.gitDirectory().openDir(io, try modulePath(arena, module.name), .{}) catch null;
+            const where = try moduleDir(arena, io, repo, module.name, entry.path, options.refusal);
+            var module_dir = where.base.openDir(io, where.path, .{}) catch null;
             if (module_dir) |*dir| {
                 defer dir.close(io);
                 if (discover.directory.isGitDirectory(io, dir.*)) try setCoreWorktree(io, repo, dir.*, null);
@@ -1095,8 +1101,166 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
     return outcome;
 }
 
-fn modulePath(arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
-    return arena.print("modules/{s}", .{name});
+/// git's `submodule--helper migrate-gitdir-configs`: each repository in
+/// `modules/` that no `submodule.<name>.gitdir` names is given one, as
+/// `init` gives one, then the format moves to version 1 and
+/// `extensions.submodulePathConfig` is turned on. How many were given one.
+pub fn migrateGitDirConfigs(gpa: Allocator, io: Io, repo: *Repository) Self.Error!usize {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var edits: LocalEdits = .{ .arena = arena };
+    var migrated: usize = 0;
+    if (repo.gitDirectory().openDir(io, "modules", .{ .iterate = true })) |modules_const| {
+        var modules = modules_const;
+        defer modules.close(io);
+        var it = modules.iterate();
+        while (try it.next(io)) |entry| {
+            var dir = modules.openDir(io, entry.name, .{}) catch continue;
+            defer dir.close(io);
+            if (!discover.directory.isGitDirectory(io, dir)) continue;
+            if (repo.configuration().get(try configKey(arena, entry.name, "gitdir")) != null) continue;
+            try setDefaultGitDir(arena, io, repo, try arena.dupe(u8, entry.name), &edits);
+            migrated += 1;
+        }
+    } else |_| {}
+    const version = try repo.configuration().getInt("core.repositoryformatversion", 0);
+    if (version == 0) try edits.set("core.repositoryformatversion", "1");
+    try edits.set("extensions.submodulePathConfig", "true");
+    try edits.commit(io, repo);
+    return migrated;
+}
+
+/// Where a submodule's repository lives, as git's `submodule_name_to_gitdir`
+/// has it: `modules/<name>` in the superproject's git directory, or under
+/// `extensions.submodulePathConfig` the path `submodule.<name>.gitdir`
+/// names -- from the top of the working tree, as git writes it, unless
+/// absolute. Checked as git checks it each time.
+const ModuleDir = struct {
+    base: Io.Dir,
+    path: []const u8,
+
+    fn absolute(m: ModuleDir, arena: Allocator, io: Io) Error![]const u8 {
+        if (std.Io.Dir.path.isAbsolute(m.path)) return m.path;
+        const base = try absolutePath(arena, io, m.base);
+        return arena.print("{s}/{s}", .{ base, m.path });
+    }
+};
+
+fn moduleDir(arena: Allocator, io: Io, repo: *Repository, name: []const u8, display: []const u8, refusal: ?*Refusal) Error!ModuleDir {
+    if (!repo.submodulePathConfig()) {
+        try validateGitDir(arena, io, repo.gitDirectory(), name, display, refusal);
+        return .{ .base = repo.gitDirectory(), .path = try arena.print("modules/{s}", .{name}) };
+    }
+    const value = repo.configuration().get(try configKey(arena, name, "gitdir")) orelse
+        return refuse(refusal, display, try configKey(arena, name, "gitdir"), error.NoSubmoduleGitDir);
+    const found: ModuleDir = if (std.Io.Dir.path.isAbsolute(value))
+        .{ .base = Io.Dir.cwd(), .path = value }
+    else
+        .{ .base = repo.topDirectory(), .path = value };
+    if (!try encodedGitDirOk(arena, io, repo, found, name)) return refuse(refusal, display, value, error.GitDirInsideGitDir);
+    return found;
+}
+
+/// git's `validate_submodule_encoded_git_dir`: the last name after a
+/// `/modules/` holds no slash, no other submodule's `gitdir` is the same
+/// repository, and under `core.ignoreCase` no name beside it differs only in
+/// case.
+fn encodedGitDirOk(arena: Allocator, io: Io, repo: *Repository, dir: ModuleDir, name: []const u8) Error!bool {
+    const marker = "/modules/";
+    const at = std.mem.findLast(u8, dir.path, marker) orelse return false;
+    const last = dir.path[at + marker.len ..];
+    if (std.mem.findScalar(u8, last, '/') != null) return false;
+    const is_git_dir = if (dir.base.openDir(io, dir.path, .{})) |d_const| blk: {
+        var d = d_const;
+        defer d.close(io);
+        break :blk discover.directory.isGitDirectory(io, d);
+    } else |_| false;
+    if (is_git_dir) {
+        // `submodule_conflicts_with_existing`.
+        const mine = try dir.absolute(arena, io);
+        for (repo.configuration().entries.items) |entry| {
+            if (!std.ascii.eqlIgnoreCase(entry.section, "submodule") or !std.ascii.eqlIgnoreCase(entry.name, "gitdir")) continue;
+            if (std.mem.eql(u8, entry.subsection, name)) continue;
+            const value = entry.value orelse continue;
+            const theirs: ModuleDir = if (std.Io.Dir.path.isAbsolute(value)) .{ .base = Io.Dir.cwd(), .path = value } else .{ .base = repo.topDirectory(), .path = value };
+            if (std.mem.eql(u8, mine, try theirs.absolute(arena, io))) return false;
+        }
+    }
+    if (repo.settings().ignore_case) {
+        // `check_casefolding_conflict`.
+        const parent = std.Io.Dir.path.dirnamePosix(dir.path) orelse return true;
+        var modules = dir.base.openDir(io, parent, .{ .iterate = true }) catch return true;
+        defer modules.close(io);
+        const suffixes_match = std.mem.eql(u8, last, name);
+        var it = modules.iterate();
+        while (try it.next(io)) |entry| {
+            if ((suffixes_match or is_git_dir) and std.ascii.eqlIgnoreCase(entry.name, name) and !std.mem.eql(u8, entry.name, name)) return false;
+        }
+    }
+    return true;
+}
+
+/// git's `create_default_gitdir_config`, under
+/// `extensions.submodulePathConfig`: `submodule.<name>.gitdir` set, unless it
+/// is, to the first of `modules/<name>`, the name percent-encoded as RFC
+/// 3986 allows, then with its capitals encoded too, then either with a
+/// digit after, then the name's blob hash, that passes git's check.
+fn setDefaultGitDir(arena: Allocator, io: Io, repo: *Repository, name: []const u8, edits: *LocalEdits) Error!void {
+    const key = try configKey(arena, name, "gitdir");
+    if (repo.configuration().get(key) != null) return;
+    const git_dir = try gitDirText(arena, io, repo);
+    var candidates: std.ArrayList([]const u8) = .empty;
+    try candidates.append(arena, name);
+    const encoded = try percentEncoded(arena, name, false);
+    const folded = try percentEncoded(arena, name, true);
+    try candidates.appendSlice(arena, &.{ encoded, folded });
+    for ('0'..'9' + 1) |digit| {
+        const c: u8 = @intCast(digit);
+        try candidates.appendSlice(arena, &.{ try arena.print("{s}{c}", .{ encoded, c }), try arena.print("{s}{c}", .{ folded, c }) });
+    }
+    var hasher: hash.Hasher = .init(repo.objectFormat());
+    hasher.update(try arena.print("blob {d}\x00", .{name.len}));
+    hasher.update(name);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try candidates.append(arena, try arena.dupe(u8, hasher.final().hex(&hex)));
+    for (candidates.items) |candidate| {
+        const path = try arena.print("{s}/modules/{s}", .{ git_dir, candidate });
+        const dir: ModuleDir = if (std.Io.Dir.path.isAbsolute(path)) .{ .base = Io.Dir.cwd(), .path = path } else .{ .base = repo.topDirectory(), .path = path };
+        // git checks each as `validate_submodule_git_dir` does: before the
+        // extension is on, as a migration runs, the plain name alone.
+        if (repo.submodulePathConfig()) {
+            if (!try encodedGitDirOk(arena, io, repo, dir, name)) continue;
+        } else {
+            validateGitDir(arena, io, repo.gitDirectory(), name, name, null) catch |err| switch (err) {
+                error.GitDirInsideGitDir => return error.NoSubmoduleGitDir,
+                else => |e| return e,
+            };
+        }
+        return edits.set(key, path);
+    }
+    return error.NoSubmoduleGitDir;
+}
+
+/// The superproject's git directory as git names it from the top of its
+/// working tree: `.git` where it is there, its absolute path otherwise.
+fn gitDirText(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
+    const git_dir = try absolutePath(arena, io, repo.gitDirectory());
+    const top = try absolutePath(arena, io, repo.topDirectory());
+    const local = try arena.print("{s}/.git", .{top});
+    return if (std.mem.eql(u8, git_dir, local)) ".git" else git_dir;
+}
+
+/// `strbuf_addstr_urlencode` with git's `is_rfc3986_unreserved`, or with
+/// `fold` its `is_casefolding_rfc3986_unreserved`, which encodes capitals.
+fn percentEncoded(arena: Allocator, name: []const u8, fold: bool) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (name) |c| {
+        const kept = (std.ascii.isLower(c) or std.ascii.isDigit(c) or (!fold and std.ascii.isUpper(c))) or
+            c == '-' or c == '_' or c == '.' or c == '~';
+        if (kept) try out.append(arena, c) else try out.print(arena, "%{x:0>2}", .{c});
+    }
+    return out.items;
 }
 
 /// What `git rm -n` refuses a submodule for: a staged gitlink change, a
@@ -1210,7 +1374,8 @@ fn absorbIn(
             // A `.git` file naming nothing: the directory it named moved
             // with the submodule this one lives in.
             const module = entry.module orelse return refuse(options.refusal, display, "", error.NoSubmoduleMapping);
-            var module_dir = repo.gitDirectory().openDir(io, try modulePath(arena, module.name), .{}) catch continue;
+            const where = try moduleDir(arena, io, repo, module.name, display, options.refusal);
+            var module_dir = where.base.openDir(io, where.path, .{}) catch continue;
             defer module_dir.close(io);
             if (!discover.directory.isGitDirectory(io, module_dir)) continue;
             var work = try wt.openDir(io, entry.path, .{});
@@ -1243,15 +1408,15 @@ fn relocate(
         var it = dir.iterate();
         if (try it.next(io) != null) return refuse(refusal, display, "", error.SubmoduleHasWorktrees);
     } else |_| {}
-    try validateGitDir(arena, io, repo.gitDirectory(), module.name, display, refusal);
-    const target = try modulePath(arena, module.name);
-    if (try fs.statAt(io, repo.gitDirectory(), target) != null) return refuse(refusal, display, target, error.GitDirExists);
-    if (std.Io.Dir.path.dirnamePosix(target)) |parent| try fs.makeDirs(io, repo.gitDirectory(), parent, repo.sharedPermissions());
-    try wt.rename(dot_git, repo.gitDirectory(), target, io);
+    const where = try moduleDir(arena, io, repo, module.name, display, refusal);
+    const target = where.path;
+    if (try fs.statAt(io, where.base, target) != null) return refuse(refusal, display, target, error.GitDirExists);
+    if (std.Io.Dir.path.dirnamePosix(target)) |parent| try fs.makeDirs(io, where.base, parent, repo.sharedPermissions());
+    try wt.rename(dot_git, where.base, target, io);
 
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
-    var module_dir = try repo.gitDirectory().openDir(io, target, .{});
+    var module_dir = try where.base.openDir(io, target, .{});
     defer module_dir.close(io);
     try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
 }
@@ -1352,13 +1517,12 @@ fn connectAt(gpa: Allocator, io: Io, repo: *Repository, wt: Io.Dir, path: []cons
     defer index.deinit();
     var modules = try loadGitmodules(gpa, io, &sub, &index);
     defer modules.deinit();
-    const sub_git_dir = try absolutePath(arena, io, sub.gitDirectory());
     for (index.items(), 0..) |entry, i| {
         if (entry.mode != .gitlink) continue;
         if (i > 0 and std.mem.eql(u8, index.items()[i - 1].path, entry.path)) continue;
         const module = modules.byPath(entry.path) orelse continue;
         if (!try isActive(arena, &sub, module.name, entry.path)) continue;
-        const nested = try arena.print("{s}/{s}", .{ sub_git_dir, try modulePath(arena, module.name) });
+        const nested = try (try moduleDir(arena, io, &sub, module.name, entry.path, null)).absolute(arena, io);
         try connectAt(gpa, io, &sub, sub_wt, entry.path, nested, depth + 1);
     }
 }
@@ -1556,9 +1720,10 @@ fn populate(
     outcome: *UpdateOutcome,
 ) Error!void {
     const wt = repo.workDirectory() orelse return error.BareRepository;
-    const target = try modulePath(arena, module.name);
+    const where = try moduleDir(arena, io, repo, module.name, display, options.refusal);
+    const target = where.path;
     var module_dir: Io.Dir = blk: {
-        if (repo.gitDirectory().openDir(io, target, .{})) |dir| {
+        if (where.base.openDir(io, target, .{})) |dir| {
             if (discover.directory.isGitDirectory(io, dir)) {
                 dir.deleteFile(io, "index") catch |err| switch (err) {
                     error.FileNotFound => {},
@@ -1577,8 +1742,8 @@ fn populate(
         // git's `clone_submodule` under `--init`: a path that is there and
         // is not an empty directory is not cloned into.
         if (options.init and !try emptyOrAbsent(io, wt, path)) return refuse(options.refusal, display, url, error.DirectoryNotEmpty);
-        try fs.makeDirs(io, repo.gitDirectory(), target, repo.sharedPermissions());
-        const dir = try repo.gitDirectory().openDir(io, target, .{ .iterate = true });
+        try fs.makeDirs(io, where.base, target, repo.sharedPermissions());
+        const dir = try where.base.openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
         transport.cloneFn(gpa, io, transport.context, url, dir) catch |err| switch (err) {
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),

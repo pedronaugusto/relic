@@ -2137,6 +2137,8 @@ test "init takes its branch, object format and ref format from the user's config
         .{ .global = "[init]\n\tdefaultObjectFormat = bogus\n" },
         .{ .global = "[init]\n\tdefaultBranch = trunk\n", .overrides = &.{"init.defaultBranch=fromcli"} },
         .{ .global = "[init]\n\tdefaultBranch = a..b\n" },
+        .{ .global = "[init]\n\tdefaultSubmodulePathConfig = true\n" },
+        .{ .global = "[init]\n\tdefaultSubmodulePathConfig = true\n\tdefaultObjectFormat = sha256\n" },
     };
     for (cases, 0..) |case, n| {
         var root = std.testing.tmpDir(.{ .iterate = true });
@@ -2179,12 +2181,13 @@ test "init takes its branch, object format and ref format from the user's config
             &.{ "symbolic-ref", "HEAD" },
             &.{ "rev-parse", "--show-object-format" },
             &.{ "rev-parse", "--show-ref-format" },
+            &.{ "config", "--get-regexp", "^extensions\\.|^core\\.repositoryformatversion" },
         }) |query| {
             var theirs_dir = try root.dir.openDir(io, "by-git", .{});
             defer theirs_dir.close(io);
-            const theirs = try testremote.gitInputEnv(gpa, io, theirs_dir, &env, query, "", true);
+            const theirs = testremote.gitInputEnv(gpa, io, theirs_dir, &env, query, "", false) catch try gpa.dupe(u8, "(none)");
             defer gpa.free(theirs);
-            const ours = try testremote.gitInputEnv(gpa, io, dir, &env, query, "", true);
+            const ours = testremote.gitInputEnv(gpa, io, dir, &env, query, "", false) catch try gpa.dupe(u8, "(none)");
             defer gpa.free(ours);
             std.testing.expectEqualStrings(theirs, ours) catch |err| {
                 std.debug.print("init case {d}: {s}\n", .{ n, query[0] });

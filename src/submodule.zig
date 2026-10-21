@@ -44,3 +44,4 @@ pub const PathMove = @import("submodule/submodule.zig").PathMove;
 pub const moveInGitmodules = @import("submodule/submodule.zig").moveInGitmodules;
 pub const gitDirOf = @import("submodule/submodule.zig").gitDirOf;
 pub const connectGitDir = @import("submodule/submodule.zig").connectGitDir;
+pub const migrateGitDirConfigs = @import("submodule/submodule.zig").migrateGitDirConfigs;

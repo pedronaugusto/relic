@@ -30,6 +30,9 @@ pub const Format = struct {
     /// Whether each worktree's `config.worktree` is read after the
     /// repository's own: `extensions.worktreeConfig`.
     worktree_config: bool = false,
+    /// Whether a submodule's repository is where `submodule.<name>.gitdir`
+    /// says rather than at `modules/<name>`: `extensions.submodulePathConfig`.
+    submodule_path_config: bool = false,
 };
 
 /// Why a format was refused. `diagnostic`, when given, names the setting.
@@ -74,7 +77,7 @@ pub fn parse(gpa: Allocator, text: []const u8, diagnostic: ?*Diagnostic) ParseEr
 
 /// The extensions git takes only from a version 1 repository: one of
 /// them at version 0 is git's "v1-only extension found" and refused.
-const v1_only_extensions = [_][]const u8{ "noop-v1", "objectformat", "compatobjectformat", "refstorage", "relativeworktrees" };
+const v1_only_extensions = [_][]const u8{ "noop-v1", "objectformat", "compatobjectformat", "refstorage", "relativeworktrees", "submodulepathconfig" };
 
 /// The extensions this release understands at format version 1.
 ///
@@ -90,6 +93,7 @@ const known_extensions = [_][]const u8{
     "worktreeconfig",
     "relativeworktrees",
     "refstorage",
+    "submodulepathconfig",
     // A partial clone's promisor remote, as git before 2.44 names it;
     // the objects it may be asked for are read as any others.
     "partialclone",
@@ -126,10 +130,15 @@ pub fn decide(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Self.E
         if (err == error.NotABoolean) try diagnostic_mod.refuse(diagnostic, "extensions.worktreeConfig");
         return err;
     };
+    const submodule_path_config = config.getBool("extensions.submodulepathconfig", false) catch |err| {
+        if (err == error.NotABoolean) try diagnostic_mod.refuse(diagnostic, "extensions.submodulePathConfig");
+        return err;
+    };
     return .{
         .kind = kind,
         .ref_storage = if (version == 1) storage else .files,
         .worktree_config = worktree_config,
+        .submodule_path_config = version == 1 and submodule_path_config,
     };
 }
 

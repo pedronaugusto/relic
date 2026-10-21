@@ -288,6 +288,8 @@ const RepositoryData = struct {
     /// "Location <working tree>, system <kernel>". `null` without a
     /// working tree.
     untracked_ident: ?[]u8 = null,
+    /// `extensions.submodulePathConfig`, from the repository's format.
+    submodule_path_config: bool = false,
 };
 
 /// The `core` settings engines take, read once from a published
@@ -813,6 +815,7 @@ pub const Repository = struct {
         repo.data().shared = try sharedOf(repo.configuration());
         repo.data().fsync = try fsyncOf(repo.configuration());
         repo.data().settings = try Settings.of(repo.configuration());
+        repo.data().submodule_path_config = format.submodule_path_config;
         if (repo.data().work_dir) |work| repo.data().untracked_ident = try untrackedIdent(gpa, io, work);
         errdefer if (repo.data().untracked_ident) |ident| gpa.free(ident);
         var odb_options = options.odb;
@@ -1148,7 +1151,8 @@ pub const Repository = struct {
         defer user.deinit();
         const object_format = options.object_format orelse initObjectFormat(&user);
         const ref_format = options.ref_format orelse initRefFormat(&user);
-        const branch = try initBranch(gpa, io, git_dir, options);
+        const choices = try initChoices(gpa, io, git_dir, options);
+        const branch = choices.branch;
         defer gpa.free(branch);
 
         try fs.makeDirs(io, git_dir, "objects/pack", shared);
@@ -1174,7 +1178,7 @@ pub const Repository = struct {
             try tx.commit(io, null);
         }
 
-        try initConfig(gpa, io, git_dir, options, .{ .object_format = object_format, .ref_format = ref_format }, shared, logs_set);
+        try initConfig(gpa, io, git_dir, options, .{ .object_format = object_format, .ref_format = ref_format, .submodule_path_config = choices.submodule_path_config }, shared, logs_set);
 
         const work_dir: ?Io.Dir = if (options.bare) null else try dir.openDir(io, ".", .{ .iterate = true });
         const discovered: Discovered = .{
@@ -1210,21 +1214,24 @@ pub const Repository = struct {
         return chosen orelse .files;
     }
 
-    /// The initial branch: `CreateOptions.default_branch`, else
-    /// `init.defaultBranch` as the configuration with the template's own
-    /// says, else `master`; a name no branch can have is refused, as git's
-    /// "invalid branch name".
-    fn initBranch(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions) ErrorNamespace.Error![]u8 {
+    /// What git's `init` reads once the template is in place, from the
+    /// configuration with the template's own: the initial branch --
+    /// `CreateOptions.default_branch`, else `init.defaultBranch`, else
+    /// `master`, a name no branch can have refused as git's "invalid branch
+    /// name" -- and `init.defaultSubmodulePathConfig`. The branch is the
+    /// caller's.
+    fn initChoices(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions) ErrorNamespace.Error!struct { branch: []u8, submodule_path_config: bool } {
+        var config = try config_mod.Config.open(gpa, io, .{
+            .system = options.system_config,
+            .xdg = options.xdg_config,
+            .global = options.global_config,
+            .local = .{ .dir = git_dir, .sub_path = "config" },
+            .command = options.config_overrides,
+            .pairs = options.config_pairs,
+        }, .{ .home = options.home });
+        defer config.deinit();
+        const submodule_path_config = try config.getBool("init.defaultsubmodulepathconfig", false);
         const name = if (options.default_branch) |given| try gpa.dupe(u8, given) else blk: {
-            var config = try config_mod.Config.open(gpa, io, .{
-                .system = options.system_config,
-                .xdg = options.xdg_config,
-                .global = options.global_config,
-                .local = .{ .dir = git_dir, .sub_path = "config" },
-                .command = options.config_overrides,
-                .pairs = options.config_pairs,
-            }, .{ .home = options.home });
-            defer config.deinit();
             const entry = config.find("init.defaultbranch") orelse break :blk try gpa.dupe(u8, "master");
             break :blk try gpa.dupe(u8, entry.value orelse return error.MalformedValue);
         };
@@ -1232,19 +1239,22 @@ pub const Repository = struct {
         const ref = try std.mem.concat(gpa, u8, &.{ "refs/heads/", name });
         defer gpa.free(ref);
         if (!names_ref.checkFormat(ref, .{})) return error.InvalidBranchName;
-        return name;
+        return .{ .branch = name, .submodule_path_config = submodule_path_config };
     }
 
     /// The configuration of a new repository: the values git's `init` sets
     /// one by one, as `git config` would, in its order, in the template's
     /// file when there is one and a new one when not.
-    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions, format: struct { object_format: hash.Kind, ref_format: refs_mod.Format }, shared: fs.Shared, logs_set: bool) ErrorNamespace.Error!void {
+    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: CreateOptions, format: struct { object_format: hash.Kind, ref_format: refs_mod.Format, submodule_path_config: bool }, shared: fs.Shared, logs_set: bool) ErrorNamespace.Error!void {
         var edits: std.ArrayList(ConfigEdit) = .empty;
         defer edits.deinit(gpa);
-        const version = if (format.object_format == .sha1 and format.ref_format == .files) "0" else "1";
-        try edits.append(gpa, .{ .set = .{ .name = "core.repositoryformatversion", .value = version } });
+        // The extensions before the version, as git's
+        // `initialize_repository_version` sets them.
         if (format.object_format != .sha1) try edits.append(gpa, .{ .set = .{ .name = "extensions.objectformat", .value = format.object_format.name() } });
         if (format.ref_format != .files) try edits.append(gpa, .{ .set = .{ .name = "extensions.refstorage", .value = format.ref_format.name() } });
+        if (format.submodule_path_config) try edits.append(gpa, .{ .set = .{ .name = "extensions.submodulepathconfig", .value = "true" } });
+        const version = if (format.object_format == .sha1 and format.ref_format == .files and !format.submodule_path_config) "0" else "1";
+        try edits.append(gpa, .{ .set = .{ .name = "core.repositoryformatversion", .value = version } });
         try edits.append(gpa, .{ .set = .{ .name = "core.filemode", .value = if (options.file_mode) "true" else "false" } });
         try edits.append(gpa, .{ .set = .{ .name = "core.bare", .value = if (options.bare) "true" else "false" } });
         if (!options.bare and !logs_set) try edits.append(gpa, .{ .set = .{ .name = "core.logallrefupdates", .value = "true" } });
@@ -1507,6 +1517,7 @@ pub const Repository = struct {
         fsync: fs.Fsync,
         settings: Settings,
         packing: odb_policy.Packing,
+        submodule_path_config: bool,
     };
 
     /// Whether `next` may be published, and the policy it sets: the same
@@ -1530,6 +1541,7 @@ pub const Repository = struct {
             .fsync = try fsyncOf(next),
             .settings = try Settings.of(next),
             .packing = try packingOf(next),
+            .submodule_path_config = format.submodule_path_config,
         };
     }
 
@@ -1548,6 +1560,7 @@ pub const Repository = struct {
         repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;
         repo.data().settings = policy.settings;
+        repo.data().submodule_path_config = policy.submodule_path_config;
     }
 
     /// The `core` settings the engines take, as the published configuration
@@ -1559,6 +1572,12 @@ pub const Repository = struct {
 
     fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) ErrorNamespace.Error!void {
         repo.installConfig(next, try repo.checkConfig(&next, format, diagnostic));
+    }
+
+    /// Whether a submodule's repository is where `submodule.<name>.gitdir`
+    /// says, rather than at `modules/<name>`: `extensions.submodulePathConfig`.
+    pub fn submodulePathConfig(repo: *const Repository) bool {
+        return repo.data().submodule_path_config;
     }
 
     /// Whether the repository has a working tree.

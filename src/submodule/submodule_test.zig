@@ -1155,3 +1155,117 @@ test "the walk visits what git submodule foreach --recursive visits, in its orde
     try testing.expectEqual(@as(usize, 2), visits);
     try testing.expectEqualStrings(theirs, out.items);
 }
+
+/// A superproject with two submodules checked out in place, `vendor/lib`
+/// (a name with a slash) and `Plain`, their `.git` directories where they
+/// are; with `absorbed`, moved into `modules/` as git lays them out
+/// without `extensions.submodulePathConfig`.
+fn pathConfigFixture(gpa: Allocator, io: Io, absorbed: bool) !testgit.Repo {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    errdefer repo.deinit();
+    try repo.writeFile(io, "top", "top\n");
+    try repo.exec(io, &.{ "add", "top" });
+    try repo.exec(io, &.{ "commit", "-qm", "top" });
+    for ([_][]const u8{ "vendor/lib", "Plain" }) |path| {
+        try repo.exec(io, &.{ "init", "-q", "-b", "main", path });
+        const file = try std.mem.concat(gpa, u8, &.{ path, "/f" });
+        defer gpa.free(file);
+        try repo.writeFile(io, file, "f\n");
+        try repo.exec(io, &.{ "-C", path, "add", "f" });
+        try repo.exec(io, &.{ "-C", path, "commit", "-qm", "f" });
+        const url = try std.mem.concat(gpa, u8, &.{ "./", path });
+        defer gpa.free(url);
+        try repo.exec(io, &.{ "submodule", "add", "-q", url, path });
+    }
+    try repo.exec(io, &.{ "commit", "-qm", "subs" });
+    if (absorbed) try repo.exec(io, &.{ "submodule", "absorbgitdirs" });
+    return repo;
+}
+
+fn enablePathConfig(io: Io, repo: *testgit.Repo) !void {
+    try repo.exec(io, &.{ "config", "core.repositoryformatversion", "1" });
+    try repo.exec(io, &.{ "config", "extensions.submodulePathConfig", "true" });
+}
+
+/// What the layout leaves: each `gitdir` setting, the format, what is in
+/// `modules/`, and each submodule's `.git` file and `core.worktree`.
+fn pathConfigState(gpa: Allocator, io: Io, repo: *testgit.Repo) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    const listed = try repo.run(io, &.{ "config", "--local", "--list" });
+    defer gpa.free(listed);
+    var lines = std.mem.splitScalar(u8, listed, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.endsWith(u8, std.mem.sliceTo(line, '='), ".gitdir") or std.mem.startsWith(u8, line, "extensions.") or
+            std.mem.startsWith(u8, line, "core.repositoryformatversion")) try out.print(gpa, "{s}\n", .{line});
+    }
+    if (repo.dir.openDir(io, ".git/modules", .{ .iterate = true })) |modules_const| {
+        var modules = modules_const;
+        defer modules.close(io);
+        var names: std.ArrayList([]u8) = .empty;
+        defer {
+            for (names.items) |n| gpa.free(n);
+            names.deinit(gpa);
+        }
+        var it = modules.iterate();
+        while (try it.next(io)) |entry| try names.append(gpa, try gpa.dupe(u8, entry.name));
+        std.mem.sort([]u8, names.items, {}, struct {
+            fn less(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        for (names.items) |n| try out.print(gpa, "module {s}\n", .{n});
+    } else |_| {}
+    for ([_][]const u8{ "vendor/lib", "Plain" }) |path| {
+        const dot_git = try std.mem.concat(gpa, u8, &.{ path, "/.git" });
+        defer gpa.free(dot_git);
+        if (repo.dir.readFileAlloc(io, dot_git, gpa, .unlimited)) |text| {
+            defer gpa.free(text);
+            try out.print(gpa, "{s}: {s}", .{ dot_git, text });
+        } else |_| try out.print(gpa, "{s}: a directory\n", .{dot_git});
+        const worktree_setting = repo.run(io, &.{ "-C", path, "config", "core.worktree" }) catch try gpa.dupe(u8, "none\n");
+        defer gpa.free(worktree_setting);
+        try out.print(gpa, "{s} core.worktree {s}", .{ path, worktree_setting });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "extensions.submodulePathConfig: init writes git's gitdir settings, absorb and migration follow them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Step = enum { init, init_then_absorb, migrate };
+    for ([_]Step{ .init, .init_then_absorb, .migrate }) |step| {
+        var described: [2][]u8 = undefined;
+        for (0..2, [_]bool{ true, false }) |side, by_git| {
+            var repo = try pathConfigFixture(gpa, io, step == .migrate);
+            defer repo.deinit();
+            if (step != .migrate) try enablePathConfig(io, &repo);
+            if (by_git) switch (step) {
+                .init => try repo.exec(io, &.{ "submodule", "init", "-q" }),
+                .init_then_absorb => {
+                    try repo.exec(io, &.{ "submodule", "init", "-q" });
+                    try repo.exec(io, &.{ "submodule", "absorbgitdirs" });
+                },
+                .migrate => try repo.exec(io, &.{ "submodule--helper", "migrate-gitdir-configs" }),
+            } else {
+                var native = try Repository.open(gpa, io, repo.dir, .{});
+                defer native.deinit(io);
+                switch (step) {
+                    .init => _ = try submodule.init(gpa, io, &native, .{}),
+                    .init_then_absorb => {
+                        _ = try submodule.init(gpa, io, &native, .{});
+                        _ = try native.refreshConfig(io, .{});
+                        _ = try submodule.absorbGitDirs(gpa, io, &native, .{});
+                    },
+                    .migrate => _ = try submodule.migrateGitDirConfigs(gpa, io, &native),
+                }
+            }
+            described[side] = try pathConfigState(gpa, io, &repo);
+        }
+        defer for (described) |d| gpa.free(d);
+        testing.expectEqualStrings(described[0], described[1]) catch |err| {
+            std.debug.print("path config step {t}\n", .{step});
+            return err;
+        };
+    }
+}
