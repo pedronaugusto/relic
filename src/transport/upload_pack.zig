@@ -141,6 +141,12 @@ pub const Server = struct {
     advertise_bundle_uris: bool,
     allow_ref_in_want: bool,
     filters: FilterRules,
+    /// `transfer.advertiseObjectInfo`: protocol v2's `object-info`.
+    advertise_object_info: bool,
+    /// `transfer.advertiseSID`: the id this server names itself by, its
+    /// length in `session_id_buf`; zero for none.
+    session_id_buf: [protocol.session_id_len]u8 = undefined,
+    session_id_len: usize = 0,
     /// A client answered `promisor-remote` taking one of this repository's
     /// promisor remotes, so what that remote promises and this repository
     /// lacks is left out of a pack: git's `--missing=allow-promisor`.
@@ -151,7 +157,7 @@ pub const Server = struct {
     pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Server {
         const config = remote.repo.configuration();
         const any = options.allow_any orelse (config.getBool("uploadpack.allowanysha1inwant", false) catch false);
-        return .{
+        var s: Server = .{
             .gpa = gpa,
             .io = io,
             .remote = remote,
@@ -164,7 +170,10 @@ pub const Server = struct {
             .advertise_bundle_uris = options.advertise_bundle_uris orelse advertisesBundleUris(config),
             .allow_ref_in_want = options.allow_ref_in_want orelse (config.getBool("uploadpack.allowrefinwant", false) catch false),
             .filters = .read(config),
+            .advertise_object_info = config.getBool("transfer.advertiseobjectinfo", false) catch false,
         };
+        if (config.getBool("transfer.advertisesid", false) catch false) s.session_id_len = protocol.sessionId(io, &s.session_id_buf).len;
+        return s;
     }
 
     fn db(s: *Server) *odb_mod.Odb {
@@ -194,6 +203,8 @@ pub const Server = struct {
         try pkt_line.print("fetch=shallow wait-for-done{s}{s}\n", .{ if (s.allow_filter) " filter" else "", if (s.allow_ref_in_want) " ref-in-want" else "" }, w);
         try pkt_line.write(w, "server-option\n");
         try pkt_line.print("object-format={s}\n", .{s.kind().name()}, w);
+        if (s.sessionId()) |sid| try pkt_line.print("session-id={s}\n", .{sid}, w);
+        if (s.advertise_object_info) try pkt_line.write(w, "object-info\n");
         if (s.advertise_bundle_uris) try pkt_line.write(w, "bundle-uri\n");
         // `promisor.advertise`: the promisor remotes this one borrows from.
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
@@ -212,6 +223,7 @@ pub const Server = struct {
         if (s.stateless) try out.appendSlice(gpa, " no-done");
         if (head_target) |t| try out.print(gpa, " symref=HEAD:{s}", .{t});
         if (s.allow_filter) try out.appendSlice(gpa, " filter");
+        if (s.sessionId()) |sid| try out.print(gpa, " session-id={s}", .{sid});
         try out.print(gpa, " object-format={s} agent={s}", .{ s.kind().name(), protocol.agent });
     }
 
@@ -323,12 +335,57 @@ pub const Server = struct {
             try s.fetchV2(arena, args.items, out);
         } else if (std.mem.eql(u8, name, "bundle-uri") and s.advertise_bundle_uris) {
             try s.bundleUri(arena, args.items, out);
+        } else if (std.mem.eql(u8, name, "object-info") and s.advertise_object_info) {
+            try s.objectInfo(args.items, out);
         } else {
             try s.sendError(out, "unknown command");
             return error.ProtocolError;
         }
         out.flush() catch return error.WriteFailed;
         return true;
+    }
+
+    /// git's `cap_object_info`: each object's size, as the client asked,
+    /// empty for one this repository does not have; a line that is not an
+    /// object's name, or not asked for at all, refused in git's words and
+    /// passed over.
+    fn objectInfo(s: *Server, args: []const []const u8, out: *Io.Writer) Error!void {
+        var size = false;
+        var oids: std.ArrayList([]const u8) = .empty;
+        var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        (write: {
+            for (args) |arg| {
+                if (std.mem.eql(u8, arg, "size")) {
+                    size = true;
+                } else if (std.mem.startsWith(u8, arg, "oid ")) {
+                    try oids.append(arena, arg["oid ".len..]);
+                } else pkt_line.print("ERR object-info: unexpected line: '{s}'", .{arg}, out) catch |e| break :write e;
+            }
+            if (oids.items.len != 0) {
+                if (size) pkt_line.write(out, "size") catch |e| break :write e;
+                for (oids.items) |text| {
+                    const oid = s.parseOid(text) orelse {
+                        pkt_line.print("ERR object-info: protocol error, expected to get oid, not '{s}'", .{text}, out) catch |e| break :write e;
+                        continue;
+                    };
+                    if (!size) {
+                        pkt_line.write(out, text) catch |e| break :write e;
+                        continue;
+                    }
+                    if (try s.db().exists(s.io, oid)) {
+                        const header = try s.db().readHeader(s.io, oid);
+                        pkt_line.print("{s} {d}", .{ text, header.size }, out) catch |e| break :write e;
+                    } else pkt_line.print("{s} ", .{text}, out) catch |e| break :write e;
+                }
+            }
+            pkt_line.flush(out) catch |e| break :write e;
+        }) catch |err| return writeError(err);
+    }
+
+    fn sessionId(s: *const Server) ?[]const u8 {
+        return if (s.session_id_len == 0) null else s.session_id_buf[0..s.session_id_len];
     }
 
     fn lsRefs(s: *Server, args: []const []const u8, out: *Io.Writer) Error!void {

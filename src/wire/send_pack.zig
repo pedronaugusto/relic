@@ -73,6 +73,8 @@ pub const Request = struct {
     /// as git's `generate_push_cert` sends it: `push-cert` and the
     /// capabilities, each of its lines, `push-cert-end`.
     certificate: ?[]const u8 = null,
+    /// `session-id=`, for a server that takes one: `transfer.advertiseSID`.
+    session_id: ?[]const u8 = null,
 };
 
 /// Whether a push is signed: git's `--signed` and `push.gpgSign`.
@@ -270,6 +272,7 @@ fn writeCommands(
     if (request.push_options.len != 0) try caps.writeAll(" push-options");
     if (adv.has("object-format")) try caps.print(" object-format={s}", .{adv.kind.name()});
     if (adv.has("agent")) try caps.print(" agent={s}", .{protocol.agent});
+    if (request.session_id) |sid| if (adv.has("session-id")) try caps.print(" session-id={s}", .{sid});
     if (request.certificate) |cert| {
         // Each line a packet, its newline kept.
         try pkt_line.print("push-cert\x00{s}", .{caps.buffered()}, w);

@@ -82,6 +82,8 @@ pub const Request = struct {
     /// A partial clone's filter, as `partial.normalize` spells it:
     /// `blob:none`, `blob:limit=1024`, `tree:0`.
     filter: ?[]const u8 = null,
+    /// `session-id=`, for a server that takes one: `transfer.advertiseSID`.
+    session_id: ?[]const u8 = null,
 };
 
 /// How deep the history is to be: git's `--depth`, `--deepen`,
@@ -286,7 +288,7 @@ fn writeFetchV2(
     no_progress: bool,
     done: *bool,
 ) (pkt_line.WriteError || Negotiator.NegotiateError)!void {
-    try protocol.writeCommand(w, adv, "fetch");
+    try protocol.writeCommand(w, adv, "fetch", request.session_id);
     // Newlines where git's fetch-pack writes them, and none where not.
     try pkt_line.write(w, "thin-pack");
     if (no_progress) try pkt_line.write(w, "no-progress");
@@ -679,6 +681,7 @@ fn writeWantsV0(
         if (adv.has("deepen-since")) try c.writeAll(" deepen-since");
         if (adv.has("deepen-not")) try c.writeAll(" deepen-not");
         if (adv.has("agent")) try c.print(" agent={s}", .{protocol.agent});
+        if (request.session_id) |sid| if (adv.has("session-id")) try c.print(" session-id={s}", .{sid});
         if (request.filter != null) try c.writeAll(" filter");
         // git names the hash only when it is not SHA-1.
         if (adv.has("object-format") and adv.kind != .sha1) try c.print(" object-format={s}", .{adv.kind.name()});

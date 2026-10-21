@@ -22,6 +22,7 @@ const testremote = @import("../testing/remote.zig");
 const local = @import("local.zig");
 const upload_pack_mod = @import("upload_pack.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
+const program = @import("../process.zig").program;
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -468,5 +469,62 @@ test "uploadpack.allowRefInWant and uploadpackfilter.* are held to as git's uplo
         // A fetch of one more ref by name.
         for ([_]Io.Dir{ a, b }) |d| gpa.free(try git(gpa, io, d, &env, &.{ "-c", "protocol.version=2", "fetch", "-q", "origin", "refs/heads/main:refs/heads/fetched" }));
         try expectSame(gpa, io, &env, a, b);
+    }
+}
+
+test "object-info answers each object's size as git's upload-pack does, and both name a session under transfer.advertiseSID" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
+    defer gpa.free(helper);
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const bare = try served(gpa, io, root.dir);
+    defer gpa.free(bare);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_PROTOCOL", "version=2");
+    var served_dir = try Io.Dir.cwd().openDir(io, bare, .{});
+    defer served_dir.close(io);
+    gpa.free(try git(gpa, io, served_dir, &env, &.{ "config", "transfer.advertiseObjectInfo", "true" }));
+    gpa.free(try git(gpa, io, served_dir, &env, &.{ "config", "transfer.advertiseSID", "true" }));
+    const main_oid = try git(gpa, io, served_dir, &env, &.{ "rev-parse", "main", "main^{tree}" });
+    defer gpa.free(main_oid);
+    var oids = std.mem.tokenizeScalar(u8, main_oid, '\n');
+    const commit = oids.next().?;
+    const tree = oids.next().?;
+
+    // One request, every kind of line: sizes asked, a commit and a tree,
+    // an object neither has, a name that is none, a line not asked for.
+    var request: Io.Writer.Allocating = .init(gpa);
+    defer request.deinit();
+    const w = &request.writer;
+    try pkt_line.write(w, "command=object-info");
+    try pkt_line.write(w, "object-format=sha1");
+    try pkt_line.delim(w);
+    try pkt_line.write(w, "size");
+    try pkt_line.print("oid {s}", .{commit}, w);
+    try pkt_line.print("oid {s}", .{tree}, w);
+    try pkt_line.write(w, "oid 0123456789012345678901234567890123456789");
+    try pkt_line.write(w, "oid nothing");
+    try pkt_line.write(w, "bogus");
+    try pkt_line.flush(w);
+    var answers: [2][]u8 = undefined;
+    for ([_][]const u8{ "git", helper }, 0..) |program_name, i| {
+        const argv: []const []const u8 = if (i == 0) &.{ program_name, "upload-pack", "--stateless-rpc", bare } else &.{ program_name, "--stateless-rpc", bare };
+        const outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv }, .{ .input = request.written() });
+        defer gpa.free(outcome.stderr);
+        answers[i] = outcome.stdout;
+    }
+    defer for (answers) |a| gpa.free(a);
+    try testing.expectEqualStrings(answers[0], answers[1]);
+
+    // Each advertises a session and the command.
+    for ([_][]const u8{ "git", helper }, 0..) |program_name, i| {
+        const argv: []const []const u8 = if (i == 0) &.{ program_name, "upload-pack", "--advertise-refs", bare } else &.{ program_name, "--advertise-refs", bare };
+        var outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv }, .{});
+        defer outcome.deinit(gpa);
+        try testing.expect(std.mem.find(u8, outcome.stdout, "session-id=") != null);
+        try testing.expect(std.mem.find(u8, outcome.stdout, "object-info\n") != null);
     }
 }

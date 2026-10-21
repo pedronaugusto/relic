@@ -191,6 +191,11 @@ pub const Session = struct {
 
     gpa: Allocator,
     service: Service,
+    /// `transfer.advertiseSID`: the id this side names itself by to a
+    /// server that takes one, its length in `session_id_buf`; zero for
+    /// none.
+    session_id_buf: [protocol.session_id_len]u8 = undefined,
+    session_id_len: usize = 0,
     impl: union(enum) {
         local: *local.Remote,
         /// A bundle file named by a path, as git's bundle transport reads
@@ -236,7 +241,14 @@ pub const Session = struct {
         var session = try openUnanswered(gpa, io, remote_url, service, kind, options);
         errdefer session.deinit(io);
         try session.answerPromisors(options);
+        if (options.config) |config| if (config.getBool("transfer.advertisesid", false) catch false) {
+            session.session_id_len = protocol.sessionId(io, &session.session_id_buf).len;
+        };
         return session;
+    }
+
+    fn sessionId(s: *const Session) ?[]const u8 {
+        return if (s.session_id_len == 0) null else s.session_id_buf[0..s.session_id_len];
     }
 
     /// Answer a v2 server's `promisor-remote` with the remotes
@@ -635,6 +647,7 @@ pub const Session = struct {
                     .push_options = request.push_options,
                     .progress = request.progress,
                     .certificate = request.certificate,
+                    .session_id = s.sessionId(),
                 });
             },
         }
@@ -726,7 +739,9 @@ pub const Session = struct {
                 // Done with either way: git ends a v2 conversation after
                 // its fetch by closing it, with no flush.
                 smart.done = true;
-                const result = try fetch_pack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = request }, options);
+                var with_id = request;
+                with_id.session_id = s.sessionId();
+                const result = try fetch_pack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = with_id }, options);
                 return .{ .pack = result.name, .objects = result.objects, .keep = result.keep };
             },
         }

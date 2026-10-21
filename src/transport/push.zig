@@ -955,6 +955,7 @@ fn updateOneTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const r
 
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
+const fetch_mod = @import("fetch.zig");
 const testremote = @import("../testing/remote.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -1482,6 +1483,59 @@ test "push.gpgSign signs a push, and a server asking for no certificate takes on
             return error.TestUnexpectedResult;
         } else |err| try testing.expectEqualStrings(case[1], @errorName(err));
     }
+}
+
+test "under transfer.advertiseSID a push and a fetch name their session to a server that takes one, as git's do" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    const fake = try testremote.fakeSsh(gpa, io, twins.root.dir);
+    defer gpa.free(fake);
+    // git's servers write what they were told to their trace2 log.
+    const events = try gpa.print("{s}/events", .{twins.root_path});
+    defer gpa.free(events);
+    try twins.env.put("GIT_TRACE2_EVENT", events);
+    var remote_dir = try twins.root.dir.openDir(io, "remote-relic.git", .{});
+    defer remote_dir.close(io);
+    try twins.git(remote_dir, &.{ "config", "transfer.advertiseSID", "true" });
+    var work = try twins.root.dir.openDir(io, "work-relic", .{});
+    defer work.close(io);
+    const ssh_path = try gpa.dupe(u8, twins.root_path);
+    defer gpa.free(ssh_path);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+    const url = try gpa.print("ssh://example.invalid{s}{s}/remote-relic.git", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path });
+    defer gpa.free(url);
+    try twins.git(work, &.{ "remote", "set-url", "origin", url });
+    try twins.git(work, &.{ "config", "core.sshCommand", fake });
+    try twins.git(work, &.{ "config", "transfer.advertiseSID", "true" });
+    var repo = try Repository.open(gpa, io, work, .{});
+    defer repo.deinit(io);
+    var pushed = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"main:refs/heads/sid"} });
+    defer pushed.deinit();
+    for ([_][]const u8{ "2", "0" }) |version| {
+        try twins.git(work, &.{ "config", "protocol.version", version });
+        // Something new there, for the fetch to ask for.
+        const made = try twins.gitOut(remote_dir, &.{ "commit-tree", "main^{tree}", "-p", "main", "-m", version });
+        defer gpa.free(made);
+        try twins.git(remote_dir, &.{ "update-ref", "refs/heads/main", std.mem.trimEnd(u8, made, "\n") });
+        var reopened = try Repository.open(gpa, io, work, .{});
+        defer reopened.deinit(io);
+        var fetched = try fetch_mod.fetch(gpa, io, &reopened, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"refs/heads/main:refs/heads/fetched"} });
+        fetched.deinit();
+    }
+    const log = try Io.Dir.cwd().readFileAlloc(io, events, gpa, .unlimited);
+    defer gpa.free(log);
+    // receive-pack's, and upload-pack's in v0 and v2: relic's id each time.
+    var told: usize = 0;
+    var it = std.mem.splitSequence(u8, log, "\"key\":\"client-sid\",\"value\":\"");
+    _ = it.next();
+    while (it.next()) |rest| {
+        const end = std.mem.findScalar(u8, rest, '"') orelse continue;
+        try testing.expect(std.mem.find(u8, rest[0..end], "Z-R") != null);
+        told += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), told);
 }
 
 test "a push goes through the proxy it is given, and past the configured one when given none" {

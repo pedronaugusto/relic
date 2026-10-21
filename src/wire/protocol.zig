@@ -28,6 +28,28 @@ const Connection = connection.Connection;
 /// What relic calls itself in an `agent` capability.
 pub const agent = "relic/0.3";
 
+/// Room for a `sessionId`.
+pub const session_id_len = 48;
+
+/// A name for a conversation's side, as `session-id=` carries it, in the
+/// role git's trace2 session id has: the time, in UTC to the microsecond,
+/// as git writes its, then random bits where git names the host and the
+/// process, which say as surely that two are not the same.
+pub fn sessionId(io: Io, buf: *[session_id_len]u8) []const u8 {
+    const ns = Io.Clock.real.now(io).nanoseconds;
+    const secs: u64 = @intCast(@max(0, @divFloor(ns, std.time.ns_per_s)));
+    const micros: u64 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
+    const day = epoch.getEpochDay().calculateYearDay();
+    const month = day.calculateMonthDay();
+    const clock = epoch.getDaySeconds();
+    var random: [8]u8 = undefined;
+    io.random(&random);
+    const fields = .{ day.year, month.month.numeric(), month.day_index + 1, clock.getHoursIntoDay(), clock.getMinutesIntoHour(), clock.getSecondsIntoMinute(), micros, &random };
+    // unreachable: 24 bytes of time and 18 of the rest fit in 48
+    return std.mem.print(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}.{d:0>6}Z-R{x}", fields) catch unreachable;
+}
+
 /// Which dialect the server opened in.
 pub const Version = enum { v0, v1, v2 };
 
@@ -286,7 +308,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
     }
 
     const w = try conn.request();
-    writeCommand(w, adv, "ls-refs") catch |err| return conn.writeFailed(err);
+    writeCommand(w, adv, "ls-refs", null) catch |err| return conn.writeFailed(err);
     const unborn = adv.commandHas("ls-refs", "unborn");
     (struct {
         fn args(out: *Io.Writer, prefixes: []const []const u8, want_unborn: bool) !void {
@@ -353,7 +375,7 @@ fn matchesPrefix(name: []const u8, prefixes: []const []const u8) bool {
 
 /// The head of a v2 command: `command=<name>`, the capabilities this side
 /// sends back, and the delimiter before the arguments.
-pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8) pkt_line.WriteError!void {
+pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8, session_id: ?[]const u8) pkt_line.WriteError!void {
     // As git writes them: `ls-refs` and `bundle-uri` with a newline,
     // `fetch` without (they are separate functions in git), the
     // capabilities without, the arguments with; `bundle-uri` after the
@@ -363,6 +385,7 @@ pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u
         try pkt_line.print("command={s}\n", .{command}, w);
     } else if (!bundle_uri) try pkt_line.print("command={s}", .{command}, w);
     if (adv.has("agent")) try pkt_line.print("agent={s}", .{agent}, w);
+    if (session_id) |sid| if (adv.has("session-id")) try pkt_line.print("session-id={s}", .{sid}, w);
     if (adv.has("object-format")) try pkt_line.print("object-format={s}", .{adv.kind.name()}, w);
     if (adv.promisor_reply) |names| try pkt_line.print("promisor-remote={s}", .{names}, w);
     if (bundle_uri) try pkt_line.write(w, "command=bundle-uri\n");
@@ -378,7 +401,7 @@ pub fn bundleUri(arena: Allocator, conn: *Connection, adv: *const Advertisement)
     const w = try conn.request();
     (struct {
         fn send(out: *Io.Writer, a: *const Advertisement) !void {
-            try writeCommand(out, a, "bundle-uri");
+            try writeCommand(out, a, "bundle-uri", null);
             try pkt_line.flush(out);
         }
     }).send(w, adv) catch |err| return conn.writeFailed(err);

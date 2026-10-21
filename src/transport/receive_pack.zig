@@ -142,6 +142,8 @@ const Settings = struct {
     /// `receive.updateServerInfo`: the dumb HTTP files written again after
     /// every push.
     update_server_info: bool,
+    /// `transfer.advertiseSID`: a `session-id` among the capabilities.
+    advertise_sid: bool,
     /// `receive.unpackLimit`, else `transfer.unpackLimit`, else git's 100:
     /// a pack of fewer objects is stored loose.
     unpack_limit: u64,
@@ -162,6 +164,7 @@ const Settings = struct {
             .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
             .keepalive_secs = config.getInt("receive.keepalive", 5) catch 5,
             .update_server_info = config.getBool("receive.updateserverinfo", false) catch false,
+            .advertise_sid = config.getBool("transfer.advertisesid", false) catch false,
             .unpack_limit = limit: {
                 for ([_][]const u8{ "receive.unpacklimit", "transfer.unpacklimit" }) |key| {
                     const value = config.getInt(key, -1) catch -1;
@@ -329,6 +332,10 @@ pub const Server = struct {
         if (s.settings.ofs_delta) try caps.appendSlice(s.gpa, " ofs-delta");
         if (s.nonce) |nonce| try caps.print(s.gpa, " push-cert={s}", .{nonce});
         if (s.settings.advertise_push_options) try caps.appendSlice(s.gpa, " push-options");
+        if (s.settings.advertise_sid) {
+            var sid: [protocol.session_id_len]u8 = undefined;
+            try caps.print(s.gpa, " session-id={s}", .{protocol.sessionId(s.io, &sid)});
+        }
         try caps.print(s.gpa, " object-format={s} agent={s}", .{ s.kind().name(), protocol.agent });
 
         var listing = try s.remote.repo.refStore().list(s.gpa, s.io, "refs/");
