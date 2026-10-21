@@ -64,6 +64,7 @@ const decimal = @import("../text.zig").decimal;
 const abbrev = @import("../odb/abbrev.zig");
 const progress_mod = @import("../report.zig").progress;
 const server_info = @import("../maintenance/server_info.zig");
+const maintenance = @import("../maintenance/run.zig");
 const checkout = @import("../checkout/checkout.zig");
 const three_way = @import("../merge/three_way.zig");
 const signing = @import("../object/signing.zig");
@@ -143,6 +144,9 @@ const Settings = struct {
     /// `receive.updateServerInfo`: the dumb HTTP files written again after
     /// every push.
     update_server_info: bool,
+    /// `receive.autogc`: git's `maintenance run --auto --quiet` after
+    /// every push.
+    auto_gc: bool,
     /// `transfer.advertiseSID`: a `session-id` among the capabilities.
     advertise_sid: bool,
     /// `receive.unpackLimit`, else `transfer.unpackLimit`, else git's 100:
@@ -165,6 +169,7 @@ const Settings = struct {
             .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
             .keepalive_secs = config.getInt("receive.keepalive", 5) catch 5,
             .update_server_info = config.getBool("receive.updateserverinfo", false) catch false,
+            .auto_gc = config.getBool("receive.autogc", true) catch true,
             .advertise_sid = config.getBool("transfer.advertisesid", false) catch false,
             .unpack_limit = limit: {
                 for ([_][]const u8{ "receive.unpacklimit", "transfer.unpacklimit" }) |key| {
@@ -488,9 +493,18 @@ pub const Server = struct {
 
         try s.execute(arena, commands, unpack_status, &q, &received, &keeps, push_options.items);
         if (received) |*r| try s.settleLoose(r, &keeps);
+        // The pack's `.keep` goes once the refs hold its objects, as git's
+        // `delete_tempfile(&pack_lockfile)` removes it: before the hooks
+        // and the maintenance after them, which would leave it alone.
+        for (keeps.items) |*token| token.deinit(s.io);
+        keeps.clearRetainingCapacity();
         try s.report(commands, unpack_status);
         _ = try s.runReceiveHook(arena, "post-receive", commands, true, push_options.items, null);
         try s.runPostUpdate(arena, commands);
+        // `receive.autogc`, as git's `prepare_auto_maintenance` decides it.
+        // A setting that is no boolean leaves it unrun, where git dies.
+        const auto = if (s.settings.auto_gc) maintenance.autoMaintenance(&s.remote.repo) catch null else null;
+        if (auto) |a| if (!a.detach) try s.autoMaintain();
         if (s.settings.update_server_info) {
             // As git's: what it comes to is not the push's to answer for.
             server_info.updateServerInfo(s.gpa, s.io, &s.remote.repo) catch |err| switch (err) {
@@ -506,6 +520,24 @@ pub const Server = struct {
         }
         if (s.asked.band != .none) try s.send(.raw, "0000");
         out.flush() catch return error.WriteFailed;
+        // git detaches it and the client hears the end of the push at
+        // once; here it runs once the client has heard all of it.
+        if (auto) |a| if (a.detach) try s.autoMaintain();
+    }
+
+    /// `maintenance run --auto --quiet`, whose failures are not the
+    /// push's: git does not look at how it ends.
+    fn autoMaintain(s: *Server) Self.Error!void {
+        _ = maintenance.run(s.gpa, s.io, &s.remote.repo, .{
+            .clock = .{ .now = Io.Clock.real.now(s.io), .local_offset_minutes = s.options.who.offset_minutes },
+            .auto = true,
+            .hooks = if (s.runner) |*r| r else null,
+            .programs = s.options.programs,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => {},
+        };
     }
 
     fn setChannel(s: *Server, channel: Channel) void {

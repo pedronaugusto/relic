@@ -749,6 +749,33 @@ test "receive.updateServerInfo writes the dumb HTTP files after a push, as git's
     try testing.expect(std.mem.count(u8, files[1][1], "P pack-") >= 1);
 }
 
+test "receive.autogc runs git's auto maintenance after a push, as git's receive-pack does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{ .{ "receive.unpackLimit", "1" }, .{ "gc.autoPackLimit", "2" }, .{ "maintenance.autoDetach", "false" } });
+    defer p.deinit();
+    try p.both(&.{"main~2:refs/heads/main"});
+    try p.both(&.{"main~1:refs/heads/main"});
+    // Three packs, past the limit: gathered into one.
+    try p.gitBoth(&.{ "config", "receive.autogc", "true" });
+    try p.both(&.{ "main:refs/heads/main", "v1" });
+    var dir = try Io.Dir.cwd().openDir(io, p.ours, .{});
+    defer dir.close(io);
+    const counted = try testremote.gitInputEnv(gpa, io, dir, &p.env, &.{ "count-objects", "-v" }, "", true);
+    defer gpa.free(counted);
+    try testing.expect(std.mem.find(u8, counted, "packs: 1\n") != null);
+    // Detached in git, so only ours is looked at once it is done.
+    try p.gitBoth(&.{ "config", "maintenance.autoDetach", "true" });
+    try testremote.addCommits(gpa, io, &p.source, 3, 1);
+    const pushed = try p.push(p.ours, true, &.{"main:refs/heads/main"});
+    defer gpa.free(pushed.report);
+    defer gpa.free(pushed.remote_lines);
+    try testing.expect(pushed.ok);
+    const again = try testremote.gitInputEnv(gpa, io, dir, &p.env, &.{ "count-objects", "-v" }, "", true);
+    defer gpa.free(again);
+    try testing.expect(std.mem.find(u8, again, "packs: 2\n") != null);
+}
+
 test "a push updating a symbolic ref and its target is taken once, or refused when the two disagree, as git's check_aliased_updates decides" {
     const gpa = testing.allocator;
     const io = testing.io;
