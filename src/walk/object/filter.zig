@@ -17,6 +17,7 @@
 //! object asked for by name is sent whatever the filter says.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -47,7 +48,7 @@ const Verdict = struct {
 const State = union(enum) {
     none,
     blob_none,
-    blob_limit: u64,
+    blob_limit: aegis.units.Bytes(u64),
     object_type: object.Type,
     tree_depth: TreeDepth,
     sparse: Sparse,
@@ -222,7 +223,7 @@ const Traversal = struct {
                 .blob => blk: {
                     const header = t.db.readHeader(t.io, oid) catch break :blk Verdict.shown;
                     // Strictly smaller than the limit, as git keeps it.
-                    break :blk if (header.size < limit) Verdict.shown else Verdict.hidden;
+                    break :blk if (aegis.units.Bytes(u64).fromRaw(header.size).compare(limit) == .lt) Verdict.shown else Verdict.hidden;
                 },
             },
             .object_type => |want| return switch (sit) {

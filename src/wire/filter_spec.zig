@@ -17,6 +17,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const percent = @import("../text.zig").percent;
 const shakedown = @import("shakedown");
@@ -35,7 +36,7 @@ pub const Spec = union(enum) {
     /// `blob:none`: no blob.
     blob_none,
     /// `blob:limit=<n>`: no blob larger than `n` bytes.
-    blob_limit: u64,
+    blob_limit: aegis.units.Bytes(u64),
     /// `tree:<depth>`: no tree or blob at `depth` or deeper.
     tree_depth: u64,
     /// `object:type=<type>`: only objects of the type.
@@ -51,7 +52,7 @@ pub const Spec = union(enum) {
 /// Read `text`. The result's slices are `arena`'s or `text`'s.
 pub fn parse(arena: Allocator, text: []const u8) Self.Error!Spec {
     if (std.mem.eql(u8, text, "blob:none")) return .blob_none;
-    if (std.mem.startsWith(u8, text, "blob:limit=")) return .{ .blob_limit = try parseUlong(text["blob:limit=".len..]) };
+    if (std.mem.startsWith(u8, text, "blob:limit=")) return .{ .blob_limit = .fromRaw(try parseUlong(text["blob:limit=".len..])) };
     if (std.mem.startsWith(u8, text, "tree:")) return .{ .tree_depth = try parseUlong(text["tree:".len..]) };
     if (std.mem.startsWith(u8, text, "sparse:oid=")) return .{ .sparse_oid = text["sparse:oid=".len..] };
     if (std.mem.startsWith(u8, text, "object:type=")) {
@@ -89,7 +90,7 @@ pub fn parse(arena: Allocator, text: []const u8) Self.Error!Spec {
 pub fn sendForm(arena: Allocator, text: []const u8) Self.Error![]const u8 {
     const spec = try parse(arena, text);
     return switch (spec) {
-        .blob_limit => |n| arena.print("blob:limit={d}", .{n}),
+        .blob_limit => |n| arena.print("blob:limit={d}", .{n.raw()}),
         else => text,
     };
 }

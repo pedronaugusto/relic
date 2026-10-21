@@ -1,4 +1,5 @@
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const object = @import("../../../object/object.zig");
@@ -22,7 +23,7 @@ pub const Filter = union(enum) {
     /// `blob:none`: no blob.
     blob_none,
     /// `blob:limit=<n>`: no blob of `n` bytes or more.
-    blob_limit: u64,
+    blob_limit: aegis.units.Bytes(u64),
     /// `tree:<depth>`: no tree or blob at `depth` or deeper, a commit's
     /// root tree being at depth zero.
     tree_depth: u64,
