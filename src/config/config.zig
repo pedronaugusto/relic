@@ -1094,6 +1094,21 @@ pub const Config = struct {
         return out.toOwnedSlice(config.gpa);
     }
 
+    /// The last entry setting `full_name` where the repository cannot set
+    /// it: the system, global and command-line values, which git's
+    /// `git_protected_config` reads for a setting that runs a program on
+    /// the repository's behalf.
+    pub fn findProtected(config: *const Config, full_name: []const u8) ?Entry {
+        const split = splitFullName(full_name) orelse return null;
+        var found: ?Entry = null;
+        for (config.entries.items) |entry| {
+            if (entry.level == .local or entry.level == .worktree) continue;
+            if (!entry.matches(split.section, split.subsection, split.name)) continue;
+            found = entry;
+        }
+        return found;
+    }
+
     /// Whether `full_name` is set at all.
     pub fn has(config: *const Config, full_name: []const u8) bool {
         return config.get(full_name) != null;

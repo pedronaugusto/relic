@@ -42,6 +42,8 @@ const promisors = @import("../wire.zig").promisors;
 const side_band = @import("../wire.zig").side_band;
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
+const program = @import("../process.zig").program;
+const aegis = @import("aegis");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -58,7 +60,16 @@ pub const Error = error{
     FilterRefused,
     /// Writing to the client failed.
     WriteFailed,
-} || Io.Reader.Error || odb_mod.Error || object_walk.Error || local.Error || Allocator.Error || Io.Cancelable;
+    /// `uploadpack.packObjectsHook` is set and no `Options.programs` was
+    /// given to run it with.
+    PackObjectsHookNotRun,
+    /// `uploadpack.packObjectsHook` is set with no value, which git dies
+    /// on.
+    InvalidPackObjectsHook,
+    /// The program making the pack failed: the client was told on channel
+    /// three, as git's "git-pack-objects died with error" tells it.
+    PackObjectsFailed,
+} || program.Error || Io.Reader.Error || odb_mod.Error || object_walk.Error || local.Error || Allocator.Error || Io.Cancelable;
 
 /// What the server allows, as git's `upload_pack.*` settings say; `null`
 /// takes the served repository's own setting.
@@ -78,6 +89,10 @@ pub const Options = struct {
     /// `uploadpack.allowRefInWant`: protocol v2's `want-ref`, a ref asked
     /// for by name and answered in `wanted-refs`.
     allow_ref_in_want: ?bool = null,
+    /// For `uploadpack.packObjectsHook`, which makes the pack in place of
+    /// this process when the configuration the repository cannot write
+    /// names one.
+    programs: ?program.Programs = null,
 };
 
 /// Which filters a client may ask for: `uploadpackfilter.allow`, the
@@ -147,6 +162,15 @@ pub const Server = struct {
     /// length in `session_id_buf`; zero for none.
     session_id_buf: [protocol.session_id_len]u8 = undefined,
     session_id_len: usize = 0,
+    /// `uploadpack.keepAlive`: the seconds of quiet while a pack is made
+    /// after which the client is sent an empty packet on the side band;
+    /// none when zero or less.
+    keepalive_secs: i64,
+    /// `uploadpack.packObjectsHook`, read only where the repository cannot
+    /// write it: the command run in place of `git pack-objects`, with that
+    /// command line after it. The inner `null` is the name set bare.
+    pack_objects_hook: ??[]const u8,
+    programs: ?program.Programs,
     /// A client answered `promisor-remote` taking one of this repository's
     /// promisor remotes, so what that remote promises and this repository
     /// lacks is left out of a pack: git's `--missing=allow-promisor`.
@@ -171,6 +195,9 @@ pub const Server = struct {
             .allow_ref_in_want = options.allow_ref_in_want orelse (config.getBool("uploadpack.allowrefinwant", false) catch false),
             .filters = .read(config),
             .advertise_object_info = config.getBool("transfer.advertiseobjectinfo", false) catch false,
+            .keepalive_secs = config.getInt("uploadpack.keepalive", 5) catch 5,
+            .pack_objects_hook = if (config.findProtected("uploadpack.packobjectshook")) |entry| entry.value else null,
+            .programs = options.programs,
         };
         if (config.getBool("transfer.advertisesid", false) catch false) s.session_id_len = protocol.sessionId(io, &s.session_id_buf).len;
         return s;
@@ -452,8 +479,12 @@ pub const Server = struct {
                 n.ofs_delta = true;
             } else if (std.mem.eql(u8, arg, "include-tag")) {
                 n.include_tag = true;
-            } else if (std.mem.eql(u8, arg, "thin-pack") or std.mem.eql(u8, arg, "no-progress") or std.mem.eql(u8, arg, "sideband-all")) {
-                // A full pack is always sent, and no progress.
+            } else if (std.mem.eql(u8, arg, "thin-pack")) {
+                n.thin = true;
+            } else if (std.mem.eql(u8, arg, "no-progress")) {
+                n.no_progress = true;
+            } else if (std.mem.eql(u8, arg, "sideband-all")) {
+                // The pack goes on the side band in any case.
             } else if (try n.takeShallowArg(arg)) {
                 // Recorded.
             } else if (std.mem.startsWith(u8, arg, "filter ")) {
@@ -565,6 +596,8 @@ pub const Server = struct {
             if (std.mem.eql(u8, cap, "ofs-delta")) n.ofs_delta = true;
             if (std.mem.eql(u8, cap, "include-tag")) n.include_tag = true;
             if (std.mem.eql(u8, cap, "deepen-relative")) n.deepen_relative = true;
+            if (std.mem.eql(u8, cap, "thin-pack")) n.thin = true;
+            if (std.mem.eql(u8, cap, "no-progress")) n.no_progress = true;
         }
 
         if (n.depth != 0 or n.deepen_since != null or n.deepen_not.items.len != 0 or n.client_shallows.items.len != 0) {
@@ -658,7 +691,14 @@ const Negotiation = struct {
     oldest_have: i64 = 0,
     ofs_delta: bool = false,
     include_tag: bool = false,
+    /// `thin-pack` and `no-progress`: what a pack-objects hook is told. The
+    /// pack made here is whole, and says nothing of its progress.
+    thin: bool = false,
+    no_progress: bool = false,
     filter: object_walk.Filter = .none,
+    /// The filter as git hands it to pack-objects: as the client wrote
+    /// it, a top-level `blob:limit` in bytes.
+    filter_text: ?[]const u8 = null,
     // The boundary.
     client_shallows: std.ArrayList(Oid) = .empty,
     client_shallow_set: Oid.Set = .empty,
@@ -1058,6 +1098,11 @@ const Negotiation = struct {
             error.InvalidFilter => return n.server.refuse(out, "invalid filter-spec"),
         };
         try n.checkFilter(out, spec);
+        // As git hands it to pack-objects.
+        n.filter_text = filter_spec.sendForm(n.arena, text) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidFilter => return n.server.refuse(out, "invalid filter-spec"),
+        };
         var lookup: SparseLookup = .{ .n = n };
         return filter_spec.toWalk(n.arena, spec, &lookup) catch |err| switch (err) {
             // One set of patterns to a walk.
@@ -1115,7 +1160,29 @@ const Negotiation = struct {
         };
     }
 
+    /// The pack, on the side band when there is one, made here or by
+    /// `uploadpack.packObjectsHook`, with keepalives while it is made.
     fn sendPack(n: *Negotiation, out: *Io.Writer, band: Band) Error!void {
+        const s = n.server;
+        // Whatever went before is out before the pack's packets.
+        out.flush() catch return error.WriteFailed;
+        const buffer = try n.arena.alloc(u8, 2 * pkt_line.max_line);
+        var paced: Paced = .init(s.io, out, band, buffer);
+        var keeper: ?Io.Future(void) = null;
+        defer if (keeper) |*task| task.cancel(s.io);
+        if (band != .none and s.keepalive_secs > 0) {
+            keeper = s.io.concurrent(Paced.keepAlive, .{ &paced, s.keepalive_secs }) catch null;
+        }
+        var framed: side_band.Mux = .init(&paced.interface, band);
+        if (s.pack_objects_hook) |hook| {
+            try n.packByHook(hook orelse return error.InvalidPackObjectsHook, &paced, framed.writer());
+        } else try n.packHere(framed.writer());
+        framed.end() catch return error.WriteFailed;
+        paced.interface.flush() catch return error.WriteFailed;
+    }
+
+    /// The pack made in this process.
+    fn packHere(n: *Negotiation, packed_writer: *Io.Writer) Error!void {
         const s = n.server;
         var include: std.ArrayList(Oid) = .empty;
         try include.appendSlice(n.arena, n.wants.items);
@@ -1140,17 +1207,101 @@ const Negotiation = struct {
         }
         if (n.include_tag) try n.addTags(&entries);
 
-        var framed: side_band.Mux = .init(out, band);
         // The settings git's pack-objects reads, its delta form the client's.
         var pack_options = n.db().packOptions();
         pack_options.delta = if (n.ofs_delta) .offset else .reference;
-        _ = n.db().writePackTo(s.io, framed.writer(), entries.items, pack_options) catch |err| switch (err) {
+        _ = n.db().writePackTo(s.io, packed_writer, entries.items, pack_options) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.WriteFailed,
         };
-        framed.end() catch return error.WriteFailed;
-        out.flush() catch return error.WriteFailed;
+    }
+
+    /// git's `create_pack_file` with `uploadpack.packObjectsHook`: the
+    /// hook run through the shell with git's `git pack-objects` command
+    /// line after it, in the git directory, told what to pack on its
+    /// input; what it prints is the pack, and what it says the progress on
+    /// channel two. A hook that fails ends the pack with git's words on
+    /// channel three.
+    fn packByHook(n: *Negotiation, hook: []const u8, paced: *Paced, packed_writer: *Io.Writer) Error!void {
+        const s = n.server;
+        const programs = s.programs orelse return error.PackObjectsHookNotRun;
+        var shallow: std.ArrayList(Oid) = .empty;
+        if (n.boundary.count() != 0) {
+            // Every boundary the walk knows, sorted as git's grafts are.
+            var it = n.boundary.keyIterator();
+            while (it.next()) |oid| try shallow.append(n.arena, oid.*);
+            var own = n.db().shallow.keyIterator();
+            while (own.next()) |oid| if (!n.boundary.contains(oid.*)) try shallow.append(n.arena, oid.*);
+            std.mem.sort(Oid, shallow.items, {}, struct {
+                fn lessThan(_: void, a: Oid, b: Oid) bool {
+                    return a.order(b) == .lt;
+                }
+            }.lessThan);
+        }
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(n.arena, &.{ hook, "git" });
+        if (shallow.items.len != 0) try argv.appendSlice(n.arena, &.{ "--shallow-file", "" });
+        try argv.appendSlice(n.arena, &.{ "pack-objects", "--revs" });
+        if (n.thin) try argv.append(n.arena, "--thin");
+        try argv.append(n.arena, "--stdout");
+        if (shallow.items.len != 0) try argv.append(n.arena, "--shallow");
+        if (!n.no_progress) try argv.append(n.arena, "--progress");
+        if (n.ofs_delta) try argv.append(n.arena, "--delta-base-offset");
+        if (n.include_tag) try argv.append(n.arena, "--include-tag");
+        if (s.promisor_taken) try argv.append(n.arena, "--missing=allow-promisor");
+        if (n.filter_text) |text| try argv.append(n.arena, try n.arena.print("--filter={s}", .{text}));
+
+        var running = try program.start(s.gpa, s.io, programs, .{
+            .argv = argv.items,
+            .shell = true,
+            .cwd = .{ .dir = s.remote.repo.gitDirectory() },
+            .set = &.{.{ .name = "GIT_DIR", .value = "." }},
+            // Without a side band, its words are this process's, as git's
+            // are its own standard error.
+            .stderr = if (paced.band != .none) .capture else .inherit,
+        });
+        defer running.deinit(s.io);
+        {
+            var buf: [4096]u8 = undefined;
+            var w = running.child.stdinFile().?.writerStreaming(s.io, &buf);
+            (write: {
+                for (shallow.items) |oid| w.interface.print("--shallow {f}\n", .{oid}) catch |e| break :write e;
+                for (n.wants.items) |oid| w.interface.print("{f}\n", .{oid}) catch |e| break :write e;
+                for (n.extra_wants.items) |oid| w.interface.print("{f}\n", .{oid}) catch |e| break :write e;
+                w.interface.writeAll("--not\n") catch |e| break :write e;
+                for (n.have_obj.items) |oid| w.interface.print("{f}\n", .{oid}) catch |e| break :write e;
+                for (n.edges.items) |oid| w.interface.print("{f}\n", .{oid}) catch |e| break :write e;
+                w.interface.writeAll("\n") catch |e| break :write e;
+                w.interface.flush() catch |e| break :write e;
+            }) catch return paced.died();
+            running.child.closeStdin(s.io);
+        }
+        // Its progress beside the pack, where a second task runs; else the
+        // pipe is closed rather than left to fill.
+        var relay: ?Io.Future(void) = null;
+        defer if (relay) |*task| task.cancel(s.io);
+        if (running.child.takeStderr()) |file| {
+            relay = s.io.concurrent(Paced.relayProgress, .{ paced, file }) catch blk: {
+                file.close(s.io);
+                break :blk null;
+            };
+        }
+        var read_buffer: [pkt_line.max_data]u8 = undefined;
+        var pack = running.child.stdoutFile().?.readerStreaming(s.io, &read_buffer);
+        _ = pack.interface.streamRemaining(packed_writer) catch |err| switch (err) {
+            error.WriteFailed => return error.WriteFailed,
+            error.ReadFailed => return paced.died(),
+        };
+        if (relay) |*task| {
+            task.await(s.io);
+            relay = null;
+        }
+        const term = running.wait(s.io) catch return paced.died();
+        switch (term) {
+            .exited => |code| if (code != 0) return paced.died(),
+            else => return paced.died(),
+        }
     }
 
     /// `include-tag`: an annotated tag whose object the pack carries comes
@@ -1214,6 +1365,145 @@ pub fn bundleSettings(arena: Allocator, config: *const config_mod.Config) Alloca
     }
     return lines.items;
 }
+
+/// The client's end while a pack is made: only whole packets reach it,
+/// written under a lock that a keepalive task and the hook's progress
+/// share, so that what they send falls between two packets; and the time
+/// the last one went.
+const Paced = struct {
+    io: Io,
+    band: Band,
+    line: aegis.BlockingGuarded(Line),
+    interface: Io.Writer,
+
+    const Line = struct { out: *Io.Writer, last: Io.Timestamp };
+
+    /// `buffer` holds two of the longest packets.
+    fn init(io: Io, out: *Io.Writer, band: Band, buffer: []u8) Paced {
+        assert(buffer.len >= 2 * pkt_line.max_line);
+        return .{
+            .io = io,
+            .band = band,
+            .line = .init(.{ .out = out, .last = Io.Clock.awake.now(io) }),
+            .interface = .{ .buffer = buffer, .vtable = &.{ .drain = drain, .flush = flush } },
+        };
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // safe: this function is installed only on a Paced's interface
+        try p.forwardWhole();
+        // Then what fits: what is not taken is offered again.
+        var taken: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| {
+            const n = p.take(bytes);
+            taken += n;
+            if (n < bytes.len) return taken;
+        }
+        for (0..splat) |_| {
+            const pattern = data[data.len - 1];
+            const n = p.take(pattern);
+            taken += n;
+            if (n < pattern.len) return taken;
+        }
+        return taken;
+    }
+
+    fn take(p: *Paced, bytes: []const u8) usize {
+        const n = @min(bytes.len, p.interface.buffer.len - p.interface.end);
+        @memcpy(p.interface.buffer[p.interface.end..][0..n], bytes[0..n]);
+        p.interface.end += n;
+        return n;
+    }
+
+    /// Every whole packet buffered; a packet begun waits for its end.
+    fn flush(w: *Io.Writer) Io.Writer.Error!void {
+        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // safe: this function is installed only on a Paced's interface
+        try p.forwardWhole();
+    }
+
+    fn forwardWhole(p: *Paced) Io.Writer.Error!void {
+        const buffered = p.interface.buffered();
+        var whole: usize = 0;
+        while (buffered.len - whole >= 4) {
+            const len = pkt_line.parseLength(buffered[whole..][0..4]) orelse return error.WriteFailed;
+            // A flush, a delimiter or an end is four bytes.
+            const packet = @max(len, 4);
+            if (buffered.len - whole < packet) break;
+            whole += packet;
+        }
+        if (whole == 0) return;
+        try p.send(buffered[0..whole]);
+        const rest = buffered.len - whole;
+        @memmove(p.interface.buffer[0..rest], buffered[whole..]);
+        p.interface.end = rest;
+    }
+
+    /// Whole packets to the client, now.
+    fn send(p: *Paced, packets: []const u8) Io.Writer.Error!void {
+        var guard = p.line.acquireUncancelable(p.io);
+        defer guard.deinit(p.io);
+        const line = guard.value();
+        try line.out.writeAll(packets);
+        try line.out.flush();
+        line.last = Io.Clock.awake.now(p.io);
+    }
+
+    /// `bytes` on `channel` of the side band, now.
+    fn sendBand(p: *Paced, channel: u8, bytes: []const u8) Io.Writer.Error!void {
+        var guard = p.line.acquireUncancelable(p.io);
+        defer guard.deinit(p.io);
+        const line = guard.value();
+        try side_band.send(line.out, p.band, channel, bytes);
+        try line.out.flush();
+        line.last = Io.Clock.awake.now(p.io);
+    }
+
+    /// What a task beside the pack does: a keepalive -- an empty packet on
+    /// channel one, `0005\x01` -- whenever the client has heard nothing
+    /// for `secs` seconds, as git's `create_pack_file` sends it.
+    fn keepAlive(p: *Paced, secs: i64) void {
+        const period: Io.Duration = .fromSeconds(secs);
+        var wait = period;
+        while (true) {
+            p.io.sleep(wait, .awake) catch return;
+            var guard = p.line.acquireUncancelable(p.io);
+            defer guard.deinit(p.io);
+            const line = guard.value();
+            const now = Io.Clock.awake.now(p.io);
+            const quiet = line.last.durationTo(now);
+            if (quiet.nanoseconds < period.nanoseconds) {
+                wait = .{ .nanoseconds = period.nanoseconds - quiet.nanoseconds };
+                continue;
+            }
+            wait = period;
+            // A packet is written whole, whatever asks this task to stop.
+            const protection = p.io.swapCancelProtection(.blocked);
+            defer _ = p.io.swapCancelProtection(protection);
+            line.out.writeAll("0005\x01") catch return;
+            line.out.flush() catch return;
+            line.last = now;
+        }
+    }
+
+    /// What a task beside a hook's pack does: what the hook says, on
+    /// channel two as it comes, in git's 128-byte reads.
+    fn relayProgress(p: *Paced, file: Io.File) void {
+        defer file.close(p.io);
+        var said: [128]u8 = undefined;
+        while (true) {
+            const n = file.readStreaming(p.io, &.{&said}) catch return;
+            if (n == 0) return;
+            p.sendBand(2, said[0..n]) catch return;
+        }
+    }
+
+    /// git's `fail` in `create_pack_file`: the client told on channel
+    /// three, or on nothing without a side band.
+    fn died(p: *Paced) Error {
+        if (p.band != .none) p.sendBand(3, "aborting due to possible repository corruption on the remote side.") catch return error.WriteFailed;
+        return error.PackObjectsFailed;
+    }
+};
 
 fn writeError(err: pkt_line.WriteError) Error {
     return switch (err) {

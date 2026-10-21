@@ -528,3 +528,121 @@ test "object-info answers each object's size as git's upload-pack does, and both
         try testing.expect(std.mem.find(u8, outcome.stdout, "object-info\n") != null);
     }
 }
+
+test "uploadpack.packObjectsHook makes the pack as git's upload-pack has it made, read only where the repository cannot write it, and uploadpack.keepAlive speaks while it works" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const shell_helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
+    defer gpa.free(shell_helper);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const bare = try served(gpa, io, root.dir);
+    defer gpa.free(bare);
+    const url = try gpa.print("file://{s}", .{bare});
+    defer gpa.free(url);
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, root_path, '\\', '/');
+
+    // The hook notes what it is handed, then makes the pack as asked.
+    const script =
+        \\#!/bin/sh
+        \\d=$(dirname "$0")
+        \\printf '%s\n' "$*" >>"$d/args"
+        \\if test -n "$SLOW_HOOK"; then sleep 3; fi
+        \\tee -a "$d/stdin" | "$@"
+        \\
+    ;
+    try root.dir.writeFile(io, .{ .sub_path = "hook", .data = script });
+    try root.dir.writeFile(io, .{ .sub_path = "evil", .data = "#!/bin/sh\ntouch \"$(dirname \"$0\")/evil-ran\"\nexec \"$@\"\n" });
+    if (builtin.target.os.tag != .windows) for ([_][]const u8{ "hook", "evil" }) |name| {
+        const file = try root.dir.openFile(io, name, .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    };
+    const global = try gpa.print("[uploadpack]\n\tpackObjectsHook = {s}/hook\n\tkeepAlive = 1\n", .{root_path});
+    defer gpa.free(global);
+    try root.dir.writeFile(io, .{ .sub_path = "global.gitconfig", .data = global });
+    const global_path = try gpa.print("{s}/global.gitconfig", .{root_path});
+    defer gpa.free(global_path);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_CONFIG_GLOBAL", global_path);
+    // The repository's own word is not taken.
+    const evil = try gpa.print("{s}/evil", .{root_path});
+    defer gpa.free(evil);
+    const set_evil = try git(gpa, io, root.dir, &env, &.{ "--git-dir", bare, "config", "uploadpack.packObjectsHook", evil });
+    gpa.free(set_evil);
+
+    const cases = [_][]const []const u8{
+        &.{},
+        &.{"--depth=2"},
+        &.{"--filter=blob:limit=1k"},
+        &.{ "--filter=combine:blob:none+tree:3", "--depth=3" },
+    };
+    for ([_][]const u8{ "2", "0" }) |version| for (cases) |extra| {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        var said: [2][2][]u8 = undefined;
+        for ([_]?[]const u8{ null, shell_helper }, [_][]const u8{ "by-git", "by-relic" }, 0..) |upload_pack, name, i| {
+            for ([_][]const u8{ "args", "stdin" }) |log| root.dir.deleteFile(io, log) catch |err| if (err != error.FileNotFound) return err;
+            var args: std.ArrayList([]const u8) = .empty;
+            defer args.deinit(gpa);
+            const version_setting = try gpa.print("protocol.version={s}", .{version});
+            defer gpa.free(version_setting);
+            try args.appendSlice(gpa, &.{ "-c", version_setting, "clone", "-q", "--no-checkout" });
+            if (upload_pack) |p| try args.appendSlice(gpa, &.{ "--upload-pack", p });
+            try args.appendSlice(gpa, extra);
+            try args.appendSlice(gpa, &.{ url, name });
+            const out = try git(gpa, io, tmp.dir, &env, args.items);
+            gpa.free(out);
+            // A shallow clone deepened: haves, and the boundary moved.
+            if (extra.len != 0 and std.mem.startsWith(u8, extra[extra.len - 1], "--depth")) {
+                var d = try tmp.dir.openDir(io, name, .{});
+                defer d.close(io);
+                const fetched = try git(gpa, io, d, &env, &.{ "-c", version_setting, "fetch", "-q", "--deepen=1" });
+                gpa.free(fetched);
+            }
+            said[i][0] = try root.dir.readFileAlloc(io, "args", gpa, .unlimited);
+            said[i][1] = try root.dir.readFileAlloc(io, "stdin", gpa, .unlimited);
+        }
+        defer for (said) |pair| for (pair) |text| gpa.free(text);
+        for (0..2) |k| testing.expectEqualStrings(said[0][k], said[1][k]) catch |err| {
+            for (extra) |arg| std.debug.print("{s} ", .{arg});
+            std.debug.print("in protocol v{s}\n", .{version});
+            return err;
+        };
+        var a = try tmp.dir.openDir(io, "by-git", .{});
+        defer a.close(io);
+        var b = try tmp.dir.openDir(io, "by-relic", .{});
+        defer b.close(io);
+        try expectSame(gpa, io, &env, a, b);
+    };
+    try testing.expectError(error.FileNotFound, root.dir.access(io, "evil-ran", .{}));
+
+    // A hook slow to start: the client hears keepalives meanwhile.
+    try env.put("SLOW_HOOK", "1");
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const tmp_path = try testremote.absolutePath(gpa, io, tmp.dir);
+    defer gpa.free(tmp_path);
+    for ([_]?[]const u8{ null, shell_helper }, [_][]const u8{ "by-git", "by-relic" }) |upload_pack, name| {
+        const trace = try gpa.print("{s}/{s}.trace", .{ tmp_path, name });
+        defer gpa.free(trace);
+        try env.put("GIT_TRACE_PACKET", trace);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "clone", "-q", "--no-checkout" });
+        if (upload_pack) |p| try args.appendSlice(gpa, &.{ "--upload-pack", p });
+        try args.appendSlice(gpa, &.{ url, name });
+        const out = try git(gpa, io, tmp.dir, &env, args.items);
+        gpa.free(out);
+        const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+        defer gpa.free(traced);
+        testing.expect(std.mem.count(u8, traced, "sideband< \\1\n") >= 1) catch |err| {
+            std.debug.print("{s}: no keepalive in\n{s}\n", .{ name, traced });
+            return err;
+        };
+    }
+}

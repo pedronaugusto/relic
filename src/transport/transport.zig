@@ -326,7 +326,7 @@ pub const Session = struct {
                 errdefer if (owned) here.deinit(io);
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 const v2 = options.protocol_v2 orelse wantsV2(options.config);
-                const conn = try upload_pack.connect(gpa, io, here, if (v2) .v2 else .v0, .{});
+                const conn = try upload_pack.connect(gpa, io, here, if (v2) .v2 else .v0, .{ .programs = options.programs });
                 owned = false;
                 errdefer conn.deinit(io);
                 return fromConnection(gpa, conn, service, kind);
