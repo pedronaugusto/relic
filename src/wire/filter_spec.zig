@@ -24,6 +24,7 @@ const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
 const object = @import("../object/object.zig");
+const object_walk = @import("../walk/object.zig").walk;
 
 /// Errors from reading a filter.
 pub const Error = error{
@@ -48,6 +49,42 @@ pub const Spec = union(enum) {
     /// `combine:`: what every part keeps.
     combine: []const Spec,
 };
+
+/// Failures of `toWalk`, beside the lookup's own.
+pub const WalkError = Allocator.Error || error{
+    /// Two `sparse:oid=` parts: a walk takes one set of patterns.
+    TwoSparseFilters,
+    /// A `sparse:oid=` naming no blob the lookup can read.
+    SparseBlobMissing,
+};
+
+/// The walk's filter for `spec`, as git's `list-objects-filter` builds it.
+/// `lookup`, a pointer to a type with an `Error` set, `.rules(name)` gives a `sparse:oid=` blob's patterns, or `null`
+/// when the name names none; its errors are returned as they are.
+pub fn toWalk(arena: Allocator, spec: Spec, lookup: anytype) (WalkError || std.meta.Child(@TypeOf(lookup)).Error)!object_walk.Filter {
+    var sparse_seen = false;
+    return toWalkPart(arena, spec, lookup, &sparse_seen);
+}
+
+fn toWalkPart(arena: Allocator, spec: Spec, lookup: anytype, sparse_seen: *bool) (WalkError || std.meta.Child(@TypeOf(lookup)).Error)!object_walk.Filter {
+    return switch (spec) {
+        .blob_none => .blob_none,
+        .blob_limit => |v| .{ .blob_limit = v },
+        .tree_depth => |v| .{ .tree_depth = v },
+        .object_type => |v| .{ .object_type = v },
+        .sparse_oid => |name| {
+            if (sparse_seen.*) return error.TwoSparseFilters;
+            sparse_seen.* = true;
+            const rules = (try lookup.rules(name)) orelse return error.SparseBlobMissing;
+            return .{ .sparse = rules };
+        },
+        .combine => |parts| {
+            const walked = try arena.alloc(object_walk.Filter, parts.len);
+            for (parts, walked) |part, *w| w.* = try toWalkPart(arena, part, lookup, sparse_seen);
+            return .{ .combine = walked };
+        },
+    };
+}
 
 /// Read `text`. The result's slices are `arena`'s or `text`'s.
 pub fn parse(arena: Allocator, text: []const u8) Self.Error!Spec {

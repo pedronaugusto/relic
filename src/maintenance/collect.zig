@@ -30,6 +30,9 @@ const gc = @import("gc.zig");
 const prune_mod = @import("prune.zig");
 const repack_mod = @import("repack.zig");
 const ops = @import("maintenance.zig");
+const object_walk = @import("../walk/object.zig").walk;
+const filter_spec = @import("../wire.zig").filter_spec;
+const ignore = @import("../patterns.zig").ignore;
 const Repository = repo_mod.Repository;
 
 /// What `gc` prunes: `--prune=<date>`, `--no-prune`.
@@ -64,6 +67,10 @@ pub const Options = struct {
     cruft: ?bool = null,
     /// `--max-cruft-size`; `null` takes `gc.maxCruftSize`.
     max_cruft_bytes: ?u64 = null,
+    /// The filter of the repack of every pack, `repack --filter`'s; `null`
+    /// takes `gc.repackFilter` (a `sparse:oid=` in it by its full object
+    /// name), into `gc.repackFilterTo` when that is set.
+    filter: ?object_walk.Filter = null,
     /// `--expire-to`: `repack`'s, with cruft packs.
     expire_to: @FieldType(repack_mod.Options, "expire_to") = null,
     /// `--keep-largest-pack`; `null` keeps the packs at least
@@ -126,7 +133,7 @@ pub const Report = struct {
 };
 
 /// Failures of `gc`.
-pub const Error = repack_mod.Error || prune_mod.Error || worktrees.Error || rerere.Error || hooks_mod.Error ||
+pub const Error = repack_mod.Error || prune_mod.Error || filter_spec.Error || filter_spec.WalkError || ignore.Error || worktrees.Error || rerere.Error || hooks_mod.Error ||
     ops.MaintenanceError || fs.LockError || fs.CommitError || fs.HostNameError || Io.Writer.Error ||
     Io.Dir.StatFileError || Io.Dir.ReadFileError || Io.Dir.DeleteFileError || error{
     /// Another gc holds `gc.pid`, and neither `auto` nor `force` was
@@ -206,6 +213,8 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         if (s.aggressive_depth > 0) plan.pack.?.depth = std.math.cast(u32, s.aggressive_depth) orelse std.math.maxInt(u32);
         if (s.aggressive_window > 0) plan.pack.?.window = std.math.cast(u32, s.aggressive_window) orelse std.math.maxInt(u32);
     }
+    try repackFilter(arena, io, repo, options, &plan);
+    defer if (options.filter == null) if (plan.filter_to) |to| to.dir.close(io);
     const detach = options.detach orelse (options.auto and s.detach_auto);
     if (options.auto) {
         if (!try needToGc(arena, io, repo, &s, &plan)) return .{ .outcome = .not_needed };
@@ -277,6 +286,49 @@ pub fn foreground(gpa: Allocator, io: Io, repo: *Repository, clock: date.Context
     if (s.prune_reflogs) try gc.expireReflogs(gpa, io, repo, .{ .clock = clock });
 }
 
+/// `gc.repackFilter` and `gc.repackFilterTo` on `plan`, as
+/// `add_repack_all_option` passes them, unless the caller gave a filter.
+fn repackFilter(arena: Allocator, io: Io, repo: *Repository, options: Options, plan: *repack_mod.Options) Self.Error!void {
+    if (options.filter) |f| {
+        plan.filter = f;
+        return;
+    }
+    const config = repo.configuration();
+    const text = config.get("gc.repackfilter") orelse return;
+    if (text.len == 0) return;
+    const spec = try filter_spec.parse(arena, text);
+    var lookup: NamedBlob = .{ .arena = arena, .io = io, .repo = repo };
+    plan.filter = try filter_spec.toWalk(arena, spec, &lookup);
+    const to = config.get("gc.repackfilterto") orelse return;
+    if (to.len == 0) return;
+    // A path and the start of the packs' names, as pack-objects takes it.
+    const dir_name = std.Io.Dir.path.dirname(to) orelse ".";
+    plan.filter_to = .{ .dir = try Io.Dir.cwd().openDir(io, dir_name, .{}), .prefix = std.Io.Dir.path.basename(to) };
+}
+
+/// A `sparse:oid=` blob by its full object name: what maintenance, below
+/// the revision parser, can look up.
+const NamedBlob = struct {
+    pub const Error = Self.Error;
+
+    arena: Allocator,
+    io: Io,
+    repo: *Repository,
+
+    pub fn rules(l: *NamedBlob, name: []const u8) Self.Error!?*const ignore.Rules {
+        const oid = hash.Oid.parse(l.repo.objectFormat(), name) catch return null;
+        const db = l.repo.objectDatabase();
+        if (!try db.exists(l.io, oid)) return null;
+        const found = try db.read(l.io, oid);
+        defer db.allocator().free(found.bytes);
+        if (found.type != .blob) return null;
+        const r = try l.arena.create(ignore.Rules);
+        r.* = try .init(l.arena, .{});
+        try r.addText(try l.arena.dupe(u8, found.bytes), "", "sparse:oid", 0);
+        return r;
+    }
+};
+
 /// What git's daemonized gc does after the foreground tasks.
 fn background(gpa: Allocator, io: Io, repo: *Repository, options: Options, s: *const Settings, plan: repack_mod.Options, report: *Report) Self.Error!void {
     if (!try repo.configuration().getBool("extensions.preciousobjects", false)) {
@@ -315,6 +367,8 @@ fn needToGc(arena: Allocator, io: Io, repo: *Repository, s: *Settings, plan: *re
     if (try tooManyLoose(io, repo, s.auto_threshold)) {
         plan.mode = .loose;
         plan.write_bitmaps = false;
+        // `add_repack_incremental_option` passes no filter.
+        plan.filter = .none;
         return true;
     }
     return false;

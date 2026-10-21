@@ -403,3 +403,9 @@ test "a failing pre-auto-gc hook stops gc --auto, as git's" {
     defer gpa.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
 }
+
+test "gc.repackFilter filters the repack of every pack, as git's gc does" {
+    try compare(.files, &.{
+        .{ .args = &.{}, .options = .{ .clock = clock().clock }, .config = &.{.{ "gc.repackFilter", "blob:none" }} },
+    }, null);
+}

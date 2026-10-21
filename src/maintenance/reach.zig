@@ -192,11 +192,11 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
 /// `collectStarts` reaches without the rebase state, as a set to pack,
 /// each with the path it was found at as its delta hint; `odb.Odb.Collected`
 /// is the caller's.
-pub fn reachableToPack(gpa: Allocator, io: Io, repo: *Repository) Self.Error!odb_mod.Odb.Collected {
+pub fn reachableToPack(gpa: Allocator, io: Io, repo: *Repository, filter: object_walk.Filter) Self.Error!odb_mod.Odb.Collected {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const starts = try collectStarts(gpa, arena_instance.allocator(), io, repo, .{ .rebase_state = false });
-    var walked = try object_walk.missing(gpa, io, repo.objectDatabase(), starts.roots, .{});
+    var walked = try object_walk.missing(gpa, io, repo.objectDatabase(), starts.roots, .{ .filter = filter });
     errdefer walked.deinit();
     if (starts.blobs.len == 0) return walked;
     const out = walked.arena.allocator();

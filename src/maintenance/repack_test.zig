@@ -883,3 +883,36 @@ test "repack --cruft -d --expire-to writes what goes into a cruft pack of its ow
     defer gpa.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
 }
+
+test "repack --filter puts what the filter leaves out into a pack of its own, as git's, --filter-to included" {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    for ([_]bool{ false, true }) |elsewhere| {
+        var theirs = try fixture(.files, now);
+        defer theirs.deinit();
+        var ours = try fixture(.files, now);
+        defer ours.deinit();
+        for ([_]*testgit.Repo{ &theirs, &ours }) |r| try r.dir.createDirPath(io, "filtered");
+        var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try theirs.dir.realPath(io, &root_buf)];
+        var arg_buf: [Io.Dir.max_path_bytes + 32]u8 = undefined;
+        if (elsewhere) {
+            try theirs.exec(io, &.{ "repack", "-q", "-a", "-d", "--filter=blob:none", try std.mem.print(&arg_buf, "--filter-to={s}/filtered/pack", .{root}) });
+        } else try theirs.exec(io, &.{ "repack", "-q", "-a", "-d", "--filter=blob:none" });
+        var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+        defer native.deinit(io);
+        var filtered = try ours.dir.openDir(io, "filtered", .{});
+        defer filtered.close(io);
+        var pack_options = native.objectDatabase().packOptions();
+        pack_options.threads = 1;
+        const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .filter = .blob_none, .filter_to = if (elsewhere) .{ .dir = filtered } else null, .pack = pack_options });
+        try std.testing.expectEqual(@as(u32, 1), report.filtered_written);
+        const expected = try state(&theirs);
+        defer gpa.free(expected);
+        const actual = try state(&ours);
+        defer gpa.free(actual);
+        std.testing.expectEqualStrings(expected, actual) catch |err| {
+            std.debug.print("filter-to: {}\n", .{elsewhere});
+            return err;
+        };
+    }
+}

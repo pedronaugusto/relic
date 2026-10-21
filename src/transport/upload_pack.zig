@@ -895,33 +895,32 @@ const Negotiation = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidFilter => return n.server.refuse(out, "invalid filter-spec"),
         };
-        var sparse_seen = false;
-        return n.walkFilter(out, spec, text, &sparse_seen);
-    }
-
-    fn walkFilter(n: *Negotiation, out: *Io.Writer, spec: filter_spec.Spec, text: []const u8, sparse_seen: *bool) Error!object_walk.Filter {
-        return switch (spec) {
-            .blob_none => .blob_none,
-            .blob_limit => |v| .{ .blob_limit = v },
-            .tree_depth => |v| .{ .tree_depth = v },
-            .object_type => |v| .{ .object_type = v },
-            .sparse_oid => |name| {
-                // One set of patterns to a walk.
-                if (sparse_seen.*) return n.server.refuse(out, "invalid filter-spec");
-                sparse_seen.* = true;
-                const rules = try n.sparseRules(name) orelse {
-                    var buf: [512]u8 = undefined;
-                    return n.server.refuse(out, std.mem.print(&buf, "unable to access sparse blob in '{s}'", .{name}) catch "unable to access sparse blob");
-                };
-                return .{ .sparse = rules };
+        var lookup: SparseLookup = .{ .n = n };
+        return filter_spec.toWalk(n.arena, spec, &lookup) catch |err| switch (err) {
+            // One set of patterns to a walk.
+            error.TwoSparseFilters => n.server.refuse(out, "invalid filter-spec"),
+            error.SparseBlobMissing => {
+                var buf: [512]u8 = undefined;
+                const name = lookup.last orelse "";
+                return n.server.refuse(out, std.mem.print(&buf, "unable to access sparse blob in '{s}'", .{name}) catch "unable to access sparse blob");
             },
-            .combine => |parts| {
-                const walked = try n.arena.alloc(object_walk.Filter, parts.len);
-                for (parts, walked) |part, *w| w.* = try n.walkFilter(out, part, text, sparse_seen);
-                return .{ .combine = walked };
-            },
+            else => |e| e,
         };
     }
+
+    /// `filter_spec.toWalk`'s `sparse:oid=` lookup: the blob the server
+    /// resolves the name to.
+    const SparseLookup = struct {
+        pub const Error = Self.Error;
+
+        n: *Negotiation,
+        last: ?[]const u8 = null,
+
+        pub fn rules(l: *SparseLookup, name: []const u8) Self.Error!?*const ignore.Rules {
+            l.last = name;
+            return l.n.sparseRules(name);
+        }
+    };
 
     /// The patterns in the blob `name` names, or `null` when there is no
     /// such blob.

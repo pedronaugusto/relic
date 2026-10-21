@@ -103,6 +103,14 @@ pub const Options = struct {
     /// object of the new pack a delta of one in fewer of the islands
     /// `pack.island` describes (`maintenance/islands.zig`).
     delta_islands: ?bool = null,
+    /// `--filter=<spec>`, as `wire.filter_spec.toWalk` gives it: what the
+    /// filter leaves out of the reachable objects' pack, and of what the
+    /// packs taken away held, goes into a pack of its own
+    /// (`write_filtered_pack`); the objects the index names stay.
+    filter: object_walk.Filter = .none,
+    /// `--filter-to`: that pack in `dir`, named `<prefix>-<name>.pack`, in
+    /// place of beside the others.
+    filter_to: ?struct { dir: Io.Dir, prefix: []const u8 = "pack" } = null,
     /// `-n` is `false`; `null` takes `repack.updateServerInfo`, true.
     update_server_info: ?bool = null,
     /// How each pack is built. `repack.cruftWindow`, `cruftDepth` and
@@ -119,6 +127,8 @@ pub const Report = struct {
     /// New packs of reachable objects, a promisor pack's included.
     packs_written: u32 = 0,
     cruft_written: u32 = 0,
+    /// Packs of what `filter` left out.
+    filtered_written: u32 = 0,
     /// Cruft packs `expire_to` wrote.
     expired_written: u32 = 0,
     /// Packs taken away.
@@ -244,6 +254,7 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
             run.report.expired_written = try writeCruft(gpa, arena, io, repo, &run.existing, fresh.items, &elsewhere, expired_options, to_options, limit, to.dir);
         };
     }
+    if (options.filter != .none) try run.writeFiltered();
     if (main_written) |written| if (bitmaps != false and !run.kept_skipped and !options.write_midx) try run.writeBitmap(written);
     if (options.write_midx) run.report.midx = try run.writeMidx(if (geometry) |*g| g else null, bitmaps == true);
     if (options.delete) try run.removeRedundant(if (geometry) |*g| g else null);
@@ -312,7 +323,7 @@ const Run = struct {
     fn writeReachable(run: *Run) Self.Error!?pack_mod.WriteReport {
         const gpa = run.gpa;
         const db = run.db;
-        var collected = try reach.reachableToPack(gpa, run.io, run.repo);
+        var collected = try reach.reachableToPack(gpa, run.io, run.repo, run.options.filter);
         defer collected.deinit();
         var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
         var taken: Oid.Set = .empty;
@@ -348,6 +359,44 @@ const Run = struct {
         for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
         run.report.packs_written += @intCast(reports.len);
         return if (reports.len == 1) reports[0] else null;
+    }
+
+    /// `write_filtered_pack`: `pack-objects --stdin-packs` over the packs
+    /// not kept and the cruft ones (and the kept ones with kept objects
+    /// packed), the new packs `^`-marked, into `filter_to` or beside them.
+    fn writeFiltered(run: *Run) Self.Error!void {
+        const gpa = run.gpa;
+        const db = run.db;
+        var skip: Oid.Set = .empty;
+        defer skip.deinit(gpa);
+        for (run.fresh.items) |name| try addPackObjects(gpa, db, name, &skip);
+        for (run.retained.items) |name| try addPackObjects(gpa, db, name, &skip);
+        if (!run.pack_kept) for (run.existing.kept.items) |name| try addPackObjects(gpa, db, name, &skip);
+        var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+        var sources: std.ArrayList([]const u8) = .empty;
+        try sources.appendSlice(run.arena, run.existing.non_kept.items);
+        try sources.appendSlice(run.arena, run.existing.cruft.items);
+        if (run.pack_kept) try sources.appendSlice(run.arena, run.existing.kept.items);
+        for (sources.items) |name| {
+            const p = db.packNamed(name) orelse continue;
+            for (0..p.index.count) |i| {
+                const oid = p.index.nameAt(@intCast(i));
+                if ((try skip.fetchPut(gpa, oid, {})) != null) continue;
+                try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
+            }
+        }
+        if (entries.items.len == 0) return;
+        var options = run.pack_options;
+        const dir = if (run.options.filter_to) |to| blk: {
+            options.prefix = to.prefix;
+            break :blk to.dir;
+        } else run.pack_dir;
+        const reports = try writeLimited(db, run.io, dir, entries.items, options, run.max_pack);
+        defer db.allocator().free(reports);
+        // Beside the others, they are packs this repack keeps.
+        if (run.options.filter_to == null) for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
+        run.report.filtered_written = @intCast(reports.len);
+        try db.refresh(run.io);
     }
 
     /// The new pack's reachability bitmap, as `--write-bitmap-index`.
