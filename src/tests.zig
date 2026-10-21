@@ -133,6 +133,7 @@ test {
         _ = @import("testing/rebase_apply.zig");
         _ = @import("testing/branch.zig");
         _ = @import("testing/follow.zig");
+        _ = @import("testing/textconv.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");

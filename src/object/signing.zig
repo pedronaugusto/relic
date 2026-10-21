@@ -36,7 +36,6 @@ const Self = @This();
 const std = @import("std");
 const message = @import("message.zig");
 const shakedown = @import("shakedown");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -429,7 +428,7 @@ pub const Signer = struct {
         defer if (key_file) |*f| f.remove(io);
         var key_path: []const u8 = undefined;
         if (literalSshKey(key)) |text| {
-            key_file = try TempFile.create(arena, io, signer.programs, ".git_signing_key_tmp", text);
+            key_file = try TempFile.create(arena, io, signer.programs.environ, .{ .prefix = ".git_signing_key_tmp" }, text);
             key_path = key_file.?.path;
         } else key_path = try config_mod.interpolatePath(arena, key, signer.home);
         var argv: std.ArrayList([]const u8) = .empty;
@@ -527,7 +526,7 @@ pub const Signer = struct {
         signature: []const u8,
         verdict: *Verdict,
     ) ErrorNamespace.Error!void {
-        var sig_file = try TempFile.create(arena, io, signer.programs, ".git_vtag_tmp", signature);
+        var sig_file = try TempFile.create(arena, io, signer.programs.environ, .{ .prefix = ".git_vtag_tmp" }, signature);
         defer sig_file.remove(io);
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.append(arena, program_name);
@@ -556,7 +555,7 @@ pub const Signer = struct {
         verdict: *Verdict,
     ) ErrorNamespace.Error!void {
         const allowed = signer.allowed_signers orelse return error.AllowedSignersFileMissing;
-        var sig_file = try TempFile.create(arena, io, signer.programs, ".git_vtag_tmp", signature);
+        var sig_file = try TempFile.create(arena, io, signer.programs.environ, .{ .prefix = ".git_vtag_tmp" }, signature);
         defer sig_file.remove(io);
 
         // A key's validity window is compared with the time the object says
@@ -964,35 +963,7 @@ fn splitCommandLine(arena: Allocator, line: []const u8) Allocator.Error![]const 
     return words.items;
 }
 
-/// A file in the caller's temporary directory holding bytes a program
-/// reads by name.
-const TempFile = struct {
-    path: []const u8,
-
-    fn create(arena: Allocator, io: Io, programs: program.Programs, prefix: []const u8, bytes: []const u8) Error!TempFile {
-        const dir_path = programs.environ.get("TMPDIR") orelse
-            programs.environ.get("TEMP") orelse
-            programs.environ.get("TMP") orelse
-            (if (builtin.target.os.tag == .windows) return error.NoTemporaryDirectory else "/tmp");
-        var name_buf: [96]u8 = undefined;
-        const name = fs.tempName(io, &name_buf, prefix);
-        // A relative `TMPDIR` is taken from where the process runs, made
-        // absolute so the program reading the file finds it from anywhere.
-        const dir_abs = if (std.Io.Dir.path.isAbsolute(dir_path)) dir_path else try Io.Dir.cwd().realPathFileAlloc(io, dir_path, arena);
-        const path = try std.Io.Dir.path.join(arena, &.{ dir_abs, name });
-        const file = try Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
-        defer file.close(io);
-        // glint-ignore: Z026 -- the write's error is the one to report; a scratch file left behind is in relic's own temporary directory
-        errdefer Io.Dir.deleteFileAbsolute(io, path) catch {};
-        try file.writePositionalAll(io, bytes, 0);
-        return .{ .path = path };
-    }
-
-    fn remove(f: *TempFile, io: Io) void {
-        // glint-ignore: Z026 -- as git's delete_tempfile: the signature is already read, and a temporary file left behind holds only what was signed or verified
-        Io.Dir.deleteFileAbsolute(io, f.path) catch {};
-    }
-};
+const TempFile = fs.TempFile;
 
 //=========================================================================
 // Tests

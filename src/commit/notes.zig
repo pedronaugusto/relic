@@ -41,6 +41,7 @@ const rev_parse = @import("../rev_walk/rev_parse.zig");
 const rev_walk = @import("../walk/walk.zig");
 const message = @import("../object/message.zig");
 const diff = @import("../diff/diff.zig");
+const textconv_mod = @import("../diff/textconv.zig");
 const blob_merge = @import("../merge/blob_merge.zig");
 const head_mod = @import("../repo/head.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
@@ -213,6 +214,18 @@ pub const Notes = struct {
         };
         var leaf: Leaf = .{ .key = @splat(0), .val = tree };
         try t.loadSubtree(io, &leaf, t.root, 0);
+        return t;
+    }
+
+    /// `init_notes` with `NOTES_INIT_EMPTY`: no notes, written to `ref`.
+    pub fn openEmpty(gpa: Allocator, repo: *Repository, ref: []const u8, combine: Combine) Self.Error!Notes {
+        const root = try gpa.create(IntNode);
+        root.* = .{};
+        var t: Notes = .{ .gpa = gpa, .repo = repo, .ref = undefined, .combine = combine, .root = root, .arena = .init(gpa) };
+        t.ref = t.arena.allocator().dupe(u8, ref) catch |err| {
+            t.deinit();
+            return err;
+        };
         return t;
     }
 
@@ -836,6 +849,120 @@ fn updateRef(io: Io, repo: *Repository, name: []const u8, new: Oid, expected: re
     try tx.update(name, .{ .direct = new }, expected);
     try tx.commit(io, .{ .who = who, .message = log, .policy = repo.reflogPolicy() });
 }
+
+// ---------------------------------------------------------------------------
+// git's `notes-cache.c`, as `diff.<driver>.cachetextconv` keeps converted
+// text.
+
+/// The caches `diff.<driver>.cachetextconv` keeps: for each driver,
+/// `refs/notes/textconv/<driver>`, a note on each blob holding its text,
+/// valid while its commit's subject is the driver's command. One whose
+/// subject is another command starts empty, as git's starts it. Each text
+/// kept is committed at once, with no parent, its message the command and
+/// `update notes cache` in the ref's log. Hand `cache()` to
+/// `textconv_mod.Textconv`; it must outlive every conversion.
+pub const TextconvCaches = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    gpa: Allocator,
+    repo: *Repository,
+    who: object.Signature,
+    caches: std.StringHashMapUnmanaged(*Entry) = .empty,
+
+    const Entry = struct { notes: Notes, validity: []const u8 };
+
+    pub fn init(gpa: Allocator, repo: *Repository, who: object.Signature) TextconvCaches {
+        return .{ .gpa = gpa, .repo = repo, .who = who };
+    }
+
+    pub fn deinit(c: *TextconvCaches) void {
+        var it = c.caches.iterator();
+        while (it.next()) |e| {
+            e.value_ptr.*.notes.deinit();
+            c.gpa.free(e.value_ptr.*.validity);
+            c.gpa.free(e.key_ptr.*);
+            c.gpa.destroy(e.value_ptr.*);
+        }
+        c.caches.deinit(c.gpa);
+        c.* = undefined;
+    }
+
+    pub fn cache(c: *TextconvCaches) textconv_mod.Cache {
+        return .{ .context = c, .getFn = getFn, .putFn = putFn };
+    }
+
+    /// `notes_cache_init`: the driver's cache, opened once.
+    fn entryFor(c: *TextconvCaches, io: Io, driver: []const u8, command: []const u8) ErrorNamespace.Error!*Entry {
+        if (c.caches.get(driver)) |e| return e;
+        const ref = try c.gpa.print("refs/notes/textconv/{s}", .{driver});
+        defer c.gpa.free(ref);
+        const entry = try c.gpa.create(Entry);
+        errdefer c.gpa.destroy(entry);
+        entry.notes = if (try c.matchesValidity(io, ref, command))
+            try Notes.open(c.gpa, io, c.repo, ref, .overwrite)
+        else
+            try Notes.openEmpty(c.gpa, c.repo, ref, .overwrite);
+        errdefer entry.notes.deinit();
+        entry.validity = try c.gpa.dupe(u8, command);
+        errdefer c.gpa.free(entry.validity);
+        try c.caches.put(c.gpa, try c.gpa.dupe(u8, driver), entry);
+        return entry;
+    }
+
+    /// `notes_cache_match_validity`: the ref's commit's subject, trimmed,
+    /// is `validity`.
+    fn matchesValidity(c: *TextconvCaches, io: Io, ref: []const u8, validity: []const u8) ErrorNamespace.Error!bool {
+        const tip = (try c.repo.refStore().readOid(c.gpa, io, ref)) orelse return false;
+        const found = c.repo.objectDatabase().read(io, tip) catch |err| switch (err) {
+            error.ObjectNotFound => return false,
+            else => |e| return e,
+        };
+        defer c.repo.objectDatabase().allocator().free(found.bytes);
+        if (found.type != .commit) return false;
+        var commit = try object.Commit.parse(c.gpa, c.repo.objectFormat(), found.bytes);
+        defer commit.deinit();
+        const subject = try message.onelineSubject(c.gpa, commit.message);
+        defer c.gpa.free(subject);
+        return std.mem.eql(u8, std.mem.trim(u8, subject, " \t\n\r"), validity);
+    }
+
+    fn getFn(context: *anyopaque, a: Allocator, io: Io, key: textconv_mod.Cache.Key) textconv_mod.Error!?[]const u8 {
+        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a TextconvCaches
+        const entry = c.entryFor(io, key.driver, key.command) catch |err| return cacheError(err);
+        const note = (entry.notes.get(io, key.blob) catch |err| return cacheError(err)) orelse return null;
+        const found = c.repo.objectDatabase().read(io, note) catch |err| return cacheError(err);
+        defer c.repo.objectDatabase().allocator().free(found.bytes);
+        return try a.dupe(u8, found.bytes);
+    }
+
+    /// `notes_cache_put` and `notes_cache_write`, whose failure git passes
+    /// over: the repository may be read-only.
+    fn putFn(context: *anyopaque, io: Io, key: textconv_mod.Cache.Key, text: []const u8) textconv_mod.Error!void {
+        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a TextconvCaches
+        c.put(io, key, text) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => {},
+        };
+    }
+
+    fn put(c: *TextconvCaches, io: Io, key: textconv_mod.Cache.Key, text: []const u8) ErrorNamespace.Error!void {
+        const entry = try c.entryFor(io, key.driver, key.command);
+        const note = try c.repo.objectDatabase().write(io, .blob, text);
+        try entry.notes.add(io, key.blob, note, .overwrite);
+        const commit = try entry.notes.commitWith(io, &.{}, entry.validity, c.who);
+        try updateRef(io, c.repo, entry.notes.ref, commit, .any, "update notes cache", c.who);
+        entry.notes.dirty = false;
+    }
+
+    fn cacheError(err: anyerror) textconv_mod.Error {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            else => error.TextconvFailed,
+        };
+    }
+};
 
 // ---------------------------------------------------------------------------
 // The commands: git's `builtin/notes.c`.

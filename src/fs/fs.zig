@@ -1411,6 +1411,49 @@ pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     return std.mem.print(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;
 }
 
+/// A file in the temporary directory holding bytes a program reads by
+/// name: `TMPDIR`, `TEMP` or `TMP` from the environment the program runs
+/// in, else `/tmp`, as git's `mks_tempfile_ts` finds it. Its name is
+/// `prefix`, random hex digits and `suffix`.
+pub const TempFile = struct {
+    path: []const u8,
+
+    pub const Error = error{
+        /// No temporary directory: none named on Windows, where there is
+        /// no `/tmp` to fall back on.
+        NoTemporaryDirectory,
+    } || Io.File.OpenError || Io.File.WritePositionalError || Io.Dir.RealPathFileAllocError || Allocator.Error;
+
+    pub const Name = struct { prefix: []const u8 = "", suffix: []const u8 = "" };
+
+    pub fn create(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, name: Name, bytes: []const u8) TempFile.Error!TempFile {
+        const dir_path = environ.get("TMPDIR") orelse
+            environ.get("TEMP") orelse
+            environ.get("TMP") orelse
+            (if (builtin.target.os.tag == .windows) return error.NoTemporaryDirectory else "/tmp");
+        var name_buf: [96]u8 = undefined;
+        const random = tempName(io, &name_buf, name.prefix);
+        const file_name = try std.mem.concat(arena, u8, &.{ random, name.suffix });
+        // A relative `TMPDIR` is taken from where the process runs, made
+        // absolute so the program reading the file finds it from anywhere.
+        const dir_abs = if (std.Io.Dir.path.isAbsolute(dir_path)) dir_path else try Io.Dir.cwd().realPathFileAlloc(io, dir_path, arena);
+        const path = try std.Io.Dir.path.join(arena, &.{ dir_abs, file_name });
+        const file = try Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
+        defer file.close(io);
+        // glint-ignore: Z026 -- the write's error is the one to report; a scratch file left behind is in the temporary directory
+        errdefer Io.Dir.deleteFileAbsolute(io, path) catch {};
+        try file.writePositionalAll(io, bytes, 0);
+        return .{ .path = path };
+    }
+
+    /// Remove the file, as git's `delete_tempfile`: one left behind holds
+    /// only what a program was given to read.
+    pub fn remove(f: *TempFile, io: Io) void {
+        // glint-ignore: Z026 -- as git's delete_tempfile: what the file held is already read
+        Io.Dir.deleteFileAbsolute(io, f.path) catch {};
+    }
+};
+
 /// Errors from reading a file whose length is already known.
 pub const ReadSizedError = Io.File.OpenError || Io.File.ReadPositionalError ||
     Io.Dir.ReadFileAllocError || Allocator.Error;

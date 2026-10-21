@@ -22,6 +22,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const attributes = @import("../patterns.zig").attributes;
 const user_diff = @import("user_diff.zig");
+const textconv_mod = @import("textconv.zig");
 const config_mod = @import("../config/config.zig");
 const glob = @import("../text.zig").glob;
 const pathspec = @import("../patterns.zig").pathspec;
@@ -1013,7 +1014,7 @@ pub fn numstat(
 }
 
 /// Errors from `unified`.
-pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || error{InvalidDriverBinary};
+pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || error{InvalidDriverBinary};
 
 /// The borrowed object store, the changes whose patch is written, and what
 /// decides which of their files are binary.
@@ -1025,6 +1026,10 @@ pub const UnifiedInputs = struct {
     /// Which files are binary, as git's `diff_filespec_is_binary` says;
     /// the zero value decides by the bytes alone.
     binary: BinaryRule = .{},
+    /// `--textconv`, which `git diff` and `git log -p` have by default: a
+    /// side whose driver has a `textconv` is diffed as the program's text,
+    /// and is never binary. `null` diffs the bytes.
+    textconv: ?*const textconv_mod.Textconv = null,
 };
 
 /// Append the unified diff of `inputs.changes` to `w`, each with git's
@@ -1045,7 +1050,7 @@ pub fn unified(
     const r: ?*paint.Recorder = if (recorder) |*r| r else null;
     const out = if (r) |rec| &rec.painted.writer else w;
     for (inputs.changes) |change| {
-        writeChange(gpa, io, inputs.db, inputs.binary, change, out, options, r) catch |err| return recorded(r, err);
+        writeChange(gpa, io, inputs, change, out, options, r) catch |err| return recorded(r, err);
     }
     if (r) |rec| try rec.finish(w);
 }
@@ -1063,8 +1068,8 @@ fn recorded(r: ?*paint.Recorder, err: anytype) @TypeOf(err) {
     return err;
 }
 
-fn writeChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, binary: BinaryRule, change: Change, w: *Io.Writer, options: Options, r: ?*paint.Recorder) UnifiedError!void {
-    const file: FileInputs = .{ .db = db, .binary = binary, .change = change, .recorder = r };
+fn writeChange(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, w: *Io.Writer, options: Options, r: ?*paint.Recorder) UnifiedError!void {
+    const file: FileInputs = .{ .db = inputs.db, .binary = inputs.binary, .textconv = inputs.textconv, .change = change, .recorder = r };
     if (change.old != null and change.new != null and typeChanged(change.old.?.mode, change.new.?.mode)) {
         try writeFilePatch(gpa, io, file, w, options, change.old, null);
         return writeFilePatch(gpa, io, file, w, options, null, change.new);
@@ -1077,6 +1082,7 @@ fn writeChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, binary: BinaryRule, cha
 const FileInputs = struct {
     db: *odb_mod.Odb,
     binary: BinaryRule,
+    textconv: ?*const textconv_mod.Textconv,
     change: Change,
     recorder: ?*paint.Recorder,
 };
@@ -1105,6 +1111,15 @@ const SideBytes = struct {
     }
 };
 
+/// One side's text as its driver's `textconv` writes it, `null` when it
+/// is not converted: git's `get_textconv` converts only a regular file,
+/// never a symbolic link or a gitlink.
+fn convertSide(tc: *const textconv_mod.Textconv, a: Allocator, io: Io, entry: ?Entry, bytes: []const u8) textconv_mod.Error!?[]const u8 {
+    const e = entry orelse return null;
+    if (e.mode != .file and e.mode != .exec) return null;
+    return tc.convert(a, io, .{ .path = e.path, .blob = e.oid, .bytes = bytes });
+}
+
 /// One file pair's patch, either side absent for a creation or a deletion.
 fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, options: Options, old: ?Entry, new: ?Entry) UnifiedError!void {
     const db = inputs.db;
@@ -1118,36 +1133,12 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     const new_name = try quoteTwo(gpa, "b/", new_path, fully);
     defer gpa.free(new_name);
 
-    try paint.writeMeta(w, colors, "diff --git {s} {s}", .{ old_name, new_name });
-
-    var old_mode_buf: [6]u8 = undefined;
-    var new_mode_buf: [6]u8 = undefined;
-    if (old == null) {
-        try paint.writeMeta(w, colors, "new file mode {s}", .{new.?.mode.text(&new_mode_buf)});
-    } else if (new == null) {
-        try paint.writeMeta(w, colors, "deleted file mode {s}", .{old.?.mode.text(&old_mode_buf)});
-    } else {
-        if (old.?.mode != new.?.mode) {
-            try paint.writeMeta(w, colors, "old mode {s}", .{old.?.mode.text(&old_mode_buf)});
-            try paint.writeMeta(w, colors, "new mode {s}", .{new.?.mode.text(&new_mode_buf)});
-        }
-        if (change.status == .renamed or change.status == .copied) {
-            const word = if (change.status == .renamed) "rename" else "copy";
-            try paint.writeMeta(w, colors, "similarity index {d}%", .{change.similarity});
-            const from = try quoteTwo(gpa, "", old_path, fully);
-            defer gpa.free(from);
-            const to = try quoteTwo(gpa, "", new_path, fully);
-            defer gpa.free(to);
-            try paint.writeMeta(w, colors, "{s} from {s}", .{ word, from });
-            try paint.writeMeta(w, colors, "{s} to {s}", .{ word, to });
-        }
-    }
-
     const old_oid = if (old) |e| e.oid else Oid.zero(db.objectFormat());
     const new_oid = if (new) |e| e.oid else Oid.zero(db.objectFormat());
+    const header: Header = .{ .old_name = old_name, .new_name = new_name, .old_path = old_path, .new_path = new_path, .old = old, .new = new, .change = change, .quote_fully = fully };
     if (old_oid.eql(new_oid)) {
         // Only the mode moved: git prints no index line and no hunks.
-        return;
+        return writeHeader(gpa, w, colors, header);
     }
 
     var old_side: SideBytes = .{};
@@ -1160,14 +1151,36 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
 
     var lookup: std.heap.ArenaAllocator = .init(gpa);
     defer lookup.deinit();
-    const binary = (if (old) |e| try inputs.binary.isBinary(lookup.allocator(), io, e.path, old_side.bytes) else false) or
-        (if (new) |e| try inputs.binary.isBinary(lookup.allocator(), io, e.path, new_side.bytes) else false);
+    // `fill_textconv`: each side the driver converts is diffed as its text.
+    var old_text = old_side.bytes;
+    var new_text = new_side.bytes;
+    var old_converted = false;
+    var new_converted = false;
+    if (inputs.textconv) |tc| {
+        if (try convertSide(tc, lookup.allocator(), io, old, old_side.bytes)) |t| {
+            old_text = t;
+            old_converted = true;
+        }
+        if (try convertSide(tc, lookup.allocator(), io, new, new_side.bytes)) |t| {
+            new_text = t;
+            new_converted = true;
+        }
+    }
+    const binary = (if (old) |e| !old_converted and try inputs.binary.isBinary(lookup.allocator(), io, e.path, old_side.bytes) else false) or
+        (if (new) |e| !new_converted and try inputs.binary.isBinary(lookup.allocator(), io, e.path, new_side.bytes) else false);
+    // A change git need not announce -- no file made or removed, no mode
+    // moved, no rename -- is written only with a hunk, which a text that
+    // converts the same has none of.
+    if (!binary and (old_converted or new_converted) and std.mem.eql(u8, old_text, new_text) and
+        old != null and new != null and old.?.mode == new.?.mode and change.status != .renamed and change.status != .copied) return;
+    try writeHeader(gpa, w, colors, header);
 
     // The mode is on the index line only when it did not change and the
     // file was neither created nor removed; otherwise it is on its own line
     // above. A binary patch names its objects in full, which `git apply`
     // checks.
     const full = options.full_index or (options.binary_patches and binary);
+    var new_mode_buf: [6]u8 = undefined;
     var old_hex: [hash.max_hex_len]u8 = undefined;
     var new_hex: [hash.max_hex_len]u8 = undefined;
     const same_mode = old != null and new != null and old.?.mode == new.?.mode;
@@ -1192,7 +1205,54 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     if (new) |entry| if (entry.mode == .symlink) {
         body_options.whitespace_rule &= ~whitespace.incomplete_line;
     };
-    try writeBody(gpa, w, old_side.bytes, new_side.bytes, body_options, .{ .old = old_label, .new = new_label }, inputs.recorder);
+    try writeBody(gpa, w, old_text, new_text, body_options, .{ .old = old_label, .new = new_label }, inputs.recorder);
+}
+
+/// The lines a file's patch starts with, before its `index` line.
+const Header = struct {
+    old_name: []const u8,
+    new_name: []const u8,
+    old_path: []const u8,
+    new_path: []const u8,
+    old: ?Entry,
+    new: ?Entry,
+    change: Change,
+    quote_fully: bool,
+};
+
+fn writeHeader(gpa: Allocator, w: *Io.Writer, colors: ?*const Colors, h: Header) UnifiedError!void {
+    const old_name = h.old_name;
+    const new_name = h.new_name;
+    const old_path = h.old_path;
+    const new_path = h.new_path;
+    const old = h.old;
+    const new = h.new;
+    const change = h.change;
+    const fully = h.quote_fully;
+    try paint.writeMeta(w, colors, "diff --git {s} {s}", .{ old_name, new_name });
+
+    var old_mode_buf: [6]u8 = undefined;
+    var new_mode_buf: [6]u8 = undefined;
+    if (old == null) {
+        try paint.writeMeta(w, colors, "new file mode {s}", .{new.?.mode.text(&new_mode_buf)});
+    } else if (new == null) {
+        try paint.writeMeta(w, colors, "deleted file mode {s}", .{old.?.mode.text(&old_mode_buf)});
+    } else {
+        if (old.?.mode != new.?.mode) {
+            try paint.writeMeta(w, colors, "old mode {s}", .{old.?.mode.text(&old_mode_buf)});
+            try paint.writeMeta(w, colors, "new mode {s}", .{new.?.mode.text(&new_mode_buf)});
+        }
+        if (change.status == .renamed or change.status == .copied) {
+            const word = if (change.status == .renamed) "rename" else "copy";
+            try paint.writeMeta(w, colors, "similarity index {d}%", .{change.similarity});
+            const from = try quoteTwo(gpa, "", old_path, fully);
+            defer gpa.free(from);
+            const to = try quoteTwo(gpa, "", new_path, fully);
+            defer gpa.free(to);
+            try paint.writeMeta(w, colors, "{s} from {s}", .{ word, from });
+            try paint.writeMeta(w, colors, "{s} to {s}", .{ word, to });
+        }
+    }
 }
 
 /// A path as a patch's headers name it: under `Options.relative_to`, from

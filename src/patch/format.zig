@@ -69,7 +69,7 @@ pub const Error = error{
     /// `i18n.logOutputEncoding` or `i18n.commitEncoding` set with no value,
     /// which git dies on.
     InvalidEncodingSetting,
-} || shortlog.Error || rev_walk.Error || diff.Error || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
+} || shortlog.Error || rev_walk.Error || diff.Error || diff.UnifiedError || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
     Io.Dir.ReadFileAllocError;
 
 /// A name and an address.

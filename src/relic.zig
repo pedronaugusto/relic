@@ -65,6 +65,7 @@
 //! | `diff.patch_id` | Module within `diff`. |
 //! | `diff.rename` | Module within `diff`. |
 //! | `diff.similarity` | Module within `diff`. |
+//! | `diff.textconv` | Module within `diff`. |
 //! | `rev_walk` | Public concern. |
 //! | `rev_walk.bisect` | Module within `rev_walk`. |
 //! | `rev_walk.describe` | Module within `rev_walk`. |

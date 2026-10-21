@@ -4,6 +4,7 @@ pub const blame = @import("diff/blame.zig");
 pub const patch_id = @import("diff/patch_id.zig");
 pub const rename = @import("diff/rename.zig");
 pub const similarity = @import("diff/similarity.zig");
+pub const textconv = @import("diff/textconv.zig");
 pub const Algorithm = @import("diff/diff.zig").Algorithm;
 pub const TextError = @import("diff/diff.zig").TextError;
 pub const Error = @import("diff/diff.zig").Error;

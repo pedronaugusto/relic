@@ -36,6 +36,7 @@ const ere = @import("text.zig").ere;
 const pathspec_mod = @import("patterns.zig").pathspec;
 const fs = @import("fs/fs.zig");
 const user_diff = @import("diff/user_diff.zig");
+const textconv_mod = @import("diff/textconv.zig");
 const color = @import("config/color.zig");
 const config_mod = @import("config/config.zig");
 
@@ -73,7 +74,7 @@ pub const Error = error{
     /// The tree nests deeper than `core.maxTreeDepth`.
     TreeTooDeep,
 } || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || attributes.Error || Io.Writer.Error ||
-    odb_mod.Error || object.TreeParseError;
+    odb_mod.Error || object.TreeParseError || textconv_mod.Error;
 
 /// How patterns are read: `-G`, `-E`, `-F`, `-P`.
 pub const Syntax = enum { basic, extended, fixed, perl };
@@ -180,6 +181,10 @@ pub const Options = struct {
     /// `-z`.
     null_separator: bool = false,
     binary: Binary = .match,
+    /// `--textconv`: a file whose driver has a `textconv` is searched as
+    /// the program's text, which is never binary. `null`, git's default,
+    /// searches the bytes.
+    textconv: ?*const textconv_mod.Textconv = null,
     pathspecs: []const []const u8 = &.{},
     source: Source = .worktree,
     /// Tasks to search on: zero is one per processor.
@@ -1085,6 +1090,9 @@ fn collect(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pa
 /// each with its bytes (`null` for a file that could not be read) and
 /// whether it is binary.
 const Batch = struct {
+    /// Where a batch starts, and what converts its files.
+    const Place = struct { start: usize, textconv: ?*const textconv_mod.Textconv };
+
     contents: std.ArrayList(?[]const u8) = .empty,
     binaries: std.ArrayList(bool) = .empty,
     /// The bytes read, the object database allocator's to free.
@@ -1092,7 +1100,8 @@ const Batch = struct {
 
     /// Read the files from `start` on until the budget is spent, at least
     /// one; returns where the batch ends.
-    fn load(batch: *Batch, a: Allocator, gpa: Allocator, io: Io, repo: *Repository, items: []const Item, start: usize) Error!usize {
+    fn load(batch: *Batch, a: Allocator, gpa: Allocator, io: Io, repo: *Repository, items: []const Item, at: Place) Error!usize {
+        const start = at.start;
         var end = start;
         var bytes: usize = 0;
         while (end < items.len and (end == start or bytes < batch_bytes)) : (end += 1) {
@@ -1108,11 +1117,23 @@ const Batch = struct {
                 try batch.owned.append(gpa, c);
                 bytes += c.len;
             }
-            try batch.contents.append(a, content);
+            var searched: ?[]const u8 = content;
             var bin = false;
             if (content) |c| {
                 bin = item.binary orelse attributes.isBinaryForDiff(c);
+                // `fill_textconv_grep`: the driver's text, which is text.
+                if (at.textconv) |tc| {
+                    const blob: ?Oid = switch (item.source) {
+                        .blob => |oid| oid,
+                        .file => null,
+                    };
+                    if (try tc.convert(a, io, .{ .path = item.path, .blob = blob, .bytes = c })) |text| {
+                        searched = text;
+                        bin = false;
+                    }
+                }
             }
+            try batch.contents.append(a, searched);
             try batch.binaries.append(a, bin);
         }
         // The tasks index both by a file's place in the batch.
@@ -1189,7 +1210,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     while (start < items.items.len) {
         var batch: Batch = .{};
         defer batch.deinit(gpa, repo);
-        const end = try batch.load(a, gpa, io, repo, items.items, start);
+        const end = try batch.load(a, gpa, io, repo, items.items, .{ .start = start, .textconv = options.textconv });
         const n = end - start;
         const outputs = try a.alloc(?[]const u8, n);
         @memset(outputs, null);

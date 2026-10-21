@@ -11,6 +11,9 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const blame = @import("blame.zig");
+const textconv = @import("textconv.zig");
+const attributes = @import("../patterns.zig").attributes;
+const suite = @import("../testing/helpers.zig");
 
 const Oid = hash.Oid;
 
@@ -390,4 +393,40 @@ test "blame ignoring random reformats, lines changed a little and moved about, a
             };
         }
     }
+}
+
+test "with a driver's textconv each line goes where git blame sends it, by the text the program writes" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const command = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "upper-file");
+    defer gpa.free(command);
+    try git.exec(io, &.{ "config", "diff.up.textconv", command });
+    try git.writeFile(io, ".gitattributes", "*.txt diff=up\n");
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var h: History = .{ .gpa = gpa, .arena = .init(gpa), .repo = &repo, .io = io };
+    defer h.arena.deinit();
+    const a = h.arena.allocator();
+
+    // Changes of case the program's text does not see, beside real ones.
+    var files: History.Files = .empty;
+    try files.put(a, "notes.txt", try text(a, &.{ "first", "second", "third" }));
+    try files.put(a, "notes.dat", try text(a, &.{ "first", "second", "third" }));
+    const root = try h.commit(&files, &.{}, 1000);
+    try files.put(a, "notes.txt", try text(a, &.{ "FIRST", "second", "third", "fourth" }));
+    try files.put(a, "notes.dat", try text(a, &.{ "FIRST", "second", "third", "fourth" }));
+    const grow = try h.commit(&files, &.{root}, 2000);
+    try files.put(a, "notes.txt", try text(a, &.{ "FIRST", "Second", "THIRD", "fourth", "fifth" }));
+    try files.put(a, "notes.dat", try text(a, &.{ "FIRST", "Second", "THIRD", "fourth", "fifth" }));
+    const tip = try h.commit(&files, &.{grow}, 3000);
+
+    var env = try testgit.datedEnv(gpa, 0);
+    defer env.deinit();
+    var attrs = try attributes.Attrs.init(gpa, .{});
+    defer attrs.deinit();
+    const tc: textconv.Textconv = .{ .programs = .{ .environ = &env }, .config = repo.configuration(), .attrs = &attrs, .work_dir = git.dir };
+    try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.txt", .{ .textconv = &tc });
+    try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.dat", .{ .textconv = &tc });
 }

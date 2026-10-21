@@ -10,6 +10,9 @@ const grep_mod = @import("grep.zig");
 const hash = @import("hash/hash.zig");
 const repo_mod = @import("repo/repo.zig");
 const testgit = @import("testing/git.zig");
+const suite = @import("testing/helpers.zig");
+const textconv = @import("diff/textconv.zig");
+const attributes = @import("patterns.zig").attributes;
 
 const Repository = repo_mod.Repository;
 
@@ -249,6 +252,41 @@ test "-p and -W show the function lines git's diff drivers find" {
     try compare(gpa, io, &git, &repo, &.{ "-W", "value" }, .{ .patterns = &.{"value"}, .function_context = true });
     try compare(gpa, io, &git, &repo, &.{ "-W", "-c", "total" }, .{ .patterns = &.{"total"}, .function_context = true, .show = .count });
     try compare(gpa, io, &git, &repo, &.{ "--threads=1", "-W", "-n", "total" }, .{ .patterns = &.{"total"}, .function_context = true, .line_number = true, .threads = 1 });
+}
+
+test "--textconv searches the text a driver's program writes, in the working tree, the index and a tree, as git grep's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const command = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "upper-file");
+    defer gpa.free(command);
+    try git.exec(io, &.{ "config", "diff.up.textconv", command });
+    try git.writeFile(io, ".gitattributes", "*.txt diff=up\n*.bin diff=up\n");
+    try git.writeFile(io, "words.txt", "hello there\nnothing\n");
+    try git.writeFile(io, "data.bin", "raw\x00hello inside\n");
+    try git.writeFile(io, "plain.dat", "hello as it is\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try git.writeFile(io, "words.txt", "hello in the working tree\n");
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const head_oid = blk: {
+        const text = try git.line(io, &.{ "rev-parse", "HEAD" });
+        defer gpa.free(text);
+        break :blk try hash.Oid.parse(.sha1, text);
+    };
+    var env = try testgit.datedEnv(gpa, 0);
+    defer env.deinit();
+    var attrs = try attributes.Attrs.init(gpa, .{});
+    defer attrs.deinit();
+    const tc: textconv.Textconv = .{ .programs = .{ .environ = &env }, .config = repo.configuration(), .attrs = &attrs, .work_dir = git.dir };
+
+    try compare(gpa, io, &git, &repo, &.{ "--textconv", "-n", "HELLO" }, .{ .patterns = &.{"HELLO"}, .line_number = true, .textconv = &tc });
+    try compare(gpa, io, &git, &repo, &.{ "--textconv", "hello" }, .{ .patterns = &.{"hello"}, .textconv = &tc });
+    try compare(gpa, io, &git, &repo, &.{ "--textconv", "--cached", "HELLO" }, .{ .patterns = &.{"HELLO"}, .source = .index, .textconv = &tc });
+    try compare(gpa, io, &git, &repo, &.{ "--textconv", "-c", "HELLO", "HEAD" }, .{ .patterns = &.{"HELLO"}, .show = .count, .source = .{ .tree = .{ .oid = head_oid, .name = "HEAD" } }, .textconv = &tc });
+    try compare(gpa, io, &git, &repo, &.{"HELLO"}, .{ .patterns = &.{"HELLO"} });
 }
 
 /// A `-P` stand-in that finds its patterns as fixed text.

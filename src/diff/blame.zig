@@ -30,6 +30,7 @@ const odb_mod = @import("../odb/odb.zig");
 const diff = @import("diff.zig");
 const rename = @import("rename.zig");
 const blame_ignore = @import("blame/ignore.zig");
+const textconv_mod = @import("textconv.zig");
 const config_mod = @import("../config/config.zig");
 const fs = @import("../fs/fs.zig");
 const parallax = @import("parallax");
@@ -37,7 +38,7 @@ const parallax = @import("parallax");
 const Oid = hash.Oid;
 
 /// Errors from a blame.
-pub const Error = diff.Error || diff.TextError || object.ParseError || error{
+pub const Error = diff.Error || diff.TextError || object.ParseError || textconv_mod.Error || error{
     /// A commit named is not a commit.
     NotACommit,
     /// The path is not a file in the commit blamed.
@@ -65,6 +66,9 @@ pub const Options = struct {
     /// `ignored`; one it finds no line for stays the commit's, marked
     /// `unblamable`.
     ignore: []const Oid = &.{},
+    /// `--textconv`, which `git blame` has by default: each version of a
+    /// file whose driver has a `textconv` is blamed as the program's text.
+    textconv: ?*const textconv_mod.Textconv = null,
 };
 
 /// A run of lines that come from one commit, at consecutive lines there.
@@ -126,7 +130,7 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
     const found = (try s.entryAt(start.tree, path)) orelse return error.PathNotFound;
     if (!found.mode.isBlob()) return error.PathNotFound;
     const origin = try s.origin(start, path, found.oid);
-    const line_count = try lineCount(try s.textOf(found.oid));
+    const line_count = try lineCount(try s.textFor(origin));
     try origin.suspects.ensureTotalCapacity(s.arena, line_count);
     for (0..line_count) |i| origin.suspects.appendAssumeCapacity(.{ .final = @intCast(i), .at = @intCast(i) });
     try s.enqueue(start);
@@ -325,6 +329,8 @@ const Scoreboard = struct {
     nodes: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, *Node) = .empty,
     /// Each blob's bytes, read once.
     texts: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, []const u8) = .empty,
+    /// Each origin's converted text, by blob and path.
+    converted: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// The workspace every diff of the walk is taken in.
     differ: parallax.Differ,
     queue: std.PriorityQueue(*Node, void, newerFirst) = .empty,
@@ -363,6 +369,20 @@ const Scoreboard = struct {
         o.* = .{ .commit = n.oid, .path = try s.arena.dupe(u8, path), .blob = blob };
         try n.origins.append(s.arena, o);
         return o;
+    }
+
+    /// An origin's text: its blob's bytes, or for a regular file as its
+    /// driver's `textconv` writes them for its path, each made once.
+    fn textFor(s: *Scoreboard, o: *const Origin) Error![]const u8 {
+        const tc = s.options.textconv orelse return s.textOf(o.blob);
+        const key = try s.arena.print("{x}:{s}", .{ &o.blob.bytes, o.path });
+        if (s.converted.get(key)) |t| return t;
+        const bytes = try s.textOf(o.blob);
+        // git's `textconv_object` converts only a regular file.
+        if (try s.modeAt(o) == .symlink) return bytes;
+        const text = (try tc.convert(s.arena, s.io, .{ .path = o.path, .blob = o.blob, .bytes = bytes })) orelse bytes;
+        try s.converted.put(s.arena, key, text);
+        return text;
     }
 
     /// A blob's bytes, read once.
@@ -498,8 +518,8 @@ const Scoreboard = struct {
     /// none for stays, marked `unblamable`; every change is guessed, in
     /// order, as each takes what it matched out of the parent's lines.
     fn passToParent(s: *Scoreboard, target: *Origin, parent: *Origin, ignoring: bool) Error!void {
-        const old = try s.textOf(parent.blob);
-        const new = try s.textOf(target.blob);
+        const old = try s.textFor(parent);
+        const new = try s.textFor(target);
         const changes = (try s.differ.lines(old, new, .{})).changes;
         var parent_prints: []blame_ignore.Fingerprint = &.{};
         var target_prints: []const blame_ignore.Fingerprint = &.{};
