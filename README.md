@@ -733,7 +733,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `fast` | git's fast-import stream. |
 | `fast.importer` | `import`, `Marks` — `git fast-import`: every command, its dates, marks files and notes fanout, branches updated as git updates them. |
 | `fast.exporter` | `write` — `git fast-export` byte for byte: marks, renames, tags, signatures, refspecs. |
-| `maintenance` | `writeCommitGraph`, `writeMidx`, `repackMidx`, `expireMidx`, `writePackBitmap`, `writeMidxBitmap`, `writeConfiguredCommitGraph`, `repackRepository`. The format modules own the bytes; these operations gather through the object database, diff and revision walk. Fetch applies `fetch.writeCommitGraph`; configured maintenance applies `gc.writeCommitGraph` and the bitmap settings. |
+| `maintenance` | `writeCommitGraph`, `writeMidx`, `repackMidx`, `expireMidx`, `writePackBitmap`, `writeMidxBitmap`, `writeConfiguredCommitGraph`, `repackRepository`, `packRefs`, `expireReflogs`, `prune` and `reachableObjects` (git's `pack-refs`, `reflog expire` and `prune`, with `gc.reflogExpire*` and `gc.pruneExpire`). The format modules own the bytes; these operations gather through the object database, diff and revision walk. Fetch applies `fetch.writeCommitGraph`; configured maintenance applies `gc.writeCommitGraph` and the bitmap settings. |
 <!-- END MODULES -->
 
 Native LFS belongs to the operation owner. Use `lfs.filter.load(gpa, io, &repo,
