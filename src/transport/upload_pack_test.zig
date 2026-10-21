@@ -410,3 +410,63 @@ test "relic's upload-pack answers bundle-uri as git's under uploadpack.advertise
     try server.advertise(&advertised.writer);
     try testing.expect(std.mem.find(u8, advertised.written(), "object-format=sha1\n000fbundle-uri\n") != null);
 }
+
+test "uploadpack.allowRefInWant and uploadpackfilter.* are held to as git's upload-pack holds to them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const shell_helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
+    defer gpa.free(shell_helper);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const bare = try served(gpa, io, root.dir);
+    defer gpa.free(bare);
+    const url = try gpa.print("file://{s}", .{bare});
+    defer gpa.free(url);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var served_dir = try Io.Dir.cwd().openDir(io, bare, .{});
+    defer served_dir.close(io);
+    const settings = [_][2][]const u8{
+        .{ "uploadpack.allowRefInWant", "true" },
+        .{ "uploadpack.allowFilter", "true" },
+        .{ "uploadpackfilter.allow", "false" },
+        .{ "uploadpackfilter.blob:none.allow", "true" },
+        .{ "uploadpackfilter.tree.maxDepth", "1" },
+    };
+    for (settings) |kv| gpa.free(try git(gpa, io, served_dir, &env, &.{ "config", kv[0], kv[1] }));
+    // A clone by ref name, with filters the settings allow and refuse.
+    const cases = [_][]const []const u8{
+        &.{},
+        &.{"--filter=blob:none"},
+        &.{"--filter=tree:1"},
+        &.{"--filter=tree:2"},
+        &.{"--filter=blob:limit=1k"},
+        &.{"--filter=combine:blob:none+tree:1"},
+    };
+    for (cases) |extra| {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        var outcomes: [2]?[]u8 = undefined;
+        for ([_]?[]const u8{ null, shell_helper }, [_][]const u8{ "by-git", "by-relic" }, 0..) |upload_pack, name, i| {
+            var args: std.ArrayList([]const u8) = .empty;
+            defer args.deinit(gpa);
+            try args.appendSlice(gpa, &.{ "-c", "protocol.version=2", "clone", "-q", "--no-checkout" });
+            if (upload_pack) |p| try args.appendSlice(gpa, &.{ "--upload-pack", p });
+            try args.appendSlice(gpa, extra);
+            try args.appendSlice(gpa, &.{ url, name });
+            outcomes[i] = testremote.gitInputEnv(gpa, io, tmp.dir, &env, args.items, "", false) catch null;
+        }
+        defer for (outcomes) |o| if (o) |text| gpa.free(text);
+        try testing.expectEqual(outcomes[0] == null, outcomes[1] == null);
+        if (outcomes[0] == null) continue;
+        var a = try tmp.dir.openDir(io, "by-git", .{});
+        defer a.close(io);
+        var b = try tmp.dir.openDir(io, "by-relic", .{});
+        defer b.close(io);
+        try expectSame(gpa, io, &env, a, b);
+        // A fetch of one more ref by name.
+        for ([_]Io.Dir{ a, b }) |d| gpa.free(try git(gpa, io, d, &env, &.{ "-c", "protocol.version=2", "fetch", "-q", "origin", "refs/heads/main:refs/heads/fetched" }));
+        try expectSame(gpa, io, &env, a, b);
+    }
+}

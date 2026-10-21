@@ -75,6 +75,56 @@ pub const Options = struct {
     /// `uploadpack.advertiseBundleURIs`: protocol v2's `bundle-uri`
     /// command, answered with every `bundle.*` setting.
     advertise_bundle_uris: ?bool = null,
+    /// `uploadpack.allowRefInWant`: protocol v2's `want-ref`, a ref asked
+    /// for by name and answered in `wanted-refs`.
+    allow_ref_in_want: ?bool = null,
+};
+
+/// Which filters a client may ask for: `uploadpackfilter.allow`, the
+/// fallback, `uploadpackfilter.<filter>.allow` for one, and
+/// `uploadpackfilter.tree.maxDepth`, which allows `tree` up to that depth.
+const FilterRules = struct {
+    fallback: bool = true,
+    /// Each named filter's word, the last one said winning.
+    named: [6]?bool = @splat(null),
+    tree_max_depth: ?u64 = null,
+
+    /// git's `list_object_filter_config_name`, in the order of `named`.
+    const names = [_][]const u8{ "blob:none", "blob:limit", "tree", "sparse:oid", "object:type", "combine" };
+
+    fn read(config: *const config_mod.Config) FilterRules {
+        var rules: FilterRules = .{};
+        for (config.entries.items) |entry| {
+            if (!std.mem.eql(u8, entry.section, "uploadpackfilter")) continue;
+            const value = entry.value;
+            if (!entry.has_subsection) {
+                if (std.mem.eql(u8, entry.name, "allow")) rules.fallback = config_mod.parseBool(value orelse "true") catch rules.fallback;
+                continue;
+            }
+            const at = for (names, 0..) |name, i| {
+                if (std.mem.eql(u8, name, entry.subsection)) break i;
+            } else continue;
+            if (std.mem.eql(u8, entry.name, "allow")) {
+                rules.named[at] = config_mod.parseBool(value orelse "true") catch rules.named[at];
+            } else if (at == 2 and std.mem.eql(u8, entry.name, "maxdepth")) {
+                // As git's: a depth allows `tree` too.
+                rules.named[at] = true;
+                rules.tree_max_depth = decimal.digits(u64, value orelse continue);
+            }
+        }
+        return rules;
+    }
+
+    fn index(spec: filter_spec.Spec) usize {
+        return switch (spec) {
+            .blob_none => 0,
+            .blob_limit => 1,
+            .tree_depth => 2,
+            .sparse_oid => 3,
+            .object_type => 4,
+            .combine => 5,
+        };
+    }
 };
 
 /// A repository, serving.
@@ -89,6 +139,8 @@ pub const Server = struct {
     allow_reachable: bool,
     allow_any: bool,
     advertise_bundle_uris: bool,
+    allow_ref_in_want: bool,
+    filters: FilterRules,
     /// A client answered `promisor-remote` taking one of this repository's
     /// promisor remotes, so what that remote promises and this repository
     /// lacks is left out of a pack: git's `--missing=allow-promisor`.
@@ -110,6 +162,8 @@ pub const Server = struct {
             .allow_reachable = any or (options.allow_reachable orelse (config.getBool("uploadpack.allowreachablesha1inwant", false) catch false)),
             .allow_any = any,
             .advertise_bundle_uris = options.advertise_bundle_uris orelse advertisesBundleUris(config),
+            .allow_ref_in_want = options.allow_ref_in_want orelse (config.getBool("uploadpack.allowrefinwant", false) catch false),
+            .filters = .read(config),
         };
     }
 
@@ -137,7 +191,7 @@ pub const Server = struct {
         try pkt_line.write(w, "version 2\n");
         try pkt_line.print("agent={s}\n", .{protocol.agent}, w);
         try pkt_line.write(w, "ls-refs=unborn\n");
-        try pkt_line.write(w, if (s.allow_filter) "fetch=shallow wait-for-done filter\n" else "fetch=shallow wait-for-done\n");
+        try pkt_line.print("fetch=shallow wait-for-done{s}{s}\n", .{ if (s.allow_filter) " filter" else "", if (s.allow_ref_in_want) " ref-in-want" else "" }, w);
         try pkt_line.write(w, "server-option\n");
         try pkt_line.print("object-format={s}\n", .{s.kind().name()}, w);
         if (s.advertise_bundle_uris) try pkt_line.write(w, "bundle-uri\n");
@@ -347,6 +401,8 @@ pub const Server = struct {
             } else if (std.mem.startsWith(u8, arg, "filter ")) {
                 if (!s.allow_filter) return s.refuse(out, "unexpected line: 'filter'");
                 n.filter = try n.readFilter(out, arg["filter ".len..]);
+            } else if (s.allow_ref_in_want and std.mem.startsWith(u8, arg, "want-ref ")) {
+                try n.wantRef(out, arg["want-ref ".len..]);
             } else if (std.mem.startsWith(u8, arg, "packfile-uris ") or std.mem.startsWith(u8, arg, "want-ref ")) {
                 return s.refuse(out, "unexpected line");
             }
@@ -378,6 +434,12 @@ pub const Server = struct {
         }
         if (!send_pack) return;
 
+        // git's `send_wanted_ref_info`.
+        if (n.wanted_refs.items.len != 0) {
+            pkt_line.write(out, "wanted-refs\n") catch |err| return writeError(err);
+            for (n.wanted_refs.items) |ref| pkt_line.print("{f} {s}\n", .{ ref.oid, ref.name }, out) catch |err| return writeError(err);
+            pkt_line.delim(out) catch |err| return writeError(err);
+        }
         if (n.depth != 0 or n.deepen_since != null or n.deepen_not.items.len != 0 or n.client_shallows.items.len != 0 or s.db().shallow.count() != 0) {
             pkt_line.write(out, "shallow-info\n") catch |err| return writeError(err);
             if (!try n.sendShallowList(out) and s.db().shallow.count() != 0) try n.deepen(out, infinite_depth);
@@ -500,6 +562,15 @@ pub const Server = struct {
         return if (std.mem.find(u8, text, "filter") != null) error.FilterRefused else error.ProtocolError;
     }
 
+    /// An error in the server's own words, as git's `packet_writer_error`
+    /// sends one with no `upload-pack:` before it, and the conversation
+    /// ends.
+    fn refusePlain(_: *Server, out: *Io.Writer, comptime fmt: []const u8, args: anytype, err: Error) Error {
+        pkt_line.print("ERR " ++ fmt ++ "\n", args, out) catch return error.WriteFailed;
+        out.flush() catch return error.WriteFailed;
+        return err;
+    }
+
     fn notOurRef(s: *Server, out: *Io.Writer, oid: Oid) Error {
         var buf: [128]u8 = undefined;
         try s.sendError(out, std.mem.print(&buf, "not our ref {f}", .{oid}) catch "not our ref");
@@ -519,6 +590,8 @@ const Negotiation = struct {
     arena: Allocator,
     wants: std.ArrayList(Oid) = .empty,
     wanted: Oid.Set = .empty,
+    /// The refs `want-ref` named, and their values.
+    wanted_refs: std.ArrayList(struct { name: []const u8, oid: Oid }) = .empty,
     /// Commits the client has, and their parents: git's `THEY_HAVE`.
     they_have: Oid.Set = .empty,
     /// The client's objects this server has too, in the order met, each
@@ -890,11 +963,43 @@ const Negotiation = struct {
     /// The filter a client asked for, read as git reads it
     /// (`filter_spec.zig`), or the request refused as git's upload-pack
     /// refuses it.
+    /// git's `parse_want_ref`: a ref the client may see, named once, and
+    /// wanted at its value.
+    fn wantRef(n: *Negotiation, out: *Io.Writer, name: []const u8) Error!void {
+        const s = n.server;
+        const oid = (if (s.remote.isHidden(name)) null else try s.remote.repo.refStore().readOid(n.arena, s.io, name)) orelse
+            return s.refusePlain(out, "unknown ref {s}", .{name}, error.ProtocolError);
+        for (n.wanted_refs.items) |ref| {
+            if (std.mem.eql(u8, ref.name, name)) return s.refusePlain(out, "duplicate want-ref {s}", .{name}, error.ProtocolError);
+        }
+        try n.wanted_refs.append(n.arena, .{ .name = try n.arena.dupe(u8, name), .oid = oid });
+        if (!n.wanted.contains(oid)) {
+            try n.wanted.put(n.arena, oid, {});
+            try n.wants.append(n.arena, oid);
+        }
+    }
+
+    /// git's `check_one_filter`, for the filter and each one it combines:
+    /// `uploadpackfilter.*` allows it.
+    fn checkFilter(n: *Negotiation, out: *Io.Writer, spec: filter_spec.Spec) Error!void {
+        const rules = n.server.filters;
+        const at = FilterRules.index(spec);
+        if (!(rules.named[at] orelse rules.fallback)) return n.server.refusePlain(out, "filter '{s}' not supported", .{FilterRules.names[at]}, error.FilterRefused);
+        switch (spec) {
+            .tree_depth => |depth| if (rules.tree_max_depth) |max| if (depth > max) {
+                return n.server.refusePlain(out, "tree filter allows max depth {d}, but got {d}", .{ max, depth }, error.FilterRefused);
+            },
+            .combine => |parts| for (parts) |part| try n.checkFilter(out, part),
+            else => {},
+        }
+    }
+
     fn readFilter(n: *Negotiation, out: *Io.Writer, text: []const u8) Error!object_walk.Filter {
         const spec = filter_spec.parse(n.arena, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidFilter => return n.server.refuse(out, "invalid filter-spec"),
         };
+        try n.checkFilter(out, spec);
         var lookup: SparseLookup = .{ .n = n };
         return filter_spec.toWalk(n.arena, spec, &lookup) catch |err| switch (err) {
             // One set of patterns to a walk.
