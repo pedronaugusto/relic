@@ -23,6 +23,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const delta = @import("../codec.zig").delta;
 const rev_index = @import("rev_index.zig");
+const mtimes = @import("mtimes.zig");
 const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
@@ -1832,6 +1833,10 @@ pub const WriteOptions = struct {
     /// What `core.sharedRepository` asks of the files' permissions, which
     /// are otherwise git's read-only ones.
     shared: fs.Shared = .umask,
+    /// A cruft pack's object times: `pack-<name>.mtimes` is written beside
+    /// it from them (`odb.mtimes`), as git's `pack-objects --cruft` does.
+    /// Borrowed until `finish`.
+    mtimes: ?*const Oid.Map(u32) = null,
 };
 
 /// What a finished pack turned out to be.
@@ -2298,11 +2303,17 @@ pub const Writer = struct {
         if (rev_temp) |t| try rev_index.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
         // glint-ignore: Z026 -- the write's error is the one to report; a temporary reverse index left behind is what git gc prunes
         errdefer if (rev_temp) |t| w.dir.deleteFile(io, t) catch {};
+        var mtimes_temp_buf: [64]u8 = undefined;
+        const mtimes_temp: ?[]const u8 = if (w.options.mtimes != null) fs.tempName(io, &mtimes_temp_buf, "tmp_mtimes_") else null;
+        if (mtimes_temp) |t| try mtimes.write(io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .times = w.options.mtimes.?, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
+        // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind is what git gc prunes
+        errdefer if (mtimes_temp) |t| w.dir.deleteFile(io, t) catch {};
 
         // read-only, as git leaves a pack and its indexes
         fs.readOnlyObject(io, w.dir, w.temp[0..w.temp_len], w.options.shared);
         fs.readOnlyObject(io, w.dir, idx_temp, w.options.shared);
         if (rev_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
+        if (mtimes_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
         fs.rename(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
             // glint-ignore: Z026 -- the rename's error is the one to report; temporary files left behind are what `git gc` prunes
             w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
@@ -2316,6 +2327,12 @@ pub const Writer = struct {
             // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
             const rev_name = std.mem.print(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
             try fs.rename(io, w.dir, t, rev_name);
+        }
+        if (mtimes_temp) |t| {
+            var mtimes_name_buf: [hash.max_hex_len + 16]u8 = undefined;
+            // unreachable: a hex name is at most max_hex_len digits, the rest twelve bytes
+            const mtimes_name = std.mem.print(&mtimes_name_buf, "pack-{s}.mtimes", .{text}) catch unreachable;
+            try fs.rename(io, w.dir, t, mtimes_name);
         }
         fs.rename(io, w.dir, idx_temp, idx_name) catch |err| {
             // glint-ignore: Z026 -- the rename's error is the one to report; a pack without its index is unreachable, and `git gc` prunes it

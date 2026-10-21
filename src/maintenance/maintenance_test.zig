@@ -1,6 +1,7 @@
 //! Accelerator files are held to git's writer and git's verifier.
 const std = @import("std");
 const testgit = @import("../testing/git.zig");
+const repack_mod = @import("repack.zig");
 const ops = @import("maintenance.zig");
 const graph = @import("../odb/commit_graph.zig");
 const odb = @import("../odb/odb.zig");
@@ -344,7 +345,8 @@ test "configured maintenance writes full and split commit graphs and repack bitm
     try linearCommit(&repo, 6);
     _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .fetch);
     try repo.exec(io, &.{ "commit-graph", "verify" });
-    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 2 }, .remove_packs = true });
+    _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .write_bitmaps = true, .pack = .{ .threads = 2 } });
+    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
     try repo.exec(io, &.{ "commit-graph", "verify" });
     try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
 }
@@ -409,15 +411,19 @@ test "accelerator files are deterministic across pack worker counts" {
     for (0..16) |n| try linearCommit(&repo, n);
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
-    const first = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1 }, .remove_packs = true });
+    _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .write_bitmaps = true, .pack = .{ .threads = 1 } });
+    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
     const graph_bytes = try repo.readFile(io, ".git/objects/info/commit-graph");
     defer gpa.free(graph_bytes);
     const path = try bitmapPath(&repo, "pack-");
     defer gpa.free(path);
     const bitmap_bytes = try repo.readFile(io, path);
     defer gpa.free(bitmap_bytes);
-    const second = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 4 }, .remove_packs = true });
-    try std.testing.expect(first.written.?.name.eql(second.written.?.name));
+    _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .write_bitmaps = true, .pack = .{ .threads = 4 } });
+    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
+    const again = try bitmapPath(&repo, "pack-");
+    defer gpa.free(again);
+    try std.testing.expectEqualStrings(path, again);
     try sameFile(&repo, ".git/objects/info/commit-graph", graph_bytes);
     try sameFile(&repo, path, bitmap_bytes);
     try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
@@ -659,7 +665,8 @@ test "a repository with replace refs is repacked with a commit graph of the pare
     try repo.exec(io, &.{ "replace", "HEAD~1", "HEAD~2" });
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
-    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1 }, .remove_packs = true });
+    _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .pack = .{ .threads = 1 } });
+    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
     try repo.exec(io, &.{ "commit-graph", "verify" });
     // git writes these generation bytes from 2.43 on.
     if (!try testgit.gitAtLeast(gpa, io, 2, 43)) return;

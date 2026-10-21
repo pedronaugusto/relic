@@ -606,6 +606,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `odb.commit_graph` | Module within `odb`. |
 | `odb.commit_graph.bloom` | Module within `odb.commit_graph`. |
 | `odb.rev_index` | Module within `odb`. |
+| `odb.mtimes` | Module within `odb`. |
 | `odb.index_pack` | Module within `odb`. |
 | `odb.pack` | Module within `odb`. |
 | `odb.delta` | Module within `odb`. |

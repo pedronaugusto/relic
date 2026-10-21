@@ -1,0 +1,607 @@
+//! git's `repack` (`builtin/repack.c`, `repack.c`, `repack-cruft.c`,
+//! `repack-promisor.c`, and the paths of `pack-objects` it asks for): the
+//! reachable objects into a new pack, the unreachable ones kept in it, turned
+//! loose or put into a cruft pack with each one's time, the packs this
+//! replaces taken away, and the files a dumb HTTP client reads written.
+//!
+//! The order is the one a running git survives, as git's: every new pack is
+//! written and readable, and every object turned loose is written, before
+//! any pack goes; a loose object goes only once a pack holds it.
+
+const Self = @This();
+const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
+const hash = @import("../hash/hash.zig");
+const Oid = hash.Oid;
+const odb_mod = @import("../odb/odb.zig");
+const pack_mod = @import("../odb/pack.zig");
+const rev_index = @import("../odb/rev_index.zig");
+const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
+const object_walk = @import("../walk/object.zig").walk;
+const program = @import("../process/program.zig");
+const gc = @import("gc.zig");
+const reach = @import("reach.zig");
+const ops = @import("maintenance.zig");
+const server_info = @import("server_info.zig");
+const Repository = repo_mod.Repository;
+const Odb = odb_mod.Odb;
+
+/// What goes into the new pack, and what becomes of the rest.
+pub const Mode = enum {
+    /// git's default (`--unpacked --incremental`): the reachable objects
+    /// no pack holds, into a new pack beside the others.
+    loose,
+    /// `-a`: every reachable object into one pack.
+    all,
+    /// `-A`: as `-a`, and with `delete` the unreachable objects of the
+    /// packs it takes away written loose first.
+    all_loosen,
+    /// `--cruft`: as `-a`, and the unreachable objects into a cruft pack,
+    /// each with its time in the pack's `.mtimes`.
+    cruft,
+};
+
+/// git's `repack` options. Those left `null` are read from the
+/// repository's configuration as git reads them.
+pub const Options = struct {
+    mode: Mode = .loose,
+    /// `-d`: the packs the new ones replace go, then `prune-packed`.
+    delete: bool = false,
+    /// `-k`, with `-a` and `-d`: the unreachable objects go into the new
+    /// pack too.
+    keep_unreachable: bool = false,
+    /// `--unpack-unreachable=<date>`, with `-A`: an unreachable object
+    /// whose pack is no newer than this, and which no recent object
+    /// reaches, is not turned loose but dropped. `null` turns every one
+    /// loose.
+    unpack_unreachable: ?gc.Expiry = null,
+    /// `--cruft-expiration`: with `--cruft`, the unreachable objects no
+    /// newer than this, and that no newer one reaches, go into no cruft
+    /// pack, and so go. `null` keeps every one.
+    cruft_expiration: ?gc.Expiry = null,
+    /// `--max-cruft-size`: the largest cruft pack written; `null` takes
+    /// `max_pack_bytes`.
+    max_cruft_bytes: ?u64 = null,
+    /// `--combine-cruft-below-size`: without an expiration, only the cruft
+    /// packs smaller than this are written again; the others stay. 0 writes
+    /// every one again.
+    combine_cruft_below: u64 = 0,
+    /// `--max-pack-size`; `null` takes `pack.packSizeLimit`. Less than a
+    /// megabyte is a megabyte, as git raises it.
+    max_pack_bytes: ?u64 = null,
+    /// `-l`: what an alternate's packs hold is not packed here.
+    local: bool = false,
+    /// `--keep-pack`: packs, by file name (`pack-<name>.pack`), left as
+    /// they are, as a `.keep` leaves one.
+    keep_packs: []const []const u8 = &.{},
+    /// `--pack-kept-objects`; `null` takes `repack.packKeptObjects`, else
+    /// whether bitmaps are written.
+    pack_kept_objects: ?bool = null,
+    /// `-b`; `null` takes `repack.writeBitmaps` or `pack.writeBitmaps`,
+    /// else writes them for `-a` in a bare repository when it can.
+    write_bitmaps: ?bool = null,
+    /// `-n` is `false`; `null` takes `repack.updateServerInfo`, true.
+    update_server_info: ?bool = null,
+    /// How each pack is built. `repack.cruftWindow`, `cruftDepth` and
+    /// `cruftThreads` change it for a cruft pack.
+    pack: odb_mod.PackOptions = .{},
+    /// What runs `gc.recentObjectsHook`, for a cruft expiration and
+    /// `--unpack-unreachable`.
+    programs: ?program.Programs = null,
+};
+
+/// What a repack did.
+pub const Report = struct {
+    /// New packs of reachable objects, a promisor pack's included.
+    packs_written: u32 = 0,
+    cruft_written: u32 = 0,
+    /// Packs taken away.
+    packs_removed: u32 = 0,
+    /// Unreachable objects written loose, for `-A`.
+    loosened: u32 = 0,
+    /// Loose objects a pack holds, taken away by `prune-packed`.
+    loose_removed: u32 = 0,
+    /// Commits taken out of `.git/shallow` that are gone.
+    shallow_removed: u32 = 0,
+};
+
+/// Failures of `repack`.
+pub const Error = reach.Error || ops.BitmapError || Repository.WriteShallowError || server_info.Error || error{
+    /// `-d` in a repository with `extensions.preciousObjects`: git refuses.
+    PreciousObjects,
+    /// Two of `-A` (or `--unpack-unreachable`), `-k` and `--cruft`: git
+    /// refuses them together.
+    IncompatibleOptions,
+    /// Bitmaps asked for without `-a`: git's "Incremental repacks are
+    /// incompatible with bitmap indexes".
+    IncrementalBitmaps,
+};
+
+/// The local packs as `existing_packs_collect` sorts them.
+const Existing = struct {
+    kept: std.ArrayList([]const u8) = .empty,
+    cruft: std.ArrayList([]const u8) = .empty,
+    non_kept: std.ArrayList([]const u8) = .empty,
+    promisor: std.ArrayList([]const u8) = .empty,
+    /// Each pack's time and size, by base name.
+    times: std.StringHashMapUnmanaged(i64) = .empty,
+    sizes: std.StringHashMapUnmanaged(u64) = .empty,
+};
+
+/// git's `repack`, as `options` asks.
+pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Report {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const config = repo.configuration();
+    const db = repo.objectDatabase();
+
+    var mode = options.mode;
+    const loosen = mode == .all_loosen or options.unpack_unreachable != null;
+    if (@as(u2, @intFromBool(loosen)) + @intFromBool(options.keep_unreachable) + @intFromBool(mode == .cruft) > 1) return error.IncompatibleOptions;
+    if (loosen and mode != .loose) mode = .all_loosen;
+    if (options.delete and try config.getBool("extensions.preciousobjects", false)) return error.PreciousObjects;
+
+    var bitmaps: ?bool = options.write_bitmaps orelse try lastBool(config, &.{ "repack.writebitmaps", "pack.writebitmaps" });
+    if (bitmaps == null and !(mode != .loose and repo.isBare())) bitmaps = false;
+    if (bitmaps == true and mode == .loose) return error.IncrementalBitmaps;
+    if (bitmaps != false and options.local and db.hasAlternates()) bitmaps = false;
+    var pack_options = options.pack;
+    // `pack.writeReverseIndex`, as pack-objects reads it.
+    pack_options.reverse_index = pack_options.reverse_index or rev_index.wanted(config);
+
+    try db.refresh(io);
+    const pack_dir = try db.openPackDirectory(io);
+    defer pack_dir.close(io);
+    var run: Run = .{
+        .gpa = gpa,
+        .arena = arena,
+        .io = io,
+        .repo = repo,
+        .db = db,
+        .options = options,
+        .mode = mode,
+        .pack_options = pack_options,
+        .pack_kept = options.pack_kept_objects orelse try lastBool(config, &.{"repack.packkeptobjects"}) orelse (bitmaps == true),
+        .max_pack = if (options.max_pack_bytes orelse try sizeSetting(config, "pack.packsizelimit")) |limit| @max(limit, 1 << 20) else null,
+        .pack_dir = pack_dir,
+        .existing = try collectExisting(gpa, arena, io, db, options.keep_packs),
+    };
+    defer run.deinit();
+    for (run.existing.promisor.items) |name| try addPackObjects(gpa, db, name, &run.promised);
+    for (run.existing.kept.items) |name| try addPackObjects(gpa, db, name, &run.kept_objects);
+
+    if (mode != .loose) try run.writePromisorPack();
+    const main_written = try run.writeReachable();
+    try db.refresh(io);
+
+    var main_objects: Oid.Set = .empty;
+    defer main_objects.deinit(gpa);
+    for (run.fresh.items) |name| try addPackObjects(gpa, db, name, &main_objects);
+    const has_old = run.existing.non_kept.items.len + run.existing.cruft.items.len != 0;
+    // `-A`: `loosen_unused_packed_objects`.
+    if (mode == .all_loosen and options.delete and has_old) {
+        run.report.loosened = try loosenUnreachable(gpa, arena, io, repo, &run.existing, &main_objects, &run.kept_objects, options);
+    }
+    // `--cruft`: `write_cruft_pack`.
+    if (mode == .cruft) {
+        var cruft_options = pack_options;
+        if (config.has("repack.cruftwindow")) cruft_options.window = std.math.cast(u32, @max(try config.getInt("repack.cruftwindow", 0), 0)) orelse std.math.maxInt(u32);
+        if (config.has("repack.cruftdepth")) cruft_options.depth = std.math.cast(u32, @max(try config.getInt("repack.cruftdepth", 0), 0)) orelse std.math.maxInt(u32);
+        if (config.has("repack.cruftthreads")) cruft_options.threads = std.math.cast(u16, @max(try config.getInt("repack.cruftthreads", 0), 0)) orelse std.math.maxInt(u16);
+        const limit: ?u64 = if (options.max_cruft_bytes) |l| @max(l, 1 << 20) else run.max_pack;
+        run.report.cruft_written = try writeCruft(gpa, arena, io, repo, &run.existing, run.fresh.items, &run.retained, options, cruft_options, limit, pack_dir);
+        try db.refresh(io);
+    }
+    if (main_written) |written| if (bitmaps != false and !run.kept_skipped) try run.writeBitmap(written);
+    if (options.delete) try run.removeRedundant();
+    if (options.update_server_info orelse try config.getBool("repack.updateserverinfo", true)) try server_info.updateServerInfo(gpa, io, repo);
+    return run.report;
+}
+
+/// One repack's state as it goes.
+const Run = struct {
+    gpa: Allocator,
+    arena: Allocator,
+    io: Io,
+    repo: *Repository,
+    db: *Odb,
+    options: Options,
+    mode: Mode,
+    pack_options: odb_mod.PackOptions,
+    pack_kept: bool,
+    max_pack: ?u64,
+    pack_dir: Io.Dir,
+    existing: Existing,
+    report: Report = .{},
+    /// The packs written of what is not cruft, by base name.
+    fresh: std.ArrayList([]const u8) = .empty,
+    /// The cruft packs that stay: those written, and those too large to
+    /// combine.
+    retained: std.ArrayList([]const u8) = .empty,
+    /// What a promisor pack holds, and what a kept pack holds.
+    promised: Oid.Set = .empty,
+    kept_objects: Oid.Set = .empty,
+    /// Whether a reachable object was left to a kept pack, so the new pack
+    /// cannot carry a bitmap.
+    kept_skipped: bool = false,
+
+    fn deinit(run: *Run) void {
+        run.promised.deinit(run.gpa);
+        run.kept_objects.deinit(run.gpa);
+    }
+
+    /// git's `repack_promisor_objects`: what the promisor packs hold, but
+    /// for a kept pack's, into one promisor pack of its own, so a partial
+    /// clone still knows what its promisor remote can send again.
+    fn writePromisorPack(run: *Run) Self.Error!void {
+        var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+        for (run.existing.promisor.items) |name| {
+            if (isListed(run.existing.kept.items, name)) continue;
+            const p = run.db.packNamed(name) orelse continue;
+            for (0..p.index.count) |i| {
+                const oid = p.index.nameAt(@intCast(i));
+                if (run.kept_objects.contains(oid)) continue;
+                try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
+            }
+        }
+        if (entries.items.len == 0) return;
+        const written = try run.db.writePack(run.io, run.pack_dir, entries.items, run.pack_options);
+        try run.db.writePromisor(run.io, written.name, "", .replace);
+        try run.fresh.append(run.arena, try baseName(run.arena, written.name));
+        run.report.packs_written += 1;
+    }
+
+    /// `pack-objects --all --reflog --indexed-objects` and what `mode` adds
+    /// to it, into new packs, none of them larger than `max_pack`; the one
+    /// written, when it is one.
+    fn writeReachable(run: *Run) Self.Error!?pack_mod.WriteReport {
+        const gpa = run.gpa;
+        const db = run.db;
+        var collected = try reach.reachableToPack(gpa, run.io, run.repo);
+        defer collected.deinit();
+        var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+        var taken: Oid.Set = .empty;
+        defer taken.deinit(gpa);
+        // `--keep-pack`'s packs, which `--pack-kept-objects` does not reach.
+        var keep_pack_objects: Oid.Set = .empty;
+        defer keep_pack_objects.deinit(gpa);
+        for (run.existing.kept.items) |name| if (!(try hasKeepFile(run.io, run.pack_dir, name))) try addPackObjects(gpa, db, name, &keep_pack_objects);
+        for (collected.entries) |entry| {
+            if (run.promised.contains(entry.oid)) continue;
+            if (keep_pack_objects.contains(entry.oid) or (!run.pack_kept and run.kept_objects.contains(entry.oid))) {
+                run.kept_skipped = true;
+                continue;
+            }
+            if (run.mode == .loose and try db.isPacked(entry.oid)) continue;
+            if (run.options.local and !try db.existsOwn(run.io, entry.oid)) continue;
+            try taken.put(gpa, entry.oid, {});
+            try entries.append(run.arena, entry);
+        }
+        // `--keep-unreachable` with `--pack-loose-unreachable`.
+        if (run.mode == .all and run.options.keep_unreachable and run.options.delete and run.existing.non_kept.items.len + run.existing.cruft.items.len != 0) {
+            const timed = try db.timedObjects(gpa, run.io, .{ .exclude_packs = run.existing.kept.items });
+            defer gpa.free(timed);
+            for (timed) |object| {
+                if (run.promised.contains(object.oid)) continue;
+                if ((try taken.fetchPut(gpa, object.oid, {})) != null) continue;
+                try entries.append(run.arena, .{ .oid = object.oid, .in_pack = object.pack != null });
+            }
+        }
+        if (entries.items.len == 0) return null;
+        const reports = try writeLimited(db, run.io, run.pack_dir, entries.items, run.pack_options, run.max_pack);
+        defer db.allocator().free(reports);
+        for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
+        run.report.packs_written += @intCast(reports.len);
+        return if (reports.len == 1) reports[0] else null;
+    }
+
+    /// The new pack's reachability bitmap, as `--write-bitmap-index`.
+    fn writeBitmap(run: *Run, written: pack_mod.WriteReport) Self.Error!void {
+        const config = run.repo.configuration();
+        const tips = try ops.repositoryTips(run.gpa, run.io, run.repo);
+        defer run.gpa.free(tips);
+        const name = try baseName(run.arena, written.name);
+        ops.writePackBitmap(run.gpa, run.io, run.db, .{ .pack_name = name, .tips = tips }, .{
+            .hash_cache = try config.getBool("pack.writebitmaphashcache", true),
+            .lookup_table = try config.getBool("pack.writebitmaplookuptable", false),
+        }) catch |err| switch (err) {
+            // git's `--write-bitmap-index-quiet`, and the warning of the
+            // asked-for one: the pack does not hold every object its
+            // commits reach, and no bitmap is written.
+            error.BitmapNotClosed => {},
+            else => |e| return e,
+        };
+    }
+
+    /// `-d`: with `-a`, `-A` or `--cruft` the old packs the new ones
+    /// replace go; then `prune-packed`, and `prune_shallow(PRUNE_QUICK)`,
+    /// the boundary commits that are gone.
+    fn removeRedundant(run: *Run) Self.Error!void {
+        const db = run.db;
+        if (run.mode != .loose) {
+            var doomed: std.ArrayList([]const u8) = .empty;
+            for ([_][]const []const u8{ run.existing.non_kept.items, run.existing.cruft.items }) |names| for (names) |name| {
+                if (isListed(run.fresh.items, name) or isListed(run.retained.items, name)) continue;
+                try doomed.append(run.arena, name);
+            };
+            run.report.packs_removed = try db.removePacks(run.io, doomed.items);
+        }
+        run.report.loose_removed = try db.prunePacked(run.io, false);
+        if (run.options.keep_unreachable or (run.mode == .all_loosen and run.options.unpack_unreachable == null) or db.shallow.count() == 0) return;
+        var gone: std.ArrayList(Oid) = .empty;
+        var it = db.shallow.keyIterator();
+        while (it.next()) |oid| if (!try db.exists(run.io, oid.*)) try gone.append(run.arena, oid.*);
+        if (gone.items.len == 0) return;
+        for (gone.items) |oid| _ = db.shallow.remove(oid);
+        try run.repo.writeShallow(run.io);
+        run.report.shallow_removed = @intCast(gone.items.len);
+    }
+};
+
+/// The last of `names` set, as a boolean, or `null`: git's config
+/// callback, which reads each and keeps the last.
+fn lastBool(config: *const config_mod.Config, names: []const []const u8) config_mod.ValueError!?bool {
+    var found: ?bool = null;
+    var it = config.iterate(names);
+    while (it.next()) |entry| found = if (entry.value) |v| try config_mod.parseBool(v) else true;
+    return found;
+}
+
+/// A size setting with git's `k`, `m` and `g`, or `null` when unset or 0.
+fn sizeSetting(config: *const config_mod.Config, name: []const u8) config_mod.ValueError!?u64 {
+    const value = try config.getInt(name, 0);
+    return if (value <= 0) null else @intCast(value);
+}
+
+fn baseName(arena: Allocator, name: Oid) Allocator.Error![]const u8 {
+    var hex: [hash.max_hex_len]u8 = undefined;
+    return arena.print("pack-{s}", .{name.hex(&hex)});
+}
+
+fn isListed(names: []const []const u8, name: []const u8) bool {
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
+fn hasKeepFile(io: Io, pack_dir: Io.Dir, base: []const u8) Io.Dir.AccessError!bool {
+    var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
+    const name = std.mem.print(&name_buf, "{s}.keep", .{base}) catch return false;
+    pack_dir.access(io, name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    return true;
+}
+
+/// Every object of the pack `name` into `set`.
+fn addPackObjects(gpa: Allocator, db: *Odb, name: []const u8, set: *Oid.Set) Allocator.Error!void {
+    const p = db.packNamed(name) orelse return;
+    try set.ensureUnusedCapacity(gpa, p.index.count);
+    for (0..p.index.count) |i| set.putAssumeCapacity(p.index.nameAt(@intCast(i)), {});
+}
+
+/// `existing_packs_collect`: the local packs by kind, a pack `keep_packs`
+/// names or with a `.keep` kept, the names copied into `arena`.
+fn collectExisting(gpa: Allocator, arena: Allocator, io: Io, db: *Odb, keep_packs: []const []const u8) Self.Error!Existing {
+    const listed = try db.localPacks(gpa, io);
+    defer gpa.free(listed);
+    var existing: Existing = .{};
+    for (listed) |p| {
+        const name = try arena.dupe(u8, p.name);
+        const kept = p.kept or for (keep_packs) |k| {
+            if (std.mem.endsWith(u8, k, ".pack") and std.mem.eql(u8, k[0 .. k.len - 5], name)) break true;
+        } else false;
+        if (kept) {
+            try existing.kept.append(arena, name);
+        } else if (p.cruft) {
+            try existing.cruft.append(arena, name);
+        } else {
+            try existing.non_kept.append(arena, name);
+        }
+        if (p.promisor) try existing.promisor.append(arena, name);
+        try existing.times.put(arena, name, p.time);
+        try existing.sizes.put(arena, name, p.size);
+    }
+    return existing;
+}
+
+/// The objects that are recent as git's `add_unseen_recent_objects_to_traversal`
+/// finds them, of `timed`: each newer than `after` or named by a
+/// `gc.recentObjectsHook` command (run once, at the first that is not
+/// newer), into `out` with its time, the newest of its copies.
+fn recentOf(gpa: Allocator, io: Io, repo: *Repository, timed: []const Odb.Timed, after: i64, programs: ?program.Programs, out: *Oid.Map(i64)) Self.Error!void {
+    var hooked: ?Oid.Set = null;
+    defer if (hooked) |*set| set.deinit(gpa);
+    for (timed) |object| {
+        if (object.time <= after) {
+            if (hooked == null) hooked = try reach.hookedObjects(gpa, io, repo, programs);
+            if (!hooked.?.contains(object.oid)) continue;
+        }
+        const slot = try out.getOrPut(gpa, object.oid);
+        if (!slot.found_existing or slot.value_ptr.* < object.time) slot.value_ptr.* = object.time;
+    }
+}
+
+/// What the recent objects in `recent` reach, as far as it is there and
+/// short of what the repository reaches: `traverse_commit_list` from them
+/// with `ignore_missing_links`, the commits the refs name excluded.
+fn walkRecent(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, recent: *const Oid.Map(i64)) Self.Error!odb_mod.Odb.Collected {
+    const starts = try reach.collectStarts(gpa, arena, io, repo, .{ .rebase_state = false });
+    var tips: std.ArrayList(Oid) = .empty;
+    var it = recent.keyIterator();
+    while (it.next()) |oid| try tips.append(arena, oid.*);
+    return object_walk.missing(gpa, io, repo.objectDatabase(), tips.items, .{ .exclude = starts.roots, .ignore_missing_links = true });
+}
+
+/// `loosen_unused_packed_objects`: each object of a pack about to go that
+/// the new packs, a kept pack and an alternate do not hold, written loose
+/// with its pack's time, unless `--unpack-unreachable` drops it: its pack
+/// no newer than the date and no recent object reaching it.
+fn loosenUnreachable(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, existing: *const Existing, fresh: *const Oid.Set, kept: *const Oid.Set, options: Options) Self.Error!u32 {
+    const db = repo.objectDatabase();
+    var recent: Oid.Map(i64) = .empty;
+    defer recent.deinit(gpa);
+    var recent_reached: Oid.Set = .empty;
+    defer recent_reached.deinit(gpa);
+    if (options.unpack_unreachable) |after| {
+        const timed = try db.timedObjects(gpa, io, .{});
+        defer gpa.free(timed);
+        try recentOf(gpa, io, repo, timed, after, options.programs, &recent);
+        var walked = try walkRecent(gpa, arena, io, repo, &recent);
+        defer walked.deinit();
+        for (walked.entries) |entry| try recent_reached.put(gpa, entry.oid, {});
+    }
+    var count: u32 = 0;
+    for ([_][]const []const u8{ existing.non_kept.items, existing.cruft.items }) |names| for (names) |name| {
+        const p = db.packNamed(name) orelse continue;
+        const time = existing.times.get(name) orelse 0;
+        for (0..p.index.count) |i| {
+            const oid = p.index.nameAt(@intCast(i));
+            if (fresh.contains(oid) or kept.contains(oid)) continue;
+            if (!try db.existsOwn(io, oid)) continue;
+            if (options.unpack_unreachable) |after| {
+                if (time <= after and !recent.contains(oid) and !recent_reached.contains(oid)) continue;
+            }
+            if (try db.loosen(io, oid, time)) count += 1;
+        }
+    };
+    return count;
+}
+
+/// `write_cruft_pack` and `pack-objects --cruft`: the objects of the packs
+/// about to go and the loose ones that the fresh packs do not hold, into
+/// cruft packs, each with the newest time of its copies; with an
+/// expiration only the recent ones and what they reach, the reached ones
+/// no older than the expiration. A cruft pack at least
+/// `combine_cruft_below` large stays (`retained`), and an object it holds
+/// is written again only when newer than its copy there. How many packs
+/// were written; their names join the retained ones in `retained`, which
+/// no removal takes.
+fn writeCruft(
+    gpa: Allocator,
+    arena: Allocator,
+    io: Io,
+    repo: *Repository,
+    existing: *const Existing,
+    fresh_names: []const []const u8,
+    retained: *std.ArrayList([]const u8),
+    options: Options,
+    pack_options: odb_mod.PackOptions,
+    limit: ?u64,
+    pack_dir: Io.Dir,
+) Self.Error!u32 {
+    const db = repo.objectDatabase();
+    // The packs whose objects are not cruft: the new ones and the kept
+    // ones, which `null` marks; a retained cruft pack's objects by time.
+    var fresh: Oid.Map(?i64) = .empty;
+    defer fresh.deinit(gpa);
+    var discard: std.ArrayList([]const u8) = .empty;
+    for (fresh_names) |name| try addFresh(gpa, db, name, &fresh, null);
+    for (existing.kept.items) |name| try addFresh(gpa, db, name, &fresh, null);
+    try discard.appendSlice(arena, existing.non_kept.items);
+    for (existing.cruft.items) |name| {
+        if (options.combine_cruft_below != 0 and options.cruft_expiration == null and (existing.sizes.get(name) orelse 0) >= options.combine_cruft_below) {
+            try retained.append(arena, name);
+            continue;
+        }
+        try discard.append(arena, name);
+    }
+    var retained_times: std.ArrayList(Odb.Timed) = .empty;
+    {
+        // A retained cruft pack's objects with their own times.
+        var skip: std.ArrayList([]const u8) = .empty;
+        for (existing.non_kept.items) |n| try skip.append(arena, n);
+        for (existing.kept.items) |n| try skip.append(arena, n);
+        for (existing.cruft.items) |n| if (!isListed(retained.items, n)) try skip.append(arena, n);
+        for (fresh_names) |n| try skip.append(arena, n);
+        if (retained.items.len != 0) {
+            const timed = try db.timedObjects(gpa, io, .{ .exclude_packs = skip.items });
+            defer gpa.free(timed);
+            for (timed) |object| if (object.pack != null) try retained_times.append(arena, object);
+        }
+    }
+    for (retained_times.items) |object| {
+        const slot = try fresh.getOrPut(gpa, object.oid);
+        if (!slot.found_existing) {
+            slot.value_ptr.* = object.time;
+        } else if (slot.value_ptr.*) |t| slot.value_ptr.* = @max(t, object.time);
+    }
+
+    // Every loose object and every object of a discarded pack, with its
+    // time: what is enumerated.
+    var excluded: std.ArrayList([]const u8) = .empty;
+    for (existing.kept.items) |n| try excluded.append(arena, n);
+    for (retained.items) |n| try excluded.append(arena, n);
+    for (fresh_names) |n| try excluded.append(arena, n);
+    const timed = try db.timedObjects(gpa, io, .{ .exclude_packs = excluded.items });
+    defer gpa.free(timed);
+
+    var times: Oid.Map(i64) = .empty;
+    defer times.deinit(gpa);
+    if (options.cruft_expiration) |after| {
+        try recentOf(gpa, io, repo, timed, after, options.programs, &times);
+        var walked = try walkRecent(gpa, arena, io, repo, &times);
+        defer walked.deinit();
+        for (walked.entries) |entry| {
+            const slot = try times.getOrPut(gpa, entry.oid);
+            if (!slot.found_existing) slot.value_ptr.* = after else slot.value_ptr.* = @max(slot.value_ptr.*, after);
+        }
+    } else {
+        for (timed) |object| {
+            const slot = try times.getOrPut(gpa, object.oid);
+            if (!slot.found_existing or slot.value_ptr.* < object.time) slot.value_ptr.* = object.time;
+        }
+    }
+
+    var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+    var mtimes: Oid.Map(u32) = .empty;
+    defer mtimes.deinit(gpa);
+    var it = times.iterator();
+    while (it.next()) |kv| {
+        const oid = kv.key_ptr.*;
+        const time = kv.value_ptr.*;
+        // `want_object_in_pack_mtime`: an object the fresh packs hold
+        // stays there, unless only a retained cruft pack holds it, and
+        // with an older time.
+        if (fresh.get(oid)) |held| {
+            const t = held orelse continue;
+            if (time <= t) continue;
+        }
+        if (options.local and !try db.existsOwn(io, oid)) continue;
+        if (!try db.exists(io, oid)) continue;
+        try entries.append(arena, .{ .oid = oid, .in_pack = try db.isPacked(oid) });
+        // `oe_set_cruft_mtime`: a 32-bit time.
+        try mtimes.put(gpa, oid, @truncate(@as(u64, @bitCast(time))));
+    }
+    if (entries.items.len == 0) return 0;
+    // In name order, so the same objects make the same packs.
+    std.mem.sort(odb_mod.PackEntry, entries.items, {}, struct {
+        fn less(_: void, a: odb_mod.PackEntry, b: odb_mod.PackEntry) bool {
+            return a.oid.order(b.oid) == .lt;
+        }
+    }.less);
+    var cruft_options = pack_options;
+    cruft_options.mtimes = &mtimes;
+    const reports = try writeLimited(db, io, pack_dir, entries.items, cruft_options, limit);
+    defer db.allocator().free(reports);
+    for (reports) |written| try retained.append(arena, try baseName(arena, written.name));
+    return @intCast(reports.len);
+}
+
+/// The entries into one pack, or under `limit` into as many as it takes;
+/// the reports in the database's allocator.
+fn writeLimited(db: *Odb, io: Io, pack_dir: Io.Dir, entries: []const odb_mod.PackEntry, options: odb_mod.PackOptions, limit: ?u64) Self.Error![]pack_mod.WriteReport {
+    if (limit) |l| return db.writePacks(io, pack_dir, entries, .{ .pack = options, .max_bytes = l });
+    const reports = try db.allocator().alloc(pack_mod.WriteReport, 1);
+    errdefer db.allocator().free(reports);
+    reports[0] = try db.writePack(io, pack_dir, entries, options);
+    return reports;
+}
+
+fn addFresh(gpa: Allocator, db: *Odb, name: []const u8, fresh: *Oid.Map(?i64), time: ?i64) Allocator.Error!void {
+    const p = db.packNamed(name) orelse return;
+    for (0..p.index.count) |i| try fresh.put(gpa, p.index.nameAt(@intCast(i)), time);
+}

@@ -842,7 +842,9 @@ pub const MaintenanceError = BitmapError || repo_mod.Error || config_mod.ValueEr
 /// The purpose selects Git's writeCommitGraph key and default.
 pub const Maintenance = enum { gc, fetch };
 
-fn repositoryTips(gpa: Allocator, io: Io, repo: *repo_mod.Repository) repo_mod.Error![]Oid {
+/// The commit every ref names, peeled, in the caller's `gpa`: what a
+/// reachability bitmap and the commit graph start from.
+pub fn repositoryTips(gpa: Allocator, io: Io, repo: *repo_mod.Repository) repo_mod.Error![]Oid {
     var listed = try repo.refStore().list(gpa, io, "refs/");
     defer listed.deinit();
     var tips: std.ArrayList(Oid) = .empty;
@@ -887,23 +889,6 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
         value.version = @intCast(version);
     }
     return writeCommitGraph(gpa, io, repo.objectDatabase(), tips, .{ .split = if (purpose == .fetch) .merge else .none, .generations = generation_version == 2, .changed_paths = settings });
-}
-
-/// Repack the repository and apply its bitmap and gc.writeCommitGraph policies.
-/// Object retention is the caller's RepackOptions; this hook does not prune refs or reflogs.
-pub fn repackRepository(gpa: Allocator, io: Io, repo: *repo_mod.Repository, options: odb.Odb.RepackOptions) Self.MaintenanceError!odb.Odb.RepackReport {
-    const report = try repo.objectDatabase().repack(io, options);
-    const config = repo.configuration();
-    if (report.written) |written| if (try config.getBool("repack.writebitmaps", true)) {
-        const tips = try repositoryTips(gpa, io, repo);
-        defer gpa.free(tips);
-        var hex: [hash.max_hex_len]u8 = undefined;
-        const name = try gpa.print("pack-{s}", .{written.name.hex(&hex)});
-        defer gpa.free(name);
-        try writePackBitmap(gpa, io, repo.objectDatabase(), .{ .pack_name = name, .tips = tips }, .{ .hash_cache = try config.getBool("pack.writebitmaphashcache", true), .lookup_table = try config.getBool("pack.writebitmaplookuptable", false) });
-    };
-    _ = try writeConfiguredCommitGraph(gpa, io, repo, .gc);
-    return report;
 }
 
 fn clearMidxBitmaps(gpa: Allocator, io: Io, dir: Io.Dir, keep: ?[]const u8) MidxError!void {

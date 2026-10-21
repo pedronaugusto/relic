@@ -16,6 +16,10 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
+const entry_mod = @import("pack/entry.zig");
+
+const Oid = hash.Oid;
 
 /// The size of the header: signature, version and hash id.
 const header_len = 12;
@@ -56,6 +60,64 @@ pub fn parse(gpa: Allocator, bytes: []const u8, count: u32) Self.ReadError![]u32
     const times = try gpa.alloc(u32, count);
     for (times, 0..) |*t, i| t.* = std.mem.readInt(u32, bytes[header_len + i * 4 ..][0..4], .big);
     return times;
+}
+
+/// Every failure of this module.
+pub const Error = ReadError || WriteError;
+
+/// Errors from writing one.
+pub const WriteError = Allocator.Error || Io.File.OpenError || fs.SyncError || Io.Writer.Error;
+
+/// What `write` writes: the times of a pack whose `.idx` holds `entries`,
+/// sorted by name as `pack.writeIndexFile` leaves them, each looked up in
+/// `times` (0 for one not there).
+pub const WriteOptions = struct {
+    kind: hash.Kind,
+    entries: []const entry_mod.IndexEntry,
+    times: *const Oid.Map(u32),
+    pack_checksum: Oid,
+    sync: fs.Sync = .none,
+};
+
+/// Write the `.mtimes` git's `write_mtimes_file` writes, to `sub_path` in
+/// `dir`; a failed write leaves nothing there.
+pub fn write(io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) Self.WriteError!void {
+    const kind = options.kind;
+    var buffer: [8192]u8 = undefined;
+    const file = try dir.createFile(io, sub_path, .{ .exclusive = false, .truncate = true });
+    var failed = true;
+    defer if (failed) {
+        file.close(io);
+        // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind is what git gc prunes
+        dir.deleteFile(io, sub_path) catch {};
+    };
+    var fw = file.writer(io, &buffer);
+    const out = &fw.interface;
+    var hasher: hash.Hasher = .init(kind);
+    var head: [header_len]u8 = undefined;
+    @memcpy(head[0..4], "MTME");
+    std.mem.writeInt(u32, head[4..8], 1, .big);
+    std.mem.writeInt(u32, head[8..12], switch (kind) {
+        .sha1 => 1,
+        .sha256 => 2,
+    }, .big);
+    hasher.update(&head);
+    try out.writeAll(&head);
+    for (options.entries) |e| {
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, options.times.get(e.oid) orelse 0, .big);
+        hasher.update(&bytes);
+        try out.writeAll(&bytes);
+    }
+    const checksum = options.pack_checksum.raw()[0..kind.rawLen()];
+    hasher.update(checksum);
+    try out.writeAll(checksum);
+    const own = hasher.final();
+    try out.writeAll(own.raw()[0..kind.rawLen()]);
+    try out.flush();
+    try fs.syncFile(io, file, .{ .policy = options.sync });
+    file.close(io);
+    failed = false;
 }
 
 test "parse takes git's layout and refuses what git refuses" {

@@ -1044,7 +1044,7 @@ pub const Odb = struct {
             odb.stats.loose_present += 1;
             return oid;
         }
-        try odb.writeLoose(io, t, bytes, oid);
+        try odb.writeLoose(io, t, bytes, oid, null);
         return oid;
     }
 
@@ -1066,12 +1066,30 @@ pub const Odb = struct {
         if (try odb.existsOwn(io, oid)) return;
         const found = try odb.read(io, oid);
         defer odb.backendData().gpa.free(found.bytes);
-        try odb.writeLoose(io, found.type, found.bytes, oid);
+        try odb.writeLoose(io, found.type, found.bytes, oid, null);
+    }
+
+    /// git's `force_object_loose`: `oid`, held in a pack, written as a loose
+    /// object of this database's own directory with its file time set to
+    /// `time`, as `repack -A` turns an unreachable object loose; `false`
+    /// when a loose copy is there already, which is left as it is.
+    pub fn loosen(odb: *Odb, io: Io, oid: Oid, time: i64) ErrorNamespace.Error!bool {
+        var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+        odb.writableSource().dir.access(io, odb.loosePath(oid, &path_buf), .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                const found = try odb.read(io, oid);
+                defer odb.backendData().gpa.free(found.bytes);
+                try odb.writeLoose(io, found.type, found.bytes, oid, time);
+                return true;
+            },
+            else => |e| return e,
+        };
+        return false;
     }
 
     /// Writes `bytes`, named `oid`, as a loose object in this database's own
     /// objects, whatever an alternate holds.
-    fn writeLoose(odb: *Odb, io: Io, t: object.Type, bytes: []const u8, oid: Oid) ErrorNamespace.Error!void {
+    fn writeLoose(odb: *Odb, io: Io, t: object.Type, bytes: []const u8, oid: Oid, time: ?i64) ErrorNamespace.Error!void {
         const source = odb.writableSource();
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
@@ -1135,6 +1153,12 @@ pub const Odb = struct {
         try fs.syncFile(io, file, .{ .policy = odb.looseSync() });
         file.close(io);
         failed = false;
+        // The time before the name, as git's `write_loose_object` sets it.
+        if (time) |seconds| source.dir.setTimestamps(io, temp, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, seconds) * std.time.ns_per_s) } }) catch |err| {
+            // glint-ignore: Z026 -- the error is the one to report; a temporary object left behind is what `git gc` prunes
+            source.dir.deleteFile(io, temp) catch {};
+            return err;
+        };
 
         // An object's name is the hash of its content, so a rename over an
         // object that is already there replaces it with the same bytes.
@@ -1685,26 +1709,32 @@ pub const Odb = struct {
                 }
             }
         }
-        {
-            var loose: LooseNames = .{ .odb = odb, .remove_empty = !options.dry_run };
-            defer loose.deinit(io);
-            while (try loose.next(io)) |found| {
-                if (found.oid) |oid| {
-                    var packed_somewhere = false;
-                    for (odb.backendData().sources.items) |*source| {
-                        if ((try source.findPack(oid, &odb.stats)) != null) packed_somewhere = true;
-                    }
-                    if (packed_somewhere) {
-                        report.packed_removed += 1;
-                        if (!options.dry_run) try deleteIfThere(io, found.dir, found.name);
-                    }
-                }
-            }
-        }
+        report.packed_removed = try odb.prunePacked(io, options.dry_run);
         const source = odb.writableSource();
         report.temporary_removed += try pruneTemporaries(io, source.dir, options);
         if (source.pack_dir) |pack_dir| report.temporary_removed += try pruneTemporaries(io, pack_dir, options);
         return report;
+    }
+
+    /// git's `prune-packed`: every loose object of this database's own
+    /// directory that a pack, an alternate's too, also holds goes, and each
+    /// fan-out directory left empty; how many went, or with `dry_run` would
+    /// have, removing nothing. A file is only removed, the pack already
+    /// holding it.
+    pub fn prunePacked(odb: *Odb, io: Io, dry_run: bool) ErrorNamespace.Error!u32 {
+        var removed: u32 = 0;
+        var loose: LooseNames = .{ .odb = odb, .remove_empty = !dry_run };
+        defer loose.deinit(io);
+        while (try loose.next(io)) |found| {
+            const oid = found.oid orelse continue;
+            for (odb.backendData().sources.items) |*source| {
+                if ((try source.findPack(oid, &odb.stats)) == null) continue;
+                removed += 1;
+                if (!dry_run) try deleteIfThere(io, found.dir, found.name);
+                break;
+            }
+        }
+        return removed;
     }
 
     /// Whether `name`'s time is not after `expire`; a file already gone is
@@ -1954,6 +1984,92 @@ pub const Odb = struct {
         return odb.writePackInto(io, .{ .dir = pack_dir }, entries, options);
     }
 
+    /// `writePack` under git's `--max-pack-size`: the entries, in their
+    /// order, cut into packs of at most `max_bytes` each, unless one object
+    /// alone is larger. The cut goes by
+    /// what each object takes here -- its entry in the pack that holds it,
+    /// else its loose file -- and a pack that still comes out larger is
+    /// taken away and written again as two. Each pack is whole, as git's
+    /// are: a delta's base is in the same pack. The reports are the
+    /// caller's, in the database's allocator. `PackOptions.keep` is not for
+    /// this.
+    pub fn writePacks(
+        odb: *Odb,
+        io: Io,
+        pack_dir: Io.Dir,
+        entries: []const PackEntry,
+        options: SplitOptions,
+    ) ErrorNamespace.Error![]pack.WriteReport {
+        std.debug.assert(!options.pack.keep);
+        const gpa = odb.backendData().gpa;
+        var reports: std.ArrayList(pack.WriteReport) = .empty;
+        errdefer reports.deinit(gpa);
+        const sizes = try odb.storedSizes(io, entries);
+        defer gpa.free(sizes);
+        var start: usize = 0;
+        while (start < entries.len) {
+            var end = start;
+            var total: u64 = 0;
+            while (end < entries.len and (end == start or total + sizes[end] <= options.max_bytes)) : (end += 1) total += sizes[end];
+            try odb.writeBounded(io, pack_dir, entries[start..end], options, &reports);
+            start = end;
+        }
+        return reports.toOwnedSlice(gpa);
+    }
+
+    /// How `writePacks` cuts and builds its packs.
+    pub const SplitOptions = struct {
+        pack: PackOptions = .{},
+        /// The largest pack, in bytes.
+        max_bytes: u64,
+    };
+
+    fn writeBounded(odb: *Odb, io: Io, pack_dir: Io.Dir, entries: []const PackEntry, options: SplitOptions, reports: *std.ArrayList(pack.WriteReport)) ErrorNamespace.Error!void {
+        const report = try odb.writePack(io, pack_dir, entries, options.pack);
+        if (report.pack_bytes <= options.max_bytes or entries.len < 2) return reports.append(odb.backendData().gpa, report);
+        var hex: [hash.max_hex_len]u8 = undefined;
+        var name_buf: [hash.max_hex_len + 16]u8 = undefined;
+        // The index first, so no reader finds a pack whose file is gone.
+        for ([_][]const u8{ ".idx", ".mtimes", ".rev", ".pack" }) |extension| {
+            // unreachable: a hex name is at most max_hex_len digits, the rest twelve bytes
+            const name = std.mem.print(&name_buf, "pack-{s}{s}", .{ report.name.hex(&hex), extension }) catch unreachable;
+            try deleteIfThere(io, pack_dir, name);
+        }
+        const half = entries.len / 2;
+        try odb.writeBounded(io, pack_dir, entries[0..half], options, reports);
+        try odb.writeBounded(io, pack_dir, entries[half..], options, reports);
+    }
+
+    /// What each of `entries` takes in this database: its entry in the
+    /// pack that holds it, else its loose file, else nothing.
+    fn storedSizes(odb: *Odb, io: Io, entries: []const PackEntry) ErrorNamespace.Error![]u64 {
+        const gpa = odb.backendData().gpa;
+        const sizes = try gpa.alloc(u64, entries.len);
+        errdefer gpa.free(sizes);
+        var orders: std.ArrayList(PackEntryOrder) = .empty;
+        defer {
+            for (orders.items) |*order| order.deinit(gpa);
+            orders.deinit(gpa);
+        }
+        for (entries, sizes) |entry, *size| {
+            if (try odb.locatePacked(entry.oid)) |at| {
+                const order = try orderOf(gpa, &orders, at.pack);
+                size.* = order.endOf(at.pack, at.offset) - at.offset;
+                continue;
+            }
+            var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+            const stat = odb.writableSource().dir.statFile(io, odb.loosePath(entry.oid, &path_buf), .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    size.* = 0;
+                    continue;
+                },
+                else => |e| return e,
+            };
+            size.* = stat.size;
+        }
+        return sizes;
+    }
+
     /// `writePack`, with the pack written to `out` as it is made rather
     /// than to a file: what a push sends. No index is written; `out` is not
     /// flushed.
@@ -2000,6 +2116,10 @@ pub const Odb = struct {
             .compression = options.compression,
             .reverse_index = options.reverse_index,
             .shared = odb.backendData().options.shared,
+            .mtimes = switch (target) {
+                .dir => options.mtimes,
+                .stream => null,
+            },
         };
         var writer = switch (target) {
             .dir => |pack_dir| try pack.Writer.open(gpa, io, pack_dir, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
@@ -2603,6 +2723,70 @@ pub const Odb = struct {
         }
     };
 
+    /// One pack of this database's own directory, as git's repack and gc
+    /// sort them.
+    pub const PackListing = struct {
+        /// The base name, `pack-<name>`, borrowed from this database until
+        /// it next re-scans.
+        name: []const u8,
+        /// A `.keep` beside it.
+        kept: bool,
+        /// An `.mtimes` beside it: a cruft pack.
+        cruft: bool,
+        /// A `.promisor` beside it.
+        promisor: bool,
+        /// The `.pack`'s size and time, in seconds.
+        size: u64,
+        time: i64,
+        objects: u32,
+    };
+
+    /// Every pack open in this database's own directory, in `gpa`, in the
+    /// order it holds them; a pack whose `.pack` is gone is left out.
+    pub fn localPacks(odb: *Odb, gpa: Allocator, io: Io) ErrorNamespace.Error![]PackListing {
+        const source = odb.writableSource();
+        var out: std.ArrayList(PackListing) = .empty;
+        errdefer out.deinit(gpa);
+        const pack_dir = source.pack_dir orelse return out.toOwnedSlice(gpa);
+        for (source.packs.items) |*named| {
+            var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
+            const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
+            const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            try out.append(gpa, .{
+                .name = named.name,
+                .kept = try hasCompanion(io, pack_dir, named.name, ".keep"),
+                .cruft = try hasCompanion(io, pack_dir, named.name, ".mtimes"),
+                .promisor = try hasCompanion(io, pack_dir, named.name, ".promisor"),
+                .size = stat.size,
+                .time = stat.mtime.toSeconds(),
+                .objects = named.pack.index.count,
+            });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Whether a pack, this database's own or an alternate's, holds `oid`:
+    /// git's `has_object_pack`.
+    pub fn isPacked(odb: *Odb, oid: Oid) ErrorNamespace.Error!bool {
+        for (odb.backendData().sources.items) |*source| {
+            if ((try source.findPack(oid, &odb.stats)) != null) return true;
+        }
+        return false;
+    }
+
+    /// Whether this database borrows from alternates.
+    pub fn hasAlternates(odb: *const Odb) bool {
+        return odb.backendData().sources.items.len > 1;
+    }
+
+    /// The pack open here by the base name `pack-<name>`, any source's.
+    pub fn packNamed(odb: *Odb, base: []const u8) ?*const pack.Pack {
+        return odb.findPackByName(base);
+    }
+
     fn findPackByName(odb: *Odb, base: []const u8) ?*pack.Pack {
         for (odb.backendData().sources.items) |*source| {
             for (source.packs.items) |*named| {
@@ -2861,27 +3045,80 @@ pub const Odb = struct {
             for (leave) |left| {
                 if (std.mem.eql(u8, old_base, left)) break;
             } else {
-                if (try hasCompanion(io, pack_dir, old_base, ".keep")) continue;
-                var name_buf: [160]u8 = undefined;
-                var removed = false;
-                // Every companion goes with its pack, the `.pack` and
-                // `.idx` last so a reader never finds an index whose
-                // pack is gone first.
-                for ([_][]const u8{ ".bitmap", ".rev", ".mtimes", ".promisor", ".pack", ".idx" }) |extension| {
-                    const name = std.mem.print(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
-                    if (pack_dir.deleteFile(io, name)) {
-                        if (std.mem.eql(u8, extension, ".pack")) removed = true;
-                    } else |_| {}
-                }
-                if (removed) count += 1;
+                if (try removePackFiles(io, pack_dir, old_base)) count += 1;
             }
         }
+        return count;
+    }
+
+    /// git's `unlink_pack_path` without force: `base`'s files gone, in
+    /// git's order -- the `.idx` first, so that a reader, which finds packs
+    /// by their index, no longer finds it before its `.pack` goes -- unless
+    /// a `.keep` is beside it; whether its `.pack` went.
+    fn removePackFiles(io: Io, pack_dir: Io.Dir, base: []const u8) ErrorNamespace.Error!bool {
+        if (try hasCompanion(io, pack_dir, base, ".keep")) return false;
+        var name_buf: [160]u8 = undefined;
+        var removed = false;
+        for ([_][]const u8{ ".idx", ".pack", ".rev", ".keep", ".bitmap", ".promisor", ".mtimes" }) |extension| {
+            const name = std.mem.print(&name_buf, "{s}{s}", .{ base, extension }) catch return error.NameTooLong;
+            pack_dir.deleteFile(io, name) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            if (std.mem.eql(u8, extension, ".pack")) removed = true;
+        }
+        return removed;
+    }
+
+    /// The packs of this database's own directory that `names` names --
+    /// base names, `pack-<name>` -- taken away as git's repack removes a
+    /// redundant pack: each one's files in `unlink_pack_path`'s order, a
+    /// pack with a `.keep` left; and when the multi-pack index names one of
+    /// them, the index with its bitmaps and reverse indexes too, as git's
+    /// `clear_midx_file`. Every pack is closed first, as Windows will not
+    /// remove a file held open, and opened again after. How many went.
+    pub fn removePacks(odb: *Odb, io: Io, names: []const []const u8) ErrorNamespace.Error!u32 {
+        if (names.len == 0) return 0;
+        const source = odb.writableSource();
+        const pack_dir = source.pack_dir orelse return 0;
+        var in_midx = false;
+        if (source.midx) |*m| for (names) |name| {
+            for (0..m.pack_count) |i| if (m.packName(@intCast(i))) |listed| if (std.mem.eql(u8, listed, name)) {
+                in_midx = true;
+            };
+        };
+        odb.closePacks(0, io);
+        // glint-ignore: Z026 -- the removal's error is the one to report; a read that misses re-scans the packs left
+        errdefer odb.scanPacks(io, 0) catch {};
+        if (in_midx) {
+            var it = pack_dir.iterate();
+            var doomed: std.ArrayList([]u8) = .empty;
+            defer freeNames(odb.backendData().gpa, &doomed);
+            while (try it.next(io)) |entry| {
+                if (!std.mem.startsWith(u8, entry.name, "multi-pack-index")) continue;
+                if (!std.mem.eql(u8, entry.name, "multi-pack-index") and !std.mem.endsWith(u8, entry.name, ".bitmap") and !std.mem.endsWith(u8, entry.name, ".rev")) continue;
+                try doomed.append(odb.backendData().gpa, try odb.backendData().gpa.dupe(u8, entry.name));
+            }
+            for (doomed.items) |name| try deleteIfThere(io, pack_dir, name);
+        }
+        var count: u32 = 0;
+        for (names) |name| {
+            if (try removePackFiles(io, pack_dir, name)) count += 1;
+        }
+        try odb.scanPacks(io, 0);
         return count;
     }
 
     /// Close and re-open every pack of one source, so that a pack removed
     /// from the disk is gone from here too.
     fn reopenPacks(odb: *Odb, io: Io, source_index: usize) ErrorNamespace.Error!void {
+        odb.closePacks(source_index, io);
+        try odb.scanPacks(io, source_index);
+    }
+
+    /// Close every pack of one source, and its multi-pack index, until the
+    /// next scan.
+    fn closePacks(odb: *Odb, source_index: usize, io: Io) void {
         const source = &odb.backendData().sources.items[source_index];
         for (source.packs.items) |*named| named.deinit(odb.backendData().gpa, io);
         source.packs.clearRetainingCapacity();
@@ -2891,10 +3128,9 @@ pub const Odb = struct {
         }
         source.midx_packs.clearRetainingCapacity();
         // The delta base cache is keyed on which pack an offset was in, and
-        // the packs have just been renumbered.
+        // the packs are about to be renumbered.
         odb.backendData().cache.clear();
         odb.backendData().generation +%= 1;
-        try odb.scanPacks(io, source_index);
     }
 
     /// A pack this database is filling, and the directory it lives in.
@@ -3204,6 +3440,10 @@ pub const PackOptions = struct {
     /// in its pack's index. Off, every object is read, searched and
     /// deflated as if it were loose.
     reuse_packed: bool = true,
+    /// Write a cruft pack: each object's time, looked up here, goes into
+    /// the `.mtimes` beside the pack (`pack.WriteOptions.mtimes`). Ignored
+    /// for a pack streamed to a caller. Borrowed for the write.
+    mtimes: ?*const Oid.Map(u32) = null,
 };
 
 /// How many tasks `threads` asks for.
