@@ -152,8 +152,9 @@ fn appendFilter(gpa: Allocator, config: *const config_mod.Config, name: []const 
     try out.append(gpa, .{ .name = name, .format = .{ .filtered = name }, .remote = try config.getBool(key, isBuiltinFilter(name)) });
 }
 
-/// `tar.<name>.command`, or git's own gzip for `tgz` and `tar.gz`.
-fn filterCommand(config: *const config_mod.Config, name: []const u8) ?[]const u8 {
+/// `tar.<name>.command`, or git's own gzip (`git archive gzip`) for `tgz`
+/// and `tar.gz`; `null` for a name with neither.
+pub fn filterCommand(config: *const config_mod.Config, name: []const u8) ?[]const u8 {
     var key_buf: [256]u8 = undefined;
     const key = std.mem.print(&key_buf, "tar.{s}.command", .{name}) catch return null;
     if (config.get(key)) |line| return line;
@@ -192,6 +193,9 @@ pub const Options = struct {
     /// The programs filters run through, and the signature programs
     /// `%G?` in an `export-subst` file asks of a signed commit.
     programs: ?program.Programs = null,
+    /// Where a tar filter's own diagnostics go; `null` is this process's
+    /// standard error, as git's filter writes to git's.
+    filter_messages: ?*Io.Writer = null,
     /// The process's umask, for `tar.umask=user`. `null` reads it as git
     /// does, setting it to zero and back, which a caller creating files on
     /// other threads at that moment passes here instead.
@@ -992,8 +996,13 @@ const Filter = struct {
         defer command.deinit(gpa);
         try command.appendSlice(gpa, line);
         if (options.level) |l| try command.print(gpa, " -{d}", .{l});
-        var outcome = try program.run(gpa, io, programs, .{ .argv = &.{command.items}, .shell = true, .stderr = .inherit }, .{ .input = f.piped.written() });
+        var outcome = try program.run(gpa, io, programs, .{
+            .argv = &.{command.items},
+            .shell = true,
+            .stderr = if (options.filter_messages != null) .capture else .inherit,
+        }, .{ .input = f.piped.written() });
         defer outcome.deinit(gpa);
+        if (options.filter_messages) |messages| try messages.writeAll(outcome.stderr);
         if (!outcome.succeeded()) return error.FilterFailed;
         try w.writeAll(outcome.stdout);
     }

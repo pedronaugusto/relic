@@ -157,10 +157,25 @@ pub fn serve(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader,
     }
     parsed.options.now = options.now;
     parsed.options.programs = options.programs;
-    archive.archive(gpa, io, .{ .repo = repo, .treeish = oid }, band, parsed.options) catch |err| switch (err) {
+    // A filter's words go on channel two, as git's archiver's own do.
+    var said: Io.Writer.Allocating = .init(arena);
+    parsed.options.filter_messages = &said.writer;
+    const made = archive.archive(gpa, io, .{ .repo = repo, .treeish = oid }, band, parsed.options);
+    if (said.written().len != 0) side_band.send(out, .large, 2, said.written()) catch return error.WriteFailed;
+    made catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         error.PathspecNoMatch => return refuse(out, "pathspec '{s}' did not match any files", .{firstPath(parsed.options.pathspecs)}),
+        error.NotATree => return refuse(out, "not a tree object: {f}", .{oid}),
+        error.FilterFailed => {
+            const name = switch (parsed.options.format) {
+                .filtered => |name| name,
+                else => "",
+            };
+            const line = archive.filterCommand(repo.configuration(), name) orelse "";
+            if (parsed.options.level) |l| return refuse(out, "'{s} -{d}' filter reported error", .{ line, l });
+            return refuse(out, "'{s}' filter reported error", .{line});
+        },
         else => return refuse(out, "{s}", .{@errorName(err)}),
     };
     return end(&mux, out);
@@ -255,7 +270,13 @@ fn parse(arena: Allocator, args: []const []const u8, offered: []const archive.Na
             return error.Refused;
         }
     }
-    if (p.list) return p;
+    if (p.list) {
+        if (p.treeish) |extra| {
+            why.* = try arena.print("fatal: extra command line parameter '{s}'\n", .{extra});
+            return error.Refused;
+        }
+        return p;
+    }
     p.options.format = for (offered) |f| {
         if (std.mem.eql(u8, f.name, format)) break f.format;
     } else {

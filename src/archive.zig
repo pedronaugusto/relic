@@ -9,6 +9,7 @@ pub const Format = archive_mod.Format;
 pub const Named = archive_mod.Named;
 pub const formats = archive_mod.formats;
 pub const formatNamed = archive_mod.formatNamed;
+pub const filterCommand = archive_mod.filterCommand;
 pub const Options = archive_mod.Options;
 pub const Inputs = archive_mod.Inputs;
 pub const archive = archive_mod.archive;

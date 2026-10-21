@@ -98,6 +98,8 @@ test "relic's upload-archive gives git's client what git's gives: archives, list
     try git.exec(io, &.{ "config", "tar.rev.command", "cat; echo level" });
     try git.exec(io, &.{ "config", "tar.rev.remote", "true" });
     try git.exec(io, &.{ "config", "tar.secret.command", "cat" });
+    try git.exec(io, &.{ "config", "tar.fail.command", "cat >/dev/null; exit 3" });
+    try git.exec(io, &.{ "config", "tar.fail.remote", "true" });
     const path = try testremote.absolutePath(gpa, io, git.dir);
     defer gpa.free(path);
     const helper = suite.path(.upload_archive_helper);
@@ -117,6 +119,8 @@ test "relic's upload-archive gives git's client what git's gives: archives, list
         &.{"--list"},
         // what the archiver refuses
         &.{ "--format=secret", "HEAD" },
+        &.{"HEAD:README"},
+        &.{ "--list", "HEAD" },
         &.{"nowhere"},
         &.{head},
         &.{ "HEAD", "nothing-here" },
@@ -124,8 +128,10 @@ test "relic's upload-archive gives git's client what git's gives: archives, list
         &.{ "-9", "HEAD" },
     };
     // git's usage text, which each version words its own way: the first
-    // line and the end are the same.
-    const usage_cases = [_][]const []const u8{ &.{ "--bogus", "HEAD" }, &.{} };
+    // line and the end are the same. And a filter that fails, whose words
+    // git's server loses -- it stops reading its archiver's errors once the
+    // archive's end is read -- and relic's sends.
+    const usage_cases = [_][]const []const u8{ &.{ "--bogus", "HEAD" }, &.{}, &.{ "--format=fail", "HEAD" }, &.{ "--format=fail", "-4", "HEAD" } };
     // A tree has no time of its own, and takes the time now unless
     // `--mtime` (2.42) gives one.
     const timed = [_][]const []const u8{&.{ "--mtime=@1600000000", "HEAD:src", "util" }};
@@ -157,8 +163,13 @@ test "relic's upload-archive gives git's client what git's gives: archives, list
         var ours = try gitArchive(gpa, io, &git, path, helper, args);
         defer ours.deinit(gpa);
         try std.testing.expectEqual(theirs.code, ours.code);
-        const first = theirs.stderr[0 .. std.mem.findScalar(u8, theirs.stderr, '\n') orelse theirs.stderr.len];
-        try std.testing.expect(std.mem.find(u8, ours.stderr, first) != null);
+        if (std.mem.startsWith(u8, theirs.stderr, "remote: ")) {
+            const first = theirs.stderr[0 .. std.mem.findScalar(u8, theirs.stderr, '\n') orelse theirs.stderr.len];
+            std.testing.expect(std.mem.find(u8, ours.stderr, first) != null) catch |err| {
+                std.debug.print("{any}\ngit:\n{s}\nrelic:\n{s}\n", .{ args, theirs.stderr, ours.stderr });
+                return err;
+            };
+        }
         try std.testing.expect(std.mem.find(u8, ours.stderr, "remote: git upload-archive: archiver died with error\n") != null);
         try std.testing.expect(std.mem.find(u8, ours.stderr, "fatal: sent error to the client: git upload-archive: archiver died with error\n") != null);
     }
