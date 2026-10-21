@@ -58,6 +58,14 @@
       {
         "id": "Z026",
         "level": "gate"
+      },
+      {
+        "id": "A004",
+        "level": "gate"
+      },
+      {
+        "id": "A006",
+        "level": "gate"
       }
     ]
   }
