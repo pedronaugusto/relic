@@ -109,7 +109,7 @@ pub const Remote = struct {
         const arena = remote.arena.allocator();
 
         const url_key = try arena.print("remote.{s}.url", .{name});
-        const configured = try listOf(arena, config, url_key);
+        const configured = try resetList(arena, config, url_key);
         if (configured.len == 0) {
             remote.urls = try arena.dupe([]const u8, &.{try rewrite(arena, config, name, .fetch) orelse try arena.dupe(u8, name)});
             remote.push_urls = try pushUrlsFor(arena, config, &.{name});
@@ -131,7 +131,7 @@ pub const Remote = struct {
         for (configured) |raw| try urls.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
         remote.urls = urls.items;
 
-        const pushurls = try listOf(arena, config, try key("pushurl", arena, name));
+        const pushurls = try resetList(arena, config, try key("pushurl", arena, name));
         if (pushurls.len != 0) {
             var rewritten: std.ArrayList([]const u8) = .empty;
             for (pushurls) |raw| try rewritten.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
@@ -153,8 +153,8 @@ pub const Remote = struct {
         remote.upload_pack = try valueOf(arena, config, try key("uploadpack", arena, name));
         remote.receive_pack = try valueOf(arena, config, try key("receivepack", arena, name));
         remote.mirror = boolOf(config, try key("mirror", arena, name)) orelse false;
-        remote.negotiation_restrict = try listOf(arena, config, try key("negotiationrestrict", arena, name));
-        remote.negotiation_include = try listOf(arena, config, try key("negotiationinclude", arena, name));
+        remote.negotiation_restrict = try resetList(arena, config, try key("negotiationrestrict", arena, name));
+        remote.negotiation_include = try resetList(arena, config, try key("negotiationinclude", arena, name));
         return remote;
     }
 
@@ -378,7 +378,7 @@ pub fn freeList(gpa: Allocator, list: [][]u8) void {
 /// Every value of a list git resets with an empty value -- a remote's
 /// `url` and `pushurl` (`add_url`), and its transport options
 /// (`parse_transport_option`): the values after the last empty one.
-fn listOf(arena: Allocator, config: *const Config, key: []const u8) Error![]const []const u8 {
+pub fn resetList(arena: Allocator, config: *const Config, key: []const u8) Error![]const []const u8 {
     const raw = try config.all(key);
     defer config.gpa.free(raw);
     var out: std.ArrayList([]const u8) = .empty;

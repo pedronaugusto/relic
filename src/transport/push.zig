@@ -40,6 +40,7 @@ const rev_walk = @import("../walk/walk.zig");
 const refspec_mod = @import("../wire.zig").refspec;
 const ref_names = @import("../names.zig").ref;
 const remote_mod = @import("../wire.zig").remote;
+const branch_mod = @import("../commit/branch.zig");
 const program = @import("../process.zig").program;
 const protocol = @import("../wire.zig").protocol;
 const transport = @import("transport.zig");
@@ -77,8 +78,19 @@ pub const Error = error{
     /// Two updates of one remote ref.
     ConflictingRefspecs,
     /// `push.default` is `nothing`, or asks for a branch and `HEAD` is not
-    /// on one, or `simple` or `upstream` finds no upstream to push to.
+    /// on one.
     NoPushDestination,
+    /// `push.default` asks for the current branch's upstream, and it has
+    /// none: git's "The current branch has no upstream branch".
+    NoUpstreamBranch,
+    /// `push.default=simple`, to the branch's own remote, and its upstream
+    /// has another name: git's "The upstream branch of your current branch
+    /// does not match the name of your current branch".
+    UpstreamNameDiffers,
+    /// The current branch has more than one upstream branch.
+    MultipleUpstreams,
+    /// `push.default=upstream` to a remote that is not the branch's own.
+    NotUpstreamRemote,
     /// The `pre-push` hook refused the push.
     PrePushRefused,
     /// The push is to be signed and the server takes no push
@@ -91,7 +103,7 @@ pub const Error = error{
     InvalidPushCertNonce,
     /// `push.gpgSign` is neither a boolean nor `if-asked`.
     InvalidPushGpgSign,
-} || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error;
+} || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error || branch_mod.Error;
 
 /// What a `pre-push` hook is shown: one line of its input.
 pub const PrePushUpdate = struct {
@@ -135,6 +147,12 @@ pub const BeforeSendInput = struct {
     objects: []const odb_mod.PackEntry,
 };
 
+/// A branch set to track the branch it was pushed to.
+pub const Tracked = struct {
+    branch: []const u8,
+    upstream: branch_mod.Upstream,
+};
+
 /// How a push runs.
 pub const Options = struct {
     /// Refspecs, as on git's command line. Empty takes the remote's `push`
@@ -145,8 +163,16 @@ pub const Options = struct {
     leases: []const Lease = &.{},
     /// Update every ref or none.
     atomic: bool = false,
-    /// `--push-option` values for the remote's hooks.
-    push_options: []const []const u8 = &.{},
+    /// `--push-option` values for the remote's hooks; `null` takes
+    /// `push.pushOption`, an empty value clearing those before it.
+    push_options: ?[]const []const u8 = null,
+    /// `--follow-tags`: the annotated tags the remote lacks, on commits it
+    /// will have, pushed too; `null` takes `push.followTags`.
+    follow_tags: ?bool = null,
+    /// `--set-upstream`: each branch pushed to a branch tracks it after.
+    /// `push.autoSetupRemote` sets it for a default push of a branch with
+    /// no upstream.
+    set_upstream: bool = false,
     /// Work everything out and send nothing.
     dry_run: bool = false,
     /// Sign the push with a certificate the server keeps: `--signed`.
@@ -250,6 +276,8 @@ pub const Outcome = struct {
 
     arena: std.heap.ArenaAllocator,
     refs: []const RefResult,
+    /// The branches `set_upstream` set to track what they were pushed to.
+    upstreams: []const Tracked = &.{},
     /// Whether the remote took the pack.
     unpack_ok: bool = true,
     /// Why it did not.
@@ -301,11 +329,16 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     if (specs.items.len == 0) {
         for (remote.push) |spec| try specs.append(arena, spec);
     }
-    if (specs.items.len == 0) try defaultRefspecs(arena, gpa, io, repo, &remote, remote_name, &specs);
+    var settled = options;
+    if (specs.items.len == 0) {
+        if (try defaultRefspecs(arena, gpa, io, repo, &remote, remote_name, &specs)) settled.set_upstream = true;
+    }
+    settled.push_options = options.push_options orelse try remote_mod.resetList(arena, repo.configuration(), "push.pushoption");
+    settled.follow_tags = options.follow_tags orelse try repo.configuration().getBool("push.followtags", false);
 
     var results: std.ArrayList(RefResult) = .empty;
     for (remote.push_urls) |url| {
-        try pushTo(arena, gpa, io, repo, &remote, try arena.dupe(u8, url), specs.items, options, &results, &outcome);
+        try pushTo(arena, gpa, io, repo, &remote, try arena.dupe(u8, url), specs.items, settled, &results, &outcome);
     }
     outcome.refs = results.items;
     return outcome;
@@ -332,7 +365,7 @@ fn pushTo(
     var local_refs = try repo.refStore().list(gpa, io, "refs/");
     defer local_refs.deinit();
 
-    const updates = try matchRefs(arena, gpa, io, repo, &local_refs, &remote_refs, specs);
+    const updates = try matchRefs(arena, gpa, io, repo, &local_refs, &remote_refs, specs, options.follow_tags.?);
 
     // Judge each before anything is sent.
     const results = try judgeAll(arena, gpa, io, repo, remote, url, updates, &remote_refs, options);
@@ -387,7 +420,7 @@ fn pushTo(
             .commands = commands.items,
             .objects = &.{},
             .atomic = options.atomic,
-            .push_options = options.push_options,
+            .push_options = options.push_options.?,
             .who = options.who,
             .progress = options.progress,
             .sources = sources.items,
@@ -404,7 +437,32 @@ fn pushTo(
             try updateTracking(gpa, io, repo, remote, r, options.who);
         }
     }
+    if (options.set_upstream) try setUpstreams(arena, gpa, io, repo, remote.name orelse url, results, outcome);
     try all_results.appendSlice(arena, results);
+}
+
+/// git's `set_upstreams`: each branch the remote took or had already, to a
+/// branch, tracks it -- `HEAD` as the branch it names.
+fn setUpstreams(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, results: []const RefResult, outcome: *Outcome) Error!void {
+    var tracked: std.ArrayList(Tracked) = .empty;
+    try tracked.appendSlice(arena, outcome.upstreams);
+    for (results) |r| {
+        if (r.status != .ok and r.status != .up_to_date) continue;
+        if (r.new.isZero()) continue;
+        var local = r.local_ref orelse continue;
+        if (try repo.refStore().read(gpa, io, local)) |value| switch (value) {
+            .symbolic => |target| {
+                defer gpa.free(target);
+                if (std.mem.startsWith(u8, target, "refs/heads/")) local = try arena.dupe(u8, target);
+            },
+            .direct => {},
+        };
+        if (!std.mem.startsWith(u8, local, "refs/heads/") or !std.mem.startsWith(u8, r.remote_ref, "refs/heads/")) continue;
+        const name = local["refs/heads/".len..];
+        const upstream = (try branch_mod.installBranchConfig(arena, io, repo, name, remote_name, try arena.dupe([]const u8, &.{r.remote_ref}))) orelse continue;
+        try tracked.append(arena, .{ .branch = name, .upstream = upstream });
+    }
+    outcome.upstreams = tracked.items;
 }
 
 /// `push.gpgSign`, every value read as git's callback reads it: a
@@ -470,7 +528,7 @@ fn pushCertificate(
         try cert.print(arena, "pushee {s}{s}\n", .{ anonymous, if (slash) "/" else "" });
     }
     if (nonce.len != 0) try cert.print(arena, "nonce {s}\n", .{nonce});
-    for (options.push_options) |option| try cert.print(arena, "push-option {s}\n", .{option});
+    for (options.push_options orelse &.{}) |option| try cert.print(arena, "push-option {s}\n", .{option});
     try cert.append(arena, '\n');
     for (commands) |c| try cert.print(arena, "{f} {f} {s}\n", .{ c.old, c.new, c.name });
     const signature = try signer.sign(io, cert.items, null, options.who);
@@ -647,7 +705,9 @@ fn send(
     }
 }
 
-/// The refspecs `push.default` asks for when none are named.
+/// The refspecs `push.default` asks for when none are named, as git's
+/// `setup_default_push_refspecs` decides them; whether
+/// `push.autoSetupRemote` asks for the branch's upstream to be set.
 fn defaultRefspecs(
     arena: Allocator,
     gpa: Allocator,
@@ -656,35 +716,42 @@ fn defaultRefspecs(
     remote: *const remote_mod.Remote,
     remote_name: []const u8,
     specs: *std.ArrayList(Refspec),
-) Error!void {
-    const mode_text = repo.configuration().get("push.default") orelse "simple";
+) Error!bool {
+    const config = repo.configuration();
+    const mode_text = config.get("push.default") orelse "simple";
     if (std.ascii.eqlIgnoreCase(mode_text, "nothing")) return error.NoPushDestination;
     if (std.ascii.eqlIgnoreCase(mode_text, "matching")) {
         try specs.append(arena, try Refspec.parse(":", .push, repo.objectFormat()));
-        return;
+        return false;
     }
     const current = (try repo.refStore().currentBranch(gpa, io)) orelse return error.NoPushDestination;
     defer gpa.free(current);
     const branch_ref = try arena.print("refs/heads/{s}", .{current});
-    if (std.ascii.eqlIgnoreCase(mode_text, "current")) {
-        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push, repo.objectFormat()));
-        return;
-    }
-    var branch = try remote_mod.Branch.get(gpa, repo.configuration(), current);
+    var branch = try remote_mod.Branch.get(gpa, config, current);
     defer branch.deinit();
-    const same_remote = if (branch.remote) |r| std.mem.eql(u8, r, remote.name orelse remote_name) else false;
-    const upstream_mode = std.ascii.eqlIgnoreCase(mode_text, "upstream") or std.ascii.eqlIgnoreCase(mode_text, "tracking");
-    if (!upstream_mode and !same_remote) {
-        // `simple` to a remote that is not the branch's own: the branch of
-        // the same name.
-        try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, branch_ref }), .push, repo.objectFormat()));
-        return;
+    const auto = try config.getBool("push.autosetupremote", false);
+    const same_remote = std.mem.eql(u8, remote.name orelse remote_name, branch.fetchRemote(config));
+    var dst = branch_ref;
+    if (std.ascii.eqlIgnoreCase(mode_text, "upstream") or std.ascii.eqlIgnoreCase(mode_text, "tracking")) {
+        if (!same_remote) return error.NotUpstreamRemote;
+        dst = try arena.dupe(u8, try upstreamRef(&branch, branch_ref, auto));
+    } else if (!std.ascii.eqlIgnoreCase(mode_text, "current")) {
+        // `simple`, and whatever git does not know, which it takes as it.
+        if (same_remote and !std.mem.eql(u8, branch_ref, try upstreamRef(&branch, branch_ref, auto))) return error.UpstreamNameDiffers;
     }
-    if (!same_remote or branch.merge.len != 1) return error.NoPushDestination;
-    const upstream = branch.merge[0];
-    // `simple` pushes to the upstream only when it has the branch's name.
-    if (!upstream_mode and !std.mem.eql(u8, upstream, branch_ref)) return error.NoPushDestination;
-    try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, try arena.dupe(u8, upstream) }), .push, repo.objectFormat()));
+    try specs.append(arena, try Refspec.parse(try arena.print("{s}:{s}", .{ branch_ref, dst }), .push, repo.objectFormat()));
+    // A default push of a branch with no upstream under
+    // `push.autoSetupRemote` sets the one it pushes to.
+    return auto and branch.merge.len == 0;
+}
+
+/// git's `get_upstream_ref`: the branch's one upstream, or under
+/// `push.autoSetupRemote` its own name when it has none.
+fn upstreamRef(branch: *const remote_mod.Branch, branch_ref: []const u8, auto: bool) Error![]const u8 {
+    if (branch.merge.len == 0 and auto) return branch_ref;
+    if (branch.merge.len == 0 or branch.remote == null) return error.NoUpstreamBranch;
+    if (branch.merge.len != 1) return error.MultipleUpstreams;
+    return branch.merge[0];
 }
 
 /// git's `ref_rev_parse_rules`, used to find what a short name names.
@@ -767,6 +834,7 @@ fn matchRefs(
     local_refs: *const refs_mod.Store.Listing,
     remote_refs: *const protocol.RefList,
     specs: []const Refspec,
+    follow_tags: bool,
 ) Error![]const Update {
     var local_names: std.ArrayList([]const u8) = .empty;
     for (local_refs.entries) |e| try local_names.append(arena, try arena.dupe(u8, e.name));
@@ -839,7 +907,69 @@ fn matchRefs(
         }
         try kept.append(arena, u);
     }
+    if (follow_tags) try addMissingTags(arena, gpa, io, repo, local_refs, remote_refs, &kept);
     return kept.items;
+}
+
+/// git's `add_missing_tags` (`--follow-tags`): each annotated tag here
+/// the remote does not have, on a commit any ref the remote will have
+/// after the push reaches, pushed to the same name.
+fn addMissingTags(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    local_refs: *const refs_mod.Store.Listing,
+    remote_refs: *const protocol.RefList,
+    updates: *std.ArrayList(Update),
+) Error!void {
+    // What the remote will have, and the tags it has.
+    var tips: std.ArrayList(Oid) = .empty;
+    var tip_set: Oid.Set = .empty;
+    var their_tags: std.StringHashMapUnmanaged(void) = .empty;
+    const Tips = struct {
+        fn add(a: Allocator, i: Io, r: *Repository, list: *std.ArrayList(Oid), set: *Oid.Set, oid: Oid) Error!void {
+            if (oid.isZero()) return;
+            const commit = commitOf(i, r, oid) orelse return;
+            if ((try set.getOrPut(a, commit)).found_existing) return;
+            try list.append(a, commit);
+        }
+    };
+    for (remote_refs.refs) |ref| {
+        var value = ref.oid;
+        for (updates.items) |u| if (std.mem.eql(u8, u.remote_ref, ref.name) and !u.new.isZero()) {
+            value = u.new;
+        };
+        try Tips.add(arena, io, repo, &tips, &tip_set, value);
+        if (std.mem.startsWith(u8, ref.name, "refs/tags/")) try their_tags.put(arena, ref.name, {});
+    }
+    for (updates.items) |u| if (remote_refs.find(u.remote_ref) == null) {
+        try Tips.add(arena, io, repo, &tips, &tip_set, u.new);
+        if (std.mem.startsWith(u8, u.remote_ref, "refs/tags/")) try their_tags.put(arena, u.remote_ref, {});
+    };
+    if (tips.items.len == 0) return;
+    // The annotated tags here they lack, and the commits they are on.
+    var names: std.ArrayList([]const u8) = .empty;
+    var tags: std.ArrayList(Oid) = .empty;
+    var commits: std.ArrayList(Oid) = .empty;
+    for (local_refs.entries) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "refs/tags/") or their_tags.contains(entry.name)) continue;
+        const oid = switch (entry.target) {
+            .direct => |oid| oid,
+            .symbolic => continue,
+        };
+        if ((try repo.objectDatabase().readHeader(io, oid)).type != .tag) continue;
+        const commit = commitOf(io, repo, oid) orelse continue;
+        try names.append(arena, try arena.dupe(u8, entry.name));
+        try tags.append(arena, oid);
+        try commits.append(arena, commit);
+    }
+    const reached = try rev_walk.reachableSubset(gpa, io, repo.objectDatabase(), .{ .from = tips.items, .to = commits.items }, .{});
+    defer gpa.free(reached);
+    for (names.items, tags.items, reached) |name, tag, yes| {
+        if (!yes) continue;
+        try updates.append(arena, .{ .local_ref = name, .new = tag, .remote_ref = name, .force = false });
+    }
 }
 
 /// The order git sends `results`' commands in, as positions: the remote's
@@ -1124,6 +1254,103 @@ test "a push leaves the remote and the remote-tracking refs as git push leaves t
     defer simple.deinit();
     try testing.expectEqual(@as(usize, 1), simple.refs.len);
     try testing.expectEqualStrings("refs/heads/main", simple.refs[0].remote_ref);
+}
+
+/// Both working repositories' `branch.*` settings, the same.
+fn expectSameBranchConfig(twins: *PushTwins) !void {
+    const io = testing.io;
+    var config: [2][]u8 = undefined;
+    for ([_][]const u8{ "work-git", "work-relic" }, 0..) |name, i| {
+        var dir = try twins.root.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        config[i] = try twins.gitOut(dir, &.{ "config", "--get-regexp", "^branch\\." });
+    }
+    defer for (config) |text| twins.gpa.free(text);
+    try testing.expectEqualStrings(config[0], config[1]);
+}
+
+/// The same git command in both working repositories.
+fn inBothWorks(twins: *PushTwins, args: []const []const u8) !void {
+    for ([_][]const u8{ "work-git", "work-relic" }) |name| {
+        var dir = try twins.root.dir.openDir(testing.io, name, .{});
+        defer dir.close(testing.io);
+        try twins.git(dir, args);
+    }
+}
+
+test "push.followTags, --set-upstream and push.autoSetupRemote as git's, and a branch with no upstream refused as git refuses it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    // An annotated tag on a commit the remote has, one on the new work,
+    // and a lightweight one, which is not followed.
+    try inBothWorks(&twins, &.{ "tag", "-a", "reached", "-m", "reached", "HEAD~1" });
+    try inBothWorks(&twins, &.{ "tag", "lightweight" });
+    try inBothWorks(&twins, &.{ "config", "push.followTags", "true" });
+    var followed = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
+    defer followed.deinit();
+    try testing.expectEqual(@as(usize, 3), followed.refs.len);
+
+    // `--set-upstream`.
+    try inBothWorks(&twins, &.{ "branch", "topic" });
+    var upstream = try twins.pushBoth(&.{ "--set-upstream", "origin", "topic" }, .{ .who = test_who, .refspecs = &.{"topic"}, .set_upstream = true });
+    defer upstream.deinit();
+    try testing.expectEqual(@as(usize, 1), upstream.upstreams.len);
+    try expectSameBranchConfig(&twins);
+
+    // A branch of its own, with no upstream: refused under `simple`.
+    try inBothWorks(&twins, &.{ "switch", "-q", "-c", "lone" });
+    {
+        var work_git = try twins.root.dir.openDir(io, "work-git", .{});
+        defer work_git.close(io);
+        const said = try twins.gitOut(work_git, &.{ "push", "-q", "origin" });
+        defer gpa.free(said);
+        try testing.expectEqualStrings("failed", said);
+        var work_relic = try twins.root.dir.openDir(io, "work-relic", .{});
+        defer work_relic.close(io);
+        var repo = try Repository.open(gpa, io, work_relic, .{});
+        defer repo.deinit(io);
+        try testing.expectError(error.NoUpstreamBranch, push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env } }));
+    }
+    // `push.autoSetupRemote`: pushed to its own name, and set to track it.
+    try inBothWorks(&twins, &.{ "config", "push.autoSetupRemote", "true" });
+    var auto = try twins.pushBoth(&.{"origin"}, .{ .who = test_who });
+    defer auto.deinit();
+    try testing.expectEqualStrings("refs/heads/lone", auto.refs[0].remote_ref);
+    try expectSameBranchConfig(&twins);
+}
+
+test "push.pushOption gives the push options when none are named, an empty one clearing those before it, as git's push reads it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hook is a shell script
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    const hook =
+        \\#!/bin/sh
+        \\echo "count $GIT_PUSH_OPTION_COUNT" >>hook.log
+        \\i=0
+        \\while test $i -lt "${GIT_PUSH_OPTION_COUNT:-0}"; do eval "echo \"\$GIT_PUSH_OPTION_$i\"" >>hook.log; i=$((i + 1)); done
+        \\
+    ;
+    try twins.inBothRemotes(&.{ "config", "receive.advertisePushOptions", "true" });
+    for ([_][]const u8{ "remote-git.git", "remote-relic.git" }) |name| {
+        var dir = try twins.root.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        try dir.writeFile(io, .{ .sub_path = "hooks/pre-receive", .data = hook });
+        const file = try dir.openFile(io, "hooks/pre-receive", .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
+    for ([_][]const u8{ "dropped", "", "first", "second" }) |value| try inBothWorks(&twins, &.{ "config", "--add", "push.pushOption", value });
+    var pushed = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
+    defer pushed.deinit();
+    try expectSameHookLogs(&twins, io);
+    // Named ones take their place.
+    var named = try twins.pushBoth(&.{ "--push-option", "named", "origin", "main:refs/heads/again" }, .{ .who = test_who, .refspecs = &.{"main:refs/heads/again"}, .push_options = &.{"named"} });
+    defer named.deinit();
+    try expectSameHookLogs(&twins, io);
 }
 
 test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stale lease, and atomic all or none" {

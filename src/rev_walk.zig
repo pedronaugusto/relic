@@ -23,4 +23,6 @@ pub const Virtual = @import("walk/walk.zig").Virtual;
 pub const mergeBasesMany = @import("walk/walk.zig").mergeBasesMany;
 pub const mergeBase = @import("walk/walk.zig").mergeBase;
 pub const isAncestor = @import("walk/walk.zig").isAncestor;
+pub const Subset = @import("walk/walk.zig").Subset;
+pub const reachableSubset = @import("walk/walk.zig").reachableSubset;
 pub const object = @import("walk.zig").object;

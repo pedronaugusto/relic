@@ -140,7 +140,8 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options
     errdefer arena_state.deinit();
     const a = arena_state.allocator();
     const how = options.track orelse try configuredTrack(repo.configuration());
-    const autorebase = try configuredRebase(repo.configuration());
+    // A bad `branch.autoSetupRebase` is refused before the branch is made.
+    _ = try configuredRebase(repo.configuration());
 
     const ref = try branchRef(a, name);
     const exists = (try repo.refStore().resolve(a, io, ref)) != null;
@@ -160,7 +161,7 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options
 
     var upstream: ?Upstream = null;
     if (at.ref) |orig| if (how != .never) {
-        upstream = try setupTracking(a, io, repo, name, orig, how, autorebase);
+        upstream = try setupTracking(a, io, repo, name, orig, how);
     };
     return .{ .arena = arena_state.state, .gpa = gpa, .oid = at.oid, .upstream = upstream };
 }
@@ -171,9 +172,9 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options
 pub fn setUpstream(arena: Allocator, io: Io, repo: *Repository, name: []const u8, upstream: []const u8) Self.Error!?Upstream {
     const ref = try branchRef(arena, name);
     if ((try repo.refStore().resolve(arena, io, ref)) == null) return error.NoSuchBranch;
-    const autorebase = try configuredRebase(repo.configuration());
+    _ = try configuredRebase(repo.configuration());
     const at = try resolveStart(arena, io, repo, upstream, true);
-    return setupTracking(arena, io, repo, name, at.ref.?, .explicit, autorebase);
+    return setupTracking(arena, io, repo, name, at.ref.?, .explicit);
 }
 
 /// A branch to set an upstream for: `name`, to track the ref `orig` as
@@ -185,7 +186,8 @@ pub const Tracking = struct { name: []const u8, orig: []const u8, how: Track };
 /// up none. The result is `arena`'s.
 pub fn setTracking(arena: Allocator, io: Io, repo: *Repository, tracking: Tracking) Self.Error!?Upstream {
     if (tracking.how == .never) return null;
-    return setupTracking(arena, io, repo, tracking.name, tracking.orig, tracking.how, try configuredRebase(repo.configuration()));
+    _ = try configuredRebase(repo.configuration());
+    return setupTracking(arena, io, repo, tracking.name, tracking.orig, tracking.how);
 }
 
 /// `strbuf_check_branch_ref`: `refs/heads/<name>`, where that is a ref
@@ -259,7 +261,7 @@ fn isRemoteTracking(a: Allocator, repo: *Repository, ref: []const u8) Self.Error
 }
 
 /// git's `setup_tracking` and `install_branch_config_multiple_remotes`.
-fn setupTracking(a: Allocator, io: Io, repo: *Repository, name: []const u8, orig: []const u8, track: Track, autorebase: AutoRebase) Self.Error!?Upstream {
+fn setupTracking(a: Allocator, io: Io, repo: *Repository, name: []const u8, orig: []const u8, track: Track) Self.Error!?Upstream {
     const config = repo.configuration();
     var remote_name: ?[]const u8 = null;
     var sources: std.ArrayList([]const u8) = .empty;
@@ -297,24 +299,35 @@ fn setupTracking(a: Allocator, io: Io, repo: *Repository, name: []const u8, orig
         if (!std.mem.eql(u8, tracked, name)) return null;
     }
     if (sources.items.len == 0) try sources.append(a, orig);
+    return installBranchConfig(a, io, repo, name, remote_name, sources.items);
+}
 
-    // A branch is not set up to track itself.
-    if (sources.items.len == 1 and remote_name == null and std.mem.startsWith(u8, sources.items[0], "refs/heads/") and
-        std.mem.eql(u8, sources.items[0]["refs/heads/".len..], name)) return null;
-    const rebase = switch (autorebase) {
+/// git's `install_branch_config_multiple_remotes`: the branch `name` set to
+/// track `merge` on `remote` (`null`, or `.`, for this repository) --
+/// `branch.<name>.remote`, `branch.<name>.merge` and, as
+/// `branch.autoSetupRebase` says, `branch.<name>.rebase` -- as `git branch
+/// --set-upstream-to` and `git push --set-upstream` set it. `null`, and
+/// nothing written, for a branch that would track itself. The result is
+/// `arena`'s.
+pub fn installBranchConfig(arena: Allocator, io: Io, repo: *Repository, name: []const u8, remote: ?[]const u8, merge: []const []const u8) Self.Error!?Upstream {
+    const here = remote == null or std.mem.eql(u8, remote.?, ".");
+    // A branch is not set up to track itself in this repository.
+    if (merge.len == 1 and remote == null and std.mem.startsWith(u8, merge[0], "refs/heads/") and
+        std.mem.eql(u8, merge[0]["refs/heads/".len..], name)) return null;
+    const rebase = switch (try configuredRebase(repo.configuration())) {
         .never => false,
-        .local => remote_name == null,
-        .remote => remote_name != null,
+        .local => here,
+        .remote => !here,
         .always => true,
     };
     var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
-    try edits.append(a, .{ .set = .{ .name = try a.print("branch.{s}.remote", .{name}), .value = remote_name orelse "." } });
-    const merge_key = try a.print("branch.{s}.merge", .{name});
-    try edits.append(a, .{ .unset = .{ .name = merge_key } });
-    for (sources.items) |source| try edits.append(a, .{ .add = .{ .name = merge_key, .value = source } });
-    if (rebase) try edits.append(a, .{ .set = .{ .name = try a.print("branch.{s}.rebase", .{name}), .value = "true" } });
+    try edits.append(arena, .{ .set = .{ .name = try arena.print("branch.{s}.remote", .{name}), .value = remote orelse "." } });
+    const merge_key = try arena.print("branch.{s}.merge", .{name});
+    try edits.append(arena, .{ .unset = .{ .name = merge_key } });
+    for (merge) |source| try edits.append(arena, .{ .add = .{ .name = merge_key, .value = source } });
+    if (rebase) try edits.append(arena, .{ .set = .{ .name = try arena.print("branch.{s}.rebase", .{name}), .value = "true" } });
     _ = try repo.writeConfig(io, .local, edits.items, .{});
-    return .{ .remote = remote_name orelse ".", .merge = sources.items, .rebase = rebase };
+    return .{ .remote = remote orelse ".", .merge = merge, .rebase = rebase };
 }
 
 /// What `guessRemote` found.

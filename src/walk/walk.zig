@@ -554,6 +554,62 @@ pub fn isAncestor(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Ancestry, op
     return painter.flagsOf(ancestor).parent2;
 }
 
+/// What `reachableSubset` asks: which of `to` any of `from` reaches.
+pub const Subset = struct { from: []const Oid, to: []const Oid };
+
+/// git's `get_reachable_subset`: for each of `inputs.to`, by position,
+/// whether any of `inputs.from` reaches it, itself included. The ancestry
+/// is walked once, no lower than the oldest generation among `to` when the
+/// graph gives generations. A commit missing from the repository ends its
+/// line. The result is the caller's.
+pub fn reachableSubset(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Subset, options: BaseOptions) Self.Error![]bool {
+    const out = try gpa.alloc(bool, inputs.to.len);
+    errdefer gpa.free(out);
+    @memset(out, false);
+    if (inputs.to.len == 0) return out;
+    var painter: Painter = .{ .gpa = gpa, .io = io, .db = db, .virtuals = options.virtuals, .graph = options.graph };
+    defer painter.deinit();
+    // Without generations every line is walked to its end.
+    var min_generation: u64 = 0;
+    if (painter.byGeneration()) {
+        min_generation = Painter.infinity;
+        for (inputs.to) |oid| min_generation = @min(min_generation, (try painter.load(oid)).generation);
+    }
+    var wanted: Oid.Map(std.ArrayList(usize)) = .empty;
+    defer {
+        var it = wanted.valueIterator();
+        while (it.next()) |positions| positions.deinit(gpa);
+        wanted.deinit(gpa);
+    }
+    for (inputs.to, 0..) |oid, i| {
+        const gop = try wanted.getOrPut(gpa, oid);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(gpa, i);
+    }
+    var left = wanted.count();
+    var seen: Oid.Set = .empty;
+    defer seen.deinit(gpa);
+    var stack: std.ArrayList(Oid) = .empty;
+    defer stack.deinit(gpa);
+    for (inputs.from) |oid| try stack.append(gpa, oid);
+    while (stack.pop()) |oid| {
+        if ((try seen.getOrPut(gpa, oid)).found_existing) continue;
+        if (wanted.get(oid)) |positions| {
+            for (positions.items) |i| out[i] = true;
+            left -= 1;
+            if (left == 0) break;
+        }
+        if (!try db.exists(io, oid)) continue;
+        const loaded = painter.load(oid) catch |err| switch (err) {
+            error.NotACommit => continue,
+            else => |e| return e,
+        };
+        if (loaded.generation < min_generation) continue;
+        for (loaded.parents) |parent| try stack.append(gpa, parent);
+    }
+    return out;
+}
+
 pub const BaseOptions = struct {
     /// Parents and dates from a commit-graph, for the commits it holds.
     /// The answer does not change.
