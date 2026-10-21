@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-21
+
+### Breaking
+
+- `refs.Store.logNames` takes `LogNamesOptions`; `every_worktree` adds each other linked worktree's own logs as `worktrees/<id>/<name>` and, from a linked worktree, the main worktree's as `main-worktree/<name>`, in both formats.
+- `maintenance.expireReflogs` with `refs` of `null` is git's `--all`: every worktree's logs, each other worktree's own expired through a store opened in it (`refs.Store.sibling`); `single_worktree` is `--single-worktree`, what `null` was.
+
+### Added
+
+- `maintenance.prune`: git's `prune` (`--expire`, `<head>...`, `-n`). Reachability as git's `mark_reachable_objects` (`maintenance.reachableObjects`): every worktree's index with its cache-tree and resolve-undo, every ref, every worktree's `HEAD`, every rebase's `autostash` and `orig-head`, every worktree's reflog entries, then the recent objects (`Odb.recentObjects`: loose by file time, packed by the pack's) and what they reach. `Odb.prune` removes, in git's order, the unkept loose objects no newer than the expiry with stale `tmp_obj_*` files and empty fan-out directories, then the loose objects a pack holds (`prune-packed`), then stale `tmp_*` in `objects/` and `objects/pack/`; the shallow boundary loses the commits nothing reaches. `extensions.preciousObjects` refuses it (`PreciousObjects`). `maintenance.pruneExpiry`: `gc.pruneExpire`, `2.weeks.ago` by default, `never` for none. Held to git 2.55 in both ref formats and at every crash point on shakedown's simulated disk.
+- `walk.object.walk.MissingOptions.ignore_missing_links`: git's `ignore_missing_links`, what prune walks its recent objects with.
+- `refs.Store.sibling`: a store over another worktree of the repository with this one's options, which writes that worktree's own refs and logs.
+
+### Fixed
+
+- `maintenance.expireReflogs`' defaults are git 2.55's `REFLOG_EXPIRE_OPTIONS_INIT`: 30 days for every entry and 90 for unreachable ones, so with neither configured an entry older than 30 days goes whatever reaches it. git's documentation gives 90 and 30; relic kept those.
+
 ## [0.28.0] - 2026-10-21
 
 ### Breaking
@@ -13,8 +30,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `transport.credential.Session` holds its secrets (`password`, `credential`, `oauth_refresh_token` and the `Authorization` header it makes) in aegis's `SecretBytes`, which wipes them when let go and refuses to format them; `Session.exposePassword()` hands the password on, explicitly. A prompt's answer is wiped as it is let go, and the `Basic` header's plain `user:password` lives in one such owner while it is encoded. relic depends on aegis 0.1.14 itself.
 - `warning.Warning` has `advertised_bundles_failed` and `bundle_uri` (git's words on the way through a bundle URI: a download that failed, a file that is neither a bundle nor a list, a `creationToken` that does not parse, a recursion past four lists, a server's list that does not read).
 - `commit.Error` and `rebase.Error` take `notes.Error`, with its new `InvalidRewriteSetting`; `warning.Warning` has `notes`.
-- `refs.Store.logNames` takes `LogNamesOptions`; `every_worktree` adds each other linked worktree's own logs as `worktrees/<id>/<name>` and, from a linked worktree, the main worktree's as `main-worktree/<name>`, in both formats.
-- `maintenance.expireReflogs` with `refs` of `null` is git's `--all`: every worktree's logs, each other worktree's own expired through a store opened in it (`refs.Store.sibling`); `single_worktree` is `--single-worktree`, what `null` was.
 
 ### Added
 
@@ -23,14 +38,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Notes follow rewritten commits as git 2.55's `copy_note_for_rewrite` copies them (`notes.copyForRewrite`): after `commit --amend` and every amend a rebase makes (`notes.rewrite.amend`, `Notes added by 'git commit --amend'`), and at a rebase's end for every commit in `rewritten-list` (`notes.rewrite.rebase`, as git's `notes copy --for-rewrite=rebase`), into each ref `notes.rewriteRef` names (globs matched over every ref, one outside `refs/notes/` warned of and left out), met as `notes.rewriteMode` says. `GIT_NOTES_REWRITE_REF` and `GIT_NOTES_REWRITE_MODE` are not read.
 - `lfs.server`: a Git LFS server, as a handler for uplink's server, held to git-lfs 3.8's push, clone, pull and locks. `Backend` finds repositories under a root as `transport.http_backend` does (`http_backend.openServed`, now shared) and answers `<repository>/info/lfs`: the batch API (download and upload, a `verify` action with each upload, an object's own error for one missing or malformed, 409 for another hash algorithm), the basic transfer adapter through the backend, and the locking API (create, list with `path`/`id`/`cursor`/`limit`, verify split into ours and theirs, unlock and forced unlock), every answer in git-lfs's JSON. Requests it does not own go to an `http_backend.Backend` it is given, so one server is the whole remote. The objects go to a `Store` the caller gives: `Directory` lays them out per repository as git-lfs's own store and keeps an upload only when its SHA-256 and length match. `Caller.authorize` decides each request (`download`, `upload`, `force_unlock`) and names the lock's owner, or asks for credentials (401 with its `LFS-Authenticate`) or refuses (403). Locks are kept in `<git dir>/lfs/locks.json` under git's lock file.
 - `lfs.transfer.parseBatchRequest` and `writeBatch`, `lfs.locks.parseRequest`, `writeLockAnswer`, `writeListPage`, `writeVerifyPage` and `writeLockList`: the server's side of the API's JSON, on the types the client reads it with, written as git-lfs's Go writes them.
-- `maintenance.prune`: git's `prune` (`--expire`, `<head>...`, `-n`). Reachability as git's `mark_reachable_objects` (`maintenance.reachableObjects`): every worktree's index with its cache-tree and resolve-undo, every ref, every worktree's `HEAD`, every rebase's `autostash` and `orig-head`, every worktree's reflog entries, then the recent objects (`Odb.recentObjects`: loose by file time, packed by the pack's) and what they reach. `Odb.prune` removes, in git's order, the unkept loose objects no newer than the expiry with stale `tmp_obj_*` files and empty fan-out directories, then the loose objects a pack holds (`prune-packed`), then stale `tmp_*` in `objects/` and `objects/pack/`; the shallow boundary loses the commits nothing reaches. `extensions.preciousObjects` refuses it (`PreciousObjects`). `maintenance.pruneExpiry`: `gc.pruneExpire`, `2.weeks.ago` by default, `never` for none. Held to git 2.55 in both ref formats and at every crash point on shakedown's simulated disk.
-- `walk.object.walk.MissingOptions.ignore_missing_links`: git's `ignore_missing_links`, what prune walks its recent objects with.
-- `refs.Store.sibling`: a store over another worktree of the repository with this one's options, which writes that worktree's own refs and logs.
 
 ### Fixed
 
 - A `rebase --continue` that amends the stopped commit tells `post-rewrite amend`, as the `git commit --amend` git runs there does.
-- `maintenance.expireReflogs`' defaults are git 2.55's `REFLOG_EXPIRE_OPTIONS_INIT`: 30 days for every entry and 90 for unreachable ones, so with neither configured an entry older than 30 days goes whatever reaches it. git's documentation gives 90 and 30; relic kept those.
 
 ## [0.27.0] - 2026-10-21
 
