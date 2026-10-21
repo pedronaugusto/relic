@@ -449,7 +449,7 @@ test "git-lfs moves objects through URLs S3-compatible storage signed for relic'
     defer gpa.free(endpoint);
     var client: uplink.Client = .init(gpa, .{});
     defer client.deinit(io);
-    var s3: server.S3 = .{ .gpa = gpa, .client = &client, .endpoint = endpoint, .bucket = "objects", .prefix = "lfs/", .signer = signer, .expires = 600 };
+    var s3: server.S3 = .{ .gpa = gpa, .client = &client, .endpoint = endpoint, .bucket = "objects", .prefix = "lfs/", .signer = signer, .expires = .fromRaw(600) };
     try w.serve(s3.store());
 
     // ada's push goes straight to the storage.

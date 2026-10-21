@@ -200,8 +200,8 @@ pub const Options = struct {
 const Limits = struct {
     batch_size: usize,
     max_retries: u32,
-    max_retry_delay_s: u32,
-    max_retry_time_s: u32,
+    max_retry_delay: Seconds,
+    max_retry_time: Seconds,
     max_verifies: u32,
     concurrency: u32,
     allow_incomplete_push: bool,
@@ -218,8 +218,8 @@ const Limits = struct {
         return .{
             .batch_size = if (batch > 0) @intCast(batch) else 100,
             .max_retries = if (retries >= 1) @intCast(@min(retries, 1000)) else 8,
-            .max_retry_delay_s = if (delay >= 0) @intCast(@min(delay, 3600)) else 10,
-            .max_retry_time_s = if (retry_time >= 1) @intCast(@min(retry_time, 86400)) else 300,
+            .max_retry_delay = .fromRaw(if (delay >= 0) @intCast(@min(delay, 3600)) else 10),
+            .max_retry_time = .fromRaw(if (retry_time >= 1) @intCast(@min(retry_time, 86400)) else 300),
             .max_verifies = @intCast(@max(3, @min(verifies, 100))),
             .concurrency = options.concurrency orelse (if (concurrent >= 1) @intCast(@min(concurrent, 256)) else 8),
             .allow_incomplete_push = settings.getBool("lfs.allowincompletepush", false),
@@ -231,20 +231,23 @@ const Limits = struct {
     /// longer than `lfs.transfer.maxRetryTime`, and the transfer fails, as
     /// git-lfs fails it.
     fn retryDelay(l: Limits, attempt: u32, after: ?Io.Duration) ?Io.Duration {
-        const wait = after orelse return .fromNanoseconds(@as(i96, l.backoffMs(attempt)) * std.time.ns_per_ms);
-        if (wait.nanoseconds > Io.Duration.fromSeconds(l.max_retry_time_s).nanoseconds) return null;
+        const wait = after orelse return l.backoff(attempt).toIoDuration();
+        if (wait.nanoseconds > l.max_retry_time.toIoDuration().nanoseconds) return null;
         return wait;
     }
 
     /// git-lfs's backoff: a quarter of a second, doubled each retry, up to
     /// the most it may wait.
-    fn backoffMs(l: Limits, attempt: u32) u64 {
-        const max_ms: u64 = @as(u64, l.max_retry_delay_s) * 1000;
-        if (attempt == 0) return 0;
+    fn backoff(l: Limits, attempt: u32) Millis {
+        if (attempt == 0) return .fromRaw(0);
+        const most = l.max_retry_delay.convert(.millisecond, u64, .exact);
         const shift: u6 = @intCast(@min(attempt - 1, 40));
-        const delay: u64 = @as(u64, 250) << shift;
-        return @min(delay, max_ms);
+        const delay: Millis = .fromRaw(@as(u64, 250) << shift);
+        return if (delay.compare(most) == .gt) most else delay;
     }
+
+    const Seconds = aegis.units.Duration(.second, u32);
+    const Millis = aegis.units.Duration(.millisecond, u64);
 };
 
 //=====================================================================
@@ -2575,7 +2578,7 @@ test "a batch request is written as git-lfs writes one" {
 }
 
 test "a Retry-After longer than lfs.transfer.maxRetryTime fails the retry, however long it is" {
-    const l: Limits = .{ .batch_size = 100, .max_retries = 8, .max_retry_delay_s = 10, .max_retry_time_s = 300, .max_verifies = 3, .concurrency = 8, .allow_incomplete_push = false };
+    const l: Limits = .{ .batch_size = 100, .max_retries = 8, .max_retry_delay = .fromRaw(10), .max_retry_time = .fromRaw(300), .max_verifies = 3, .concurrency = 8, .allow_incomplete_push = false };
     try testing.expectEqual(@as(i64, 250), l.retryDelay(1, null).?.toMilliseconds());
     try testing.expectEqual(@as(i64, 300), l.retryDelay(1, lfsapi.parseRetryAfter("300", null)).?.toSeconds());
     try testing.expectEqual(@as(?Io.Duration, null), l.retryDelay(1, lfsapi.parseRetryAfter("301", null)));
@@ -2586,12 +2589,12 @@ test "a Retry-After longer than lfs.transfer.maxRetryTime fails the retry, howev
 }
 
 test "the backoff is git-lfs's: a quarter second, doubling, capped" {
-    const l: Limits = .{ .batch_size = 100, .max_retries = 8, .max_retry_delay_s = 10, .max_retry_time_s = 300, .max_verifies = 3, .concurrency = 8, .allow_incomplete_push = false };
-    try testing.expectEqual(@as(u64, 250), l.backoffMs(1));
-    try testing.expectEqual(@as(u64, 500), l.backoffMs(2));
-    try testing.expectEqual(@as(u64, 8000), l.backoffMs(6));
-    try testing.expectEqual(@as(u64, 10000), l.backoffMs(7));
-    try testing.expectEqual(@as(u64, 10000), l.backoffMs(40));
+    const l: Limits = .{ .batch_size = 100, .max_retries = 8, .max_retry_delay = .fromRaw(10), .max_retry_time = .fromRaw(300), .max_verifies = 3, .concurrency = 8, .allow_incomplete_push = false };
+    try testing.expectEqual(@as(u64, 250), l.backoff(1).raw());
+    try testing.expectEqual(@as(u64, 500), l.backoff(2).raw());
+    try testing.expectEqual(@as(u64, 8000), l.backoff(6).raw());
+    try testing.expectEqual(@as(u64, 10000), l.backoff(7).raw());
+    try testing.expectEqual(@as(u64, 10000), l.backoff(40).raw());
 }
 
 test "fuzz: any batch answer is read or refused by name" {

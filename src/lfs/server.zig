@@ -36,6 +36,7 @@
 //! branch, as most servers keep them.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -208,7 +209,7 @@ pub const S3 = struct {
     addressing: Addressing = .path,
     signer: uplink.wire.sigv4.Signer,
     /// How long a link works.
-    expires: u32 = 3600,
+    expires: aegis.units.Duration(.second, u32) = .fromRaw(3600),
 
     pub const Addressing = enum { path, virtual_host };
 
@@ -279,11 +280,11 @@ pub const S3 = struct {
             .download => "GET",
             .upload => "PUT",
         };
-        s.signer.presign(&out.writer, url, .{ .method = method, .url = parsed }, now(io), s.expires) catch |err| switch (err) {
+        s.signer.presign(&out.writer, url, .{ .method = method, .url = parsed }, now(io), s.expires.raw()) catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
             else => return error.LfsStoreFailed,
         };
-        return .{ .href = out.written(), .expires_in = s.expires };
+        return .{ .href = out.written(), .expires_in = s.expires.raw() };
     }
 };
 
