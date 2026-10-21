@@ -288,6 +288,10 @@ const pack_mod = @import("../odb/pack.zig");
 pub const MidxOptions = struct {
     preferred_pack: ?[]const u8 = null,
     reverse_index: bool = false,
+    /// git's `--stdin-packs`: the packs, by base name (`pack-<name>`), the
+    /// index covers, an earlier index's assignments not carried over;
+    /// `null` takes every pack in the directory.
+    packs: ?[]const []const u8 = null,
     /// Keep a previous bitmap until writeMidxBitmap publishes its replacement.
     keep_bitmaps: bool = false,
     /// How the files are synced; `null` as the database's `core.fsync`
@@ -304,7 +308,7 @@ const PackInputs = struct {
     }
 };
 
-fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind) MidxError!PackInputs {
+fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind, only: ?[]const []const u8) MidxError!PackInputs {
     var result: PackInputs = .{ .arena = .init(gpa), .packs = &.{} };
     errdefer result.deinit();
     const arena = result.arena.allocator();
@@ -312,6 +316,9 @@ fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind) MidxErro
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "pack-") or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        if (only) |names| for (names) |name| {
+            if (std.mem.eql(u8, name, entry.name[0 .. entry.name.len - 4])) break;
+        } else continue;
         var index = try pack_mod.Index.open(gpa, io, dir, entry.name, .{ .kind = kind, .max_bytes = 1 << 30 });
         defer index.deinit();
         const base = entry.name[0 .. entry.name.len - 4];
@@ -334,7 +341,7 @@ pub const MidxError = odb.Error || midx_mod.Error || fs.LockError || fs.CommitEr
 pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Self.MidxError!?Oid {
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
-    var inputs = try readPackInputs(gpa, io, dir, db.objectFormat());
+    var inputs = try readPackInputs(gpa, io, dir, db.objectFormat(), options.packs);
     defer inputs.deinit();
     if (inputs.packs.len == 0) return null;
     // Existing MIDX entries have mtime zero in git's merge. New packs win
@@ -367,7 +374,8 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
             };
             if (oldest) |i| preferred_name = inputs.packs[i].name;
         }
-        for (inputs.packs) |*p| {
+        // With the packs named, git copies nothing from the earlier index.
+        if (options.packs == null) for (inputs.packs) |*p| {
             var old_position: ?u32 = null;
             for (0..old.pack_count) |i| if (std.mem.eql(u8, old.packName(@intCast(i)).?, p.name[0 .. p.name.len - 4])) {
                 old_position = @intCast(i);
@@ -383,7 +391,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
                 if (located.pack == pack_position) try assigned.append(arena, .{ .oid = old.nameAt(@intCast(i)), .offset = located.offset });
             }
             p.entries = assigned.items;
-        }
+        };
     }
     const bytes = try midx_mod.encode(gpa, db.objectFormat(), inputs.packs, .{ .preferred_pack = options.preferred_pack, .reverse_index = options.reverse_index });
     defer gpa.free(bytes);
@@ -776,7 +784,7 @@ pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptio
     defer dir.close(io);
     var index = (try midx_mod.Index.openUsable(gpa, io, dir, db.objectFormat())) orelse return null;
     defer index.deinit();
-    var inputs = try readPackInputs(gpa, io, dir, db.objectFormat());
+    var inputs = try readPackInputs(gpa, io, dir, db.objectFormat(), null);
     defer inputs.deinit();
     const arena = inputs.arena.allocator();
     const referenced = try arena.alloc(u32, index.pack_count);

@@ -2732,8 +2732,7 @@ pub const Odb = struct {
         }
     };
 
-    /// One pack of this database's own directory, as git's repack and gc
-    /// sort them.
+    /// One pack, as git's repack and gc sort them.
     pub const PackListing = struct {
         /// The base name, `pack-<name>`, borrowed from this database until
         /// it next re-scans.
@@ -2748,31 +2747,45 @@ pub const Odb = struct {
         size: u64,
         time: i64,
         objects: u32,
+        /// In this database's own directory, not an alternate's: git's
+        /// `pack_local`.
+        local: bool,
     };
 
-    /// Every pack open in this database's own directory, in `gpa`, in the
+    /// Which packs `listPacks` lists.
+    pub const PackScope = enum {
+        /// This database's own directory's.
+        own,
+        /// Its own, then each alternate's, as git's `repo_for_each_pack`.
+        all,
+    };
+
+    /// Every pack open in this database, as `scope` asks, in `gpa`, in the
     /// order it holds them; a pack whose `.pack` is gone is left out.
-    pub fn localPacks(odb: *Odb, gpa: Allocator, io: Io) ErrorNamespace.Error![]PackListing {
-        const source = odb.writableSource();
+    pub fn listPacks(odb: *Odb, gpa: Allocator, io: Io, scope: PackScope) ErrorNamespace.Error![]PackListing {
         var out: std.ArrayList(PackListing) = .empty;
         errdefer out.deinit(gpa);
-        const pack_dir = source.pack_dir orelse return out.toOwnedSlice(gpa);
-        for (source.packs.items) |*named| {
-            var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
-            const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
-            const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
-            };
-            try out.append(gpa, .{
-                .name = named.name,
-                .kept = try hasCompanion(io, pack_dir, named.name, ".keep"),
-                .cruft = try hasCompanion(io, pack_dir, named.name, ".mtimes"),
-                .promisor = try hasCompanion(io, pack_dir, named.name, ".promisor"),
-                .size = stat.size,
-                .time = stat.mtime.toSeconds(),
-                .objects = named.pack.index.count,
-            });
+        const sources = odb.backendData().sources.items;
+        for (sources[0..if (scope == .own) @min(sources.len, 1) else sources.len], 0..) |*source, at| {
+            const pack_dir = source.pack_dir orelse continue;
+            for (source.packs.items) |*named| {
+                var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
+                const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
+                const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => |e| return e,
+                };
+                try out.append(gpa, .{
+                    .name = named.name,
+                    .kept = try hasCompanion(io, pack_dir, named.name, ".keep"),
+                    .cruft = try hasCompanion(io, pack_dir, named.name, ".mtimes"),
+                    .promisor = try hasCompanion(io, pack_dir, named.name, ".promisor"),
+                    .size = stat.size,
+                    .time = stat.mtime.toSeconds(),
+                    .objects = named.pack.index.count,
+                    .local = at == 0,
+                });
+            }
         }
         return out.toOwnedSlice(gpa);
     }

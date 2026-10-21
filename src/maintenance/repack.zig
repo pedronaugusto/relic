@@ -82,6 +82,16 @@ pub const Options = struct {
     /// `-b`; `null` takes `repack.writeBitmaps` or `pack.writeBitmaps`,
     /// else writes them for `-a` in a bare repository when it can.
     write_bitmaps: ?bool = null,
+    /// `--geometric=<factor>`, with `.loose`: in place of the reachable
+    /// objects, the packs, smallest first, that break a progression in
+    /// which each pack holds at least `factor` times the objects of all
+    /// before it, rolled up with the loose objects into one pack (and the
+    /// promisor packs so into one of their own). 0 is none, as git's.
+    geometric: u32 = 0,
+    /// `-m`, `--write-midx`: a multi-pack index over the packs that stay,
+    /// which carries the bitmap `write_bitmaps` asks for in place of a
+    /// pack's.
+    write_midx: bool = false,
     /// `-n` is `false`; `null` takes `repack.updateServerInfo`, true.
     update_server_info: ?bool = null,
     /// How each pack is built. `repack.cruftWindow`, `cruftDepth` and
@@ -105,14 +115,17 @@ pub const Report = struct {
     loose_removed: u32 = 0,
     /// Commits taken out of `.git/shallow` that are gone.
     shallow_removed: u32 = 0,
+    /// The multi-pack index written, by its checksum.
+    midx: ?Oid = null,
 };
 
 /// Failures of `repack`.
-pub const Error = reach.Error || ops.BitmapError || Repository.WriteShallowError || server_info.Error || error{
+pub const Error = reach.Error || ops.BitmapError || ops.MidxError || Repository.WriteShallowError || server_info.Error || error{
     /// `-d` in a repository with `extensions.preciousObjects`: git refuses.
     PreciousObjects,
-    /// Two of `-A` (or `--unpack-unreachable`), `-k` and `--cruft`: git
-    /// refuses them together.
+    /// Two of `-A` (or `--unpack-unreachable`), `-k` and `--cruft`, or
+    /// `--geometric` with `-a`, `-A` or `--cruft`: git refuses them
+    /// together.
     IncompatibleOptions,
     /// Bitmaps asked for without `-a`: git's "Incremental repacks are
     /// incompatible with bitmap indexes".
@@ -142,11 +155,12 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     const loosen = mode == .all_loosen or options.unpack_unreachable != null;
     if (@as(u2, @intFromBool(loosen)) + @intFromBool(options.keep_unreachable) + @intFromBool(mode == .cruft) > 1) return error.IncompatibleOptions;
     if (loosen and mode != .loose) mode = .all_loosen;
+    if (options.geometric != 0 and mode != .loose) return error.IncompatibleOptions;
     if (options.delete and try config.getBool("extensions.preciousobjects", false)) return error.PreciousObjects;
 
     var bitmaps: ?bool = options.write_bitmaps orelse try lastBool(config, &.{ "repack.writebitmaps", "pack.writebitmaps" });
-    if (bitmaps == null and !(mode != .loose and repo.isBare())) bitmaps = false;
-    if (bitmaps == true and mode == .loose) return error.IncrementalBitmaps;
+    if (bitmaps == null and !options.write_midx and !(mode != .loose and repo.isBare())) bitmaps = false;
+    if (bitmaps == true and mode == .loose and !options.write_midx) return error.IncrementalBitmaps;
     if (bitmaps != false and options.local and db.hasAlternates()) bitmaps = false;
     var pack_options = options.pack;
     // `pack.writeReverseIndex`, as pack-objects reads it.
@@ -164,7 +178,7 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
         .options = options,
         .mode = mode,
         .pack_options = pack_options,
-        .pack_kept = options.pack_kept_objects orelse try lastBool(config, &.{"repack.packkeptobjects"}) orelse (bitmaps == true),
+        .pack_kept = options.pack_kept_objects orelse try lastBool(config, &.{"repack.packkeptobjects"}) orelse (bitmaps == true and !options.write_midx),
         .max_pack = if (options.max_pack_bytes orelse try sizeSetting(config, "pack.packsizelimit")) |limit| @max(limit, 1 << 20) else null,
         .pack_dir = pack_dir,
         .existing = try collectExisting(gpa, arena, io, db, options.keep_packs),
@@ -174,7 +188,8 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     for (run.existing.kept.items) |name| try addPackObjects(gpa, db, name, &run.kept_objects);
 
     if (mode != .loose) try run.writePromisorPack();
-    const main_written = try run.writeReachable();
+    var geometry: ?Geometry = if (options.geometric != 0) try run.geometry() else null;
+    const main_written = if (geometry) |*g| try run.writeGeometric(g) else try run.writeReachable();
     try db.refresh(io);
 
     var main_objects: Oid.Set = .empty;
@@ -195,8 +210,9 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
         run.report.cruft_written = try writeCruft(gpa, arena, io, repo, &run.existing, run.fresh.items, &run.retained, options, cruft_options, limit, pack_dir);
         try db.refresh(io);
     }
-    if (main_written) |written| if (bitmaps != false and !run.kept_skipped) try run.writeBitmap(written);
-    if (options.delete) try run.removeRedundant();
+    if (main_written) |written| if (bitmaps != false and !run.kept_skipped and !options.write_midx) try run.writeBitmap(written);
+    if (options.write_midx) run.report.midx = try run.writeMidx(if (geometry) |*g| g else null, bitmaps == true);
+    if (options.delete) try run.removeRedundant(if (geometry) |*g| g else null);
     if (options.update_server_info orelse try config.getBool("repack.updateserverinfo", true)) try server_info.updateServerInfo(gpa, io, repo);
     return run.report;
 }
@@ -316,19 +332,178 @@ const Run = struct {
         };
     }
 
-    /// `-d`: with `-a`, `-A` or `--cruft` the old packs the new ones
-    /// replace go; then `prune-packed`, and `prune_shallow(PRUNE_QUICK)`,
-    /// the boundary commits that are gone.
-    fn removeRedundant(run: *Run) Self.Error!void {
-        const db = run.db;
-        if (run.mode != .loose) {
-            var doomed: std.ArrayList([]const u8) = .empty;
-            for ([_][]const []const u8{ run.existing.non_kept.items, run.existing.cruft.items }) |names| for (names) |name| {
-                if (isListed(run.fresh.items, name) or isListed(run.retained.items, name)) continue;
-                try doomed.append(run.arena, name);
-            };
-            run.report.packs_removed = try db.removePacks(run.io, doomed.items);
+    /// `pack_geometry_init` and `pack_geometry_split`: the packs a
+    /// geometric repack weighs, an alternate's but for `-l`, and where each
+    /// list splits.
+    fn geometry(run: *Run) Self.Error!Geometry {
+        const listed = try run.db.listPacks(run.gpa, run.io, .all);
+        defer run.gpa.free(listed);
+        var packs: std.ArrayList(Odb.PackListing) = .empty;
+        var promisor: std.ArrayList(Odb.PackListing) = .empty;
+        for (listed) |p| {
+            if (run.options.local and !p.local) continue;
+            if (!run.pack_kept and (p.kept or (p.local and isListed(run.existing.kept.items, p.name)))) continue;
+            if (p.cruft) continue;
+            var copy = p;
+            copy.name = try run.arena.dupe(u8, p.name);
+            try (if (p.promisor) &promisor else &packs).append(run.arena, copy);
         }
+        const by_objects = struct {
+            fn less(_: void, a: Odb.PackListing, b: Odb.PackListing) bool {
+                return a.objects < b.objects;
+            }
+        }.less;
+        std.mem.sort(Odb.PackListing, packs.items, {}, by_objects);
+        std.mem.sort(Odb.PackListing, promisor.items, {}, by_objects);
+        return .{
+            .packs = packs.items,
+            .split = geometrySplit(packs.items, run.options.geometric),
+            .promisor = promisor.items,
+            .promisor_split = geometrySplit(promisor.items, run.options.geometric),
+        };
+    }
+
+    /// `pack-objects --stdin-packs --unpacked`, the packs before the split
+    /// given and those after it `^`-marked, the promisor packs that roll up
+    /// written first into a promisor pack of their own
+    /// (`pack_geometry_repack_promisors`); the one written, when it is one.
+    fn writeGeometric(run: *Run, g: *const Geometry) Self.Error!?pack_mod.WriteReport {
+        if (g.promisor_split != 0) {
+            const entries = try run.rollUp(g.promisor, g.promisor_split, false);
+            if (entries.len != 0) {
+                const reports = try writeLimited(run.db, run.io, run.pack_dir, entries, run.pack_options, run.max_pack);
+                defer run.db.allocator().free(reports);
+                for (reports) |written| {
+                    try run.db.writePromisor(run.io, written.name, "", .replace);
+                    try run.fresh.append(run.arena, try baseName(run.arena, written.name));
+                }
+                run.report.packs_written += @intCast(reports.len);
+            }
+        }
+        const entries = try run.rollUp(g.packs, g.split, true);
+        if (entries.len == 0) return null;
+        const reports = try writeLimited(run.db, run.io, run.pack_dir, entries, run.pack_options, run.max_pack);
+        defer run.db.allocator().free(reports);
+        for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
+        run.report.packs_written += @intCast(reports.len);
+        return if (reports.len == 1) reports[0] else null;
+    }
+
+    /// `--stdin-packs`: each object of `packs` before `split`, and with
+    /// `main` each loose one, that no pack after the split holds, nor a
+    /// kept pack (`--honor-pack-keep`, and for `main` `--keep-pack`) or,
+    /// for `main`, a promisor pack.
+    fn rollUp(run: *Run, packs: []const Odb.PackListing, split: usize, main: bool) Self.Error![]odb_mod.PackEntry {
+        const gpa = run.gpa;
+        const db = run.db;
+        var skip: Oid.Set = .empty;
+        defer skip.deinit(gpa);
+        for (packs[split..]) |p| try addPackObjects(gpa, db, p.name, &skip);
+        for (run.existing.kept.items) |name| {
+            const keep_file = try hasKeepFile(run.io, run.pack_dir, name);
+            if ((keep_file and !run.pack_kept) or (!keep_file and main)) try addPackObjects(gpa, db, name, &skip);
+        }
+        var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+        for (packs[0..split]) |p| {
+            const found = db.packNamed(p.name) orelse continue;
+            for (0..found.index.count) |i| {
+                const oid = found.index.nameAt(@intCast(i));
+                if (main and run.promised.contains(oid)) continue;
+                if ((try skip.fetchPut(gpa, oid, {})) != null) continue;
+                try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
+            }
+        }
+        if (main) {
+            var loose = try db.collectLoose(run.io, .{});
+            defer loose.deinit();
+            for (loose.entries) |entry| {
+                if (run.promised.contains(entry.oid)) continue;
+                if ((try skip.fetchPut(gpa, entry.oid, {})) != null) continue;
+                try entries.append(run.arena, entry);
+            }
+        }
+        return entries.items;
+    }
+
+    /// Whether `-d` takes the pack `name` away: with `-a`, `-A` or
+    /// `--cruft` each pack that is not kept and that no new pack and no
+    /// retained cruft pack is.
+    fn doomed(run: *const Run, name: []const u8) bool {
+        if (run.mode == .loose or !run.options.delete) return false;
+        return !isListed(run.fresh.items, name) and !isListed(run.retained.items, name);
+    }
+
+    /// `repack_write_midx`'s `write_midx_included_packs`: a multi-pack
+    /// index over the kept packs, the new ones, those that stay (with
+    /// `--geometric` the local ones after the split) and the cruft packs;
+    /// the largest that stays preferred, else the first new one that is
+    /// not cruft. With `bitmap` it carries one, and the packs it covers
+    /// lose theirs.
+    fn writeMidx(run: *Run, g: ?*const Geometry, bitmap: bool) Self.Error!?Oid {
+        const arena = run.arena;
+        var include: std.ArrayList([]const u8) = .empty;
+        var stays: std.ArrayList([]const u8) = .empty;
+        if (g) |geo| {
+            for (geo.packs[geo.split..]) |p| if (p.local) try stays.append(arena, p.name);
+        } else for (run.existing.non_kept.items) |name| {
+            if (!run.doomed(name)) try stays.append(arena, name);
+        }
+        for (run.existing.cruft.items) |name| if (!run.doomed(name)) try stays.append(arena, name);
+        for ([_][]const []const u8{ run.existing.kept.items, run.fresh.items, run.retained.items, stays.items }) |names| for (names) |name| {
+            if (!isListed(include.items, name)) try include.append(arena, name);
+        };
+        if (include.items.len == 0) return null;
+
+        var preferred: ?[]const u8 = null;
+        if (g) |geo| {
+            var i = geo.packs.len;
+            while (i > geo.split) : (i -= 1) if (geo.packs[i - 1].local) {
+                preferred = geo.packs[i - 1].name;
+                break;
+            };
+        }
+        if (preferred == null) for (run.fresh.items) |name| {
+            if (preferred == null or std.mem.order(u8, name, preferred.?) == .lt) preferred = name;
+        };
+
+        const options: ops.MidxOptions = .{ .packs = include.items, .preferred_pack = preferred };
+        if (!bitmap) return ops.writeMidx(run.gpa, run.io, run.db, options);
+        const config = run.repo.configuration();
+        const tips = try ops.repositoryTips(run.gpa, run.io, run.repo);
+        defer run.gpa.free(tips);
+        const written = try ops.writeMidxBitmap(run.gpa, run.io, run.db, .{ .tips = tips, .midx_options = options }, .{
+            .hash_cache = try config.getBool("pack.writebitmaphashcache", true),
+            .lookup_table = try config.getBool("pack.writebitmaplookuptable", false),
+        });
+        // `remove_redundant_bitmaps`.
+        for (include.items) |name| {
+            var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
+            const file = std.mem.print(&name_buf, "{s}.bitmap", .{name}) catch continue;
+            run.pack_dir.deleteFile(run.io, file) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
+        }
+        try run.db.refresh(run.io);
+        return written;
+    }
+
+    /// `-d`: with `-a`, `-A` or `--cruft` the old packs the new ones
+    /// replace go, with `--geometric` the local ones that rolled up; then
+    /// `prune-packed`, and `prune_shallow(PRUNE_QUICK)`, the boundary
+    /// commits that are gone.
+    fn removeRedundant(run: *Run, g: ?*const Geometry) Self.Error!void {
+        const db = run.db;
+        var doomed_packs: std.ArrayList([]const u8) = .empty;
+        for ([_][]const []const u8{ run.existing.non_kept.items, run.existing.cruft.items }) |names| for (names) |name| {
+            if (run.doomed(name)) try doomed_packs.append(run.arena, name);
+        };
+        // `pack_geometry_remove_redundant`.
+        if (g) |geo| for ([_][]const Odb.PackListing{ geo.packs[0..geo.split], geo.promisor[0..geo.promisor_split] }) |packs| for (packs) |p| {
+            if (!p.local or p.kept or isListed(run.existing.kept.items, p.name) or isListed(run.fresh.items, p.name)) continue;
+            try doomed_packs.append(run.arena, p.name);
+        };
+        if (doomed_packs.items.len != 0) run.report.packs_removed = try db.removePacks(run.io, doomed_packs.items);
         run.report.loose_removed = try db.prunePacked(run.io, false);
         if (run.options.keep_unreachable or (run.mode == .all_loosen and run.options.unpack_unreachable == null) or db.shallow.count() == 0) return;
         var gone: std.ArrayList(Oid) = .empty;
@@ -340,6 +515,33 @@ const Run = struct {
         run.report.shallow_removed = @intCast(gone.items.len);
     }
 };
+
+/// git's `pack_geometry`: the packs a geometric repack weighs, each list
+/// by its objects, fewest first; those before its split roll up.
+const Geometry = struct {
+    packs: []const Odb.PackListing,
+    split: usize,
+    promisor: []const Odb.PackListing,
+    promisor_split: usize,
+};
+
+/// `compute_pack_geometry_split`: how many of `packs`, fewest objects
+/// first, roll up so that each pack left holds at least `factor` times the
+/// objects of all before it, the new pack among them.
+fn geometrySplit(packs: []const Odb.PackListing, factor: u32) usize {
+    if (packs.len == 0) return 0;
+    // The packs from the heaviest down that already make a progression.
+    var i = packs.len - 1;
+    while (i > 0) : (i -= 1) {
+        if (@as(u64, packs[i].objects) < @as(u64, factor) * packs[i - 1].objects) break;
+    }
+    var split = if (i == 0) 0 else i + 1;
+    // The new pack may be heavy enough to break it again above the split.
+    var total: u64 = 0;
+    for (packs[0..split]) |p| total += p.objects;
+    while (split < packs.len and packs[split].objects < @as(u64, factor) * total) : (split += 1) total += packs[split].objects;
+    return split;
+}
 
 /// The last of `names` set, as a boolean, or `null`: git's config
 /// callback, which reads each and keeps the last.
@@ -386,7 +588,7 @@ fn addPackObjects(gpa: Allocator, db: *Odb, name: []const u8, set: *Oid.Set) All
 /// `existing_packs_collect`: the local packs by kind, a pack `keep_packs`
 /// names or with a `.keep` kept, the names copied into `arena`.
 fn collectExisting(gpa: Allocator, arena: Allocator, io: Io, db: *Odb, keep_packs: []const []const u8) Self.Error!Existing {
-    const listed = try db.localPacks(gpa, io);
+    const listed = try db.listPacks(gpa, io, .own);
     defer gpa.free(listed);
     var existing: Existing = .{};
     for (listed) |p| {

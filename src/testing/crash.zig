@@ -1,7 +1,8 @@
 //! Crashes during the writes a repository lives by (design §12c), on
 //! shakedown's simulated disk: a ref update, a received pack and the ref
 //! that publishes it, an index write, a checkout, `pack-refs`,
-//! `reflog expire`, `prune` and `repack` (`-a -d` and `--cruft -d`),
+//! `reflog expire`, `prune` and `repack` (`-a -d`, `--cruft -d` and
+//! `--geometric=2 -d --write-midx`),
 //! each stopped before
 //! every `Io` call it makes and every state the disk could come back in
 //! after that tried. airlock's syncs and renames reach the simulated disk
@@ -47,7 +48,7 @@ const granularity: Io.Duration = .fromSeconds(1);
 
 const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
 
-const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire, prune, repack, repack_cruft };
+const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire, prune, repack, repack_cruft, repack_geometric };
 
 /// A directory tree held in memory: what is put on the simulated disk
 /// before a run, and what a crash state holds.
@@ -244,7 +245,7 @@ pub const Case = struct {
     fn seed(c: *const Case) *const Image {
         return switch (c.kind) {
             .pack_receive => &c.seeds.before,
-            .prune, .repack, .repack_cruft => &c.seeds.pruning,
+            .prune, .repack, .repack_cruft, .repack_geometric => &c.seeds.pruning,
             else => &c.seeds.after,
         };
     }
@@ -318,6 +319,7 @@ pub const Case = struct {
             .prune => _ = try prune.prune(gpa, io, &repo, .{}),
             .repack => _ = try repack.repack(gpa, io, &repo, .{ .mode = .all, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
             .repack_cruft => _ = try repack.repack(gpa, io, &repo, .{ .mode = .cruft, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
+            .repack_geometric => _ = try repack.repack(gpa, io, &repo, .{ .geometric = 2, .delete = true, .write_midx = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
         }
         repo.deinit(io);
     }
@@ -427,7 +429,7 @@ pub const Case = struct {
             // A repack moves no ref and loses no object: the unreachable
             // ones stay loose, or go into the cruft pack before the loose
             // copies go.
-            .repack, .repack_cruft => {
+            .repack, .repack_cruft, .repack_geometric => {
                 try expectRef(io, git, "refs/heads/main", &.{first});
                 try expectRef(io, git, "refs/heads/next", &.{second});
                 const held = try allObjects(git, io);
@@ -603,4 +605,12 @@ test "every crash: repack --cruft -d, files" {
 
 test "every crash: repack --cruft -d, reftable" {
     try inFormat(.repack_cruft, .reftable);
+}
+
+test "every crash: repack --geometric=2 -d --write-midx, files" {
+    try inFormat(.repack_geometric, .files);
+}
+
+test "every crash: repack --geometric=2 -d --write-midx, reftable" {
+    try inFormat(.repack_geometric, .reftable);
 }

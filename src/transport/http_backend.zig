@@ -172,7 +172,7 @@ pub const Backend = struct {
             },
             .info_packs => {
                 const db = remote.repo.objectDatabase();
-                const packs = try db.localPacks(b.gpa, io);
+                const packs = try db.listPacks(b.gpa, io, .own);
                 defer b.gpa.free(packs);
                 for (packs) |listed| try body.print(arena, "P {s}.pack\n", .{listed.name});
                 try body.append(arena, '\n');

@@ -1,7 +1,8 @@
 //! `repack` held to git 2.55's: the same repository repacked by each, and
 //! what each object directory then holds compared -- which objects each
 //! pack holds and what kind of pack it is, a cruft pack's times, the loose
-//! objects and their times, `.git/shallow` and the dumb HTTP files. The
+//! objects and their times, the packs a multi-pack index lists and the
+//! one it prefers, `.git/shallow` and the dumb HTTP files. The
 //! packs' bytes differ (relic's delta search is its own), never what they
 //! hold.
 
@@ -12,6 +13,7 @@ const repack_mod = @import("repack.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pack_mod = @import("../odb/pack.zig");
 const mtimes = @import("../odb/mtimes.zig");
+const midx = @import("../odb/midx.zig");
 const hash = @import("../hash/hash.zig");
 const io = std.testing.io;
 const gpa = std.testing.allocator;
@@ -130,8 +132,10 @@ fn fixture(format: testgit.RefFormat, now: i64) !testgit.Repo {
 }
 
 /// What the object directory holds, as text: each pack's kind and objects
-/// (a cruft pack's with their times), the loose objects with their times,
-/// then `.git/shallow` and the dumb HTTP files.
+/// (a cruft pack's with their times, `midx` when the multi-pack index
+/// lists it, `preferred` when it is the index's preferred pack), the loose
+/// objects with their times, whether the index has a bitmap, then
+/// `.git/shallow` and the dumb HTTP files.
 fn state(repo: *testgit.Repo) ![]u8 {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -139,6 +143,9 @@ fn state(repo: *testgit.Repo) ![]u8 {
     var lines: std.ArrayList([]const u8) = .empty;
     var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
+    var index_of_packs = try midx.Index.open(gpa, io, pack_dir, .sha1);
+    defer if (index_of_packs) |*m| m.deinit();
+    const preferred: ?u32 = if (index_of_packs) |*m| (if (try m.reverseAt(0)) |first| (try m.locate(first)).pack else null) else null;
     var pack_count: usize = 0;
     var it = pack_dir.iterate();
     while (try it.next(io)) |entry| {
@@ -154,6 +161,9 @@ fn state(repo: *testgit.Repo) ![]u8 {
             pack_dir.access(io, name, .{}) catch continue;
             try line.appendSlice(arena, ext);
         }
+        if (index_of_packs) |*m| for (0..m.pack_count) |i| if (std.mem.eql(u8, m.packName(@intCast(i)).?, base)) {
+            try line.appendSlice(arena, if (preferred == @as(u32, @intCast(i))) " midx preferred" else " midx");
+        };
         const times: ?[]u32 = mtimes.read(arena, io, pack_dir, try arena.print("{s}.mtimes", .{base}), index.count) catch |err| switch (err) {
             error.FileNotFound => null,
             else => |e| return e,
@@ -186,6 +196,12 @@ fn state(repo: *testgit.Repo) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (lines.items) |l| try out.print(gpa, "{s}\n", .{l});
+    var midx_bitmaps: usize = 0;
+    var files = pack_dir.iterate();
+    while (try files.next(io)) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "multi-pack-index-") and std.mem.endsWith(u8, entry.name, ".bitmap")) midx_bitmaps += 1;
+    }
+    try out.print(gpa, "multi-pack-index bitmaps: {d}\n", .{midx_bitmaps});
     for ([_][]const u8{ ".git/shallow", ".git/info/refs" }) |path| {
         const bytes = repo.readFile(io, path) catch |err| switch (err) {
             error.FileNotFound => try gpa.dupe(u8, "(none)\n"),
@@ -245,6 +261,8 @@ fn compare(format: testgit.RefFormat, cases: []const Case, configure: ?*const fn
             return err;
         };
         try ours.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+        if (options.write_midx) try ours.exec(io, &.{ "multi-pack-index", "verify", "--no-progress" });
+        if (options.write_midx and options.write_bitmaps == true) try ours.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
     }
 }
 
@@ -457,6 +475,65 @@ test "a bare repository's -a carries a bitmap, as git's" {
     try repo.exec(io, &.{ "--git-dir=.git", "rev-list", "--test-bitmap", "HEAD" });
 }
 
+fn geometricInFormat(format: testgit.RefFormat) !void {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var buf: [2][48]u8 = undefined;
+    _, const expiration_arg = try dates(now, &buf);
+    // The fixture's packs hold 1 (kept), 3 and 7 objects: a factor of 2
+    // rolls up only the loose objects, 3 every pack.
+    try compare(format, &.{
+        .{ .args = &.{"--geometric=2"}, .options = .{ .geometric = 2 } },
+        .{ .args = &.{ "--geometric=2", "-d" }, .options = .{ .geometric = 2, .delete = true } },
+        .{ .args = &.{ "--geometric=3", "-d" }, .options = .{ .geometric = 3, .delete = true } },
+        .{ .args = &.{ "--geometric=3", "-d", "--pack-kept-objects" }, .options = .{ .geometric = 3, .delete = true, .pack_kept_objects = true } },
+        .{ .args = &.{ "--geometric=2", "-d", "--write-midx" }, .options = .{ .geometric = 2, .delete = true, .write_midx = true } },
+        .{ .args = &.{ "--geometric=3", "-d", "--write-midx", "-b" }, .options = .{ .geometric = 3, .delete = true, .write_midx = true, .write_bitmaps = true } },
+        .{ .args = &.{ "-d", "--write-midx" }, .options = .{ .delete = true, .write_midx = true } },
+        .{ .args = &.{ "-a", "-d", "--write-midx", "-b" }, .options = .{ .mode = .all, .delete = true, .write_midx = true, .write_bitmaps = true } },
+        .{ .args = &.{ "--cruft", "-d", "--write-midx", expiration_arg }, .options = .{ .mode = .cruft, .delete = true, .write_midx = true, .cruft_expiration = now - 14 * day } },
+    }, null);
+}
+
+test "--geometric rolls up the packs git's does, and --write-midx indexes the packs git's does" {
+    try testgit.eachRefFormat(geometricInFormat);
+}
+
+/// The fixture's pack of 3 unreachable objects a promisor pack, and a
+/// second promisor pack of one blob.
+fn promisorPacks(repo: *testgit.Repo, now: i64) !void {
+    _ = now;
+    var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var it = pack_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        var index = try pack_mod.Index.open(gpa, io, pack_dir, entry.name, .{ .kind = .sha1, .max_bytes = 1 << 30 });
+        defer index.deinit();
+        if (index.count != 3) continue;
+        var name: [128]u8 = undefined;
+        try pack_dir.writeFile(io, .{ .sub_path = try std.mem.print(&name, "{s}.promisor", .{entry.name[0 .. entry.name.len - 4]}), .data = "" });
+        break;
+    }
+    const b = try blob(repo, "in a second promisor pack\n");
+    defer gpa.free(b);
+    const made = try repo.runInput(io, &.{ "pack-objects", "-q", ".git/objects/pack/pack" }, b);
+    defer gpa.free(made);
+    var promisor: [256]u8 = undefined;
+    try repo.writeFile(io, try std.mem.print(&promisor, ".git/objects/pack/pack-{s}.promisor", .{std.mem.trim(u8, made, "\n")}), "");
+    try repo.exec(io, &.{"prune-packed"});
+}
+
+fn promisorInFormat(format: testgit.RefFormat) !void {
+    try compare(format, &.{
+        .{ .args = &.{ "--geometric=2", "-d" }, .options = .{ .geometric = 2, .delete = true } },
+        .{ .args = &.{ "--geometric=4", "-d", "--write-midx" }, .options = .{ .geometric = 4, .delete = true, .write_midx = true } },
+    }, promisorPacks);
+}
+
+test "--geometric rolls the promisor packs up into a promisor pack, as git's" {
+    try testgit.eachRefFormat(promisorInFormat);
+}
+
 test "repack refuses what git refuses" {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
@@ -466,6 +543,8 @@ test "repack refuses what git refuses" {
     try std.testing.expectError(error.IncompatibleOptions, repack_mod.repack(gpa, io, &native, .{ .mode = .cruft, .keep_unreachable = true }));
     try std.testing.expectError(error.IncompatibleOptions, repack_mod.repack(gpa, io, &native, .{ .mode = .all_loosen, .keep_unreachable = true }));
     try std.testing.expectError(error.IncrementalBitmaps, repack_mod.repack(gpa, io, &native, .{ .write_bitmaps = true }));
+    try std.testing.expectError(error.IncrementalBitmaps, repack_mod.repack(gpa, io, &native, .{ .geometric = 2, .write_bitmaps = true }));
+    try std.testing.expectError(error.IncompatibleOptions, repack_mod.repack(gpa, io, &native, .{ .mode = .all, .geometric = 2 }));
     try repo.exec(io, &.{ "config", "extensions.preciousObjects", "true" });
     _ = try native.refreshConfig(io, .{});
     try std.testing.expectError(error.PreciousObjects, repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true }));
