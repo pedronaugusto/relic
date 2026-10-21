@@ -690,6 +690,8 @@ pub const Fetched = union(enum) {
 
 /// What `fetchMany` did, remote by remote, in the order asked.
 pub const Many = struct {
+    pub const Error = Self.Error;
+
     names: []const []const u8,
     results: []Fetched,
     gpa: Allocator,
@@ -717,7 +719,17 @@ pub const Many = struct {
 /// still fetched. `jobs` at once (`null` takes `fetch.parallel`, 0 is one
 /// per processor) when the `Io` runs tasks beside each other, each on its
 /// own handle on the repository (`Repository.openAgain`).
-pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []const u8, options: Options, jobs: ?u32) Self.Error!Many {
+pub const ManyOptions = struct {
+    /// How each remote is fetched.
+    fetch: Options,
+    /// How many at once; `null` takes `fetch.parallel`, 0 one per
+    /// processor.
+    jobs: ?u32 = null,
+};
+
+pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []const u8, many: ManyOptions) Self.Error!Many {
+    const options = many.fetch;
+    const jobs = many.jobs;
     const results = try gpa.alloc(Fetched, names.len);
     errdefer gpa.free(results);
     for (results) |*r| r.* = .{ .failed = error.Canceled };

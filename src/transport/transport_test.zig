@@ -2200,7 +2200,7 @@ test "several remotes are fetched as git fetches them: fetch.all and skipFetchAl
             var arena: std.heap.ArenaAllocator = .init(gpa);
             defer arena.deinit();
             const names = try fetch_mod.remotesToFetch(arena.allocator(), repo.configuration(), case.selection);
-            var many = try fetch_mod.fetchMany(gpa, io, &repo, names, .{ .who = test_who, .programs = .{ .environ = &env } }, null);
+            var many = try fetch_mod.fetchMany(gpa, io, &repo, names, .{ .fetch = .{ .who = test_who, .programs = .{ .environ = &env } } });
             defer many.deinit();
             try testing.expect(!many.anyFailed());
         }

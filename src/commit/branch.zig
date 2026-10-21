@@ -299,8 +299,15 @@ fn setupTracking(a: Allocator, io: Io, repo: *Repository, name: []const u8, orig
         if (!std.mem.eql(u8, tracked, name)) return null;
     }
     if (sources.items.len == 0) try sources.append(a, orig);
-    return installBranchConfig(a, io, repo, name, remote_name, sources.items);
+    return installBranchConfig(a, io, repo, name, .{ .remote = remote_name, .merge = sources.items });
 }
+
+/// What a branch is set to track: refs on a remote, or here.
+pub const TrackedRefs = struct {
+    /// The remote; `null`, or `.`, for this repository.
+    remote: ?[]const u8,
+    merge: []const []const u8,
+};
 
 /// git's `install_branch_config_multiple_remotes`: the branch `name` set to
 /// track `merge` on `remote` (`null`, or `.`, for this repository) --
@@ -309,7 +316,9 @@ fn setupTracking(a: Allocator, io: Io, repo: *Repository, name: []const u8, orig
 /// --set-upstream-to` and `git push --set-upstream` set it. `null`, and
 /// nothing written, for a branch that would track itself. The result is
 /// `arena`'s.
-pub fn installBranchConfig(arena: Allocator, io: Io, repo: *Repository, name: []const u8, remote: ?[]const u8, merge: []const []const u8) Self.Error!?Upstream {
+pub fn installBranchConfig(arena: Allocator, io: Io, repo: *Repository, name: []const u8, tracked: TrackedRefs) Self.Error!?Upstream {
+    const remote = tracked.remote;
+    const merge = tracked.merge;
     const here = remote == null or std.mem.eql(u8, remote.?, ".");
     // A branch is not set up to track itself in this repository.
     if (merge.len == 1 and remote == null and std.mem.startsWith(u8, merge[0], "refs/heads/") and

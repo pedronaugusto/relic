@@ -497,7 +497,7 @@ fn setUpstreams(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, rem
         };
         if (!std.mem.startsWith(u8, local, "refs/heads/") or !std.mem.startsWith(u8, r.remote_ref, "refs/heads/")) continue;
         const name = local["refs/heads/".len..];
-        const upstream = (try branch_mod.installBranchConfig(arena, io, repo, name, remote_name, try arena.dupe([]const u8, &.{r.remote_ref}))) orelse continue;
+        const upstream = (try branch_mod.installBranchConfig(arena, io, repo, name, .{ .remote = remote_name, .merge = try arena.dupe([]const u8, &.{r.remote_ref}) })) orelse continue;
         try tracked.append(arena, .{ .branch = name, .upstream = upstream });
     }
     outcome.upstreams = tracked.items;
