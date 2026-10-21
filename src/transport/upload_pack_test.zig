@@ -19,6 +19,9 @@ const fetch_mod = @import("fetch.zig");
 const warning = @import("../report.zig").warning;
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
+const local = @import("local.zig");
+const upload_pack_mod = @import("upload_pack.zig");
+const pkt_line = @import("../codec.zig").pkt_line;
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -365,4 +368,45 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
         repo.deinit(io);
         try expectSame(gpa, io, &env, a, c);
     };
+}
+
+test "relic's upload-pack answers bundle-uri as git's under uploadpack.advertiseBundleURIs: every bundle.* setting, its section and variable in lower case" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const bare = try served(gpa, io, root.dir);
+    defer gpa.free(bare);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_PROTOCOL", "version=2");
+    const config_path = try std.Io.Dir.path.join(gpa, &.{ bare, "config" });
+    defer gpa.free(config_path);
+    const config = try Io.Dir.cwd().readFileAlloc(io, config_path, gpa, .unlimited);
+    defer gpa.free(config);
+    const more = "[uploadpack]\n\tadvertiseBundleURIs = yes\n[Bundle]\n\tVersion = 1\n\tmode = all\n[bundle \"One.B\"]\n\tURI = https://example.com/one.bundle\n\tcreationToken = 3\n[core]\n\tbundled = no\n";
+    const joined = try std.mem.concat(gpa, u8, &.{ config, more });
+    defer gpa.free(joined);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = joined });
+
+    const request = "0017command=bundle-uri\n00010000";
+    const theirs = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "upload-pack", "--stateless-rpc", bare }, request, true);
+    defer gpa.free(theirs);
+    var remote = try local.Remote.open(gpa, io, bare, .{});
+    defer remote.deinit(io);
+    var server: upload_pack_mod.Server = .init(gpa, io, &remote, .v2, .{ .stateless = true });
+    var fixed: Io.Reader = .fixed(request);
+    var buffer: [pkt_line.max_line]u8 = undefined;
+    var in = fixed.limited(.unlimited, &buffer);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try server.serveRequest(&in.interface, &out.writer);
+    try testing.expectEqualStrings(theirs, out.written());
+    try testing.expect(std.mem.find(u8, theirs, "bundle.One.B.uri=https://example.com/one.bundle") != null);
+
+    // The advertisement names it where git's does: after object-format.
+    var advertised: Io.Writer.Allocating = .init(gpa);
+    defer advertised.deinit();
+    try server.advertise(&advertised.writer);
+    try testing.expect(std.mem.find(u8, advertised.written(), "object-format=sha1\n000fbundle-uri\n") != null);
 }

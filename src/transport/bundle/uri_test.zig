@@ -1,5 +1,6 @@
 //! Bundle URIs against git 2.55: a clone's `--bundle-uri`, a list under
-//! the `creationToken` heuristic, and the fetches after it.
+//! the `creationToken` heuristic, the fetches after it, and a server's list
+//! under `transfer.bundleURI` over http.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -12,6 +13,10 @@ const fetch_mod = @import("../fetch.zig");
 const repo_mod = @import("../../repo/repo.zig");
 const object = @import("../../object/object.zig");
 const testgit = @import("../../testing/git.zig");
+const testremote = @import("../../testing/remote.zig");
+const suite = @import("../../testing/helpers.zig");
+const config_mod = @import("../../config/config.zig");
+const warning = @import("../../report.zig").warning;
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -126,4 +131,91 @@ test "clone --bundle-uri and fetch.bundleURI take bundles before the server as g
     const got = try describe(&src, io, try std.Io.Dir.path.join(arena, &.{ outside, "relic-list" }));
     defer gpa.free(got);
     try testing.expectEqualStrings(want, got);
+}
+
+test "a server's bundle-uri list under transfer.bundleURI as git 2.55 takes it over http: from git's upload-pack and relic's, cloned by git and relic, all bundles and by creationToken" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var src = try testgit.Repo.init(gpa, io, &.{});
+    defer src.deinit();
+    src.report_failures = false;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const served = try root.dir.realPathFileAlloc(io, ".", arena);
+
+    // Two bundles, the second on the first, and a commit after them that
+    // only the server has.
+    for (0..3) |i| {
+        try src.writeFile(io, "f", try arena.print("{d}\n", .{i}));
+        try src.exec(io, &.{ "add", "f" });
+        try src.exec(io, &.{ "commit", "-q", "-m", try arena.print("c{d}", .{i}) });
+        if (i == 2) break;
+        const file = try std.Io.Dir.path.join(arena, &.{ served, try arena.print("b{d}.bundle", .{i}) });
+        try src.exec(io, &.{ "bundle", "create", "-q", file, if (i == 0) "main" else "main~1..main" });
+    }
+    const bare = try std.Io.Dir.path.join(arena, &.{ served, "repo.git" });
+    try src.exec(io, &.{ "clone", "-q", "--bare", ".", bare });
+
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const theirs = try testremote.HttpServer.start(gpa, io, root.dir, .{ .files = true });
+    defer theirs.stop();
+    const ours = try testremote.HttpServer.start(gpa, io, root.dir, .{ .files = true, .upload_pack = suite.path(.upload_pack_helper) });
+    defer ours.stop();
+    // One URI whole, one relative to the remote's URL.
+    const b0 = try theirs.url(arena, "files/b0.bundle");
+    try src.exec(io, &.{ "-C", bare, "config", "uploadpack.advertiseBundleURIs", "true" });
+    try src.exec(io, &.{ "-C", bare, "config", "bundle.version", "1" });
+    try src.exec(io, &.{ "-C", bare, "config", "bundle.mode", "all" });
+    try src.exec(io, &.{ "-C", bare, "config", "bundle.b0.uri", b0 });
+    try src.exec(io, &.{ "-C", bare, "config", "bundle.b0.creationToken", "1" });
+    try src.exec(io, &.{ "-C", bare, "config", "bundle.b1.uri", "../files/b1.bundle" });
+    try src.exec(io, &.{ "-C", bare, "config", "bundle.b1.creationToken", "2" });
+
+    var config = try config_mod.Config.parseText(gpa, "[transfer]\n\tbundleURI = true\n", .command);
+    defer config.deinit();
+    for ([_]bool{ false, true }) |heuristic| {
+        if (heuristic) try src.exec(io, &.{ "-C", bare, "config", "bundle.heuristic", "creationToken" });
+        var out = testing.tmpDir(.{});
+        defer out.cleanup();
+        const outside = try out.dir.realPathFileAlloc(io, ".", arena);
+        const want = want: {
+            const by_git = try std.Io.Dir.path.join(arena, &.{ outside, "by-git" });
+            const url = try theirs.url(arena, "repo.git");
+            gpa.free(try testremote.gitInputEnv(gpa, io, out.dir, &env, &.{ "-c", "transfer.bundleURI=true", "clone", "-q", "--no-checkout", url, by_git }, "", true));
+            break :want try describe(&src, io, by_git);
+        };
+        defer gpa.free(want);
+        errdefer std.debug.print("{s}\n", .{want});
+        try testing.expect(std.mem.find(u8, want, "refs/bundles/heads/main") != null);
+        // git's from relic's server, relic's from either.
+        for ([_]*testremote.HttpServer{ ours, theirs, ours }, [_][]const u8{ "git-ours", "relic-theirs", "relic-ours" }) |server, name| {
+            const url = try server.url(arena, "repo.git");
+            const path = try std.Io.Dir.path.join(arena, &.{ outside, name });
+            if (std.mem.startsWith(u8, name, "git")) {
+                gpa.free(try testremote.gitInputEnv(gpa, io, out.dir, &env, &.{ "-c", "transfer.bundleURI=true", "clone", "-q", "--no-checkout", url, path }, "", true));
+            } else {
+                try out.dir.createDirPath(io, name);
+                var dir = try out.dir.openDir(io, name, .{});
+                defer dir.close(io);
+                var said: warning.Warnings = .init(gpa);
+                defer said.deinit();
+                var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = test_who, .checkout = false, .programs = .{ .environ = &env }, .config = &config, .warnings = &said });
+                cloned.deinit(io);
+                for (said.items.items) |w| std.debug.print("{s}: {s}\n", .{ name, try w.message(arena) });
+                try testing.expectEqual(@as(usize, 0), said.items.items.len);
+            }
+            const got = try describe(&src, io, path);
+            defer gpa.free(got);
+            errdefer std.debug.print("{s}, creationToken {}\n", .{ name, heuristic });
+            try testing.expectEqualStrings(want, got);
+        }
+        // Each took both bundles from the servers' files.
+        const seen = try theirs.requests(gpa);
+        defer gpa.free(seen);
+        try testing.expect(std.mem.find(u8, seen, "GET /files/b0.bundle") != null);
+    }
 }

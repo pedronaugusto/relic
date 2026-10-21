@@ -19,6 +19,12 @@
 //! greater than it downloads nothing. A clone from such a list keeps the
 //! URI in `fetch.bundleURI`, which every fetch after it reads again.
 //!
+//! A clone under `transfer.bundleURI=true` and no URI of its own takes the
+//! list a server's protocol v2 `bundle-uri` command gives instead
+//! (`List.parseLine` for each line, `fetchList`), its relative URIs taken
+//! against the remote's URL. What git warns of on the way goes to the
+//! transfer settings' `warnings`.
+//!
 //! git keeps a list's bundles in a hash map and walks them in its order;
 //! relic walks them in the list's order. Where it matters, `mode = any`
 //! with more than one bundle that works, another may be the one taken.
@@ -37,6 +43,7 @@ const fsck = @import("../../object/fsck.zig");
 const url_mod = @import("../../wire.zig").url;
 const fs = @import("../../fs/fs.zig");
 const decimal = @import("../../text.zig").decimal;
+const warning = @import("../../report.zig").warning;
 
 const Repository = repo_mod.Repository;
 
@@ -70,6 +77,8 @@ pub const List = struct {
     /// its last `/`, or the remote's URL for a server's list.
     base_uri: ?[]const u8 = null,
     bundles: std.ArrayList(Bundle) = .empty,
+    /// Where a `creationToken` that does not parse is told of.
+    warnings: ?*warning.Warnings = null,
 
     /// git's `bundle_list_update`: `key` (section and variable in lower
     /// case) set to `value`. `InvalidBundleList` for a key outside
@@ -105,7 +114,11 @@ pub const List = struct {
             const text = std.mem.trimStart(u8, v, " \t\n\r\x0b\x0c");
             var end: usize = 0;
             while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
-            if (decimal.digits(u64, text[0..end])) |n| entry.creation_token = n;
+            if (decimal.digits(u64, text[0..end])) |n| {
+                entry.creation_token = n;
+            } else if (list.warnings) |w| {
+                try w.add(.{ .bundle_uri = try list.arena.print("could not parse bundle list key creationToken with value '{s}'", .{v}) });
+            }
         }
     }
 
@@ -210,15 +223,38 @@ const Run = struct {
         for (run.files.items) |file| objects.deleteFile(run.io, file) catch {};
     }
 
+    fn warnings(run: *Run) ?*warning.Warnings {
+        return run.options.transport.warnings;
+    }
+
+    /// git's `warning` (or its `error` it goes on from), as text.
+    fn warn(run: *Run, comptime format: []const u8, args: anytype) Allocator.Error!void {
+        const w = run.warnings() orelse return;
+        try w.add(.{ .bundle_uri = try run.arena.print(format, args) });
+    }
+
     /// `fetch_bundle_uri_internal`: download `b`; a bundle goes into
     /// `global`, a list is followed.
     fn fetchInternal(run: *Run, b: *Bundle, depth: usize, global: *List) Error!bool {
-        if (depth >= max_depth) return false;
-        const uri = b.uri orelse return false;
+        if (depth >= max_depth) {
+            try run.warn("exceeded bundle URI recursion limit ({d})", .{max_depth});
+            return false;
+        }
+        const uri = b.uri orelse {
+            try run.warn("bundle '{s}' has no uri", .{b.id});
+            return false;
+        };
         if (b.file == null) b.file = try run.tempFile() orelse return false;
-        if (!try run.copy(uri, b.file.?)) return false;
+        if (!try run.copy(uri, b.file.?)) {
+            try run.warn("failed to download bundle from URI '{s}'", .{uri});
+            return false;
+        }
         const objects = run.repo.objectDatabase().objectsDirectory();
-        if (!bundle.isBundle(run.gpa, run.io, objects, b.file.?)) return run.followList(b, depth, global);
+        if (!bundle.isBundle(run.gpa, run.io, objects, b.file.?)) {
+            if (try run.followList(b, depth, global)) return true;
+            try run.warn("file at URI '{s}' is not a bundle or bundle list", .{uri});
+            return false;
+        }
         try global.bundles.append(run.arena, .{ .id = b.id, .file = b.file });
         return true;
     }
@@ -231,7 +267,7 @@ const Run = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,
         };
-        var list: List = .{ .arena = run.arena };
+        var list: List = .{ .arena = run.arena, .warnings = run.warnings() };
         list.parseConfig(b.uri.?, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidBundleList => return false,
@@ -252,7 +288,7 @@ const Run = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,
         };
-        var list: List = .{ .arena = run.arena };
+        var list: List = .{ .arena = run.arena, .warnings = run.warnings() };
         list.parseConfig(uri, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidBundleList => return false,
@@ -314,14 +350,21 @@ const Run = struct {
             if (b.creation_token <= max_token) break;
             if (b.file == null) {
                 var fetched = false;
-                if (b.uri) |_| if (try run.tempFile()) |file| {
-                    b.file = file;
-                    fetched = try run.copy(b.uri.?, file);
-                };
+                if (b.uri) |uri| {
+                    if (try run.tempFile()) |file| {
+                        b.file = file;
+                        fetched = try run.copy(uri, file);
+                        if (!fetched) try run.warn("failed to download bundle from URI '{s}'", .{uri});
+                    }
+                } else try run.warn("bundle '{s}' has no uri", .{b.id});
                 // What is neither a bundle nor a list fails to download,
                 // to git; a list where a bundle is expected ends the walk.
                 if (fetched and !bundle.isBundle(run.gpa, run.io, objects, b.file.?)) {
-                    if (try run.isList(b.uri.?, b.file.?)) break;
+                    if (try run.isList(b.uri.?, b.file.?)) {
+                        try run.warn("file downloaded from '{s}' is not a bundle", .{b.uri.?});
+                        break;
+                    }
+                    try run.warn("file at URI '{s}' is not a bundle or bundle list", .{b.uri.?});
                     fetched = false;
                 }
                 if (!fetched) {
@@ -343,11 +386,10 @@ const Run = struct {
         if (cur >= 0) return false;
         var buf: [20]u8 = undefined;
         const value = std.mem.print(&buf, "{d}", .{new_max}) catch unreachable; // unreachable: a u64 is at most twenty digits
-        // git warns and goes on when it cannot be written.
         _ = run.repo.writeConfig(run.io, .local, &.{.{ .set = .{ .name = "fetch.bundleCreationToken", .value = value } }}, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,
-            else => {},
+            else => try run.warn("failed to store maximum creation token", .{}),
         };
         return true;
     }
@@ -357,7 +399,10 @@ const Run = struct {
         const objects = run.repo.objectDatabase().objectsDirectory();
         objects.createDirPath(run.io, "bundles") catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => return null,
+            else => {
+                try run.warn("failed to create temporary file", .{});
+                return null;
+            },
         };
         var buf: [64]u8 = undefined;
         const name = try std.mem.concat(run.arena, u8, &.{ "bundles/", fs.tempName(run.io, &buf, "tmp_uri_") });

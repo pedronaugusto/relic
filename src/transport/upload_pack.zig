@@ -5,11 +5,11 @@
 //! acknowledged the way `multi_ack_detailed` acknowledges them until the
 //! server is ready, a shallow boundary drawn by depth, by date or by ref
 //! when one is asked for, and a pack of what the client lacks, filtered as
-//! a partial clone asks, sent on the side-band. Protocol v2's `ls-refs` and
-//! `fetch` are answered, and v0's single conversation, over a pipe where
-//! the server remembers the conversation (`serve`) and over HTTP where every
-//! request carries all of it again (`serveRequest`, git's
-//! `--stateless-rpc`).
+//! a partial clone asks, sent on the side-band. Protocol v2's `ls-refs`,
+//! `fetch` and, under `uploadpack.advertiseBundleURIs`, `bundle-uri` are
+//! answered, and v0's single conversation, over a pipe where the server
+//! remembers the conversation (`serve`) and over HTTP where every request
+//! carries all of it again (`serveRequest`, git's `--stateless-rpc`).
 //!
 //! relic uses it in process for a `file://` remote, as git runs its own
 //! `upload-pack` for one — which is how a shallow or partial clone of a
@@ -40,6 +40,7 @@ const connection = @import("../wire.zig").connection;
 const promisors = @import("../wire.zig").promisors;
 const side_band = @import("../wire.zig").side_band;
 const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -70,6 +71,9 @@ pub const Options = struct {
     allow_reachable: ?bool = null,
     /// `uploadpack.allowAnySHA1InWant`: anything at all.
     allow_any: ?bool = null,
+    /// `uploadpack.advertiseBundleURIs`: protocol v2's `bundle-uri`
+    /// command, answered with every `bundle.*` setting.
+    advertise_bundle_uris: ?bool = null,
 };
 
 /// A repository, serving.
@@ -83,6 +87,7 @@ pub const Server = struct {
     allow_tip: bool,
     allow_reachable: bool,
     allow_any: bool,
+    advertise_bundle_uris: bool,
     /// A client answered `promisor-remote` taking one of this repository's
     /// promisor remotes, so what that remote promises and this repository
     /// lacks is left out of a pack: git's `--missing=allow-promisor`.
@@ -103,6 +108,7 @@ pub const Server = struct {
             .allow_tip = any or (options.allow_tip orelse (config.getBool("uploadpack.allowtipsha1inwant", false) catch false)),
             .allow_reachable = any or (options.allow_reachable orelse (config.getBool("uploadpack.allowreachablesha1inwant", false) catch false)),
             .allow_any = any,
+            .advertise_bundle_uris = options.advertise_bundle_uris orelse advertisesBundleUris(config),
         };
     }
 
@@ -133,6 +139,7 @@ pub const Server = struct {
         try pkt_line.write(w, if (s.allow_filter) "fetch=shallow wait-for-done filter\n" else "fetch=shallow wait-for-done\n");
         try pkt_line.write(w, "server-option\n");
         try pkt_line.print("object-format={s}\n", .{s.kind().name()}, w);
+        if (s.advertise_bundle_uris) try pkt_line.write(w, "bundle-uri\n");
         // `promisor.advertise`: the promisor remotes this one borrows from.
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
@@ -258,6 +265,8 @@ pub const Server = struct {
             try s.lsRefs(args.items, out);
         } else if (std.mem.eql(u8, name, "fetch")) {
             try s.fetchV2(arena, args.items, out);
+        } else if (std.mem.eql(u8, name, "bundle-uri") and s.advertise_bundle_uris) {
+            try s.bundleUri(arena, args.items, out);
         } else {
             try s.sendError(out, "unknown command");
             return error.ProtocolError;
@@ -293,6 +302,14 @@ pub const Server = struct {
             try line.append(s.gpa, '\n');
             pkt_line.write(out, line.items) catch |err| return writeError(err);
         }
+        pkt_line.flush(out) catch |err| return writeError(err);
+    }
+
+    /// git's `bundle_uri_command`: no arguments, and the served
+    /// repository's `bundle.*` settings as `key=value` lines.
+    fn bundleUri(s: *Server, arena: Allocator, args: []const []const u8, out: *Io.Writer) Error!void {
+        if (args.len != 0) return s.refuse(out, try arena.print("bundle-uri: unexpected argument: '{s}'", .{args[0]}));
+        for (try bundleSettings(arena, s.remote.repo.configuration())) |line| pkt_line.write(out, line) catch |err| return writeError(err);
         pkt_line.flush(out) catch |err| return writeError(err);
     }
 
@@ -1009,6 +1026,31 @@ const Negotiation = struct {
 };
 
 /// A packet that could not be written, to the client: `WriteFailed`.
+/// git's `bundle_uri_advertise`: `uploadpack.advertiseBundleURIs`. A value
+/// that is no boolean advertises the command too, as git's maybe-bool getter
+/// leaves -1 there and its caller takes that for true.
+pub fn advertisesBundleUris(config: *const config_mod.Config) bool {
+    return config.getBool("uploadpack.advertisebundleuris", false) catch true;
+}
+
+/// What `bundle-uri` answers, as git's `config_to_packet_line` writes it:
+/// every `bundle.*` setting of `config` in its order, `<key>=<value>`, the
+/// section and the variable in lower case and the subsection as written.
+/// A name with no value at all is left out, where git hands its NULL to
+/// printf. The lines are `arena`'s.
+pub fn bundleSettings(arena: Allocator, config: *const config_mod.Config) Allocator.Error![]const []const u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (config.entries.items) |e| {
+        if (!std.mem.eql(u8, e.section, "bundle")) continue;
+        const value = e.value orelse continue;
+        try lines.append(arena, if (e.has_subsection)
+            try arena.print("bundle.{s}.{s}={s}", .{ e.subsection, e.name, value })
+        else
+            try arena.print("bundle.{s}={s}", .{ e.name, value }));
+    }
+    return lines.items;
+}
+
 fn writeError(err: pkt_line.WriteError) Error {
     return switch (err) {
         error.PacketTooLong, error.WriteFailed => error.WriteFailed,

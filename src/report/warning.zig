@@ -61,6 +61,14 @@ pub const Warning = union(enum) {
     bundle_uri_clone_failed: []const u8,
     /// `fetch.bundleURI` brought nothing in; the fetch went on without it.
     bundle_uri_fetch_failed: []const u8,
+    /// The bundles a server listed for a clone under `transfer.bundleURI`
+    /// brought nothing in; the clone went on without them.
+    advertised_bundles_failed,
+    /// What git says of one bundle URI on the way and goes on from: a
+    /// download that failed, a file that is neither a bundle nor a list, a
+    /// `creationToken` that does not parse, a server's list it could not
+    /// read. The text.
+    bundle_uri: []const u8,
     /// `http.cookieFile` is `-`, curl's standard input, which git does not
     /// read cookies from.
     cookie_file_stdin,
@@ -101,6 +109,8 @@ pub const Warning = union(enum) {
             .ssl_version_unknown => |v| arena.print("unsupported ssl version {s}: using default", .{v}),
             .bundle_uri_clone_failed => |v| arena.print("failed to fetch objects from bundle URI '{s}'", .{v}),
             .bundle_uri_fetch_failed => |v| arena.print("failed to fetch bundles from '{s}'", .{v}),
+            .advertised_bundles_failed => "failed to fetch advertised bundles",
+            .bundle_uri => |text| text,
             .cookie_file_stdin => "refusing to read cookies from http.cookiefile '-'",
             .save_cookies_without_file => "ignoring http.savecookies for empty http.cookiefile",
             .http_env_unparsed => |name| arena.print("failed to parse {s}", .{name}),
@@ -149,6 +159,8 @@ pub const Warnings = struct {
             .ssl_version_unknown => |t| .{ .ssl_version_unknown = try a.dupe(u8, t) },
             .bundle_uri_clone_failed => |t| .{ .bundle_uri_clone_failed = try a.dupe(u8, t) },
             .bundle_uri_fetch_failed => |t| .{ .bundle_uri_fetch_failed = try a.dupe(u8, t) },
+            .advertised_bundles_failed => .advertised_bundles_failed,
+            .bundle_uri => |t| .{ .bundle_uri = try a.dupe(u8, t) },
             .cookie_file_stdin => .cookie_file_stdin,
             .save_cookies_without_file => .save_cookies_without_file,
             .http_env_unparsed => |t| .{ .http_env_unparsed = try a.dupe(u8, t) },

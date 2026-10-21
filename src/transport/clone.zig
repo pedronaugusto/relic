@@ -320,7 +320,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     const single_tag = try singleTagRef(arena, head, single_branch, options);
     try configureRemote(arena, io, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
 
-    const tips = try takeBundles(arena, gpa, io, &repo, settings, options);
+    const tips = try takeBundles(arena, gpa, io, &repo, &session, reached, settings, options);
 
     var chosen = try chooseRefs(arena, remote_refs.refs, head, single_branch, single_tag, options);
     var received = try receiveObjects(arena, gpa, io, &repo, &session, &chosen, .{
@@ -526,16 +526,48 @@ fn transferOptions(local_copy: bool, settings: ?*const config_mod.Config, repo: 
 }
 
 /// git's clone takes a bundle URI's objects once it knows the object
-/// format and before it fetches; the refs they leave under `refs/bundles/`
-/// are returned, the fetch's haves.
-fn takeBundles(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, settings: ?*const config_mod.Config, options: Options) Error![]const Oid {
-    const uri = options.bundle_uri orelse return &.{};
-    const got = try bundle_uri.fetch(gpa, io, repo, uri, .{ .transport = transferOptions(false, settings, repo, options), .who = options.who });
-    if (!got.ok) {
-        try warning.note(options.warnings, .{ .bundle_uri_clone_failed = uri });
-    } else if (got.heuristic) {
-        _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fetch.bundleuri", .value = uri } }}, .{});
+/// format and before it fetches: `bundle_uri`'s, else under
+/// `transfer.bundleURI` those of the list the server's `bundle-uri`
+/// command gives, its relative URIs against the remote's URL. The refs
+/// they leave under `refs/bundles/` are returned, the fetch's haves.
+fn takeBundles(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    session: *transport.Session,
+    reached: []const u8,
+    settings: ?*const config_mod.Config,
+    options: Options,
+) Error![]const Oid {
+    const fetching: bundle_uri.Options = .{ .transport = transferOptions(false, settings, repo, options), .who = options.who };
+    if (options.bundle_uri) |uri| {
+        const got = try bundle_uri.fetch(gpa, io, repo, uri, fetching);
+        if (!got.ok) {
+            try warning.note(options.warnings, .{ .bundle_uri_clone_failed = uri });
+        } else if (got.heuristic) {
+            _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fetch.bundleuri", .value = uri } }}, .{});
+        }
+        return bundle.repositoryTips(arena, io, repo);
     }
+    const config = settings orelse return &.{};
+    if (!try config.getBool("transfer.bundleuri", false)) return &.{};
+    const lines = try session.bundleUri(arena) orelse {
+        try warning.note(options.warnings, .{ .bundle_uri = "bundle-uri operation not supported by protocol" });
+        return &.{};
+    };
+    var list: bundle_uri.List = .{ .arena = arena, .base_uri = reached, .warnings = options.warnings };
+    for (lines, 2..) |line, number| list.parseLine(line) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // git keeps what it read before the line, and says so.
+        error.InvalidBundleList => {
+            try warning.note(options.warnings, .{ .bundle_uri = try arena.print("error on bundle-uri response line {d}: {s}", .{ number, line }) });
+            try warning.note(options.warnings, .{ .bundle_uri = "could not retrieve server-advertised bundle-uri list" });
+            break;
+        },
+    };
+    if (list.bundles.items.len == 0) return &.{};
+    if (!try bundle_uri.fetchList(gpa, io, repo, &list, fetching)) try warning.note(options.warnings, .advertised_bundles_failed);
     return bundle.repositoryTips(arena, io, repo);
 }
 

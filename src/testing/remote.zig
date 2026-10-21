@@ -216,6 +216,9 @@ pub const HttpServer = struct {
         /// Wait this long before answering a `POST`, as a server that has
         /// stopped sending does.
         stall: ?Io.Duration = null,
+        /// Answer a `GET` of `/files/<rest>` with the file `<rest>` under
+        /// the root, as a web server serves a bundle; 404 when there is none.
+        files: bool = false,
     };
 
     /// Listen on an ephemeral port and serve the repositories under `root`.
@@ -364,6 +367,14 @@ pub const HttpServer = struct {
         });
     }
 
+    /// The file `sub_path` under the root, or 404.
+    fn serveFile(s: *HttpServer, arena: Allocator, request: *std.http.Server.Request, sub_path: []const u8) !void {
+        const full = try std.Io.Dir.path.join(arena, &.{ s.root, sub_path });
+        const data = Io.Dir.cwd().readFileAlloc(s.io, full, arena, .limited(1 << 30)) catch
+            return request.respond("", .{ .status = .not_found, .keep_alive = s.options.keep_alive });
+        return request.respond(data, .{ .keep_alive = s.options.keep_alive });
+    }
+
     fn logCookie(s: *HttpServer, value: []const u8) !void {
         s.log_mutex.lockUncancelable(s.io);
         defer s.log_mutex.unlock(s.io);
@@ -414,6 +425,7 @@ pub const HttpServer = struct {
             const location = try arena.print("{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
             return request.respond("", .{ .status = .found, .keep_alive = s.options.keep_alive, .extra_headers = &.{.{ .name = "Location", .value = location }} });
         }
+        if (s.options.files and method == .GET and std.mem.startsWith(u8, path, "/files/")) return s.serveFile(arena, request, path["/files/".len..]);
 
         var remote_user: ?[]const u8 = null;
         if (s.options.basic_auth) |auth| {

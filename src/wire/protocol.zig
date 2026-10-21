@@ -354,16 +354,44 @@ fn matchesPrefix(name: []const u8, prefixes: []const []const u8) bool {
 /// The head of a v2 command: `command=<name>`, the capabilities this side
 /// sends back, and the delimiter before the arguments.
 pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8) pkt_line.WriteError!void {
-    // As git writes them: `ls-refs` with a newline, `fetch` without (they
-    // are two functions in git), the capabilities without, the arguments
-    // with.
+    // As git writes them: `ls-refs` and `bundle-uri` with a newline,
+    // `fetch` without (they are separate functions in git), the
+    // capabilities without, the arguments with; `bundle-uri` after the
+    // capabilities, which git's `get_remote_bundle_uri` sends first.
+    const bundle_uri = std.mem.eql(u8, command, "bundle-uri");
     if (std.mem.eql(u8, command, "ls-refs")) {
         try pkt_line.print("command={s}\n", .{command}, w);
-    } else try pkt_line.print("command={s}", .{command}, w);
+    } else if (!bundle_uri) try pkt_line.print("command={s}", .{command}, w);
     if (adv.has("agent")) try pkt_line.print("agent={s}", .{agent}, w);
     if (adv.has("object-format")) try pkt_line.print("object-format={s}", .{adv.kind.name()}, w);
     if (adv.promisor_reply) |names| try pkt_line.print("promisor-remote={s}", .{names}, w);
+    if (bundle_uri) try pkt_line.write(w, "command=bundle-uri\n");
     try pkt_line.delim(w);
+}
+
+/// What a v2 server's `bundle-uri` command lists: its `key=value` lines as
+/// sent, read by `transport/bundle/uri.zig`'s `List.parseLine`. None from
+/// a server that does not advertise the command, v0 and v1 included, as
+/// git asks only one that does. The lines are `arena`'s.
+pub fn bundleUri(arena: Allocator, conn: *Connection, adv: *const Advertisement) Self.Error![]const []const u8 {
+    if (adv.version != .v2 or !adv.has("bundle-uri")) return &.{};
+    const w = try conn.request();
+    (struct {
+        fn send(out: *Io.Writer, a: *const Advertisement) !void {
+            try writeCommand(out, a, "bundle-uri");
+            try pkt_line.flush(out);
+        }
+    }).send(w, adv) catch |err| return conn.writeFailed(err);
+    const in = try conn.response();
+    var lines: std.ArrayList([]const u8) = .empty;
+    while (true) {
+        switch (try conn.readPacket(in)) {
+            .flush, .response_end => break,
+            .delim => return error.ProtocolError,
+            .data => |d| try lines.append(arena, try arena.dupe(u8, std.mem.trimEnd(u8, d, "\n"))),
+        }
+    }
+    return lines.items;
 }
 
 const testing = std.testing;
