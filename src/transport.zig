@@ -10,6 +10,7 @@ pub const push = @import("transport/push.zig");
 pub const clone = @import("transport/clone.zig");
 pub const fetch = @import("transport/fetch.zig");
 pub const pull = @import("transport/pull.zig");
+pub const backfill = @import("transport/backfill.zig");
 pub const refspec = @import("wire.zig").refspec;
 pub const remote = @import("wire.zig").remote;
 pub const url = @import("wire.zig").url;

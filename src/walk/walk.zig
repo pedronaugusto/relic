@@ -67,6 +67,8 @@ pub const Commit = struct {
     parents: []const Oid,
     /// Committer time in seconds, which is what the date order uses.
     time: i64,
+    /// The root tree.
+    tree: Oid,
     /// With `Walk.paths`: the commit changes nothing the paths name
     /// against the parents that matter, git's `TREESAME`. `git rev-list --
     /// <paths>` leaves such a commit out; it stays here, marked.
@@ -134,7 +136,7 @@ pub const Walk = struct {
         oid: Oid,
         parents: []const Oid = &.{},
         time: i64 = 0,
-        /// The root tree, read only with `paths`.
+        /// The root tree, once parsed.
         tree: ?Oid = null,
         parsed: bool = false,
         seen: bool = false,
@@ -372,7 +374,7 @@ pub const Walk = struct {
         try walk.ordered.ensureTotalCapacity(walk.gpa, list.items.len);
         for (list.items) |n| {
             if (n.uninteresting) continue;
-            walk.ordered.appendAssumeCapacity(.{ .oid = n.oid, .parents = n.parents, .time = n.time, .treesame = n.treesame });
+            walk.ordered.appendAssumeCapacity(.{ .oid = n.oid, .parents = n.parents, .time = n.time, .tree = n.tree.?, .treesame = n.treesame });
         }
         if (walk.reverse) std.mem.reverse(Commit, walk.ordered.items);
         walk.prepared = true;

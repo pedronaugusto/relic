@@ -147,6 +147,16 @@ pub const Patterns = struct {
         }
         return included;
     }
+
+    /// What the patterns say of `path` alone, without what its directories
+    /// decide: git's `path_matches_pattern_list`. Read as plain patterns,
+    /// the last one matching the path decides, and `null` is none matching;
+    /// read as a cone, the cone decides every path.
+    pub fn decides(p: *const Patterns, path: []const u8, kind: Kind) ?bool {
+        if (p.cone) |*c| return c.match(path, kind) != .outside;
+        const last = matcher(p.compiled orelse return null).last(path, kind) orelse return null;
+        return !p.items.items[last].negated;
+    }
 };
 
 /// What cone mode says of a path.

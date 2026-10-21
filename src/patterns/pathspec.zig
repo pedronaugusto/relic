@@ -40,6 +40,8 @@ const Item = struct {
     icase: bool,
     glob: bool,
     literal: bool,
+    /// `:(top)` or `:/`.
+    top: bool,
     onestar: bool,
     /// What follows the literal prefix, compiled, when it holds a wildcard
     /// a plain comparison cannot answer.
@@ -126,6 +128,15 @@ pub const Pathspec = struct {
             if (item.nowildcard_len < item.match.len) return true;
         }
         return false;
+    }
+
+    /// Whether every item is a plain path, with no wildcard and no magic:
+    /// git's `!has_wildcard && !magic`.
+    pub fn isExact(p: *const Pathspec) bool {
+        for (p.items) |item| {
+            if (item.nowildcard_len < item.match.len or item.exclude or item.icase or item.glob or item.literal or item.top) return false;
+        }
+        return true;
     }
 
     /// Whether a tree diff limited to `max_depth` levels enters the
@@ -305,6 +316,7 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
         var icase = false;
         var glob = false;
         var literal = false;
+        var top = false;
         if (spec.len == 0) return error.EmptyPathspec;
         var rest = spec;
         if (rest.len > 0 and rest[0] == ':') {
@@ -313,7 +325,9 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
                 var words = std.mem.splitScalar(u8, rest[2..close], ',');
                 while (words.next()) |w| {
                     if (w.len == 0) continue;
-                    if (std.mem.eql(u8, w, "top")) {} else if (std.mem.eql(u8, w, "exclude")) {
+                    if (std.mem.eql(u8, w, "top")) {
+                        top = true;
+                    } else if (std.mem.eql(u8, w, "exclude")) {
                         exclude = true;
                     } else if (std.mem.eql(u8, w, "icase")) {
                         icase = true;
@@ -337,7 +351,7 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
                 // ends the magic.
                 while (i < rest.len and rest[i] != ':') : (i += 1) {
                     switch (rest[i]) {
-                        '/' => {},
+                        '/' => top = true,
                         '!', '^' => exclude = true,
                         '"', '#', '%', '&', '\'', ',', '-', ';', '<', '=', '>', '@', '_', '`', '~' => return error.InvalidPathspecMagic,
                         else => break,
@@ -363,10 +377,10 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
             try .compile(a, match[nowildcard_len..], .{ .pathname = glob, .case_fold = icase })
         else
             null;
-        try items.append(a, .{ .match = match, .nowildcard_len = nowildcard_len, .exclude = exclude, .icase = icase, .glob = glob, .literal = literal, .onestar = onestar, .matcher = matcher });
+        try items.append(a, .{ .match = match, .nowildcard_len = nowildcard_len, .exclude = exclude, .icase = icase, .glob = glob, .literal = literal, .top = top, .onestar = onestar, .matcher = matcher });
     }
     // only exclusions: everything else is named, as git adds `:/`
-    if (all_exclude) try items.append(a, .{ .match = "", .nowildcard_len = 0, .exclude = false, .icase = false, .glob = false, .literal = false, .onestar = false, .matcher = null });
+    if (all_exclude) try items.append(a, .{ .match = "", .nowildcard_len = 0, .exclude = false, .icase = false, .glob = false, .literal = false, .top = false, .onestar = false, .matcher = null });
     return .{ .arena = arena, .items = items.items, .has_exclude = has_exclude };
 }
 

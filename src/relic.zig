@@ -66,6 +66,7 @@
 //! | `rev_walk.describe` | Module within `rev_walk`. |
 //! | `rev_walk.fork_point` | Module within `rev_walk`. |
 //! | `rev_walk.last_modified` | Module within `rev_walk`. |
+//! | `rev_walk.path_walk` | Module within `rev_walk`. |
 //! | `rev_walk.mailmap` | Module within `rev_walk`. |
 //! | `rev_walk.rev_parse` | Module within `rev_walk`. |
 //! | `rev_walk.shallow` | Module within `rev_walk`. |
@@ -106,6 +107,7 @@
 //! | `transport.clone` | Module within `transport`. |
 //! | `transport.fetch` | Module within `transport`. |
 //! | `transport.pull` | Module within `transport`. |
+//! | `transport.backfill` | Module within `transport`. |
 //! | `transport.refspec` | Module within `transport`. |
 //! | `transport.remote` | Module within `transport`. |
 //! | `transport.url` | Module within `transport`. |

@@ -648,6 +648,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `rev_walk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
 | `rev_walk.fork_point` | `forkPoint` — `git merge-base --fork-point`: where a branch forked from a ref, through the ref's log. |
 | `rev_walk.last_modified` | `lastModified` — `git last-modified`: for each path of a commit's tree, the commit that last changed it. |
+| `rev_walk.path_walk` | `PathWalk` — git's path-walk: the objects a history reaches, in batches by the path that reaches them. |
 | `rev_walk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
 | `rev_walk.rev_parse` | git's revision grammar, `@{<date>}` with git's approximate dates included. |
 | `rev_walk.shallow` | A shallow repository's boundary: `.git/shallow`. |
@@ -688,6 +689,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `transport.clone` | Module within `transport`. |
 | `transport.fetch` | Module within `transport`. |
 | `transport.pull` | `pull` — `git pull`: the fetch, then a fast-forward, a merge of `FETCH_HEAD` or a rebase from the fork point, as `pull.ff`, `pull.rebase` and `branch.<name>.rebase` say. |
+| `transport.backfill` | `backfill` — `git backfill`: a partial clone's missing blobs fetched in batches by path, within a range, a pathspec or the sparse checkout. |
 | `transport.refspec` | Module within `transport`. |
 | `transport.remote` | Module within `transport`. |
 | `transport.url` | Module within `transport`. |
