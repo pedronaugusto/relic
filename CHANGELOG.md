@@ -30,6 +30,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A non-atomic push's refs go in two transactions allowing failure, the deletions and then the rest, as git 2.55's receive-pack batches them: `reference-transaction` runs once per batch, a ref whose old value moved or whose name conflicts is refused alone (`incorrect old value provided`, `refname conflict`, ...) with git's message on the side band, and a failure of a batch's own refuses every command (`failed to update refs`).
 - A transaction's name checks follow git's: in a reftable repository, a ref created where another edit of the same transaction deletes one in its way is refused (`cannot process ... at the same time`), as git refuses it.
+- The rest of aegis W1: every password and key relic reads is held in aegis's `SecretBytes`, wiped when let go, and no copy of it is freed unwiped on the way. A password in a URL is decoded straight into its owner; `http.proxy`'s user and password are parsed in wiped scratch (uplink's `Proxy.parseKept`) and kept in one; `~/.netrc` is read into one (`fs.engine.readSecretFile`) and `lfs.netrc.Netrc` keeps its entries' strings in another; LFS's `Authorization` headers, the passphrases that opened client keys and the client certificate and key files themselves are read and held the same way.
+- uplink 0.8.7 (from 0.8.6), for `Proxy.parseKept`.
 
 ### Fixed
 
