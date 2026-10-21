@@ -67,6 +67,8 @@ const rerere = @import("../merge/rerere.zig");
 const diagnostic = @import("../report.zig").diagnostic;
 const config_mod = @import("../config/config.zig");
 const unicode_width = @import("../text.zig").unicode_width;
+const rev_parse = @import("../rev_walk/rev_parse.zig");
+const fork_point = @import("../rev_walk/fork_point.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -123,7 +125,7 @@ pub const Error = error{
     MergeCommit,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || sequencer.Error || merging.Error || program.Error || patch_id.Error || rev_walk.Error || worktrees.Error || notes.Error;
+} || sequencer.Error || merging.Error || program.Error || patch_id.Error || rev_walk.Error || worktrees.Error || notes.Error || rev_parse.Error || fork_point.Error;
 
 /// A message a person would be shown in an editor, and what they would
 /// see.
@@ -194,6 +196,17 @@ pub const Options = struct {
     interactive: bool = false,
     /// Move `fixup!`, `squash!` and `amend!` commits after their targets.
     autosquash: bool = false,
+    /// `--fork-point` or `--no-fork-point`: only the commits after the
+    /// branch's fork point from the upstream (`rev_walk.fork_point`, by
+    /// the reflog of the ref `upstream_name` names) are replayed, so a
+    /// commit the upstream once had and dropped is not. `null` is git's
+    /// default: on for a rebase onto the branch's own upstream
+    /// (`default_upstream`), unless `rebase.forkPoint` is false.
+    fork_point: ?bool = null,
+    /// `upstream` is the branch's configured upstream, which
+    /// `upstream_name` names, taken because no upstream was named: `git
+    /// rebase` with no upstream.
+    default_upstream: bool = false,
     /// `--rebase-merges[=<mode>]` or `--no-rebase-merges`; `null` takes
     /// `rebase.rebaseMerges`. The sheet then makes the merges again:
     /// `label`, `reset` and `merge` lines, as git writes them.
@@ -351,6 +364,11 @@ const Run = struct {
     /// `rebase_merges`, or `rebase.rebaseMerges`, which is read and
     /// checked whichever decides, as git reads its configuration.
     merges: RebaseMerges,
+    /// Whether the fork point limits the commits, `rebase.forkPoint`
+    /// read the same way.
+    fork_point: bool,
+    /// The fork point found: git's `restrict_revision`.
+    restrict: ?Oid = null,
     /// What is left to do, the current instruction first.
     items: std.ArrayList(todo.Item) = .empty,
     done_nr: usize = 0,
@@ -435,6 +453,10 @@ fn newRun(gpa: Allocator, io: Io, arena_state: *std.heap.ArenaAllocator, repo: *
         .merges = blk: {
             const configured = try configuredRebaseMerges(repo.configuration());
             break :blk options.rebase_merges orelse configured;
+        },
+        .fork_point = blk: {
+            const configured = try repo.configuration().getBool("rebase.forkpoint", true);
+            break :blk options.fork_point orelse (configured and options.default_upstream);
         },
     };
 }
@@ -606,7 +628,8 @@ fn originallyEmpty(w: *Walker, oid: Oid) Error!bool {
 /// with; with `--rebase-merges`, `make_script_with_merges`'s.
 fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
     var w: Walker = .{ .gpa = r.gpa, .arena = r.arena, .io = r.io, .repo = r.repo };
-    const sides = try symmetricDifference(&w, upstream, orig_head);
+    var sides = try symmetricDifference(&w, upstream, orig_head);
+    if (r.restrict) |fork| sides.right = try leavingFrom(r, &w, sides.right, fork);
     const same = try upstreamHas(r, &w, sides.left, sides.right);
     const ordered = try graphOrderOldestFirst(&w, sides.right);
     if (r.merges != .off) return scriptWithMerges(r, &w, .{ .ordered = ordered, .same = &same, .upstream = upstream, .orig_head = orig_head, .cousins = r.merges == .rebase_cousins });
@@ -621,6 +644,36 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
         try items.append(r.arena, .{ .command = .pick, .commit = oid, .arg = try pickArg(r, oid, empty) });
     }
     return items.items;
+}
+
+/// The commits of `right` that `fork` does not reach: git's
+/// `^<restrict_revision>`. What `fork` reaches of them is reached through
+/// them alone, since none of them is the upstream's.
+fn leavingFrom(r: *Run, w: *Walker, right: []Oid, fork: Oid) Error![]Oid {
+    var on_side: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    for (right) |oid| try on_side.put(r.arena, oid.bytes, {});
+    var reached: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    var stack: std.ArrayList(Oid) = .empty;
+    try stack.append(r.arena, fork);
+    while (stack.pop()) |oid| {
+        if (!on_side.contains(oid.bytes)) continue;
+        if ((try reached.getOrPut(r.arena, oid.bytes)).found_existing) continue;
+        try stack.appendSlice(r.arena, (try w.load(oid)).parents);
+    }
+    var kept: std.ArrayList(Oid) = .empty;
+    for (right) |oid| if (!reached.contains(oid.bytes)) try kept.append(r.arena, oid);
+    return kept.items;
+}
+
+/// git's `get_fork_point` of `upstream_name` and the branch, when the fork
+/// point is asked for: `null` where the name is not one ref's, or no fork
+/// point is found.
+fn findForkPoint(r: *Run, orig_head: Oid) Error!?Oid {
+    if (!r.fork_point) return null;
+    const name = r.options.upstream_name orelse return null;
+    const found = (try rev_parse.dwimRef(r.arena, r.io, r.repo, name)) orelse return null;
+    if (found.count != 1) return null;
+    return fork_point.forkPoint(r.gpa, r.io, r.repo, .{ .ref = found.ref, .commit = orig_head });
 }
 
 /// The commits of `right` whose patch id one of `left` has: what git's
@@ -1087,6 +1140,7 @@ pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: O
     defer arena_state.deinit();
     var r = try newRun(gpa, io, &arena_state, repo, options);
     const tip = try resolveTip(&r);
+    r.restrict = try findForkPoint(&r, tip.orig_head);
     var items = try makeScript(&r, upstream, tip.orig_head);
     if (items.len == 0) {
         const noop = try r.arena.alloc(todo.Item, 1);
@@ -1195,6 +1249,7 @@ fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Err
     const repo = r.repo;
     const options = r.options;
     try requireClean(r);
+    r.restrict = try findForkPoint(r, tip.orig_head);
 
     // Already on top of `onto`, with a straight line from it: nothing to do.
     const branch_base = blk: {
@@ -1205,6 +1260,7 @@ fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Err
     const preemptive = !options.interactive and options.todo == null and options.exec.len == 0 and
         !options.autosquash and !options.force;
     if (preemptive and branch_base != null and branch_base.?.eql(onto)) up_to_date: {
+        if (r.restrict) |fork| if (!fork.eql(onto)) break :up_to_date;
         const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = upstream, .b = tip.orig_head }, .{});
         defer gpa.free(bases);
         if (bases.len != 1 or !bases[0].eql(onto)) break :up_to_date;

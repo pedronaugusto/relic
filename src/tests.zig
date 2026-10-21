@@ -122,6 +122,7 @@ test {
         _ = @import("testing/last_modified.zig");
         _ = @import("testing/backfill.zig");
         _ = @import("testing/rebase_merges.zig");
+        _ = @import("testing/rebase_settings.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");
