@@ -400,15 +400,25 @@ pub const Session = struct {
 /// Errors from opening the repository a connection is for.
 pub const OpenError = http_backend.OpenServedError;
 
-/// Serve one `git-lfs-transfer <path> <operation>` connection over `in` and
-/// `out`: the repository at `path` under `root` (a path with no `..`, its
-/// leading `/` taken from the root). `false` when there is no repository
-/// there to serve, and nothing was said.
-pub fn serve(gpa: Allocator, io: Io, root: []const u8, path: []const u8, operation: Operation, in: *Io.Reader, out: *Io.Writer, options: Options) (Error || OpenError)!bool {
-    const repository = std.mem.trim(u8, path, "/");
-    var remote = (try http_backend.openServed(gpa, io, root, repository, true)) orelse return false;
+/// One `git-lfs-transfer <path> <operation>` connection.
+pub const Connection = struct {
+    /// The directory the repositories are served from.
+    root: []const u8,
+    /// `<path>`: the repository under `root`, a path with no `..`, its
+    /// leading `/` taken from the root.
+    path: []const u8,
+    operation: Operation,
+    in: *Io.Reader,
+    out: *Io.Writer,
+};
+
+/// Serve one connection. `false` when there is no repository at its path
+/// to serve, and nothing was said.
+pub fn serve(gpa: Allocator, io: Io, connection: Connection, options: Options) (Error || OpenError)!bool {
+    const repository = std.mem.trim(u8, connection.path, "/");
+    var remote = (try http_backend.openServed(gpa, io, connection.root, repository, true)) orelse return false;
     defer remote.deinit(io);
-    var session: Session = .{ .gpa = gpa, .io = io, .remote = &remote, .repository = repository, .operation = operation, .options = options, .in = in, .out = out };
+    var session: Session = .{ .gpa = gpa, .io = io, .remote = &remote, .repository = repository, .operation = connection.operation, .options = options, .in = connection.in, .out = connection.out };
     try session.greet();
     while (true) {
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -606,7 +616,7 @@ test "a connection is served whole: an object up, checked and down, a lock taken
     var limited = in.limited(.unlimited, &in_buffer);
     var answered: Io.Writer.Allocating = .init(gpa);
     defer answered.deinit();
-    try testing.expect(try serve(gpa, io, root, "/repo.git", .upload, &limited.interface, &answered.writer, .{
+    try testing.expect(try serve(gpa, io, .{ .root = root, .path = "/repo.git", .operation = .upload, .in = &limited.interface, .out = &answered.writer }, .{
         .store = directory.store(),
         .caller = .{ .authorize = Who.authorize, .now = Who.now },
     }));
