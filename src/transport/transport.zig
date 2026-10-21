@@ -442,6 +442,8 @@ pub const Session = struct {
         switch (service) {
             .upload_pack => if (!h.caps.fetch and !h.caps.import) return error.HelperCannotFetch,
             .receive_pack => if (!h.caps.push and !h.caps.@"export") return error.HelperCannotPush,
+            // An archive goes over a helper's `connect` alone, as git's.
+            .upload_archive => return error.UnsupportedTransport,
         }
         return .{ .gpa = gpa, .service = service, .impl = .{ .helper = .{
             .h = h,

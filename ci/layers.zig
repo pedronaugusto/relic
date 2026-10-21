@@ -35,14 +35,14 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "transport", .patterns = &.{"src/transport/**"} },
     .{ .name = "submodule", .patterns = &.{"src/submodule/**"} },
     .{ .name = "stage", .patterns = &.{ "src/stage/**", "src/stage.zig" } },
-    .{ .name = "archive", .patterns = &.{"src/archive.zig"} },
+    .{ .name = "archive", .patterns = &.{ "src/archive.zig", "src/archive/**" } },
     .{ .name = "clean", .patterns = &.{"src/clean.zig"} },
     .{ .name = "grep", .patterns = &.{"src/grep.zig"} },
     .{ .name = "lfs", .patterns = &.{"src/lfs/**"} },
     .{ .name = "public", .patterns = &.{ "src/commit.zig", "src/config.zig", "src/diff.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/relic.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" } },
 };
 
-pub const required = [_][]const u8{ "src/relic.zig", "src/tests.zig", "src/archive_test.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
+pub const required = [_][]const u8{ "src/relic.zig", "src/tests.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
 pub const entries: []const []const u8 = &.{};
 pub const modules: []const gantry.NamedModule = &.{
     .{ .name = "root", .path = "src/tests.zig", .from = "src/testing/concurrency.zig" },

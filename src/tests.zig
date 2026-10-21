@@ -150,7 +150,8 @@ test {
         _ = @import("patch/am_test.zig");
         _ = @import("commit/in_progress_test.zig");
         _ = @import("grep_test.zig");
-        _ = @import("archive_test.zig");
+        _ = @import("archive/archive_test.zig");
+        _ = @import("archive/remote_test.zig");
         _ = @import("clean_test.zig");
         _ = @import("fast/importer_test.zig");
         _ = @import("fast/exporter_test.zig");
@@ -283,6 +284,8 @@ test {
     _ = @import("transport/upload_pack.zig");
     _ = @import("transport/receive_pack.zig");
     _ = @import("transport/alternate_refs.zig");
+    _ = @import("archive/archive.zig");
+    _ = @import("archive/remote.zig");
     _ = @import("transport/http_backend.zig");
     _ = @import("lfs/server.zig");
     _ = @import("lfs/server/transfer.zig");

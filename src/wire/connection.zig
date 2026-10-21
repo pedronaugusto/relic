@@ -27,6 +27,8 @@ const progress = @import("../report.zig").progress;
 pub const Service = enum {
     upload_pack,
     receive_pack,
+    /// `git archive --remote`'s.
+    upload_archive,
 
     /// The program's name, which is also what the HTTP path and the
     /// `service` parameter carry.
@@ -34,6 +36,7 @@ pub const Service = enum {
         return switch (service) {
             .upload_pack => "git-upload-pack",
             .receive_pack => "git-receive-pack",
+            .upload_archive => "git-upload-archive",
         };
     }
 };

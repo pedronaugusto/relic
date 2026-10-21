@@ -26,6 +26,9 @@ fn section(service: Service) []const u8 {
     return switch (service) {
         .upload_pack => "uploadpack",
         .receive_pack => "receive",
+        // git hides no ref from upload-archive, whose tree-ish must be a
+        // ref's own; no setting of this name is read.
+        .upload_archive => "uploadarchive",
     };
 }
 
