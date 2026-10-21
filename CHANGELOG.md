@@ -68,6 +68,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A push to a repository on this machine, and a fetch from one, no longer hold the pack whole: the receive-pack or upload-pack in this process (`transport.in_process`, one for both) serves each request on a task beside the client, the request and the answer crossing through bounded pipes, so a pack goes over as it is written. A server that stops reading has the rest of the request taken, so the client reads its answer; a client canceled cancels the server's task. Where the caller's `Io` runs no second task, a request is held whole and answered after it, as before.
 - A ref list a server advertises, receive-pack's and upload-pack's, and a local fetch's, leaves out a symbolic ref that goes round in a circle, as git leaves a broken ref out, where it ended the conversation with `SymbolicRefLoop`.
 - An object database finds a `pack` directory made after it was opened, on its next scan or on a read that misses, as git reads `objects/pack` again; it found no pack there before.
 - A fast-forward merge keeps what is staged beside it, where it refused a staged change as `DirtyIndex`; a staged change the fast-forward would overwrite is still refused. The same holds for a rebase's checkouts, a cherry-pick's fast-forward and bisect's checkouts, all git's two-way merge.

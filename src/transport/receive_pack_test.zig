@@ -18,6 +18,7 @@ const program = @import("../process.zig").program;
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const push_mod = @import("push.zig");
+const fetch_mod = @import("fetch.zig");
 
 const zero = "0000000000000000000000000000000000000000";
 
@@ -775,4 +776,53 @@ test "a push updating a symbolic ref and its target is taken once, or refused wh
     try p.gitBoth(&.{ "update-ref", "--no-deref", "-d", "refs/heads/loop-a" });
     try p.gitBoth(&.{ "update-ref", "--no-deref", "-d", "refs/heads/loop-b" });
     try p.expectSame();
+}
+
+test "a push to a repository on this machine and a fetch back cross as they are written, and whole where no second task runs" {
+    const gpa = testing.allocator;
+    // A file far larger than the pipes between the two sides, which does
+    // not compress.
+    const noise = try gpa.alloc(u8, 1 << 20);
+    defer gpa.free(noise);
+    var state: u64 = 0x2545f4914f6cdd1d;
+    for (noise) |*b| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        b.* = @truncate(state);
+    }
+    for ([_]bool{ true, false }) |beside| {
+        var threaded: Io.Threaded = .init(gpa, .{ .concurrent_limit = if (beside) .unlimited else .nothing });
+        defer threaded.deinit();
+        const io = threaded.io();
+        var source = try testgit.Repo.init(gpa, io, &.{});
+        defer source.deinit();
+        try source.writeFile(io, "noise.bin", noise);
+        try source.exec(io, &.{ "add", "noise.bin" });
+        try source.exec(io, &.{ "commit", "-qm", "noise" });
+        // No hooks: where no second task runs, none could.
+        var target = try testgit.Repo.init(gpa, io, &.{"--bare"});
+        defer target.deinit();
+        const target_path = try target.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(target_path);
+        var repo = try repo_mod.Repository.open(gpa, io, source.dir, .{});
+        defer repo.deinit(io);
+        const who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
+        var pushed = try push_mod.push(gpa, io, &repo, target_path, .{ .who = who, .refspecs = &.{"HEAD:refs/heads/main"} });
+        defer pushed.deinit();
+        try testing.expectEqual(push_mod.RefResult.Status.ok, pushed.refs[0].status);
+        try target.exec(io, &.{ "fsck", "--strict" });
+        // And back, into a repository that has none of it.
+        var empty = try testgit.Repo.init(gpa, io, &.{});
+        defer empty.deinit();
+        var back = try repo_mod.Repository.open(gpa, io, empty.dir, .{});
+        defer back.deinit(io);
+        var fetched = try fetch_mod.fetch(gpa, io, &back, target_path, .{ .refspecs = &.{"refs/heads/main:refs/heads/fetched"}, .who = who });
+        defer fetched.deinit();
+        const sent = try source.line(io, &.{ "rev-parse", "HEAD:noise.bin" });
+        defer gpa.free(sent);
+        const got = try empty.line(io, &.{ "rev-parse", "fetched:noise.bin" });
+        defer gpa.free(got);
+        try testing.expectEqualStrings(sent, got);
+    }
 }

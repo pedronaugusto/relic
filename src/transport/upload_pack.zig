@@ -36,6 +36,7 @@ const filter_spec = @import("../wire.zig").filter_spec;
 const ignore = @import("../patterns.zig").ignore;
 const rev_walk = @import("../walk/walk.zig");
 const local = @import("local.zig");
+const in_process = @import("in_process.zig");
 const connection = @import("../wire.zig").connection;
 const promisors = @import("../wire.zig").promisors;
 const side_band = @import("../wire.zig").side_band;
@@ -1061,112 +1062,18 @@ fn writeError(err: pkt_line.WriteError) Error {
 /// request answered whole as it is sent, as over HTTP. The result is the
 /// caller's; closing it closes `remote` too.
 pub fn connect(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Allocator.Error!*Connection {
-    const c = try gpa.create(InProcess);
     var serving = options;
     serving.stateless = true;
-    c.* = .{
-        .gpa = gpa,
-        .io = io,
-        .remote = remote,
-        .server = .init(gpa, io, remote, version, serving),
-        .connection = .{ .context = c, .vtable = &InProcess.vtable, .stateless = true },
-    };
-    return &c.connection;
+    return in_process.InProcess(Server, told).create(gpa, io, remote, .init(gpa, io, remote, version, serving));
 }
 
-const InProcess = struct {
-    gpa: Allocator,
-    io: Io,
-    remote: *local.Remote,
-    server: Server,
-    connection: Connection,
-    request_bytes: Io.Writer.Allocating = undefined,
-    response_bytes: Io.Writer.Allocating = undefined,
-    started: bool = false,
-    fixed: Io.Reader = undefined,
-    limited: Io.Reader.Limited = undefined,
-    buffer: [pkt_line.max_line]u8 = undefined,
-    request_fixed: Io.Reader = undefined,
-    request_limited: Io.Reader.Limited = undefined,
-    request_buffer: [pkt_line.max_line]u8 = undefined,
-
-    const vtable: Connection.VTable = .{
-        .advertisement = advertisement,
-        .request = request,
-        .response = response,
-        .failure = failure,
-        .deinit = deinit,
+/// The refusals upload-pack answers the client with, which it reads.
+fn told(err: Error) bool {
+    return switch (err) {
+        error.NotOurRef, error.FilterRefused, error.ProtocolError => true,
+        else => false,
     };
-
-    fn self(context: *anyopaque) *InProcess {
-        return @ptrCast(@alignCast(context)); // safe: the context handed out with this vtable is an InProcess
-    }
-
-    fn start(c: *InProcess) void {
-        if (c.started) return;
-        c.started = true;
-        c.request_bytes = .init(c.gpa);
-        c.response_bytes = .init(c.gpa);
-    }
-
-    fn answer(c: *InProcess) *Io.Reader {
-        c.fixed = .fixed(c.response_bytes.written());
-        c.limited = c.fixed.limited(.unlimited, &c.buffer);
-        return &c.limited.interface;
-    }
-
-    fn advertisement(context: *anyopaque, conn: *Connection) connection.Error!*Io.Reader {
-        const c = self(context);
-        c.start();
-        c.response_bytes.clearRetainingCapacity();
-        c.server.advertise(&c.response_bytes.writer) catch |err| return fail(conn, err);
-        return c.answer();
-    }
-
-    fn request(context: *anyopaque, _: *Connection) connection.Error!*Io.Writer {
-        const c = self(context);
-        c.start();
-        c.request_bytes.clearRetainingCapacity();
-        return &c.request_bytes.writer;
-    }
-
-    fn response(context: *anyopaque, conn: *Connection) connection.Error!*Io.Reader {
-        const c = self(context);
-        c.response_bytes.clearRetainingCapacity();
-        c.request_fixed = .fixed(c.request_bytes.written());
-        c.request_limited = c.request_fixed.limited(.unlimited, &c.request_buffer);
-        c.server.serveRequest(&c.request_limited.interface, &c.response_bytes.writer) catch |err| switch (err) {
-            // The client was told, and reads it.
-            error.NotOurRef, error.FilterRefused, error.ProtocolError => {},
-            else => return fail(conn, err),
-        };
-        return c.answer();
-    }
-
-    fn fail(conn: *Connection, err: Error) connection.Error {
-        conn.setMessage(@errorName(err));
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.Canceled => error.Canceled,
-            else => error.ConnectionFailed,
-        };
-    }
-
-    fn failure(_: *anyopaque, _: *Connection) connection.Error {
-        return error.ConnectionFailed;
-    }
-
-    fn deinit(io: Io, context: *anyopaque) void {
-        const c = self(context);
-        if (c.started) {
-            c.request_bytes.deinit();
-            c.response_bytes.deinit();
-        }
-        c.remote.deinit(io);
-        c.gpa.destroy(c.remote);
-        c.gpa.destroy(c);
-    }
-};
+}
 
 test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
     const gpa = std.testing.allocator;
