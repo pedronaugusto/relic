@@ -119,6 +119,10 @@ pub const Error = repo_mod.Error || Repository.LockIndexError || Repository.Writ
     /// A directory the index holds as an entry that is not a gitlink:
     /// git's "Directory %s is in index and no submodule?".
     DirectoryNotSubmodule,
+    /// A directory whose destination is inside it as the filesystem
+    /// folds case (`mv dir Dir` under `core.ignoreCase`): git's "renaming
+    /// '%s' failed: Invalid argument".
+    DirectoryIntoItself,
 };
 
 /// What each source is moved as: git's `update_mode`.
@@ -393,7 +397,15 @@ const Mover = struct {
         for (m.items.items) |item| {
             const mode = item.mode;
             if (!(mode.index or mode.sparse or mode.skip_worktree_dir) and !(m.dst_mode.skip_worktree_dir or m.dst_mode.sparse)) {
-                wt.rename(item.source, wt, item.destination, io) catch |err| {
+                // Under `core.ignoreCase` a directory renamed by case alone is
+                // moved into the directory itself, which the filesystem refuses.
+                if (mode.working_directory and m.ignore_case and std.ascii.startsWithIgnoreCase(item.destination, item.source) and
+                    item.destination.len > item.source.len and item.destination[item.source.len] == '/')
+                {
+                    if (m.options.skip_errors) continue;
+                    return error.DirectoryIntoItself;
+                }
+                fs.rename(io, wt, item.source, item.destination) catch |err| {
                     if (m.options.skip_errors) continue;
                     return err;
                 };
@@ -458,7 +470,7 @@ const Mover = struct {
                 try m.dirty.append(m.arena, dst);
                 m.outcome.dirty = m.dirty.items;
                 if (std.Io.Dir.path.dirnamePosix(dst)) |parent| try fs.makeDirs(io, wt, parent, m.repo.sharedPermissions());
-                try wt.rename(src, wt, dst, io);
+                try fs.rename(io, wt, src, dst);
             }
         }
     }

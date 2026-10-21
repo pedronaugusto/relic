@@ -37,6 +37,7 @@ const pack_mod = @import("../odb/pack.zig");
 const gitlink = @import("../discover.zig").gitlink;
 const native = @import("native.zig");
 const program = @import("../process.zig").program;
+const config_mod = @import("../config/config.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -198,6 +199,17 @@ pub const NewBlobs = enum {
     pub const unpack_limit = 100;
 };
 
+/// `add.ignoreErrors`, or its older spelling `add.ignore-errors`, the last
+/// of either deciding, as git's `add_config` reads them: what
+/// `AddOptions.ignore_errors` is for `git add` when the command line says
+/// neither `--ignore-errors` nor `--no-ignore-errors`. Off when unset.
+pub fn ignoreErrorsConfigured(config: *const config_mod.Config) config_mod.ValueError!bool {
+    var on = false;
+    var it = config.iterate(&.{ "add.ignoreerrors", "add.ignore-errors" });
+    while (it.next()) |entry| on = if (entry.value) |value| try config_mod.parseBool(value) else true;
+    return on;
+}
+
 /// How `addAll` behaves.
 pub const AddOptions = struct {
     rules: Rules = .{},
@@ -211,7 +223,8 @@ pub const AddOptions = struct {
     /// Skip files that cannot be read or hashed and keep staging the rest,
     /// as `git add --ignore-errors` does. `error_report` records each path
     /// and error; `AddOutcome.skipped_errors` counts them. Without this,
-    /// the first such error stops the walk.
+    /// the first such error stops the walk. `ignoreErrorsConfigured` is
+    /// what `git add` takes when its command line does not say.
     ignore_errors: bool = false,
     /// Where files skipped under `ignore_errors` are reported.
     error_report: ?*AddErrorReport = null,

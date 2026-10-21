@@ -38,9 +38,15 @@ fn compare(theirs: *testgit.Repo, ours: *testgit.Repo, n: usize, case: Case) !vo
     defer ran.deinit(gpa);
     var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
     defer native.deinit(io);
-    var outcome = try move_mod.move(gpa, io, &native, case.options);
-    defer outcome.deinit();
-    std.testing.expectEqual(ran.code != 0, outcome.refused()) catch |err| {
+    const refused = blk: {
+        var outcome = move_mod.move(gpa, io, &native, case.options) catch |err| switch (err) {
+            error.DirectoryIntoItself => break :blk true,
+            else => |e| return e,
+        };
+        defer outcome.deinit();
+        break :blk outcome.refused();
+    };
+    std.testing.expectEqual(ran.code != 0, refused) catch |err| {
         std.debug.print("mv case {d}: git exited {d}: {s}\n", .{ n, ran.code, ran.stderr });
         return err;
     };
@@ -83,6 +89,8 @@ test "mv renames, moves into directories and refuses what git's does" {
         .{ .args = &.{ "dir/sub/c.txt", "dir", "other" }, .options = .{ .sources = &.{ "dir/sub/c.txt", "dir" }, .destination = "other" } },
         .{ .args = &.{ "a.txt", "m.txt", "z.txt" }, .options = .{ .sources = &.{ "a.txt", "m.txt" }, .destination = "z.txt" } },
         .{ .args = &.{ "a.txt", "dir", "other" }, .options = .{ .sources = &.{ "a.txt", "dir" }, .destination = "other" } },
+        .{ .args = &.{ "a.txt", "A.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "A.txt" } },
+        .{ .args = &.{ "dir", "Dir" }, .options = .{ .sources = &.{"dir"}, .destination = "Dir" } },
     };
     for (cases, 0..) |case, n| {
         var theirs = try fixture();

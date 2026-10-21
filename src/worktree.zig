@@ -20,6 +20,7 @@ pub const NewBlobs = @import("checkout/checkout.zig").NewBlobs;
 pub const AddOptions = @import("checkout/checkout.zig").AddOptions;
 pub const AddErrorReport = @import("checkout/checkout.zig").AddErrorReport;
 pub const addAll = @import("checkout/checkout.zig").addAll;
+pub const ignoreErrorsConfigured = @import("checkout/checkout.zig").ignoreErrorsConfigured;
 pub const writeTree = @import("checkout/checkout.zig").writeTree;
 pub const writeTreeInto = @import("checkout/checkout.zig").writeTreeInto;
 pub const Change = @import("checkout/checkout.zig").Change;

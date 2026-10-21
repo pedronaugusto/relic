@@ -230,6 +230,41 @@ test "without ignore-errors the first unreadable file stops add" {
     try std.testing.expect(h.index.find("z-good") == null);
 }
 
+test "add.ignoreErrors and add.ignore-errors decide git add's default as git reads them" {
+    // Windows needs ACL changes, not chmod, to deny reading a file.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const settings = [_][]const []const u8{
+        &.{},
+        &.{ "add.ignoreErrors", "true" },
+        &.{ "add.ignore-errors", "yes" },
+        &.{ "add.ignoreErrors", "false" },
+        &.{ "add.ignoreErrors", "true", "add.ignore-errors", "false" },
+        &.{ "add.ignore-errors", "false", "add.ignoreErrors", "on" },
+    };
+    for (settings) |pairs| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        var at: usize = 0;
+        while (at < pairs.len) : (at += 2) try repo.exec(io, &.{ "config", "--add", pairs[at], pairs[at + 1] });
+        try repo.writeFile(io, "a-unreadable", "cannot read\n");
+        try repo.writeFile(io, "z-good", "staged when errors are ignored\n");
+        _ = try makeUnreadable(io, repo.dir, "a-unreadable");
+        // glint-ignore: Z026 -- restoring the mode only lets the temporary directory be removed; the test's result is already decided
+        defer repo.dir.setFilePermissions(io, "a-unreadable", .default_file, .{}) catch {};
+        repo.report_failures = false;
+        var ran = try repo.capture(io, &.{ "add", "-A" });
+        defer ran.deinit(gpa);
+        const listed = try repo.run(io, &.{ "ls-files", "z-good" });
+        defer gpa.free(listed);
+
+        var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+        defer native.deinit(io);
+        try std.testing.expectEqual(listed.len != 0, try worktree.ignoreErrorsConfigured(native.configuration()));
+    }
+}
+
 test "the stat shortcut means a warm addAll hashes nothing" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
