@@ -132,6 +132,9 @@ const Settings = struct {
     /// `receive.certNonceSlop`: how many seconds apart another server's
     /// nonce may be and still count as this one's.
     cert_nonce_slop: u64,
+    /// `receive.unpackLimit`, else `transfer.unpackLimit`, else git's 100:
+    /// a pack of fewer objects is stored loose.
+    unpack_limit: u64,
 
     fn read(config: *const config_mod.Config) Settings {
         const max = config.getInt("receive.maxinputsize", 0) catch 0;
@@ -147,6 +150,13 @@ const Settings = struct {
             .max_input_size = if (max > 0) .fromRaw(@intCast(max)) else null,
             .cert_nonce_seed = config.get("receive.certnonceseed"),
             .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
+            .unpack_limit = limit: {
+                for ([_][]const u8{ "receive.unpacklimit", "transfer.unpacklimit" }) |key| {
+                    const value = config.getInt(key, -1) catch -1;
+                    if (value >= 0) break :limit @intCast(value);
+                }
+                break :limit 100;
+            },
         };
     }
 };
@@ -386,7 +396,17 @@ pub const Server = struct {
         }
         var received: ?Received = null;
         defer if (received) |*r| r.deinit(s.io);
-        if (!deleteOnly(commands)) {
+        if (!deleteOnly(commands)) unpacking: {
+            const count = switch (packHeader(in)) {
+                .count => |n| n,
+                .refused => |why| {
+                    unpack_status = why;
+                    break :unpacking;
+                },
+            };
+            // git's `unpack-objects` below the limit, its `index-pack`
+            // at it and above.
+            const loose = count < s.settings.unpack_limit;
             q = try Quarantine.begin(s.gpa, s.io, s.db());
             var diagnostic: index_pack.Diagnostic = .{};
             received = s.unpack(in, &q.?, &diagnostic) catch |err| switch (err) {
@@ -400,14 +420,16 @@ pub const Server = struct {
                         try s.rpErrorPlain("object {f}: {s}", .{ oid, text });
                         try s.rpLine("fatal: fsck error in packed object", .{});
                     };
-                    unpack_status = "index-pack abnormal exit";
+                    unpack_status = if (loose) "unpack-objects abnormal exit" else "index-pack abnormal exit";
                     break :blk null;
                 },
             };
+            if (received) |*r| r.loose = loose;
             if (received != null) try s.checkShallow(arena, commands, shallow.items, &received.?);
         }
 
         try s.execute(arena, commands, unpack_status, &q, &received, &keeps, push_options.items);
+        if (received) |*r| try s.settleLoose(r, &keeps);
         try s.report(commands, unpack_status);
         _ = try s.runReceiveHook(arena, "post-receive", commands, true, push_options.items, null);
         try s.runPostUpdate(arena, commands);
@@ -516,8 +538,16 @@ pub const Server = struct {
         links: index_pack.Links,
         /// The pack's index, in the quarantine, while it is there.
         index: ?pack.Index = null,
+        /// Fewer objects than `receive.unpackLimit`: they go in loose.
+        loose: bool = false,
+        /// The objects it brings that the repository lacked, when `loose`.
+        fresh: std.ArrayList(Oid) = .empty,
+        /// It was moved out of the quarantine into the repository.
+        migrated: bool = false,
+        gpa: Allocator,
 
         fn deinit(r: *Received, io: Io) void {
+            r.fresh.deinit(r.gpa);
             if (r.index) |*i| i.deinit();
             r.links.deinit();
             r.result.deinit(io);
@@ -530,7 +560,7 @@ pub const Server = struct {
         const config = s.remote.repo.configuration();
         var rules = try fsck.forTransfer(s.gpa, s.io, config, .{ .kind = s.kind(), .scope = .receive, .base = s.remote.repo.gitDirectory() }, .{});
         defer if (rules) |*r| r.deinit(s.gpa);
-        var received: Received = .{ .result = undefined, .links = .init(s.gpa) };
+        var received: Received = .{ .result = undefined, .links = .init(s.gpa), .gpa = s.gpa };
         errdefer received.links.deinit();
         try q.db.objectsDirectory().createDirPath(s.io, "pack");
         var pack_dir = try q.db.objectsDirectory().openDir(s.io, "pack", .{ .iterate = true });
@@ -552,6 +582,57 @@ pub const Server = struct {
             received.index = try pack.Index.open(s.gpa, s.io, pack_dir, idx_name, .{ .kind = s.kind(), .max_bytes = 1 << 30 });
         }
         return received;
+    }
+
+    /// The received pack made ready to move out of the quarantine: its
+    /// index let go, and below `receive.unpackLimit` the objects it brings
+    /// that the repository lacks noted, to be written loose once the refs
+    /// name them (`settleLoose`). A thin pack's bases, and anything else
+    /// the repository holds already, are not written again, as git's
+    /// `unpack-objects` does not write them.
+    fn placeReceived(s: *Server, r: *Received) !void {
+        var index = r.index orelse return;
+        r.index = null;
+        defer index.deinit();
+        if (!r.loose) return;
+        var it = index.iterate();
+        while (try it.next()) |entry| {
+            if (!try s.db().exists(s.io, entry.oid)) try r.fresh.append(s.gpa, entry.oid);
+        }
+    }
+
+    /// Below `receive.unpackLimit`, the pack stored as git's
+    /// `unpack-objects` stores it: its new objects loose, the pack gone.
+    /// Done once the refs are written, so that until then the pack and its
+    /// `.keep` hold the objects against a collection running beside the
+    /// push, as for any pack received. A failure here leaves the pack as
+    /// it is, every object still in it.
+    fn settleLoose(s: *Server, r: *Received, keeps: *std.ArrayList(keep.Token)) Self.Error!void {
+        if (!r.loose or !r.migrated) return;
+        const name = r.result.name orelse return;
+        settle: {
+            for (r.fresh.items) |oid| {
+                _ = s.db().loosen(s.io, oid, null) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Canceled => return error.Canceled,
+                    // the pack still holds it, and every other one
+                    else => break :settle,
+                };
+            }
+            // Its `.keep` first, which would hold it.
+            for (keeps.items) |*token| token.deinit(s.io);
+            keeps.clearRetainingCapacity();
+            var hex: [hash.max_hex_len]u8 = undefined;
+            var name_buf: [96]u8 = undefined;
+            // unreachable: the longest hex name is 64 digits, 69 bytes with `pack-`
+            const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch unreachable;
+            _ = s.db().removePacks(s.io, &.{base}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                // its objects are loose now as well; the pack stays beside them
+                else => {},
+            };
+        }
     }
 
     /// A shallow client's boundary: a command whose new history reaches a
@@ -622,9 +703,16 @@ pub const Server = struct {
         // The refs are about to name the objects: they go where every
         // reader finds them.
         if (q.*) |*held| {
-            if (received.*) |*r| if (r.index) |*i| {
-                i.deinit();
-                r.index = null;
+            const placed = if (received.*) |*r| s.placeReceived(r) else {};
+            placed catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => {
+                    for (commands) |*cmd| {
+                        if (cmd.standing()) cmd.error_string = "unable to migrate objects to permanent storage";
+                    }
+                    return;
+                },
             };
             held.migrate(s.io, s.db(), keeps) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -636,6 +724,7 @@ pub const Server = struct {
                     return;
                 },
             };
+            if (received.*) |*r| r.migrated = true;
         }
 
         const head = try s.remote.repo.refStore().currentBranch(arena, s.io);
@@ -1608,6 +1697,16 @@ fn certificateOptionsMatch(cert: []const u8, options: []const []const u8) bool {
     return seen == options.len;
 }
 
+/// git's `parse_pack_header`, looking at the pack without taking it: how
+/// many objects it says it holds, or git's words for why it is no pack.
+fn packHeader(in: *Io.Reader) union(enum) { count: u32, refused: []const u8 } {
+    const head = in.peek(12) catch return .{ .refused = "eof before pack header was fully read" };
+    if (!std.mem.eql(u8, head[0..4], "PACK")) return .{ .refused = "protocol error (pack signature mismatch detected)" };
+    const version = std.mem.readInt(u32, head[4..8], .big);
+    if (version != 2 and version != 3) return .{ .refused = "protocol error (pack version unsupported)" };
+    return .{ .count = std.mem.readInt(u32, head[8..12], .big) };
+}
+
 /// A packet's text without its one trailing newline, as git's reader
 /// chomps it.
 fn chompLine(raw: []const u8) []const u8 {
@@ -1928,6 +2027,28 @@ test "a push certificate's nonce is made as git 2.55's receive-pack makes it, in
         const ours = try certNonce(gpa, if (std.mem.eql(u8, format, "sha1")) .sha1 else .sha256, "repo.git", "a seed", stamp);
         defer gpa.free(ours);
         try std.testing.expectEqualStrings(theirs, ours);
+    }
+}
+
+test "a pack's header is read as git's parse_pack_header reads it, and left for the indexer" {
+    const Case = struct { bytes: []const u8, refused: ?[]const u8, count: u32 = 0 };
+    const cases = [_]Case{
+        .{ .bytes = "PACK\x00\x00\x00\x02\x00\x00\x01\x2cmore", .refused = null, .count = 300 },
+        .{ .bytes = "PACK\x00\x00\x00\x03\x00\x00\x00\x01", .refused = null, .count = 1 },
+        .{ .bytes = "PACK\x00\x00\x00", .refused = "eof before pack header was fully read" },
+        .{ .bytes = "KCAP\x00\x00\x00\x02\x00\x00\x00\x01", .refused = "protocol error (pack signature mismatch detected)" },
+        .{ .bytes = "PACK\x00\x00\x00\x04\x00\x00\x00\x01", .refused = "protocol error (pack version unsupported)" },
+    };
+    for (cases) |case| {
+        var in: Io.Reader = .fixed(case.bytes);
+        switch (packHeader(&in)) {
+            .count => |n| {
+                try std.testing.expect(case.refused == null);
+                try std.testing.expectEqual(case.count, n);
+                try std.testing.expectEqual(@as(usize, 0), in.seek);
+            },
+            .refused => |why| try std.testing.expectEqualStrings(case.refused.?, why),
+        }
     }
 }
 

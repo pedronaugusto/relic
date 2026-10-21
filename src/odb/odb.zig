@@ -458,6 +458,9 @@ pub const Odb = struct {
 
     fn scanPacks(odb: *Odb, io: Io, source_index: usize) ErrorNamespace.Error!void {
         const source = &odb.backendData().sources.items[source_index];
+        // A `pack` directory made since the database was opened is found
+        // here, as git reads `objects/pack` again on every scan.
+        if (source.pack_dir == null) source.pack_dir = try opening.openDirectory(io, source.dir, "pack");
         const pack_dir = source.pack_dir orelse return;
         var it = pack_dir.iterate();
         while (try it.next(io)) |entry| {
@@ -1076,9 +1079,10 @@ pub const Odb = struct {
 
     /// git's `force_object_loose`: `oid`, held in a pack, written as a loose
     /// object of this database's own directory with its file time set to
-    /// `time`, as `repack -A` turns an unreachable object loose; `false`
-    /// when a loose copy is there already, which is left as it is.
-    pub fn loosen(odb: *Odb, io: Io, oid: Oid, time: i64) ErrorNamespace.Error!bool {
+    /// `time`, as `repack -A` turns an unreachable object loose, or left at
+    /// now when `null`, as `unpack-objects` writes one; `false` when a loose
+    /// copy is there already, which is left as it is.
+    pub fn loosen(odb: *Odb, io: Io, oid: Oid, time: ?i64) ErrorNamespace.Error!bool {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         odb.writableSource().dir.access(io, odb.loosePath(oid, &path_buf), .{}) catch |err| switch (err) {
             error.FileNotFound => {

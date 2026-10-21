@@ -51,6 +51,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Odb.removePacks` (git's `unlink_pack_path`, the `.idx` first, a kept pack left, the multi-pack index cleared when it names one), `Odb.prunePacked` (`prune-packed`), `Odb.localPacks`, `Odb.packNamed`, `Odb.isPacked`, `Odb.hasAlternates`.
 - `odb.mtimes`: a cruft pack's `.mtimes` read as git's `load_pack_mtimes_file` checks it.
 - `gc.recentObjectsHook` in `maintenance.reachableObjects` and `prune` (`ReachOptions.programs`, `PruneOptions.programs`): each value run through the shell where git runs, its output one object name per line, the objects named recent whatever their time and what they reach kept; run once, at the first object too old to be recent, as git loads it. Without `programs` it is `ProgramsNotGranted`; a failed command `RecentObjectsHookFailed`, a line that is no object name `InvalidRecentObject`, as git dies; a bare value `MissingValue` (git reports it and runs no hook). Held to git 2.55's prune, as are a git-written cruft pack's per-object times.
+- `receive.unpackLimit`, else `transfer.unpackLimit`, else git's 100: a pushed pack of fewer objects is stored loose, as git's `unpack-objects` stores it (an object the repository holds already, a thin pack's base among them, not written again), once the refs are written: until then it is held as any received pack is, a pack with its `.keep`, against a collection running beside the push. One at the limit or above is kept as a pack; a failure below it is `unpack-objects abnormal exit`. A pack whose header does not read is refused before anything is kept, in git's `parse_pack_header` words.
 
 ### Changed
 
@@ -61,6 +62,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An object database finds a `pack` directory made after it was opened, on its next scan or on a read that misses, as git reads `objects/pack` again; it found no pack there before.
 - A fast-forward merge keeps what is staged beside it, where it refused a staged change as `DirtyIndex`; a staged change the fast-forward would overwrite is still refused. The same holds for a rebase's checkouts, a cherry-pick's fast-forward and bisect's checkouts, all git's two-way merge.
 - `transport.remote.Branch.fetchRemote` and `pushRemote` fall back to the only remote when there is one, before `origin`, as git does.
 - Two tasks of one LFS operation no longer allocate from its arena at once: an API request's URL, and a custom adapter's failure, were made in it without its lock.

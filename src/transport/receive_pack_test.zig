@@ -156,6 +156,9 @@ const Pair = struct {
             }
             var dir = try Io.Dir.cwd().openDir(io, target, .{});
             defer dir.close(io);
+            // git's receive-pack starts its auto maintenance detached,
+            // which would move objects while they are compared.
+            try p.git(dir, &.{ "config", "receive.autogc", "false" });
             for (settings) |kv| try p.git(dir, &.{ "config", kv[0], kv[1] });
             const git_dir = if (bare) "." else ".git";
             for (hook_scripts) |hook| {
@@ -261,6 +264,22 @@ const Pair = struct {
         defer for (logs) |l| p.gpa.free(l);
         try testing.expectEqualStrings(refs[0], refs[1]);
         try testing.expectEqualStrings(logs[0], logs[1]);
+        // Stored alike: loose below the unpack limit, in packs above it.
+        var stored: [2][]u8 = undefined;
+        for (listed, 0..) |target, i| {
+            var dir = try Io.Dir.cwd().openDir(p.io, target, .{});
+            defer dir.close(p.io);
+            const counted = try testremote.gitInputEnv(p.gpa, p.io, dir, &p.env, &.{ "count-objects", "-v" }, "", true);
+            defer p.gpa.free(counted);
+            var kept: std.ArrayList(u8) = .empty;
+            var lines = std.mem.tokenizeScalar(u8, counted, '\n');
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "count:") or std.mem.startsWith(u8, line, "in-pack:") or std.mem.startsWith(u8, line, "packs:")) try kept.print(p.gpa, "{s}\n", .{line});
+            }
+            stored[i] = try kept.toOwnedSlice(p.gpa);
+        }
+        defer for (stored) |text| p.gpa.free(text);
+        try testing.expectEqualStrings(stored[0], stored[1]);
         var ours = try Io.Dir.cwd().openDir(p.io, p.ours, .{});
         defer ours.close(p.io);
         try p.git(ours, &.{ "fsck", "--strict", "--no-dangling" });
@@ -642,4 +661,20 @@ test "denyCurrentBranch=updateInstead brings the working tree along with its bra
     try p.both(&.{"main:refs/heads/side"});
     try p.expectSameWorktrees("-linked");
     try p.both(&.{":refs/heads/side"});
+}
+
+test "a pack below receive.unpackLimit is stored loose and one at it kept, as git's unpack-objects and index-pack store them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{.{ "receive.unpackLimit", "10" }});
+    defer p.deinit();
+    // Two commits' objects, more than ten: kept as a pack.
+    try p.both(&.{"main~1:refs/heads/main"});
+    // One commit's eight: loose.
+    try p.both(&.{"main:refs/heads/main"});
+    // transfer.unpackLimit when receive.unpackLimit is unset.
+    try p.gitBoth(&.{ "config", "--unset", "receive.unpackLimit" });
+    try p.gitBoth(&.{ "config", "transfer.unpackLimit", "1" });
+    try testremote.addCommits(gpa, io, &p.source, 3, 1);
+    try p.both(&.{"main:refs/heads/main"});
 }
