@@ -635,9 +635,16 @@ pub const ReadOptions = struct {
 };
 
 pub const WriteOptions = struct {
-    /// Which version to write. `auto` is version 2, or version 3 when an
-    /// entry needs an extended flag — which is git's own rule.
+    /// Which version to write. `auto` is git's rule: the version the index
+    /// carries, the file's or `new_version` for one made here, with 2 and 3
+    /// each written as the other when that is what the entries need --
+    /// version 3 only while an entry needs an extended flag.
     version: Version = .auto,
+    /// The version an index made here is first written in under `auto`:
+    /// git's `index.version`, 3 when it is not set (and so 2 until an entry
+    /// needs an extended flag). One the file carries is kept, as git keeps
+    /// it. 2, 3 or 4.
+    new_version: u32 = 3,
     /// Whether to write the all-zero trailer `index.skipHash` asks for.
     /// Reading one is always accepted; writing one is a choice.
     skip_hash: bool = false,
@@ -691,8 +698,10 @@ pub const Index = struct {
 
     gpa: Allocator,
     kind: Kind,
-    /// The version the file on the disk carried, or 2 for one made here.
-    version: u32 = 2,
+    /// The version the file on the disk carried, or 0 for one made here,
+    /// which `WriteOptions.new_version` decides when it is first written:
+    /// git's `istate->version`.
+    version: u32 = 0,
     /// Sorted by path and then by stage.
     entries: std.ArrayList(Entry) = .empty,
     cache_tree: ?CacheTree = null,
@@ -1506,6 +1515,8 @@ pub const Index = struct {
             .v3 => 3,
             .v4 => 4,
             .auto => blk: {
+                const carried = if (index.version != 0) index.version else options.new_version;
+                if (carried != 2 and carried != 3) break :blk carried;
                 for (index.entries.items) |e| {
                     if (e.needsExtendedFlags()) break :blk 3;
                 }
@@ -1554,6 +1565,7 @@ pub const Index = struct {
         const version = index.versionFor(options);
         std.debug.assert(version >= 2);
         std.debug.assert(version <= 4);
+        index.version = version;
         // The entries rise, each path and stage once: what reading the
         // index back checks. The entries are the caller's to change, so
         // this is a refusal and not an assertion.

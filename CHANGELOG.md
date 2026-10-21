@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `index.Index.version` is 0 for an index made here, not 2; `WriteOptions.version` `.auto` keeps the version the index carries (a version 4 index stays 4), as git's `do_write_index` does, and `WriteOptions.new_version` is the one an index made here is first written in.
 - `maintenance.RepackOptions.pack`, `GcOptions.pack`, `RunOptions.pack`, `transport.bundle`'s `pack` and `transport.local.Remote.CopyOptions.pack` are optional: `null` takes the repository's pack settings (`Odb.packOptions`).
 - `commit.merging.conclude` returns `Concluded` (the commit, and what became of `MERGE_AUTOSTASH`); `merging.abort` takes `AbortOptions` and returns `?stash.Restored`; `merging.removeMergeState` takes who saves a leftover `MERGE_AUTOSTASH`.
 - `commit.rebase.abort` and `rebase.quit` take `rebase.Options` and return `?stash.Restored`; `commit.sequencer.quit` takes `who`.
@@ -94,6 +95,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `worktree.move` (`git mv`, git 2.55's `builtin/mv.c`): a file or directory renamed, or several moved into a directory, in the working tree and the index together, each source checked as git checks it (`Outcome.refusal` with git's reason, or under `skip_errors` passed over into `Outcome.skipped`); `force`, `dry_run`; a submodule's `.gitmodules` path rewritten and staged and its `.git` file and `core.worktree` reconnected, nested submodules too; across the sparse-checkout cone only under `sparse` (a dirty file moved out of the cone stays, `Outcome.dirty`); a case-only rename under `core.ignoreCase`, a directory's refused as git fails it (`error.DirectoryIntoItself`). Held to git 2.55 for files, directories, submodules (in place and absorbed) and a sparse cone.
 - `index.Index.rename` (git's `rename_index_entry_at`, replacing what the new name collides with); `submodule.gitmodulesStaged`, `removeFromGitmodules`, `moveInGitmodules`, `gitDirOf` and `connectGitDir` (git's `connect_work_tree_and_git_dir`); `patterns.pathspec.normalize`. `checkout.AddOptions.prefix` may name one file.
 - `worktree.ignoreErrorsConfigured`: `add.ignoreErrors`, or `add.ignore-errors`, the last of either deciding, as git's `add_config` reads them, for `AddOptions.ignore_errors`. Held to `git add -A`.
+- `repo.Repository.indexWriteOptions`: the index written as git 2.55's settings say -- `index.version` for a new index (`feature.manyFiles` makes it 4), `index.skipHash` (on under `feature.manyFiles`), `EOIE` and `IEOT` by `index.recordEndOfIndexEntries`, `index.recordOffsetTable` and `index.threads` -- which `LockedIndex.commit` writes with. Held to git 2.55's index files under each setting.
 
 ### Changed
 

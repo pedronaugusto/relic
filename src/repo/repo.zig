@@ -913,6 +913,47 @@ pub const Repository = struct {
         return .{ .shared = repo.data().shared, .sync = repo.data().fsync.sync(.index) };
     }
 
+    /// How `index` is written, as git's `do_write_index` reads its settings:
+    /// `index.version` for an index first written now (`feature.manyFiles`
+    /// makes it 4; a value outside 2 to 4 is git's default, 3), the all-zero
+    /// trailer of `index.skipHash` (on under `feature.manyFiles`), `EOIE` and
+    /// `IEOT` as `index.recordEndOfIndexEntries` and
+    /// `index.recordOffsetTable` say, each else on when `index.threads` asks
+    /// for other than one thread; the table only with `index.threads`, in
+    /// as many blocks as threads, or for `true` one per ten thousand entries
+    /// up to one fewer than the processors. The index lock's settings too.
+    pub fn indexWriteOptions(repo: *const Repository, index: *const index_mod.Index) Self.Error!index_mod.WriteOptions {
+        const config = repo.configuration();
+        const many_files = try config.getBool("feature.manyfiles", false);
+        const new_version: u32 = if (config.find("index.version")) |entry| blk: {
+            const value = try config_mod.parseInteger(entry.value orelse return error.NotAnInteger);
+            break :blk if (value >= 2 and value <= 4) @intCast(value) else 3;
+        } else if (many_files) 4 else 3;
+        // git's `repo_config_get_index_threads`: `true` is 0, as many as
+        // the index wants; `false` is 1.
+        const threads: ?u32 = if (config.find("index.threads")) |entry| switch (try config_mod.parseBoolOrInt(entry.value)) {
+            .boolean => |on| if (on) 0 else 1,
+            .integer => |n| std.math.cast(u32, n) orelse return error.NotAnInteger,
+        } else null;
+        const threaded = if (threads) |n| n != 1 else false;
+        const end_of_index_entries = try config.getBool("index.recordendofindexentries", threaded);
+        const blocks: u32 = blk: {
+            const n = threads orelse break :blk 0;
+            if (n == 1 or !try config.getBool("index.recordoffsettable", threaded)) break :blk 0;
+            const entries: u32 = @intCast(index.entries.items.len);
+            if (n != 0) break :blk @min(n, entries);
+            const cpus: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+            break :blk @min(entries / 10_000, cpus -| 1);
+        };
+        return .{
+            .new_version = new_version,
+            .skip_hash = try config.getBool("index.skiphash", many_files),
+            .end_of_index_entries = end_of_index_entries,
+            .entry_offset_blocks = blocks,
+            .lock = repo.indexLock(),
+        };
+    }
+
     /// Which writes are synced, and how.
     pub fn fsyncPolicy(repo: *const Repository) fs.Fsync {
         return repo.data().fsync;
@@ -1611,13 +1652,15 @@ pub const Repository = struct {
         /// rules and attributes, and put it in place.
         pub fn commit(locked: *LockedIndex, io: Io) WriteIndexError!void {
             const repo = locked.repo;
-            const wt = repo.data().work_dir orelse return locked.index.commitTo(io, &locked.lock, .{});
+            var options = try repo.indexWriteOptions(&locked.index);
+            const wt = repo.data().work_dir orelse return locked.index.commitTo(io, &locked.lock, options);
             var attrs = try repo.loadAttrs(io);
             defer attrs.deinit();
             var rules = try repo.worktreeRules();
             rules.attrs = &attrs;
             var check: worktree.RacyCheck = .{ .gpa = repo.data().gpa, .io = io, .wt = wt, .rules = rules };
-            try locked.index.commitTo(io, &locked.lock, .{ .racy = check.racy() });
+            options.racy = check.racy();
+            try locked.index.commitTo(io, &locked.lock, options);
         }
 
         /// Give the lock up, the index file as it was unless `commit` put

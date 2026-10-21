@@ -1989,3 +1989,82 @@ test "refs migrate --dry-run leaves the repository as it was and the new store i
     var path_buf: [64]u8 = undefined;
     try git.dir.access(io, try std.mem.print(&path_buf, ".git/{s}/reftable/tables.list", .{outcome.dry_run_dir.?}), .{});
 }
+
+test "the index is written in the version, trailer and offset extensions git's settings ask for" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const index_mod = @import("../index/index.zig");
+    const Case = struct {
+        settings: []const []const u8,
+        /// An index written before the settings, which keeps its version.
+        existing: bool = false,
+        files: usize = 6,
+    };
+    const cases = [_]Case{
+        .{ .settings = &.{} },
+        .{ .settings = &.{ "index.version", "4" } },
+        .{ .settings = &.{ "index.version", "4" }, .existing = true },
+        .{ .settings = &.{ "index.version", "3" } },
+        .{ .settings = &.{ "index.version", "1" } },
+        .{ .settings = &.{ "feature.manyFiles", "true" } },
+        .{ .settings = &.{ "feature.manyFiles", "true", "index.skipHash", "false", "index.version", "2" } },
+        .{ .settings = &.{ "feature.manyFiles", "true" }, .existing = true },
+        .{ .settings = &.{ "index.skipHash", "true" }, .existing = true },
+        .{ .settings = &.{ "index.threads", "true" } },
+        .{ .settings = &.{ "index.threads", "4" } },
+        .{ .settings = &.{ "index.threads", "3" }, .files = 2 },
+        .{ .settings = &.{ "index.threads", "1" } },
+        .{ .settings = &.{ "index.threads", "false" } },
+        .{ .settings = &.{ "index.threads", "4", "index.recordOffsetTable", "false" } },
+        .{ .settings = &.{ "index.threads", "4", "index.recordEndOfIndexEntries", "false" } },
+        .{ .settings = &.{ "index.recordEndOfIndexEntries", "true" } },
+        .{ .settings = &.{ "index.recordOffsetTable", "true" } },
+    };
+    // The harness turns `feature.manyFiles` off for every call; here the
+    // repository's own configuration is what decides.
+    var defaults: std.ArrayList([]const u8) = .empty;
+    defer defaults.deinit(gpa);
+    var at_default: usize = 0;
+    while (at_default < testgit.default_settings.len) : (at_default += 2) {
+        if (std.mem.startsWith(u8, testgit.default_settings[at_default + 1], "feature.manyFiles")) continue;
+        try defaults.appendSlice(gpa, testgit.default_settings[at_default..][0..2]);
+    }
+    for (cases, 0..) |case, n| {
+        var read: [2]index_mod.Index = undefined;
+        for (0..2, [_]bool{ true, false }) |side, by_git| {
+            var repo = try testgit.Repo.init(gpa, io, &.{});
+            defer repo.deinit();
+            repo.defaults = defaults.items;
+            for (0..case.files) |i| {
+                var name: [32]u8 = undefined;
+                try repo.writeFile(io, try std.mem.print(&name, "f{d}", .{i}), "x\n");
+            }
+            if (case.existing) try repo.exec(io, &.{ "add", "-A" });
+            var at: usize = 0;
+            while (at < case.settings.len) : (at += 2) try repo.exec(io, &.{ "config", case.settings[at], case.settings[at + 1] });
+            try repo.writeFile(io, "new", "y\n");
+            if (by_git) {
+                try repo.exec(io, &.{ "add", "-A" });
+            } else {
+                var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+                defer native.deinit(io);
+                var locked = try native.lockIndex(io);
+                defer locked.deinit(io);
+                _ = try worktree.addAll(gpa, io, repo.dir, .{ .index = &locked.index, .db = native.objectDatabase() }, .{ .rules = try native.worktreeRules() });
+                try locked.commit(io);
+            }
+            const git_dir = try repo.gitDir(io);
+            defer git_dir.close(io);
+            read[side] = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
+        }
+        defer for (&read) |*i| i.deinit();
+        const theirs = &read[0];
+        const ours = &read[1];
+        errdefer std.debug.print("index case {d}\n", .{n});
+        try std.testing.expectEqual(theirs.version, ours.version);
+        try std.testing.expectEqual(theirs.hash_was_skipped, ours.hash_was_skipped);
+        try std.testing.expectEqual(theirs.had_end_of_index_entries, ours.had_end_of_index_entries);
+        try std.testing.expectEqual(theirs.entry_offset_blocks, ours.entry_offset_blocks);
+        try std.testing.expectEqual(theirs.entries.items.len, ours.entries.items.len);
+    }
+}
