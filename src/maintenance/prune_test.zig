@@ -228,3 +228,186 @@ test "gc.pruneExpire as git's gc reads it" {
     try native.editConfig(io, &.{.{ .name = "gc.pruneExpire", .value = "now" }}, .{});
     try std.testing.expectEqual(@as(?gc.Expiry, gc.expire_all), try prune_mod.pruneExpiry(&native, clock));
 }
+
+/// A blob's name as `hash-object` gives it, the blob not written.
+fn nameOf(repo: *testgit.Repo, bytes: []const u8) ![]u8 {
+    const out = try repo.runInput(io, &.{ "hash-object", "--stdin" }, bytes);
+    defer gpa.free(out);
+    return gpa.dupe(u8, std.mem.trim(u8, out, "\n"));
+}
+
+/// A commit nothing names on a tree of one blob `bytes`, the blob left
+/// unwritten: `mktree --missing`, as a commit whose blob comes later.
+fn danglingOver(repo: *testgit.Repo, bytes: []const u8, message: []const u8) !struct { commit: []u8, blob: []u8 } {
+    const blob = try nameOf(repo, bytes);
+    errdefer gpa.free(blob);
+    var listing: [256]u8 = undefined;
+    const tree = try repo.runInput(io, &.{ "mktree", "--missing" }, try std.mem.print(&listing, "100644 blob {s}\tf.txt\n", .{blob}));
+    defer gpa.free(tree);
+    return .{ .commit = try dangling(repo, std.mem.trim(u8, tree, "\n"), null, message), .blob = blob };
+}
+
+/// A repository where `gc.recentObjectsHook` matters: a commit nothing
+/// names on a tree and blob of its own, and two blobs, all old.
+fn hookFixture(now: i64) !struct { repo: testgit.Repo, commit: []u8, blob: []u8 } {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    errdefer repo.deinit();
+    try commitAt(&repo, now - 100 * day, "one");
+    const tree = try repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree);
+    const own_blob = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "below the hooked commit\n");
+    defer gpa.free(own_blob);
+    var listing: [256]u8 = undefined;
+    const own_tree = try repo.runInput(io, &.{"mktree"}, try std.mem.print(&listing, "100644 blob {s}\tbelow.txt\n", .{std.mem.trim(u8, own_blob, "\n")}));
+    defer gpa.free(own_tree);
+    const commit = try dangling(&repo, std.mem.trim(u8, own_tree, "\n"), null, "named by a hook");
+    errdefer gpa.free(commit);
+    const blob = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "named by a hook too\n");
+    defer gpa.free(blob);
+    gpa.free(try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "named by nothing\n"));
+    try ageLoose(&repo, now - 30 * day);
+    return .{ .repo = repo, .commit = commit, .blob = try gpa.dupe(u8, std.mem.trim(u8, blob, "\n")) };
+}
+
+test "gc.recentObjectsHook: each command's object names are recent with what they reach, as git's prune keeps them" {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const cases = [_]Case{
+        .{ .args = &.{}, .options = .{} },
+        .{ .args = &.{"--expire=2.weeks.ago"}, .options = .{ .expire = now - 14 * day } },
+    };
+    for (cases) |case| {
+        var sides: [2]@TypeOf(try hookFixture(now)) = undefined;
+        sides[0] = try hookFixture(now);
+        defer for (&sides) |*s| {
+            s.repo.deinit();
+            gpa.free(s.commit);
+            gpa.free(s.blob);
+        };
+        sides[1] = try hookFixture(now);
+        for (&sides) |*side| {
+            var command: [512]u8 = undefined;
+            // One name per command, the second's line ended as Windows
+            // ends it, and a name the repository does not hold.
+            try side.repo.exec(io, &.{ "config", "--add", "gc.recentObjectsHook", try std.mem.print(&command, "echo {s}", .{side.commit}) });
+            try side.repo.exec(io, &.{ "config", "--add", "gc.recentObjectsHook", try std.mem.print(&command, "printf '%s\\r\\n%s\\n' {s} {s}", .{ side.blob, "0123456789abcdef0123456789abcdef01234567" }) });
+        }
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.append(gpa, "prune");
+        try args.appendSlice(gpa, case.args);
+        try sides[0].repo.exec(io, args.items);
+        var native = try repo_mod.Repository.open(gpa, io, sides[1].repo.dir, .{});
+        defer native.deinit(io);
+        var options = case.options;
+        options.programs = .{ .environ = &sides[1].repo.isolated.? };
+        const report = try prune_mod.prune(gpa, io, &native, options);
+        try std.testing.expectEqual(@as(u32, 1), report.objects.pruned);
+        const expected = try state(&sides[0].repo);
+        defer gpa.free(expected);
+        const actual = try state(&sides[1].repo);
+        defer gpa.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
+test "gc.recentObjectsHook failures stop prune where git's dies, and run only when an object is too old" {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const Failure = struct { command: []const u8, err: anyerror };
+    const failures = [_]Failure{
+        .{ .command = "exit 3", .err = error.RecentObjectsHookFailed },
+        .{ .command = "echo not-a-name", .err = error.InvalidRecentObject },
+        .{ .command = "echo; true", .err = error.InvalidRecentObject },
+    };
+    for (failures) |failure| {
+        var fixture_repo = try hookFixture(now);
+        defer {
+            fixture_repo.repo.deinit();
+            gpa.free(fixture_repo.commit);
+            gpa.free(fixture_repo.blob);
+        }
+        const repo = &fixture_repo.repo;
+        try repo.exec(io, &.{ "config", "gc.recentObjectsHook", failure.command });
+        const before = try state(repo);
+        defer gpa.free(before);
+        repo.report_failures = false;
+        try std.testing.expectError(error.GitFailed, repo.exec(io, &.{"prune"}));
+        // `--expire=never` asks for no recent objects, and runs no hook.
+        try repo.exec(io, &.{ "prune", "--expire=never" });
+        var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+        defer native.deinit(io);
+        try std.testing.expectError(failure.err, prune_mod.prune(gpa, io, &native, .{ .programs = .{ .environ = &repo.isolated.? } }));
+        try std.testing.expectError(error.ProgramsNotGranted, prune_mod.prune(gpa, io, &native, .{}));
+        _ = try prune_mod.prune(gpa, io, &native, .{ .expire = 0 });
+        const after = try state(repo);
+        defer gpa.free(after);
+        try std.testing.expectEqualStrings(before, after);
+    }
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try commitAt(&repo, testgit.fixture_date, "one");
+    try repo.writeFile(io, ".git/config.extra", "[gc]\n\trecentObjectsHook\n");
+    try repo.exec(io, &.{ "config", "include.path", "config.extra" });
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    try std.testing.expectError(error.MissingValue, prune_mod.prune(gpa, io, &native, .{ .programs = .{ .environ = &repo.isolated.? } }));
+}
+
+/// A cruft pack git wrote, of two commits nothing names, one old and one
+/// recent by the times its `.mtimes` holds while the pack file itself is
+/// new; each commit's blob loose and old, written after the pack.
+fn cruftFixture(now: i64) !testgit.Repo {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    errdefer repo.deinit();
+    try commitAt(&repo, now - 100 * day, "one");
+    const old = try danglingOver(&repo, "below the old commit\n", "old, in the cruft pack");
+    defer gpa.free(old.commit);
+    defer gpa.free(old.blob);
+    const recent = try danglingOver(&repo, "below the recent commit\n", "recent, in the cruft pack");
+    defer gpa.free(recent.commit);
+    defer gpa.free(recent.blob);
+    try ageLoose(&repo, now - 30 * day);
+    try touchObject(&repo, recent.commit, now - day);
+    try repo.exec(io, &.{ "repack", "-q", "-d", "--cruft" });
+    gpa.free(try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "below the old commit\n"));
+    gpa.free(try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "below the recent commit\n"));
+    try touchObject(&repo, old.blob, now - 30 * day);
+    try touchObject(&repo, recent.blob, now - 30 * day);
+    return repo;
+}
+
+test "a cruft pack's objects are recent each by its own time in .mtimes, as git's prune dates them" {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var theirs = try cruftFixture(now);
+    defer theirs.deinit();
+    var ours = try cruftFixture(now);
+    defer ours.deinit();
+    try theirs.exec(io, &.{ "prune", "--expire=2.weeks.ago" });
+    var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+    defer native.deinit(io);
+    const report = try prune_mod.prune(gpa, io, &native, .{ .expire = now - 14 * day });
+    try std.testing.expectEqual(@as(u32, 1), report.objects.pruned);
+    const expected = try state(&theirs);
+    defer gpa.free(expected);
+    const actual = try state(&ours);
+    defer gpa.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "an .mtimes that is not git's stops prune, as git dies on it" {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var repo = try cruftFixture(now);
+    defer repo.deinit();
+    var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var it = pack_dir.iterate();
+    while (try it.next(io)) |entry| if (std.mem.endsWith(u8, entry.name, ".mtimes")) {
+        // git writes it read-only.
+        try pack_dir.deleteFile(io, entry.name);
+        try pack_dir.writeFile(io, .{ .sub_path = entry.name, .data = "MTME" });
+    };
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.exec(io, &.{"prune"}));
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    try std.testing.expectError(error.InvalidMtimes, prune_mod.prune(gpa, io, &native, .{}));
+}

@@ -201,6 +201,7 @@ test {
     _ = @import("merge/rerere.zig");
     _ = @import("merge/three_way.zig");
     _ = @import("odb/bitmap.zig");
+    _ = @import("odb/mtimes.zig");
     _ = @import("odb/commit_graph.zig");
     _ = @import("odb/midx.zig");
     _ = @import("patch/range_diff.zig");

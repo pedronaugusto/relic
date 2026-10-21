@@ -16,6 +16,7 @@ const config_mod = @import("../config/config.zig");
 const object_walk = @import("../walk/object.zig").walk;
 const gc = @import("gc.zig");
 const date = @import("../text.zig").date;
+const program = @import("../process/program.zig");
 const Repository = repo_mod.Repository;
 
 /// Failures of `prune` and `reachableObjects`.
@@ -24,6 +25,19 @@ pub const Error = gc.Error || object_walk.Error || index_mod.ReadError || Reposi
     PreciousObjects,
     /// A rebase's `autostash` or `orig-head` names no object git reads.
     InvalidRebaseState,
+    /// `gc.recentObjectsHook` is set and no `program.Programs` was given to
+    /// run it.
+    ProgramsNotGranted,
+    /// A `gc.recentObjectsHook` command could not start, or ended with a
+    /// failure: git dies, "unable to enumerate additional recent objects".
+    RecentObjectsHookFailed,
+    /// A line of a `gc.recentObjectsHook` command's output that is not one
+    /// object name alone: git's "invalid extra cruft tip".
+    InvalidRecentObject,
+    /// A bare `gc.recentObjectsHook`, with no command. git reports it and
+    /// runs none of the hooks; relic refuses rather than drop objects the
+    /// others were set to keep.
+    MissingValue,
 };
 
 /// How `prune` runs: git's `prune` options.
@@ -37,6 +51,8 @@ pub const PruneOptions = struct {
     heads: []const Oid = &.{},
     /// `-n`: report and remove nothing.
     dry_run: bool = false,
+    /// What runs `gc.recentObjectsHook`: `ReachOptions.programs`.
+    programs: ?program.Programs = null,
 };
 
 /// What `prune` removed, or with `dry_run` would have.
@@ -53,7 +69,7 @@ pub const Report = struct {
 /// `.git/shallow`.
 pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: PruneOptions) Self.Error!Report {
     if (try repo.configuration().getBool("extensions.preciousobjects", false)) return error.PreciousObjects;
-    var keep = try reachableObjects(gpa, io, repo, .{ .heads = options.heads, .recent = options.expire });
+    var keep = try reachableObjects(gpa, io, repo, .{ .heads = options.heads, .recent = options.expire, .programs = options.programs });
     defer keep.deinit(gpa);
     var report: Report = .{ .objects = try repo.objectDatabase().prune(io, .{ .keep = &keep, .expire = options.expire, .dry_run = options.dry_run }) };
     const db = repo.objectDatabase();
@@ -85,8 +101,13 @@ pub const ReachOptions = struct {
     heads: []const Oid = &.{},
     /// Unreached objects of this repository's own directory whose time is
     /// after this are kept, and what they reach as far as it is there:
-    /// git's `mark_recent`. 0 keeps none.
+    /// git's `mark_recent`, a cruft pack's objects each by its own time.
+    /// So are those a `gc.recentObjectsHook` command names, whatever their
+    /// time. 0 keeps none, and runs no hook.
     recent: gc.Expiry = 0,
+    /// What runs the `gc.recentObjectsHook` commands. With none given and
+    /// a hook set, `error.ProgramsNotGranted`.
+    programs: ?program.Programs = null,
 };
 
 /// git's `mark_reachable_objects` with the reflogs: the objects every
@@ -194,19 +215,73 @@ pub fn reachableObjects(gpa: Allocator, io: Io, repo: *Repository, options: Reac
         for (walked.entries) |entry| try reached.put(gpa, entry.oid, {});
     }
 
-    if (options.recent != 0) {
-        const recent = try db.recentObjects(gpa, io, options.recent);
-        defer gpa.free(recent);
-        var unseen: std.ArrayList(Oid) = .empty;
-        for (recent) |oid| if (!reached.contains(oid)) try unseen.append(arena, oid);
-        if (unseen.items.len != 0) {
-            // What the refs reach is walked already: the walk stops there.
-            var walked = try object_walk.missing(gpa, io, db, unseen.items, .{ .exclude = roots.items, .ignore_missing_links = true });
-            defer walked.deinit();
-            for (walked.entries) |entry| try reached.put(gpa, entry.oid, {});
-        }
-    }
+    if (options.recent != 0) try addRecent(gpa, io, repo, arena, &reached, roots.items, options);
     return reached;
+}
+
+/// git's `add_unseen_recent_objects_to_traversal` for `mark_recent`: each
+/// object of this repository's own directory newer than `options.recent`,
+/// or named by a `gc.recentObjectsHook` command, that `reached` lacks, and
+/// what it reaches short of `roots`, go into `reached`.
+fn addRecent(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, reached: *Oid.Set, roots: []const Oid, options: ReachOptions) Self.Error!void {
+    const db = repo.objectDatabase();
+    const timed = try db.timedObjects(gpa, io, .{});
+    defer gpa.free(timed);
+    var hooked: ?Oid.Set = null;
+    defer if (hooked) |*set| set.deinit(gpa);
+    var unseen: std.ArrayList(Oid) = .empty;
+    for (timed) |object| {
+        if (object.time <= options.recent) {
+            // git runs the hooks once, at the first object too old to
+            // be recent by its time, reached or not.
+            if (hooked == null) hooked = try hookedObjects(gpa, io, repo, options.programs);
+            if (!hooked.?.contains(object.oid)) continue;
+        }
+        if (reached.contains(object.oid)) continue;
+        try unseen.append(arena, object.oid);
+    }
+    if (unseen.items.len != 0) {
+        // What the refs reach is walked already: the walk stops there.
+        var walked = try object_walk.missing(gpa, io, db, unseen.items, .{ .exclude = roots, .ignore_missing_links = true });
+        defer walked.deinit();
+        for (walked.entries) |entry| try reached.put(gpa, entry.oid, {});
+    }
+}
+
+/// git's `load_gc_recent_objects`: the objects every `gc.recentObjectsHook`
+/// command names, each value run in turn through the shell where git runs,
+/// one object name alone on each line it prints, in a set the caller owns.
+/// A name that is not here counts for nothing, as in git.
+fn hookedObjects(gpa: Allocator, io: Io, repo: *Repository, programs: ?program.Programs) Self.Error!Oid.Set {
+    var set: Oid.Set = .empty;
+    errdefer set.deinit(gpa);
+    var it = repo.configuration().iterate(&.{"gc.recentobjectshook"});
+    while (it.next()) |entry| {
+        const command = entry.value orelse return error.MissingValue;
+        var outcome = program.run(gpa, io, programs orelse return error.ProgramsNotGranted, .{
+            .argv = &.{command},
+            .shell = true,
+            .cwd = .{ .dir = repo.topDirectory() },
+            .unset = &program.repository_variables,
+            .stderr = .inherit,
+        }, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.RecentObjectsHookFailed,
+        };
+        defer outcome.deinit(gpa);
+        // git's `strbuf_getline`: a line ends at a line feed, with a
+        // carriage return before it dropped, and the last needs none.
+        var lines = std.mem.splitScalar(u8, outcome.stdout, '\n');
+        while (lines.next()) |raw| {
+            if (lines.peek() == null and raw.len == 0) break;
+            const line = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
+            const oid = Oid.parse(repo.objectFormat(), line) catch return error.InvalidRecentObject;
+            try set.put(gpa, oid, {});
+        }
+        if (!outcome.succeeded()) return error.RecentObjectsHookFailed;
+    }
+    return set;
 }
 
 /// git's `do_add_index_objects_to_pending`: each entry's blob (a sparse

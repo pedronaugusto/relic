@@ -9,6 +9,7 @@ const fs = @import("../fs/fs.zig");
 const opening = @import("open.zig");
 const reachability = @import("bitmap/reachability.zig");
 const midx = @import("midx.zig");
+const mtimes = @import("mtimes.zig");
 // The modules relic's API puts under this one, as `relic.odb.<name>`.
 const pack = @import("pack.zig");
 const delta = @import("../codec.zig").delta;
@@ -1565,13 +1566,34 @@ pub const Odb = struct {
         return set;
     }
 
-    /// The objects of this database's own directory -- not an alternate's
-    /// -- whose time is after `after`, in `gpa`: a loose object's file
-    /// time, a packed one's pack's. These are what git's `prune` and
-    /// `repack --cruft` keep beside what is reachable, with what they
-    /// reach (`add_unseen_recent_objects_to_traversal`).
-    pub fn recentObjects(odb: *Odb, gpa: Allocator, io: Io, after: i64) ErrorNamespace.Error![]Oid {
-        var out: std.ArrayList(Oid) = .empty;
+    /// An object of this database's own directory, and the time `prune`
+    /// and `repack --cruft` date it by.
+    pub const Timed = struct {
+        oid: Oid,
+        /// Seconds since the epoch: a loose object's file time; a packed
+        /// one's from its cruft pack's `.mtimes`, else its pack's file time,
+        /// as git's `packed_object_info` gives it.
+        time: i64,
+        /// The pack it was found in, by the base name a directory listing
+        /// gives -- `pack-<name>` -- borrowed from this database until it
+        /// next re-scans; `null` for a loose object.
+        pack: ?[]const u8 = null,
+    };
+
+    /// What `timedObjects` leaves out.
+    pub const TimedOptions = struct {
+        /// Packs, by base name, whose objects are not listed.
+        exclude_packs: []const []const u8 = &.{},
+    };
+
+    /// Every object of this database's own directory -- not an alternate's
+    /// -- with its time, in `gpa`: each loose one, then each packed one
+    /// pack by pack, an object held twice listed twice. git's
+    /// `odb_for_each_object` over the local source with the times asked
+    /// for, which `prune` and `repack --cruft` keep recent objects by
+    /// (`add_unseen_recent_objects_to_traversal`).
+    pub fn timedObjects(odb: *Odb, gpa: Allocator, io: Io, options: TimedOptions) ErrorNamespace.Error![]Timed {
+        var out: std.ArrayList(Timed) = .empty;
         errdefer out.deinit(gpa);
         const source = odb.writableSource();
         var loose: LooseNames = .{ .odb = odb, .remove_empty = false };
@@ -1582,18 +1604,34 @@ pub const Odb = struct {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
-            if (stat.mtime.toSeconds() > after) try out.append(gpa, oid);
+            try out.append(gpa, .{ .oid = oid, .time = stat.mtime.toSeconds() });
         }
-        if (source.pack_dir) |pack_dir| for (source.packs.items) |*named| {
+        if (source.pack_dir) |pack_dir| packs: for (source.packs.items) |*named| {
+            for (options.exclude_packs) |name| if (std.mem.eql(u8, name, named.name)) continue :packs;
             var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
-            const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
-            const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
+            const index = &named.pack.index;
+            // A pack with an `.mtimes` beside it is a cruft pack, as git
+            // reads it, and each of its objects has its own time.
+            const mtimes_name = std.mem.print(&name_buf, "{s}.mtimes", .{named.name}) catch continue;
+            const times: ?[]u32 = mtimes.read(gpa, io, pack_dir, mtimes_name, index.count) catch |err| switch (err) {
+                error.FileNotFound => null,
                 else => |e| return e,
             };
-            if (stat.mtime.toSeconds() <= after) continue;
-            var it = named.pack.index.iterate();
-            while (try it.next()) |entry| try out.append(gpa, entry.oid);
+            defer if (times) |t| gpa.free(t);
+            const pack_time = if (times != null) 0 else blk: {
+                const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
+                const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => |e| return e,
+                };
+                break :blk stat.mtime.toSeconds();
+            };
+            try out.ensureUnusedCapacity(gpa, index.count);
+            for (0..index.count) |i| out.appendAssumeCapacity(.{
+                .oid = index.nameAt(@intCast(i)),
+                .time = if (times) |t| t[i] else pack_time,
+                .pack = named.name,
+            });
         };
         return out.toOwnedSlice(gpa);
     }

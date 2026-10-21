@@ -100,7 +100,7 @@ pub const Error = error{
     object.ParseError || object.TreeParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
     Io.File.Reader.Error || Io.Reader.Error || fs.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
-    Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
+    Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error || @import("mtimes.zig").ReadError;
 
 /// Counters saying how lookups resolved and what writing cost. Nothing
 /// depends on them; they are how a caller, or a test, sees that an

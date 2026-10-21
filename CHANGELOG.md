@@ -14,6 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `commit.merging.Kind` has `remote_head` and `remote_ref` for what `FETCH_HEAD` names; `merging.Target` carries `source` and `what`.
 - Every lock relic holds is aegis's `BlockingGuarded`, its data reached only through a guard. `lfs.api.Client.message` takes an `Io` and an allocator and returns a copy, read under its lock (the borrowed buffer it returned could change under a reader). `lfs.ssh.Transfer.connection` returns the connection's `Transfer.Line`, held for a request and its answer in place of `Connection.mutex`; `Transfer.failure` copies what ssh said when one did not start; `Connection.open` returns the connection itself. `refs.reftable.stack.Cache.reloads` is a function of an `Io`.
 - `commit.sequencer`'s revert message is `sequencer.revertMessage`, taking an arena.
+- `Odb.recentObjects` is gone: `Odb.timedObjects` lists every object of the database's own directory with the time `prune` and `repack --cruft` date it by (a loose file's time; a cruft pack's object by its own time in the pack's `.mtimes`, any other packed one by its pack's time) and the pack it was found in. An `.mtimes` that is not git's is `error.InvalidMtimes`, where git dies.
 
 ### Added
 
@@ -41,6 +42,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A transaction's name checks follow git's: in a reftable repository, a ref created where another edit of the same transaction deletes one in its way is refused (`cannot process ... at the same time`), as git refuses it.
 - The rest of aegis W1: every password and key relic reads is held in aegis's `SecretBytes`, wiped when let go, and no copy of it is freed unwiped on the way. A password in a URL is decoded straight into its owner; `http.proxy`'s user and password are parsed in wiped scratch (uplink's `Proxy.parseKept`) and kept in one; `~/.netrc` is read into one (`fs.engine.readSecretFile`) and `lfs.netrc.Netrc` keeps its entries' strings in another; LFS's `Authorization` headers, the passphrases that opened client keys and the client certificate and key files themselves are read and held the same way.
 - uplink 0.8.7 (from 0.8.6), for `Proxy.parseKept`.
+- `odb.mtimes`: a cruft pack's `.mtimes` read as git's `load_pack_mtimes_file` checks it.
+- `gc.recentObjectsHook` in `maintenance.reachableObjects` and `prune` (`ReachOptions.programs`, `PruneOptions.programs`): each value run through the shell where git runs, its output one object name per line, the objects named recent whatever their time and what they reach kept; run once, at the first object too old to be recent, as git loads it. Without `programs` it is `ProgramsNotGranted`; a failed command `RecentObjectsHookFailed`, a line that is no object name `InvalidRecentObject`, as git dies; a bare value `MissingValue` (git reports it and runs no hook). Held to git 2.55's prune, as are a git-written cruft pack's per-object times.
 
 ### Fixed
 
