@@ -149,7 +149,7 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Se
         const data = switch (packet) {
             .flush => break,
             .delim, .response_end => return error.ProtocolError,
-            .data => |d| std.mem.trimEnd(u8, d, "\n"),
+            .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
         };
         if (std.mem.startsWith(u8, data, "ERR ")) {
             conn.setMessage(data[4..]);
@@ -304,7 +304,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
         const data = switch (packet) {
             .flush, .response_end => break,
             .delim => return error.ProtocolError,
-            .data => |d| std.mem.trimEnd(u8, d, "\n"),
+            .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
         };
         if (std.mem.startsWith(u8, data, "ERR ")) {
             conn.setMessage(data[4..]);
@@ -388,7 +388,7 @@ pub fn bundleUri(arena: Allocator, conn: *Connection, adv: *const Advertisement)
         switch (try conn.readPacket(in)) {
             .flush, .response_end => break,
             .delim => return error.ProtocolError,
-            .data => |d| try lines.append(arena, try arena.dupe(u8, std.mem.trimEnd(u8, d, "\n"))),
+            .data => |d| try lines.append(arena, try arena.dupe(u8, std.mem.trimEnd(u8, d.readForParse(), "\n"))),
         }
     }
     return lines.items;

@@ -293,7 +293,8 @@ pub const Server = struct {
                 .flush => if (command == null) continue else return error.ProtocolError,
                 .delim => break,
                 .response_end => return false,
-                .data => |raw| {
+                .data => |unparsed| {
+                    const raw = unparsed.readForParse();
                     const line = std.mem.trimEnd(u8, raw, "\n");
                     if (std.mem.startsWith(u8, line, "command=")) command = try arena.dupe(u8, line["command=".len..]);
                     if (std.mem.startsWith(u8, line, "promisor-remote=")) {
@@ -311,7 +312,7 @@ pub const Server = struct {
             };
             switch (packet) {
                 .flush => break,
-                .data => |raw| try args.append(arena, try arena.dupe(u8, std.mem.trimEnd(u8, raw, "\n"))),
+                .data => |raw| try args.append(arena, try arena.dupe(u8, std.mem.trimEnd(u8, raw.readForParse(), "\n"))),
                 else => return error.ProtocolError,
             }
         }
@@ -470,7 +471,7 @@ pub const Server = struct {
             any = true;
             const raw = switch (packet) {
                 .flush => break,
-                .data => |d| d,
+                .data => |d| d.readForParse(),
                 else => return error.ProtocolError,
             };
             const line = std.mem.trimEnd(u8, raw, "\n");
@@ -749,7 +750,7 @@ const Negotiation = struct {
                 else => return error.ProtocolError,
             };
             const raw = switch (packet) {
-                .data => |d| d,
+                .data => |d| d.readForParse(),
                 .flush => {
                     (write: {
                         if (multi_ack == 2 and got_common and !got_other and try n.okToGiveUp()) {

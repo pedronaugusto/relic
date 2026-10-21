@@ -100,7 +100,7 @@ test "a server's JSON is read as git-lfs reads it, within limits" {
     // Unknown members ignored, a member given twice read into what the
     // first left, a header name given twice its last value, as a Go map
     // holds it.
-    const auth = try parseAuthenticate(arena, "{\"href\":\"a\",\"extra\":[1,{}],\"href\":\"b\",\"header\":{\"X\":\"1\",\"Y\":\"2\",\"X\":\"3\"},\"HEADER\":{\"Z\":\"4\"}}");
+    const auth = try parseAuthenticate(arena, .init("{\"href\":\"a\",\"extra\":[1,{}],\"href\":\"b\",\"header\":{\"X\":\"1\",\"Y\":\"2\",\"X\":\"3\"},\"HEADER\":{\"Z\":\"4\"}}"));
     try std.testing.expectEqualStrings("b", auth.href.?);
     try std.testing.expectEqual(@as(usize, 3), auth.headers.len);
     for (auth.headers) |h| {
@@ -113,7 +113,7 @@ test "a server's JSON is read as git-lfs reads it, within limits" {
     for (0..1000) |_| try nested.append(arena, '[');
     for (0..1000) |_| try nested.append(arena, ']');
     try nested.append(arena, '}');
-    try std.testing.expectError(error.MalformedResponse, parseAuthenticate(arena, nested.items));
+    try std.testing.expectError(error.MalformedResponse, parseAuthenticate(arena, .init(nested.items)));
 }
 
 test "LFS checks certificates with the request Io before dialing" {
@@ -155,6 +155,9 @@ const lfs = @import("lfs.zig");
 const mime_sniff = @import("mime_sniff.zig");
 const fs = @import("../fs/fs.zig");
 const aegis = @import("aegis");
+/// What a server, a client, a program or a cache file holds, read only by
+/// a parser.
+pub const Unparsed = aegis.input.Untrusted([]const u8);
 const object = @import("../object/object.zig");
 const netrc_mod = @import("netrc.zig");
 const time_text = @import("time_text.zig");
@@ -1097,8 +1100,8 @@ pub const go_json: strand.json.ParseOptions = .{
 /// value with whatever follows it left, or a program's answer as
 /// `json.Unmarshal` reads it, alone. The text is copied into `arena`, which
 /// the result's strings point into.
-pub fn parseJson(comptime T: type, arena: Allocator, bytes: []const u8, from: JsonFrom) (Allocator.Error || error{MalformedResponse})!T {
-    const owned = try arena.dupe(u8, bytes);
+pub fn parseJson(comptime T: type, arena: Allocator, text: Unparsed, from: JsonFrom) (Allocator.Error || error{MalformedResponse})!T {
+    const owned = try arena.dupe(u8, text.readForParse());
     const read = switch (from) {
         .http => if (strand.json.parsePrefixLeaky(T, arena, owned, go_json)) |prefix| prefix.value else |err| err,
         .program => strand.json.parseLeaky(T, arena, owned, go_json),
@@ -1139,14 +1142,14 @@ const Reason = struct {
 };
 
 /// `git-lfs-authenticate`'s answer, read.
-pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Self.Error!SshAuth {
+pub fn parseAuthenticate(arena: Allocator, answer: Unparsed) Self.Error!SshAuth {
     const Answer = struct {
         href: []const u8 = "",
         header: HeaderMap = .{ .items = &.{} },
         expires_in: i64 = 0,
         expires_at: time_text.GoTime = .{},
     };
-    const parsed = try parseJson(Answer, arena, bytes, .program);
+    const parsed = try parseJson(Answer, arena, answer, .program);
     return .{
         .href = if (parsed.href.len != 0) parsed.href else null,
         .headers = try headersOf(arena, parsed.header),
@@ -1479,7 +1482,7 @@ pub const Client = struct {
             var outcome = try program.run(c.gpa, io, programs, invocation, .{ .output = .limited(1 << 20) });
             defer outcome.deinit(c.gpa);
             if (outcome.succeeded()) {
-                var auth = try parseAuthenticate(arena, try arena.dupe(u8, outcome.stdout));
+                var auth = try parseAuthenticate(arena, .init(outcome.stdout));
                 if (auth.expires_in == 0 and auth.expires_at.isZero()) {
                     auth.expires_in = @max(0, c.settings.getInt("lfs.defaulttokenttl", 0));
                 }
@@ -2438,7 +2441,7 @@ pub const Client = struct {
     /// arena.
     fn noteStatusText(c: *Client, io: Io, ex: *Exchange, what: []const u8) []const u8 {
         const status = ex.status();
-        const body = ex.readAll(io, 64 * 1024) catch "";
+        const body = ex.readAll(io, 64 * 1024) catch Unparsed.init("");
         const reason = if (isJsonType(ex.header("content-type") orelse "")) parseJson(Reason, ex.arena.allocator(), body, .http) catch Reason{} else Reason{};
         var buf: [512]u8 = undefined;
         c.setMessage(io, std.mem.print(&buf, "{s}: HTTP {d}{s}{s}", .{
@@ -2540,7 +2543,7 @@ pub const Exchange = struct {
     fn refusalText(ex: *Exchange, a: Allocator, io: Io) []const u8 {
         const content_type = ex.header("content-type") orelse return "";
         const body = ex.readAll(io, 4096) catch return "";
-        if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body) catch "";
+        if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body.readForParse()) catch "";
         if (!isJsonType(content_type)) return "";
         const reason = parseJson(Reason, a, body, .http) catch return "";
         return reason.message;
@@ -2611,7 +2614,7 @@ pub const Exchange = struct {
     /// or `application/json` (`isJsonType`). Any other is
     /// `error.MalformedResponse`, with git-lfs's "Expected JSON type" as the
     /// client's message.
-    pub fn readJson(ex: *Exchange, io: Io, limit: usize) Self.Error![]const u8 {
+    pub fn readJson(ex: *Exchange, io: Io, limit: usize) Self.Error!Unparsed {
         const content_type = ex.header("content-type") orelse "";
         if (!isJsonType(content_type)) {
             var buf: [512]u8 = undefined;
@@ -2621,13 +2624,13 @@ pub const Exchange = struct {
         return ex.readAll(io, limit);
     }
 
-    pub fn readAll(ex: *Exchange, io: Io, limit: usize) Self.Error![]const u8 {
+    pub fn readAll(ex: *Exchange, io: Io, limit: usize) Self.Error!Unparsed {
         const r = try ex.reader(io);
-        return r.allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.StreamTooLong => error.StreamTooLong,
-            error.ReadFailed => ex.client.fail("reading the answer: {s}", io, .{ex.bodyError()}, error.ConnectionFailed),
-        };
+        return .init(r.allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.StreamTooLong => return error.StreamTooLong,
+            error.ReadFailed => return ex.client.fail("reading the answer: {s}", io, .{ex.bodyError()}, error.ConnectionFailed),
+        });
     }
 
     /// The reason a read of the body failed.
@@ -3096,11 +3099,11 @@ test "git-lfs-authenticate's answer is read, and a header with a line break is r
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const auth = try parseAuthenticate(a, "{\"href\":\"https://lfs.example.com/r\",\"header\":{\"Authorization\":\"RemoteAuth abc\"},\"expires_in\":3600}");
+    const auth = try parseAuthenticate(a, .init("{\"href\":\"https://lfs.example.com/r\",\"header\":{\"Authorization\":\"RemoteAuth abc\"},\"expires_in\":3600}"));
     try testing.expectEqualStrings("https://lfs.example.com/r", auth.href.?);
     try testing.expectEqualStrings("RemoteAuth abc", auth.headers[0].value);
-    try testing.expectError(error.InvalidHttpHeader, parseAuthenticate(a, "{\"header\":{\"X\":\"a\\r\\nInjected: 1\"}}"));
-    try testing.expectError(error.MalformedResponse, parseAuthenticate(a, "not json"));
+    try testing.expectError(error.InvalidHttpHeader, parseAuthenticate(a, .init("{\"header\":{\"X\":\"a\\r\\nInjected: 1\"}}")));
+    try testing.expectError(error.MalformedResponse, parseAuthenticate(a, .init("not json")));
 }
 
 test "fuzz: any answer from git-lfs-authenticate is read or refused by name" {
@@ -3113,7 +3116,7 @@ fn fuzzAuthenticate(_: void, case: *shakedown.Case) anyerror!void {
     case.source.bytes(scratch[0..n]);
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
-    const auth = parseAuthenticate(arena_state.allocator(), scratch[0..n]) catch |err| switch (err) {
+    const auth = parseAuthenticate(arena_state.allocator(), .init(scratch[0..n])) catch |err| switch (err) {
         error.MalformedResponse, error.InvalidHttpHeader => return,
         else => return err,
     };

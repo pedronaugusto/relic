@@ -253,8 +253,8 @@ const Call = struct {
         }
     }
 
-    fn body(c: *Call) ErrorNamespace.Error![]const u8 {
-        return c.request.collect(c.arena, c.io, .limited(max_body));
+    fn body(c: *Call) ErrorNamespace.Error!lfsapi.Unparsed {
+        return .init(try c.request.collect(c.arena, c.io, .limited(max_body)));
     }
 
     fn store(c: *const Call) Store {
@@ -264,8 +264,7 @@ const Call = struct {
     // The batch API
 
     fn batch(c: *Call) ErrorNamespace.Error!void {
-        const bytes = try c.body();
-        const asked = transfer.parseBatchRequest(c.arena, bytes) catch |err| switch (err) {
+        const asked = transfer.parseBatchRequest(c.arena, try c.body()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedResponse => return message(c.io, c.response, .unprocessable_entity, "Unprocessable Entity"),
         };

@@ -111,7 +111,8 @@ pub const Demux = struct {
                     d.err = error.BadSideband;
                     return error.ReadFailed;
                 },
-                .data => |data| {
+                .data => |unparsed| {
+                    const data = unparsed.readForParse();
                     if (data.len == 0) {
                         d.err = error.BadSideband;
                         return error.ReadFailed;

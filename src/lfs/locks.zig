@@ -113,8 +113,8 @@ pub const VerifyPage = struct {
 
 /// An answer, or a cache file, read as git-lfs's `json.Decoder` reads either:
 /// the first value, what follows it left.
-fn parseJson(comptime T: type, arena: Allocator, bytes: []const u8) (Allocator.Error || error{MalformedResponse})!T {
-    return lfsapi.parseJson(T, arena, bytes, .http);
+fn parseJson(comptime T: type, arena: Allocator, text: lfsapi.Unparsed) (Allocator.Error || error{MalformedResponse})!T {
+    return lfsapi.parseJson(T, arena, text, .http);
 }
 
 fn toLocks(arena: Allocator, raw: []const LockJson) (Allocator.Error || error{MalformedResponse})![]const Lock {
@@ -130,7 +130,7 @@ fn toLocks(arena: Allocator, raw: []const LockJson) (Allocator.Error || error{Ma
 pub const ParseLockAnswerError = Allocator.Error || error{MalformedResponse};
 
 /// Read an answer to `POST /locks` or `POST /locks/<id>/unlock`.
-pub fn parseLockAnswer(arena: Allocator, bytes: []const u8) ParseLockAnswerError!LockAnswer {
+pub fn parseLockAnswer(arena: Allocator, answer: lfsapi.Unparsed) ParseLockAnswerError!LockAnswer {
     const Raw = struct {
         lock: ?LockJson = null,
         message: []const u8 = "",
@@ -139,7 +139,7 @@ pub fn parseLockAnswer(arena: Allocator, bytes: []const u8) ParseLockAnswerError
         documentation_url: []const u8 = "",
         request_id: []const u8 = "",
     };
-    const raw = try parseJson(Raw, arena, bytes);
+    const raw = try parseJson(Raw, arena, answer);
     const message: ?[]const u8 = if (raw.message.len != 0) raw.message else null;
     if (raw.lock) |l| {
         if (l.id.len == 0) return error.MalformedResponse;
@@ -153,10 +153,10 @@ pub const ParseListPageError = Allocator.Error || error{MalformedResponse};
 
 /// Read a page of `GET /locks`, or the `remote` cache git-lfs writes, which
 /// is a bare array of locks.
-pub fn parseListPage(arena: Allocator, bytes: []const u8) ParseListPageError!ListPage {
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+pub fn parseListPage(arena: Allocator, page: lfsapi.Unparsed) ParseListPageError!ListPage {
+    const trimmed = std.mem.trim(u8, page.readForParse(), " \t\r\n");
     if (trimmed.len != 0 and trimmed[0] == '[') {
-        return .{ .locks = try toLocks(arena, try parseJson([]const LockJson, arena, trimmed)) };
+        return .{ .locks = try toLocks(arena, try parseJson([]const LockJson, arena, page)) };
     }
     const Raw = struct {
         locks: []const LockJson = &.{},
@@ -167,7 +167,7 @@ pub fn parseListPage(arena: Allocator, bytes: []const u8) ParseListPageError!Lis
         documentation_url: []const u8 = "",
         request_id: []const u8 = "",
     };
-    const raw = try parseJson(Raw, arena, bytes);
+    const raw = try parseJson(Raw, arena, page);
     return .{ .locks = try toLocks(arena, raw.locks), .next_cursor = nonEmpty(raw.next_cursor), .message = nonEmpty(raw.message) };
 }
 
@@ -175,7 +175,7 @@ pub fn parseListPage(arena: Allocator, bytes: []const u8) ParseListPageError!Lis
 pub const ParseVerifyPageError = Allocator.Error || error{MalformedResponse};
 
 /// Read a page of `POST /locks/verify`, or the `verifiable` cache.
-pub fn parseVerifyPage(arena: Allocator, bytes: []const u8) ParseVerifyPageError!VerifyPage {
+pub fn parseVerifyPage(arena: Allocator, page: lfsapi.Unparsed) ParseVerifyPageError!VerifyPage {
     const Raw = struct {
         ours: []const LockJson = &.{},
         theirs: []const LockJson = &.{},
@@ -186,7 +186,7 @@ pub fn parseVerifyPage(arena: Allocator, bytes: []const u8) ParseVerifyPageError
         documentation_url: []const u8 = "",
         request_id: []const u8 = "",
     };
-    const raw = try parseJson(Raw, arena, bytes);
+    const raw = try parseJson(Raw, arena, page);
     return .{
         .ours = try toLocks(arena, raw.ours),
         .theirs = try toLocks(arena, raw.theirs),
@@ -285,9 +285,9 @@ pub const ParseRequestError = Allocator.Error || error{MalformedResponse};
 /// `VerifyRequest`) as git-lfs's Go reads JSON. An empty body is every
 /// field's default, as git-lfs sends no body for an unlock it does not
 /// force.
-pub fn parseRequest(comptime T: type, arena: Allocator, bytes: []const u8) ParseRequestError!T {
-    if (std.mem.trim(u8, bytes, " \t\r\n").len == 0) return .{};
-    return lfsapi.parseJson(T, arena, bytes, .program);
+pub fn parseRequest(comptime T: type, arena: Allocator, body: lfsapi.Unparsed) ParseRequestError!T {
+    if (std.mem.trim(u8, body.readForParse(), " \t\r\n").len == 0) return .{};
+    return lfsapi.parseJson(T, arena, body, .program);
 }
 
 /// Errors from writing an answer.
@@ -748,8 +748,8 @@ fn sshSay(io: Io, server: *lfsapi.Server, status: lfsssh.Status, what: []const u
     server.client.setMessage(io, std.mem.print(&buf, "{s}: status {d}{s}{s}", .{
         what,
         status.code,
-        if (status.lines.len != 0) ": " else "",
-        if (status.lines.len != 0) status.lines[0] else "",
+        if (status.message() != null) ": " else "",
+        status.message() orelse "",
     }) catch what);
 }
 
@@ -853,9 +853,9 @@ pub const ParseSshLocksError = Allocator.Error || error{MalformedResponse};
 /// <id>` and described by `path`, `locked-at`, `ownername` and `owner`
 /// lines naming the same id, as git-lfs reads them. Anything else is
 /// `error.MalformedResponse`.
-pub fn parseSshLocks(arena: Allocator, lines: []const []const u8) ParseSshLocksError![]const SshListed {
+pub fn parseSshLocks(arena: Allocator, lines: lfsssh.Lines) ParseSshLocksError![]const SshListed {
     var out: std.ArrayList(SshListed) = .empty;
-    for (lines) |line| {
+    for (lines.readForParse()) |line| {
         var it = std.mem.splitScalar(u8, line, ' ');
         const cmd = it.next() orelse return error.MalformedResponse;
         const id = it.next() orelse return error.MalformedResponse;
@@ -931,14 +931,14 @@ pub const Cache = struct {
         const dir = try dirPath(a, store, ref);
         const remote_path = try a.print("{s}/remote", .{dir});
         if (try fs.readFileAlloc(a, io, store.base, remote_path, 64 << 20)) |bytes| {
-            if (parseListPage(a, bytes)) |page| {
+            if (parseListPage(a, .init(bytes))) |page| {
                 c.remote = page.locks;
                 c.have_remote = true;
             } else |_| {}
         }
         const verifiable_path = try a.print("{s}/verifiable", .{dir});
         if (try fs.readFileAlloc(a, io, store.base, verifiable_path, 64 << 20)) |bytes| {
-            if (parseVerifyPage(a, bytes)) |page| {
+            if (parseVerifyPage(a, .init(bytes))) |page| {
                 c.ours = page.ours;
                 c.theirs = page.theirs;
                 c.have_verifiable = true;
@@ -1170,29 +1170,29 @@ test "the locking API's answers and git-lfs's cache files are read" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const created = try parseLockAnswer(a, "{\"lock\":{\"id\":\"7\",\"path\":\"a.bin\",\"owner\":{\"name\":\"Ada\"},\"locked_at\":\"2016-05-17T15:49:06+00:00\"}}");
+    const created = try parseLockAnswer(a, .init("{\"lock\":{\"id\":\"7\",\"path\":\"a.bin\",\"owner\":{\"name\":\"Ada\"},\"locked_at\":\"2016-05-17T15:49:06+00:00\"}}"));
     try testing.expectEqualStrings("Ada", created.lock.?.owner.?);
     try testing.expectEqual(@as(i64, 1463500146), created.lock.?.locked_at.unix);
-    const refused = try parseLockAnswer(a, "{\"message\":\"no\"}");
+    const refused = try parseLockAnswer(a, .init("{\"message\":\"no\"}"));
     try testing.expect(refused.lock == null);
     // A member given twice is read into what the first left, as git-lfs's
     // Go reads it.
-    const twice = try parseLockAnswer(a, "{\"message\":\"first\",\"lock\":{\"id\":\"1\",\"path\":\"x\"},\"message\":\"last\",\"LOCK\":{\"path\":\"y\",\"locked_at\":null}}");
+    const twice = try parseLockAnswer(a, .init("{\"message\":\"first\",\"lock\":{\"id\":\"1\",\"path\":\"x\"},\"message\":\"last\",\"LOCK\":{\"path\":\"y\",\"locked_at\":null}}"));
     try testing.expectEqualStrings("last", twice.message.?);
     try testing.expectEqualStrings("1", twice.lock.?.id);
     try testing.expectEqualStrings("y", twice.lock.?.path);
     try testing.expect(twice.lock.?.locked_at.isZero());
     // A time Go cannot read, or a value of another kind, is no answer.
-    try testing.expectError(error.MalformedResponse, parseLockAnswer(a, "{\"lock\":{\"id\":\"1\",\"locked_at\":\"yesterday\"}}"));
-    try testing.expectError(error.MalformedResponse, parseLockAnswer(a, "{\"lock\":{\"id\":\"1\",\"locked_at\":0}}"));
-    const page = try parseListPage(a, "{\"locks\":[{\"id\":\"1\",\"path\":\"x\"}],\"next_cursor\":\"2\"}");
+    try testing.expectError(error.MalformedResponse, parseLockAnswer(a, .init("{\"lock\":{\"id\":\"1\",\"locked_at\":\"yesterday\"}}")));
+    try testing.expectError(error.MalformedResponse, parseLockAnswer(a, .init("{\"lock\":{\"id\":\"1\",\"locked_at\":0}}")));
+    const page = try parseListPage(a, .init("{\"locks\":[{\"id\":\"1\",\"path\":\"x\"}],\"next_cursor\":\"2\"}"));
     try testing.expectEqualStrings("2", page.next_cursor.?);
-    const cached = try parseListPage(a, "[{\"id\":\"1\",\"path\":\"x\",\"owner\":{\"name\":\"b\"},\"locked_at\":\"2026-09-24T10:01:00Z\"}]\n");
+    const cached = try parseListPage(a, .init("[{\"id\":\"1\",\"path\":\"x\",\"owner\":{\"name\":\"b\"},\"locked_at\":\"2026-09-24T10:01:00Z\"}]\n"));
     try testing.expectEqualStrings("b", cached.locks[0].owner.?);
-    const split = try parseVerifyPage(a, "{\"ours\":[{\"id\":\"1\",\"path\":\"x\"}],\"theirs\":[]}");
+    const split = try parseVerifyPage(a, .init("{\"ours\":[{\"id\":\"1\",\"path\":\"x\"}],\"theirs\":[]}"));
     try testing.expectEqual(@as(usize, 1), split.ours.len);
-    try testing.expectError(error.MalformedResponse, parseListPage(a, "{\"locks\":[{\"path\":\"x\"}]}"));
-    try testing.expectError(error.MalformedResponse, parseVerifyPage(a, "{"));
+    try testing.expectError(error.MalformedResponse, parseListPage(a, .init("{\"locks\":[{\"path\":\"x\"}]}")));
+    try testing.expectError(error.MalformedResponse, parseVerifyPage(a, .init("{")));
 }
 
 test "a lock is written to the cache as git-lfs writes it" {
@@ -1226,15 +1226,15 @@ fn fuzzLocks(_: void, case: *shakedown.Case) anyerror!void {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const bytes = scratch[0..n];
-    if (parseLockAnswer(a, bytes)) |answer| {
+    if (parseLockAnswer(a, .init(bytes))) |answer| {
         if (answer.lock) |l| try testing.expect(l.id.len != 0);
     } else |err| if (err != error.MalformedResponse) return err;
-    if (parseListPage(a, bytes)) |page| {
+    if (parseListPage(a, .init(bytes))) |page| {
         for (page.locks) |l| try testing.expect(l.id.len != 0);
         var t = try Table.fromListing(testing.allocator, page.locks);
         t.deinit();
     } else |err| if (err != error.MalformedResponse) return err;
-    if (parseVerifyPage(a, bytes)) |page| {
+    if (parseVerifyPage(a, .init(bytes))) |page| {
         var t = try Table.fromVerified(testing.allocator, page.ours, page.theirs);
         t.deinit();
     } else |err| if (err != error.MalformedResponse) return err;
@@ -1254,7 +1254,7 @@ fn fuzzSshLocks(_: void, case: *shakedown.Case) anyerror!void {
     var lines: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, scratch[0..len], '\n');
     while (it.next()) |line| try lines.append(a, line);
-    _ = parseSshLocks(a, lines.items) catch |err| switch (err) {
+    _ = parseSshLocks(a, .init(lines.items)) catch |err| switch (err) {
         error.MalformedResponse => return,
         else => return err,
     };

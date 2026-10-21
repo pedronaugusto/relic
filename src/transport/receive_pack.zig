@@ -588,7 +588,7 @@ pub const Server = struct {
                 else => return error.ProtocolError,
             };
             const raw = switch (packet) {
-                .data => |d| d,
+                .data => |d| d.readForParse(),
                 else => break,
             };
             const chomped = if (raw.len != 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
@@ -611,7 +611,7 @@ pub const Server = struct {
                         else => return error.ProtocolError,
                     };
                     const text = switch (part) {
-                        .data => |d| d,
+                        .data => |d| d.readForParse(),
                         .flush => break true,
                         else => return error.ProtocolError,
                     };
@@ -1164,7 +1164,7 @@ pub const Server = struct {
             while (true) {
                 const packet = pkt_line.read(r) catch break :negotiate false;
                 const raw = switch (packet) {
-                    .data => |d| d,
+                    .data => |d| d.readForParse(),
                     else => break :negotiate true,
                 };
                 const line = chompLine(raw);
@@ -1232,7 +1232,7 @@ pub const Server = struct {
                 break;
             };
             const line = switch (packet) {
-                .data => |d| chompLine(d),
+                .data => |d| chompLine(d.readForParse()),
                 else => break,
             };
             responses += 1;
@@ -1838,7 +1838,7 @@ fn readPushOptions(arena: Allocator, in: *Io.Reader, out: *std.ArrayList([]const
             else => return error.ProtocolError,
         };
         const raw = switch (packet) {
-            .data => |d| d,
+            .data => |d| d.readForParse(),
             else => return,
         };
         const line = if (raw.len != 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;

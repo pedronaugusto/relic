@@ -55,7 +55,8 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
     var fixed: Io.Reader = .fixed(answer.written());
     var reader = fixed.limited(.unlimited, &buffer);
     while (pkt_line.read(&reader.interface)) |packet| switch (packet) {
-        .data => |line| {
+        .data => |unparsed| {
+            const line = unparsed.readForParse();
             if (std.mem.startsWith(u8, line, "ACK ") and std.mem.find(u8, line, tree) != null) count += 1;
         },
         else => {},

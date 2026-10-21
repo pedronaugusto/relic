@@ -26,7 +26,7 @@ const name = "lfs/locks.json";
 /// The locks as they are now, in `arena`.
 pub fn read(arena: Allocator, io: Io, git_dir: Io.Dir) Error![]const locks.Lock {
     const bytes = (try fs.readFileAlloc(arena, io, git_dir, name, 64 << 20)) orelse return &.{};
-    const page = locks.parseListPage(arena, bytes) catch return error.LfsStoreFailed;
+    const page = locks.parseListPage(arena, .init(bytes)) catch return error.LfsStoreFailed;
     return page.locks;
 }
 

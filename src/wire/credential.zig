@@ -758,7 +758,7 @@ pub const Session = struct {
         // there, is passed over, but what it wrote first is read, as git
         // reads it before it waits for the helper to end.
         if (operation != .get) return .{ .failed = !outcome.succeeded(), .any = false };
-        const any = try s.readAnswer(outcome.stdout);
+        const any = try s.readAnswer(.init(outcome.stdout));
         return .{ .failed = !outcome.succeeded(), .any = any };
     }
 
@@ -766,9 +766,9 @@ pub const Session = struct {
     /// a line at a time to the first empty one, or to the first with no
     /// `=`, which ends the answer keeping what came before it. Returns
     /// whether it named a username, password, authtype or credential.
-    pub fn readAnswer(s: *Session, text: []const u8) ErrorNamespace.Error!bool {
+    pub fn readAnswer(s: *Session, answer: aegis.input.Untrusted([]const u8)) ErrorNamespace.Error!bool {
         var any = false;
-        var rest = text;
+        var rest = answer.readForParse();
         while (rest.len != 0) {
             // git's `strbuf_getline`: a line ends at a newline, which goes
             // with one carriage return before it.
@@ -1265,16 +1265,16 @@ test "a helper's answer is read a line at a time, to an empty line or one with n
     var session: Session = .{ .gpa = testing.allocator, .url = try url_mod.Url.parse("https://h/r") };
     defer session.deinit();
     try session.fromOrigin();
-    try testing.expect(try session.readAnswer("username=a\x00b\npassword=p\r\r\nbroken\nhost=other\n"));
+    try testing.expect(try session.readAnswer(.init("username=a\x00b\npassword=p\r\r\nbroken\nhost=other\n")));
     try testing.expectEqualStrings("a", session.username.?);
     try testing.expectEqualStrings("p\r", session.exposePassword().?);
     try testing.expectEqualStrings("h", session.host.?);
-    try testing.expectError(error.InvalidCredentialAnswer, session.readAnswer("quit=maybe\n"));
-    _ = try session.readAnswer("password_expiry_utc=-1\n");
+    try testing.expectError(error.InvalidCredentialAnswer, session.readAnswer(.init("quit=maybe\n")));
+    _ = try session.readAnswer(.init("password_expiry_utc=-1\n"));
     try testing.expectEqual(no_expiry, session.password_expiry_utc);
-    _ = try session.readAnswer("password_expiry_utc= 12x\n");
+    _ = try session.readAnswer(.init("password_expiry_utc= 12x\n"));
     try testing.expectEqual(@as(u64, 12), session.password_expiry_utc);
-    _ = try session.readAnswer("password_expiry_utc=99999999999999999999\n");
+    _ = try session.readAnswer(.init("password_expiry_utc=99999999999999999999\n"));
     try testing.expectEqual(no_expiry, session.password_expiry_utc);
 }
 
@@ -1289,7 +1289,7 @@ fn fuzzAnswer(_: void, case: *shakedown.Case) anyerror!void {
     var session: Session = .{ .gpa = testing.allocator, .url = try url_mod.Url.parse("https://git.example.com/r.git") };
     defer session.deinit();
     try session.fromOrigin();
-    _ = session.readAnswer(input) catch |err| switch (err) {
+    _ = session.readAnswer(.init(input)) catch |err| switch (err) {
         error.InvalidCredentialAnswer => return,
         else => |e| return e,
     };

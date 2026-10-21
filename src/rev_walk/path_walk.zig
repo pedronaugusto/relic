@@ -200,7 +200,7 @@ pub const PathWalk = struct {
         switch (spec) {
             .blob_none => pw.blobs = false,
             .blob_limit => |limit| {
-                if (limit.raw() == 0) {
+                if (limit.eql(.fromRaw(0))) {
                     pw.blobs = false;
                 } else if (pw.blob_limit == null or limit.compare(pw.blob_limit.?) == .lt) pw.blob_limit = limit;
             },

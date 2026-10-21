@@ -234,7 +234,8 @@ fn fetchV2(
                         if (!ready) return error.ProtocolError;
                         break;
                     },
-                    .data => |raw| {
+                    .data => |unparsed| {
+                        const raw = unparsed.readForParse();
                         const line = std.mem.trimEnd(u8, raw, "\n");
                         if (std.mem.eql(u8, line, "NAK")) continue;
                         if (std.mem.eql(u8, line, "ready")) {
@@ -323,7 +324,7 @@ fn writeShallowRequest(w: *Io.Writer, request: Request, v2: bool) pkt_line.Write
 fn expectSection(conn: *Connection, in: *Io.Reader, name: []const u8) Error!void {
     const packet = try conn.readPacket(in);
     const line = switch (packet) {
-        .data => |raw| std.mem.trimEnd(u8, raw, "\n"),
+        .data => |raw| std.mem.trimEnd(u8, raw.readForParse(), "\n"),
         else => return error.ProtocolError,
     };
     if (std.mem.startsWith(u8, line, "ERR ")) {
@@ -348,7 +349,7 @@ fn receivePackfileV2(
     while (true) {
         const packet = try conn.readPacket(in);
         const header = switch (packet) {
-            .data => |raw| std.mem.trimEnd(u8, raw, "\n"),
+            .data => |raw| std.mem.trimEnd(u8, raw.readForParse(), "\n"),
             else => return error.ProtocolError,
         };
         if (std.mem.startsWith(u8, header, "ERR ")) {
@@ -365,7 +366,7 @@ fn receivePackfileV2(
                 .delim => break,
                 .data => |raw| if (is_shallow) {
                     const info = shallow_info orelse return error.ProtocolError;
-                    if (!try info.take(kind, std.mem.trimEnd(u8, raw, "\n"))) return error.ProtocolError;
+                    if (!try info.take(kind, std.mem.trimEnd(u8, raw.readForParse(), "\n"))) return error.ProtocolError;
                 },
                 else => return error.ProtocolError,
             }
@@ -406,7 +407,7 @@ const Ack = enum { nak, ack, common, ready, @"continue" };
 fn readAck(conn: *Connection, in: *Io.Reader, kind: hash.Kind, oid_out: *Oid) Error!Ack {
     const packet = try conn.readPacket(in);
     const line = switch (packet) {
-        .data => |raw| std.mem.trimEnd(u8, raw, "\n"),
+        .data => |raw| std.mem.trimEnd(u8, raw.readForParse(), "\n"),
         else => return error.ProtocolError,
     };
     if (std.mem.eql(u8, line, "NAK")) return .nak;
@@ -434,7 +435,8 @@ fn readShallowList(conn: *Connection, in: *Io.Reader, kind: hash.Kind, shallow_i
     while (true) {
         switch (try conn.readPacket(in)) {
             .flush => return,
-            .data => |raw| {
+            .data => |unparsed| {
+                const raw = unparsed.readForParse();
                 const line = std.mem.trimEnd(u8, raw, "\n");
                 if (!keep) continue;
                 const info = shallow_info orelse return error.ProtocolError;

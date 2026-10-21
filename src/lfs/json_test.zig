@@ -60,7 +60,7 @@ test "LFS answers are read as git-lfs's Go reads them" {
 
 fn dump(a: Allocator, w: *Io.Writer, kind: []const u8, input: []const u8) !void {
     if (std.mem.eql(u8, kind, "batch")) {
-        const r = try transfer.parseBatch(a, input);
+        const r = try transfer.parseBatch(a, .init(input));
         try w.writeAll("B(");
         try hex(w, r.transfer);
         try w.writeByte(';');
@@ -80,7 +80,7 @@ fn dump(a: Allocator, w: *Io.Writer, kind: []const u8, input: []const u8) !void 
         return w.writeByte(')');
     }
     if (std.mem.eql(u8, kind, "lock")) {
-        const r = try locks.parseLockAnswer(a, input);
+        const r = try locks.parseLockAnswer(a, .init(input));
         try w.writeAll("R(");
         if (r.lock) |l| try lock(w, l) else try w.writeAll("nil");
         try w.writeByte(';');
@@ -88,7 +88,7 @@ fn dump(a: Allocator, w: *Io.Writer, kind: []const u8, input: []const u8) !void 
         return w.writeByte(')');
     }
     if (std.mem.eql(u8, kind, "list")) {
-        const r = try locks.parseListPage(a, input);
+        const r = try locks.parseListPage(a, .init(input));
         try w.writeAll("P(");
         for (r.locks) |l| {
             try lock(w, l);
@@ -101,7 +101,7 @@ fn dump(a: Allocator, w: *Io.Writer, kind: []const u8, input: []const u8) !void 
         return w.writeByte(')');
     }
     if (std.mem.eql(u8, kind, "verify")) {
-        const r = try locks.parseVerifyPage(a, input);
+        const r = try locks.parseVerifyPage(a, .init(input));
         try w.writeAll("V(");
         for ([_][]const locks.Lock{ r.ours, r.theirs }) |set| {
             for (set) |l| {
@@ -116,7 +116,7 @@ fn dump(a: Allocator, w: *Io.Writer, kind: []const u8, input: []const u8) !void 
         return w.writeByte(')');
     }
     if (std.mem.eql(u8, kind, "auth")) {
-        const r = try lfsapi.parseAuthenticate(a, input);
+        const r = try lfsapi.parseAuthenticate(a, .init(input));
         try w.writeAll("S(");
         try hex(w, r.href orelse "");
         try w.writeByte(';');
@@ -128,7 +128,7 @@ fn dump(a: Allocator, w: *Io.Writer, kind: []const u8, input: []const u8) !void 
         return w.print(";{d})", .{r.expires_in});
     }
     if (std.mem.eql(u8, kind, "adapter")) {
-        const r = try custom.parseAnswer(a, input);
+        const r = try custom.parseAnswer(a, .init(input));
         try w.writeAll("C(");
         try hex(w, r.event);
         try w.writeByte(';');
@@ -233,7 +233,7 @@ test "a server's batch answer is written as git-lfs's Go writes tq.BatchResponse
     // And read back as the client reads it.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const back = try transfer.parseBatch(arena.allocator(), out.written());
+    const back = try transfer.parseBatch(arena.allocator(), .init(out.written()));
     try testing.expectEqualStrings("http://h/o", back.objects[0].action(.download).?.href);
     try testing.expectEqual(@as(i64, 900), back.objects[1].action(.upload).?.expires_in);
     try testing.expectEqual(@as(i64, 404), back.objects[3].@"error".?.code);
@@ -246,13 +246,13 @@ test "a batch request is read as a server's Go reads tq.batchRequest" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try transfer.writeBatchRequestOffering(&out.writer, .upload, &objects, "refs/heads/main", &.{"lfs-standalone-file"});
-    const read = try transfer.parseBatchRequest(arena.allocator(), out.written());
+    const read = try transfer.parseBatchRequest(arena.allocator(), .init(out.written()));
     try testing.expectEqualStrings("upload", read.operation);
     try testing.expectEqualStrings("refs/heads/main", read.ref.?.name);
     try testing.expectEqual(@as(usize, 2), read.transfers.len);
     try testing.expectEqualStrings(&oid_e, read.objects[0].oid);
     try testing.expectEqual(@as(i64, 7), read.objects[0].size);
-    try testing.expectError(error.MalformedResponse, transfer.parseBatchRequest(arena.allocator(), "{\"objects\":[null]}"));
+    try testing.expectError(error.MalformedResponse, transfer.parseBatchRequest(arena.allocator(), .init("{\"objects\":[null]}")));
 }
 
 const strand_pair = @typeInfo(@FieldType(lfsapi.HeaderMap, "items")).pointer.child;

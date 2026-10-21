@@ -155,7 +155,7 @@ pub const Session = struct {
             else => |e| return e,
         };
         const command = switch (first) {
-            .data => |d| try arena.dupe(u8, chomp(d)),
+            .data => |d| try arena.dupe(u8, chomp(d.readForParse())),
             else => return error.ProtocolError,
         };
         var args: std.ArrayList([]const u8) = .empty;
@@ -163,7 +163,7 @@ pub const Session = struct {
             switch (try pkt_line.read(s.in)) {
                 .flush => return .{ .command = command, .args = args.items },
                 .delim => break,
-                .data => |d| try args.append(arena, try arena.dupe(u8, chomp(d))),
+                .data => |d| try args.append(arena, try arena.dupe(u8, chomp(d.readForParse()))),
                 .response_end => return error.ProtocolError,
             }
         }
@@ -172,7 +172,7 @@ pub const Session = struct {
         while (true) {
             switch (try pkt_line.read(s.in)) {
                 .flush => break,
-                .data => |d| try lines.append(arena, try arena.dupe(u8, chomp(d))),
+                .data => |d| try lines.append(arena, try arena.dupe(u8, chomp(d.readForParse()))),
                 else => return error.ProtocolError,
             }
         }
@@ -492,7 +492,7 @@ const DataReader = struct {
                     d.ended = true;
                     return error.EndOfStream;
                 },
-                .data => |bytes| d.pending = bytes,
+                .data => |bytes| d.pending = bytes.readForParse(),
                 else => {
                     d.bad = true;
                     return error.ReadFailed;
@@ -630,7 +630,10 @@ test "a connection is served whole: an object up, checked and down, a lock taken
     while (true) {
         const packet = pkt_line.read(&out_limited.interface) catch break;
         switch (packet) {
-            .data => |d| try said.print(gpa, "{s}{s}", .{ d, if (d.len != 0 and d[d.len - 1] == '\n') "" else "\n" }),
+            .data => |unparsed| {
+                const d = unparsed.readForParse();
+                try said.print(gpa, "{s}{s}", .{ d, if (d.len != 0 and d[d.len - 1] == '\n') "" else "\n" });
+            },
             .delim => try said.appendSlice(gpa, "--\n"),
             .flush => try said.appendSlice(gpa, "==\n"),
             .response_end => break,

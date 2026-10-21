@@ -87,7 +87,7 @@ pub fn backfill(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, optio
     defer arena_state.deinit();
     const a = arena_state.allocator();
     if (options.filter) |text| switch (try filter_spec.parse(a, text)) {
-        .blob_limit => |limit| if (limit.raw() != 0) return error.BlobSizeLimit,
+        .blob_limit => |limit| if (!limit.eql(.fromRaw(0))) return error.BlobSizeLimit,
         else => {},
     };
 

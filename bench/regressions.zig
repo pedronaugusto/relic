@@ -978,7 +978,7 @@ fn exchange(conn: *relic.transport.connection.Connection) !usize {
     const r = try conn.response();
     var carried: usize = 0;
     while (true) switch (try conn.readPacket(r)) {
-        .data => |d| carried += d.len,
+        .data => |d| carried += d.readForParse().len,
         .flush => return carried,
         .delim, .response_end => {},
     };

@@ -299,7 +299,7 @@ pub const Agent = struct {
             return error.LfsAdapterProtocolError;
         }
         r.toss(1);
-        return parseAnswer(a.arena_state.allocator(), a.line.written());
+        return parseAnswer(a.arena_state.allocator(), .init(a.line.written()));
     }
 };
 
@@ -317,7 +317,7 @@ pub const Answer = struct {
 /// An answer line read as git-lfs reads one, with `json.Unmarshal`; one it
 /// cannot read is `error.LfsAdapterProtocolError`. Strings point into
 /// `arena`.
-pub fn parseAnswer(arena: std.mem.Allocator, line: []const u8) error{ OutOfMemory, LfsAdapterProtocolError }!Answer {
+pub fn parseAnswer(arena: std.mem.Allocator, line: lfsapi.Unparsed) error{ OutOfMemory, LfsAdapterProtocolError }!Answer {
     return lfsapi.parseJson(Answer, arena, line, .program) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.MalformedResponse => error.LfsAdapterProtocolError,

@@ -110,7 +110,7 @@ const FakeDaemon = struct {
         var question: std.ArrayList(u8) = .empty;
         defer question.deinit(d.gpa);
         while (true) switch (try pkt_line.read(&reader.interface)) {
-            .data => |data| try question.appendSlice(d.gpa, data),
+            .data => |data| try question.appendSlice(d.gpa, data.readForParse()),
             else => break,
         };
         d.mutex.lockUncancelable(io);

@@ -159,7 +159,8 @@ fn scriptedPage(gpa: Allocator, session: *Transfer.Session, req: Transfer.Reques
         switch (try pkt_line.read(r)) {
             .flush => break,
             .delim => in_lines = true,
-            .data => |d| {
+            .data => |unparsed| {
+                const d = unparsed.readForParse();
                 const text = try gpa.dupe(u8, std.mem.trimEnd(u8, d, "\n"));
                 if (std.mem.startsWith(u8, text, "status ")) {
                     code = std.fmt.parseInt(u16, text["status ".len..], 10) catch 500;

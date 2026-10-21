@@ -572,7 +572,10 @@ pub const Protocol = struct {
             error.EndOfStream, error.ReadFailed => return error.FilterGone,
         };
         return switch (packet) {
-            .data => |data| if (data.len == 0) null else data,
+            .data => |data| {
+                const bytes = data.readForParse();
+                return if (bytes.len == 0) null else bytes;
+            },
             else => null,
         };
     }

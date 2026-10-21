@@ -357,14 +357,14 @@ pub const ParseBatchError = Allocator.Error || error{MalformedResponse};
 /// Read a batch answer. Every string is allocated in `arena`. An answer that
 /// does not parse, whose objects are not named by a SHA-256, or that names
 /// another hash algorithm, is `error.MalformedResponse`.
-pub fn parseBatch(arena: Allocator, bytes: []const u8) ParseBatchError!BatchResponse {
+pub fn parseBatch(arena: Allocator, answer: lfsapi.Unparsed) ParseBatchError!BatchResponse {
     // The answer as Go holds it: `[]*Transfer`, whose elements may be nil.
     const Json = struct {
         transfer: []const u8 = "",
         objects: []const ?BatchObject = &.{},
         hash_algo: []const u8 = "",
     };
-    const parsed = try lfsapi.parseJson(Json, arena, bytes, .http);
+    const parsed = try lfsapi.parseJson(Json, arena, answer, .http);
     if (parsed.hash_algo.len != 0 and !std.mem.eql(u8, parsed.hash_algo, "sha256")) return error.MalformedResponse;
     const objects = try arena.alloc(BatchObject, parsed.objects.len);
     for (parsed.objects, objects) |entry, *to| {
@@ -410,7 +410,7 @@ pub const ParseBatchRequestError = Allocator.Error || error{MalformedResponse};
 /// Read a batch request as git-lfs's Go reads JSON; one that does not
 /// parse, or names an object `null`, is `error.MalformedResponse`. Strings
 /// are allocated in `arena`.
-pub fn parseBatchRequest(arena: Allocator, bytes: []const u8) ParseBatchRequestError!BatchRequest {
+pub fn parseBatchRequest(arena: Allocator, request: lfsapi.Unparsed) ParseBatchRequestError!BatchRequest {
     const Json = struct {
         operation: []const u8 = "",
         transfers: []const []const u8 = &.{},
@@ -418,7 +418,7 @@ pub fn parseBatchRequest(arena: Allocator, bytes: []const u8) ParseBatchRequestE
         objects: []const ?RequestObject = &.{},
         hash_algo: []const u8 = "",
     };
-    const parsed = try lfsapi.parseJson(Json, arena, bytes, .program);
+    const parsed = try lfsapi.parseJson(Json, arena, request, .program);
     const objects = try arena.alloc(RequestObject, parsed.objects.len);
     for (parsed.objects, objects) |entry, *to| to.* = entry orelse return error.MalformedResponse;
     return .{
@@ -1781,7 +1781,7 @@ fn sshBatch(a: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, o
         var buf: [512]u8 = undefined;
         server.client.setMessage(io, std.mem.print(&buf, "batch response: status {d} from server ({s})", .{
             status.code,
-            if (status.lines.len != 0) status.lines[0] else "no message provided",
+            status.message() orelse "no message provided",
         }) catch "batch response");
         return error.LfsBatchFailed;
     }
@@ -1798,8 +1798,8 @@ pub const ParseSshBatchError = Allocator.Error || error{MalformedResponse};
 /// them: `<oid> <size> <action>` with `id=`, `token=`, `expires-in=` and
 /// `expires-at=`, the lines for one object together, `noop` for one with
 /// nothing to do. A line that is not that is `error.MalformedResponse`.
-pub fn parseSshBatch(a: Allocator, lines: []const []const u8) ParseSshBatchError!BatchResponse {
-    const sorted = try a.dupe([]const u8, lines);
+pub fn parseSshBatch(a: Allocator, lines: lfsssh.Lines) ParseSshBatchError!BatchResponse {
+    const sorted = try a.dupe([]const u8, lines.readForParse());
     std.mem.sort([]const u8, sorted, {}, struct {
         fn less(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.lessThan(u8, x, y);
@@ -1970,8 +1970,8 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
         const why = try state.dupe(try scratch.print("got status {d} when uploading OID {s}{s}{s}", .{
             status.code,
             &r.oid,
-            if (status.lines.len != 0) ": " else "",
-            if (status.lines.len != 0) status.lines[0] else "",
+            if (status.message() != null) ": " else "",
+            status.message() orelse "",
         }));
         if (status.code == 403 or status.code == 429) return .{ .retry = .{ .message = why } };
         return .{ .fail = why };
@@ -1985,8 +1985,8 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
         return .{ .fail = try state.dupe(try scratch.print("got status {d} when verifying upload OID {s}{s}{s}", .{
             verified.code,
             &r.oid,
-            if (verified.lines.len != 0) ": " else "",
-            if (verified.lines.len != 0) verified.lines[0] else "",
+            if (verified.message() != null) ": " else "",
+            verified.message() orelse "",
         })) };
     }
     return .ok;
@@ -2550,11 +2550,11 @@ test "a batch answer is read as git-lfs reads it, legacy links and errors includ
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const oid = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
-    const answer = try parseBatch(a, "{\"transfer\":\"basic\",\"objects\":[" ++
+    const answer = try parseBatch(a, .init("{\"transfer\":\"basic\",\"objects\":[" ++
         "{\"oid\":\"" ++ oid ++ "\",\"size\":6,\"authenticated\":true,\"actions\":{\"download\":{\"href\":\"https://x/o\",\"header\":{\"A\":\"b\"},\"expires_in\":60}},\"extra\":1}," ++
         "{\"oid\":\"" ++ oid ++ "\",\"size\":6,\"_links\":{\"upload\":{\"href\":\"https://x/u\"},\"verify\":{\"href\":\"https://x/v\"}}}," ++
         "{\"oid\":\"" ++ oid ++ "\",\"size\":6,\"error\":{\"code\":404,\"message\":\"Object does not exist\"}}" ++
-        "],\"hash_algo\":\"sha256\"}");
+        "],\"hash_algo\":\"sha256\"}"));
     try testing.expectEqual(@as(usize, 3), answer.objects.len);
     try testing.expect(answer.objects[0].authenticated);
     const d = answer.objects[0].action(.download).?;
@@ -2564,9 +2564,9 @@ test "a batch answer is read as git-lfs reads it, legacy links and errors includ
     try testing.expectEqualStrings("https://x/v", answer.objects[1].action(.verify).?.href);
     try testing.expectEqual(@as(i64, 404), answer.objects[2].@"error".?.code);
 
-    try testing.expectError(error.MalformedResponse, parseBatch(a, "{\"objects\":[],\"hash_algo\":\"sha512\"}"));
-    try testing.expectError(error.MalformedResponse, parseBatch(a, "{\"objects\":[{\"oid\":\"../../etc/passwd\",\"size\":1}]}"));
-    try testing.expectError(error.MalformedResponse, parseBatch(a, "["));
+    try testing.expectError(error.MalformedResponse, parseBatch(a, .init("{\"objects\":[],\"hash_algo\":\"sha512\"}")));
+    try testing.expectError(error.MalformedResponse, parseBatch(a, .init("{\"objects\":[{\"oid\":\"../../etc/passwd\",\"size\":1}]}")));
+    try testing.expectError(error.MalformedResponse, parseBatch(a, .init("[")));
 }
 
 test "a batch request is written as git-lfs writes one" {
@@ -2608,7 +2608,7 @@ fn fuzzBatch(_: void, case: *shakedown.Case) anyerror!void {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const answer = parseBatch(a, scratch[0..n]) catch |err| switch (err) {
+    const answer = parseBatch(a, .init(scratch[0..n])) catch |err| switch (err) {
         error.MalformedResponse => return,
         else => return err,
     };
@@ -2637,7 +2637,7 @@ fn fuzzSshBatch(_: void, case: *shakedown.Case) anyerror!void {
     var lines: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, scratch[0..len], '\n');
     while (it.next()) |line| try lines.append(a, line);
-    _ = parseSshBatch(a, lines.items) catch |err| switch (err) {
+    _ = parseSshBatch(a, .init(lines.items)) catch |err| switch (err) {
         error.MalformedResponse => return,
         else => return err,
     };
@@ -2649,11 +2649,11 @@ test "an ssh batch answer's lines become the objects and actions git-lfs reads f
     const a = arena_state.allocator();
     const b = &@as([64]u8, @splat('b'));
     const c = &@as([64]u8, @splat('c'));
-    const got = try parseSshBatch(a, &.{
+    const got = try parseSshBatch(a, .init(&.{
         c ++ " 3 noop",
         b ++ " 5 download id=x token=y expires-in=60",
         b ++ " 5 verify",
-    });
+    }));
     try testing.expectEqual(@as(usize, 2), got.objects.len);
     try testing.expectEqualStrings(b, got.objects[0].oid);
     const dl = got.objects[0].action(.download).?;
@@ -2662,9 +2662,9 @@ test "an ssh batch answer's lines become the objects and actions git-lfs reads f
     try testing.expectEqual(@as(i64, 60), dl.expires_in);
     try testing.expect(got.objects[0].action(.verify) != null);
     try testing.expect(got.objects[1].action(.download) == null);
-    try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{"short line"}));
-    try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " x download"}));
-    try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " 1 download expires-at=soon"}));
+    try testing.expectError(error.MalformedResponse, parseSshBatch(a, .init(&.{"short line"})));
+    try testing.expectError(error.MalformedResponse, parseSshBatch(a, .init(&.{b ++ " x download"})));
+    try testing.expectError(error.MalformedResponse, parseSshBatch(a, .init(&.{b ++ " 1 download expires-at=soon"})));
 }
 
 test "LFS URL rewriting preserves allocation resource failures" {

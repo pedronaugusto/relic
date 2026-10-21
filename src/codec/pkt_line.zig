@@ -10,11 +10,12 @@
 //!
 //! What a line's data means — a trailing newline, a side-band byte, a
 //! capability list after a NUL — belongs to whoever reads it. This file only
-//! frames.
+//! frames, and hands the data on as the peer's, unparsed.
 
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -36,9 +37,14 @@ pub const Packet = union(enum) {
     delim,
     /// `0002`: the end of a stateless protocol v2 response.
     response_end,
-    /// A line's data. It lives in the reader's buffer until the next read.
-    data: []const u8,
+    /// A line's data, as the peer sent it. It lives in the reader's buffer
+    /// until the next read.
+    data: Unparsed,
 };
+
+/// Bytes a peer sent — a server, a client, a helper program — that only a
+/// parser reads.
+pub const Unparsed = aegis.input.Untrusted([]const u8);
 
 pub const ReadError = error{
     /// The length is not four hexadecimal digits, is `0003`, or is past
@@ -59,7 +65,7 @@ pub fn read(r: *Io.Reader) Self.ReadError!Packet {
         1 => .delim,
         2 => .response_end,
         3 => error.BadPacket,
-        else => .{ .data = try r.take(len - 4) },
+        else => .{ .data = .init(try r.take(len - 4)) },
     };
 }
 
@@ -150,10 +156,10 @@ test "a message written is the message read" {
     var buffer: [max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(out.written());
     var in = fixed.limited(.unlimited, &buffer);
-    try testing.expectEqualStrings("command=ls-refs\n", (try read(&in.interface)).data);
+    try testing.expectEqualStrings("command=ls-refs\n", (try read(&in.interface)).data.readForParse());
     try testing.expectEqual(Packet.delim, try read(&in.interface));
-    try testing.expectEqualStrings("ref-prefix refs/heads/\n", (try read(&in.interface)).data);
-    try testing.expectEqualStrings("", (try read(&in.interface)).data);
+    try testing.expectEqualStrings("ref-prefix refs/heads/\n", (try read(&in.interface)).data.readForParse());
+    try testing.expectEqualStrings("", (try read(&in.interface)).data.readForParse());
     try testing.expectEqual(Packet.flush, try read(&in.interface));
     try testing.expectEqual(Packet.response_end, try read(&in.interface));
     try testing.expectError(error.EndOfStream, read(&in.interface));
@@ -210,7 +216,7 @@ test "git's own advertisement reads as lines, then a flush" {
             .flush => break,
             .data => |data| {
                 // `<oid> <name>`, the first with its capabilities after a NUL
-                const line = std.mem.trimEnd(u8, data, "\n");
+                const line = std.mem.trimEnd(u8, data.readForParse(), "\n");
                 const end = std.mem.findScalar(u8, line, 0) orelse line.len;
                 try testing.expectEqualStrings(head, line[0..40]);
                 try names.append(gpa, try gpa.dupe(u8, line[41..end]));
@@ -242,7 +248,7 @@ fn fuzzRead(_: void, case: *shakedown.Case) anyerror!void {
             error.BadPacket, error.EndOfStream => return,
             else => return err,
         };
-        if (packet == .data) try testing.expect(packet.data.len <= max_data);
+        if (packet == .data) try testing.expect(packet.data.readForParse().len <= max_data);
     }
 }
 

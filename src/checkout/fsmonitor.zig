@@ -367,7 +367,8 @@ fn exchange(arena: Allocator, w: *Io.Writer, r: *Io.Reader, message: []const u8)
         const packet = pkt_line.read(r) catch return null;
         switch (packet) {
             .flush, .delim, .response_end => break,
-            .data => |data| {
+            .data => |unparsed| {
+                const data = unparsed.readForParse();
                 if (data.len == 0) break;
                 try answer.appendSlice(arena, data);
             },

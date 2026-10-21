@@ -53,11 +53,20 @@ pub const Head = struct {
     args: []const []const u8,
 };
 
+/// An answer's lines after its delimiter, as the server sent them.
+pub const Lines = aegis.input.Untrusted([]const []const u8);
+
 /// One answer: its status, its arguments, and its lines.
 pub const Status = struct {
     code: u16,
     args: []const []const u8,
-    lines: []const []const u8,
+    lines: Lines,
+
+    /// The first line, which a refusal carries as its message, or `null`.
+    pub fn message(s: Status) ?[]const u8 {
+        const lines = s.lines.readForParse();
+        return if (lines.len != 0) lines[0] else null;
+    }
 
     /// The value of the argument `key`, or `null`.
     pub fn arg(s: Status, key: []const u8) ?[]const u8 {
@@ -114,7 +123,8 @@ pub const Connection = struct {
         while (true) {
             switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
                 .flush => break,
-                .data => |d| {
+                .data => |unparsed| {
+                    const d = unparsed.readForParse();
                     if (std.mem.eql(u8, text(d), "version=1")) version = true;
                 },
                 else => return error.LfsSshProtocolError,
@@ -182,13 +192,14 @@ pub const Connection = struct {
         var delimited = false;
         while (true) {
             switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
-                .flush => return .{ .code = code orelse return error.LfsSshProtocolError, .args = args.items, .lines = lines.items },
+                .flush => return .{ .code = code orelse return error.LfsSshProtocolError, .args = args.items, .lines = .init(lines.items) },
                 .delim => {
                     if (code == null or delimited) return error.LfsSshProtocolError;
                     delimited = true;
                 },
                 .response_end => return error.LfsSshProtocolError,
-                .data => |d| {
+                .data => |unparsed| {
+                    const d = unparsed.readForParse();
                     const line = text(d);
                     if (code == null) {
                         code = parseStatus(line) orelse return error.LfsSshProtocolError;
@@ -213,7 +224,8 @@ pub const Connection = struct {
                     if (code == null) return error.LfsSshProtocolError;
                     return .{ .code = code.?, .args = args.items };
                 },
-                .data => |d| {
+                .data => |unparsed| {
+                    const d = unparsed.readForParse();
                     const line = text(d);
                     if (code == null) {
                         code = parseStatus(line) orelse return error.LfsSshProtocolError;
@@ -228,7 +240,7 @@ pub const Connection = struct {
     pub fn nextData(c: *Connection, io: Io) Self.Error!?[]const u8 {
         return switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
             .flush => null,
-            .data => |d| d,
+            .data => |d| d.readForParse(),
             else => error.LfsSshProtocolError,
         };
     }

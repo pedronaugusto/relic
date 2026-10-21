@@ -168,7 +168,10 @@ fn rot13(bytes: []u8) void {
 
 fn readPacket(r: *Io.Reader) !?[]const u8 {
     return switch (try pkt_line.read(r)) {
-        .data => |data| if (data.len == 0) null else data,
+        .data => |data| {
+            const bytes = data.readForParse();
+            return if (bytes.len == 0) null else bytes;
+        },
         else => null,
     };
 }

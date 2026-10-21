@@ -322,7 +322,7 @@ fn readReport(gpa: Allocator, report: *Report, r: *Io.Reader, against: Against) 
         };
         const line = switch (packet) {
             .flush => break,
-            .data => |d| std.mem.trimEnd(u8, d, "\n"),
+            .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
             else => return error.ProtocolError,
         };
         if (first) {

@@ -29,7 +29,8 @@ fn promisorLine(gpa: Allocator, advertisement: []const u8) !?[]u8 {
     while (true) {
         const packet = pkt_line.read(&in.interface) catch return null;
         switch (packet) {
-            .data => |raw| {
+            .data => |unparsed| {
+                const raw = unparsed.readForParse();
                 const line = std.mem.trimEnd(u8, raw, "\n");
                 if (std.mem.startsWith(u8, line, "promisor-remote=")) {
                     const copy = try gpa.dupe(u8, line);
