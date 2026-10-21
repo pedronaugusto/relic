@@ -10,16 +10,23 @@ const testing = std.testing;
 
 const uplink = @import("uplink");
 const testremote = @import("../testing/remote.zig");
+const testgit = @import("../testing/git.zig");
 const http_backend = @import("http_backend.zig");
+const repo_mod = @import("../repo/repo.zig");
+const fetch_mod = @import("fetch.zig");
+const object = @import("../object.zig");
 
 /// The backend, with what the requests it saw were sent as.
 const Served = struct {
     backend: http_backend.Backend,
     gzipped: std.atomic.Value(u32) = .init(0),
     requests: std.atomic.Value(u32) = .init(0),
+    /// Requests that came in HTTP/2.
+    h2: std.atomic.Value(u32) = .init(0),
 
     fn serve(s: *Served, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
         _ = s.requests.fetchAdd(1, .monotonic);
+        if (request.version == .h2) _ = s.h2.fetchAdd(1, .monotonic);
         if (request.headers.get("content-encoding")) |coding| {
             if (std.mem.eql(u8, coding, "gzip")) _ = s.gzipped.fetchAdd(1, .monotonic);
         }
@@ -134,6 +141,72 @@ test "git clones, fetches and pushes over HTTP against relic's server, in v2 and
     try git(gpa, io, served_dir, &env, &.{ "config", "http.receivepack", "false" });
     try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, behind, &env, &.{ "push", "-q", "origin", "HEAD:refs/heads/refused" }, "", false));
 }
+
+test "under http.version=HTTP/2 git and relic ask relic's server to upgrade a plain connection, and fetch over HTTP/2" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const served_path = try gpa.print("{s}/served.git", .{root_path});
+    defer gpa.free(served_path);
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    try git(gpa, io, root.dir, &env, &.{ "clone", "-q", "--bare", source_path, served_path });
+    var served_dir = try Io.Dir.cwd().openDir(io, served_path, .{});
+    defer served_dir.close(io);
+    try served_dir.writeFile(io, .{ .sub_path = "git-daemon-export-ok", .data = "" });
+
+    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = .{ .user = Served.user, .now = Served.now } }) };
+    var server = uplink.Server.init(gpa, .{ .h2c = .alongside_http1 }, .init(&served, Served.serve));
+    defer server.deinit(io);
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var task = try io.concurrent(runServer, .{ &server, io, &listener });
+    defer {
+        server.shutdown(io);
+        task.await(io);
+    }
+    const url = try gpa.print("http://127.0.0.1:{d}/served.git", .{listener.socket.address.getPort()});
+    defer gpa.free(url);
+
+    // curl's default asks nothing of a plain server.
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    try git(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" });
+    try testing.expectEqual(@as(u32, 0), served.h2.load(.monotonic));
+    // `HTTP/2`: the first request asks to upgrade, the server switches, and
+    // the conversation goes on in HTTP/2, for git as for relic.
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "config", "http.version", "HTTP/2" });
+    try git(gpa, io, source.dir, &env, &.{ "commit", "-q", "--allow-empty", "-m", "more" });
+    try git(gpa, io, source.dir, &env, &.{ "push", "-q", served_path, "HEAD:refs/heads/main" });
+    try git(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" });
+    const by_git_h2 = served.h2.load(.monotonic);
+    try testing.expect(by_git_h2 != 0);
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+        outcome.deinit();
+    }
+    try testing.expect(served.h2.load(.monotonic) > by_git_h2);
+    const ours = try testremote.gitInputEnv(gpa, io, by_relic.dir, &env, &.{ "for-each-ref", "refs/remotes/origin/" }, "", true);
+    defer gpa.free(ours);
+    const theirs = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "for-each-ref", "refs/remotes/origin/" }, "", true);
+    defer gpa.free(theirs);
+    try testing.expectEqualStrings(theirs, ours);
+}
+
+const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 fn git(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map, args: []const []const u8) !void {
     const out = try testremote.gitInputEnv(gpa, io, dir, env, args, "", true);

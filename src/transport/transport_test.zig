@@ -555,6 +555,22 @@ test "a fetch over ssh leaves what git fetch leaves, in v2 and in v0" {
 
 /// Fetch `origin` into `repo` with relic, with `env` as the programs'
 /// environment.
+/// What git says when `args` fails, as it must.
+fn gitFailure(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map, args: []const []const u8) ![]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, "git");
+    try argv.appendSlice(gpa, &testgit.default_settings);
+    try argv.appendSlice(gpa, args);
+    var outcome = try program.run(gpa, io, .{ .environ = env }, .{ .argv = argv.items, .cwd = .{ .dir = dir } }, .{});
+    gpa.free(outcome.stdout);
+    if (outcome.succeeded()) {
+        gpa.free(outcome.stderr);
+        return error.TestUnexpectedResult;
+    }
+    return outcome.stderr;
+}
+
 fn relicFetch(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map) !void {
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
@@ -1019,7 +1035,7 @@ fn cookieLines(arena: Allocator, text: []const u8) ![]const u8 {
     return std.mem.join(arena, "\n", lines.items);
 }
 
-test "http.cookieFile's cookies are sent, and http.saveCookies writes back the file curl writes for git" {
+test "http.cookieFile's cookies are sent, its Set-Cookie lines among them, and http.saveCookies writes back the file curl writes for git" {
     const gpa = testing.allocator;
     const io = testing.io;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -1040,7 +1056,9 @@ test "http.cookieFile's cookies are sent, and http.saveCookies writes back the f
     defer by_relic.deinit();
     for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
         try r.exec(io, &.{ "remote", "add", "origin", url });
-        try r.writeFile(io, "cookies.txt", "127.0.0.1\tFALSE\t/\tFALSE\t0\tothername\tothervalue\n");
+        // A header line with no domain goes to an address, as curl's table
+        // keeps it; one for another domain goes nowhere here.
+        try r.writeFile(io, "cookies.txt", "127.0.0.1\tFALSE\t/\tFALSE\t0\tothername\tothervalue\nSet-Cookie: plain=1\nSet-Cookie: scoped=2; Domain=example.com\n");
         try r.exec(io, &.{ "config", "http.cookieFile", "cookies.txt" });
         try r.exec(io, &.{ "config", "http.saveCookies", "true" });
     }
@@ -1058,6 +1076,8 @@ test "http.cookieFile's cookies are sent, and http.saveCookies writes back the f
     // relic's requests carried the cookies git's did.
     try testing.expectEqualStrings(by_git_cookies, seen[by_git_cookies.len..]);
     try testing.expect(std.mem.find(u8, seen, "othername=othervalue") != null);
+    try testing.expect(std.mem.find(u8, seen, "plain=1") != null);
+    try testing.expect(std.mem.find(u8, seen, "scoped=2") == null);
     const git_file = try by_git.readFile(io, "cookies.txt");
     defer gpa.free(git_file);
     const relic_file = try by_relic.readFile(io, "cookies.txt");
@@ -1170,7 +1190,7 @@ test "a transfer slower than http.lowSpeedLimit for http.lowSpeedTime is given u
     try testing.expectError(error.ConnectionFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } }));
 }
 
-test "http.version and http.sslVersion as git reads them: an unknown value warned of, SSL 2 and 3 refused, a pinned key with nothing else checked refused until it can be held" {
+test "http.version and http.sslVersion as git reads them: an unknown value warned of, SSL 2 and 3 refused, a pinned key nothing can match refused before a connection" {
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1193,9 +1213,8 @@ test "http.version and http.sslVersion as git reads them: an unknown value warne
     }
     const refused = [_]struct { []const u8, anyerror }{
         .{ "[http]\n\tsslVersion = sslv3\n", error.SslVersionUnsupported },
-        .{ "[http]\n\tsslVerify = false\n\tpinnedPubkey = sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", error.PinnedPubkeyUnsupported },
         // Nothing that can match fails before a connection.
-        .{ "[http]\n\tpinnedPubkey = sha256//AAAA\n", error.TlsFailed },
+        .{ "[http]\n\tpinnedPubkey = sha256//AAAA\n", error.PinnedPubkeyMismatch },
     };
     for (refused) |case| {
         var config = try config_mod.Config.parseText(gpa, case[0], .local);
@@ -1244,9 +1263,12 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
         fetched: bool,
         // macOS's libcurl has no TLS 1.3 to be held to, and git fails there.
         git: bool = true,
+        // `http.sslVerify=false`: the pins are checked alone.
+        unverified: bool = false,
+        refused: anyerror = error.PinnedPubkeyMismatch,
     };
     for ([_]Case{
-        .{ .front = old, .key = "http.sslVersion", .value = "tlsv1.3", .fetched = false },
+        .{ .front = old, .key = "http.sslVersion", .value = "tlsv1.3", .fetched = false, .refused = error.TlsFailed },
         .{ .front = old, .key = "http.sslVersion", .value = "tlsv1.2", .fetched = true },
         .{ .front = front, .key = "http.sslVersion", .value = "tlsv1.3", .fetched = true, .git = builtin.os.tag != .macos },
         .{ .front = front, .key = "http.pinnedPubkey", .value = right, .fetched = true },
@@ -1259,6 +1281,10 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
         // A certificate holds the key but is not one.
         .{ .front = front, .key = "http.pinnedPubkey", .value = front.cert_path, .fetched = false },
         .{ .front = front, .key = "http.pinnedPubkey", .value = try std.Io.Dir.path.join(arena, &.{ keys, "missing" }), .fetched = false },
+        // With nothing else checked the leaf's key is held to the pins, as
+        // curl holds it under `CURLOPT_SSL_VERIFYPEER` off.
+        .{ .front = front, .key = "http.pinnedPubkey", .value = right, .fetched = true, .unverified = true },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = wrong, .fetched = false, .unverified = true },
     }) |case| {
         errdefer std.debug.print("case: {s}={s}\n", .{ case.key, case.value });
         const url = try arena.print("https://127.0.0.1:{d}/repo.git", .{case.front.port});
@@ -1269,13 +1295,15 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
             try r.exec(io, &.{ "remote", "add", "origin", url });
             try testremote.alreadyHas(gpa, io, root.dir, r);
-            try r.exec(io, &.{ "config", "http.sslCAInfo", case.front.cert_path });
+            if (case.unverified) try r.exec(io, &.{ "config", "http.sslVerify", "false" }) else try r.exec(io, &.{ "config", "http.sslCAInfo", case.front.cert_path });
             try r.exec(io, &.{ "config", case.key, case.value });
         }
         if (!case.fetched) {
-            by_git.report_failures = false;
-            try testing.expectError(error.GitFailed, by_git.run(io, &.{ "fetch", "-q", "origin" }));
-            try testing.expectError(error.TlsFailed, relicFetch(gpa, io, by_relic.dir, &env));
+            const said = try gitFailure(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" });
+            defer gpa.free(said);
+            // curl's words for a key no pin names, which relic's error is.
+            if (case.refused == error.PinnedPubkeyMismatch) try testing.expect(std.mem.find(u8, said, "public key does not match pinned public key") != null);
+            try testing.expectError(case.refused, relicFetch(gpa, io, by_relic.dir, &env));
             continue;
         }
         try relicFetch(gpa, io, by_relic.dir, &env);

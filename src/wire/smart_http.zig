@@ -41,10 +41,12 @@
 //! ends; `http.lowSpeedLimit` over `http.lowSpeedTime` gives up on a
 //! transfer that has slowed to a crawl; a 429 to the advertisement is
 //! tried again as `http.maxRetries`, `http.retryAfter` and
-//! `http.maxRetryTime` say; `http.version` keeps HTTP/1.1 or lets TLS agree
-//! HTTP/2. `http.sslVersion` is the lowest TLS version spoken with the
-//! server, and `http.pinnedPubkey` the keys its certificate may hold
-//! (`pinned_key.zig`), both as curl holds the server to them for git.
+//! `http.maxRetryTime` say; `http.version` keeps HTTP/1.1, or speaks HTTP/2
+//! where TLS agrees it or a plain server takes `Upgrade: h2c`.
+//! `http.sslVersion` is the lowest TLS version spoken with the server, and
+//! `http.pinnedPubkey` the keys its certificate may hold (`pinned_key.zig`),
+//! with nothing else checked under `http.sslVerify=false`, both as curl
+//! holds the server to them for git.
 
 const Self = @This();
 
@@ -147,10 +149,9 @@ pub const Error = error{
     /// `http.sslVersion` names SSL 2 or 3, which curl's TLS libraries no
     /// longer speak and git fails on.
     SslVersionUnsupported,
-    /// `http.pinnedPubkey` under `http.sslVerify=false`: curl checks the
-    /// pin with nothing else checked, which uplink's TLS cannot yet, so it
-    /// is refused rather than the server's key left unchecked.
-    PinnedPubkeyUnsupported,
+    /// The server's key is none `http.pinnedPubkey` names: curl's
+    /// `CURLE_SSL_PINNEDPUBKEYNOTMATCH`, its message curl's.
+    PinnedPubkeyMismatch,
 } || connection.Error || credential.Error || client_cert.Error;
 
 /// How the conversation is made.
@@ -394,12 +395,13 @@ const Http = struct {
         var tls_options: uplink.tls.ClientOptions = .{};
         if (url.scheme == .https) {
             tls_options.min_version = try h.sslVersion(settings.ssl_version);
+            // Under `http.sslVerify=false` the pins are checked alone,
+            // the leaf's key and nothing else, as curl checks them.
             if (settings.pinned_pubkey) |value| {
-                if (!settings.ssl_verify) return h.fail(error.PinnedPubkeyUnsupported, "http.pinnedPubkey under http.sslVerify=false");
                 tls_options.pins = try pinned_key.read(arena, h.io, value);
                 // No key that can match fails every handshake, as curl
-                // fails it: refused here, by the setting's name.
-                if (tls_options.pins.len == 0) return h.fail(error.TlsFailed, "public key does not match pinned public key (http.pinnedPubkey)");
+                // fails it: refused here.
+                if (tls_options.pins.len == 0) return h.fail(error.PinnedPubkeyMismatch, pin_mismatch);
             }
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{
@@ -489,12 +491,14 @@ const Http = struct {
     }
 
     /// `http.version` as git's `get_curl_http_version_opt` reads it:
-    /// `HTTP/1.1` alone, or `HTTP/2` agreed over TLS; another value is
-    /// warned of and curl's default kept, which is HTTP/2 where TLS agrees it.
+    /// `HTTP/1.1` alone, or `HTTP/2`, curl's `CURL_HTTP_VERSION_2_0`: agreed
+    /// over TLS, and over plain HTTP asked for by `Upgrade: h2c`. Unset, or
+    /// another value (warned of), is curl's default, HTTP/2 where TLS
+    /// agrees it and HTTP/1.1 over plain HTTP.
     fn httpVersion(h: *Http, value: ?[]const u8) Error!@FieldType(uplink.Client.Options, "http2") {
         const text = value orelse return .negotiate;
         if (std.mem.eql(u8, text, "HTTP/1.1")) return .off;
-        if (std.mem.eql(u8, text, "HTTP/2")) return .negotiate;
+        if (std.mem.eql(u8, text, "HTTP/2")) return .upgrade;
         try warning.note(h.options.warnings, .{ .http_version_unknown = text });
         return .negotiate;
     }
@@ -775,6 +779,17 @@ const Http = struct {
         return .{ .config = h.options.config, .programs = h.options.programs, .prompt = h.options.prompt, .now = h.options.now };
     }
 
+    /// curl's words for a server key no pin names.
+    const pin_mismatch = "SSL: public key does not match pinned public key";
+
+    /// Whether the handshake failed on a pin: the chain verified and its key
+    /// is none pinned, or, with nothing else checked, the leaf's is none.
+    fn pinRefused(d: *const uplink.Diagnostics) bool {
+        if (d.tls_verification) |e| if (e == error.PinMismatch) return true;
+        if (d.tls_error) |e| if (e == error.PinMismatch) return true;
+        return false;
+    }
+
     fn fail(h: *Http, err: Error, text: []const u8) Error {
         h.connection.setMessage(text);
         return err;
@@ -796,7 +811,7 @@ const Http = struct {
             },
             error.NameNotResolved => h.fail(error.ConnectionFailed, "the host's name was not found"),
             error.ConcurrencyUnavailable => h.fail(error.ConnectionFailed, "no task to look the host up with"),
-            error.TlsFailed => h.fail(error.TlsFailed, if (d.tls_error) |e| @errorName(e) else "TLS handshake failed"),
+            error.TlsFailed => if (pinRefused(d)) h.fail(error.PinnedPubkeyMismatch, pin_mismatch) else h.fail(error.TlsFailed, if (d.tls_error) |e| @errorName(e) else "TLS handshake failed"),
             error.ProxyAuthenticationRequired => h.rejectProxy(),
             error.ProxyAuthMethodUnsupported => h.fail(error.ProxyAuthMethodUnsupported, if (d.proxy_offered.len != 0) d.proxy_offered.slice() else "the proxy's scheme"),
             error.ProxyRefused, error.ProxyHostUnreachable, error.ProxyAddressUnsupported, error.ProxyProtocolError => |named| {
