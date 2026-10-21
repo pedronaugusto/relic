@@ -1139,6 +1139,35 @@ pub const Odb = struct {
         return false;
     }
 
+    /// A pack this database holds, `pack-<name>`, stored as git's
+    /// `unpack-objects` stores what it receives: each object no loose file
+    /// and no other pack here or in an alternate holds written loose -- what
+    /// `unpack-objects` writes, its object store freshening what it has --
+    /// then the pack taken away. A failure part way leaves the pack, every
+    /// object still in it. A `.keep` beside the pack holds it, and is the
+    /// caller's to remove first.
+    pub fn unpackPack(odb: *Odb, io: Io, base: []const u8) ErrorNamespace.Error!void {
+        const gpa = odb.backendData().gpa;
+        const p = odb.findPackByName(base) orelse return;
+        var fresh: std.ArrayList(Oid) = .empty;
+        defer fresh.deinit(gpa);
+        var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+        objects: for (0..p.index.count) |i| {
+            const oid = p.index.nameAt(@intCast(i));
+            const path = odb.loosePath(oid, &path_buf);
+            for (odb.backendData().sources.items) |*source| {
+                if (try opening.exists(io, source.dir, path)) continue :objects;
+                for (source.packs.items) |*named| {
+                    if (&named.pack == p) continue;
+                    if ((try named.pack.index.find(oid)) != null) continue :objects;
+                }
+            }
+            try fresh.append(gpa, oid);
+        }
+        for (fresh.items) |oid| _ = try odb.loosen(io, oid, null);
+        _ = try odb.removePacks(io, &.{base});
+    }
+
     /// Writes `bytes`, named `oid`, as a loose object in this database's own
     /// objects, whatever an alternate holds.
     fn writeLoose(odb: *Odb, io: Io, t: object.Type, bytes: []const u8, oid: Oid, time: ?i64) ErrorNamespace.Error!void {

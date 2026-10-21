@@ -713,14 +713,11 @@ pub const Server = struct {
         index: ?pack.Index = null,
         /// Fewer objects than `receive.unpackLimit`: they go in loose.
         loose: bool = false,
-        /// The objects it brings that the repository lacked, when `loose`.
-        fresh: std.ArrayList(Oid) = .empty,
         /// It was moved out of the quarantine into the repository.
         migrated: bool = false,
         gpa: Allocator,
 
         fn deinit(r: *Received, io: Io) void {
-            r.fresh.deinit(r.gpa);
             if (r.index) |*i| i.deinit();
             r.links.deinit();
             r.result.deinit(io);
@@ -759,54 +756,35 @@ pub const Server = struct {
     }
 
     /// The received pack made ready to move out of the quarantine: its
-    /// index let go, and below `receive.unpackLimit` the objects it brings
-    /// that the repository lacks noted, to be written loose once the refs
-    /// name them (`settleLoose`). A thin pack's bases, and anything else
-    /// the repository holds already, are not written again, as git's
-    /// `unpack-objects` does not write them.
-    fn placeReceived(s: *Server, r: *Received) !void {
+    /// index let go.
+    fn placeReceived(_: *Server, r: *Received) !void {
         var index = r.index orelse return;
         r.index = null;
-        defer index.deinit();
-        if (!r.loose) return;
-        var it = index.iterate();
-        while (try it.next()) |entry| {
-            if (!try s.db().exists(s.io, entry.oid)) try r.fresh.append(s.gpa, entry.oid);
-        }
+        index.deinit();
     }
 
     /// Below `receive.unpackLimit`, the pack stored as git's
-    /// `unpack-objects` stores it: its new objects loose, the pack gone.
-    /// Done once the refs are written, so that until then the pack and its
-    /// `.keep` hold the objects against a collection running beside the
-    /// push, as for any pack received. A failure here leaves the pack as
-    /// it is, every object still in it.
+    /// `unpack-objects` stores it (`Odb.unpackPack`): its new objects
+    /// loose, the pack gone. Done once the refs are written, so that until
+    /// then the pack and its `.keep` hold the objects against a collection
+    /// running beside the push, as for any pack received. A failure here
+    /// leaves the pack as it is, every object still in it.
     fn settleLoose(s: *Server, r: *Received, keeps: *std.ArrayList(keep.Token)) Self.Error!void {
         if (!r.loose or !r.migrated) return;
         const name = r.result.name orelse return;
-        settle: {
-            for (r.fresh.items) |oid| {
-                _ = s.db().loosen(s.io, oid, null) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Canceled => return error.Canceled,
-                    // the pack still holds it, and every other one
-                    else => break :settle,
-                };
-            }
-            // Its `.keep` first, which would hold it.
-            for (keeps.items) |*token| token.deinit(s.io);
-            keeps.clearRetainingCapacity();
-            var hex: [hash.max_hex_len]u8 = undefined;
-            var name_buf: [96]u8 = undefined;
-            // unreachable: the longest hex name is 64 digits, 69 bytes with `pack-`
-            const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch unreachable;
-            _ = s.db().removePacks(s.io, &.{base}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                // its objects are loose now as well; the pack stays beside them
-                else => {},
-            };
-        }
+        // Its `.keep` first, which would hold it.
+        for (keeps.items) |*token| token.deinit(s.io);
+        keeps.clearRetainingCapacity();
+        var hex: [hash.max_hex_len]u8 = undefined;
+        var name_buf: [96]u8 = undefined;
+        // unreachable: the longest hex name is 64 digits, 69 bytes with `pack-`
+        const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch unreachable;
+        s.db().unpackPack(s.io, base) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            // the pack still holds every object
+            else => {},
+        };
     }
 
     /// A shallow client's boundary: a command whose new history reaches a

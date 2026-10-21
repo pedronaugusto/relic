@@ -141,6 +141,11 @@ pub const Options = struct {
     /// `.git/shallow`. Without it those refs are left, and each is a
     /// warning, as git leaves and warns.
     update_shallow: bool = false,
+    /// `--keep`: what came is kept as a pack, however few its objects;
+    /// otherwise a pack of fewer than `fetch.unpackLimit` objects
+    /// (`transfer.unpackLimit`, git's 100) is stored loose, as git's
+    /// `unpack-objects` stores it.
+    keep: bool = false,
     /// `--filter`, for a partial clone's promisor remote; `null` takes
     /// `remote.<name>.partialclonefilter`, as git does.
     filter: ?[]const u8 = null,
@@ -234,7 +239,8 @@ pub const Outcome = struct {
     /// Remote-tracking refs deleted because their source is gone.
     pruned: []const []const u8,
     fetch_head: []const HeadEntry,
-    /// The pack that came, or `null` when nothing new was needed.
+    /// The pack that came and is kept, or `null` when nothing new was
+    /// needed or what came was stored loose; `objects` counts it either way.
     pack: ?Oid,
     objects: u32,
 
@@ -400,8 +406,6 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .options = options,
     });
     defer brought.deinit(io);
-    outcome.pack = brought.pack;
-    outcome.objects = brought.objects;
     const backfill = brought.backfill;
 
     // The refs, in git's order: those for merging first.
@@ -411,6 +415,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     if (follow_head) try createRemoteHead(gpa, io, repo, remote.name.?, remote_refs.refs, asked.configured, options.who);
 
     if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, plan.fetch_head, options.append);
+    try brought.settle(io, repo, &outcome, options.keep or promisor or (checks != null and checks.?.strict));
 
     if (try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
     outcome.updates = plan.updates;
@@ -435,18 +440,71 @@ const Bringing = struct {
     options: Options,
 };
 
-/// What came: the pack, if one did, and the tags that followed.
+/// One pack a fetch brought: its name, if one came, how many objects, and
+/// the `.keep` that holds it until the refs name them.
+const Came = struct {
+    name: ?Oid = null,
+    objects: u32 = 0,
+    keep: ?keep_mod.Token = null,
+};
+
+/// What came: the pack, if one did, and the tags that followed in a pack
+/// of their own.
 const Brought = struct {
-    pack: ?Oid,
-    objects: u32,
+    packs: [2]Came,
     backfill: []MapEntry,
-    tokens: [2]?keep_mod.Token = .{ null, null },
 
     fn deinit(b: *Brought, io: Io) void {
-        for (&b.tokens) |*token| if (token.*) |*t| t.deinit(io);
+        for (&b.packs) |*came| if (came.keep) |*t| t.deinit(io);
         b.* = undefined;
     }
+
+    /// What came, into `outcome`, stored as git's `get_pack` decides:
+    /// `unpack-objects` below the unpack limit unless `kept` -- `--keep`, a
+    /// promisor pack, or objects checked one by one, which `index-pack`
+    /// keeps. Here once the refs name what came, as for a push received.
+    fn settle(b: *Brought, io: Io, repo: *Repository, outcome: *Outcome, kept: bool) Error!void {
+        outcome.pack = b.packs[0].name;
+        outcome.objects = b.packs[0].objects;
+        if (kept) return;
+        if (try b.unpackSmall(io, repo, unpackLimit(repo.configuration()))) outcome.pack = null;
+    }
+
+    /// Each pack of fewer than `limit` objects stored loose
+    /// (`Odb.unpackPack`), every one when `limit` is zero, as git's
+    /// fetch-pack reads no count then. Whether the first one was. A pack
+    /// that cannot be is left as it came.
+    fn unpackSmall(b: *Brought, io: Io, repo: *Repository, limit: u64) Error!bool {
+        var first = false;
+        for (&b.packs, 0..) |*came, i| {
+            const name = came.name orelse continue;
+            if (limit != 0 and came.objects >= limit) continue;
+            if (came.keep) |*t| t.deinit(io);
+            came.keep = null;
+            var hex: [hash.max_hex_len]u8 = undefined;
+            var name_buf: [96]u8 = undefined;
+            // unreachable: the longest hex name is 64 digits, 69 bytes with `pack-`
+            const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch unreachable;
+            repo.objectDatabase().unpackPack(io, base) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                // the pack still holds every object
+                else => continue,
+            };
+            if (i == 0) first = true;
+        }
+        return first;
+    }
 };
+
+/// git's `fetch.unpackLimit`, else `transfer.unpackLimit`, else 100.
+fn unpackLimit(config: *const config_mod.Config) u64 {
+    for ([_][]const u8{ "fetch.unpacklimit", "transfer.unpacklimit" }) |key| {
+        const value = config.getInt(key, -1) catch -1;
+        if (value >= 0) return @intCast(value);
+    }
+    return 100;
+}
 
 /// Bring the objects the map names that are not here yet into one new
 /// pack, take the boundary the server drew in `boundary_change`, follow
@@ -500,8 +558,8 @@ fn bringObjects(
     try boundary_change.take(arena, gpa, repo, &shallow_info, session.advertisedShallow(), b.deepen != null);
 
     // Tags that point at what the fetch brought.
-    var tag_keep: ?keep_mod.Token = null;
-    errdefer if (tag_keep) |*t| t.deinit(io);
+    var tag_pack: Came = .{};
+    errdefer if (tag_pack.keep) |*t| t.deinit(io);
     const backfill: []MapEntry = if (b.tags == .auto and b.autotags)
         try followTags(arena, gpa, io, repo, session, pack_dir, .{
             .remote_refs = b.remote_refs,
@@ -510,7 +568,7 @@ fn bringObjects(
             .tips = tips,
             .progress = b.options.progress,
             .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, null),
-            .keep = &tag_keep,
+            .came = &tag_pack,
         })
     else
         &.{};
@@ -530,7 +588,7 @@ fn bringObjects(
     });
 
     if (boundary_change.moved) try repo.writeShallow(io);
-    return .{ .pack = fetched.pack, .objects = fetched.objects, .backfill = backfill, .tokens = .{ fetched.keep, tag_keep } };
+    return .{ .packs = .{ .{ .name = fetched.pack, .objects = fetched.objects, .keep = fetched.keep }, tag_pack }, .backfill = backfill };
 }
 
 /// The shallow boundary across a fetch: the one before it, put back if
@@ -591,7 +649,7 @@ const Following = struct {
     tips: Tips,
     progress: ?progress_mod.Progress,
     receive: index_pack.Options,
-    keep: *?keep_mod.Token,
+    came: *Came,
 };
 
 /// git's automatic tag following: the remote tags that point at what the
@@ -608,7 +666,7 @@ fn followTags(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sessi
         .common_tips = f.tips.common,
         .include_tag = false,
     } }, .{ .progress = f.progress, .receive = f.receive });
-    f.keep.* = fetched.keep;
+    f.came.* = .{ .name = fetched.pack, .objects = fetched.objects, .keep = fetched.keep };
     takeFetchedValues(session, backfill.items);
     return backfill.items;
 }
@@ -1743,7 +1801,7 @@ test "a fetch from a local repository leaves what git fetch leaves: refs, logs a
 
     var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
     defer first.deinit();
-    try testing.expect(first.pack != null);
+    try testing.expect(first.objects > 0);
 
     // More history, a branch rewritten, a new tag below a tip: the second
     // fetch fast-forwards one ref, forces another, and follows the tag.
@@ -1765,7 +1823,7 @@ test "a fetch from a local repository leaves what git fetch leaves: refs, logs a
     // Nothing new: nothing fetched, and FETCH_HEAD still written.
     var third = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
     defer third.deinit();
-    try testing.expect(third.pack == null);
+    try testing.expectEqual(@as(u32, 0), third.objects);
 }
 
 test "named refspecs, pruning and every tag are what git makes of them" {

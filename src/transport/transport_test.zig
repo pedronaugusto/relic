@@ -107,7 +107,7 @@ test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
             .progress = .{ .context = &heard, .report = Heard.report },
         });
         defer outcome.deinit();
-        try testing.expect(outcome.pack != null);
+        try testing.expect(outcome.objects > 0);
         try testing.expect(heard.remote > 0);
         try testing.expect(heard.received > 0);
         try testing.expectEqual(@as(u64, outcome.objects), heard.indexed);
@@ -536,7 +536,7 @@ test "a fetch over ssh leaves what git fetch leaves, in v2 and in v0" {
             .programs = .{ .environ = &env },
         });
         defer outcome.deinit();
-        try testing.expect(outcome.pack != null);
+        try testing.expect(outcome.objects > 0);
 
         const format = "--format=%(refname) %(objectname) %(symref)";
         const theirs = try by_git.run(io, &.{ "for-each-ref", format });
@@ -1909,5 +1909,63 @@ test "a remote's keywords come in colour as git push shows them, under color.rem
         });
         defer pushed.deinit();
         try testing.expectEqualStrings(theirs.items, heard.text.items);
+    }
+}
+
+test "a fetch stores fewer objects than fetch.unpackLimit loose and the rest in a pack, as git's fetch-pack does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    // Five commits: fifteen objects.
+    var source = try testremote.historyRepo(gpa, io, 5);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const url = try gpa.print("file://{s}", .{source_path});
+    defer gpa.free(url);
+    const Case = struct { settings: []const [2][]const u8 = &.{}, keep: bool = false };
+    const cases = [_]Case{
+        .{},
+        .{ .settings = &.{.{ "fetch.unpackLimit", "10" }} },
+        .{ .settings = &.{.{ "fetch.unpackLimit", "20" }} },
+        .{ .settings = &.{.{ "transfer.unpackLimit", "10" }} },
+        .{ .settings = &.{ .{ "transfer.unpackLimit", "10" }, .{ "fetch.unpackLimit", "20" } } },
+        .{ .settings = &.{.{ "fetch.unpackLimit", "0" }} },
+        .{ .keep = true },
+    };
+    for (cases) |case| {
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |twin| {
+            try twin.exec(io, &.{ "remote", "add", "origin", url });
+            for (case.settings) |kv| try twin.exec(io, &.{ "config", kv[0], kv[1] });
+        }
+        if (case.keep) try by_git.exec(io, &.{ "fetch", "--keep", "origin" }) else try by_git.exec(io, &.{ "fetch", "origin" });
+        {
+            var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+            defer repo.deinit(io);
+            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .keep = case.keep });
+            defer outcome.deinit();
+        }
+        var stored: [2][]u8 = undefined;
+        for ([_]*testgit.Repo{ &by_git, &by_relic }, 0..) |twin, i| {
+            const counted = try twin.run(io, &.{ "count-objects", "-v" });
+            defer gpa.free(counted);
+            var kept: std.ArrayList(u8) = .empty;
+            var lines = std.mem.tokenizeScalar(u8, counted, '\n');
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "count:") or std.mem.startsWith(u8, line, "in-pack:") or std.mem.startsWith(u8, line, "packs:")) try kept.print(gpa, "{s}\n", .{line});
+            }
+            stored[i] = try kept.toOwnedSlice(gpa);
+        }
+        defer for (stored) |text| gpa.free(text);
+        testing.expectEqualStrings(stored[0], stored[1]) catch |err| {
+            std.debug.print("{any} keep={}\n", .{ case.settings, case.keep });
+            return err;
+        };
+        try expectSameFetch(gpa, io, &by_git, &by_relic);
     }
 }
