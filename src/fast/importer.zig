@@ -430,7 +430,7 @@ const Importer = struct {
             .export_marks = options.export_marks,
             .ignore_case = config.getBool("core.ignorecase", false) catch false,
             .quote_path = config.getBool("core.quotepath", true) catch true,
-            .empty_tree = hash.Hasher.object(kind, "tree", ""),
+            .empty_tree = kind.emptyTree(),
             .unpack_limit = try unpackLimitOf(config),
         };
     }

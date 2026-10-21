@@ -661,8 +661,10 @@ pub const Odb = struct {
     ///
     /// On a miss the pack directories are re-scanned once and the lookup is
     /// tried again, because a concurrent `git gc` may have just packed the
-    /// object away; then it is `error.ObjectNotFound`.
+    /// object away; then it is `error.ObjectNotFound`. The empty tree is
+    /// there whether or not a file holds it, as in git's.
     pub fn read(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Read {
+        if (odb.isEmptyTree(oid)) return .{ .type = .tree, .bytes = try odb.backendData().gpa.alloc(u8, 0) };
         if (try odb.tryRead(io, oid)) |found| return found;
         try odb.refresh(io);
         if (try odb.tryRead(io, oid)) |found| return found;
@@ -694,6 +696,10 @@ pub const Odb = struct {
     /// is large enough; a loose object still allocates its read buffer, and
     /// a delta its chain.
     pub fn readInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) ErrorNamespace.Error!Borrowed {
+        if (odb.isEmptyTree(oid)) {
+            buffer.clearRetainingCapacity();
+            return .{ .type = .tree, .bytes = buffer.items };
+        }
         if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
         try odb.refresh(io);
         if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
@@ -787,7 +793,14 @@ pub const Odb = struct {
     /// The type and length of `oid`, with no body inflated where the object
     /// is packed and with only its header inflated where it is loose.
     pub fn readHeader(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!object.Header {
+        if (odb.isEmptyTree(oid)) return .{ .type = .tree, .size = 0 };
         return (try odb.readHeaderForPack(io, oid, 0)).header;
+    }
+
+    /// git's in-memory source (`odb/source-inmemory.c`): the empty tree is
+    /// an object every database has, read from no file.
+    fn isEmptyTree(odb: *const Odb, oid: Oid) bool {
+        return oid.kind == odb.hashKind() and oid.eql(odb.hashKind().emptyTree());
     }
 
     /// Where an object is kept, beyond its header: what git's
@@ -1019,8 +1032,15 @@ pub const Odb = struct {
     /// Whether the database holds `oid`, without reading it.
     ///
     /// Does not refresh: a caller asking whether an object is present before
-    /// writing it wants an answer, not a directory scan.
+    /// writing it wants an answer, not a directory scan. The empty tree is
+    /// there, as `read` reads it.
     pub fn exists(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!bool {
+        return odb.isEmptyTree(oid) or try odb.onDisk(io, oid);
+    }
+
+    /// Whether a file of the database holds `oid`: what a write asks, as
+    /// git's `odb_freshen_object` asks only its sources.
+    fn onDisk(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!bool {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |*source| {
@@ -1091,7 +1111,7 @@ pub const Odb = struct {
         const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), t.name(), bytes);
         if (named.collision_attack) return error.CollisionAttack;
         const oid = named.oid;
-        if (try odb.exists(io, oid)) {
+        if (try odb.onDisk(io, oid)) {
             odb.stats.loose_present += 1;
             return oid;
         }
@@ -3361,7 +3381,7 @@ pub const Odb = struct {
         const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), t.name(), bytes);
         if (named.collision_attack) return error.CollisionAttack;
         const oid = named.oid;
-        if (filling.writer.holds(oid) or try odb.exists(io, oid)) {
+        if (filling.writer.holds(oid) or try odb.onDisk(io, oid)) {
             odb.stats.loose_present += 1;
             return oid;
         }

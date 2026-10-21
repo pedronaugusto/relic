@@ -20,7 +20,6 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const three_way = @import("../merge/three_way.zig");
-const ort = @import("../merge/ort.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
 const message = @import("../object/message.zig");
 const pretty = @import("../pretty/pretty.zig");
@@ -139,7 +138,7 @@ pub fn fixup(gpa: Allocator, io: Io, repo: *Repository, inputs: FixupInputs, opt
     if (!merged.isClean()) return error.FixupConflicts;
 
     const parents = try parentsOf(a, io, repo, original);
-    const parent_tree = if (parents.len != 0) try repo.commitTree(io, parents[0]) else ort.emptyTree(repo.objectFormat());
+    const parent_tree = if (parents.len != 0) try repo.commitTree(io, parents[0]) else repo.objectFormat().emptyTree();
     var dropped = false;
     if (merged.tree.eql(parent_tree)) switch (inputs.empty) {
         .drop => {
@@ -205,7 +204,7 @@ pub fn split(gpa: Allocator, io: Io, repo: *Repository, inputs: SplitInputs, opt
     const range = try h.descendants(original);
     const parents = try parentsOf(a, io, repo, original);
     if (parents.len > 1) return error.MergeCommit;
-    const parent_tree = if (parents.len != 0) try repo.commitTree(io, parents[0]) else ort.emptyTree(repo.objectFormat());
+    const parent_tree = if (parents.len != 0) try repo.commitTree(io, parents[0]) else repo.objectFormat().emptyTree();
     const original_tree = try repo.commitTree(io, original);
     if (inputs.first.eql(parent_tree)) return error.SplitCommitEmpty;
     if (inputs.first.eql(original_tree)) return error.SplitMatchesOriginal;

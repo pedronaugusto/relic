@@ -529,7 +529,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     else if (head.oid) |h|
         try repo.commitTree(io, h)
     else
-        try emptyTree(io, repo);
+        repo.objectFormat().emptyTree();
 
     const picked = try readCommit(r, oid, .commit);
     const commit = picked.commit;
@@ -587,7 +587,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.trailers);
 
     const style = r.options.conflict_style orelse try merge.configuredStyle(repo.configuration());
-    var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse try emptyTree(io, repo) }, .{
+    var outcome = try three_way.apply(gpa, io, repo, .{ .index = index, .base = base_tree, .ours = head_tree, .theirs = next_tree orelse repo.objectFormat().emptyTree() }, .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = base_label, .theirs = next_label },
@@ -659,9 +659,9 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     const arena = r.arena;
     // Whether the result changes anything, and what to do if not.
     var allow_empty_commit = false;
-    const head_commit_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
+    const head_commit_tree = if (head.oid) |h| try repo.commitTree(io, h) else repo.objectFormat().emptyTree();
     if (tree.eql(head_commit_tree)) {
-        const parent_tree = if (commit.parents.len != 0) try repo.commitTree(io, commit.parents[0]) else try emptyTree(io, repo);
+        const parent_tree = if (commit.parents.len != 0) try repo.commitTree(io, commit.parents[0]) else repo.objectFormat().emptyTree();
         const originally_empty = parent_tree.eql(commit.tree);
         if (originally_empty) {
             allow_empty_commit = r.options.allow_empty or r.options.empty == .keep;
@@ -723,11 +723,6 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
 fn firstLine(text: []const u8) []const u8 {
     const end = std.mem.findScalar(u8, text, '\n') orelse text.len;
     return text[0..end];
-}
-
-/// `commit.cleanup`, or the message as it is.
-fn emptyTree(io: Io, repo: *Repository) Error!Oid {
-    return repo.objectDatabase().write(io, .tree, "");
 }
 
 /// `sequencer_format_revert_message`: `Revert "<subject>"`, or `Reapply
@@ -936,7 +931,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     const picked = try repo.refStore().root().read(gpa, io, .cherry_pick_head);
     var author = r.options.who;
     if (picked) |oid| author = (try readCommit(r, oid, .commit)).commit.author;
-    const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
+    const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else repo.objectFormat().emptyTree();
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
@@ -1014,7 +1009,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
     defer index.deinit();
     var head = try head_mod.read(r.gpa, r.io, r.repo);
     defer head.deinit(r.gpa);
-    const head_tree = if (head.oid) |h| try r.repo.commitTree(r.io, h) else try emptyTree(r.io, r.repo);
+    const head_tree = if (head.oid) |h| try r.repo.commitTree(r.io, h) else r.repo.objectFormat().emptyTree();
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnresolvedConflicts;
     }

@@ -777,7 +777,7 @@ fn resetAfterPush(
 }
 
 fn isEmptyTree(kind: hash.Kind, oid: Oid) bool {
-    return oid.eql(hash.Hasher.object(kind, "tree", ""));
+    return oid.eql(kind.emptyTree());
 }
 
 fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {

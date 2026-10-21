@@ -789,7 +789,7 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
     const their_tree = try worktree.writeTree(gpa, io, &fake, db);
     try fake.write(io, repo.gitDirectory(), state_dir ++ "/patch-merge-index", .{});
 
-    const our_tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(s);
+    const our_tree = if (head.oid) |oid| try repo.commitTree(io, oid) else s.repo.objectFormat().emptyTree();
     const label = try s.a.print("{s}", .{subjectOf(s.msg.?)});
     var outcome = try three_way.apply(gpa, io, repo, .{ .index = current, .base = base_tree, .ours = our_tree, .theirs = their_tree }, .{
         .blob = .{ .algorithm = .histogram, .labels = .{ .ours = "HEAD", .base = "constructed fake ancestor", .theirs = label } },
@@ -809,10 +809,6 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
     }
     if (!try indexHasChanges(s, current)) return .no_changes;
     return .applied;
-}
-
-fn emptyTree(s: *Session) Error!Oid {
-    return s.repo.objectDatabase().write(s.io, .tree, "");
 }
 
 /// `do_commit`.
@@ -1027,7 +1023,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     try rerere.clear(gpa, io, repo);
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
-    const tree = if (head.oid) |oid| try repo.commitTree(io, oid) else try emptyTree(&s);
+    const tree = if (head.oid) |oid| try repo.commitTree(io, oid) else repo.objectFormat().emptyTree();
     var locked_index = try repo.lockIndex(io);
     defer locked_index.deinit(io);
     const index = &locked_index.index;
@@ -1064,7 +1060,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     if (!safe) return destroy(io, repo);
     try rerere.clear(gpa, io, repo);
     const orig = try repo.refStore().root().read(gpa, io, .orig_head);
-    const target_tree = if (orig) |o| try repo.commitTree(io, o) else try emptyTree(&s);
+    const target_tree = if (orig) |o| try repo.commitTree(io, o) else repo.objectFormat().emptyTree();
     var locked_index = try repo.lockIndex(io);
     defer locked_index.deinit(io);
     const index = &locked_index.index;

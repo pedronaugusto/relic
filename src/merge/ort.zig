@@ -331,7 +331,7 @@ pub fn trees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, optio
     m.branch1 = options.labels.ours;
     m.branch2 = options.labels.theirs;
     m.ancestor = options.labels.base;
-    const outcome = try m.nonrecursive(base orelse emptyTree(db.objectFormat()), ours, theirs);
+    const outcome = try m.nonrecursive(base orelse db.objectFormat().emptyTree(), ours, theirs);
     return m.finish(gpa, &arena_instance, outcome);
 }
 
@@ -362,11 +362,6 @@ pub fn dupeMessages(arena: Allocator, messages: []const Message) Allocator.Error
         copy.* = .{ .kind = msg.kind, .paths = paths, .text = try arena.dupe(u8, msg.text) };
     }
     return out;
-}
-
-/// The empty tree's name.
-pub fn emptyTree(kind: hash.Kind) Oid {
-    return hash.Hasher.object(kind, "tree", "");
 }
 
 const GitMap = rename.GitMap;
@@ -601,7 +596,7 @@ const Merge = struct {
 
     fn readTree(m: *Merge, oid: ?Oid) Error![]TreeItem {
         const tree_oid = oid orelse return &.{};
-        if (tree_oid.eql(emptyTree(m.db.objectFormat()))) return &.{};
+        if (tree_oid.eql(m.db.objectFormat().emptyTree())) return &.{};
         const found = try m.db.read(m.io, tree_oid);
         defer m.db.allocator().free(found.bytes);
         if (found.type != .tree) return error.NotATree;
@@ -2025,7 +2020,7 @@ const Merge = struct {
 
     /// `process_entries`.
     fn processEntries(m: *Merge) Error!Oid {
-        if (m.paths.count() == 0) return emptyTree(m.db.objectFormat());
+        if (m.paths.count() == 0) return m.db.objectFormat().emptyTree();
         var plist: std.ArrayList([]const u8) = .empty;
         var it = m.paths.keyIterator();
         while (it.next()) |key| try plist.append(m.arena, key.*);
@@ -2137,7 +2132,7 @@ const Merge = struct {
         var ancestor_name: []const u8 = undefined;
         var merged_merge_bases: CommitRef = undefined;
         if (bases.items.len == 0) {
-            try m.virtuals.append(m.arena, .{ .tree = emptyTree(m.db.objectFormat()), .parents = &.{}, .fake = m.fakeOid(m.virtuals.items.len) });
+            try m.virtuals.append(m.arena, .{ .tree = m.db.objectFormat().emptyTree(), .parents = &.{}, .fake = m.fakeOid(m.virtuals.items.len) });
             merged_merge_bases = .{ .virtual = m.virtuals.items.len - 1 };
             ancestor_name = "empty tree";
         } else {

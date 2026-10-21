@@ -33,6 +33,12 @@ pub const Kind = enum {
         return kind.rawLen() * 2;
     }
 
+    /// The empty tree's name in this format: git's `empty_tree`, an object
+    /// every repository's database has whether or not a file holds it.
+    pub fn emptyTree(kind: Kind) Oid {
+        return Hasher.object(kind, "tree", "");
+    }
+
     /// The name `extensions.objectFormat` carries, and the one
     /// `git init --object-format` takes.
     pub fn name(kind: Kind) []const u8 {

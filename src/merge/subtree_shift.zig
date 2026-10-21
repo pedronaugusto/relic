@@ -107,7 +107,7 @@ const Shifter = struct {
 
     /// A tree's entries in its own order; the empty tree needs no object.
     fn entries(s: Shifter, oid: Oid) Error![]Entry {
-        if (oid.eql(hash.Hasher.object(s.db.objectFormat(), "tree", ""))) return &.{};
+        if (oid.eql(s.db.objectFormat().emptyTree())) return &.{};
         const bytes = try s.treeBytes(oid);
         var out: std.ArrayList(Entry) = .empty;
         var it = object.Tree.parse(s.db.objectFormat(), bytes).iterate();
@@ -116,7 +116,7 @@ const Shifter = struct {
     }
 
     fn treeBytes(s: Shifter, oid: Oid) Error![]const u8 {
-        if (oid.eql(hash.Hasher.object(s.db.objectFormat(), "tree", ""))) return "";
+        if (oid.eql(s.db.objectFormat().emptyTree())) return "";
         const found = try s.db.read(s.io, oid);
         defer s.db.allocator().free(found.bytes);
         if (found.type != .tree) return error.NotATree;

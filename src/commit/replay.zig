@@ -20,7 +20,6 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const ort = @import("../merge/ort.zig");
 const three_way = @import("../merge/three_way.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
 const message = @import("../object/message.zig");
@@ -337,7 +336,7 @@ const Run = struct {
     fn pick(r: *Run, oid: Oid, parents: []const Oid, onto: Oid) Error!?Oid {
         const repo = r.repo;
         const base: ?Oid = if (parents.len != 0) parents[0] else null;
-        const base_tree = if (base) |b| try repo.commitTree(r.io, b) else ort.emptyTree(repo.objectFormat());
+        const base_tree = if (base) |b| try repo.commitTree(r.io, b) else repo.objectFormat().emptyTree();
         const fallback = if (r.mode == .revert) r.last else onto;
         const replayed_base = if (base) |b| r.replayed.get(b) orelse fallback else fallback;
         const replayed_base_tree = try repo.commitTree(r.io, replayed_base);
