@@ -23,6 +23,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const diff = @import("diff.zig");
+const driver = @import("driver.zig");
 const parallax = @import("parallax");
 const attributes = @import("../patterns.zig").attributes;
 
@@ -38,9 +39,9 @@ pub const Error = diff.Error || diff.TextError || object.ParseError || attribute
 
 /// The patch id of `commit` against its parent, or against nothing for a
 /// root commit. `null` for a merge, which has none. `binary` says which
-/// files are binary: a rebase hands it the repository's attributes, as
+/// files are drivers: a rebase hands it the repository's attributes, as
 /// git's patch ids read them.
-pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid, binary: diff.BinaryRule) Self.Error!?Oid {
+pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid, drivers: driver.Drivers) Self.Error!?Oid {
     const found = try db.read(io, commit_oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
@@ -56,20 +57,20 @@ pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid, binar
         defer parsed.deinit();
         parent_tree = parsed.tree;
     }
-    const id = try ofTrees(gpa, io, db, .{ .old = parent_tree, .new = commit.tree }, binary);
+    const id = try ofTrees(gpa, io, db, .{ .old = parent_tree, .new = commit.tree }, drivers);
     return id;
 }
 
 /// The patch id of the change from `old` to `new`, either of which may be
 /// the empty tree.
-pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: diff.TreeInputs, binary: diff.BinaryRule) Self.Error!Oid {
+pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: diff.TreeInputs, drivers: driver.Drivers) Self.Error!Oid {
     var changes = try diff.tree(gpa, io, db, inputs, .{});
     defer changes.deinit();
     var result: [hash.max_raw_len]u8 = @splat(0);
     const raw_len = db.objectFormat().rawLen();
     for (changes.items) |change| {
         var h: hash.Hasher = .init(db.objectFormat());
-        try hashChange(gpa, io, db, &h, change, binary);
+        try hashChange(gpa, io, db, &h, change, drivers);
         const part = h.final();
         // Summed byte by byte with a carry, from the first byte up.
         var carry: u16 = 0;
@@ -109,6 +110,12 @@ fn addMode(h: *hash.Hasher, mode: object.Mode) void {
 
 /// Read a side of a change: a blob's bytes, a symlink's target, or what git
 /// prints for a submodule.
+/// A side as its driver is found by.
+fn side(entry: ?diff.Entry) ?driver.Drivers.File {
+    const e = entry orelse return null;
+    return .{ .path = e.path, .mode = e.mode };
+}
+
 fn sideBytes(gpa: Allocator, io: Io, db: *odb_mod.Odb, entry: ?diff.Entry) Error![]u8 {
     const e = entry orelse return gpa.alloc(u8, 0);
     if (e.mode == .gitlink) {
@@ -120,7 +127,7 @@ fn sideBytes(gpa: Allocator, io: Io, db: *odb_mod.Odb, entry: ?diff.Entry) Error
     return gpa.dupe(u8, found.bytes);
 }
 
-fn hashChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, h: *hash.Hasher, change: diff.Change, binary: diff.BinaryRule) Error!void {
+fn hashChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, h: *hash.Hasher, change: diff.Change, drivers: driver.Drivers) Error!void {
     const path = change.path();
     h.update("diff--git");
     h.update("a/");
@@ -148,8 +155,8 @@ fn hashChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, h: *hash.Hasher, change:
     defer gpa.free(new_bytes);
     var lookup: std.heap.ArenaAllocator = .init(gpa);
     defer lookup.deinit();
-    const old_binary = old != null and try binary.isBinary(lookup.allocator(), io, old.?.path, old_bytes);
-    const new_binary = new != null and try binary.isBinary(lookup.allocator(), io, new.?.path, new_bytes);
+    const old_binary = try drivers.isBinary(lookup.allocator(), io, side(old), old_bytes);
+    const new_binary = try drivers.isBinary(lookup.allocator(), io, side(new), new_bytes);
     if (old_binary or new_binary) {
         var hex: [hash.max_hex_len]u8 = undefined;
         const zero = Oid.zero(db.objectFormat());
@@ -297,7 +304,7 @@ test "a file the attributes call binary is hashed by its names, so git cherry an
         var attrs: attributes.Attrs = try .init(gpa, .{});
         defer attrs.deinit();
         defer attrs.leave();
-        const rule: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = repo.dir };
+        const rule: driver.Drivers = .{ .attrs = &attrs, .work_dir = repo.dir };
         const upstream_text = try repo.line(io, &.{ "rev-parse", "main" });
         defer gpa.free(upstream_text);
         const topic_text = try repo.line(io, &.{ "rev-parse", "topic" });

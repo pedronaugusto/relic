@@ -24,6 +24,8 @@ const object = @import("../object/object.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const repo_mod = @import("../repo/repo.zig");
 const diff = @import("../diff/diff.zig");
+const driver = @import("../diff/driver.zig");
+const textconv_mod = @import("../diff/textconv.zig");
 const parallax = @import("parallax");
 const rev_walk = @import("../walk/walk.zig");
 const pretty = @import("../pretty/pretty.zig");
@@ -40,9 +42,6 @@ const Repository = repo_mod.Repository;
 
 /// Errors from a range-diff.
 pub const Error = error{
-    /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
-    /// git dies on.
-    InvalidDriverBinary,
     /// The cost matrix would need `Options.max_memory` or more, which git
     /// dies on.
     RangeDiffTooLarge,
@@ -56,7 +55,7 @@ pub const Error = error{
     InvalidEncodingSetting,
     NotACommit,
 } || diff.Error || diff.TextError || diff.ConfigError || diff.Order.ConfiguredError || rev_walk.Error || pretty.Error || notes_mod.Error ||
-    mailmap_mod.LoadError || repo_mod.Error || attributes.Error || Io.Writer.Error;
+    mailmap_mod.LoadError || repo_mod.Error || attributes.Error || Io.Writer.Error || diff.UnifiedError;
 
 /// `<base>..<tip>`: the commits `tip` reaches and `base` does not, merges
 /// left out. git's other two forms are made of these: `<base> <old> <new>`
@@ -92,6 +91,9 @@ pub const Options = struct {
     /// Whether the diff of two patches is in dual colour, each line by
     /// both its signs; `--no-dual-color` is `false`.
     dual_color: bool = true,
+    /// The drivers' `textconv`, which the patches of `git log` carry by
+    /// default; `null` compares the bytes.
+    textconv: ?*const textconv_mod.Textconv = null,
 };
 
 /// One commit's patch as range-diff compares it: ` ## Metadata ##` with
@@ -177,6 +179,7 @@ const Reader = struct {
     order: diff.Order,
     show_root: bool,
     quote_path: bool,
+    textconv: ?*const textconv_mod.Textconv,
     /// What git's `git log` writes the patches in: the log's output
     /// encoding.
     encoding: []const u8,
@@ -193,6 +196,7 @@ const Reader = struct {
             .order = try diff.Order.configured(a, io, repo.topDirectory(), config),
             .show_root = config.getBool("log.showroot", true) catch true,
             .quote_path = config.getBool("core.quotepath", true) catch true,
+            .textconv = options.textconv,
             .encoding = try message.logOutputEncoding(config),
         };
         errdefer r.deinit();
@@ -269,44 +273,36 @@ const Reader = struct {
             var changes = try diff.tree(r.gpa, r.io, db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = r.renames, .order = r.order });
             defer changes.deinit();
             for (changes.items) |change| {
-                const old = if (change.old) |e| try r.loadSide(e) else null;
-                const new = if (change.new) |e| try r.loadSide(e) else null;
-                if (old != null and new != null and typeChanged(old.?.mode, new.?.mode)) {
+                if (change.old != null and change.new != null and typeChanged(change.old.?.mode, change.new.?.mode)) {
                     // git splits a change of type into a deletion and a creation
-                    try r.appendFile(&text, &patch, change, old, null);
-                    try r.appendFile(&text, &patch, change, null, new);
-                } else try r.appendFile(&text, &patch, change, old, new);
+                    try r.appendFile(&text, &patch, change, .{ .old = change.old, .new = null });
+                    try r.appendFile(&text, &patch, change, .{ .old = null, .new = change.new });
+                } else try r.appendFile(&text, &patch, change, .{ .old = change.old, .new = change.new });
             }
         }
         patch.text = text.items;
         return patch;
     }
 
-    const Side = struct { path: []const u8, mode: object.Mode, oid: Oid, bytes: []const u8, binary: bool };
-
-    fn loadSide(r: *Reader, e: diff.Entry) Error!Side {
-        var bytes: []const u8 = undefined;
-        if (e.mode == .gitlink) {
-            var hex: [hash.max_hex_len]u8 = undefined;
-            bytes = try r.a.print("Subproject commit {s}\n", .{e.oid.hex(&hex)});
-        } else {
-            const found = try r.repo.objectDatabase().read(r.io, e.oid);
-            defer r.repo.objectDatabase().allocator().free(found.bytes);
-            bytes = try r.a.dupe(u8, found.bytes);
-        }
-        return .{ .path = e.path, .mode = e.mode, .oid = e.oid, .bytes = bytes, .binary = try r.isBinary(e.path, bytes) };
-    }
-
-    fn isBinary(r: *Reader, path: []const u8, bytes: []const u8) Error!bool {
-        const rule: diff.BinaryRule = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
-        return rule.isBinary(r.a, r.io, path, bytes);
-    }
-
     /// One file of the commit: ` ## <name> ##` for its `diff --git` header,
     /// then its hunks, an `@@` line carrying the file's name before the
     /// function's, and each line with its own sign.
-    fn appendFile(r: *Reader, text: *std.ArrayList(u8), patch: *Patch, change: diff.Change, old: ?Side, new: ?Side) Error!void {
+    fn appendFile(r: *Reader, text: *std.ArrayList(u8), patch: *Patch, change: diff.Change, sides: diff.FilePair.Sides) Error!void {
         const a = r.a;
+        const old = sides.old;
+        const new = sides.new;
+        const zero = Oid.zero(r.repo.objectFormat());
+        const same = (if (old) |o| o.oid else zero).eql(if (new) |n| n.oid else zero);
+        var pair: diff.FilePair = undefined;
+        if (!same) {
+            const drivers: driver.Drivers = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
+            try pair.init(r.gpa, r.io, .{ .db = r.repo.objectDatabase(), .drivers = drivers, .textconv = r.textconv }, sides);
+            if (pair.silent(change.status)) {
+                pair.deinit();
+                return;
+            }
+        }
+        defer if (!same) pair.deinit();
         try text.append(a, '\n');
         if (patch.diff_offset == 0) patch.diff_offset = text.items.len;
         try text.appendSlice(a, " ## ");
@@ -324,11 +320,8 @@ const Reader = struct {
         try text.appendSlice(a, " ##\n");
         patch.diff_size += 1;
 
-        const zero = Oid.zero(r.repo.objectFormat());
-        if ((if (old) |o| o.oid else zero).eql(if (new) |n| n.oid else zero)) return;
-        const one: []const u8 = if (old) |o| o.bytes else "";
-        const two: []const u8 = if (new) |n| n.bytes else "";
-        if ((old != null and old.?.binary) or (new != null and new.?.binary)) {
+        if (same) return;
+        if (pair.binary) {
             const lbl0 = if (old) |o| try c_quote.alloc(a, o.path, r.quote_path) else "/dev/null";
             const lbl1 = if (new) |n| try c_quote.alloc(a, n.path, r.quote_path) else "/dev/null";
             try text.print(a, " Binary files {s} and {s} differ\n", .{ lbl0, lbl1 });
@@ -336,10 +329,13 @@ const Reader = struct {
             return;
         }
         var body: Io.Writer.Allocating = .init(a);
-        diff.unifiedBody(r.gpa, &body.writer, one, two, r.diff_options) catch |err| switch (err) {
+        var options = r.diff_options;
+        if (options.function_line == null and options.function_context_names) options.function_line = try pair.functionLine();
+        diff.unifiedBody(r.gpa, &body.writer, pair.texts[0], pair.texts[1], options) catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
             else => |e| return e,
         };
+        try pair.finish();
         var lines = std.mem.splitScalar(u8, body.written(), '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;

@@ -8,10 +8,12 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const ere = @import("../text.zig").ere;
 const config_mod = @import("../config/config.zig");
 const attributes = @import("../patterns.zig").attributes;
+const object = @import("../object/object.zig");
 
 /// Errors from reading a driver's patterns.
 pub const Error = error{
@@ -21,6 +23,11 @@ pub const Error = error{
     /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
     /// git dies on.
     InvalidDriverBinary,
+    /// A `diff.<name>.cachetextconv` that is no boolean, which git dies on.
+    InvalidDriverCache,
+    /// A function pattern's search took more work than the matcher's
+    /// budget allows.
+    PatternTooComplex,
 } || Allocator.Error;
 
 /// The driver userdiff's lookup gives a path by its `diff` attribute
@@ -80,6 +87,19 @@ pub const Driver = union(enum) {
         return try d.says(config) orelse attributes.isBinaryForDiff(bytes);
     }
 
+    /// The driver's `diff.<name>.textconv`, `null` where it has none, as
+    /// userdiff's `userdiff_get_textconv` gives it.
+    pub fn conversion(d: Driver, config: ?*const config_mod.Config) error{InvalidDriverCache}!?Conversion {
+        const driver = d.name() orelse return null;
+        const c = config orelse return null;
+        var key_buf: [512]u8 = undefined;
+        // A name past the buffer is no driver a key could name.
+        const command = c.get(std.mem.print(&key_buf, "diff.{s}.textconv", .{driver}) catch return null) orelse return null;
+        const cache_key = std.mem.print(&key_buf, "diff.{s}.cachetextconv", .{driver}) catch return null;
+        const cached = c.getBool(cache_key, false) catch return error.InvalidDriverCache;
+        return .{ .driver = driver, .command = command, .cached = cached };
+    }
+
     /// The name `Rule.init` takes: the text and binary drivers have no
     /// function lines of their own.
     pub fn name(d: Driver) ?[]const u8 {
@@ -98,6 +118,49 @@ pub const Driver = union(enum) {
             if (std.mem.eql(u8, entry.section, "diff") and entry.has_subsection and std.mem.eql(u8, entry.subsection, driver)) return true;
         }
         return false;
+    }
+};
+
+/// A driver's `textconv`: the program a file's bytes are converted by.
+pub const Conversion = struct {
+    driver: []const u8,
+    command: []const u8,
+    /// `diff.<driver>.cachetextconv`.
+    cached: bool,
+};
+
+/// The drivers of a repository's files, as a diff's sides take them: git's
+/// `diff_filespec_load_driver`. A regular file's is its path's `diff`
+/// attribute's (`Driver.of`); anything else -- a symbolic link, a gitlink,
+/// the side a creation or a deletion lacks -- is the driver named
+/// `default`, whose `textconv`, `binary` and function lines the
+/// configuration sets as any other's. The zero value has no attributes or
+/// configuration: every file is `default`'s, binary by its bytes.
+pub const Drivers = struct {
+    attrs: ?*attributes.Attrs = null,
+    /// The working tree whose `.gitattributes` are read on the way down to
+    /// a path; `null` reads only what `attrs` holds.
+    work_dir: ?Io.Dir = null,
+    /// Where `diff.<driver>.*` is read.
+    config: ?*const config_mod.Config = null,
+
+    /// A side of a diff: the file's path and mode.
+    pub const File = struct { path: []const u8, mode: object.Mode };
+
+    /// The driver `side` takes, `null` being the side a creation or a
+    /// deletion lacks. `a` holds the lookup.
+    pub fn of(d: Drivers, a: Allocator, io: Io, side: ?File) attributes.Error!Driver {
+        const s = side orelse return .{ .named = "default" };
+        if (s.mode != .file and s.mode != .exec) return .{ .named = "default" };
+        const attrs = d.attrs orelse return Driver.of(d.config, null);
+        if (d.work_dir) |wt| try attrs.enter(io, wt, s.path);
+        return Driver.of(d.config, (try attrs.lookup(a, s.path, .file)).get("diff"));
+    }
+
+    /// Whether `side`, holding `bytes`, is binary, as git's
+    /// `diff_filespec_is_binary` decides it. `a` holds the lookup.
+    pub fn isBinary(d: Drivers, a: Allocator, io: Io, side: ?File, bytes: []const u8) (attributes.Error || error{InvalidDriverBinary})!bool {
+        return (try d.of(a, io, side)).isBinary(d.config, bytes);
     }
 };
 
@@ -148,17 +211,18 @@ pub const Rule = struct {
 
     /// The rule for the driver `Driver.name` gives, or git's default lines
     /// for `null` and for a driver with no pattern.
-    pub fn init(gpa: Allocator, config: *const config_mod.Config, driver: ?[]const u8) Self.Error!Rule {
+    pub fn init(gpa: Allocator, config: ?*const config_mod.Config, driver: ?[]const u8) Self.Error!Rule {
         var rule: Rule = .{ .arena = .init(gpa), .regs = &.{} };
         errdefer rule.deinit();
         const name = driver orelse return rule;
+        const entries = if (config) |c| c.entries.items else &.{};
         // the last of `funcname` and `xfuncname` set wins, as git reads
         // them into one place
         var pattern: ?[]const u8 = null;
         var extended = true;
         var icase = false;
         var from_config = false;
-        for (config.entries.items) |entry| {
+        for (entries) |entry| {
             if (!std.mem.eql(u8, entry.section, "diff") or !entry.has_subsection or !std.mem.eql(u8, entry.subsection, name)) continue;
             if (std.mem.eql(u8, entry.name, "funcname") or std.mem.eql(u8, entry.name, "xfuncname")) {
                 pattern = entry.value orelse "";
@@ -209,6 +273,29 @@ pub const Rule = struct {
         var n: usize = 1;
         for (rule.regs) |r| n = @max(n, r.re.program.len);
         return n;
+    }
+
+    /// Whether the rule is a driver's pattern rather than git's default.
+    pub fn hasPattern(rule: *const Rule) bool {
+        return rule.regs.len != 0;
+    }
+
+    /// What a hunk's `@@` line shows for `line`, without its newline, when
+    /// the driver's pattern takes it for the start of a function: the
+    /// pattern's first group, or its whole match where the group took no
+    /// part, as git's `ff_regexp` gives it; `null` when a negated line
+    /// refuses it or none matches. The caller cuts it and drops its
+    /// trailing whitespace. A rule with no pattern finds nothing: git's
+    /// default is the caller's.
+    pub fn heading(rule: *const Rule, line: []const u8) ere.Regex.FindWithError!?[]const u8 {
+        for (rule.regs) |r| {
+            var groups: [ere.Regex.max_groups]?ere.Match = undefined;
+            const whole = (try r.re.findGroups(line, &groups)) orelse continue;
+            if (r.negate) return null;
+            const taken = groups[1] orelse whole;
+            return line[taken.start..taken.end];
+        }
+        return null;
     }
 
     /// Whether `line`, without its newline, starts a function. `vm` is at

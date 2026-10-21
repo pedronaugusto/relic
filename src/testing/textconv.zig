@@ -13,6 +13,7 @@ const history = @import("history.zig");
 const suite = @import("helpers.zig");
 const repo_mod = @import("../repo/repo.zig");
 const diff = @import("../diff/diff.zig");
+const driver = @import("../diff/driver.zig");
 const textconv = @import("../diff/textconv.zig");
 const notes = @import("../commit/notes.zig");
 const attributes = @import("../patterns.zig").attributes;
@@ -76,7 +77,10 @@ fn gitPatches(gpa: Allocator, io: Io, git: *testgit.Repo) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn ourPatches(gpa: Allocator, io: Io, pair: *Pair, repo: *repo_mod.Repository, tc: ?*const textconv.Textconv) ![]u8 {
+/// What `ourPatches` diffs with.
+const Setup = struct { drivers: driver.Drivers, textconv: ?*const textconv.Textconv };
+
+fn ourPatches(gpa: Allocator, io: Io, pair: *Pair, repo: *repo_mod.Repository, setup: Setup) ![]u8 {
     var out: Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     var previous: ?hash.Oid = null;
@@ -84,16 +88,16 @@ fn ourPatches(gpa: Allocator, io: Io, pair: *Pair, repo: *repo_mod.Repository, t
         const tree = try repo.commitTree(io, try history.oidOf(gpa, io, &pair.ours, rev));
         var changes = try diff.tree(gpa, io, repo.objectDatabase(), .{ .old = previous, .new = tree }, .{ .renames = .{} });
         defer changes.deinit();
-        try diff.unified(gpa, io, .{ .db = repo.objectDatabase(), .changes = changes.items, .textconv = tc }, &out.writer, .{});
+        try diff.unified(gpa, io, .{ .db = repo.objectDatabase(), .changes = changes.items, .drivers = setup.drivers, .textconv = setup.textconv }, &out.writer, .{});
         previous = tree;
     }
     return out.toOwnedSlice();
 }
 
-fn expectSamePatches(gpa: Allocator, io: Io, pair: *Pair, repo: *repo_mod.Repository, tc: *const textconv.Textconv) !void {
+fn expectSamePatches(gpa: Allocator, io: Io, pair: *Pair, repo: *repo_mod.Repository, setup: Setup) !void {
     const theirs = try gitPatches(gpa, io, &pair.git);
     defer gpa.free(theirs);
-    const ours = try ourPatches(gpa, io, pair, repo, tc);
+    const ours = try ourPatches(gpa, io, pair, repo, setup);
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(theirs, ours);
 }
@@ -109,10 +113,11 @@ test "a driver's textconv makes the patches git diff prints: case changes gone, 
     defer repo.deinit(io);
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env }, .config = repo.configuration(), .attrs = &attrs, .work_dir = pair.ours.dir };
-    try expectSamePatches(gpa, io, &pair, &repo, &tc);
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.ours.dir, .config = repo.configuration() };
+    const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env } };
+    try expectSamePatches(gpa, io, &pair, &repo, .{ .drivers = drivers, .textconv = &tc });
     // `--no-textconv` is the bytes.
-    const plain = try ourPatches(gpa, io, &pair, &repo, null);
+    const plain = try ourPatches(gpa, io, &pair, &repo, .{ .drivers = drivers, .textconv = null });
     defer gpa.free(plain);
     const theirs = try pair.git.run(io, &.{ "diff", "--no-color", "--no-textconv", "-M", "HEAD~3", "HEAD~2" });
     defer gpa.free(theirs);
@@ -133,10 +138,11 @@ test "cachetextconv writes git's refs/notes/textconv/<driver>, and a text kept t
             defer repo.deinit(io);
             var attrs = try attributes.Attrs.init(gpa, .{});
             defer attrs.deinit();
+            const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.ours.dir, .config = repo.configuration() };
             var caches: notes.TextconvCaches = .init(gpa, &repo, history.who);
             defer caches.deinit();
-            const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env }, .config = repo.configuration(), .attrs = &attrs, .work_dir = pair.ours.dir, .cache = caches.cache() };
-            try expectSamePatches(gpa, io, &pair, &repo, &tc);
+            const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env }, .cache = caches.cache() };
+            try expectSamePatches(gpa, io, &pair, &repo, .{ .drivers = drivers, .textconv = &tc });
             const log_args: []const []const u8 = &.{ "reflog", "--format=%H %gs", "refs/notes/textconv/up" };
             const theirs = try pair.git.run(io, log_args);
             defer gpa.free(theirs);
@@ -151,7 +157,7 @@ test "cachetextconv writes git's refs/notes/textconv/<driver>, and a text kept t
             defer fresh.deinit();
             var kept = tc;
             kept.cache = fresh.cache();
-            try expectSamePatches(gpa, io, &pair, &repo, &kept);
+            try expectSamePatches(gpa, io, &pair, &repo, .{ .drivers = drivers, .textconv = &kept });
             const patch = try pair.git.run(io, &.{ "diff", "--no-color", "HEAD~3", "HEAD~2" });
             defer gpa.free(patch);
             try std.testing.expect(std.mem.find(u8, patch, "-KEPT IN THE CACHE") != null);
@@ -186,6 +192,7 @@ test "a textconv that fails is error.TextconvFailed, where git diff dies" {
     defer repo.deinit(io);
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env }, .config = repo.configuration(), .attrs = &attrs, .work_dir = pair.ours.dir };
-    try std.testing.expectError(error.TextconvFailed, ourPatches(gpa, io, &pair, &repo, &tc));
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.ours.dir, .config = repo.configuration() };
+    const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env } };
+    try std.testing.expectError(error.TextconvFailed, ourPatches(gpa, io, &pair, &repo, .{ .drivers = drivers, .textconv = &tc }));
 }

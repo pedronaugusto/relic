@@ -641,7 +641,7 @@ fn writeCommitPatch(s: *Session, parents: []const Oid, tree: Oid) Error!void {
     diff.unified(s.gpa, s.io, .{
         .db = db,
         .changes = changes.items,
-        .binary = .{ .attrs = &attrs, .work_dir = s.repo.workDirectory(), .config = s.repo.configuration() },
+        .drivers = .{ .attrs = &attrs, .work_dir = s.repo.workDirectory(), .config = s.repo.configuration() },
     }, &out.writer, .{
         .full_index = true,
         .binary_patches = true,

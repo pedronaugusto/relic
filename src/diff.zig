@@ -1,6 +1,7 @@
 //! Public diff namespace. Implementation is in `diff/diff.zig`.
 
 pub const blame = @import("diff/blame.zig");
+pub const driver = @import("diff/driver.zig");
 pub const patch_id = @import("diff/patch_id.zig");
 pub const rename = @import("diff/rename.zig");
 pub const similarity = @import("diff/similarity.zig");
@@ -19,6 +20,7 @@ pub const tree = @import("diff/diff.zig").tree;
 pub const NumStat = @import("diff/diff.zig").NumStat;
 pub const Options = @import("diff/diff.zig").Options;
 pub const FunctionLine = @import("diff/diff.zig").FunctionLine;
+pub const FilePair = @import("diff/diff.zig").FilePair;
 pub const ConfigError = @import("diff/diff.zig").ConfigError;
 pub const configured = @import("diff/diff.zig").configured;
 pub const findRenames = @import("diff/diff.zig").findRenames;
@@ -32,7 +34,6 @@ pub const parseRenameSetting = @import("diff/diff.zig").parseRenameSetting;
 pub const parseRenameLimit = @import("diff/diff.zig").parseRenameLimit;
 pub const RenameSettings = @import("diff/diff.zig").RenameSettings;
 pub const isBinary = @import("diff/diff.zig").isBinary;
-pub const BinaryRule = @import("diff/diff.zig").BinaryRule;
 pub const WhitespaceRule = @import("diff/diff.zig").WhitespaceRule;
 pub const Colors = @import("diff/diff.zig").Colors;
 pub const WsErrorHighlight = @import("diff/diff.zig").WsErrorHighlight;

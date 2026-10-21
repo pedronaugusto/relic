@@ -60,6 +60,7 @@ const sequencer = @import("../commit/sequencer.zig");
 const patch_id = @import("../diff/patch_id.zig");
 const rev_walk = @import("../walk/walk.zig");
 const diff = @import("../diff/diff.zig");
+const driver = @import("../diff/driver.zig");
 const program = @import("../process.zig").program;
 const repo_mod = @import("../repo/repo.zig");
 const worktrees = @import("../checkout/worktrees.zig");
@@ -760,21 +761,21 @@ fn findForkPoint(r: *Run, orig_head: Oid) Error!?Oid {
 fn upstreamHas(r: *Run, w: *Walker, left: []const Oid, right: []const Oid) Error!std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) {
     var same: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
     if (r.options.reapply_cherry_picks or left.len == 0 or right.len == 0) return same;
-    // A file the attributes call binary is one by its names alone, as
+    // A file the attributes call drivers is one by its names alone, as
     // git's patch ids take it.
     var attrs = try r.repo.loadAttrs(r.io);
     defer attrs.deinit();
     defer attrs.leave();
-    const binary: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
     var ids: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
     for (left) |oid| {
         if ((try w.load(oid)).parents.len > 1) continue;
-        const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
+        const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, drivers)) orelse continue;
         try ids.put(r.arena, id.bytes, {});
     }
     for (right) |oid| {
         if ((try w.load(oid)).parents.len > 1) continue;
-        const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
+        const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, drivers)) orelse continue;
         if (ids.contains(id.bytes)) try same.put(r.arena, oid.bytes, {});
     }
     return same;

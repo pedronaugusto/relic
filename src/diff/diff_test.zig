@@ -8,6 +8,7 @@ const testgit = @import("../testing/git.zig");
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
 const diff = @import("diff.zig");
+const driver = @import("driver.zig");
 const parallax = @import("parallax");
 const object = @import("../object/object.zig");
 
@@ -1278,7 +1279,7 @@ test "a patch's headers are git diff's: a change of kind split, binary files by 
     const attributes = @import("../patterns.zig").attributes;
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const binary: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = pair.repo.dir };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.repo.dir };
 
     const Variant = struct { args: []const []const u8, options: diff.Options, prefix: []const u8 = "" };
     const variants = [_]Variant{
@@ -1292,7 +1293,7 @@ test "a patch's headers are git diff's: a change of kind split, binary files by 
         defer changes.deinit();
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = changes.items, .binary = binary }, &out.writer, v.options);
+        try diff.unified(gpa, io, .{ .db = &pair.db, .changes = changes.items, .drivers = drivers }, &out.writer, v.options);
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.appendSlice(gpa, &.{ "diff", "--no-color", "-M" });

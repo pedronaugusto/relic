@@ -40,7 +40,7 @@ const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const worktree = @import("../checkout/checkout.zig");
 const attributes = @import("../patterns.zig").attributes;
-const user_diff = @import("../diff/user_diff.zig");
+const driver_mod = @import("../diff/driver.zig");
 const convert = @import("../checkout/convert.zig");
 const pathspec_mod = @import("../patterns.zig").pathspec;
 const pretty = @import("../pretty/pretty.zig");
@@ -757,7 +757,7 @@ const Walk = struct {
             var is_binary = false;
             if (wk.format == .zip) {
                 const config = wk.repo.configuration();
-                is_binary = try user_diff.Driver.of(config, applied.get("diff")).isBinary(config, content);
+                is_binary = try driver_mod.Driver.of(config, applied.get("diff")).isBinary(config, content);
             }
             try wk.emit(entry.oid, out_path, mode, content, is_binary);
         }

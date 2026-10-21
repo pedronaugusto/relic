@@ -280,7 +280,7 @@ test "--textconv searches the text a driver's program writes, in the working tre
     defer env.deinit();
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const tc: textconv.Textconv = .{ .programs = .{ .environ = &env }, .config = repo.configuration(), .attrs = &attrs, .work_dir = git.dir };
+    const tc: textconv.Textconv = .{ .programs = .{ .environ = &env } };
 
     try compare(gpa, io, &git, &repo, &.{ "--textconv", "-n", "HELLO" }, .{ .patterns = &.{"HELLO"}, .line_number = true, .textconv = &tc });
     try compare(gpa, io, &git, &repo, &.{ "--textconv", "hello" }, .{ .patterns = &.{"hello"}, .textconv = &tc });

@@ -35,7 +35,7 @@ const attributes = @import("patterns.zig").attributes;
 const ere = @import("text.zig").ere;
 const pathspec_mod = @import("patterns.zig").pathspec;
 const fs = @import("fs/fs.zig");
-const user_diff = @import("diff/user_diff.zig");
+const driver_mod = @import("diff/driver.zig");
 const textconv_mod = @import("diff/textconv.zig");
 const color = @import("config/color.zig");
 const config_mod = @import("config/config.zig");
@@ -74,7 +74,7 @@ pub const Error = error{
     /// The tree nests deeper than `core.maxTreeDepth`.
     TreeTooDeep,
 } || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || attributes.Error || Io.Writer.Error ||
-    odb_mod.Error || object.TreeParseError || textconv_mod.Error;
+    odb_mod.Error || object.TreeParseError || textconv_mod.Error || driver_mod.Error;
 
 /// How patterns are read: `-G`, `-E`, `-F`, `-P`.
 pub const Syntax = enum { basic, extended, fixed, perl };
@@ -627,7 +627,7 @@ const FileState = struct {
     name: []const u8,
     content: []const u8,
     /// How function lines are found, under `-p` or `-W`.
-    rule: ?*const user_diff.Rule,
+    rule: ?*const driver_mod.Rule,
     last_shown: usize = 0,
 
     /// The line from `bol` to `eol`, which ends it or the content.
@@ -920,7 +920,9 @@ const Item = struct {
     /// What the `diff` attribute says of it being binary, if anything.
     binary: ?bool = null,
     /// How its function lines are found, under `-p` or `-W`.
-    rule: ?*const user_diff.Rule = null,
+    rule: ?*const driver_mod.Rule = null,
+    /// Its driver's `textconv`, under `--textconv`.
+    conversion: ?driver_mod.Conversion = null,
 };
 
 fn collectIndex(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, cached: bool, items: *std.ArrayList(Item)) Error!void {
@@ -988,7 +990,10 @@ fn peelToTree(io: Io, repo: *Repository, oid: Oid) Error!Oid {
 /// What the attributes say of each item: binary or not by `diff`, and
 /// under `-p` or `-W` the driver `diff` names, whose rules are compiled
 /// once each into `rules`.
-fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, functions: bool, rules: *std.array_hash_map.String(*user_diff.Rule)) Error!void {
+/// What the drivers are asked for besides whether a file is binary.
+const Wanted = struct { functions: bool, conversions: bool };
+
+fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, wanted: Wanted, rules: *std.array_hash_map.String(*driver_mod.Rule)) Error!void {
     const config = repo.configuration();
     for (items) |*item| {
         var state: ?attributes.State = null;
@@ -996,13 +1001,14 @@ fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attr
             if (repo.workDirectory()) |w| try at.enter(io, w, item.path);
             state = (try at.lookup(a, item.path, .file)).get("diff");
         }
-        const driver = user_diff.Driver.of(config, state);
+        const driver = driver_mod.Driver.of(config, state);
         item.binary = try driver.says(config);
-        if (!functions) continue;
+        if (wanted.conversions) item.conversion = try driver.conversion(config);
+        if (!wanted.functions) continue;
         const key = driver.name() orelse "";
         item.rule = rules.get(key) orelse blk: {
-            const rule = try a.create(user_diff.Rule);
-            rule.* = try user_diff.Rule.init(gpa, config, driver.name());
+            const rule = try a.create(driver_mod.Rule);
+            rule.* = try driver_mod.Rule.init(gpa, config, driver.name());
             errdefer rule.deinit();
             try rules.put(a, try a.dupe(u8, key), rule);
             break :blk rule;
@@ -1122,16 +1128,14 @@ const Batch = struct {
             if (content) |c| {
                 bin = item.binary orelse attributes.isBinaryForDiff(c);
                 // `fill_textconv_grep`: the driver's text, which is text.
-                if (at.textconv) |tc| {
+                if (at.textconv) |tc| if (item.conversion) |conversion| {
                     const blob: ?Oid = switch (item.source) {
                         .blob => |oid| oid,
                         .file => null,
                     };
-                    if (try tc.convert(a, io, .{ .path = item.path, .blob = blob, .bytes = c })) |text| {
-                        searched = text;
-                        bin = false;
-                    }
-                }
+                    searched = try tc.convert(a, io, .{ .conversion = conversion, .path = item.path, .blob = blob, .bytes = c });
+                    bin = false;
+                };
             }
             try batch.contents.append(a, searched);
             try batch.binaries.append(a, bin);
@@ -1186,10 +1190,10 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     defer if (attrs) |*x| x.deinit();
     if (repo.workDirectory() != null) attrs = try repo.loadAttrs(io);
     defer if (attrs) |*x| x.leave();
-    var rules: std.array_hash_map.String(*user_diff.Rule) = .empty;
+    var rules: std.array_hash_map.String(*driver_mod.Rule) = .empty;
     defer for (rules.values()) |rule| rule.deinit();
     const functions = fmt.funcname or fmt.funcbody;
-    try applyAttributes(a, gpa, io, repo, if (attrs) |*x| x else null, items.items, functions, &rules);
+    try applyAttributes(a, gpa, io, repo, if (attrs) |*x| x else null, items.items, .{ .functions = functions, .conversions = options.textconv != null }, &rules);
     var func_program: usize = 0;
     for (rules.values()) |rule| func_program = @max(func_program, rule.programLen());
 

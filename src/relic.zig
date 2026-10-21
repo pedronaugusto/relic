@@ -62,6 +62,7 @@
 //! | `worktree.safe_path` | Module within `worktree`. |
 //! | `diff` | Public concern. |
 //! | `diff.blame` | Module within `diff`. |
+//! | `diff.driver` | Module within `diff`. |
 //! | `diff.patch_id` | Module within `diff`. |
 //! | `diff.rename` | Module within `diff`. |
 //! | `diff.similarity` | Module within `diff`. |

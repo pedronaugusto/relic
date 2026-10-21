@@ -21,7 +21,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const attributes = @import("../patterns.zig").attributes;
-const user_diff = @import("user_diff.zig");
+const driver_mod = @import("driver.zig");
 const textconv_mod = @import("textconv.zig");
 const config_mod = @import("../config/config.zig");
 const glob = @import("../text.zig").glob;
@@ -896,31 +896,6 @@ pub fn isBinary(bytes: []const u8) bool {
     return attributes.isBinaryForDiff(bytes);
 }
 
-/// Whether a path's contents diff as binary, as git's
-/// `diff_filespec_is_binary` decides it: the driver the `diff` attribute
-/// gives (`user_diff.Driver`: set is text, unset is binary, a driver says
-/// by `diff.<driver>.binary`, and no driver is `default`'s), and `isBinary`
-/// of the bytes where the driver does not say. The zero value has no
-/// attributes or configuration and decides by the bytes alone.
-pub const BinaryRule = struct {
-    attrs: ?*attributes.Attrs = null,
-    /// The working tree whose `.gitattributes` are read on the way down to
-    /// a path; `null` reads only what `attrs` holds.
-    work_dir: ?Io.Dir = null,
-    /// Where `diff.<driver>.binary` is read.
-    config: ?*const config_mod.Config = null,
-
-    /// Whether `path`, holding `bytes`, is binary. `a` holds the lookup.
-    pub fn isBinary(rule: BinaryRule, a: Allocator, io: Io, path: []const u8, bytes: []const u8) (attributes.Error || error{InvalidDriverBinary})!bool {
-        var state: ?attributes.State = null;
-        if (rule.attrs) |attrs| {
-            if (rule.work_dir) |wt| try attrs.enter(io, wt, path);
-            state = (try attrs.lookup(a, path, .file)).get("diff");
-        }
-        return try user_diff.Driver.of(rule.config, state).isBinary(rule.config, bytes);
-    }
-};
-
 /// The whitespace rule a path's patch is marked by, as git's
 /// `whitespace_rule` decides it: the path's `whitespace` attribute over
 /// `configured`, which is `core.whitespace` as `configured` reads it into
@@ -1014,18 +989,20 @@ pub fn numstat(
 }
 
 /// Errors from `unified`.
-pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || error{InvalidDriverBinary};
+pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || driver_mod.Error;
 
-/// The borrowed object store, the changes whose patch is written, and what
-/// decides which of their files are binary.
+/// The borrowed object store, the changes whose patch is written, and the
+/// drivers their files take.
 pub const UnifiedInputs = struct {
     db: *odb_mod.Odb,
     /// In the order they are written: one diff, as git's
     /// `diff_flush_patch_all_file_pairs` writes its queue.
     changes: []const Change,
-    /// Which files are binary, as git's `diff_filespec_is_binary` says;
-    /// the zero value decides by the bytes alone.
-    binary: BinaryRule = .{},
+    /// The driver each side takes, which says whether it is binary (git's
+    /// `diff_filespec_is_binary`), what converts it and what starts its
+    /// functions for the `@@` lines (unless `Options.function_line` says);
+    /// the zero value is `default`'s for every file, binary by the bytes.
+    drivers: driver_mod.Drivers = .{},
     /// `--textconv`, which `git diff` and `git log -p` have by default: a
     /// side whose driver has a `textconv` is diffed as the program's text,
     /// and is never binary. `null` diffs the bytes.
@@ -1069,7 +1046,7 @@ fn recorded(r: ?*paint.Recorder, err: anytype) @TypeOf(err) {
 }
 
 fn writeChange(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, w: *Io.Writer, options: Options, r: ?*paint.Recorder) UnifiedError!void {
-    const file: FileInputs = .{ .db = inputs.db, .binary = inputs.binary, .textconv = inputs.textconv, .change = change, .recorder = r };
+    const file: FileInputs = .{ .db = inputs.db, .drivers = inputs.drivers, .textconv = inputs.textconv, .change = change, .recorder = r };
     if (change.old != null and change.new != null and typeChanged(change.old.?.mode, change.new.?.mode)) {
         try writeFilePatch(gpa, io, file, w, options, change.old, null);
         return writeFilePatch(gpa, io, file, w, options, null, change.new);
@@ -1081,44 +1058,139 @@ fn writeChange(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, w:
 /// moved lines are recorded.
 const FileInputs = struct {
     db: *odb_mod.Odb,
-    binary: BinaryRule,
+    drivers: driver_mod.Drivers,
     textconv: ?*const textconv_mod.Textconv,
     change: Change,
     recorder: ?*paint.Recorder,
 };
 
-/// A side's bytes, as the patch compares them: a gitlink's commit as git's
-/// `Subproject commit` line, an object's bytes read from `db`.
-const SideBytes = struct {
-    bytes: []const u8 = "",
-    read: ?[]u8 = null,
-    gitlink: [gitlink_text_max]u8 = undefined,
+/// One file pair of a diff as git's `builtin_diff` compares it: each
+/// side's bytes (a gitlink's commit as git's `Subproject commit` line), the
+/// driver it takes (`driver.Drivers`, git's `diff_filespec_load_driver`),
+/// its text -- the `textconv` program's where there is one and the driver
+/// has it (`fill_textconv`; a side that is not there is never converted)
+/// -- whether the pair is binary (a converted side never is), and what
+/// starts its functions on the `@@` lines. `unified` writes a patch from
+/// one; a caller with its own headers, as range-diff has, writes the body
+/// with `unifiedBody`. It must not move once made.
+pub const FilePair = struct {
+    pub const Error = UnifiedError;
 
-    fn load(side: *SideBytes, io: Io, db: *odb_mod.Odb, entry: ?Entry) Self.Error!void {
-        const e = entry orelse return;
-        if (e.mode == .gitlink) {
-            side.bytes = gitlinkText(&side.gitlink, e.oid);
-            return;
+    gpa: Allocator,
+    db: *odb_mod.Odb,
+    config: ?*const config_mod.Config,
+    arena: std.heap.ArenaAllocator,
+    /// The bytes read from `db`, the object database allocator's.
+    read: [2]?[]u8 = .{ null, null },
+    /// Old and new: the driver each side takes.
+    drivers: [2]driver_mod.Driver = undefined,
+    /// Old and new: what is diffed, `""` for a side that is not there.
+    texts: [2][]const u8 = .{ "", "" },
+    /// Old and new: the bytes, which a binary patch is made of.
+    bytes: [2][]const u8 = .{ "", "" },
+    /// Old and new: each side's mode, `null` for one that is not there.
+    modes: [2]?object.Mode = .{ null, null },
+    converted: [2]bool = .{ false, false },
+    binary: bool = false,
+    rule: ?driver_mod.Rule = null,
+    /// A function pattern's search that went past the matcher's budget,
+    /// which `finish` reports.
+    failed: bool = false,
+
+    /// Where a pair's sides are read and how they are converted.
+    pub const Sources = struct {
+        db: *odb_mod.Odb,
+        drivers: driver_mod.Drivers = .{},
+        textconv: ?*const textconv_mod.Textconv = null,
+    };
+
+    /// Old and new, either absent for a creation or a deletion.
+    pub const Sides = struct { old: ?Entry, new: ?Entry };
+
+    pub fn init(pair: *FilePair, gpa: Allocator, io: Io, sources: Sources, sides: Sides) UnifiedError!void {
+        pair.* = .{ .gpa = gpa, .db = sources.db, .config = sources.drivers.config, .arena = .init(gpa) };
+        errdefer pair.deinit();
+        const a = pair.arena.allocator();
+        for ([_]?Entry{ sides.old, sides.new }, 0..) |entry, i| {
+            if (entry) |e| {
+                pair.modes[i] = e.mode;
+                if (e.mode == .gitlink) {
+                    var buf: [gitlink_text_max]u8 = undefined;
+                    pair.bytes[i] = try a.dupe(u8, gitlinkText(&buf, e.oid));
+                } else {
+                    pair.read[i] = (try sources.db.read(io, e.oid)).bytes;
+                    pair.bytes[i] = pair.read[i].?;
+                }
+            }
         }
-        side.read = (try db.read(io, e.oid)).bytes;
-        side.bytes = side.read.?;
+        try checkTextSize(pair.bytes[0], pair.bytes[1]);
+        for ([_]?Entry{ sides.old, sides.new }, 0..) |entry, i| {
+            const file: ?driver_mod.Drivers.File = if (entry) |e| .{ .path = e.path, .mode = e.mode } else null;
+            pair.drivers[i] = try sources.drivers.of(a, io, file);
+            pair.texts[i] = pair.bytes[i];
+            const tc = sources.textconv orelse continue;
+            const e = entry orelse continue;
+            const conversion = (try pair.drivers[i].conversion(pair.config)) orelse continue;
+            pair.texts[i] = try tc.convert(a, io, .{ .conversion = conversion, .path = e.path, .blob = e.oid, .bytes = pair.bytes[i] });
+            pair.converted[i] = true;
+        }
+        for (0..2) |i| {
+            if (!pair.converted[i] and try pair.drivers[i].isBinary(pair.config, pair.bytes[i])) pair.binary = true;
+        }
     }
 
-    /// An object's bytes are the object database's allocator's, whoever
-    /// asked for them.
-    fn deinit(side: *SideBytes, db: *odb_mod.Odb) void {
-        if (side.read) |bytes| db.allocator().free(bytes);
+    pub fn deinit(pair: *FilePair) void {
+        for (pair.read) |r| if (r) |bytes| pair.db.allocator().free(bytes);
+        if (pair.rule) |*rule| rule.deinit();
+        pair.arena.deinit();
+        pair.* = undefined;
+    }
+
+    /// Whether git writes nothing at all for the pair, not even its
+    /// headers: a change it need not announce -- no file made or removed,
+    /// no mode moved, no rename or copy -- is written only with a hunk,
+    /// which sides that convert to the same text have none of (git's
+    /// `must_show_header`).
+    pub fn silent(pair: *const FilePair, status: Status) bool {
+        if (pair.binary or !(pair.converted[0] or pair.converted[1])) return false;
+        if (!std.mem.eql(u8, pair.texts[0], pair.texts[1])) return false;
+        const old = pair.modes[0] orelse return false;
+        const new = pair.modes[1] orelse return false;
+        return old == new and status != .renamed and status != .copied;
+    }
+
+    /// The function lines of the `@@` lines: the old side's driver's
+    /// pattern, else the new side's (git's `diff_funcname_pattern`);
+    /// `null` for git's default rule.
+    pub fn functionLine(pair: *FilePair) driver_mod.Error!?FunctionLine {
+        if (pair.rule == null) {
+            for (pair.drivers) |d| {
+                var rule = try driver_mod.Rule.init(pair.gpa, pair.config, d.name());
+                if (rule.hasPattern()) {
+                    pair.rule = rule;
+                    break;
+                }
+                rule.deinit();
+            } else return null;
+        }
+        return .{ .context = pair, .find = findFunction };
+    }
+
+    /// Whether every function line was looked for: a search past the
+    /// matcher's budget is `error.PatternTooComplex`, after the body that
+    /// went on without it.
+    pub fn finish(pair: *const FilePair) error{PatternTooComplex}!void {
+        if (pair.failed) return error.PatternTooComplex;
+    }
+
+    fn findFunction(context: ?*const anyopaque, line: []const u8) ?[]const u8 {
+        const pair: *FilePair = @ptrCast(@alignCast(@constCast(context.?))); // safe: functionLine hands out its own FilePair, which is not const, as the context
+        return pair.rule.?.heading(line) catch {
+            pair.failed = true;
+            return null;
+        };
     }
 };
-
-/// One side's text as its driver's `textconv` writes it, `null` when it
-/// is not converted: git's `get_textconv` converts only a regular file,
-/// never a symbolic link or a gitlink.
-fn convertSide(tc: *const textconv_mod.Textconv, a: Allocator, io: Io, entry: ?Entry, bytes: []const u8) textconv_mod.Error!?[]const u8 {
-    const e = entry orelse return null;
-    if (e.mode != .file and e.mode != .exec) return null;
-    return tc.convert(a, io, .{ .path = e.path, .blob = e.oid, .bytes = bytes });
-}
 
 /// One file pair's patch, either side absent for a creation or a deletion.
 fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, options: Options, old: ?Entry, new: ?Entry) UnifiedError!void {
@@ -1141,44 +1213,17 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
         return writeHeader(gpa, w, colors, header);
     }
 
-    var old_side: SideBytes = .{};
-    defer old_side.deinit(db);
-    try old_side.load(io, db, old);
-    var new_side: SideBytes = .{};
-    defer new_side.deinit(db);
-    try new_side.load(io, db, new);
-    try checkTextSize(old_side.bytes, new_side.bytes);
-
-    var lookup: std.heap.ArenaAllocator = .init(gpa);
-    defer lookup.deinit();
-    // `fill_textconv`: each side the driver converts is diffed as its text.
-    var old_text = old_side.bytes;
-    var new_text = new_side.bytes;
-    var old_converted = false;
-    var new_converted = false;
-    if (inputs.textconv) |tc| {
-        if (try convertSide(tc, lookup.allocator(), io, old, old_side.bytes)) |t| {
-            old_text = t;
-            old_converted = true;
-        }
-        if (try convertSide(tc, lookup.allocator(), io, new, new_side.bytes)) |t| {
-            new_text = t;
-            new_converted = true;
-        }
-    }
-    const binary = (if (old) |e| !old_converted and try inputs.binary.isBinary(lookup.allocator(), io, e.path, old_side.bytes) else false) or
-        (if (new) |e| !new_converted and try inputs.binary.isBinary(lookup.allocator(), io, e.path, new_side.bytes) else false);
-    // A change git need not announce -- no file made or removed, no mode
-    // moved, no rename -- is written only with a hunk, which a text that
-    // converts the same has none of.
-    if (!binary and (old_converted or new_converted) and std.mem.eql(u8, old_text, new_text) and
-        old != null and new != null and old.?.mode == new.?.mode and change.status != .renamed and change.status != .copied) return;
+    var pair: FilePair = undefined;
+    try pair.init(gpa, io, .{ .db = db, .drivers = inputs.drivers, .textconv = inputs.textconv }, .{ .old = old, .new = new });
+    defer pair.deinit();
+    if (pair.silent(change.status)) return;
     try writeHeader(gpa, w, colors, header);
 
     // The mode is on the index line only when it did not change and the
     // file was neither created nor removed; otherwise it is on its own line
     // above. A binary patch names its objects in full, which `git apply`
     // checks.
+    const binary = pair.binary;
     const full = options.full_index or (options.binary_patches and binary);
     var new_mode_buf: [6]u8 = undefined;
     var old_hex: [hash.max_hex_len]u8 = undefined;
@@ -1195,7 +1240,7 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     const new_label = if (new == null) "/dev/null" else new_name;
     if (binary) {
         if (options.binary_patches) {
-            try binarypatch.write(gpa, w, old_side.bytes, new_side.bytes);
+            try binarypatch.write(gpa, w, pair.bytes[0], pair.bytes[1]);
         } else try w.print("Binary files {s} and {s} differ\n", .{ old_label, new_label });
         return;
     }
@@ -1205,7 +1250,9 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     if (new) |entry| if (entry.mode == .symlink) {
         body_options.whitespace_rule &= ~whitespace.incomplete_line;
     };
-    try writeBody(gpa, w, old_text, new_text, body_options, .{ .old = old_label, .new = new_label }, inputs.recorder);
+    if (options.function_line == null and options.function_context_names) body_options.function_line = try pair.functionLine();
+    try writeBody(gpa, w, pair.texts[0], pair.texts[1], body_options, .{ .old = old_label, .new = new_label }, inputs.recorder);
+    try pair.finish();
 }
 
 /// The lines a file's patch starts with, before its `index` line.

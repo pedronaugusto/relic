@@ -31,6 +31,8 @@ const diff = @import("diff.zig");
 const rename = @import("rename.zig");
 const blame_ignore = @import("blame/ignore.zig");
 const textconv_mod = @import("textconv.zig");
+const driver_mod = @import("driver.zig");
+const attributes = @import("../patterns.zig").attributes;
 const config_mod = @import("../config/config.zig");
 const fs = @import("../fs/fs.zig");
 const parallax = @import("parallax");
@@ -38,7 +40,7 @@ const parallax = @import("parallax");
 const Oid = hash.Oid;
 
 /// Errors from a blame.
-pub const Error = diff.Error || diff.TextError || object.ParseError || textconv_mod.Error || error{
+pub const Error = diff.Error || diff.TextError || object.ParseError || textconv_mod.Error || driver_mod.Error || attributes.Error || error{
     /// A commit named is not a commit.
     NotACommit,
     /// The path is not a file in the commit blamed.
@@ -69,6 +71,9 @@ pub const Options = struct {
     /// `--textconv`, which `git blame` has by default: each version of a
     /// file whose driver has a `textconv` is blamed as the program's text.
     textconv: ?*const textconv_mod.Textconv = null,
+    /// The driver each version takes, as `diff.unified`'s sides take
+    /// theirs: what converts it under `textconv`.
+    drivers: driver_mod.Drivers = .{},
 };
 
 /// A run of lines that come from one commit, at consecutive lines there.
@@ -371,16 +376,19 @@ const Scoreboard = struct {
         return o;
     }
 
-    /// An origin's text: its blob's bytes, or for a regular file as its
-    /// driver's `textconv` writes them for its path, each made once.
+    /// An origin's text: its blob's bytes, or as its driver's `textconv`
+    /// writes them (git's `textconv_object`), each made once.
     fn textFor(s: *Scoreboard, o: *const Origin) Error![]const u8 {
         const tc = s.options.textconv orelse return s.textOf(o.blob);
         const key = try s.arena.print("{x}:{s}", .{ &o.blob.bytes, o.path });
         if (s.converted.get(key)) |t| return t;
         const bytes = try s.textOf(o.blob);
-        // git's `textconv_object` converts only a regular file.
-        if (try s.modeAt(o) == .symlink) return bytes;
-        const text = (try tc.convert(s.arena, s.io, .{ .path = o.path, .blob = o.blob, .bytes = bytes })) orelse bytes;
+        const drivers = s.options.drivers;
+        const driver = try drivers.of(s.arena, s.io, .{ .path = o.path, .mode = try s.modeAt(o) });
+        const text = if (try driver.conversion(drivers.config)) |conversion|
+            try tc.convert(s.arena, s.io, .{ .conversion = conversion, .path = o.path, .blob = o.blob, .bytes = bytes })
+        else
+            bytes;
         try s.converted.put(s.arena, key, text);
         return text;
     }

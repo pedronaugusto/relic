@@ -29,6 +29,7 @@ const odb_mod = @import("../odb/odb.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const diff = @import("../diff/diff.zig");
+const driver = @import("../diff/driver.zig");
 const patch_id = @import("../diff/patch_id.zig");
 const rev_walk = @import("../walk/walk.zig");
 const abbrev = @import("../odb/abbrev.zig");
@@ -284,8 +285,8 @@ const Ctx = struct {
     /// `get_log_output_encoding` gives it.
     encoding: []const u8,
 
-    /// Which files are binary, as git's `diff_filespec_is_binary` says.
-    fn binaryRule(ctx: *const Ctx) diff.BinaryRule {
+    /// The drivers the files take, which say which are binary.
+    fn drivers(ctx: *const Ctx) driver.Drivers {
         return .{ .attrs = ctx.attrs, .work_dir = ctx.repo.workDirectory(), .config = ctx.repo.configuration() };
     }
 };
@@ -314,9 +315,9 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     defer if (own_attrs) |*x| x.deinit();
     if (repo.workDirectory() != null) own_attrs = try repo.loadAttrs(io);
     defer if (own_attrs) |*x| x.leave();
-    const binary: diff.BinaryRule = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.workDirectory(), .config = config };
+    const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.workDirectory(), .config = config };
 
-    const selected = try selectCommits(gpa, a, io, db, range, options, binary) orelse return emptySeries(gpa, &arena_instance);
+    const selected = try selectCommits(gpa, a, io, db, range, options, drivers) orelse return emptySeries(gpa, &arena_instance);
     const list = selected.list;
 
     // the boundary: the one commit outside the range the range grew from
@@ -405,7 +406,7 @@ const Selected = struct { list: []const Oid, in_list: []const Oid, walked: []con
 /// The commits of `range`, newest first, as `git format-patch` takes them:
 /// merges left out, at most `max_count`, and under `ignore_if_in_upstream`
 /// those whose patch id upstream has. `null` when there are none.
-fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, options: Options, binary: diff.BinaryRule) Error!?Selected {
+fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, options: Options, drivers: driver.Drivers) Error!?Selected {
     var list: std.ArrayList(Oid) = .empty;
     var walk = rev_walk.Walk.init(gpa, db);
     defer walk.deinit();
@@ -416,7 +417,7 @@ fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: 
     var upstream_ids: std.ArrayList(Oid) = .empty;
     if (options.ignore_if_in_upstream and range.upstream != null) {
         if (range.upstream.?.eql(range.tip)) return null;
-        try upstreamPatchIds(gpa, a, io, db, range, binary, &upstream_ids);
+        try upstreamPatchIds(gpa, a, io, db, range, drivers, &upstream_ids);
     }
     var in_list: std.ArrayList(Oid) = .empty;
     var walked: std.ArrayList(Oid) = .empty;
@@ -426,7 +427,7 @@ fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: 
         if (c.parents.len > 1) continue;
         try in_list.append(a, c.oid);
         if (upstream_ids.items.len != 0) {
-            if (try patch_id.ofCommit(gpa, io, db, c.oid, binary)) |id| {
+            if (try patch_id.ofCommit(gpa, io, db, c.oid, drivers)) |id| {
                 if (containsOid(upstream_ids.items, id)) continue;
             }
         }
@@ -458,7 +459,7 @@ fn subjectPrefix(a: Allocator, options: Options) Allocator.Error![]const u8 {
 
 /// The patch ids of the upstream's own commits, which
 /// `--ignore-if-in-upstream` leaves out of the series.
-fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, binary: diff.BinaryRule, out: *std.ArrayList(Oid)) Error!void {
+fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, drivers: driver.Drivers, out: *std.ArrayList(Oid)) Error!void {
     var back = rev_walk.Walk.init(gpa, db);
     defer back.deinit();
     // Asked only of a range with an upstream.
@@ -466,7 +467,7 @@ fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, rang
     try back.hide(range.tip);
     while (try back.next(io)) |c| {
         if (c.parents.len > 1) continue;
-        if (try patch_id.ofCommit(gpa, io, db, c.oid, binary)) |id| try out.append(a, id);
+        if (try patch_id.ofCommit(gpa, io, db, c.oid, drivers)) |id| try out.append(a, id);
     }
 }
 
@@ -568,7 +569,7 @@ fn prepareBases(ctx: *Ctx, base: Oid, list: []const Oid) Error!Bases {
             if (l.eql(c.oid)) listed = true;
         }
         if (listed) continue;
-        const id = (try patch_id.ofCommit(gpa, ctx.io, ctx.db, c.oid, ctx.binaryRule())) orelse continue;
+        const id = (try patch_id.ofCommit(gpa, ctx.io, ctx.db, c.oid, ctx.drivers())) orelse continue;
         try ids.append(ctx.a, id);
     }
     return .{ .base = base, .patch_ids = ids.items };
@@ -962,11 +963,11 @@ fn loadSide(ctx: *Ctx, e: diff.Entry) Error!Side {
         defer ctx.db.allocator().free(found.bytes);
         bytes = try ctx.a.dupe(u8, found.bytes);
     }
-    return .{ .path = e.path, .mode = e.mode, .oid = e.oid, .bytes = bytes, .binary = try isBinaryPath(ctx, e.path, bytes) };
+    return .{ .path = e.path, .mode = e.mode, .oid = e.oid, .bytes = bytes, .binary = try isBinaryPath(ctx, e, bytes) };
 }
 
-fn isBinaryPath(ctx: *Ctx, path: []const u8, bytes: []const u8) Error!bool {
-    return ctx.binaryRule().isBinary(ctx.a, ctx.io, path, bytes);
+fn isBinaryPath(ctx: *Ctx, e: diff.Entry, bytes: []const u8) Error!bool {
+    return ctx.drivers().isBinary(ctx.a, ctx.io, .{ .path = e.path, .mode = e.mode }, bytes);
 }
 
 const StatFile = struct {
@@ -1034,7 +1035,7 @@ fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, s
     }
     var w: Io.Writer.Allocating = .fromArrayList(a, out);
     defer out.* = w.toArrayList();
-    diff.unified(ctx.gpa, ctx.io, .{ .db = ctx.db, .changes = changes, .binary = ctx.binaryRule() }, &w.writer, ctx.diff_options) catch |err| switch (err) {
+    diff.unified(ctx.gpa, ctx.io, .{ .db = ctx.db, .changes = changes, .drivers = ctx.drivers() }, &w.writer, ctx.diff_options) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
         else => |e| return e,
     };

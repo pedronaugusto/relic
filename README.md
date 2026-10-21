@@ -644,10 +644,11 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `worktree.safe_path` | What a path from a tree is allowed to be. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, `Colors`, `WhitespaceRule` — a file's patch as `git diff` and `git format-patch` write it (git's headers, unique abbreviations, `--binary`, `--full-index`, `--relative`), in colour as `git diff --color` writes it where `Options.colors` is given: `color.diff.<slot>`, whitespace errors by `core.whitespace`, the `whitespace` attribute and `diff.wsErrorHighlight`. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
+| `diff.driver` | `Drivers` — the diff driver each side of a diff takes by its `diff` attribute and mode, and what the driver says: binary or not, its `textconv`, the lines that start its functions. |
 | `diff.patch_id` | Patch ids: a name for what a commit changes. |
 | `diff.rename` | Module within `diff`. |
 | `diff.similarity` | Module within `diff`. |
-| `diff.textconv` | `Textconv` — a file's text as its diff driver's `textconv` program writes it, for diff, blame and grep; a cache for `cachetextconv`. |
+| `diff.textconv` | `Textconv` — a file's text as its diff driver's `textconv` program writes it, for diff, blame, grep and range-diff; a cache for `cachetextconv`. |
 | `rev_walk` | `Walk` and `Walk.count`, `mergeBase`, `mergeBases`, `mergeBasesMany`, `isAncestor`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary, and history simplified by paths (`Walk.paths`) as git simplifies it by default. |
 | `rev_walk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found`, terms and pathspecs. |
 | `rev_walk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
@@ -797,7 +798,6 @@ reread the affected refs before retrying.
 - **`grep -P` only through a caller's matcher.** Without one, Perl expressions are refused by name; back-references follow glibc's matcher, which git uses on Linux and builds in for Windows, where macOS's differs.
 - **A deflated zip entry is this package's deflate,** decoding to the same file; a stored zip and every tar are git's bytes. `export-subst` leaves `%N` as it stands, as git does, and refuses `%(describe)`, relative and human dates, wrapping and padding by name; colour is written only where a `%C(always,...)` asks, as git's.
 - **No interactive `clean`.**
-- **A hunk's function line by git's default rule.** In `patch.format` and `patch.range_diff` a `diff` driver's `funcname` does not reach the `@@` line, and in `patch.range_diff` its `textconv` does not reach the patch.
 - **`range-diff` over commits that are not merges.** `--diff-merges` and `--remerge-diff` are not offered; the notes compared are `core.notesRef`'s (or `refs/notes/commits`), not `--notes=<ref>` or `notes.displayRef`, and no `git log` arguments follow the ranges.
 - **Ref listings in columns.** `--column` is not offered.
 - **`info/` is made by `init` with or without a template,** where git makes it only from one. A template's configuration keeps the spelling of a key `init` sets again, where git writes its own.

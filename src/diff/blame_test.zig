@@ -12,6 +12,7 @@ const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const blame = @import("blame.zig");
 const textconv = @import("textconv.zig");
+const driver = @import("driver.zig");
 const attributes = @import("../patterns.zig").attributes;
 const suite = @import("../testing/helpers.zig");
 
@@ -426,7 +427,8 @@ test "with a driver's textconv each line goes where git blame sends it, by the t
     defer env.deinit();
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const tc: textconv.Textconv = .{ .programs = .{ .environ = &env }, .config = repo.configuration(), .attrs = &attrs, .work_dir = git.dir };
-    try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.txt", .{ .textconv = &tc });
-    try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.dat", .{ .textconv = &tc });
+    const tc: textconv.Textconv = .{ .programs = .{ .environ = &env } };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = git.dir, .config = repo.configuration() };
+    try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.txt", .{ .textconv = &tc, .drivers = drivers });
+    try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.dat", .{ .textconv = &tc, .drivers = drivers });
 }
