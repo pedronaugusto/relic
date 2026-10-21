@@ -186,6 +186,32 @@ pub fn expireReflogs(gpa: Allocator, io: Io, repo: *Repository, options: ReflogE
     }
 }
 
+/// How many of `ref`'s log entries `reflog expire` would take with the
+/// repository's settings and git's defaults, counted up to `limit`: git's
+/// `reflog_expire_condition` for `maintenance.reflog-expire.auto`.
+pub const CountInputs = struct { ref: []const u8, clock: date.Context, limit: usize };
+
+pub fn countExpiring(gpa: Allocator, io: Io, repo: *Repository, inputs: CountInputs) Self.Error!usize {
+    const ref = inputs.ref;
+    const clock = inputs.clock;
+    const limit = inputs.limit;
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const settings = try Settings.read(arena, repo.configuration(), clock);
+    var keeper: Keeper = .{ .gpa = gpa, .io = io, .repo = repo, .ref = ref, .policy = try settings.forRef(arena, ref, .{ .clock = clock }) };
+    defer keeper.deinit();
+    var log = try repo.refStore().readLog(gpa, io, ref);
+    defer log.deinit();
+    var count: usize = 0;
+    for (log.entries) |entry| {
+        if (count >= limit) break;
+        if (!keeper.judge(entry)) count += 1;
+    }
+    if (keeper.failure) |err| return err;
+    return count;
+}
+
 /// git's `should_expire_reflog_ent` over one log, prepared on its first
 /// entry, which the store hands over with the ref's lock held, as git's
 /// `reflog_expiry_prepare` runs under it.
@@ -221,6 +247,10 @@ const Keeper = struct {
     // glint-ignore: Z012 -- the ref store calls `keep` on the keeper it is handed (`expireLog`'s `anytype`), which is this file's own and never leaves it
     pub fn keep(k: *Keeper, entry: refs_mod.LogEntry, nth: usize) bool {
         _ = nth;
+        return k.judge(entry);
+    }
+
+    fn judge(k: *Keeper, entry: refs_mod.LogEntry) bool {
         if (k.failure != null) return true;
         const when = entry.who.when_secs;
         if (when < k.policy.total) return false;

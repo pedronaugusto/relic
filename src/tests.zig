@@ -85,6 +85,7 @@ test {
         _ = @import("maintenance/prune_test.zig");
         _ = @import("maintenance/repack_test.zig");
         _ = @import("maintenance/collect_test.zig");
+        _ = @import("maintenance/run_test.zig");
         _ = @import("checkout/checkout_test.zig");
         _ = @import("repo/repo_test.zig");
         _ = @import("testing/concurrency.zig");

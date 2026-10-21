@@ -1619,6 +1619,20 @@ pub const Odb = struct {
         exclude_packs: []const []const u8 = &.{},
     };
 
+    /// How many loose objects this database's own directory holds, counted
+    /// up to `limit`: git's `for_each_loose_file_in_source` as
+    /// `maintenance` counts them.
+    pub fn countLoose(odb: *Odb, io: Io, limit: usize) ErrorNamespace.Error!usize {
+        var loose: LooseNames = .{ .odb = odb, .remove_empty = false };
+        defer loose.deinit(io);
+        var count: usize = 0;
+        while (count < limit) {
+            const found = (try loose.next(io)) orelse break;
+            if (found.oid != null) count += 1;
+        }
+        return count;
+    }
+
     /// Every object of this database's own directory -- not an alternate's
     /// -- with its time, in `gpa`: each loose one, then each packed one
     /// pack by pack, an object held twice listed twice. git's
@@ -2156,6 +2170,7 @@ pub const Odb = struct {
                 .dir => options.mtimes,
                 .stream => null,
             },
+            .prefix = options.prefix,
         };
         var writer = switch (target) {
             .dir => |pack_dir| try pack.Writer.open(gpa, io, pack_dir, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
@@ -2777,6 +2792,9 @@ pub const Odb = struct {
         /// In this database's own directory, not an alternate's: git's
         /// `pack_local`.
         local: bool,
+        /// Its source's multi-pack index covers it: git's
+        /// `p->multi_pack_index`.
+        in_midx: bool,
     };
 
     /// Which packs `listPacks` lists.
@@ -2795,7 +2813,7 @@ pub const Odb = struct {
         const sources = odb.backendData().sources.items;
         for (sources[0..if (scope == .own) @min(sources.len, 1) else sources.len], 0..) |*source, at| {
             const pack_dir = source.pack_dir orelse continue;
-            for (source.packs.items) |*named| {
+            for (source.packs.items, 0..) |*named, position| {
                 var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
                 const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
                 const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
@@ -2811,6 +2829,9 @@ pub const Odb = struct {
                     .time = stat.mtime.toSeconds(),
                     .objects = named.pack.index.count,
                     .local = at == 0,
+                    .in_midx = for (source.midx_packs.items) |covered| {
+                        if (covered == @as(u32, @intCast(position))) break true;
+                    } else false,
                 });
             }
         }
@@ -3544,6 +3565,10 @@ pub const PackOptions = struct {
     /// the `.mtimes` beside the pack (`pack.WriteOptions.mtimes`). Ignored
     /// for a pack streamed to a caller. Borrowed for the write.
     mtimes: ?*const Oid.Map(u32) = null,
+    /// The files' names before `-<name>`: `pack.WriteOptions.prefix`. The
+    /// database finds a pack by any name; what it reports and removes by
+    /// name assumes `pack`.
+    prefix: []const u8 = "pack",
 };
 
 /// How many tasks `threads` asks for.

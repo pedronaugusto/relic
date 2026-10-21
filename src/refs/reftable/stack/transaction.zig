@@ -1016,6 +1016,23 @@ pub fn pack(gpa: Allocator, io: Io, store: anytype, auto: bool) refs.Transaction
     try clean(gpa, io, parent, store.objectFormat(), options);
 }
 
+/// git's `reftable_stack_compaction_required`: whether `pack` would
+/// compact anything: two tables or more, and with `auto` a segment the
+/// geometric rule picks.
+pub fn compactionRequired(gpa: Allocator, io: Io, store: anytype, auto: bool) refs.TransactionError!bool {
+    const parent = if (isLinked(store)) store.gitDir() else store.commonDir();
+    var dir = parent.openDir(io, "reftable", .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    defer dir.close(io);
+    var stack = try Stack.load(gpa, io, dir, store.objectFormat());
+    defer stack.deinit();
+    if (stack.tables.len < 2) return false;
+    if (!auto) return true;
+    return (try suggestSegment(&stack, store.reftableOptions().geometric_factor)) != null;
+}
+
 /// git's `reftable_stack_clean`: under the stack's lock, remove each
 /// table in the directory that the list does not name and whose newest
 /// update is no newer than the stack's; a newer one is a writer's, about

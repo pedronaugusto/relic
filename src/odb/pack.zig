@@ -1837,6 +1837,10 @@ pub const WriteOptions = struct {
     /// it from them (`odb.mtimes`), as git's `pack-objects --cruft` does.
     /// Borrowed until `finish`.
     mtimes: ?*const Oid.Map(u32) = null,
+    /// The files' names before `-<name>`: git's `pack-objects <base>`,
+    /// which `maintenance`'s loose-objects task gives as `loose`. At most
+    /// sixteen bytes.
+    prefix: []const u8 = "pack",
 };
 
 /// What a finished pack turned out to be.
@@ -2281,12 +2285,12 @@ pub const Writer = struct {
 
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = checksum.hex(&hex);
-        var pack_name_buf: [hash.max_hex_len + 16]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, the rest ten bytes
-        const pack_name = std.mem.print(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
-        var idx_name_buf: [hash.max_hex_len + 16]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-        const idx_name = std.mem.print(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
+        var pack_name_buf: [hash.max_hex_len + 32]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+        const pack_name = std.mem.print(&pack_name_buf, "{s}-{s}.pack", .{ w.options.prefix, text }) catch unreachable;
+        var idx_name_buf: [hash.max_hex_len + 32]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+        const idx_name = std.mem.print(&idx_name_buf, "{s}-{s}.idx", .{ w.options.prefix, text }) catch unreachable;
 
         // The index goes to a temporary of its own, because the order the two
         // become visible in is not free to choose: a reader finds a pack by
@@ -2323,15 +2327,15 @@ pub const Writer = struct {
         };
         // The reverse index before the index, as git renames them.
         if (rev_temp) |t| {
-            var rev_name_buf: [hash.max_hex_len + 16]u8 = undefined;
-            // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-            const rev_name = std.mem.print(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
+            var rev_name_buf: [hash.max_hex_len + 32]u8 = undefined;
+            // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+            const rev_name = std.mem.print(&rev_name_buf, "{s}-{s}.rev", .{ w.options.prefix, text }) catch unreachable;
             try fs.rename(io, w.dir, t, rev_name);
         }
         if (mtimes_temp) |t| {
-            var mtimes_name_buf: [hash.max_hex_len + 16]u8 = undefined;
-            // unreachable: a hex name is at most max_hex_len digits, the rest twelve bytes
-            const mtimes_name = std.mem.print(&mtimes_name_buf, "pack-{s}.mtimes", .{text}) catch unreachable;
+            var mtimes_name_buf: [hash.max_hex_len + 32]u8 = undefined;
+            // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+            const mtimes_name = std.mem.print(&mtimes_name_buf, "{s}-{s}.mtimes", .{ w.options.prefix, text }) catch unreachable;
             try fs.rename(io, w.dir, t, mtimes_name);
         }
         fs.rename(io, w.dir, idx_temp, idx_name) catch |err| {

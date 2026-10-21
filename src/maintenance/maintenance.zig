@@ -315,7 +315,9 @@ fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind, only: ?[
     var packs: std.ArrayList(midx_mod.WritePack) = .empty;
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "pack-") or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        // Any index, as git's `add_pack_to_midx` takes it: `maintenance`'s
+        // loose-objects task names its packs `loose-<name>`.
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         if (only) |names| for (names) |name| {
             if (std.mem.eql(u8, name, entry.name[0 .. entry.name.len - 4])) break;
         } else continue;
@@ -847,8 +849,10 @@ const config_mod = @import("../config/config.zig");
 /// Failures while applying a repository's accelerator configuration.
 pub const MaintenanceError = BitmapError || repo_mod.Error || config_mod.ValueError || error{UnsupportedGenerationVersion};
 
-/// The purpose selects Git's writeCommitGraph key and default.
-pub const Maintenance = enum { gc, fetch };
+/// The purpose selects Git's writeCommitGraph key and default: `gc` and
+/// `fetch` by their settings, `maintenance` (its commit-graph task, git's
+/// `commit-graph write --split --reachable`) under `core.commitGraph`.
+pub const Maintenance = enum { gc, fetch, maintenance };
 
 /// The commit every ref names, peeled, in the caller's `gpa`: what a
 /// reachability bitmap and the commit graph start from.
@@ -879,7 +883,11 @@ pub fn repositoryTips(gpa: Allocator, io: Io, repo: *repo_mod.Repository) repo_m
 /// and git's readers leave a graph aside while replace refs are in use.
 pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Repository, purpose: Maintenance) Self.MaintenanceError!?Oid {
     const config = repo.configuration();
-    if (!try config.getBool(if (purpose == .gc) "gc.writecommitgraph" else "fetch.writecommitgraph", purpose == .gc)) return null;
+    switch (purpose) {
+        .gc => if (!try config.getBool("gc.writecommitgraph", true)) return null,
+        .fetch => if (!try config.getBool("fetch.writecommitgraph", false)) return null,
+        .maintenance => if (!try config.getBool("core.commitgraph", true)) return null,
+    }
     if (repo.objectDatabase().shallow.count() != 0) return null;
     const generation_version = try config.getInt("commitgraph.generationversion", 2);
     if (generation_version != 1 and generation_version != 2) return error.UnsupportedGenerationVersion;
@@ -896,7 +904,7 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
         if (version != 1 and version != 2) return error.UnsupportedBloomVersion;
         value.version = @intCast(version);
     }
-    return writeCommitGraph(gpa, io, repo.objectDatabase(), tips, .{ .split = if (purpose == .fetch) .merge else .none, .generations = generation_version == 2, .changed_paths = settings });
+    return writeCommitGraph(gpa, io, repo.objectDatabase(), tips, .{ .split = if (purpose == .gc) .none else .merge, .generations = generation_version == 2, .changed_paths = settings });
 }
 
 fn clearMidxBitmaps(gpa: Allocator, io: Io, dir: Io.Dir, keep: ?[]const u8) MidxError!void {

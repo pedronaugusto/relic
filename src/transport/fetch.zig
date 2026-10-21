@@ -58,6 +58,7 @@ const warning = @import("../report.zig").warning;
 const fsck = @import("../object/fsck.zig");
 const promisors = @import("../wire.zig").promisors;
 const accelerators = @import("../maintenance/maintenance.zig");
+const maintenance_mod = @import("../maintenance/run.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -106,6 +107,11 @@ pub const Options = struct {
     update_head_ok: bool = false,
     /// Write `FETCH_HEAD`.
     write_fetch_head: bool = true,
+    /// `--prefetch`: every refspec's destination moved under
+    /// `refs/prefetch/` and forced, one without a destination or fetching
+    /// a tag left out, and the remote's `HEAD` not fetched in place of
+    /// none: git's `filter_prefetch_refspec`, for `maintenance`.
+    prefetch: bool = false,
     /// Add to `FETCH_HEAD` rather than replace it.
     append: bool = false,
     /// Update every ref or none: one transaction instead of one per ref.
@@ -336,7 +342,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     const prune_tags = options.prune_tags orelse remote.prune_tags orelse false;
     var branch_config: ?remote_mod.Branch = null;
     defer if (branch_config) |*b| b.deinit();
-    const asked = try askedRefspecs(arena, gpa, io, repo, &remote, options.refspecs, prune and prune_tags, &branch_config);
+    var asked = try askedRefspecs(arena, gpa, io, repo, &remote, options.refspecs, prune and prune_tags, &branch_config);
+    if (options.prefetch) asked = try asked.prefetched(arena);
 
     const follow_head = asked.cli.len == 0 and remote.name != null and followRemoteHead(repo.configuration(), remote.name.?);
 
@@ -624,7 +631,42 @@ const Asked = struct {
     /// `cli` when it names any, else `configured`: what negative refspecs
     /// and pruning go by.
     specs: []const Refspec,
+    /// The remote's own, which refs the command line fetched also go to.
+    remote_fetch: []const Refspec,
+    /// `--prefetch`: no `HEAD` when nothing is asked.
+    prefetch: bool = false,
+
+    /// `filter_prefetch_refspec` over every list.
+    fn prefetched(asked: Asked, arena: Allocator) Allocator.Error!Asked {
+        var out = asked;
+        out.cli = try filterPrefetch(arena, asked.cli);
+        out.configured = try filterPrefetch(arena, asked.configured);
+        out.remote_fetch = try filterPrefetch(arena, asked.remote_fetch);
+        out.specs = if (out.cli.len != 0) out.cli else out.configured;
+        out.prefetch = true;
+        return out;
+    }
 };
+
+/// git's `filter_prefetch_refspec`: a negative refspec kept; one with no
+/// destination, or a source under `refs/tags/`, left out; each other's
+/// destination under `refs/prefetch/` (in place of `refs/`), forced.
+fn filterPrefetch(arena: Allocator, specs: []const Refspec) Allocator.Error![]const Refspec {
+    var out: std.ArrayList(Refspec) = .empty;
+    for (specs) |spec| {
+        if (spec.negative) {
+            try out.append(arena, spec);
+            continue;
+        }
+        const dst = spec.dst orelse continue;
+        if (std.mem.startsWith(u8, spec.src, "refs/tags/")) continue;
+        var moved = spec;
+        moved.dst = try arena.print("refs/prefetch/{s}", .{if (std.mem.startsWith(u8, dst, "refs/")) dst["refs/".len..] else dst});
+        moved.force = true;
+        try out.append(arena, moved);
+    }
+    return out.items;
+}
 
 /// The refspecs `refspecs` and `remote` ask for, `tags_refspec` adding
 /// the tags `pruneTags` prunes by. The current branch's settings are kept
@@ -667,6 +709,7 @@ fn askedRefspecs(
         .configured = configured.items,
         .branch_merge = branch_merge,
         .specs = if (cli.items.len != 0) cli.items else configured.items,
+        .remote_fetch = remote.fetch,
     };
 }
 
@@ -757,7 +800,7 @@ fn refMap(
             const spec: Refspec = .{ .src = merge, .dst = null };
             try fetchMap(arena, &map, remote_refs.refs, spec, true, .merge);
         }
-    } else {
+    } else if (!asked.prefetch) {
         const head = remote_refs.find("HEAD") orelse return error.RemoteRefNotFound;
         if (head.unborn) return error.RemoteRefNotFound;
         try map.append(arena, .{ .name = "HEAD", .oid = head.oid, .dst = null, .force = false, .status = .merge });
@@ -773,7 +816,7 @@ fn refMap(
     // refspecs would keep them, without a line in `FETCH_HEAD`.
     if (asked.cli.len != 0 and remote.name != null) {
         const named = map.items.len;
-        for (remote.fetch) |spec| {
+        for (asked.remote_fetch) |spec| {
             if (spec.negative) continue;
             for (0..named) |i| {
                 // The map grows as it is walked; each entry is taken by
@@ -1894,3 +1937,51 @@ test "a linked reftable fetch sees the main worktree branch through its backend"
     for (branches) |branch| main_found = main_found or std.mem.eql(u8, branch, "refs/heads/main");
     try testing.expect(main_found);
 }
+
+/// `maintenance`'s prefetch task (`maintenance_task_prefetch`): each
+/// configured remote but those with `remote.<name>.skipDefaultUpdate`
+/// fetched as `git fetch <remote> --prefetch --prune --no-tags
+/// --no-write-fetch-head`, `template` giving the rest. The first failure
+/// is returned once every remote is tried, as git's loop runs on.
+pub fn prefetchAll(gpa: Allocator, io: Io, repo: *Repository, template: Options) Self.Error!void {
+    const names = try remote_mod.names(gpa, repo.configuration());
+    defer gpa.free(names);
+    var first: ?Self.Error = null;
+    for (names) |name| {
+        var remote = try remote_mod.Remote.get(gpa, repo.configuration(), repo.objectFormat(), name);
+        defer remote.deinit();
+        if (remote.skip_default_update) continue;
+        var options = template;
+        options.refspecs = &.{};
+        options.prefetch = true;
+        options.prune = true;
+        options.tags = .none;
+        options.write_fetch_head = false;
+        var outcome = fetch(gpa, io, repo, name, options) catch |err| {
+            if (first == null) first = err;
+            continue;
+        };
+        outcome.deinit();
+    }
+    if (first) |err| return err;
+}
+
+/// `prefetchAll` as `maintenance.run` asks for it: `maintenance()` is the
+/// `maintenance.Prefetch` to hand it; a failure is kept in `failure`.
+pub const Prefetcher = struct {
+    gpa: Allocator,
+    options: Options,
+    failure: ?Self.Error = null,
+
+    pub fn maintenance(p: *Prefetcher) maintenance_mod.Prefetch {
+        return .{ .context = p, .fetch = run };
+    }
+
+    fn run(context: *anyopaque, io: Io, repo: *Repository) error{PrefetchFailed}!void {
+        const p: *Prefetcher = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Prefetcher
+        prefetchAll(p.gpa, io, repo, p.options) catch |err| {
+            p.failure = err;
+            return error.PrefetchFailed;
+        };
+    }
+};

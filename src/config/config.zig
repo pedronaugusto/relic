@@ -1181,7 +1181,7 @@ pub const Config = struct {
     /// the end of the file. Nothing else in the file moves.
     pub fn set(config: *Config, full_name: []const u8, value: []const u8) SetError!void {
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        return config.setInFile(file_index, full_name, value);
+        return config.setInFile(file_index, .{ .name = full_name, .value = value }, false);
     }
 
     /// `set`, in the first writable file read at `level` rather than the
@@ -1192,10 +1192,22 @@ pub const Config = struct {
     /// say — belongs in the first of them whichever is last.
     pub fn setIn(config: *Config, level: Level, full_name: []const u8, value: []const u8) SetError!void {
         const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
-        return config.setInFile(file_index, full_name, value);
+        return config.setInFile(file_index, .{ .name = full_name, .value = value }, false);
     }
 
-    fn setInFile(config: *Config, file_index: u32, full_name: []const u8, value: []const u8) SetError!void {
+    /// `git config --add`: a new setting of `full_name` in the first
+    /// writable file read at `level`, where `setIn` puts a new one, every
+    /// setting already there kept.
+    pub fn addIn(config: *Config, level: Level, full_name: []const u8, value: []const u8) SetError!void {
+        const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
+        return config.setInFile(file_index, .{ .name = full_name, .value = value }, true);
+    }
+
+    const Setting = struct { name: []const u8, value: []const u8 };
+
+    fn setInFile(config: *Config, file_index: u32, setting: Setting, add: bool) SetError!void {
+        const full_name = setting.name;
+        const value = setting.value;
         const split = try checkKey(full_name);
         const file = &config.files.items[file_index];
 
@@ -1222,7 +1234,7 @@ pub const Config = struct {
                     insert_at = i + 1;
                     // `[a.b]` takes a new `a.B.x` as git does, but only an
                     // exact subsection is the same key.
-                    if (same_key_section and std.ascii.eqlIgnoreCase(line.name, split.name)) target = i;
+                    if (!add and same_key_section and std.ascii.eqlIgnoreCase(line.name, split.name)) target = i;
                 },
                 .other => {},
             }
@@ -1357,47 +1369,91 @@ pub const Config = struct {
     /// everything else exactly as it was.
     pub fn unset(config: *Config, full_name: []const u8) SetError!void {
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        return config.unsetInFile(file_index, full_name);
+        return config.unsetInFile(file_index, full_name, null);
     }
 
     /// `unset`, in the first writable file read at `level`.
     pub fn unsetIn(config: *Config, level: Level, full_name: []const u8) SetError!void {
         const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
-        return config.unsetInFile(file_index, full_name);
+        return config.unsetInFile(file_index, full_name, null);
     }
 
-    fn unsetInFile(config: *Config, file_index: u32, full_name: []const u8) SetError!void {
+    /// `git config --fixed-value --unset-all <name> <value>`: every setting
+    /// of `full_name` whose value is `value`, byte for byte, out of the
+    /// first writable file read at `level`.
+    pub fn unsetValueIn(config: *Config, level: Level, full_name: []const u8, value: []const u8) SetError!void {
+        const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
+        return config.unsetInFile(file_index, full_name, value);
+    }
+
+    fn unsetInFile(config: *Config, file_index: u32, full_name: []const u8, only: ?[]const u8) SetError!void {
         const split = try checkKey(full_name);
         const file = &config.files.items[file_index];
 
+        const lines = file.lines.items;
+        const doomed = try config.gpa.alloc(bool, lines.len);
+        defer config.gpa.free(doomed);
+        @memset(doomed, false);
         var section: Line = .{ .kind = .other, .text = "" };
-        var i: usize = 0;
-        while (i < file.lines.items.len) {
-            const line = file.lines.items[i];
-            switch (line.kind) {
-                .section => section = line,
-                .variable => {
-                    const entry: Entry = .{
-                        .section = section.section,
-                        .subsection = section.subsection,
-                        .has_subsection = section.has_subsection,
-                        .name = line.name,
-                        .value = null,
-                        .level = file.level,
-                        .file_index = file_index,
-                        .line_index = @intCast(i),
-                    };
-                    if (section.kind == .section and entry.matches(split.section, split.subsection, split.name)) {
-                        if (line.owned) config.gpa.free(line.text);
-                        _ = file.lines.orderedRemove(i);
-                        continue;
-                    }
-                },
-                .other => {},
-            }
-            i += 1;
+        for (lines, 0..) |line, i| switch (line.kind) {
+            .section => section = line,
+            .variable => {
+                const entry: Entry = .{
+                    .section = section.section,
+                    .subsection = section.subsection,
+                    .has_subsection = section.has_subsection,
+                    .name = line.name,
+                    .value = null,
+                    .level = file.level,
+                    .file_index = file_index,
+                    .line_index = @intCast(i),
+                };
+                const value_matches = if (only) |wanted| line.has_value and std.mem.eql(u8, line.value, wanted) else true;
+                doomed[i] = section.kind == .section and value_matches and entry.matches(split.section, split.subsection, split.name);
+            },
+            .other => {},
+        };
+        emptiedSections(lines, split, doomed);
+        var i = lines.len;
+        while (i > 0) {
+            i -= 1;
+            if (!doomed[i]) continue;
+            if (file.lines.items[i].owned) config.gpa.free(file.lines.items[i].text);
+            _ = file.lines.orderedRemove(i);
         }
         try config.reindex();
+    }
+
+    /// git's `maybe_remove_section`: a section of the key whose every
+    /// setting goes goes too, header and blank lines, unless a comment is
+    /// in it or between it and the setting before it.
+    fn emptiedSections(lines: []const Line, split: FullName, doomed: []bool) void {
+        for (lines, 0..) |header, h| {
+            if (header.kind != .section or !header.opensSectionOf(split)) continue;
+            var end = h + 1;
+            var removed = false;
+            const whole = while (end < lines.len and lines[end].kind != .section) : (end += 1) {
+                switch (lines[end].kind) {
+                    .variable => if (doomed[end]) {
+                        removed = true;
+                    } else break false,
+                    .other => if (isComment(lines[end].text)) break false,
+                    .section => unreachable,
+                }
+            } else true;
+            if (!whole or !removed) continue;
+            var begin = h;
+            while (begin > 0 and lines[begin - 1].kind == .other) : (begin -= 1) {
+                if (isComment(lines[begin - 1].text)) break;
+            } else {
+                for (begin..end) |k| doomed[k] = true;
+            }
+        }
+    }
+
+    fn isComment(text: []const u8) bool {
+        const trimmed = std.mem.trimStart(u8, text, " \t");
+        return trimmed.len != 0 and (trimmed[0] == '#' or trimmed[0] == ';');
     }
 
     /// Remove every `[section "subsection"]` from the first writable file

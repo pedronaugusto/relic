@@ -18,7 +18,7 @@ const day = shared.day;
 /// The harness's settings but `gc.auto=0` and its empty hooks directory,
 /// so the repository's own configuration decides git's gc as it decides
 /// relic's.
-const gc_settings = blk: {
+pub const gc_settings = blk: {
     var kept: [testgit.default_settings.len][]const u8 = undefined;
     var n: usize = 0;
     var i: usize = 0;
@@ -47,7 +47,7 @@ fn clock() collect.Options {
 /// What `gc` leaves besides objects: the loose refs' files and
 /// `packed-refs`, or the number of reftables; whether there is a commit
 /// graph; `worktrees/`; `gc.pid` and `gc.log`.
-fn housekeeping(repo: *testgit.Repo) ![]u8 {
+pub fn housekeeping(repo: *testgit.Repo) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     var walker_dir = try repo.dir.openDir(io, ".git/refs", .{ .iterate = true });

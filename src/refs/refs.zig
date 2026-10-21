@@ -762,6 +762,18 @@ pub const Store = struct {
         return false;
     }
 
+    /// git's `refs_optimize_required`: whether `pack` would do anything.
+    /// For loose refs, `should_pack_refs`: always without `auto`, else
+    /// when enough are loose; in a reftable stack whether it would be
+    /// compacted.
+    pub fn packRequired(store: *Store, gpa: Allocator, io: Io, options: PackOptions) TransactionError!bool {
+        if (store.refFormat() == .reftable) return stack_engine.compactionRequired(gpa, io, store, options.auto);
+        if (!options.auto) return true;
+        var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_instance.deinit();
+        return store.packingDue(arena_instance.allocator(), io, options);
+    }
+
     /// git's `should_pack_refs` for `--auto`: whether the loose refs to
     /// pack reach `log2(size of packed-refs / 100) * 5`, at least 16.
     fn packingDue(store: *const Store, arena: Allocator, io: Io, options: PackOptions) TransactionError!bool {

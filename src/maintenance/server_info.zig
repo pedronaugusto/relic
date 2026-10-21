@@ -99,7 +99,9 @@ fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.E
     var present: std.ArrayList([]const u8) = .empty;
     var it = pack_dir.iterate();
     while (try it.next(io)) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "pack-") or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        // Every local pack, as `repo_for_each_pack` gives them, whatever it is
+        // named: `maintenance`'s loose-objects task writes `loose-<name>`.
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         const pack_name = try arena.print("{s}.pack", .{entry.name[0 .. entry.name.len - 4]});
         pack_dir.access(io, pack_name, .{}) catch continue;
         try present.append(arena, pack_name);

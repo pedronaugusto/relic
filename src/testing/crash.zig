@@ -2,7 +2,8 @@
 //! shakedown's simulated disk: a ref update, a received pack and the ref
 //! that publishes it, an index write, a checkout, `pack-refs`,
 //! `reflog expire`, `prune` and `repack` (`-a -d`, `--cruft -d` and
-//! `--geometric=2 -d --write-midx`) and the commit graph `gc` writes,
+//! `--geometric=2 -d --write-midx`), the commit graph `gc` writes and
+//! `maintenance`'s loose-objects and incremental-repack tasks,
 //! each stopped before
 //! every `Io` call it makes and every state the disk could come back in
 //! after that tried. airlock's syncs and renames reach the simulated disk
@@ -36,6 +37,7 @@ const gc = @import("../maintenance/gc.zig");
 const prune = @import("../maintenance/prune.zig");
 const repack = @import("../maintenance/repack.zig");
 const maintenance = @import("../maintenance/maintenance.zig");
+const maintenance_run = @import("../maintenance/run.zig");
 const date = @import("../text.zig").date;
 const Oid = hash.Oid;
 
@@ -49,7 +51,7 @@ const granularity: Io.Duration = .fromSeconds(1);
 
 const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
 
-const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire, prune, repack, repack_cruft, repack_geometric, commit_graph };
+const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire, prune, repack, repack_cruft, repack_geometric, commit_graph, loose_objects, incremental_repack };
 
 /// A directory tree held in memory: what is put on the simulated disk
 /// before a run, and what a crash state holds.
@@ -246,7 +248,7 @@ pub const Case = struct {
     fn seed(c: *const Case) *const Image {
         return switch (c.kind) {
             .pack_receive => &c.seeds.before,
-            .prune, .repack, .repack_cruft, .repack_geometric, .commit_graph => &c.seeds.pruning,
+            .prune, .repack, .repack_cruft, .repack_geometric, .commit_graph, .loose_objects, .incremental_repack => &c.seeds.pruning,
             else => &c.seeds.after,
         };
     }
@@ -322,6 +324,13 @@ pub const Case = struct {
             .repack_cruft => _ = try repack.repack(gpa, io, &repo, .{ .mode = .cruft, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
             .repack_geometric => _ = try repack.repack(gpa, io, &repo, .{ .geometric = 2, .delete = true, .write_midx = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
             .commit_graph => _ = try maintenance.writeConfiguredCommitGraph(gpa, io, &repo, .gc),
+            .loose_objects, .incremental_repack => {
+                const report = try maintenance_run.run(gpa, io, &repo, .{ .clock = .{ .now = date.timestamp(testgit.fixture_date) }, .tasks = &.{if (c.kind == .loose_objects) .loose_objects else .incremental_repack}, .pack = .{ .threads = 1 } });
+                for (std.enums.values(maintenance_run.Task)) |task| switch (report.outcomes.get(task)) {
+                    .failed => |err| return err,
+                    else => {},
+                };
+            },
         }
         repo.deinit(io);
     }
@@ -431,7 +440,7 @@ pub const Case = struct {
             // A repack moves no ref and loses no object: the unreachable
             // ones stay loose, or go into the cruft pack before the loose
             // copies go.
-            .repack, .repack_cruft, .repack_geometric => {
+            .repack, .repack_cruft, .repack_geometric, .loose_objects, .incremental_repack => {
                 try expectRef(io, git, "refs/heads/main", &.{first});
                 try expectRef(io, git, "refs/heads/next", &.{second});
                 const held = try allObjects(git, io);
@@ -623,4 +632,20 @@ test "every crash: the commit graph gc writes, files" {
 
 test "every crash: the commit graph gc writes, reftable" {
     try inFormat(.commit_graph, .reftable);
+}
+
+test "every crash: maintenance's loose-objects task, files" {
+    try inFormat(.loose_objects, .files);
+}
+
+test "every crash: maintenance's loose-objects task, reftable" {
+    try inFormat(.loose_objects, .reftable);
+}
+
+test "every crash: maintenance's incremental-repack task, files" {
+    try inFormat(.incremental_repack, .files);
+}
+
+test "every crash: maintenance's incremental-repack task, reftable" {
+    try inFormat(.incremental_repack, .reftable);
 }

@@ -1821,3 +1821,46 @@ test "a directory is taken for a git directory exactly where git's rev-parse tak
         try std.testing.expectEqual(git_takes_it, discover_directory.isGitDirectory(io, git_dir));
     }
 }
+
+test "config --unset-all, --add and --fixed-value leave each file as git's do, an emptied section removed as git removes it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const config_write = @import("../config/write.zig");
+    const texts = [_][]const u8{
+        "[user]\n\tname = x\n[maintenance]\n\trepo = /a\n",
+        "[maintenance]\n\trepo = /a\n\trepo = /b\n[user]\n\tname = x\n",
+        "[user]\n\tname = x\n\n[maintenance]\n\trepo = /a\n\n[core]\n\tbare = false\n",
+        "[user]\n\tname = x\n# about maintenance\n[maintenance]\n\trepo = /a\n",
+        "[maintenance]\n\t# kept\n\trepo = /a\n",
+        "[maintenance]\n\trepo = /a\n[maintenance]\n\trepo = /a\n[user]\n\tname = x\n",
+        "[maintenance]\n\tauto = false\n\trepo = /a\n",
+        "[maintenance \"x\"]\n\trepo = /a\n[maintenance]\n\trepo = /a\n",
+    };
+    const Op = struct { args: []const []const u8, edit: config_write.Edit };
+    const ops = [_]Op{
+        .{ .args = &.{ "--unset-all", "maintenance.repo" }, .edit = .{ .unset = .{ .name = "maintenance.repo" } } },
+        .{ .args = &.{ "--fixed-value", "--unset-all", "maintenance.repo", "/a" }, .edit = .{ .unset = .{ .name = "maintenance.repo", .value = "/a" } } },
+        .{ .args = &.{ "--add", "maintenance.repo", "/c" }, .edit = .{ .add = .{ .name = "maintenance.repo", .value = "/c" } } },
+    };
+    for (texts, 0..) |text, t| for (ops, 0..) |op, o| {
+        var git = try testgit.Repo.init(gpa, io, &.{});
+        defer git.deinit();
+        try git.writeFile(io, "theirs", text);
+        try git.writeFile(io, "ours", text);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "config", "--file", "theirs" });
+        try args.appendSlice(gpa, op.args);
+        var ran = try git.capture(io, args.items);
+        ran.deinit(gpa);
+        _ = try config_write.editFile(gpa, io, git.dir, "ours", .global, .umask, &.{op.edit});
+        const expected = try git.readFile(io, "theirs");
+        defer gpa.free(expected);
+        const actual = try git.readFile(io, "ours");
+        defer gpa.free(actual);
+        std.testing.expectEqualStrings(expected, actual) catch |err| {
+            std.debug.print("config text {d}, edit {d}\n", .{ t, o });
+            return err;
+        };
+    };
+}

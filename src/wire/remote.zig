@@ -66,6 +66,9 @@ pub const Remote = struct {
     prune: ?bool = null,
     /// `remote.<name>.pruneTags`, else `fetch.pruneTags`.
     prune_tags: ?bool = null,
+    /// `remote.<name>.skipDefaultUpdate`: left out of the remotes fetched
+    /// together, as `maintenance`'s prefetch fetches them.
+    skip_default_update: bool = false,
     /// `remote.<name>.uploadpack`, the program a fetch asks the other side
     /// to run.
     upload_pack: ?[]const u8 = null,
@@ -136,6 +139,7 @@ pub const Remote = struct {
         }
         remote.prune = boolOf(config, try key("prune", arena, name)) orelse boolOf(config, "fetch.prune");
         remote.prune_tags = boolOf(config, try key("prunetags", arena, name)) orelse boolOf(config, "fetch.prunetags");
+        remote.skip_default_update = boolOf(config, try key("skipdefaultupdate", arena, name)) orelse false;
         remote.upload_pack = try valueOf(arena, config, try key("uploadpack", arena, name));
         remote.receive_pack = try valueOf(arena, config, try key("receivepack", arena, name));
         remote.mirror = boolOf(config, try key("mirror", arena, name)) orelse false;

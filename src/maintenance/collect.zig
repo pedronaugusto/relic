@@ -228,10 +228,7 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     defer repo.commonDirectory().deleteFile(io, "gc.pid") catch {};
 
     var report: Report = .{ .outcome = .ran };
-    if (!options.skip_foreground_tasks) {
-        if (s.pack_refs) try gc.packRefs(io, repo, .{ .include = &.{"*"}, .prune = true, .auto = options.auto });
-        if (s.prune_reflogs) try gc.expireReflogs(gpa, io, repo, .{ .clock = options.clock });
-    }
+    if (!options.skip_foreground_tasks) try foreground(gpa, io, repo, options.clock, options.auto);
     background(gpa, io, repo, options, &s, plan, &report) catch |err| {
         if (detach) try writeLog(gpa, io, repo, "error: gc failed: {s}\n", .{@errorName(err)});
         return err;
@@ -242,6 +239,39 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         try deleteIfThere(io, repo.gitDirectory(), "gc.log");
     }
     return report;
+}
+
+/// `gc_condition`: whether `gc --auto` would run, the `pre-auto-gc` hook
+/// asked as `need_to_gc` asks it.
+pub fn autoNeeded(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!bool {
+    var s = try Settings.read(repo, options.clock);
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    var plan: repack_mod.Options = .{};
+    if (!try needToGc(arena_instance.allocator(), io, repo, &s, &plan)) return false;
+    if (options.hooks) |runner| return (try runner.run(io, "pre-auto-gc", .{})).succeeded();
+    return true;
+}
+
+/// `add_repack_all_option` as `maintenance`'s geometric repack takes it,
+/// over `plan`, with the repository's `gc.*` settings.
+pub fn repackAll(repo: *Repository, clock: date.Context, plan: *repack_mod.Options) Self.Error!void {
+    const s = try Settings.read(repo, clock);
+    allPacked(plan, &s, &.{});
+}
+
+/// `gc.worktreePruneExpire`, three months unless set.
+pub fn worktreeExpiry(repo: *Repository, clock: date.Context) Self.Error!gc.Expiry {
+    return (try Settings.read(repo, clock)).worktree_expire;
+}
+
+/// The foreground tasks `gc` runs before it would detach, as `maintenance`
+/// runs them for its gc task: `pack-refs` and `reflog expire`, as the
+/// settings say.
+pub fn foreground(gpa: Allocator, io: Io, repo: *Repository, clock: date.Context, auto: bool) Self.Error!void {
+    const s = try Settings.read(repo, clock);
+    if (s.pack_refs) try gc.packRefs(io, repo, .{ .include = &.{"*"}, .prune = true, .auto = auto });
+    if (s.prune_reflogs) try gc.expireReflogs(gpa, io, repo, .{ .clock = clock });
 }
 
 /// What git's daemonized gc does after the foreground tasks.
@@ -298,7 +328,7 @@ fn tooManyPacks(arena: Allocator, io: Io, repo: *Repository, limit: i64) Self.Er
 
 /// `too_many_loose_objects`: the loose objects in `objects/17`, times 256,
 /// above `limit` rounded up to a multiple of 256.
-fn tooManyLoose(io: Io, repo: *Repository, limit: i64) Self.Error!bool {
+pub fn tooManyLoose(io: Io, repo: *Repository, limit: i64) Self.Error!bool {
     const threshold = @divFloor(limit + 255, 256) * 256;
     const hex_len = repo.objectFormat().hexLen() - 2;
     var dir = repo.objectDatabase().objectsDirectory().openDir(io, "17", .{ .iterate = true }) catch |err| switch (err) {

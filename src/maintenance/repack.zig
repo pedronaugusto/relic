@@ -332,35 +332,8 @@ const Run = struct {
         };
     }
 
-    /// `pack_geometry_init` and `pack_geometry_split`: the packs a
-    /// geometric repack weighs, an alternate's but for `-l`, and where each
-    /// list splits.
     fn geometry(run: *Run) Self.Error!Geometry {
-        const listed = try run.db.listPacks(run.gpa, run.io, .all);
-        defer run.gpa.free(listed);
-        var packs: std.ArrayList(Odb.PackListing) = .empty;
-        var promisor: std.ArrayList(Odb.PackListing) = .empty;
-        for (listed) |p| {
-            if (run.options.local and !p.local) continue;
-            if (!run.pack_kept and (p.kept or (p.local and isListed(run.existing.kept.items, p.name)))) continue;
-            if (p.cruft) continue;
-            var copy = p;
-            copy.name = try run.arena.dupe(u8, p.name);
-            try (if (p.promisor) &promisor else &packs).append(run.arena, copy);
-        }
-        const by_objects = struct {
-            fn less(_: void, a: Odb.PackListing, b: Odb.PackListing) bool {
-                return a.objects < b.objects;
-            }
-        }.less;
-        std.mem.sort(Odb.PackListing, packs.items, {}, by_objects);
-        std.mem.sort(Odb.PackListing, promisor.items, {}, by_objects);
-        return .{
-            .packs = packs.items,
-            .split = geometrySplit(packs.items, run.options.geometric),
-            .promisor = promisor.items,
-            .promisor_split = geometrySplit(promisor.items, run.options.geometric),
-        };
+        return planGeometry(run.arena, run.io, run.db, .{ .factor = run.options.geometric, .local = run.options.local, .pack_kept_objects = run.pack_kept, .keep_packs = run.options.keep_packs });
     }
 
     /// `pack-objects --stdin-packs --unpacked`, the packs before the split
@@ -518,12 +491,56 @@ const Run = struct {
 
 /// git's `pack_geometry`: the packs a geometric repack weighs, each list
 /// by its objects, fewest first; those before its split roll up.
-const Geometry = struct {
+pub const Geometry = struct {
     packs: []const Odb.PackListing,
     split: usize,
     promisor: []const Odb.PackListing,
     promisor_split: usize,
 };
+
+/// What `planGeometry` weighs.
+pub const GeometryOptions = struct {
+    factor: u32,
+    /// `-l`: an alternate's packs are not weighed.
+    local: bool = false,
+    /// A kept pack is weighed too.
+    pack_kept_objects: bool = false,
+    /// `--keep-pack`'s packs, by file name.
+    keep_packs: []const []const u8 = &.{},
+};
+
+/// `pack_geometry_init` and `pack_geometry_split`: the packs a geometric
+/// repack by `options.factor` weighs, an alternate's but for `-l`, and
+/// where each list splits; the names in `arena`.
+pub fn planGeometry(arena: Allocator, io: Io, db: *Odb, options: GeometryOptions) Self.Error!Geometry {
+    const listed = try db.listPacks(arena, io, .all);
+    var packs: std.ArrayList(Odb.PackListing) = .empty;
+    var promisor: std.ArrayList(Odb.PackListing) = .empty;
+    for (listed) |p| {
+        if (options.local and !p.local) continue;
+        const keep_pack = p.local and for (options.keep_packs) |k| {
+            if (std.mem.endsWith(u8, k, ".pack") and std.mem.eql(u8, k[0 .. k.len - 5], p.name)) break true;
+        } else false;
+        if (!options.pack_kept_objects and (p.kept or keep_pack)) continue;
+        if (p.cruft) continue;
+        var copy = p;
+        copy.name = try arena.dupe(u8, p.name);
+        try (if (p.promisor) &promisor else &packs).append(arena, copy);
+    }
+    const by_objects = struct {
+        fn less(_: void, a: Odb.PackListing, b: Odb.PackListing) bool {
+            return a.objects < b.objects;
+        }
+    }.less;
+    std.mem.sort(Odb.PackListing, packs.items, {}, by_objects);
+    std.mem.sort(Odb.PackListing, promisor.items, {}, by_objects);
+    return .{
+        .packs = packs.items,
+        .split = geometrySplit(packs.items, options.factor),
+        .promisor = promisor.items,
+        .promisor_split = geometrySplit(promisor.items, options.factor),
+    };
+}
 
 /// `compute_pack_geometry_split`: how many of `packs`, fewest objects
 /// first, roll up so that each pack left holds at least `factor` times the

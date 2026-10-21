@@ -21,8 +21,11 @@ pub const Edit = union(enum) {
     /// `git config <name> <value>`: the last setting of `name` rewritten in
     /// place, or a new one at the end of its section.
     set: struct { name: []const u8, value: []const u8 },
-    /// `git config --unset-all <name>`.
-    unset: struct { name: []const u8 },
+    /// `git config --add <name> <value>`: a new setting beside the others.
+    add: struct { name: []const u8, value: []const u8 },
+    /// `git config --unset-all <name>`; with `value`, git's
+    /// `--fixed-value`, only the settings that hold it.
+    unset: struct { name: []const u8, value: ?[]const u8 = null },
     /// `git config --remove-section`, the header matched as spelled.
     remove_section: struct { section: []const u8, subsection: ?[]const u8 = null },
 };
@@ -102,6 +105,7 @@ pub fn prepare(
     for (edits) |edit| switch (edit) {
         .set => |e| _ = try config.checkKey(e.name),
         .unset => |e| _ = try config.checkKey(e.name),
+        .add => |e| _ = try config.checkKey(e.name),
         .remove_section => {},
     };
     const buffer = try gpa.alloc(u8, 16 * 1024);
@@ -118,7 +122,8 @@ pub fn prepare(
     var outcome: Outcome = .{};
     for (edits) |edit| switch (edit) {
         .set => |e| try file.setIn(level, e.name, e.value),
-        .unset => |e| try file.unsetIn(level, e.name),
+        .unset => |e| if (e.value) |v| try file.unsetValueIn(level, e.name, v) else try file.unsetIn(level, e.name),
+        .add => |e| try file.addIn(level, e.name, e.value),
         .remove_section => |e| if (try file.removeSectionIn(level, e.section, e.subsection)) {
             outcome.sections_removed += 1;
         },
