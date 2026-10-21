@@ -29,6 +29,9 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const diff = @import("diff.zig");
 const rename = @import("rename.zig");
+const blame_ignore = @import("blame/ignore.zig");
+const config_mod = @import("../config/config.zig");
+const fs = @import("../fs/fs.zig");
 const parallax = @import("parallax");
 
 const Oid = hash.Oid;
@@ -41,11 +44,27 @@ pub const Error = diff.Error || diff.TextError || object.ParseError || error{
     PathNotFound,
 };
 
+/// Errors from reading the commits to ignore.
+pub const IgnoreError = Error || config_mod.PathSettingError || Io.Dir.ReadFileAllocError || error{
+    /// An ignore-revs file that is not there: "could not open object name
+    /// list".
+    IgnoreRevsFileMissing,
+    /// A line of one that is not a full object name: "invalid object name".
+    InvalidIgnoreRev,
+};
+
 /// How a blame is taken.
 pub const Options = struct {
     /// Follow the file to the path it had before a whole-file rename, as
     /// git does unless told `--no-follow`.
     follow_renames: bool = true,
+    /// Commits whose changes are passed over: `--ignore-rev`,
+    /// `--ignore-revs-file` and `blame.ignoreRevsFile` (see
+    /// `ignoredRevisions`). A line such a commit changed is given to the
+    /// parent line it most likely came from, as git guesses it, and marked
+    /// `ignored`; one it finds no line for stays the commit's, marked
+    /// `unblamable`.
+    ignore: []const Oid = &.{},
 };
 
 /// A run of lines that come from one commit, at consecutive lines there.
@@ -60,6 +79,12 @@ pub const Hunk = struct {
     path: []const u8,
     /// Where the run starts in that commit's copy of the file, from one.
     orig_start: u32,
+    /// The lines passed over an ignored commit to get here: what git marks
+    /// with `?` under `blame.markIgnoredLines`.
+    ignored: bool = false,
+    /// The lines an ignored commit changed and no parent line was found
+    /// for: what git marks with `*` under `blame.markUnblamableLines`.
+    unblamable: bool = false,
 };
 
 /// Every line of a file, by where it comes from.
@@ -126,7 +151,8 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
         if (hunks.items.len != 0) {
             const last = &hunks.items[hunks.items.len - 1];
             if (last.commit.eql(g.origin.commit) and std.mem.eql(u8, last.path, g.origin.path) and
-                last.final_start + last.count == g.final + 1 and last.orig_start + last.count == g.at + 1)
+                last.final_start + last.count == g.final + 1 and last.orig_start + last.count == g.at + 1 and
+                last.ignored == g.ignored and last.unblamable == g.unblamable)
             {
                 last.count += 1;
                 continue;
@@ -136,7 +162,7 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
             hunks.items[hunks.items.len - 1].path
         else
             try arena.dupe(u8, g.origin.path);
-        try hunks.append(arena, .{ .final_start = g.final + 1, .count = 1, .commit = g.origin.commit, .path = owned, .orig_start = g.at + 1 });
+        try hunks.append(arena, .{ .final_start = g.final + 1, .count = 1, .commit = g.origin.commit, .path = owned, .orig_start = g.at + 1, .ignored = g.ignored, .unblamable = g.unblamable });
     }
     // What `Blame` promises: every line blamed once, the hunks running from
     // the first line to the last without a gap or an overlap.
@@ -150,6 +176,96 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
     return .{ .gpa = gpa, .arena = out_arena.state, .hunks = hunks.items };
 }
 
+/// git's `build_ignorelist` for the files: the commits named in each
+/// `blame.ignoreRevsFile` -- the values read as git's `string_list_insert`
+/// keeps them, sorted and each once -- then in each of `files`
+/// (`--ignore-revs-file`), an empty name forgetting what came before. A
+/// line is a full object name, with what follows a `#` and blank lines
+/// left out; one that does not peel to a commit is passed over.
+/// `--ignore-rev` is the caller's to resolve.
+/// The result is `arena`'s.
+/// Where the commits to ignore are named.
+pub const IgnoreSources = struct {
+    /// Read for `blame.ignoreRevsFile`.
+    config: *const config_mod.Config,
+    /// Where a relative path is found from.
+    base: Io.Dir,
+    /// `--ignore-revs-file`, after the configured ones.
+    files: []const []const u8 = &.{},
+};
+
+pub fn ignoredRevisions(arena: Allocator, io: Io, db: *odb_mod.Odb, sources: IgnoreSources) IgnoreError![]Oid {
+    const config = sources.config;
+    const base = sources.base;
+    const files = sources.files;
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = config.iterate(&.{"blame.ignorerevsfile"});
+    while (it.next()) |entry| {
+        const path = (try config_mod.pathSetting(arena, io, base, config.context.home, entry.value)) orelse continue;
+        const at = std.sort.lowerBound([]const u8, names.items, path, orderText);
+        if (at < names.items.len and std.mem.eql(u8, names.items[at], path)) continue;
+        try names.insert(arena, at, path);
+    }
+    try names.appendSlice(arena, files);
+    var set: std.ArrayList(Oid) = .empty;
+    for (names.items) |name| {
+        if (name.len == 0) {
+            set.clearRetainingCapacity();
+            continue;
+        }
+        const text = (try fs.readFileAlloc(arena, io, base, name, 1 << 30)) orelse return error.IgnoreRevsFileMissing;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            var line = raw[0 .. std.mem.findScalar(u8, raw, '#') orelse raw.len];
+            line = std.mem.trim(u8, line, " \t\r\n\x0b\x0c");
+            if (line.len == 0) continue;
+            const oid = Oid.parse(db.objectFormat(), line) catch return error.InvalidIgnoreRev;
+            const commit = try peelToCommit(arena, io, db, oid) orelse continue;
+            for (set.items) |x| {
+                if (x.eql(commit)) break;
+            } else try set.append(arena, commit);
+        }
+    }
+    return set.items;
+}
+
+fn orderText(key: []const u8, item: []const u8) std.math.Order {
+    return std.mem.order(u8, key, item);
+}
+
+/// The commit `oid` is or a tag chain ends at; `null` for anything else or
+/// nothing.
+fn peelToCommit(arena: Allocator, io: Io, db: *odb_mod.Odb, start: Oid) Error!?Oid {
+    var oid = start;
+    while (true) {
+        const found = db.read(io, oid) catch |err| switch (err) {
+            error.ObjectNotFound => return null,
+            else => |e| return e,
+        };
+        defer db.allocator().free(found.bytes);
+        switch (found.type) {
+            .commit => return oid,
+            .tag => {
+                const tag = object.Tag.parse(arena, db.objectFormat(), found.bytes) catch return null;
+                oid = tag.target;
+            },
+            else => return null,
+        }
+    }
+}
+
+/// `blame.markIgnoredLines` and `blame.markUnblamableLines`: whether git
+/// writes `?` before a line passed over an ignored commit, and `*` before
+/// one an ignored commit changed that no parent line was found for.
+pub const Marks = struct { ignored: bool, unblamable: bool };
+
+pub fn marks(config: *const config_mod.Config) config_mod.ValueError!Marks {
+    return .{
+        .ignored = try config.getBool("blame.markignoredlines", false),
+        .unblamable = try config.getBool("blame.markunblamablelines", false),
+    };
+}
+
 /// How many lines `text` holds, a last one without a newline counted: a
 /// `u32` numbers them, as a diff does, so a text of 4 GiB or more is
 /// `error.InputTooLarge`.
@@ -161,8 +277,9 @@ fn lineCount(text: []const u8) error{InputTooLarge}!u32 {
 }
 
 /// A line under suspicion: where it is in the file blamed, and where it is
-/// in the suspect's copy, both from zero.
-const Suspect = struct { final: u32, at: u32 };
+/// in the suspect's copy, both from zero; and what an ignored commit did
+/// to it on the way.
+const Suspect = struct { final: u32, at: u32, ignored: bool = false, unblamable: bool = false };
 
 /// A file in one commit, and the lines it is suspected of.
 const Origin = struct {
@@ -187,6 +304,8 @@ const Guilty = struct {
     final: u32,
     at: u32,
     origin: *const Origin,
+    ignored: bool,
+    unblamable: bool,
 
     fn lessThan(_: void, a: Guilty, b: Guilty) bool {
         return a.final < b.final;
@@ -298,12 +417,20 @@ const Scoreboard = struct {
         }
         for (n.parents, scapegoats) |parent_oid, maybe| {
             const p_origin = maybe orelse continue;
-            try s.passToParent(o, p_origin);
+            try s.passToParent(o, p_origin, false);
             if (p_origin.suspects.items.len != 0) try s.enqueue(try s.node(parent_oid));
             if (o.suspects.items.len == 0) return;
         }
+        // An ignored commit's changed lines go to the parent lines they
+        // most likely came from.
+        if (s.ignored(n.oid)) for (n.parents, scapegoats) |parent_oid, maybe| {
+            const p_origin = maybe orelse continue;
+            try s.passToParent(o, p_origin, true);
+            if (p_origin.suspects.items.len != 0) try s.enqueue(try s.node(parent_oid));
+            if (o.suspects.items.len == 0) return;
+        };
         // What no parent took is this commit's.
-        for (o.suspects.items) |l| try s.guilty.append(s.arena, .{ .final = l.final, .at = l.at, .origin = o });
+        for (o.suspects.items) |l| try s.guilty.append(s.arena, .{ .final = l.final, .at = l.at, .origin = o, .ignored = l.ignored, .unblamable = l.unblamable });
         o.suspects.clearRetainingCapacity();
     }
 
@@ -359,12 +486,36 @@ const Scoreboard = struct {
         return found;
     }
 
+    fn ignored(s: *const Scoreboard, oid: Oid) bool {
+        for (s.options.ignore) |x| if (x.eql(oid)) return true;
+        return false;
+    }
+
     /// git's `pass_blame_to_parent`: every suspect on a line the diff from
     /// the parent's copy leaves alone goes to the parent, at its line there.
-    fn passToParent(s: *Scoreboard, target: *Origin, parent: *Origin) Error!void {
+    /// With `ignoring`, a suspect inside a change goes to the parent line
+    /// `blame_ignore.guess` finds for it, marked `ignored`, and one it finds
+    /// none for stays, marked `unblamable`; every change is guessed, in
+    /// order, as each takes what it matched out of the parent's lines.
+    fn passToParent(s: *Scoreboard, target: *Origin, parent: *Origin, ignoring: bool) Error!void {
         const old = try s.textOf(parent.blob);
         const new = try s.textOf(target.blob);
         const changes = (try s.differ.lines(old, new, .{})).changes;
+        var parent_prints: []blame_ignore.Fingerprint = &.{};
+        var target_prints: []const blame_ignore.Fingerprint = &.{};
+        var guesses: []const []const blame_ignore.Guess = &.{};
+        if (ignoring) {
+            parent_prints = try blame_ignore.fingerprints(s.arena, old);
+            target_prints = try blame_ignore.fingerprints(s.arena, new);
+            const all = try s.arena.alloc([]const blame_ignore.Guess, changes.len);
+            for (changes, all) |ch, *g| g.* = try blame_ignore.guess(s.arena, parent_prints, target_prints, .{
+                .target_start = ch.new_start,
+                .target_end = ch.new_start + ch.new_len,
+                .parent_start = ch.old_start,
+                .parent_len = ch.old_len,
+            });
+            guesses = all;
+        }
         std.mem.sort(Suspect, target.suspects.items, {}, byAt);
         var kept: usize = 0;
         var c: usize = 0;
@@ -374,12 +525,23 @@ const Scoreboard = struct {
                 offset = @as(i64, changes[c].old_start + changes[c].old_len) - @as(i64, changes[c].new_start + changes[c].new_len);
             }
             if (c < changes.len and changes[c].new_start <= l.at) {
+                if (ignoring) {
+                    if (guesses[c][l.at - changes[c].new_start]) |at| {
+                        try parent.suspects.append(s.arena, .{ .final = l.final, .at = at, .ignored = true, .unblamable = l.unblamable });
+                        continue;
+                    }
+                    var stays = l;
+                    stays.unblamable = true;
+                    target.suspects.items[kept] = stays;
+                    kept += 1;
+                    continue;
+                }
                 // Inside a change: the target's own line.
                 target.suspects.items[kept] = l;
                 kept += 1;
                 continue;
             }
-            try parent.suspects.append(s.arena, .{ .final = l.final, .at = @intCast(@as(i64, l.at) + offset) });
+            try parent.suspects.append(s.arena, .{ .final = l.final, .at = @intCast(@as(i64, l.at) + offset), .ignored = l.ignored, .unblamable = l.unblamable });
         }
         target.suspects.shrinkRetainingCapacity(kept);
     }

@@ -20,8 +20,12 @@ fn expectSameAsGit(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *repo_mod.R
     const commit_hex = commit.hex(&hex);
     var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(gpa);
-    try args.appendSlice(gpa, &.{ "blame", "--line-porcelain" });
+    try args.appendSlice(gpa, &.{ "-c", "blame.markIgnoredLines=true", "-c", "blame.markUnblamableLines=true", "blame", "--line-porcelain" });
     if (!options.follow_renames) try args.append(gpa, "--no-follow");
+    var ignore_hex: std.ArrayList([hash.max_hex_len]u8) = .empty;
+    defer ignore_hex.deinit(gpa);
+    try ignore_hex.resize(gpa, options.ignore.len);
+    for (options.ignore, ignore_hex.items) |oid, *buf| try args.appendSlice(gpa, &.{ "--ignore-rev", oid.hex(buf) });
     try args.appendSlice(gpa, &.{ commit_hex, "--", path });
     const porcelain = try git.run(io, args.items);
     defer gpa.free(porcelain);
@@ -31,6 +35,8 @@ fn expectSameAsGit(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *repo_mod.R
     defer expected.deinit();
     var lines = std.mem.splitScalar(u8, porcelain, '\n');
     var head: ?[]const u8 = null;
+    var marks: [2]bool = .{ false, false };
+    var filename: []const u8 = "";
     while (lines.next()) |line| {
         if (line.len > 40 and std.ascii.isHex(line[0]) and line[40] == ' ' and head == null) {
             var fields = std.mem.tokenizeScalar(u8, line, ' ');
@@ -39,8 +45,16 @@ fn expectSameAsGit(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *repo_mod.R
             const final = fields.next().?;
             try expected.writer.print("{s} {s} {s}", .{ final, sha, orig });
             head = line;
-        } else if (std.mem.startsWith(u8, line, "filename ")) {
-            try expected.writer.print(" {s}\n", .{line["filename ".len..]});
+            marks = .{ false, false };
+        } else if (head != null and std.mem.eql(u8, line, "ignored")) {
+            marks[0] = true;
+        } else if (head != null and std.mem.eql(u8, line, "unblamable")) {
+            marks[1] = true;
+        } else if (head != null and std.mem.startsWith(u8, line, "filename ")) {
+            filename = line["filename ".len..];
+        } else if (head != null and line.len != 0 and line[0] == '\t') {
+            // The line itself, after the headers and the marks.
+            try expected.writer.print(" {s}{s}{s}\n", .{ filename, if (marks[0]) " ignored" else "", if (marks[1]) " unblamable" else "" });
             head = null;
         }
     }
@@ -54,7 +68,7 @@ fn expectSameAsGit(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *repo_mod.R
         try std.testing.expectEqual(next, h.final_start);
         for (0..h.count) |i| {
             const n: u32 = @intCast(i);
-            try actual.writer.print("{d} {s} {d} {s}\n", .{ h.final_start + n, h.commit.hex(&hex), h.orig_start + n, h.path });
+            try actual.writer.print("{d} {s} {d} {s}{s}{s}\n", .{ h.final_start + n, h.commit.hex(&hex), h.orig_start + n, h.path, if (h.ignored) " ignored" else "", if (h.unblamable) " unblamable" else "" });
         }
         next += h.count;
     }
@@ -242,6 +256,18 @@ test "blame of random histories with merges, renames and repeated lines agrees w
                 };
             }
         }
+        // The tip again with commits along the way ignored, the tip itself
+        // and back-to-back ones among them now and then.
+        for (0..3) |_| {
+            var ignore: std.ArrayList(Oid) = .empty;
+            for (0..1 + random.uintLessThan(usize, 4)) |_| try ignore.append(a, commits.items[random.uintLessThan(usize, commits.items.len)].oid);
+            for (tip.files.keys()) |path| {
+                expectSameAsGit(gpa, io, &git, &repo, tip.oid, path, .{ .ignore = ignore.items }) catch |err| {
+                    std.debug.print("round {d}, ignoring {d}\n", .{ round, ignore.items.len });
+                    return err;
+                };
+            }
+        }
     }
 }
 
@@ -252,4 +278,116 @@ fn splitText(a: Allocator, bytes: []const u8) ![]const []const u8 {
     // The text ends in a newline, which leaves one empty piece after it.
     if (out.items.len != 0 and out.items[out.items.len - 1].len == 0) _ = out.pop();
     return out.items;
+}
+
+test "an ignored commit's changed lines go where git's guess sends them, marked ignored, or stay unblamable" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var h: History = .{ .gpa = gpa, .arena = .init(gpa), .repo = &repo, .io = io };
+    defer h.arena.deinit();
+    const a = h.arena.allocator();
+
+    var files: History.Files = .empty;
+    try files.put(a, "code.c", try text(a, &.{ "int main(void)", "{", "    int count = 0;", "    for (int i = 0; i < 10; i++)", "        count += i;", "    return count;", "}" }));
+    const root = try h.commit(&files, &.{}, 1000);
+    try files.put(a, "code.c", try text(a, &.{ "int main(void)", "{", "    int total = 0;", "    for (int i = 0; i < 10; i++)", "        total += i;", "    printf(\"%d\\n\", total);", "    return total;", "}" }));
+    const rename = try h.commit(&files, &.{root}, 2000);
+    // A reformat: the same words with other spacing and case, a brace
+    // moved, and a line no parent has.
+    try files.put(a, "code.c", try text(a, &.{ "int main(void) {", "\tint TOTAL = 0;", "\tfor (int i = 0; i < 10; i++) TOTAL += i;", "\t/* a brand new remark xyzzy */", "\tprintf(\"%d\\n\", TOTAL);", "\treturn TOTAL;", "}" }));
+    const reformat = try h.commit(&files, &.{rename}, 3000);
+    try files.put(a, "code.c", try text(a, &.{ "int main(void) {", "\tint TOTAL = 0;", "\tfor (int i = 0; i < 20; i++) TOTAL += i;", "\t/* a brand new remark xyzzy */", "\tprintf(\"%d\\n\", TOTAL);", "\treturn TOTAL;", "}" }));
+    const tip = try h.commit(&files, &.{reformat}, 4000);
+
+    try expectSameAsGit(gpa, io, &git, &repo, tip, "code.c", .{ .ignore = &.{reformat} });
+    try expectSameAsGit(gpa, io, &git, &repo, tip, "code.c", .{ .ignore = &.{ reformat, rename } });
+    try expectSameAsGit(gpa, io, &git, &repo, tip, "code.c", .{ .ignore = &.{ tip, root } });
+
+    // The same commits named in files, as `--ignore-revs-file` and
+    // `blame.ignoreRevsFile` name them: comments, blank lines, a name that
+    // is no commit passed over, and an empty file name forgetting.
+    var hex: [3][hash.max_hex_len]u8 = undefined;
+    const listed = try a.print("# reformatting\n  {s}  # the big one\n\n{s}\n", .{ reformat.hex(&hex[0]), rename.hex(&hex[1]) });
+    try git.writeFile(io, "ignore-a", listed);
+    try git.writeFile(io, "ignore-b", try a.print("{s}\n", .{root.hex(&hex[2])}));
+    try git.writeFile(io, "bad", "not-an-object-name\n");
+    try git.exec(io, &.{ "config", "blame.ignoreRevsFile", "ignore-b" });
+    try git.exec(io, &.{ "config", "--add", "blame.ignoreRevsFile", "ignore-a" });
+    var config_repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer config_repo.deinit(io);
+    const both = try blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir });
+    try std.testing.expectEqual(@as(usize, 3), both.len);
+    const reset = try blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir, .files = &.{ "", "ignore-a" } });
+    try std.testing.expectEqual(@as(usize, 2), reset.len);
+    try std.testing.expectError(error.InvalidIgnoreRev, blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir, .files = &.{"bad"} }));
+    try std.testing.expectError(error.IgnoreRevsFileMissing, blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir, .files = &.{"missing"} }));
+}
+
+test "blame ignoring random reformats, lines changed a little and moved about, agrees with git" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var h: History = .{ .gpa = gpa, .arena = .init(gpa), .repo = &repo, .io = io };
+    defer h.arena.deinit();
+    const a = h.arena.allocator();
+
+    const words = [_][]const u8{ "alpha", "beta", "gamma", "delta", "count", "total", "index", "value", "parse", "print" };
+    var prng: std.Random.DefaultPrng = .init(0xf1a9e7);
+    const random = prng.random();
+    for (0..testgit.corpusCases(64)) |round| {
+        var lines: std.ArrayList([]const u8) = .empty;
+        for (0..6 + random.uintLessThan(usize, 18)) |_| {
+            try lines.append(a, try a.print("{s} = {s}({s});", .{ words[random.uintLessThan(usize, words.len)], words[random.uintLessThan(usize, words.len)], words[random.uintLessThan(usize, words.len)] }));
+        }
+        var files: History.Files = .empty;
+        try files.put(a, "f", try text(a, lines.items));
+        var commits: std.ArrayList(Oid) = .empty;
+        try commits.append(a, try h.commit(&files, &.{}, 1_000_000));
+        for (0..6) |n| {
+            for (0..1 + random.uintLessThan(usize, 5)) |_| {
+                const at = random.uintLessThan(usize, lines.items.len + 1);
+                switch (random.uintLessThan(u8, 5)) {
+                    // A line touched: its case, its spacing, a word.
+                    0, 1 => if (at < lines.items.len) {
+                        const old = lines.items[at];
+                        lines.items[at] = switch (random.uintLessThan(u8, 3)) {
+                            0 => try std.ascii.allocUpperString(a, old),
+                            1 => try a.print("  {s} ", .{old}),
+                            else => try a.print("{s} {s}", .{ old, words[random.uintLessThan(usize, words.len)] }),
+                        };
+                    },
+                    // Two lines joined, or one split.
+                    2 => if (at + 1 < lines.items.len) {
+                        lines.items[at] = try a.print("{s} {s}", .{ lines.items[at], lines.items[at + 1] });
+                        _ = lines.orderedRemove(at + 1);
+                    },
+                    3 => if (at < lines.items.len) {
+                        const old = lines.items[at];
+                        const cut = old.len / 2;
+                        lines.items[at] = old[0..cut];
+                        try lines.insert(a, at + 1, old[cut..]);
+                    },
+                    else => try lines.insert(a, at, try a.print("{s}();", .{words[random.uintLessThan(usize, words.len)]})),
+                }
+            }
+            try files.put(a, "f", try text(a, lines.items));
+            try commits.append(a, try h.commit(&files, &.{commits.items[commits.items.len - 1]}, 1_000_000 + @as(i64, @intCast(n + 1)) * 100));
+        }
+        const tip = commits.items[commits.items.len - 1];
+        for (0..4) |_| {
+            var ignore: std.ArrayList(Oid) = .empty;
+            for (0..1 + random.uintLessThan(usize, 3)) |_| try ignore.append(a, commits.items[1 + random.uintLessThan(usize, commits.items.len - 1)]);
+            expectSameAsGit(gpa, io, &git, &repo, tip, "f", .{ .ignore = ignore.items }) catch |err| {
+                std.debug.print("round {d}\n", .{round});
+                return err;
+            };
+        }
+    }
 }

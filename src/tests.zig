@@ -97,6 +97,7 @@ test {
         _ = @import("testing/pack_write.zig");
         _ = @import("diff/diff_test.zig");
         _ = @import("diff/blame_test.zig");
+        _ = @import("diff/blame/ignore.zig");
         _ = @import("submodule/submodule_test.zig");
         _ = @import("checkout/filter_test.zig");
         _ = @import("lfs/lfs_test.zig");
