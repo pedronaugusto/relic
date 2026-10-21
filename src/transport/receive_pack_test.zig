@@ -282,9 +282,12 @@ const Pair = struct {
             defer dir.close(p.io);
             if (data) |bytes| {
                 try dir.writeFile(p.io, .{ .sub_path = name, .data = bytes });
-                const file = try dir.openFile(p.io, name, .{});
-                defer file.close(p.io);
-                try file.setPermissions(p.io, .fromMode(mode));
+                // Windows has no mode bits to set.
+                if (builtin.target.os.tag != .windows) {
+                    const file = try dir.openFile(p.io, name, .{});
+                    defer file.close(p.io);
+                    try file.setPermissions(p.io, .fromMode(mode));
+                }
             } else dir.deleteFile(p.io, name) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,

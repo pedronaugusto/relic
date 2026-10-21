@@ -1385,9 +1385,11 @@ fn signedTwins(twins: *PushTwins, io: Io, server: ?*testremote.HttpServer, seed:
         try twins.git(remote_dir, &.{ "config", "http.receivepack", "true" });
         try twins.git(remote_dir, &.{ "config", "gpg.ssh.allowedSignersFile", allowed_path });
         try remote_dir.writeFile(io, .{ .sub_path = "hooks/pre-receive", .data = cert_hook });
-        const hook = try remote_dir.openFile(io, "hooks/pre-receive", .{});
-        defer hook.close(io);
-        try hook.setPermissions(io, .fromMode(0o755));
+        if (builtin.target.os.tag != .windows) {
+            const hook = try remote_dir.openFile(io, "hooks/pre-receive", .{});
+            defer hook.close(io);
+            try hook.setPermissions(io, .fromMode(0o755));
+        }
         const url = if (server) |s|
             try s.url(gpa, pair[1])
         else
