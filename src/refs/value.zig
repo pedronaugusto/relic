@@ -276,12 +276,14 @@ pub const Rejection = enum {
         };
     }
 
-    /// The error a transaction that does not allow failure gives up with.
-    pub fn err(r: Rejection) TransactionError {
+    /// The error a transaction that does not allow failure gives up with,
+    /// for an edit that expected `expected`: a ref missing where a value
+    /// was expected is that value not matching.
+    pub fn err(r: Rejection, expected: Expected) TransactionError {
         return switch (r) {
             .name_conflict => error.RefNameConflict,
             .create_exists => error.RefAlreadyExists,
-            .nonexistent_ref => error.RefNotFound,
+            .nonexistent_ref => if (expected == .matches) error.ExpectedValueMismatch else error.RefNotFound,
             .incorrect_old_value => error.ExpectedValueMismatch,
         };
     }
@@ -302,7 +304,7 @@ pub const Rejected = struct {
 /// `ref_transaction_maybe_set_rejected` decides. For each backend's
 /// `prepare`.
 pub fn reject(tx: anytype, index: usize, reason: Rejection, comptime format: []const u8, args: anytype) TransactionError!void {
-    if (!tx.allow_failure) return reason.err();
+    if (!tx.allow_failure) return reason.err(tx.edits.items[index].expected);
     const detail = try tx.gpa.print(format, args);
     errdefer tx.gpa.free(detail);
     const edit = &tx.edits.items[index];

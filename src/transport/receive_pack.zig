@@ -11,7 +11,11 @@
 //! objects are moved into the repository; each command is held to
 //! `receive.denyCurrentBranch`, `denyDeletes`, `denyDeleteCurrent`,
 //! `denyNonFastForwards` and its `update` hook, and the refs are written,
-//! each alone or, for an atomic push, all together. The report follows —
+//! each alone or, for an atomic push, all together. A ref under
+//! `receive.procReceiveRefs` is the `proc-receive` hook's instead: it is
+//! handed the commands in a pkt-line conversation and answers for each,
+//! with what it made of them in report-status-v2's options, which the
+//! report and `post-receive` carry. The report follows —
 //! `report-status` or `report-status-v2`, on the side-band when the client
 //! asked for one, the hooks' output beside it on channel two — and then
 //! `post-receive` and `post-update`.
@@ -52,6 +56,7 @@ const hooks = @import("../hooks/hooks.zig");
 const program = @import("../process.zig").program;
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
+const decimal = @import("../text.zig").decimal;
 const local = @import("local.zig");
 
 const Oid = hash.Oid;
@@ -136,12 +141,29 @@ const Command = struct {
     /// A deletion of a ref that was not there.
     did_not_exist: bool = false,
     /// Under a `receive.procReceiveRefs` prefix: the `proc-receive` hook's
-    /// to update, not the ref transaction's.
+    /// to update, not the ref transaction's. A hook's `fall-through` hands
+    /// it back.
     proc_receive: bool = false,
+    /// The `proc-receive` hook reported on it: git's
+    /// `RUN_PROC_RECEIVE_RETURNED`.
+    returned: bool = false,
+    /// What the `proc-receive` hook said its `ok` became, one for each
+    /// `ok` it followed with options.
+    reports: std.ArrayList(Report) = .empty,
 
     fn standing(c: *const Command) bool {
         return c.error_string == null;
     }
+};
+
+/// One update a `proc-receive` hook made for a command: report-status-v2's
+/// `option refname`, `old-oid`, `new-oid` and `forced-update`, each `null`
+/// where the command's own stands.
+const Report = struct {
+    name: ?[]const u8 = null,
+    old: ?Oid = null,
+    new: ?Oid = null,
+    forced: bool = false,
 };
 
 /// The capabilities the client asked for.
@@ -505,7 +527,7 @@ pub const Server = struct {
         // hook once `pre-receive` has seen them.
         var any_proc_receive = false;
         for (commands) |*cmd| {
-            if (cmd.standing() and s.procReceiveRef(cmd.name)) {
+            if (cmd.standing() and s.procReceiveRef(cmd)) {
                 cmd.proc_receive = true;
                 any_proc_receive = true;
             }
@@ -541,10 +563,10 @@ pub const Server = struct {
 
         const head = try s.remote.repo.refStore().currentBranch(arena, s.io);
         const head_ref: ?[]const u8 = if (head) |h| try arena.print("refs/heads/{s}", .{h}) else null;
-        if (any_proc_receive and !try s.runProcReceive()) {
+        if (any_proc_receive and !try s.runProcReceive(arena, commands, push_options)) {
             // An atomic push fails whole with it.
             for (commands) |*cmd| {
-                if (cmd.standing() and (cmd.proc_receive or s.asked.atomic)) cmd.error_string = "fail to run proc-receive hook";
+                if (cmd.standing() and !cmd.returned and (cmd.proc_receive or s.asked.atomic)) cmd.error_string = "fail to run proc-receive hook";
             }
         }
         if (s.asked.atomic) try s.executeAtomic(arena, commands, head_ref) else try s.executeEach(arena, commands, head_ref);
@@ -635,7 +657,7 @@ pub const Server = struct {
         if (s.runner) |*r| tx.hooks = r;
         var reported: []const u8 = "atomic push failure";
         const failed = for (commands) |*cmd| {
-            if (!cmd.standing()) continue;
+            if (!cmd.standing() or cmd.proc_receive) continue;
             cmd.error_string = try s.update(arena, cmd, &tx, head_ref);
             if (!cmd.standing()) break true;
         } else blk: {
@@ -742,24 +764,291 @@ pub const Server = struct {
         return null;
     }
 
-    /// git's `run_proc_receive_hook`: whether the hook ran and answered.
-    fn runProcReceive(s: *Server) Self.Error!bool {
-        const runner = if (s.runner) |*r| r else return false;
-        if (!runner.exists(s.io, "proc-receive")) {
+    /// git's `run_proc_receive_hook`: the commands under
+    /// `receive.procReceiveRefs` handed to the `proc-receive` hook, which
+    /// updates what it will and answers for each in report-status-v2's
+    /// words. What it writes on its standard error reaches the client as
+    /// it is written, as git's muxer sends it. Whether it ran and answered
+    /// without a fault.
+    fn runProcReceive(s: *Server, arena: Allocator, commands: []Command, push_options: []const []const u8) Self.Error!bool {
+        // Its standard error is read beside the conversation; where no
+        // second task can run, it is this process's own.
+        const beside = canRunBeside(s.io);
+        const started = if (s.runner) |*r| r.start(s.io, "proc-receive", .{}, if (beside) .pipe else .inherit) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            // A hook that cannot be started fails as git's does, saying
+            // nothing more.
+            else => return false,
+        } else null;
+        var running = started orelse {
             try s.rpError("cannot find hook 'proc-receive'", .{});
             return false;
+        };
+        defer running.deinit(s.io);
+        var relay: ?Io.Future(void) = null;
+        defer if (relay) |*task| task.cancel(s.io);
+        if (running.child.takeStderr()) |file| {
+            relay = s.io.concurrent(relayStderr, .{ s, file }) catch blk: {
+                file.close(s.io);
+                break :blk null;
+            };
         }
-        return false;
+
+        var errmsg: std.ArrayList(u8) = .empty;
+        const in_buffer = try arena.alloc(u8, pkt_line.max_line);
+        var out_buffer: [4096]u8 = undefined;
+        var reader = running.child.stdoutFile().?.readerStreaming(s.io, in_buffer);
+        var writer = running.child.stdinFile().?.writerStreaming(s.io, &out_buffer);
+        var answered = try s.converse(arena, &reader.interface, &writer.interface, commands, push_options, &errmsg);
+        if (reader.err) |err| if (err == error.Canceled) return error.Canceled;
+        if (writer.err) |err| if (err == error.Canceled) return error.Canceled;
+
+        // Its output is no longer heard, and its input ends.
+        if (running.child.takeStdout()) |file| file.close(s.io);
+        const term = running.wait(s.io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => null,
+        };
+        if (term == null or !program.Child.succeeded(term.?)) answered = false;
+        if (relay) |*task| {
+            task.await(s.io);
+            relay = null;
+        }
+        if (errmsg.items.len != 0) {
+            const text = if (errmsg.items[errmsg.items.len - 1] == '\n') errmsg.items[0 .. errmsg.items.len - 1] else errmsg.items;
+            try s.rpError("{s}", .{text});
+        }
+        return answered;
     }
 
-    /// Whether `name` is under a `receive.procReceiveRefs` prefix, its
-    /// `<modifiers>:` passed over.
-    fn procReceiveRef(s: *Server, name: []const u8) bool {
+    /// What a task beside the `proc-receive` conversation does: the hook's
+    /// standard error to the client, to its end.
+    fn relayStderr(s: *Server, file: Io.File) void {
+        defer file.close(s.io);
+        var chunk: [1024]u8 = undefined;
+        while (true) {
+            const n = file.readStreaming(s.io, &.{&chunk}) catch return;
+            s.message(chunk[0..n]) catch return;
+        }
+    }
+
+    /// The conversation with `proc-receive`: the version and what each
+    /// side can do, the commands, the push options when the hook takes
+    /// them, then its report. Whether every step went through; what went
+    /// wrong is added to `errmsg` in git's words.
+    fn converse(s: *Server, arena: Allocator, r: *Io.Reader, w: *Io.Writer, commands: []Command, push_options: []const []const u8, errmsg: *std.ArrayList(u8)) Self.Error!bool {
+        var version: i128 = 0;
+        var hook_push_options = false;
+        const negotiated = negotiate: {
+            const caps: []const u8 = if (s.asked.atomic and s.asked.push_options)
+                "\x00atomic push-options"
+            else if (s.asked.atomic)
+                "\x00atomic"
+            else if (s.asked.push_options)
+                "\x00push-options"
+            else
+                "";
+            pkt_line.print("version=1{s}\n", .{caps}, w) catch break :negotiate false;
+            pkt_line.flush(w) catch break :negotiate false;
+            w.flush() catch break :negotiate false;
+            while (true) {
+                const packet = pkt_line.read(r) catch break :negotiate false;
+                const raw = switch (packet) {
+                    .data => |d| d,
+                    else => break :negotiate true,
+                };
+                const line = chompLine(raw);
+                if (line.len <= "version=".len or !std.mem.startsWith(u8, line, "version=")) continue;
+                const nul = std.mem.findScalar(u8, line, 0) orelse line.len;
+                version = decimal.strtol(line["version=".len..nul], 10, 32).value;
+                if (nul < line.len and hasFeature(line[nul + 1 ..], "push-options")) hook_push_options = true;
+            }
+        };
+        if (!negotiated) {
+            try errmsg.appendSlice(arena, "fail to negotiate version with proc-receive hook");
+            return false;
+        }
+        if (version != 0 and version != 1) {
+            try errmsg.print(arena, "proc-receive version '{d}' is not supported", .{version});
+            return false;
+        }
+
+        const sent = send: {
+            for (commands) |cmd| {
+                if (!cmd.proc_receive or !cmd.standing()) continue;
+                pkt_line.print("{f} {f} {s}", .{ cmd.old, cmd.new, cmd.name }, w) catch break :send false;
+            }
+            pkt_line.flush(w) catch break :send false;
+            w.flush() catch break :send false;
+            break :send true;
+        };
+        if (!sent) {
+            try errmsg.appendSlice(arena, "fail to write commands to proc-receive hook");
+            return false;
+        }
+        if (hook_push_options) {
+            const sent_options = send: {
+                for (push_options) |option| pkt_line.write(w, option) catch break :send false;
+                pkt_line.flush(w) catch break :send false;
+                w.flush() catch break :send false;
+                break :send true;
+            };
+            if (!sent_options) {
+                try errmsg.appendSlice(arena, "fail to write push-options to proc-receive hook");
+                return false;
+            }
+        }
+        return s.readProcReceiveReport(arena, r, commands, errmsg);
+    }
+
+    /// git's `read_proc_receive_report`: `ok <ref>` and its `option`
+    /// lines, or `ng <ref> [<reason>]`, to a flush. A command the hook was
+    /// handed and said nothing about fails.
+    fn readProcReceiveReport(s: *Server, arena: Allocator, r: *Io.Reader, commands: []Command, errmsg: *std.ArrayList(u8)) Self.Error!bool {
+        var ok = true;
+        var hint: ?usize = null;
+        // The report an `option` goes to: the hinted command's last, or a
+        // new one at the first option after an `ok`.
+        var last: ?usize = null;
+        var new_report = false;
+        var once = false;
+        var responses: usize = 0;
+        while (true) {
+            const packet = pkt_line.read(r) catch {
+                if (responses == 0) {
+                    try errmsg.appendSlice(arena, "proc-receive exited abnormally");
+                    return false;
+                }
+                break;
+            };
+            const line = switch (packet) {
+                .data => |d| chompLine(d),
+                else => break,
+            };
+            responses += 1;
+            const space = std.mem.findScalar(u8, line, ' ') orelse {
+                try errmsg.print(arena, "proc-receive reported incomplete status line: '{s}'\n", .{line});
+                ok = false;
+                continue;
+            };
+            const head = line[0..space];
+            const rest = line[space + 1 ..];
+            if (std.mem.eql(u8, head, "option")) {
+                if (hint == null or (last == null and !new_report)) {
+                    if (!once) try errmsg.appendSlice(arena, "proc-receive reported 'option' without a matching 'ok/ng' directive\n");
+                    once = true;
+                    ok = false;
+                    continue;
+                }
+                const cmd = &commands[hint.?];
+                if (new_report) {
+                    try cmd.reports.append(arena, .{});
+                    last = cmd.reports.items.len - 1;
+                    new_report = false;
+                }
+                const into = &cmd.reports.items[last.?];
+                const key_end = std.mem.findScalar(u8, rest, ' ');
+                const key = rest[0 .. key_end orelse rest.len];
+                const value: ?[]const u8 = if (key_end) |at| rest[at + 1 ..] else null;
+                if (std.mem.eql(u8, key, "refname")) {
+                    into.name = if (value) |v| try arena.dupe(u8, v) else null;
+                } else if (std.mem.eql(u8, key, "old-oid")) {
+                    if (s.oidPrefix(value)) |oid| into.old = oid;
+                } else if (std.mem.eql(u8, key, "new-oid")) {
+                    if (s.oidPrefix(value)) |oid| into.new = oid;
+                } else if (std.mem.eql(u8, key, "forced-update")) {
+                    into.forced = true;
+                } else if (std.mem.eql(u8, key, "fall-through")) {
+                    // receive-pack updates it after all.
+                    cmd.proc_receive = false;
+                    cmd.returned = false;
+                }
+                continue;
+            }
+
+            last = null;
+            new_report = false;
+            const name_end = std.mem.findScalar(u8, rest, ' ');
+            const name = rest[0 .. name_end orelse rest.len];
+            if (!std.mem.eql(u8, head, "ok") and !std.mem.eql(u8, head, "ng")) {
+                try errmsg.print(arena, "proc-receive reported bad status '{s}' on ref '{s}'\n", .{ head, name });
+                ok = false;
+                continue;
+            }
+            // From the last command reported on, then from the first.
+            if (hint) |from| hint = findCommand(commands, from, name);
+            if (hint == null) hint = findCommand(commands, 0, name);
+            const at = hint orelse {
+                try errmsg.print(arena, "proc-receive reported status on unknown ref: {s}\n", .{name});
+                ok = false;
+                continue;
+            };
+            const cmd = &commands[at];
+            if (!cmd.proc_receive) {
+                try errmsg.print(arena, "proc-receive reported status on unexpected ref: {s}\n", .{name});
+                ok = false;
+                continue;
+            }
+            cmd.returned = true;
+            if (std.mem.eql(u8, head, "ng")) {
+                cmd.error_string = if (name_end) |at_reason| try arena.dupe(u8, rest[at_reason + 1 ..]) else "failed";
+                ok = false;
+                continue;
+            }
+            new_report = true;
+        }
+        for (commands) |*cmd| {
+            if (cmd.proc_receive and cmd.standing() and !cmd.returned) {
+                cmd.error_string = "proc-receive failed to report status";
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    /// git's `parse_oid_hex`: an object name at the start of `text`.
+    fn oidPrefix(s: *Server, text: ?[]const u8) ?Oid {
+        const t = text orelse return null;
+        const len = s.kind().hexLen();
+        if (t.len < len) return null;
+        return Oid.parse(s.kind(), t[0..len]) catch null;
+    }
+
+    /// git's `proc_receive_ref_matches`: whether a `receive.procReceiveRefs`
+    /// value takes `cmd`. A value is a ref prefix, matched whole at a `/`,
+    /// after optional `<modifiers>:` -- `a` creations, `d` deletions, `m`
+    /// other updates, all three when none is named, and `!` taking every
+    /// ref the prefix does not match.
+    fn procReceiveRef(s: *Server, cmd: *const Command) bool {
         var it = s.remote.repo.configuration().iterate(&.{"receive.procreceiverefs"});
         while (it.next()) |entry| {
             const value = entry.value orelse continue;
-            const prefix = if (std.mem.findScalar(u8, value, ':')) |colon| value[colon + 1 ..] else value;
-            if (prefix.len != 0 and std.mem.startsWith(u8, name, prefix)) return true;
+            var add = true;
+            var delete = true;
+            var modify = true;
+            var negative = false;
+            var prefix = value;
+            if (std.mem.findScalar(u8, value, ':')) |colon| {
+                add = false;
+                delete = false;
+                modify = false;
+                for (value[0..colon]) |c| switch (c) {
+                    'a' => add = true,
+                    'd' => delete = true,
+                    'm' => modify = true,
+                    '!' => negative = true,
+                    else => {},
+                };
+                prefix = value[colon + 1 ..];
+            }
+            prefix = std.mem.trimEnd(u8, prefix, "/");
+            if (!add and cmd.old.isZero()) continue;
+            if (!delete and cmd.new.isZero()) continue;
+            if (!modify and !cmd.old.isZero() and !cmd.new.isZero()) continue;
+            const under = std.mem.startsWith(u8, cmd.name, prefix) and
+                (cmd.name.len == prefix.len or cmd.name[prefix.len] == '/');
+            if (under != negative) return true;
         }
         return false;
     }
@@ -809,7 +1098,11 @@ pub const Server = struct {
         var input: std.ArrayList(u8) = .empty;
         for (commands) |cmd| {
             if (skip_broken and (!cmd.standing() or cmd.did_not_exist)) continue;
-            try input.print(arena, "{f} {f} {s}\n", .{ cmd.old, cmd.new, cmd.name });
+            // A proc-receive hook's updates in place of the command's own.
+            for (cmd.reports.items) |r| {
+                try input.print(arena, "{f} {f} {s}\n", .{ r.old orelse cmd.old, r.new orelse cmd.new, r.name orelse cmd.name });
+            }
+            if (cmd.reports.items.len == 0) try input.print(arena, "{f} {f} {s}\n", .{ cmd.old, cmd.new, cmd.name });
         }
         if (input.items.len == 0) return true;
         var set: std.ArrayList(program.Var) = .empty;
@@ -903,7 +1196,18 @@ pub const Server = struct {
             for (commands) |cmd| {
                 if (cmd.error_string) |why| {
                     pkt_line.print("ng {s} {s}\n", .{ cmd.name, why }, w) catch |e| break :write e;
-                } else pkt_line.print("ok {s}\n", .{cmd.name}, w) catch |e| break :write e;
+                    continue;
+                }
+                pkt_line.print("ok {s}\n", .{cmd.name}, w) catch |e| break :write e;
+                // What a proc-receive hook made of it, in v2 alone.
+                if (!s.asked.report_status_v2) continue;
+                for (cmd.reports.items, 0..) |r, i| {
+                    if (i > 0) pkt_line.print("ok {s}\n", .{cmd.name}, w) catch |e| break :write e;
+                    if (r.name) |name| pkt_line.print("option refname {s}\n", .{name}, w) catch |e| break :write e;
+                    if (r.old) |oid| pkt_line.print("option old-oid {f}\n", .{oid}, w) catch |e| break :write e;
+                    if (r.new) |oid| pkt_line.print("option new-oid {f}\n", .{oid}, w) catch |e| break :write e;
+                    if (r.forced) pkt_line.write(w, "option forced-update\n") catch |e| break :write e;
+                }
             }
             pkt_line.flush(w) catch |e| break :write e;
         }) catch return error.OutOfMemory;
@@ -953,6 +1257,42 @@ fn readPushOptions(arena: Allocator, in: *Io.Reader, out: *std.ArrayList([]const
         try out.append(arena, try arena.dupe(u8, line));
     }
 }
+
+/// A packet's text without its one trailing newline, as git's reader
+/// chomps it.
+fn chompLine(raw: []const u8) []const u8 {
+    return if (raw.len != 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
+}
+
+/// git's `parse_feature_request`: whether `list`, words apart, names
+/// `feature`, alone or with a value.
+fn hasFeature(list: []const u8, feature: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, list, ' ');
+    while (it.next()) |word| {
+        const name = word[0 .. std.mem.findScalar(u8, word, '=') orelse word.len];
+        if (std.mem.eql(u8, name, feature)) return true;
+    }
+    return false;
+}
+
+/// git's `find_command_by_refname`: the first command from `from` on
+/// that names `name`.
+fn findCommand(commands: []const Command, from: usize, name: []const u8) ?usize {
+    for (commands[from..], from..) |cmd, i| {
+        if (std.mem.eql(u8, cmd.name, name)) return i;
+    }
+    return null;
+}
+
+/// Whether `io` runs a second task beside this one, asked by running an
+/// empty one.
+fn canRunBeside(io: Io) bool {
+    var probe = io.concurrent(nothing, .{}) catch return false;
+    probe.await(io);
+    return true;
+}
+
+fn nothing() void {}
 
 fn deleteOnly(commands: []const Command) bool {
     for (commands) |cmd| if (!cmd.new.isZero()) return false;

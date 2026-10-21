@@ -446,42 +446,66 @@ pub const Runner = struct {
         return .{ .found = path };
     }
 
-    fn runOne(
-        runner: *Runner,
-        io: Io,
-        event: []const u8,
-        ran: *Ran,
-        request: Request,
-        command: []const u8,
-        shell: bool,
-    ) ErrorNamespace.Error!void {
-        const gpa = runner.gpa;
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(gpa);
+    /// Start `event`'s hook file for a conversation over its standard input
+    /// and output, as git starts `proc-receive`: the file alone, never a
+    /// configured hook, with its standard error a third pipe for the caller
+    /// to drain beside the conversation. `null` when there is no such file
+    /// to run. Where the caller cannot drain it, its standard error is
+    /// this process's own.
+    pub fn start(runner: *Runner, io: Io, event: []const u8, request: Request, stderr: StartStderr) Self.Error!?program.Running {
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = switch (try runner.findFile(io, event, &path_buf)) {
+            .found => |path| path,
+            .missing, .not_executable => return null,
+        };
+        var prepared: Prepared = .{};
+        defer prepared.deinit(runner.gpa);
+        var invocation = try runner.prepare(io, &prepared, request, path, false);
+        invocation.stdout = .capture;
+        invocation.stderr = switch (stderr) {
+            .pipe => .capture,
+            .inherit => .inherit,
+        };
+        return try program.start(runner.gpa, io, runner.programs, invocation);
+    }
 
-        var interpreter_buf: [100]u8 = undefined;
+    /// Where a started hook's standard error goes.
+    pub const StartStderr = enum { pipe, inherit };
+
+    /// A hook's command line and the variables set for it.
+    const Prepared = struct {
+        argv: std.ArrayList([]const u8) = .empty,
+        set: std.ArrayList(program.Var) = .empty,
+        interpreter_buf: [100]u8 = undefined,
+
+        fn deinit(prepared: *Prepared, gpa: Allocator) void {
+            prepared.argv.deinit(gpa);
+            prepared.set.deinit(gpa);
+        }
+    };
+
+    /// How `command` runs for `request`: in the hooks' directory, with
+    /// `GIT_PREFIX` and git's repository variables cleared, its output
+    /// where `Options.output` sends it.
+    fn prepare(runner: *Runner, io: Io, prepared: *Prepared, request: Request, command: []const u8, shell: bool) Allocator.Error!program.Invocation {
+        const gpa = runner.gpa;
         if (!shell and builtin.target.os.tag == .windows) {
             // git for Windows reads the `#!` line itself and starts the
             // interpreter it names, by its base name, with the script as its
             // first argument.
-            if (windowsInterpreter(io, command, &interpreter_buf)) |interpreter| {
-                try argv.append(gpa, interpreter);
+            if (windowsInterpreter(io, command, &prepared.interpreter_buf)) |interpreter| {
+                try prepared.argv.append(gpa, interpreter);
             }
         }
-        try argv.append(gpa, command);
-        try argv.appendSlice(gpa, request.args);
-
-        var set: std.ArrayList(program.Var) = .empty;
-        defer set.deinit(gpa);
-        try set.append(gpa, .{ .name = "GIT_PREFIX", .value = runner.options.prefix });
-        try set.appendSlice(gpa, request.set);
-
-        const capture = runner.options.output == .capture;
-        var outcome = program.run(gpa, io, runner.programs, .{
-            .argv = argv.items,
+        try prepared.argv.append(gpa, command);
+        try prepared.argv.appendSlice(gpa, request.args);
+        try prepared.set.append(gpa, .{ .name = "GIT_PREFIX", .value = runner.options.prefix });
+        try prepared.set.appendSlice(gpa, request.set);
+        return .{
+            .argv = prepared.argv.items,
             .shell = shell,
             .cwd = .{ .path = runner.cwd },
-            .set = set.items,
+            .set = prepared.set.items,
             .unset = &program.repository_variables,
             .stderr = switch (runner.options.output) {
                 .inherit => .inherit,
@@ -493,7 +517,23 @@ pub const Runner = struct {
                 .capture => .capture,
                 .ignore => .ignore,
             },
-        }, .{
+        };
+    }
+
+    fn runOne(
+        runner: *Runner,
+        io: Io,
+        event: []const u8,
+        ran: *Ran,
+        request: Request,
+        command: []const u8,
+        shell: bool,
+    ) ErrorNamespace.Error!void {
+        const gpa = runner.gpa;
+        var prepared: Prepared = .{};
+        defer prepared.deinit(gpa);
+        const capture = runner.options.output == .capture;
+        var outcome = program.run(gpa, io, runner.programs, try runner.prepare(io, &prepared, request, command, shell), .{
             .input = request.input,
         }) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;

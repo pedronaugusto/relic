@@ -80,6 +80,37 @@ const hook_scripts = [_][2][]const u8{
     },
 };
 
+/// A `proc-receive` hook that logs what receive-pack sends it and answers
+/// from files in the git directory: `proc-receive.version` its version
+/// packets (`version=1` when there is none), `proc-receive.report` its
+/// report (`ok` for each ref it was handed when there is none),
+/// `proc-receive.exit` its exit status. It reads push options when its
+/// version packets ask for them, and exits at once while
+/// `proc-receive.gone` exists.
+const proc_receive_hook =
+    \\#!/bin/sh
+    \\readpkt() {
+    \\  len=$(dd bs=1 count=4 2>/dev/null)
+    \\  test -n "$len" || exit 1
+    \\  test "$len" = 0000 && return 1
+    \\  line=$(dd bs=1 count=$((0x$len - 4)) 2>/dev/null | tr '\0' ' ')
+    \\}
+    \\pkt() { printf '%04x%s' $((${#1} + 4)) "$1"; }
+    \\test -e proc-receive.gone && exit 1
+    \\while readpkt; do echo "proc-receive version $line" >>hook.log; done
+    \\if test -e proc-receive.version; then cat proc-receive.version; else pkt version=1; printf 0000; fi
+    \\refs=
+    \\while readpkt; do echo "proc-receive command $line" >>hook.log; refs="$refs ${line##* }"; done
+    \\if grep -q push-options proc-receive.version 2>/dev/null; then
+    \\  while readpkt; do echo "proc-receive option $line" >>hook.log; done
+    \\fi
+    \\echo "hook says proc-receive" >&2
+    \\if test -e proc-receive.report; then cat proc-receive.report
+    \\else for ref in $refs; do pkt "ok $ref"; done; printf 0000; fi
+    \\exit $(cat proc-receive.exit 2>/dev/null || echo 0)
+    \\
+;
+
 /// Two repositories alike, one pushed to through git's receive-pack and
 /// one through relic's, and a source to push from.
 const Pair = struct {
@@ -242,6 +273,45 @@ const Pair = struct {
         }
     }
 
+    /// The same file in both git directories, or none with `null`.
+    fn fileBoth(p: *Pair, name: []const u8, data: ?[]const u8, mode: u16) !void {
+        for ([_][]const u8{ p.theirs, p.ours }) |target| {
+            var dir = try Io.Dir.cwd().openDir(p.io, target, .{});
+            defer dir.close(p.io);
+            if (data) |bytes| {
+                try dir.writeFile(p.io, .{ .sub_path = name, .data = bytes });
+                const file = try dir.openFile(p.io, name, .{});
+                defer file.close(p.io);
+                try file.setPermissions(p.io, .fromMode(mode));
+            } else dir.deleteFile(p.io, name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+        }
+    }
+
+    /// What `proc-receive` answers with in a bare pair: `lines` as packets,
+    /// `{old}` and `{new}` in them the source's `main~1` and `main`, then a
+    /// flush; `null` for the hook's own answer.
+    fn procSays(p: *Pair, name: []const u8, lines: ?[]const []const u8) !void {
+        const these = lines orelse return p.fileBoth(name, null, 0o644);
+        const old = try p.source.line(p.io, &.{ "rev-parse", "main~1" });
+        defer p.gpa.free(old);
+        const new = try p.source.line(p.io, &.{ "rev-parse", "main" });
+        defer p.gpa.free(new);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(p.gpa);
+        for (these) |line| {
+            const a = try std.mem.replaceOwned(u8, p.gpa, line, "{old}", old);
+            defer p.gpa.free(a);
+            const b = try std.mem.replaceOwned(u8, p.gpa, a, "{new}", new);
+            defer p.gpa.free(b);
+            try out.print(p.gpa, "{x:0>4}{s}", .{ b.len + 4, b });
+        }
+        try out.appendSlice(p.gpa, "0000");
+        try p.fileBoth(name, out.items, 0o644);
+    }
+
     fn markBoth(p: *Pair, name: []const u8, present: bool, bare: bool) !void {
         for ([_][]const u8{ p.theirs, p.ours }) |target| {
             var dir = try Io.Dir.cwd().openDir(p.io, target, .{});
@@ -367,4 +437,69 @@ test "a push's refs go in two transactions that refuse a ref alone, as git 2.55 
         try p.both(&.{ ":refs/heads/meddle", ":refs/heads/gone" });
         try p.markBoth("meddle", false, true);
     }
+}
+
+test "a proc-receive hook takes the refs it is given, and says what it made of them, as git 2.55 hears it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{
+        .{ "receive.advertisePushOptions", "true" },
+        .{ "receive.procReceiveRefs", "refs/for/" },
+    });
+    defer p.deinit();
+    try p.fileBoth("hooks/proc-receive", proc_receive_hook, 0o755);
+    try p.both(&.{ "main~1:refs/heads/main", "v1" });
+    // The hook's own answer: ok for each, its refs untouched here.
+    try p.both(&.{ "main:refs/for/main", "main:refs/heads/beside", "main:refs/for/main/topic" });
+    // What it made of them: another ref, its old and new values, forced,
+    // several for one; in report-status-v2 and the hooks after.
+    try p.procSays("proc-receive.report", &.{ "ok refs/for/main", "option refname refs/heads/main", "option old-oid {old}", "option new-oid {new}", "ok refs/for/next", "option refname refs/heads/next", "option new-oid {new}", "option forced-update", "ok refs/for/next", "option refname refs/heads/next2" });
+    try p.both(&.{ "main:refs/for/main", "main:refs/for/next", "main:refs/heads/plain" });
+    // Refusals, with and without a reason, and a ref it does not answer for.
+    try p.procSays("proc-receive.report", &.{ "ng refs/for/main not today", "ng refs/for/next" });
+    try p.both(&.{ "main:refs/for/main", "main:refs/for/next", "main:refs/for/third" });
+    // fall-through: receive-pack updates it after all.
+    try p.procSays("proc-receive.report", &.{ "ok refs/for/main", "option fall-through", "ok refs/for/next" });
+    try p.both(&.{ "main:refs/for/main", "main:refs/for/next" });
+    // What breaks its protocol: an unknown ref, one it was not given, a bad
+    // status, a line with no ref, an option with no ok before it.
+    try p.procSays("proc-receive.report", &.{ "option refname refs/heads/x", "ok refs/heads/nowhere", "ok refs/heads/main", "option refname refs/heads/y", "bad refs/for/main", "ok", "ok refs/for/main" });
+    try p.both(&.{ "main:refs/for/main", "main~1:refs/heads/main" });
+    // Answering nothing; exiting with a failure after answering; a version
+    // it cannot speak; gone before it is asked anything.
+    try p.procSays("proc-receive.report", &.{});
+    try p.both(&.{ "main:refs/for/main", "main:refs/heads/after-nothing" });
+    try p.procSays("proc-receive.report", null);
+    try p.fileBoth("proc-receive.exit", "1\n", 0o644);
+    try p.both(&.{ "main:refs/for/main", "main:refs/heads/after-exit" });
+    try p.both(&.{ "--atomic", "main:refs/for/main", "main:refs/heads/atomic-exit" });
+    try p.fileBoth("proc-receive.exit", null, 0o644);
+    try p.procSays("proc-receive.version", &.{"version=2"});
+    try p.both(&.{ "main:refs/for/main", "main:refs/heads/after-v2" });
+    try p.procSays("proc-receive.version", null);
+    try p.fileBoth("proc-receive.gone", "", 0o644);
+    try p.both(&.{ "main:refs/for/main", "main:refs/heads/after-gone" });
+    try p.fileBoth("proc-receive.gone", null, 0o644);
+    // Push options, which it asks for; atomic, which it is told of, where
+    // its refusal refuses the rest.
+    try p.procSays("proc-receive.version", &.{"version=1\x00push-options"});
+    try p.both(&.{ "-o", "first", "-o", "second", "main:refs/for/main" });
+    try p.both(&.{ "--atomic", "main:refs/for/main", "main:refs/heads/atomic-ok" });
+    try p.procSays("proc-receive.report", &.{"ng refs/for/main no"});
+    try p.both(&.{ "--atomic", "main:refs/for/main", "main:refs/heads/atomic-no" });
+}
+
+test "receive.procReceiveRefs takes creations, deletions or other updates, and refs outside a prefix, as git matches them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{.{ "receive.procReceiveRefs", "a:refs/review" }});
+    defer p.deinit();
+    try p.gitBoth(&.{ "config", "--add", "receive.procReceiveRefs", "dm!:refs/heads/" });
+    try p.gitBoth(&.{ "config", "--add", "receive.procReceiveRefs", "!:refs/never" });
+    try p.fileBoth("hooks/proc-receive", proc_receive_hook, 0o755);
+    try p.both(&.{ "main~1:refs/heads/main", "v1", "main:refs/reviewed/x" });
+    try p.gitBoth(&.{ "update-ref", "refs/review/x", "main~1" });
+    // A creation under refs/review, an update there, an update under
+    // refs/heads and one outside it, and a tag's deletion.
+    try p.both(&.{ "main:refs/review/new", "main:refs/review/x", "main:refs/heads/main", "+main~1:refs/reviewed/x", ":refs/tags/v1" });
 }
