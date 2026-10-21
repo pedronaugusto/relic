@@ -68,8 +68,9 @@ pub const Output = enum {
     /// To this process's standard error, as git sends it — or, for
     /// `pre-push`, its standard output to this process's standard output.
     inherit,
-    /// Into `Runner.captured`, standard output then standard error, for a
-    /// caller that shows it somewhere of its own.
+    /// Into `Runner.captured`, standard output and standard error as one
+    /// stream in the order the hook wrote them, as git's hooks reach the
+    /// person, for a caller that shows it somewhere of its own.
     capture,
     /// Nowhere.
     ignore,
@@ -509,7 +510,7 @@ pub const Runner = struct {
             .unset = &program.repository_variables,
             .stderr = switch (runner.options.output) {
                 .inherit => .inherit,
-                .capture => .capture,
+                .capture => .to_stdout,
                 .ignore => .ignore,
             },
             .stdout = switch (runner.options.output) {
@@ -549,8 +550,8 @@ pub const Runner = struct {
         defer outcome.deinit(gpa);
         ran.count += 1;
         if (capture) {
+            // Standard error came on standard output's pipe.
             try runner.captured.appendSlice(gpa, outcome.stdout);
-            try runner.captured.appendSlice(gpa, outcome.stderr);
         }
         if (!outcome.succeeded() and ran.failure == null) ran.failure = .init(event, outcome.term);
     }

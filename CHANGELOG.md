@@ -88,6 +88,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - A pass over the loose objects (`prune`, `prune-packed`, `repack`, `gc`) lists the objects directory once and opens only the fan-outs there, where it tried all 256; the order is git's, `00` to `ff`.
+- A hook's output, when the caller captures it (`hooks.Output.capture`, receive-pack's), is its standard output and standard error as one stream in the order the hook wrote them, as git relays it, where it was all of the one and then all of the other: conduit's `2>&1` (`program.Invocation.stderr = .to_stdout`).
 - receive-pack sends the hooks' output and its own messages on the side band as they are written, as git's does, where they waited in its buffer for the end of the push.
 - A non-atomic push's refs go in two transactions allowing failure, the deletions and then the rest, as git 2.55's receive-pack batches them: `reference-transaction` runs once per batch, a ref whose old value moved or whose name conflicts is refused alone (`incorrect old value provided`, `refname conflict`, ...) with git's message on the side band, and a failure of a batch's own refuses every command (`failed to update refs`).
 - A transaction's name checks follow git's: in a reftable repository, a ref created where another edit of the same transaction deletes one in its way is refused (`cannot process ... at the same time`), as git refuses it.

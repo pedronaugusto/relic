@@ -83,8 +83,10 @@ pub const Invocation = struct {
     /// runs a program in another one.
     unset: []const []const u8 = &.{},
     /// Where the program's diagnostics go. A hook's reach the person, as
-    /// git's do; a helper's are the caller's to show.
-    stderr: enum { capture, inherit, ignore } = .capture,
+    /// git's do; a helper's are the caller's to show. `to_stdout` is the
+    /// shell's `2>&1`: wherever standard output goes, one stream with it in
+    /// the order the program wrote them.
+    stderr: enum { capture, inherit, ignore, to_stdout } = .capture,
     /// Where the program's standard output goes. `to_stderr` is this
     /// process's own standard error, which is where git sends most hooks'
     /// output so that it never mixes with what git itself prints; `inherit`
@@ -250,6 +252,7 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
                 .capture => .pipe,
                 .inherit => .inherit,
                 .ignore => .ignore,
+                .to_stdout => .stdout,
             },
         } },
     };

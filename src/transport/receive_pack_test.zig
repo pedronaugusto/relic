@@ -24,7 +24,8 @@ const zero = "0000000000000000000000000000000000000000";
 
 /// Hooks that write what they were shown to `hook.log` in the git
 /// directory, the quarantine and what it holds included, and say a word
-/// back to the pusher; `update` declines a branch named `declined…`, and
+/// back to the pusher -- `update` on standard output, standard error and
+/// standard output again, which git relays in that order; `update` declines a branch named `declined…`, and
 /// `pre-receive` declines everything while `decline-pre-receive` exists,
 /// and takes three seconds while `slow` does.
 /// `update` for `refs/heads/meddle` moves refs behind the push's back,
@@ -52,6 +53,7 @@ const hook_scripts = [_][2][]const u8{
         "update",
         \\#!/bin/sh
         \\echo "update $1 $2 $3" >>hook.log
+        \\echo "hook says update out"; echo "hook says update err" >&2; echo "hook says update out again"
         \\case "$1" in refs/heads/declined*) echo "hook says no to $1"; exit 1;; esac
         \\if test "$1" = refs/heads/meddle && test -e meddle; then
         \\  git update-ref refs/heads/race refs/heads/race~1
