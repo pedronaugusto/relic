@@ -131,6 +131,10 @@ pub const Error = error{
     /// merges made again: "apply options are incompatible with
     /// rebase.rebaseMerges".
     ApplyWithRebaseMerges,
+    /// The apply backend asked for while `rebase.updateRefs` asks for the
+    /// other branches moved: "apply options are incompatible with
+    /// rebase.updateRefs".
+    ApplyWithUpdateRefs,
     /// `--continue` with changes in the working tree not staged, which
     /// the apply backend refuses: git's "You must edit all merge conflicts
     /// and then mark them as resolved using git add".
@@ -208,8 +212,10 @@ pub const Options = struct {
     /// `--interactive` with no sheet of its own: the generated sheet as it
     /// is, with an interactive rebase's defaults.
     interactive: bool = false,
-    /// Move `fixup!`, `squash!` and `amend!` commits after their targets.
-    autosquash: bool = false,
+    /// Move `fixup!`, `squash!` and `amend!` commits after their targets:
+    /// `--autosquash`, `--no-autosquash`, or `rebase.autoSquash` for an
+    /// interactive rebase (`interactive` or a sheet) when `null`.
+    autosquash: ?bool = null,
     /// `--apply` or `--merge`. `null` is the merge backend where an option
     /// only it has is asked for (a sheet, `interactive`, `exec`,
     /// `autosquash`, `update_refs`, `empty`, `reapply_cherry_picks`,
@@ -233,9 +239,9 @@ pub const Options = struct {
     /// `label`, `reset` and `merge` lines, as git writes them.
     rebase_merges: ?RebaseMerges = null,
     /// Add `update-ref` lines for the other branches that point at the
-    /// replayed commits, so they move with them: `--update-refs`. git's
-    /// `rebase.updateRefs` is the caller's to read.
-    update_refs: bool = false,
+    /// replayed commits, so they move with them: `--update-refs`,
+    /// `--no-update-refs`, or `rebase.updateRefs` when `null`.
+    update_refs: ?bool = null,
     /// Keep commits that were empty to begin with.
     keep_empty: bool = true,
     /// What to do with one that becomes empty. `drop` for a
@@ -260,8 +266,10 @@ pub const Options = struct {
     conflict_style: ?merge.ConflictStyle = null,
     /// `--exec`: commands to run after each commit.
     exec: []const []const u8 = &.{},
-    /// Put a failed `exec` back on the sheet: `--reschedule-failed-exec`.
-    reschedule_failed_exec: bool = false,
+    /// Put a failed `exec` back on the sheet: `--reschedule-failed-exec`,
+    /// `--no-reschedule-failed-exec`, or `rebase.rescheduleFailedExec`
+    /// when `null`.
+    reschedule_failed_exec: ?bool = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
     /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
     rerere_autoupdate: ?bool = null,
@@ -323,6 +331,10 @@ pub const Stop = enum {
     exec_failed,
     /// A pick would change nothing and empty commits stop the rebase.
     empty,
+    /// The sheet leaves out commits the rebase would replay, with no
+    /// `drop` line for them, and `rebase.missingCommitsCheck` is `error`:
+    /// nothing is applied. Correct `git-rebase-todo` and continue.
+    missing_commits,
 };
 
 /// One rewritten commit: what `post-rewrite` is told.
@@ -411,6 +423,11 @@ const Run = struct {
     restrict: ?Oid = null,
     /// Which backend, and so which directory the state is in.
     backend: Backend = .merge,
+    /// `autosquash`, `update_refs` and `reschedule_failed_exec`, or the
+    /// settings behind them, which are read and checked whichever decides.
+    autosquash: bool,
+    update_refs: bool,
+    reschedule_failed_exec: bool,
     /// What is left to do, the current instruction first.
     items: std.ArrayList(todo.Item) = .empty,
     done_nr: usize = 0,
@@ -498,10 +515,23 @@ fn newRun(gpa: Allocator, io: Io, arena_state: *std.heap.ArenaAllocator, repo: *
         .trailers = try message.trailerSettings(arena_state.allocator(), repo.configuration()),
         .abbrev_len = abbrev.defaultLength(repo.configuration(), repo.objectDatabase()),
         .allow_ff = !options.force and !options.signoff,
-        .empty = options.empty orelse if (interactive) .stop else .drop,
+        // git's default: stop interactively, keep with `--exec`, else drop.
+        .empty = options.empty orelse if (interactive) .stop else if (options.exec.len != 0) .keep else .drop,
         .merges = blk: {
             const configured = try configuredRebaseMerges(repo.configuration());
             break :blk options.rebase_merges orelse configured;
+        },
+        .autosquash = blk: {
+            const configured = try repo.configuration().getBool("rebase.autosquash", false);
+            break :blk options.autosquash orelse (configured and interactive);
+        },
+        .update_refs = blk: {
+            const configured = try repo.configuration().getBool("rebase.updaterefs", false);
+            break :blk options.update_refs orelse configured;
+        },
+        .reschedule_failed_exec = blk: {
+            const configured = try repo.configuration().getBool("rebase.reschedulefailedexec", false);
+            break :blk options.reschedule_failed_exec orelse configured;
         },
         .fork_point = blk: {
             const configured = try repo.configuration().getBool("rebase.forkpoint", true);
@@ -754,8 +784,21 @@ fn upstreamHas(r: *Run, w: *Walker, left: []const Oid, right: []const Oid) Error
 /// default, `# %s`, in the log's encoding; the `#` is git's own, whatever
 /// the comment string.
 fn sheetOneline(r: *Run, oid: Oid) Error![]const u8 {
-    const commit = (try readIn(r, oid, try message.logOutputEncoding(r.repo.configuration()))).commit;
-    return r.arena.print("# {s}", .{try message.onelineSubject(r.arena, commit.message)});
+    const config = r.repo.configuration();
+    const set = config.get("rebase.instructionformat") orelse "";
+    if (set.len == 0) {
+        const commit = (try readIn(r, oid, try message.logOutputEncoding(config))).commit;
+        return r.arena.print("# {s}", .{try message.onelineSubject(r.arena, commit.message)});
+    }
+    // `rebase.instructionFormat`, a `#` before it if it has none, with
+    // git's sheet context: no abbreviation given, so `%h` is the full name.
+    const format = if (set[0] == '#') set else try r.arena.print("# {s}", .{set});
+    var out: std.ArrayList(u8) = .empty;
+    try pretty.formatCommit(r.arena, r.io, .{ .db = r.repo.objectDatabase(), .oid = oid, .format = format }, &out, .{
+        .output_encoding = try message.logOutputEncoding(config),
+        .abbrev_len = r.repo.objectFormat().hexLen(),
+    });
+    return out.items;
 }
 
 /// A pick's line after its commit: the oneline, and `<comment> empty`
@@ -1196,8 +1239,8 @@ pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: O
         noop[0] = .{ .command = .noop };
         items = noop;
     }
-    if (options.update_refs) items = try addUpdateRefCommands(&r, items, false);
-    if (options.autosquash) items = try rearrangeSquash(&r, items);
+    if (r.update_refs) items = try addUpdateRefCommands(&r, items, false);
+    if (r.autosquash) items = try rearrangeSquash(&r, items);
     items = try addExecCommands(&r, items, options.exec);
     const onto = options.onto orelse upstream;
     return sheetText(&r, gpa, items, upstream, onto, tip.orig_head, true);
@@ -1225,7 +1268,14 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
     const revisions = try r.arena.print("{s}..{s}", .{ try r.short(upstream), try r.short(orig_head) });
     var sheet = out.toArrayList();
     errdefer sheet.deinit(gpa);
-    try todo.appendHelp(gpa, &sheet, .{ .command_count = count, .revisions = revisions, .onto = try r.short(onto), .comment = r.comment });
+    const check = r.repo.configuration().get("rebase.missingcommitscheck") orelse "";
+    try todo.appendHelp(gpa, &sheet, .{
+        .command_count = count,
+        .revisions = revisions,
+        .onto = try r.short(onto),
+        .comment = r.comment,
+        .missing_commits_error = std.ascii.eqlIgnoreCase(check, "error"),
+    });
     return sheet.toOwnedSlice(gpa);
 }
 
@@ -1267,7 +1317,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
         try removeState(&r);
         return err;
     };
-    if (!begun) {
+    if (begun == .missing_commits) return finishOutcome(&r, .stopped, .missing_commits, null);
+    if (begun == .up_to_date) {
         // `finish_rebase`, with nothing to finish.
         try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
         try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
@@ -1314,7 +1365,7 @@ fn prepare(r: *Run, upstream: Oid, tip: Tip, onto: Oid) Error!bool {
         break :blk if (bases.len == 1) bases[0] else null;
     };
     const preemptive = !options.interactive and options.todo == null and options.exec.len == 0 and
-        !options.autosquash and !options.force;
+        !r.autosquash and !options.force;
     if (preemptive and branch_base != null and branch_base.?.eql(onto)) up_to_date: {
         if (r.restrict) |fork| if (!fork.eql(onto)) break :up_to_date;
         const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = upstream, .b = tip.orig_head }, .{});
@@ -1340,12 +1391,15 @@ fn prepare(r: *Run, upstream: Oid, tip: Tip, onto: Oid) Error!bool {
 /// written and `onto` checked out, detached. `false` when the branch
 /// already sits on `onto` and there is nothing to do, the branch named to
 /// rebase switched to.
-fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Error!bool {
+/// How a rebase's start went.
+const Begun = enum { up_to_date, begun, missing_commits };
+
+fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Error!Begun {
     const gpa = r.gpa;
     const io = r.io;
     const repo = r.repo;
     const options = r.options;
-    if (!try prepare(r, upstream, tip, onto)) return false;
+    if (!try prepare(r, upstream, tip, onto)) return .up_to_date;
 
     // git's `do_interactive_rebase` reads the sequencer's settings first.
     try sequencer.initConfig(repo);
@@ -1359,8 +1413,8 @@ fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Err
         noop[0] = .{ .command = .noop };
         items = noop;
     }
-    if (options.update_refs) items = try addUpdateRefCommands(r, items, true);
-    if (options.autosquash) items = try rearrangeSquash(r, items);
+    if (r.update_refs) items = try addUpdateRefCommands(r, items, true);
+    if (r.autosquash) items = try rearrangeSquash(r, items);
     items = try addExecCommands(r, items, options.exec);
     if (countCommands(items) == 0) return error.NothingToDo;
     // What a person would be given, and a backup of it.
@@ -1376,6 +1430,14 @@ fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Err
     if (sheet.len == 0) return error.NothingToDo;
     var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
     const list = try todo.parse(r.arena, sheet, context.resolver(), .{ .comment = r.comment, .rebase = true });
+    if (options.todo) |left| if (try missingCommits(r, items, list.items.items)) {
+        // `edit_todo_list`'s refusal: the sheet as it was left, `dropped`
+        // marking it, and `onto` checked out for it to be corrected.
+        try r.state("git-rebase-todo", left);
+        try r.state("dropped", "");
+        try checkoutOnto(r, onto, tip.orig_head, onto_name);
+        return .missing_commits;
+    };
     try r.items.appendSlice(r.arena, list.items.items);
     // The refs to move follow the sheet as it was left.
     try filterUpdateRefs(r);
@@ -1396,7 +1458,20 @@ fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Err
 
     // Detach at `onto`.
     try checkoutOnto(r, base, tip.orig_head, onto_name);
-    return true;
+    return .begun;
+}
+
+/// git's `todo_list_check` under `rebase.missingCommitsCheck=error`:
+/// whether a commit of `old` is in no line of `new`. `warn` and `ignore`,
+/// and a value git does not know, which it ignores with a warning, let
+/// the sheet stand.
+fn missingCommits(r: *Run, old: []const todo.Item, new: []const todo.Item) Error!bool {
+    const level = r.repo.configuration().get("rebase.missingcommitscheck") orelse return false;
+    if (!std.ascii.eqlIgnoreCase(level, "error")) return false;
+    var seen: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    for (new) |item| if (item.commit) |oid| try seen.put(r.arena, oid.bytes, {});
+    for (old) |item| if (item.commit) |oid| if (!seen.contains(oid.bytes)) return true;
+    return false;
 }
 
 fn isLinear(r: *Run, from: Oid, to: Oid) Error!bool {
@@ -1438,7 +1513,7 @@ fn writeBasicState(r: *Run, tip: Tip, onto: Oid) Error!void {
         .keep => try r.state("keep_redundant_commits", ""),
         .stop => {},
     }
-    if (r.options.reschedule_failed_exec) {
+    if (r.reschedule_failed_exec) {
         try r.state("reschedule-failed-exec", "");
     } else try r.state("no-reschedule-failed-exec", "");
     if (r.options.rerere_autoupdate) |on| {
@@ -1459,7 +1534,7 @@ fn readBasicState(r: *Run) Error!Tip {
         r.allow_ff = false;
     }
     if (r.hasState("drop_redundant_commits")) r.empty = .drop else if (r.hasState("keep_redundant_commits")) r.empty = .keep else r.empty = .stop;
-    r.options.reschedule_failed_exec = r.hasState("reschedule-failed-exec");
+    r.reschedule_failed_exec = r.hasState("reschedule-failed-exec");
     if (try r.readState("allow_rerere_autoupdate")) |text| {
         const value = state_file.oneliner(text);
         if (std.mem.eql(u8, value, "--rerere-autoupdate")) r.options.rerere_autoupdate = true else if (std.mem.eql(u8, value, "--no-rerere-autoupdate")) r.options.rerere_autoupdate = false;
@@ -2386,7 +2461,7 @@ fn doExec(r: *Run, command_line: []const u8) Error!?Outcome {
     };
     if (status == 0 and dirty) status = 1;
     if (status == 0) return null;
-    if (r.options.reschedule_failed_exec) {
+    if (r.reschedule_failed_exec) {
         // Back on the sheet, to be run again on `--continue`.
         try saveTodo(r, 0);
     }
@@ -2934,20 +3009,26 @@ fn finish(r: *Run) Error!Outcome {
 /// `--merge`, the options only the merge backend has, and `rebase.backend`.
 fn backendOf(r: *Run) Error!Backend {
     const o = r.options;
-    const merge_only = o.interactive or o.todo != null or o.exec.len != 0 or o.autosquash or o.update_refs or
+    const merge_only = o.interactive or o.todo != null or o.exec.len != 0 or o.autosquash == true or o.update_refs == true or
         o.empty != null or o.reapply_cherry_picks or o.strategy_options.len != 0 or !o.keep_empty or
         (o.rebase_merges != null and o.rebase_merges.? != .off);
-    if (o.backend == .apply) {
-        if (merge_only) return error.RequiresMergeBackend;
-        if (o.rebase_merges == null and r.merges != .off) return error.ApplyWithRebaseMerges;
-        return .apply;
-    }
-    if (merge_only or r.merges != .off) return .merge;
-    if (o.backend) |b| return b;
-    const configured = r.repo.configuration().get("rebase.backend") orelse return .merge;
-    if (std.mem.eql(u8, configured, "merge")) return .merge;
-    if (std.mem.eql(u8, configured, "apply")) return .apply;
-    return error.UnknownRebaseBackend;
+    const backend: Backend = blk: {
+        if (o.backend == .apply) {
+            if (merge_only) return error.RequiresMergeBackend;
+            if (o.rebase_merges == null and r.merges != .off) return error.ApplyWithRebaseMerges;
+            if (o.update_refs == null and r.update_refs) return error.ApplyWithUpdateRefs;
+            break :blk .apply;
+        }
+        if (merge_only or r.merges != .off) break :blk .merge;
+        if (o.backend) |b| break :blk b;
+        const configured = r.repo.configuration().get("rebase.backend") orelse break :blk .merge;
+        if (std.mem.eql(u8, configured, "merge")) break :blk .merge;
+        if (std.mem.eql(u8, configured, "apply")) break :blk .apply;
+        return error.UnknownRebaseBackend;
+    };
+    // "--reschedule-failed-exec requires --exec or --interactive".
+    if (backend == .apply and o.reschedule_failed_exec == true) return error.RequiresMergeBackend;
+    return backend;
 }
 
 /// The apply backend after the checks every rebase makes: `HEAD` detached
@@ -3116,6 +3197,8 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
             error.InvalidTodoLine, error.FixupWithoutCommit => r.done_nr = 0,
         }
     }
+    // ... and writes the total again, as git's does each time.
+    try r.state("end", try r.arena.print("{d}\n", .{r.done_nr + countCommands(r.items.items)}));
     return r;
 }
 
@@ -3148,6 +3231,15 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     try sequencer.initConfig(repo);
     var r = try loadRun(gpa, io, repo, options);
     errdefer freeRun(&r);
+    // A sheet refused for the commits it leaves out is checked again
+    // against the one written first.
+    if (r.hasState("dropped")) {
+        const backup = (try r.readState("git-rebase-todo.backup")) orelse "";
+        var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
+        const old = try todo.parse(r.arena, backup, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
+        if (try missingCommits(&r, old.items.items, r.items.items)) return finishOutcome(&r, .stopped, .missing_commits, null);
+        try r.removeState("dropped");
+    }
     try commitStagedChanges(&r);
     if (r.hasState("stopped-sha")) {
         const text = (try r.readState("stopped-sha")).?;

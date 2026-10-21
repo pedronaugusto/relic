@@ -93,3 +93,148 @@ test "the fork point leaves out what the upstream dropped: by default for the br
         }
     }.f);
 }
+
+const suite = @import("helpers.zig");
+
+/// `side`: `first`, `second`, `fixup! first`, with `part` on `second`;
+/// `main` moves on.
+fn settingsScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try commitFile(io, repo, "a", "base");
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    try commitFile(io, repo, "f1", "first");
+    try commitFile(io, repo, "f2", "second");
+    try repo.exec(io, &.{ "branch", "part" });
+    try repo.writeFile(io, "f1", "first, fixed");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "fixup! first" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try commitFile(io, repo, "m", "main moves");
+    try repo.exec(io, &.{ "checkout", "-q", "side" });
+}
+
+const settings_state = history.rebase_state ++ [_][]const u8{
+    "rebase-merge/reschedule-failed-exec", "rebase-merge/dropped",
+    "rebase-merge/update-refs",            "rebase-merge/git-rebase-todo.backup",
+};
+
+fn expectSameSettings(pair: *Pair, io: Io) !void {
+    try history.expectSameState(pair, io, &settings_state, &.{ "HEAD", "refs/heads/side", "refs/heads/part" });
+    for ([_][]const []const u8{
+        &.{ "for-each-ref", "--format=%(refname) %(objectname)" },
+        &.{ "log", "--all", "--topo-order", "--format=%H %P%n%an <%ae> %ad%n%cn <%ce> %cd%n%B", "--date=raw" },
+    }) |args| {
+        const left = try pair.git.run(io, args);
+        defer pair.gpa.free(left);
+        const right = try pair.ours.run(io, args);
+        defer pair.gpa.free(right);
+        try std.testing.expectEqualStrings(left, right);
+    }
+}
+
+test "rebase.autoSquash, rebase.updateRefs and rebase.rescheduleFailedExec decide what is not given, autoSquash only for an interactive rebase" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 55);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cases = [_]struct { config: []const u8, value: []const u8 = "true", args: []const []const u8, options: rebase.Options }{
+        .{ .config = "rebase.autoSquash", .args = &.{ "rebase", "-i", "main" }, .options = .{ .who = who, .onto_name = "main", .interactive = true } },
+        .{ .config = "rebase.autoSquash", .args = &.{ "rebase", "main" }, .options = .{ .who = who, .onto_name = "main" } },
+        .{ .config = "rebase.autoSquash", .args = &.{ "rebase", "-i", "--no-autosquash", "main" }, .options = .{ .who = who, .onto_name = "main", .interactive = true, .autosquash = false } },
+        .{ .config = "rebase.updateRefs", .args = &.{ "rebase", "main" }, .options = .{ .who = who, .onto_name = "main" } },
+        .{ .config = "rebase.updateRefs", .args = &.{ "rebase", "--no-update-refs", "main" }, .options = .{ .who = who, .onto_name = "main", .update_refs = false } },
+        .{ .config = "rebase.rescheduleFailedExec", .args = &.{ "rebase", "--exec", "false", "main" }, .options = .{ .who = who, .onto_name = "main", .exec = &.{"false"} } },
+        .{ .config = "rebase.rescheduleFailedExec", .value = "false", .args = &.{ "rebase", "--reschedule-failed-exec", "--exec", "false", "main" }, .options = .{ .who = who, .onto_name = "main", .exec = &.{"false"}, .reschedule_failed_exec = true } },
+    };
+    for (cases) |case| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, settingsScript);
+        defer pair.deinit();
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", case.config, case.value });
+        try history.gitMayFail(io, &pair.git, case.args);
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var options = case.options;
+        options.programs = .{ .environ = &pair.env };
+        var outcome = try rebase.start(gpa, io, &repo, try history.oidOf(gpa, io, &pair.ours, "main"), options);
+        defer outcome.deinit();
+        expectSameSettings(&pair, io) catch |err| {
+            std.debug.print("{s}={s}: git {s} differs\n", .{ case.config, case.value, case.args[1] });
+            return err;
+        };
+    }
+}
+
+test "rebase.instructionFormat writes the sheet's lines, and %h is the full name as git's sheet gives it" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 55);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_][]const u8{ "%h %an: %s", "#%s [%ae]" }) |format| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, settingsScript);
+        defer pair.deinit();
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "rebase.instructionFormat", format });
+        const editor = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "keep-copy .git/relic-sheet");
+        defer gpa.free(editor);
+        try pair.env.put("GIT_SEQUENCE_EDITOR", editor);
+        try pair.git.exec(io, &.{ "rebase", "-i", "main" });
+        _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
+        const theirs = try pair.git.readFile(io, ".git/relic-sheet");
+        defer gpa.free(theirs);
+        try pair.git.dir.deleteFile(io, ".git/relic-sheet");
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const ours = try rebase.plan(gpa, io, &repo, try history.oidOf(gpa, io, &pair.ours, "main"), .{ .who = who });
+        defer gpa.free(ours);
+        try std.testing.expectEqualStrings(theirs[0 .. std.mem.find(u8, theirs, "\n# Rebase ") orelse theirs.len], ours[0 .. std.mem.find(u8, ours, "\n# Rebase ") orelse ours.len]);
+    }
+}
+
+test "rebase.missingCommitsCheck=error refuses a sheet that leaves commits out, until it is corrected, as git's does" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 55);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, .files, settingsScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "rebase.missingCommitsCheck", "error" });
+    const first = try history.oidOf(gpa, io, &pair.ours, "side~2");
+    const second = try history.oidOf(gpa, io, &pair.ours, "side~1");
+    const fixup = try history.oidOf(gpa, io, &pair.ours, "side");
+    var hex: [3][40]u8 = undefined;
+    _ = first.hex(&hex[0]);
+    _ = second.hex(&hex[1]);
+    _ = fixup.hex(&hex[2]);
+    const short = try gpa.print("pick {s} # first\npick {s} # second\n", .{ hex[0][0..], hex[1][0..] });
+    defer gpa.free(short);
+    try history.gitRebaseInteractive(io, &pair.git, short, &.{"main"});
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try history.oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = short });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Stop.missing_commits, outcome.stopped.?);
+    }
+    try expectSameSettings(&pair, io);
+
+    // Continued as it is, it is refused again; with the commit dropped by
+    // name, it goes on.
+    try history.gitMayFail(io, &pair.git, &.{ "rebase", "--continue" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Stop.missing_commits, outcome.stopped.?);
+    }
+    try expectSameSettings(&pair, io);
+    const corrected = try gpa.print("{s}drop {s} # fixup! first\n", .{ short, hex[2][0..] });
+    defer gpa.free(corrected);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.writeFile(io, ".git/rebase-merge/git-rebase-todo", corrected);
+    try pair.git.exec(io, &.{ "rebase", "--continue" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameSettings(&pair, io);
+}

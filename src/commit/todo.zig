@@ -418,13 +418,14 @@ pub fn appendHelp(gpa: Allocator, out: *std.ArrayList(u8), sheet: Sheet) Allocat
         \\
         \\These lines can be re-ordered; they are executed from top to bottom.
         \\
-        \\If you remove a line here THAT COMMIT WILL BE LOST.
-        \\
-        \\However, if you remove everything, the rebase will be aborted.
-        \\
-        \\
     ;
     try message.appendCommented(gpa, out, help, sheet.comment);
+    const keep = if (sheet.missing_commits_error)
+        "\nDo not remove any line. Use 'drop' explicitly to remove a commit.\n"
+    else
+        "\nIf you remove a line here THAT COMMIT WILL BE LOST.\n";
+    try message.appendCommented(gpa, out, keep, sheet.comment);
+    try message.appendCommented(gpa, out, "\nHowever, if you remove everything, the rebase will be aborted.\n\n", sheet.comment);
 }
 
 /// What the help's first line names.
@@ -434,6 +435,9 @@ pub const Sheet = struct {
     revisions: []const u8,
     onto: []const u8,
     comment: []const u8,
+    /// `rebase.missingCommitsCheck` is `error`: the help asks for `drop`
+    /// rather than warning that a removed line loses its commit.
+    missing_commits_error: bool = false,
 };
 
 //=========================================================================
