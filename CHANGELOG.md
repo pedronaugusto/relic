@@ -56,6 +56,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `receive.unpackLimit`, else `transfer.unpackLimit`, else git's 100: a pushed pack of fewer objects is stored loose, as git's `unpack-objects` stores it (an object the repository holds already, a thin pack's base among them, not written again), once the refs are written: until then it is held as any received pack is, a pack with its `.keep`, against a collection running beside the push. One at the limit or above is kept as a pack; a failure below it is `unpack-objects abnormal exit`. A pack whose header does not read is refused before anything is kept, in git's `parse_pack_header` words.
 - `receive.keepAlive` (default 5 seconds; zero or less, none): from the pack's end, or from the commands of a push that only deletes, receive-pack sends git's keepalive, an empty packet on side-band channel one, whenever the client has heard nothing for that long, as git's muxers send it while index-pack, the connectivity check and the hooks run.
 - `receive.updateServerInfo`: after a push's last hook, receive-pack writes the dumb HTTP files again (`info/refs`, `objects/info/packs`) through `maintenance.updateServerInfo`, as git's does, what that comes to not the push's to answer for.
+- receive-pack's aliased updates, as git's `check_aliased_updates`: a command on a symbolic ref whose target another command of the push updates is left to that one when the two agree, and both are refused (`inconsistent aliased update`, with git's message naming both and their values) when they do not; a symbolic ref that leads nowhere a ref can be is refused (`broken symref`).
 
 ### Changed
 
@@ -67,6 +68,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A ref list a server advertises, receive-pack's and upload-pack's, and a local fetch's, leaves out a symbolic ref that goes round in a circle, as git leaves a broken ref out, where it ended the conversation with `SymbolicRefLoop`.
 - An object database finds a `pack` directory made after it was opened, on its next scan or on a read that misses, as git reads `objects/pack` again; it found no pack there before.
 - A fast-forward merge keeps what is staged beside it, where it refused a staged change as `DirtyIndex`; a staged change the fast-forward would overwrite is still refused. The same holds for a rebase's checkouts, a cherry-pick's fast-forward and bisect's checkouts, all git's two-way merge.
 - `transport.remote.Branch.fetchRemote` and `pushRemote` fall back to the only remote when there is one, before `origin`, as git does.

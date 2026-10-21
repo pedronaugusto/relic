@@ -61,6 +61,7 @@ const program = @import("../process.zig").program;
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const decimal = @import("../text.zig").decimal;
+const abbrev = @import("../odb/abbrev.zig");
 const progress_mod = @import("../report.zig").progress;
 const server_info = @import("../maintenance/server_info.zig");
 const checkout = @import("../checkout/checkout.zig");
@@ -191,8 +192,18 @@ const Command = struct {
     /// `ok` it followed with options.
     reports: std.ArrayList(Report) = .empty,
 
+    /// Left out of the ref updates and the `proc-receive` hook while it
+    /// stands: a symbolic ref whose target another command updates,
+    /// git's `skip_update`.
+    skip_update: bool = false,
+
     fn standing(c: *const Command) bool {
         return c.error_string == null;
+    }
+
+    /// git's `should_process_cmd`.
+    fn processed(c: *const Command) bool {
+        return c.standing() and !c.skip_update;
     }
 };
 
@@ -329,7 +340,12 @@ pub const Server = struct {
             const oid = switch (entry.target) {
                 .direct => |oid| oid,
                 .symbolic => blk: {
-                    const resolved = (try s.remote.repo.refStore().resolve(s.gpa, s.io, entry.name)) orelse continue;
+                    // A dangling or circular one is left out, as git
+                    // leaves a broken ref out.
+                    const resolved = (s.remote.repo.refStore().resolve(s.gpa, s.io, entry.name) catch |err| switch (err) {
+                        error.SymbolicRefLoop => continue,
+                        else => |e| return e,
+                    }) orelse continue;
                     defer s.gpa.free(resolved.name);
                     break :blk resolved.oid;
                 },
@@ -849,6 +865,7 @@ pub const Server = struct {
             if (received.*) |*r| r.migrated = true;
         }
 
+        try s.checkAliasedUpdates(arena, commands);
         const head = try s.remote.repo.refStore().currentBranch(arena, s.io);
         const head_ref: ?[]const u8 = if (head) |h| try arena.print("refs/heads/{s}", .{h}) else null;
         if (any_proc_receive and !try s.runProcReceive(arena, commands, push_options)) {
@@ -914,7 +931,7 @@ pub const Server = struct {
             if (s.runner) |*r| tx.hooks = r;
             var any = false;
             for (commands) |*cmd| {
-                if (!cmd.standing() or cmd.proc_receive or cmd.new.isZero() != deletions) continue;
+                if (!cmd.processed() or cmd.proc_receive or cmd.new.isZero() != deletions) continue;
                 any = true;
                 cmd.error_string = try s.update(arena, cmd, &tx, head_ref);
             }
@@ -945,7 +962,7 @@ pub const Server = struct {
         if (s.runner) |*r| tx.hooks = r;
         var reported: []const u8 = "atomic push failure";
         const failed = for (commands) |*cmd| {
-            if (!cmd.standing() or cmd.proc_receive) continue;
+            if (!cmd.processed() or cmd.proc_receive) continue;
             cmd.error_string = try s.update(arena, cmd, &tx, head_ref);
             if (!cmd.standing()) break true;
         } else blk: {
@@ -1167,7 +1184,7 @@ pub const Server = struct {
 
         const sent = send: {
             for (commands) |cmd| {
-                if (!cmd.proc_receive or !cmd.standing()) continue;
+                if (!cmd.proc_receive or !cmd.processed()) continue;
                 pkt_line.print("{f} {f} {s}", .{ cmd.old, cmd.new, cmd.name }, w) catch break :send false;
             }
             pkt_line.flush(w) catch break :send false;
@@ -1351,6 +1368,66 @@ pub const Server = struct {
 
     /// Whether `name` is the branch a working tree of this repository has
     /// checked out: git's `find_shared_symref` over its worktrees.
+    /// git's `check_aliased_updates`: a command on a symbolic ref whose
+    /// target another command updates is left to that one when the two
+    /// agree, and both are refused when they do not; a symbolic ref that
+    /// leads nowhere a ref can be is refused.
+    fn checkAliasedUpdates(s: *Server, arena: Allocator, commands: []Command) Self.Error!void {
+        for (commands) |*cmd| {
+            if (!cmd.standing()) continue;
+            const target = switch (try s.aliasOf(arena, cmd.name)) {
+                .direct => continue,
+                .broken => {
+                    try s.rpError("refusing update to broken symref '{s}'", .{cmd.name});
+                    cmd.skip_update = true;
+                    cmd.error_string = "broken symref";
+                    continue;
+                },
+                .target => |name| name,
+            };
+            const at = findCommand(commands, 0, target) orelse continue;
+            const dst = &commands[at];
+            cmd.skip_update = true;
+            if (cmd.old.eql(dst.old) and cmd.new.eql(dst.new)) continue;
+            dst.skip_update = true;
+            const len = abbrev.defaultLength(s.remote.repo.configuration(), s.db());
+            var bufs: [4][hash.max_hex_len]u8 = undefined;
+            try s.rpError("refusing inconsistent update between symref '{s}' ({s}..{s}) and its target '{s}' ({s}..{s})", .{
+                cmd.name,
+                try abbrev.unique(s.io, s.db(), cmd.old, len, &bufs[0]),
+                try abbrev.unique(s.io, s.db(), cmd.new, len, &bufs[1]),
+                dst.name,
+                try abbrev.unique(s.io, s.db(), dst.old, len, &bufs[2]),
+                try abbrev.unique(s.io, s.db(), dst.new, len, &bufs[3]),
+            });
+            cmd.error_string = "inconsistent aliased update";
+            dst.error_string = "inconsistent aliased update";
+        }
+    }
+
+    const Alias = union(enum) { direct, broken, target: []const u8 };
+
+    /// What `name` is as git's `refs_resolve_ref_unsafe` reads it without
+    /// asking the ref to be there: not symbolic, the name at the end of its
+    /// chain of symbolic refs (which need not exist), or broken -- deeper
+    /// than git's five, or naming what no ref can be.
+    fn aliasOf(s: *Server, arena: Allocator, name: []const u8) Self.Error!Alias {
+        var current = name;
+        for (0..5) |depth| {
+            const found = try s.remote.repo.refStore().read(s.gpa, s.io, current) orelse
+                return if (depth == 0) .direct else .{ .target = current };
+            switch (found) {
+                .direct => return if (depth == 0) .direct else .{ .target = current },
+                .symbolic => |next| {
+                    defer s.gpa.free(next);
+                    if (!ref_names.checkFormat(next, .{ .allow_onelevel = true })) return .broken;
+                    current = try arena.dupe(u8, next);
+                },
+            }
+        }
+        return .broken;
+    }
+
     /// A working tree with a branch checked out: its path and its git
     /// directory, absolute, and whether it is a linked one.
     const CheckedOut = struct { path: []const u8, git_dir: []const u8, linked: bool };

@@ -119,9 +119,14 @@ pub const Remote = struct {
 
         if (matches("HEAD", prefixes) and (include_hidden or !r.isHidden("HEAD"))) {
             if (try r.repo.refStore().read(gpa, io, "HEAD")) |head| switch (head) {
-                .symbolic => |target| {
+                .symbolic => |target| broken: {
                     defer gpa.free(target);
-                    const resolved = try r.repo.refStore().resolve(gpa, io, "HEAD");
+                    // A `HEAD` that goes round in a circle is broken, and
+                    // left out as git leaves a broken ref out.
+                    const resolved = r.repo.refStore().resolve(gpa, io, "HEAD") catch |err| switch (err) {
+                        error.SymbolicRefLoop => break :broken,
+                        else => |e| return e,
+                    };
                     if (resolved) |res| {
                         defer gpa.free(res.name);
                         try out.append(arena, .{
@@ -151,7 +156,12 @@ pub const Remote = struct {
             switch (entry.target) {
                 .direct => |oid| ref.oid = oid,
                 .symbolic => |target| {
-                    const resolved = (try r.repo.refStore().resolve(gpa, io, entry.name)) orelse continue;
+                    // A dangling or circular one is left out, as git
+                    // leaves a broken ref out.
+                    const resolved = (r.repo.refStore().resolve(gpa, io, entry.name) catch |err| switch (err) {
+                        error.SymbolicRefLoop => continue,
+                        else => |e| return e,
+                    }) orelse continue;
                     defer gpa.free(resolved.name);
                     ref.oid = resolved.oid;
                     ref.symref_target = try arena.dupe(u8, target);

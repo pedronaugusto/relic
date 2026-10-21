@@ -745,3 +745,34 @@ test "receive.updateServerInfo writes the dumb HTTP files after a push, as git's
     try testing.expectEqual(std.mem.count(u8, files[0][1], "P pack-"), std.mem.count(u8, files[1][1], "P pack-"));
     try testing.expect(std.mem.count(u8, files[1][1], "P pack-") >= 1);
 }
+
+test "a push updating a symbolic ref and its target is taken once, or refused when the two disagree, as git's check_aliased_updates decides" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{});
+    defer p.deinit();
+    try p.both(&.{ "main~2:refs/heads/main", "main~2:refs/heads/side" });
+    try p.gitBoth(&.{ "symbolic-ref", "refs/heads/alias", "refs/heads/main" });
+    // The same update through both names: once.
+    try p.both(&.{ "main~1:refs/heads/main", "main~1:refs/heads/alias" });
+    // Two updates that disagree: both refused, the rest taken.
+    try p.both(&.{ "main:refs/heads/main", "main~2:refs/heads/alias", "main:refs/heads/side" });
+    // The symbolic ref alone moves its target.
+    try p.both(&.{"main:refs/heads/alias"});
+    // A symbolic ref that leads round in a circle, which fsck would
+    // refuse: the two pushes alone are compared, and it goes after.
+    try p.gitBoth(&.{ "symbolic-ref", "refs/heads/loop-a", "refs/heads/loop-b" });
+    try p.gitBoth(&.{ "symbolic-ref", "refs/heads/loop-b", "refs/heads/loop-a" });
+    const args = [_][]const u8{ "main:refs/heads/loop-a", "main~1:refs/heads/side" };
+    const theirs = try p.push(p.theirs, false, &args);
+    defer gpa.free(theirs.report);
+    defer gpa.free(theirs.remote_lines);
+    const ours = try p.push(p.ours, true, &args);
+    defer gpa.free(ours.report);
+    defer gpa.free(ours.remote_lines);
+    try testing.expectEqualStrings(theirs.report, ours.report);
+    try testing.expectEqualStrings(theirs.remote_lines, ours.remote_lines);
+    try p.gitBoth(&.{ "update-ref", "--no-deref", "-d", "refs/heads/loop-a" });
+    try p.gitBoth(&.{ "update-ref", "--no-deref", "-d", "refs/heads/loop-b" });
+    try p.expectSame();
+}
