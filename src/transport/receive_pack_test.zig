@@ -25,6 +25,9 @@ const zero = "0000000000000000000000000000000000000000";
 /// directory, the quarantine and what it holds included, and say a word
 /// back to the pusher; `update` declines a branch named `declined…`, and
 /// `pre-receive` declines everything while `decline-pre-receive` exists.
+/// `update` for `refs/heads/meddle` moves refs behind the push's back,
+/// while `meddle` exists: `race` back one commit, `made` created, `gone`
+/// deleted. `reference-transaction` logs every state and line.
 const hook_scripts = [_][2][]const u8{
     .{
         "pre-receive",
@@ -46,6 +49,11 @@ const hook_scripts = [_][2][]const u8{
         \\#!/bin/sh
         \\echo "update $1 $2 $3" >>hook.log
         \\case "$1" in refs/heads/declined*) echo "hook says no to $1"; exit 1;; esac
+        \\if test "$1" = refs/heads/meddle && test -e meddle; then
+        \\  git update-ref refs/heads/race refs/heads/race~1
+        \\  git update-ref refs/heads/made refs/heads/main
+        \\  git update-ref -d refs/heads/gone
+        \\fi
         \\exit 0
         \\
     },
@@ -55,6 +63,13 @@ const hook_scripts = [_][2][]const u8{
         \\echo "post-receive options=$GIT_PUSH_OPTION_COUNT" >>hook.log
         \\while read old new ref; do echo "post-receive $old $new $ref" >>hook.log; done
         \\test -z "$GIT_QUARANTINE_PATH" || echo "post-receive quarantined" >>hook.log
+        \\
+    },
+    .{
+        "reference-transaction",
+        \\#!/bin/sh
+        \\echo "reference-transaction $1" >>hook.log
+        \\while read old new ref; do echo "  $old $new $ref" >>hook.log; done
         \\
     },
     .{
@@ -80,6 +95,10 @@ const Pair = struct {
     settings: []const []const u8 = &.{},
 
     fn init(gpa: Allocator, io: Io, bare: bool, settings: []const [2][]const u8) !Pair {
+        return initFormat(gpa, io, bare, "files", settings);
+    }
+
+    fn initFormat(gpa: Allocator, io: Io, bare: bool, ref_format: []const u8, settings: []const [2][]const u8) !Pair {
         if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hooks are shell scripts
         var p: Pair = .{ .gpa = gpa, .io = io, .root = testing.tmpDir(.{ .iterate = true }), .env = undefined, .source = undefined, .theirs = &.{}, .ours = &.{}, .helper = &.{} };
         errdefer p.root.cleanup();
@@ -95,10 +114,12 @@ const Pair = struct {
         p.ours = try gpa.print("{s}/ours", .{root_path});
         p.helper = try gpa.dupe(u8, suite.path(.receive_pack_helper));
         for ([_][]const u8{ p.theirs, p.ours }) |target| {
+            const format_arg = try gpa.print("--ref-format={s}", .{ref_format});
+            defer gpa.free(format_arg);
             if (bare) {
-                try p.git(p.root.dir, &.{ "init", "-q", "--bare", "-b", "main", target });
+                try p.git(p.root.dir, &.{ "init", "-q", "--bare", "-b", "main", format_arg, target });
             } else {
-                try p.git(p.root.dir, &.{ "init", "-q", "-b", "main", target });
+                try p.git(p.root.dir, &.{ "init", "-q", "-b", "main", format_arg, target });
             }
             var dir = try Io.Dir.cwd().openDir(io, target, .{});
             defer dir.close(io);
@@ -159,7 +180,7 @@ const Pair = struct {
         errdefer remote.deinit(p.gpa);
         var err_lines = std.mem.tokenizeScalar(u8, outcome.stderr, '\n');
         while (err_lines.next()) |line| {
-            if (std.mem.startsWith(u8, line, "remote: hook says")) try remote.print(p.gpa, "{s}\n", .{std.mem.trimEnd(u8, line, " \r")});
+            if (std.mem.startsWith(u8, line, "remote: hook says") or std.mem.startsWith(u8, line, "remote: error:")) try remote.print(p.gpa, "{s}\n", .{std.mem.trimEnd(u8, line, " \r")});
         }
         return .{ .ok = outcome.succeeded(), .report = try report.toOwnedSlice(p.gpa), .remote_lines = try remote.toOwnedSlice(p.gpa) };
     }
@@ -210,6 +231,15 @@ const Pair = struct {
         var ours = try Io.Dir.cwd().openDir(p.io, p.ours, .{});
         defer ours.close(p.io);
         try p.git(ours, &.{ "fsck", "--strict", "--no-dangling" });
+    }
+
+    /// The same git command in both repositories.
+    fn gitBoth(p: *Pair, args: []const []const u8) !void {
+        for ([_][]const u8{ p.theirs, p.ours }) |target| {
+            var dir = try Io.Dir.cwd().openDir(p.io, target, .{});
+            defer dir.close(p.io);
+            try p.git(dir, args);
+        }
     }
 
     fn markBoth(p: *Pair, name: []const u8, present: bool, bare: bool) !void {
@@ -312,4 +342,29 @@ test "relic pushes to a repository on this machine through its receive-pack, hoo
     try testing.expectEqual(push_mod.RefResult.Status.rejected_by_remote, outcome.refs[1].status);
     try testing.expectEqualStrings("hook declined", outcome.refs[1].message.?);
     try p.expectSame();
+}
+
+test "a push's refs go in two transactions that refuse a ref alone, as git 2.55 batches them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    for ([_][]const u8{ "files", "reftable" }) |format| {
+        var p = try Pair.initFormat(gpa, io, true, format, &.{});
+        defer p.deinit();
+        try p.both(&.{ "main:refs/heads/main", "main~1:refs/heads/x", "main~1:refs/heads/race", "main:refs/heads/gone", "main:refs/heads/lp", "main:refs/heads/pp", "main:refs/heads/lc/d", "main:refs/heads/pc/d", "main:refs/heads/g1", "main:refs/heads/g2" });
+        // Some in packed-refs, some loose, which the files backend checks
+        // apart.
+        try p.gitBoth(&.{ "pack-refs", "--include", "refs/heads/p*" });
+        // Names in conflict with refs there, loose and packed, above and
+        // below, and with each other, in both orders, beside refs that go
+        // ahead; the deletion first, so a directory can take its place.
+        try p.both(&.{ "main~1:refs/heads/main/sub", "main~2:refs/heads/ok", "main:refs/heads/n", "main:refs/heads/n/m", ":refs/heads/x", "main:refs/heads/x/y", "main:refs/heads/lp/x", "main:refs/heads/pp/x", "main:refs/heads/lc", "main:refs/heads/pc", "main:refs/heads/z/a", "main:refs/heads/z", "main:refs/heads/z/b" });
+        // Refs moved behind the push's back by a hook: an old value gone,
+        // a ref made that the push creates, and, in the deletions' own
+        // transaction, one deleted that the push deletes.
+        try p.markBoth("meddle", true, true);
+        try p.both(&.{ "main:refs/heads/race", "main:refs/heads/made", "main~2:refs/heads/meddle", "main:refs/heads/after" });
+        try p.gitBoth(&.{ "update-ref", "refs/heads/gone", "main" });
+        try p.both(&.{ ":refs/heads/meddle", ":refs/heads/gone" });
+        try p.markBoth("meddle", false, true);
+    }
 }

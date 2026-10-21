@@ -248,7 +248,136 @@ pub const Edit = struct {
     via: ?usize = null,
     /// This edit's own log text, owned: `EditOptions.message`.
     message: ?[]const u8 = null,
+    /// Set by `prepare` on the ref at the end of a symbolic chain: the
+    /// edit it was split from, whose name git's messages give.
+    origin: ?usize = null,
+    /// Set by `prepare` when a transaction that allows failure refused
+    /// this edit: it is left out of the commit, and so is every ref
+    /// logged through it.
+    rejected: bool = false,
 };
+
+/// Why a transaction that allows failure refused one edit: git's
+/// `ref_transaction_error`, short of its generic one, which fails the
+/// whole transaction.
+pub const Rejection = enum {
+    name_conflict,
+    create_exists,
+    nonexistent_ref,
+    incorrect_old_value,
+
+    /// git's `ref_transaction_error_msg`, which a push reports.
+    pub fn message(r: Rejection) []const u8 {
+        return switch (r) {
+            .name_conflict => "refname conflict",
+            .create_exists => "reference already exists",
+            .nonexistent_ref => "reference does not exist",
+            .incorrect_old_value => "incorrect old value provided",
+        };
+    }
+
+    /// The error a transaction that does not allow failure gives up with.
+    pub fn err(r: Rejection) TransactionError {
+        return switch (r) {
+            .name_conflict => error.RefNameConflict,
+            .create_exists => error.RefAlreadyExists,
+            .nonexistent_ref => error.RefNotFound,
+            .incorrect_old_value => error.ExpectedValueMismatch,
+        };
+    }
+};
+
+/// An edit a transaction that allows failure refused.
+pub const Rejected = struct {
+    /// The edit's name, borrowed from the transaction.
+    name: []const u8,
+    reason: Rejection,
+    /// git's words for it, owned by the transaction.
+    detail: []const u8,
+};
+
+/// Refuse the edit at `index` of `tx` for `reason`, in git's words: with
+/// `allow_failure` it is recorded and left out, and without it the whole
+/// transaction fails with `reason`'s error, as git's
+/// `ref_transaction_maybe_set_rejected` decides. For each backend's
+/// `prepare`.
+pub fn reject(tx: anytype, index: usize, reason: Rejection, comptime format: []const u8, args: anytype) TransactionError!void {
+    if (!tx.allow_failure) return reason.err();
+    const detail = try tx.gpa.print(format, args);
+    errdefer tx.gpa.free(detail);
+    const edit = &tx.edits.items[index];
+    try tx.rejected.append(tx.gpa, .{ .name = edit.name, .reason = reason, .detail = detail });
+    edit.rejected = true;
+}
+
+/// The edit at `index` of `tx` held to the value it expected, the ref
+/// there now `exists` and resolving to `current`: whether it stands,
+/// refused in git's words when it does not (`check_old_oid`, and the
+/// missing ref of `lock_raw_ref`).
+pub fn checkExpected(tx: anytype, index: usize, exists: bool, current: ?Oid) TransactionError!bool {
+    const edit = tx.edits.items[index];
+    const name = originalName(tx, index);
+    switch (edit.expected) {
+        .any => return true,
+        .must_not_exist => if (exists) {
+            try reject(tx, index, .create_exists, "cannot lock ref '{s}': reference already exists", .{name});
+            return false;
+        },
+        .must_exist => if (!exists) {
+            try reject(tx, index, .nonexistent_ref, "cannot lock ref '{s}': unable to resolve reference '{s}'", .{ name, edit.name });
+            return false;
+        },
+        .matches => |want| {
+            if (!exists) {
+                try reject(tx, index, .nonexistent_ref, "cannot lock ref '{s}': unable to resolve reference '{s}'", .{ name, edit.name });
+                return false;
+            }
+            const have = current orelse {
+                try reject(tx, index, .nonexistent_ref, "cannot lock ref '{s}': reference is missing but expected {f}", .{ name, want });
+                return false;
+            };
+            if (!have.eql(want)) {
+                try reject(tx, index, .incorrect_old_value, "cannot lock ref '{s}': is at {f} but expected {f}", .{ name, have, want });
+                return false;
+            }
+        },
+    }
+    return true;
+}
+
+/// The name git's messages give the edit at `index`: the one it was split
+/// from, when it is the end of a symbolic chain.
+pub fn originalName(tx: anytype, index: usize) []const u8 {
+    var at = index;
+    while (tx.edits.items[at].origin) |from| at = from;
+    return tx.edits.items[at].name;
+}
+
+/// Whether `edit` changes nothing: refused, or only logged through a ref
+/// that was refused.
+pub fn leftOut(edits: []const Edit, edit: Edit) bool {
+    if (edit.rejected) return true;
+    const at = edit.via orelse return false;
+    return edits[at].rejected;
+}
+
+/// The other names a transaction writes that git's name check holds
+/// `index`'s against: every edit's own, short of those refused. The
+/// first one at `name` exactly, when `below` is false; the least one
+/// under `name/`, when it is true.
+pub fn otherEdit(tx: anytype, index: usize, name: []const u8, below: bool) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    for (tx.edits.items, 0..) |e, i| {
+        if (i == index or e.via != null or e.rejected) continue;
+        if (!below) {
+            if (std.mem.eql(u8, e.name, name)) return e.name;
+            continue;
+        }
+        if (e.name.len <= name.len or !std.mem.startsWith(u8, e.name, name) or e.name[name.len] != '/') continue;
+        if (best == null or std.mem.order(u8, e.name, best.?) == .lt) best = e.name;
+    }
+    return best;
+}
 
 /// All errors reported by this namespace.
 pub const Error = ReadError || TransactionError || CreateError;

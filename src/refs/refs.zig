@@ -76,6 +76,12 @@ pub const Resolved = @import("value.zig").Resolved;
 /// What an edit requires the ref's current value to be.
 pub const Expected = @import("value.zig").Expected;
 
+/// Why a transaction that allows failure refused one of its edits.
+pub const Rejection = value_mod.Rejection;
+
+/// An edit a transaction that allows failure refused.
+pub const Rejected = value_mod.Rejected;
+
 /// A ref's log, oldest first, as `Store.readLog` returns it.
 pub const Log = reflog.Log;
 
@@ -1434,6 +1440,13 @@ const config_mod = @import("../config/config.zig");
 /// taken, `prepared` once every lock is held and checked, then `committed`
 /// or `aborted`. A hook that fails in either of the first two refuses the
 /// transaction, which then rolls back as it would for a held lock.
+///
+/// With `allow_failure`, git's `REF_TRANSACTION_ALLOW_FAILURE`, an edit
+/// refused for what it asks -- its expected value not met, its name in
+/// conflict with a ref or with another edit -- is left out and listed in
+/// `rejected`, in git's words, and the rest go ahead; `reference-transaction`
+/// is still shown it, as git shows it. A failure that is not the edit's
+/// own (a lock held, a write failing) still fails them all.
 pub const Transaction = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -1465,6 +1478,12 @@ pub const Transaction = struct {
     /// Whether a deleted ref is in `packed-refs`, which is then rewritten
     /// without it.
     packed_rewrite: bool = false,
+    /// Refuse an edit alone for what it asks, rather than the whole
+    /// transaction: git's `REF_TRANSACTION_ALLOW_FAILURE`.
+    allow_failure: bool = false,
+    /// The edits `prepare` refused, in the order it refused them, when
+    /// `allow_failure` is set.
+    rejected: std.ArrayList(Rejected) = .empty,
 
     /// One ref's change.
     pub const Edit = value_mod.Edit;
@@ -1493,6 +1512,8 @@ pub const Transaction = struct {
             };
         }
         tx.edits.deinit(tx.gpa);
+        for (tx.rejected.items) |r| tx.gpa.free(r.detail);
+        tx.rejected.deinit(tx.gpa);
         tx.* = undefined;
     }
 
@@ -1564,21 +1585,13 @@ pub const Transaction = struct {
         try tx.lockAndCheck(io);
     }
 
-    /// `prepare` after the edits through symbolic refs are split: nested
-    /// names refused, every lock taken and every expected value checked.
+    /// `prepare` after the edits through symbolic refs are split: every
+    /// lock taken and every expected value checked, then every name, in
+    /// git's order -- what a lock meets on the disk, loose refs in the way
+    /// or another edit's directory, as each lock is taken, and `packed-refs`
+    /// and the other edits once all are held.
     fn lockAndCheck(tx: *Transaction, io: Io) TransactionError!void {
         errdefer tx.abort(io);
-        // Two edits whose names nest — `refs/heads/a` and `refs/heads/a/b` —
-        // cannot both exist, because one is a file and the other a directory
-        // with the same path.
-        for (tx.edits.items, 0..) |a, i| {
-            if (a.via != null) continue;
-            for (tx.edits.items[i + 1 ..]) |b| {
-                if (b.via != null) continue;
-                if (nests(a.name, b.name)) return error.RefNameConflict;
-            }
-        }
-
         if (tx.store.refFormat() == .reftable) {
             // One table under one lock: no `packed-refs` step to announce.
             try stack_engine.prepare(io, tx);
@@ -1588,9 +1601,26 @@ pub const Transaction = struct {
             return;
         }
 
-        for (tx.edits.items) |*edit| {
+        // The edits creating a ref, checked against `packed-refs` and the
+        // other edits once every lock is held: git's `refnames_to_check`.
+        var to_check: std.ArrayList(usize) = .empty;
+        defer to_check.deinit(tx.gpa);
+        for (tx.edits.items, 0..) |*edit, i| {
             const dir = tx.store.dirFor(edit.name);
-            if (edit.via == null and edit.new != null) try tx.checkAvailable(io, edit.name);
+            const own = edit.via == null;
+            if (own and edit.new != null) {
+                // A loose ref where a directory of this one would be, or
+                // a directory where this one would be that holds anything:
+                // git's `lock_raw_ref` failing to make the directory, or
+                // finding one in the ref's place.
+                const in_way = try looseParent(io, dir, edit.name) or try hasFileBelow(tx.gpa, io, dir, edit.name);
+                if (in_way) {
+                    const detail = try tx.conflict(io, i, .loose_and_packed) orelse return error.RefNameConflict;
+                    defer tx.gpa.free(detail);
+                    try value_mod.reject(tx, i, .name_conflict, "cannot lock ref '{s}': {s}", .{ value_mod.originalName(tx, i), detail });
+                    continue;
+                }
+            }
             if (std.Io.Dir.path.dirnamePosix(edit.name)) |parent| {
                 fs.makeDirs(io, dir, parent, tx.store.sharedPermissions()) catch |err| switch (err) {
                     error.PathAlreadyExists => {},
@@ -1604,7 +1634,7 @@ pub const Transaction = struct {
                 else => |e| return e,
             };
             // A ref only logged through is held, not checked.
-            if (edit.via != null) continue;
+            if (!own) continue;
 
             // Read without a check of the name, which a deletion need only
             // have safe.
@@ -1626,16 +1656,13 @@ pub const Transaction = struct {
                 }
             }
             edit.old = current_oid;
-
-            switch (edit.expected) {
-                .any => {},
-                .must_not_exist => if (current != null) return error.RefAlreadyExists,
-                .must_exist => if (current == null) return error.RefNotFound,
-                .matches => |want| {
-                    const have = current_oid orelse return error.ExpectedValueMismatch;
-                    if (!have.eql(want)) return error.ExpectedValueMismatch;
-                },
-            }
+            if (!try value_mod.checkExpected(tx, i, current != null, current_oid)) continue;
+            if (edit.new != null and current == null) try to_check.append(tx.gpa, i);
+        }
+        for (to_check.items) |i| {
+            const detail = try tx.conflict(io, i, .packed_only) orelse continue;
+            defer tx.gpa.free(detail);
+            try value_mod.reject(tx, i, .name_conflict, "{s}", .{detail});
         }
         try tx.checkSplitUnchanged(io);
         try tx.lockPackedForDeletions(io);
@@ -1702,7 +1729,7 @@ pub const Transaction = struct {
         tx.packed_lock = try tx.store.lockPacked(io, tx.packed_lock_buffer);
         tx.packed_listing = try tx.store.readPacked(tx.gpa, io);
         for (tx.edits.items) |*edit| {
-            if (edit.via != null or edit.new != null) continue;
+            if (edit.via != null or edit.new != null or edit.rejected) continue;
             edit.was_packed = tx.packed_listing.?.find(edit.name) != null;
             tx.packed_rewrite = tx.packed_rewrite or edit.was_packed;
         }
@@ -1723,35 +1750,54 @@ pub const Transaction = struct {
         }
     }
 
-    /// git's `refs_verify_refname_available`: `name` cannot be written
-    /// while a ref exists at one of its parents (`refs/heads/a` for
-    /// `refs/heads/a/b`) or below it (`refs/heads/c/d` for
-    /// `refs/heads/c`), loose or packed. A ref this transaction also names
-    /// is no exception: `prepare` has refused the pair already, as git
-    /// refuses to process both at once.
-    fn checkAvailable(tx: *Transaction, io: Io, name: []const u8) TransactionError!void {
+    /// Which refs `conflict` holds an edit's name against.
+    const Existing = enum { loose_and_packed, packed_only };
+
+    /// git's `refs_verify_refname_available` for the edit at `index`: its
+    /// name cannot be written while a ref exists at one of its parents
+    /// (`refs/heads/a` for `refs/heads/a/b`) or below it (`refs/heads/c/d`
+    /// for `refs/heads/c`), or while another edit of this transaction,
+    /// short of those refused, is to write one there. git's words for the
+    /// first conflict found, owned, or `null` when there is none.
+    fn conflict(tx: *Transaction, io: Io, index: usize, existing: Existing) TransactionError!?[]u8 {
+        const name = tx.edits.items[index].name;
         const dir = tx.store.dirFor(name);
-        var parent = std.Io.Dir.path.dirnamePosix(name);
-        while (parent) |p| : (parent = std.Io.Dir.path.dirnamePosix(p)) {
-            if (std.mem.findScalar(u8, p, '/') == null) break;
-            if (try isLooseFile(io, dir, p)) return error.RefNameConflict;
-            if (try tx.store.readPackedOne(io, p) != null) return error.RefNameConflict;
+        var end: usize = 0;
+        while (std.mem.findScalarPos(u8, name, end + 1, '/')) |slash| : (end = slash) {
+            const parent = name[0..slash];
+            if (std.mem.findScalar(u8, parent, '/') == null) continue;
+            const found = switch (existing) {
+                .loose_and_packed => try isLooseFile(io, dir, parent),
+                .packed_only => false,
+            } or try tx.store.readPackedOne(io, parent) != null;
+            if (found) return try tx.gpa.print("'{s}' exists; cannot create '{s}'", .{ parent, name });
+            if (value_mod.otherEdit(tx, index, parent, false)) |other| return try tx.gpa.print("cannot process '{s}' and '{s}' at the same time", .{ name, other });
         }
-        if (try hasLooseBelow(tx.gpa, io, dir, name)) return error.RefNameConflict;
-        const listing = try tx.store.acquirePacked(io);
-        defer tx.store.releasePacked(io);
-        var folder_buf: [max_loose_ref + 1]u8 = undefined;
-        if (name.len + 1 > folder_buf.len) return;
-        @memcpy(folder_buf[0..name.len], name);
-        folder_buf[name.len] = '/';
-        const folder = folder_buf[0 .. name.len + 1];
-        const from = std.sort.lowerBound(Store.PackedEntry, listing.entries, folder, Store.orderPrefix);
-        if (from < listing.entries.len and std.mem.startsWith(u8, listing.entries[from].name, folder)) return error.RefNameConflict;
+        const folder = try tx.gpa.print("{s}/", .{name});
+        defer tx.gpa.free(folder);
+        switch (existing) {
+            .loose_and_packed => {
+                var listing = try tx.store.list(tx.gpa, io, folder);
+                defer listing.deinit();
+                var first: ?[]const u8 = if (listing.entries.len != 0) listing.entries[0].name else null;
+                if (listing.broken.len != 0 and (first == null or std.mem.order(u8, listing.broken[0].name, first.?) == .lt)) first = listing.broken[0].name;
+                if (first) |found| return try tx.gpa.print("'{s}' exists; cannot create '{s}'", .{ found, name });
+            },
+            .packed_only => {
+                const listing = try tx.store.acquirePacked(io);
+                defer tx.store.releasePacked(io);
+                const from = std.sort.lowerBound(Store.PackedEntry, listing.entries, folder, Store.orderPrefix);
+                if (from < listing.entries.len and std.mem.startsWith(u8, listing.entries[from].name, folder))
+                    return try tx.gpa.print("'{s}' exists; cannot create '{s}'", .{ listing.entries[from].name, name });
+            },
+        }
+        if (value_mod.otherEdit(tx, index, name, true)) |other| return try tx.gpa.print("cannot process '{s}' and '{s}' at the same time", .{ name, other });
+        return null;
     }
 
     fn hasDeletions(tx: *const Transaction) bool {
         for (tx.edits.items) |e| {
-            if (e.via == null and e.new == null) return true;
+            if (e.via == null and e.new == null and !e.rejected) return true;
         }
         return false;
     }
@@ -1800,6 +1846,7 @@ pub const Transaction = struct {
                 .name = try tx.gpa.dupe(u8, final),
                 .new = e.new,
                 .expected = e.expected,
+                .origin = i,
             });
             tx.edits.items[i].via = target_at;
             tx.edits.items[i].expected = .any;
@@ -1857,7 +1904,7 @@ pub const Transaction = struct {
             // leaves it off the hook's lines.
             if (edit.via != null) continue;
             if (packed_step) {
-                if (edit.new == null) try lines.append(tx.gpa, .{ .old = null, .new = null, .name = edit.name });
+                if (edit.new == null and !edit.rejected) try lines.append(tx.gpa, .{ .old = null, .new = null, .name = edit.name });
                 continue;
             }
             try lines.append(tx.gpa, .{
@@ -1904,7 +1951,7 @@ pub const Transaction = struct {
         var hex: [hash.max_hex_len]u8 = undefined;
         for (tx.edits.items) |*edit| {
             // Its lock is given up with the rest, the file as it was.
-            if (edit.via != null) continue;
+            if (edit.via != null or edit.rejected) continue;
             const new = edit.new orelse continue;
             const lock = &edit.lock.?;
             switch (new) {
@@ -1918,7 +1965,7 @@ pub const Transaction = struct {
             try lock.commit(io);
         }
         for (tx.edits.items) |edit| {
-            if (edit.via != null or edit.new != null) continue;
+            if (edit.via != null or edit.new != null or edit.rejected) continue;
             try reflog.delete(tx.gpa, io, tx.store.dirFor(edit.name), edit.name);
         }
         if (tx.packed_rewrite) try tx.removeFromPacked(io);
@@ -1928,7 +1975,7 @@ pub const Transaction = struct {
             tx.announceAs(io, .committed, true) catch {};
         }
         for (tx.edits.items) |edit| {
-            if (edit.via != null or edit.new != null) continue;
+            if (edit.via != null or edit.new != null or edit.rejected) continue;
             tx.store.dirFor(edit.name).deleteFile(io, edit.name) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
@@ -1939,6 +1986,7 @@ pub const Transaction = struct {
             const shared = try reflog.normalizeMessage(tx.gpa, message.message);
             defer tx.gpa.free(shared);
             for (tx.edits.items) |edit| {
+                if (value_mod.leftOut(tx.edits.items, edit)) continue;
                 // A deleted ref's log went with it.
                 if (edit.via == null and edit.new == null) continue;
                 // A ref logged through records what the ref at the end of it
@@ -1971,7 +2019,7 @@ pub const Transaction = struct {
         // With the locks gone, the directories the deletions emptied go,
         // as git's cleanup removes them.
         for (tx.edits.items) |edit| {
-            if (edit.via != null or edit.new != null) continue;
+            if (edit.via != null or edit.new != null or edit.rejected) continue;
             const dir = tx.store.dirFor(edit.name);
             removeEmptyParents(io, dir, edit.name);
             const log_path = try reflog.pathFor(tx.gpa, edit.name);
@@ -1991,7 +2039,7 @@ pub const Transaction = struct {
         var deleted: std.ArrayList([]const u8) = .empty;
         defer deleted.deinit(tx.gpa);
         for (tx.edits.items) |e| {
-            if (e.via == null and e.new == null) try deleted.append(tx.gpa, e.name);
+            if (e.via == null and e.new == null and !e.rejected) try deleted.append(tx.gpa, e.name);
         }
         std.mem.sort([]const u8, deleted.items, {}, lessThanName);
         var kept: std.ArrayList(Store.PackedEntry) = .empty;
@@ -2055,9 +2103,21 @@ fn isLooseFile(io: Io, dir: Io.Dir, path: []const u8) TransactionError!bool {
     return stat.kind != .directory;
 }
 
-/// Whether a file other than a lock is anywhere under the directory `name`
-/// in `dir`: a loose ref that `name` cannot be written over.
-fn hasLooseBelow(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) TransactionError!bool {
+/// Whether a loose ref is where a directory of `name`'s would be: a file
+/// at one of its parents.
+fn looseParent(io: Io, dir: Io.Dir, name: []const u8) TransactionError!bool {
+    var parent = std.Io.Dir.path.dirnamePosix(name);
+    while (parent) |p| : (parent = std.Io.Dir.path.dirnamePosix(p)) {
+        if (std.mem.findScalar(u8, p, '/') == null) break;
+        if (try isLooseFile(io, dir, p)) return true;
+    }
+    return false;
+}
+
+/// Whether any file, a lock included, is anywhere under the directory
+/// `name` in `dir`: a directory git's `lock_raw_ref` cannot clear away for
+/// the ref.
+fn hasFileBelow(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) TransactionError!bool {
     var sub = dir.openDir(io, name, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
         else => |e| return e,
@@ -2066,8 +2126,7 @@ fn hasLooseBelow(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) Transact
     var walker = try sub.walk(gpa);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
-        if (entry.kind == .directory or std.mem.endsWith(u8, entry.basename, ".lock")) continue;
-        return true;
+        if (entry.kind != .directory) return true;
     }
     return false;
 }
@@ -2082,13 +2141,6 @@ fn removeEmptyParents(io: Io, dir: Io.Dir, path: []const u8) void {
         dir.deleteDir(io, parent) catch return;
         current = parent;
     }
-}
-
-fn nests(a: []const u8, b: []const u8) bool {
-    if (a.len == b.len) return false;
-    const shorter = if (a.len < b.len) a else b;
-    const longer = if (a.len < b.len) b else a;
-    return std.mem.startsWith(u8, longer, shorter) and longer[shorter.len] == '/';
 }
 
 test "a loose ref is written, read and resolved" {

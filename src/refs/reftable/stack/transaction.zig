@@ -147,7 +147,7 @@ fn resolveIn(gpa: Allocator, stacks: *const Stacks, name: []const u8, pending: a
         const maybe: Maybe = pending;
         if (maybe) |tx| {
             for (tx.edits.items) |edit| {
-                if (!std.mem.eql(u8, edit.name, current)) continue;
+                if (edit.rejected or !std.mem.eql(u8, edit.name, current)) continue;
                 overridden = true;
                 value = edit.new;
             }
@@ -427,7 +427,11 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     var stacks = try cache.internal.open(gpa, io, store);
     errdefer cache.internal.deinit(&stacks);
 
-    for (tx.edits.items) |*edit| {
+    // The edits creating a ref, whose names are checked once every
+    // expected value is: git's `refnames_to_check`.
+    var to_check: std.ArrayList(usize) = .empty;
+    defer to_check.deinit(gpa);
+    for (tx.edits.items, 0..) |*edit, i| {
         // A ref only logged through is neither read nor checked.
         if (edit.via != null) continue;
         const current = try readIn(gpa, &stacks, edit.name);
@@ -440,17 +444,10 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
             },
         };
         edit.old = current_oid;
-        switch (edit.expected) {
-            .any => {},
-            .must_not_exist => if (current != null) return error.RefAlreadyExists,
-            .must_exist => if (current == null) return error.RefNotFound,
-            .matches => |want| {
-                const have = current_oid orelse return error.ExpectedValueMismatch;
-                if (!have.eql(want)) return error.ExpectedValueMismatch;
-            },
-        }
+        if (!try refs.checkExpected(tx, i, current != null, current_oid)) continue;
+        if (edit.new != null and current == null) try to_check.append(gpa, i);
     }
-    try checkNames(tx, &stacks);
+    try checkNames(tx, &stacks, to_check.items);
 
     const pending = try gpa.create(Pending);
     pending.* = .{ .main = main, .worktree = worktree, .stacks = stacks };
@@ -458,36 +455,45 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
 }
 
 /// A name and a directory of names cannot both exist: `refs/heads/a` and
-/// `refs/heads/a/b`. git checks that against the refs already there, and
-/// so does this, leaving out the ones the transaction deletes.
-fn checkNames(tx: anytype, stacks: *const Stacks) refs.TransactionError!void {
+/// `refs/heads/a/b`. git checks each ref an edit creates, in the edits'
+/// order, against the refs already there -- leaving out, here, the ones
+/// the transaction deletes -- and against the other edits not refused,
+/// refusing the edit as `refs_verify_refnames_available` does.
+fn checkNames(tx: anytype, stacks: *const Stacks, to_check: []const usize) refs.TransactionError!void {
     const gpa = tx.gpa;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    for (tx.edits.items) |edit| {
-        if (edit.new == null or edit.via != null) continue;
-        const stack = cache.internal.forName(stacks, edit.name);
+    next: for (to_check) |i| {
+        const name = tx.edits.items[i].name;
+        const stack = cache.internal.forName(stacks, name);
         // A ref where a directory of this one would be.
-        var end = edit.name.len;
-        while (std.mem.findScalarLast(u8, edit.name[0..end], '/')) |slash| {
-            end = slash;
-            const ancestor = edit.name[0..end];
-            if (deletedHere(tx, ancestor)) continue;
-            const record = (try stack.lookup(gpa, ancestor, .{ .out = arena })) orelse continue;
-            if (record.value != .deletion) return error.RefNameConflict;
+        var end: usize = 0;
+        while (std.mem.findScalarPos(u8, name, end + 1, '/')) |slash| : (end = slash) {
+            const parent = name[0..slash];
+            if (!deletedHere(tx, parent)) if (try stack.lookup(gpa, parent, .{ .out = arena })) |record| if (record.value != .deletion) {
+                try refs.reject(tx, i, .name_conflict, "'{s}' exists; cannot create '{s}'", .{ parent, name });
+                continue :next;
+            };
+            if (refs.otherEdit(tx, i, parent, false)) |other| {
+                try refs.reject(tx, i, .name_conflict, "cannot process '{s}' and '{s}' at the same time", .{ name, other });
+                continue :next;
+            }
         }
         // Refs where this one's directory would be.
-        const below = try arena.print("{s}/", .{edit.name});
+        const below = try arena.print("{s}/", .{name});
         for (try stack.refsWithPrefix(gpa, below, .{ .arena = arena, .include_deletions = false })) |record| {
-            if (!deletedHere(tx, record.name)) return error.RefNameConflict;
+            if (deletedHere(tx, record.name)) continue;
+            try refs.reject(tx, i, .name_conflict, "'{s}' exists; cannot create '{s}'", .{ record.name, name });
+            continue :next;
         }
+        if (refs.otherEdit(tx, i, name, true)) |other| try refs.reject(tx, i, .name_conflict, "cannot process '{s}' and '{s}' at the same time", .{ name, other });
     }
 }
 
 fn deletedHere(tx: anytype, name: []const u8) bool {
     for (tx.edits.items) |edit| {
-        if (edit.via == null and edit.new == null and std.mem.eql(u8, edit.name, name)) return true;
+        if (edit.via == null and edit.new == null and !edit.rejected and std.mem.eql(u8, edit.name, name)) return true;
     }
     return false;
 }
@@ -777,6 +783,7 @@ fn addTable(
         break :blk try logMessage(arena, normal, store.reftableOptions().write.block_size);
     } else null;
     for (tx.edits.items) |edit| {
+        if (refs.leftOut(tx.edits.items, edit)) continue;
         if (isLinked(store) and ref_names.isCurrentWorktree(edit.name) != worktree_stack) continue;
         // A ref an update went through, or `HEAD` when the branch it names
         // moved, keeps its value and gains the log line: git's

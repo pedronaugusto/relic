@@ -432,3 +432,53 @@ test "an edit to a symbolic value releases its target when the transaction canno
         try std.testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{});
     }
 }
+
+test "a transaction that allows failure refuses an edit alone, in git's words, and writes the rest" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var r = try twoCommits(gpa, io, format);
+            defer r.deinit();
+            const tip = try oidOf(gpa, io, &r, "main");
+            const side = try oidOf(gpa, io, &r, "side");
+            var repo = try Repository.open(gpa, io, r.dir, .{});
+            defer repo.deinit(io);
+
+            var tx = repo.beginRefs();
+            defer tx.deinit(io);
+            tx.allow_failure = true;
+            try tx.create("refs/heads/side", .{ .direct = tip });
+            try tx.update("refs/heads/main", .{ .direct = side }, .{ .matches = side });
+            try tx.create("refs/heads/main/below", .{ .direct = tip });
+            try tx.create("refs/heads/fresh", .{ .direct = tip });
+            try tx.delete("refs/heads/never", .{ .matches = tip });
+            try tx.commit(io, .{ .who = who, .message = "batch", .policy = repo.reflogPolicy() });
+
+            var seen: std.ArrayList(u8) = .empty;
+            defer seen.deinit(gpa);
+            for (tx.rejected.items) |rejected| try seen.print(gpa, "{s} ({s}): {s}\n", .{ rejected.name, rejected.reason.message(), rejected.detail });
+            const main_detail = try gpa.print("cannot lock ref 'refs/heads/main': is at {f} but expected {f}", .{ tip, side });
+            defer gpa.free(main_detail);
+            const below = switch (format) {
+                .files => "cannot lock ref 'refs/heads/main/below': 'refs/heads/main' exists; cannot create 'refs/heads/main/below'",
+                .reftable => "'refs/heads/main' exists; cannot create 'refs/heads/main/below'",
+            };
+            // The order git refuses them in: each edit as it is locked, the
+            // names that conflict once all are; the files backend meets a
+            // loose ref in the way as it locks.
+            const expected = switch (format) {
+                .files => try gpa.print("refs/heads/side (reference already exists): cannot lock ref 'refs/heads/side': reference already exists\nrefs/heads/main (incorrect old value provided): {s}\nrefs/heads/main/below (refname conflict): {s}\nrefs/heads/never (reference does not exist): cannot lock ref 'refs/heads/never': unable to resolve reference 'refs/heads/never'\n", .{ main_detail, below }),
+                .reftable => try gpa.print("refs/heads/side (reference already exists): cannot lock ref 'refs/heads/side': reference already exists\nrefs/heads/main (incorrect old value provided): {s}\nrefs/heads/never (reference does not exist): cannot lock ref 'refs/heads/never': unable to resolve reference 'refs/heads/never'\nrefs/heads/main/below (refname conflict): {s}\n", .{ main_detail, below }),
+            };
+            defer gpa.free(expected);
+            try std.testing.expectEqualStrings(expected, seen.items);
+            // What was refused is as it was; the rest went ahead.
+            try std.testing.expect((try oidOf(gpa, io, &r, "main")).eql(tip));
+            try std.testing.expect((try oidOf(gpa, io, &r, "side")).eql(side));
+            try std.testing.expect((try oidOf(gpa, io, &r, "fresh")).eql(tip));
+            try std.testing.expect(!try gitHas(io, &r, "refs/heads/main/below"));
+            try r.exec(io, &.{ "fsck", "--no-dangling" });
+        }
+    }.inFormat);
+}

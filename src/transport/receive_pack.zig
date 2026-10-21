@@ -135,6 +135,9 @@ const Command = struct {
     error_string: ?[]const u8 = null,
     /// A deletion of a ref that was not there.
     did_not_exist: bool = false,
+    /// Under a `receive.procReceiveRefs` prefix: the `proc-receive` hook's
+    /// to update, not the ref transaction's.
+    proc_receive: bool = false,
 
     fn standing(c: *const Command) bool {
         return c.error_string == null;
@@ -322,10 +325,18 @@ pub const Server = struct {
         defer if (received) |*r| r.deinit(s.io);
         if (!deleteOnly(commands)) {
             q = try Quarantine.begin(s.gpa, s.io, s.db());
-            received = s.unpack(in, &q.?) catch |err| switch (err) {
+            var diagnostic: index_pack.Diagnostic = .{};
+            received = s.unpack(in, &q.?, &diagnostic) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
                 else => blk: {
+                    // What git's fsck found, as its unpacker says it.
+                    if (diagnostic.problem) |problem| if (diagnostic.oid) |oid| {
+                        const finding: fsck.Finding = .{ .oid = oid, .problem = problem, .level = .@"error" };
+                        const text = try finding.message(arena);
+                        try s.rpErrorPlain("object {f}: {s}", .{ oid, text });
+                        try s.rpLine("fatal: fsck error in packed object", .{});
+                    };
                     unpack_status = "index-pack abnormal exit";
                     break :blk null;
                 },
@@ -416,7 +427,7 @@ pub const Server = struct {
 
     /// git's `unpack`: the pack indexed into the quarantine and checked by
     /// `receive.fsckObjects`'s rules.
-    fn unpack(s: *Server, in: *Io.Reader, q: *Quarantine) !Received {
+    fn unpack(s: *Server, in: *Io.Reader, q: *Quarantine, diagnostic: *index_pack.Diagnostic) !Received {
         const config = s.remote.repo.configuration();
         var rules = try fsck.forTransfer(s.gpa, s.io, config, .{ .kind = s.kind(), .scope = .receive, .base = s.remote.repo.gitDirectory() }, .{});
         defer if (rules) |*r| r.deinit(s.gpa);
@@ -431,6 +442,7 @@ pub const Server = struct {
             .reverse_index = rev_index.wanted(config),
             .links = &received.links,
             .threads = index_pack.configuredThreads(config),
+            .diagnostic = diagnostic,
         });
         errdefer received.result.deinit(s.io);
         if (received.result.name) |name| {
@@ -489,11 +501,14 @@ pub const Server = struct {
             if (!cmd.standing() or !s.remote.isHidden(cmd.name)) continue;
             cmd.error_string = if (cmd.new.isZero()) "deny deleting a hidden ref" else "deny updating a hidden ref";
         }
-        // `receive.procReceiveRefs` hands its refs to a `proc-receive` hook,
-        // which relic does not run: they fail as git fails them with no
-        // hook to run.
+        // `receive.procReceiveRefs` hands its refs to the `proc-receive`
+        // hook once `pre-receive` has seen them.
+        var any_proc_receive = false;
         for (commands) |*cmd| {
-            if (cmd.standing() and s.procReceiveRef(cmd.name)) cmd.error_string = "fail to run proc-receive hook";
+            if (cmd.standing() and s.procReceiveRef(cmd.name)) {
+                cmd.proc_receive = true;
+                any_proc_receive = true;
+            }
         }
         if (!try s.runReceiveHook("pre-receive", commands, false, push_options, if (q.*) |*held| held else null)) {
             for (commands) |*cmd| {
@@ -526,6 +541,12 @@ pub const Server = struct {
 
         const head = try s.remote.repo.refStore().currentBranch(arena, s.io);
         const head_ref: ?[]const u8 = if (head) |h| try arena.print("refs/heads/{s}", .{h}) else null;
+        if (any_proc_receive and !try s.runProcReceive()) {
+            // An atomic push fails whole with it.
+            for (commands) |*cmd| {
+                if (cmd.standing() and (cmd.proc_receive or s.asked.atomic)) cmd.error_string = "fail to run proc-receive hook";
+            }
+        }
         if (s.asked.atomic) try s.executeAtomic(arena, commands, head_ref) else try s.executeEach(arena, commands, head_ref);
 
         if (s.new_shallow.count() != 0) {
@@ -568,24 +589,40 @@ pub const Server = struct {
         };
     }
 
-    /// git's `execute_commands_non_atomic`: each command's ref written in
-    /// a transaction of its own, a failure that command's alone.
+    /// git's `execute_commands_non_atomic`: the deletions in one
+    /// transaction, then the rest in another, each allowing failure. A
+    /// ref refused for what it asks -- its old value gone, its name in
+    /// conflict -- is refused alone, with git's words for why; a failure
+    /// of the transaction's own refuses every command, as git's does.
     fn executeEach(s: *Server, arena: Allocator, commands: []Command, head_ref: ?[]const u8) Self.Error!void {
         // Deletions first, so a ref deleted and one created in its place
         // as a directory do not meet.
         for ([_]bool{ true, false }) |deletions| {
+            var tx = s.remote.repo.beginRefs();
+            defer tx.deinit(s.io);
+            tx.allow_failure = true;
+            if (s.runner) |*r| tx.hooks = r;
+            var any = false;
             for (commands) |*cmd| {
-                if (!cmd.standing() or cmd.new.isZero() != deletions) continue;
-                var tx = s.remote.repo.beginRefs();
-                defer tx.deinit(s.io);
-                if (s.runner) |*r| tx.hooks = r;
+                if (!cmd.standing() or cmd.proc_receive or cmd.new.isZero() != deletions) continue;
+                any = true;
                 cmd.error_string = try s.update(arena, cmd, &tx, head_ref);
-                if (!cmd.standing()) continue;
-                s.commitRefs(&tx) catch |err| {
-                    if (err == error.Canceled) return error.Canceled;
-                    cmd.error_string = transactionMessage(err);
-                };
-                try s.sendHookOutput();
+            }
+            if (!any) continue;
+            const failed = if (s.commitRefs(&tx)) false else |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => true,
+            };
+            try s.sendHookOutput();
+            if (failed) {
+                for (commands) |*cmd| cmd.error_string = "failed to update refs";
+                return;
+            }
+            for (tx.rejected.items) |r| try s.rpErrorPlain("{s}", .{r.detail});
+            for (commands) |*cmd| {
+                for (tx.rejected.items) |r| {
+                    if (std.mem.eql(u8, r.name, cmd.name)) cmd.error_string = r.reason.message();
+                }
             }
         }
     }
@@ -637,6 +674,7 @@ pub const Server = struct {
             // is refused as with no setting.
             .refuse, .unconfigured, .update_instead => {
                 try s.rpError("refusing to update checked out branch: {s}", .{name});
+                if (s.settings.deny_current_branch == .unconfigured) try s.rpError("{s}", .{refuse_unconfigured_deny});
                 return "branch is currently checked out";
             },
         };
@@ -655,6 +693,7 @@ pub const Server = struct {
                 .warn => try s.rpWarning("deleting the current branch", .{}),
                 .refuse, .unconfigured, .update_instead => {
                     try s.rpError("refusing to delete the current branch: {s}", .{name});
+                    if (s.settings.deny_delete_current == .unconfigured) try s.rpError("{s}", .{refuse_unconfigured_deny_delete_current});
                     return "deletion of the current branch prohibited";
                 },
             };
@@ -689,9 +728,10 @@ pub const Server = struct {
                     }
                     try s.rpWarning("allowing deletion of corrupt ref", .{});
                 } else {
+                    // Still staged, as git stages it: the transaction and
+                    // its hook see it.
                     try s.rpWarning("deleting a non-existent ref", .{});
                     cmd.did_not_exist = true;
-                    return null;
                 }
             }
             tx.delete(name, expected) catch |err| return stageError(err);
@@ -700,6 +740,16 @@ pub const Server = struct {
             tx.update(name, .{ .direct = cmd.new }, expected) catch |err| return stageError(err);
         }
         return null;
+    }
+
+    /// git's `run_proc_receive_hook`: whether the hook ran and answered.
+    fn runProcReceive(s: *Server) Self.Error!bool {
+        const runner = if (s.runner) |*r| r else return false;
+        if (!runner.exists(s.io, "proc-receive")) {
+            try s.rpError("cannot find hook 'proc-receive'", .{});
+            return false;
+        }
+        return false;
     }
 
     /// Whether `name` is under a `receive.procReceiveRefs` prefix, its
@@ -922,22 +972,43 @@ fn sortedShallow(gpa: Allocator, db: *odb_mod.Odb) Allocator.Error![]Oid {
     return boundary;
 }
 
-/// The reason git's ref transaction gives for a failure.
-fn transactionMessage(err: refs_mod.TransactionError) []const u8 {
-    return switch (err) {
-        error.ExpectedValueMismatch => "incorrect old value provided",
-        error.RefAlreadyExists => "reference already exists",
-        error.RefNotFound => "reference does not exist",
-        error.RefNameConflict => "refname conflict",
-        else => "failed to update ref",
-    };
-}
+/// What git says when a push to the checked-out branch is refused with
+/// `receive.denyCurrentBranch` unset.
+const refuse_unconfigured_deny =
+    \\By default, updating the current branch in a non-bare repository
+    \\is denied, because it will make the index and work tree inconsistent
+    \\with what you pushed, and will require 'git reset --hard' to match
+    \\the work tree to HEAD.
+    \\
+    \\You can set the 'receive.denyCurrentBranch' configuration variable
+    \\to 'ignore' or 'warn' in the remote repository to allow pushing into
+    \\its current branch; however, this is not recommended unless you
+    \\arranged to update its work tree to match what you pushed in some
+    \\other way.
+    \\
+    \\To squelch this message and still keep the default behaviour, set
+    \\'receive.denyCurrentBranch' configuration variable to 'refuse'.
+;
 
+/// What git says when a deletion of the current branch is refused with
+/// `receive.denyDeleteCurrent` unset.
+const refuse_unconfigured_deny_delete_current =
+    \\By default, deleting the current branch is denied, because the next
+    \\'git clone' won't result in any file checked out, causing confusion.
+    \\
+    \\You can set 'receive.denyDeleteCurrent' configuration variable to
+    \\'warn' or 'ignore' in the remote repository to allow deleting the
+    \\current branch, with or without a warning message.
+    \\
+    \\To squelch this message, you can set it to 'refuse'.
+;
+
+/// git's `update` when a ref cannot be staged at all.
 fn stageError(err: refs_mod.TransactionError) Self.Error!?[]const u8 {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Canceled => error.Canceled,
-        else => transactionMessage(err),
+        else => "failed to update ref",
     };
 }
 
