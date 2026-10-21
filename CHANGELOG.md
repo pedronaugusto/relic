@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-10-21
+
 ### Added
 
 - `maintenance.packRefs`: git's `pack-refs` (`--include`, `--exclude`, `--all` as `*`, `--no-prune`, `--auto`) through `refs.Store.pack`. Files: under `packed-refs.lock`, the shared, direct loose refs whose objects exist go into `packed-refs` beside what it held, an annotated tag peeled; each loose file then goes under its own lock when it still holds what was packed, with the directories that leaves empty; `--auto` waits for git's `log2(size / 100) * 5` loose refs, at least 16. Reftable: the worktree's stack compacted whole (geometrically with `--auto`), then cleaned of the tables no list names that are no newer than the stack (`reftable_stack_clean`). Held to git byte for byte in both formats, and on shakedown's simulated disk at every crash point.
