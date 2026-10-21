@@ -1853,7 +1853,7 @@ pub fn checkout(
     try refuseUnsafeTree(arena, &wanted, options);
     if (!options.force) try verifyCheckout(gpa, arena, io, wt, index, &wanted, options);
     try refuseDirectoriesInTheWay(arena, io, wt, index, &wanted, options.force, options.rules.precompose_unicode);
-    var removed_dirs = try removeUnwanted(gpa, arena, io, wt, index, &wanted, &outcome);
+    var removed_dirs = try removeUnwanted(arena, io, wt, index, &wanted, &outcome);
 
     // Write what the tree has, in path order.
     var paths = try arena.alloc([]const u8, wanted.count());
@@ -2014,7 +2014,6 @@ fn refuseDirectoriesInTheWay(
 /// Remove what the index has and the tree does not, from both. The
 /// directories they were in are returned, for removing once empty.
 fn removeUnwanted(
-    gpa: Allocator,
     arena: Allocator,
     io: Io,
     wt: Io.Dir,
@@ -2054,8 +2053,7 @@ fn removeUnwanted(
         }
         const tree = try index.cacheTree();
         tree.invalidate(entry.path);
-        gpa.free(entry.path);
-        _ = index.entries.orderedRemove(i);
+        _ = index.remove(entry.path);
         outcome.removed += 1;
     }
     return removed_dirs;

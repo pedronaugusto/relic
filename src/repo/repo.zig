@@ -28,6 +28,7 @@ const odb_mod = @import("../odb/odb.zig");
 const odb_policy = @import("../odb/policy.zig");
 const pack_mod = @import("../odb/pack.zig");
 const index_mod = @import("../index/index.zig");
+const untracked_mod = @import("../index/untracked.zig");
 const refs_mod = @import("../refs/refs.zig");
 const config_mod = @import("../config/config.zig");
 const config_write = @import("../config/write.zig");
@@ -281,6 +282,10 @@ const RepositoryData = struct {
     shallow_seen: shallow.Seen = null,
     /// Commits read through `commitInfo` and `commitTree`, kept.
     commits: commit_cache.Cache = .{},
+    /// Where an untracked cache made here says it was made: git's
+    /// "Location <working tree>, system <kernel>". `null` without a
+    /// working tree.
+    untracked_ident: ?[]u8 = null,
 };
 
 /// The `core` settings engines take, read once from a published
@@ -308,6 +313,15 @@ pub const Settings = struct {
     /// `core.protectNTFS` (on everywhere) and `core.protectHFS` (on macOS):
     /// the spellings of `.git` another file system opens as it.
     protect: names_path.Protect,
+    /// `core.untrackedCache` as git's `prepare_repo_settings` reads it: a
+    /// boolean writes or removes the cache an index carries, anything else
+    /// keeps what it carries; unset, `feature.manyFiles` writes it.
+    untracked_cache: UntrackedCacheSetting,
+    /// The walk a new untracked cache serves, as git's
+    /// `new_untracked_cache_flags` reads `status.showUntrackedFiles`.
+    untracked_flags: u32,
+
+    pub const UntrackedCacheSetting = enum { keep, write, remove };
 
     /// The settings `config` gives, git's defaults where it gives none.
     pub fn of(config: *const config_mod.Config) ErrorNamespace.Error!Settings {
@@ -331,9 +345,32 @@ pub const Settings = struct {
                 .ntfs = try config.getBool("core.protectntfs", true),
                 .hfs = try config.getBool("core.protecthfs", builtin.target.os.tag == .macos),
             },
+            .untracked_cache = untracked: {
+                const fallback: UntrackedCacheSetting = if (try config.getBool("feature.manyfiles", false)) .write else .keep;
+                const entry = config.find("core.untrackedcache") orelse break :untracked fallback;
+                const value = entry.value orelse break :untracked fallback;
+                const on = config_mod.parseBool(value) catch break :untracked fallback;
+                break :untracked if (on) .write else .remove;
+            },
+            .untracked_flags = if (config.get("status.showuntrackedfiles")) |mode|
+                (if (std.mem.eql(u8, mode, "all")) 0 else untracked_mod.show_other_directories | untracked_mod.hide_empty_directories)
+            else
+                untracked_mod.show_other_directories | untracked_mod.hide_empty_directories,
         };
     }
 };
+
+/// git's `get_ident_string`: "Location <the working tree's real path>,
+/// system <the kernel's name>", which an untracked cache carries and is
+/// trusted by.
+fn untrackedIdent(gpa: Allocator, io: Io, work: Io.Dir) (Allocator.Error || Io.Dir.RealPathFileAllocError)![]u8 {
+    const real = try work.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(real);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, real, '\\', '/');
+    if (builtin.target.os.tag == .windows) return gpa.print("Location {s}, system Windows", .{real});
+    const uts = std.posix.uname();
+    return gpa.print("Location {s}, system {s}", .{ real, std.mem.sliceTo(&uts.sysname, 0) });
+}
 
 pub const Repository = struct {
     /// How `refreshConfig` reports.
@@ -749,6 +786,8 @@ pub const Repository = struct {
         repo.data().shared = try sharedOf(repo.configuration());
         repo.data().fsync = try fsyncOf(repo.configuration());
         repo.data().settings = try Settings.of(repo.configuration());
+        if (repo.data().work_dir) |work| repo.data().untracked_ident = try untrackedIdent(gpa, io, work);
+        errdefer if (repo.data().untracked_ident) |ident| gpa.free(ident);
         var odb_options = options.odb;
         odb_options.shared = repo.data().shared;
         odb_options.fsync = repo.data().fsync;
@@ -1172,6 +1211,7 @@ pub const Repository = struct {
         repo.data().git_dir.close(io);
         if (repo.data().work_dir) |w| w.close(io);
         const gpa = repo.data().gpa;
+        if (repo.data().untracked_ident) |ident| gpa.free(ident);
         gpa.destroy(repo.data());
         repo.* = undefined;
     }
@@ -1684,8 +1724,36 @@ pub const Repository = struct {
         return .{ .index = index, .lock = lock, .buffer = buffer, .repo = repo };
     }
 
+    /// Read the index, its untracked cache made, kept or dropped as
+    /// `core.untrackedCache` says (git's `tweak_untracked_cache`).
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution });
+        var index = try index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution });
+        errdefer index.deinit();
+        try repo.tweakUntrackedCache(&index);
+        return index;
+    }
+
+    /// git's `tweak_untracked_cache`: `core.untrackedCache=true` gives the
+    /// index a cache, a new one where it has none or one made elsewhere
+    /// (`add_untracked_cache`); `false` takes it away.
+    fn tweakUntrackedCache(repo: *const Repository, index: *index_mod.Index) Allocator.Error!void {
+        switch (repo.data().settings.untracked_cache) {
+            .keep => {},
+            .remove => if (index.untracked) |*cache| {
+                cache.deinit();
+                index.untracked = null;
+            },
+            .write => {
+                // A bare repository has no working tree to cache.
+                const ident = repo.data().untracked_ident orelse return;
+                if (index.untracked) |*cache| {
+                    if (cache.madeFor(ident)) return;
+                    cache.deinit();
+                    index.untracked = null;
+                }
+                index.untracked = try untracked_mod.UntrackedCache.init(repo.data().gpa, ident, repo.data().settings.untracked_flags);
+            },
+        }
     }
 
     /// Open an index anywhere.
@@ -1698,7 +1766,10 @@ pub const Repository = struct {
         dir: Io.Dir,
         sub_path: []const u8,
     ) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat() });
+        var index = try index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat() });
+        errdefer index.deinit();
+        try repo.tweakUntrackedCache(&index);
+        return index;
     }
 
     /// What `HEAD` resolves to, or `null` on an unborn branch.

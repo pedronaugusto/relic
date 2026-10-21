@@ -96,6 +96,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `index.Index.rename` (git's `rename_index_entry_at`, replacing what the new name collides with); `submodule.gitmodulesStaged`, `removeFromGitmodules`, `moveInGitmodules`, `gitDirOf` and `connectGitDir` (git's `connect_work_tree_and_git_dir`); `patterns.pathspec.normalize`. `checkout.AddOptions.prefix` may name one file.
 - `worktree.ignoreErrorsConfigured`: `add.ignoreErrors`, or `add.ignore-errors`, the last of either deciding, as git's `add_config` reads them, for `AddOptions.ignore_errors`. Held to `git add -A`.
 - `repo.Repository.indexWriteOptions`: the index written as git 2.55's settings say -- `index.version` for a new index (`feature.manyFiles` makes it 4), `index.skipHash` (on under `feature.manyFiles`), `EOIE` and `IEOT` by `index.recordEndOfIndexEntries`, `index.recordOffsetTable` and `index.threads` -- which `LockedIndex.commit` writes with. Held to git 2.55's index files under each setting.
+- `index.untracked`, git's untracked cache (`UNTR`): read (`Index.untracked`; a malformed one dropped, `Dropped.untracked_cache`), kept true as entries come and go -- a path that joins or leaves the index invalidates the directories it is in, and each above it under `DIR_SHOW_OTHER_DIRECTORIES`, as git's `untracked_cache_add_to_index` and `remove_from_index` do -- and written back. `core.untrackedCache` (else `feature.manyFiles`) read as git's `tweak_untracked_cache` reads it whenever the repository reads its index: `true` gives the index a new cache where it has none or one made elsewhere (git's ident, `status.showUntrackedFiles` deciding its flags), `false` takes it away. Held to git 2.55: a cache git filled written back byte for byte, git's new one, and after each add and removal git's directories and git's next status.
 
 ### Changed
 
@@ -110,6 +111,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `index.Index.remove` reads `path` before it frees an entry, so an entry's own path may be passed.
 - A push to a repository on this machine, and a fetch from one, no longer hold the pack whole: the receive-pack or upload-pack in this process (`transport.in_process`, one for both) serves each request on a task beside the client, the request and the answer crossing through bounded pipes, so a pack goes over as it is written. A server that stops reading has the rest of the request taken, so the client reads its answer; a client canceled cancels the server's task. Where the caller's `Io` runs no second task, a request is held whole and answered after it, as before.
 - A ref list a server advertises, receive-pack's and upload-pack's, and a local fetch's, leaves out a symbolic ref that goes round in a circle, as git leaves a broken ref out, where it ended the conversation with `SymbolicRefLoop`.
 - An object database finds a `pack` directory made after it was opened, on its next scan or on a read that misses, as git reads `objects/pack` again; it found no pack there before.

@@ -42,6 +42,7 @@
 //! | `config.color` | git's colours: values, `color.ui` and the writers' settings and slots. |
 //! | `index` | Public concern. |
 //! | `index.sparse` | Module within `index`. |
+//! | `index.untracked` | The untracked cache, git's `UNTR`: read, kept true as entries come and go, and written. |
 //! | `worktree` | Public concern. |
 //! | `worktree.sparse_checkout` | Module within `worktree`. |
 //! | `worktree.linked` | Module within `worktree`. |

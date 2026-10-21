@@ -624,6 +624,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `config.color` | `parse`, `When`, `wanted`, `readSlots` — git's colours: a value as `color_parse` writes it, `color.ui` beneath each writer's `color.<writer>`, and its `color.<writer>.<slot>` colours. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `index.sparse` | The sparse index. |
+| `index.untracked` | The untracked cache, git's `UNTR`: read, kept true as entries come and go, and written. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
 | `worktree.sparse_checkout` | Module within `worktree`. |
 | `worktree.linked` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`, each worktree's refs in the repository's ref format. |

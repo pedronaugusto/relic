@@ -29,6 +29,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
 const varint = @import("../codec.zig").varint;
+const untracked_mod = @import("untracked.zig");
 const odb_mod = @import("../odb/odb.zig");
 const testgit = @import("../testing/git.zig");
 
@@ -224,10 +225,12 @@ pub const Dropped = struct {
     resolve_undo: bool = false,
     /// `FSMN`: "corrupt fsmonitor extension".
     fsmonitor: bool = false,
+    /// `UNTR`, which git's `read_untracked_extension` gives up on silently.
+    untracked_cache: bool = false,
 
     /// Whether any was dropped.
     pub fn any(d: Dropped) bool {
-        return d.cache_tree or d.resolve_undo or d.fsmonitor;
+        return d.cache_tree or d.resolve_undo or d.fsmonitor or d.untracked_cache;
     }
 };
 
@@ -706,6 +709,8 @@ pub const Index = struct {
     entries: std.ArrayList(Entry) = .empty,
     cache_tree: ?CacheTree = null,
     resolve_undo: ?ResolveUndo = null,
+    /// `UNTR`, the untracked cache, kept true as entries come and go.
+    untracked: ?untracked_mod.UntrackedCache = null,
     /// Optional extensions this package does not interpret, as they were
     /// read. They are not written back, as git writes back none it does not
     /// know: one such as `UNTR` describes the working tree as it was, which
@@ -776,6 +781,7 @@ pub const Index = struct {
         index.entries.deinit(index.gpa);
         if (index.cache_tree) |*t| t.deinit();
         if (index.resolve_undo) |*r| r.deinit();
+        if (index.untracked) |*u| u.deinit();
         for (index.unknown.items) |e| index.gpa.free(e.data);
         index.unknown.deinit(index.gpa);
         if (index.fsmonitor_token) |t| index.gpa.free(t);
@@ -956,6 +962,11 @@ pub const Index = struct {
             if (index.resolve_undo) |*r| r.deinit();
             index.resolve_undo = undo;
             index.dropped.resolve_undo = undo == null;
+        } else if (std.mem.eql(u8, &signature, "UNTR")) {
+            const cache = try untracked_mod.parse(gpa, index.kind, data);
+            if (index.untracked) |*u| u.deinit();
+            index.untracked = cache;
+            index.dropped.untracked_cache = cache == null;
         } else if (std.mem.eql(u8, &signature, "link")) {
             try index.parseLink(gpa, data);
         } else if (std.mem.eql(u8, &signature, "EOIE")) {
@@ -1288,6 +1299,15 @@ pub const Index = struct {
         copy.path = try index.gpa.dupe(u8, entry.path);
         errdefer index.gpa.free(copy.path);
         try index.entries.insert(index.gpa, at, copy);
+        index.untrackedJoined(entry.path);
+    }
+
+    /// A path that joined or left the index: the untracked cache's
+    /// directories for it are out of date, as git's
+    /// `untracked_cache_add_to_index` and `untracked_cache_remove_from_index`
+    /// say.
+    fn untrackedJoined(index: *Index, path: []const u8) void {
+        if (index.untracked) |*cache| cache.invalidatePath(path);
     }
 
     /// Add many entries at once: sorted among themselves and merged in.
@@ -1341,6 +1361,7 @@ pub const Index = struct {
                 },
                 .gt => {
                     merged.appendAssumeCapacity(fresh[j]);
+                    index.untrackedJoined(fresh[j].path);
                     j += 1;
                 },
                 .eq => {
@@ -1367,7 +1388,10 @@ pub const Index = struct {
         const list = index.entries.items;
         var write_at: usize = 0;
         for (list, 0..) |entry, read_at| {
-            if (std.sort.binarySearch([]const u8, paths, entry.path, orderPath) != null) continue;
+            if (std.sort.binarySearch([]const u8, paths, entry.path, orderPath) != null) {
+                index.untrackedJoined(entry.path);
+                continue;
+            }
             std.mem.swap(Entry, &list[write_at], &list[read_at]);
             write_at += 1;
         }
@@ -1376,15 +1400,16 @@ pub const Index = struct {
     }
 
     /// Remove `path` at every stage. Returns how many entries went.
+    /// `path` may be an entry's own: it is read before any is freed.
     pub fn remove(index: *Index, path: []const u8) usize {
-        var removed: usize = 0;
         const at = index.position(path, 0);
-        while (at < index.entries.items.len and std.mem.eql(u8, index.entries.items[at].path, path)) {
-            index.gpa.free(index.entries.items[at].path);
-            _ = index.entries.orderedRemove(at);
-            removed += 1;
-        }
-        return removed;
+        var end = at;
+        while (end < index.entries.items.len and std.mem.eql(u8, index.entries.items[end].path, path)) end += 1;
+        if (end == at) return 0;
+        index.untrackedJoined(path);
+        for (index.entries.items[at..end]) |e| index.gpa.free(e.path);
+        index.entries.replaceRangeAssumeCapacity(at, end - at, &.{});
+        return end - at;
     }
 
     /// Move the stage-0 entry at `from` to `to`, whole, as git's
@@ -1419,6 +1444,7 @@ pub const Index = struct {
         var removed: usize = 0;
         const at = index.position(prefix, 0);
         while (at < index.entries.items.len and std.mem.startsWith(u8, index.entries.items[at].path, prefix)) {
+            index.untrackedJoined(index.entries.items[at].path);
             index.gpa.free(index.entries.items[at].path);
             _ = index.entries.orderedRemove(at);
             removed += 1;
@@ -1480,6 +1506,7 @@ pub const Index = struct {
 
     /// Drop every entry, leaving the extensions alone.
     pub fn clear(index: *Index) void {
+        if (index.untracked) |*cache| cache.invalidateAll();
         for (index.entries.items) |e| index.gpa.free(e.path);
         index.entries.clearRetainingCapacity();
     }
@@ -1756,6 +1783,13 @@ pub const Index = struct {
             try undo.write(&undo_body.writer);
             try writeExtension(out, "REUC", undo_body.written());
             hashExtensionHeader(&ext_hasher, "REUC", undo_body.written().len);
+        }
+        if (index.untracked) |*cache| {
+            var untracked_body: Io.Writer.Allocating = .init(index.gpa);
+            defer untracked_body.deinit();
+            try cache.write(index.gpa, index.kind, &untracked_body.writer);
+            try writeExtension(out, "UNTR", untracked_body.written());
+            hashExtensionHeader(&ext_hasher, "UNTR", untracked_body.written().len);
         }
         // `FSMN` after the untracked cache, as git writes them: version 2,
         // the token, and the entries not vouched for.

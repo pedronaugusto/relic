@@ -1,6 +1,7 @@
 //! Public index namespace. Implementation is in `index/index.zig`.
 
 pub const sparse = @import("index/sparse_index.zig");
+pub const untracked = @import("index/untracked.zig");
 pub const magic = @import("index/index.zig").magic;
 pub const ReadError = @import("index/index.zig").ReadError;
 pub const WriteError = @import("index/index.zig").WriteError;
