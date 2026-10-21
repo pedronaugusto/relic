@@ -18,6 +18,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const cloak = @import("cloak");
+const aegis = @import("aegis");
+const fs = @import("../fs/fs.zig");
 
 /// Errors from reading a certificate and its key.
 pub const Error = error{
@@ -57,32 +59,37 @@ pub fn keyPath(files: Files) []const u8 {
 
 /// Whether the key's file holds an encrypted key; `false` when it cannot
 /// be read, which `load` names.
-pub fn keyIsEncrypted(arena: Allocator, io: Io, files: Files) bool {
-    const bytes = readAll(arena, io, keyPath(files)) catch return false;
-    return cloak.PrivateKey.isEncrypted(bytes);
+pub fn keyIsEncrypted(gpa: Allocator, io: Io, files: Files) bool {
+    var bytes = readSecret(gpa, io, keyPath(files)) catch return false;
+    defer bytes.deinit();
+    return cloak.PrivateKey.isEncrypted(bytes.expose());
 }
 
-/// How `load` reads the files: `arena` holds their bytes, and `passphrase`
-/// opens the key when it is encrypted.
-pub const LoadOptions = struct { arena: Allocator, passphrase: ?[]const u8 = null };
+/// How `load` reads the files: `passphrase` opens the key when it is
+/// encrypted.
+pub const LoadOptions = struct { passphrase: ?[]const u8 = null };
 
 /// Read the certificate chain and the key. The result is `gpa`'s, released
-/// with `deinit`; the files' bytes are the arena's.
+/// with `deinit`. The files' bytes are read into owners that wipe them, a
+/// certificate's file too, since it may hold the key.
 pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Error!cloak.ClientAuth {
-    const arena = options.arena;
     const cert_der = files.cert_format == .der;
     const key_der = files.key_format == .der;
-    const cert_bytes = readAll(arena, io, files.cert) catch |err| switch (err) {
+    var cert_file = readSecret(gpa, io, files.cert) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return error.SslClientCertificateUnreadable,
     };
+    defer cert_file.deinit();
+    const cert_bytes = cert_file.expose();
     if (cert_der and std.mem.find(u8, cert_bytes, "-----BEGIN ") != null) return error.SslClientCertificateUnreadable;
-    const key_bytes = if (files.key) |path| readAll(arena, io, path) catch |err| switch (err) {
+    var key_file: ?aegis.SecretBytes = if (files.key) |path| readSecret(gpa, io, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return error.SslClientKeyUnreadable,
-    } else cert_bytes;
+    } else null;
+    defer if (key_file) |*k| k.deinit();
+    const key_bytes = if (key_file) |*k| k.expose() else cert_bytes;
     if (key_der and std.mem.find(u8, key_bytes, "-----BEGIN ") != null) return error.SslClientKeyUnreadable;
     const key = cloak.PrivateKey.parse(gpa, key_bytes, .{ .passphrase = options.passphrase }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -119,8 +126,8 @@ pub const Format = enum {
     }
 };
 
-fn readAll(arena: Allocator, io: Io, path: []const u8) ![]u8 {
-    return Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+fn readSecret(gpa: Allocator, io: Io, path: []const u8) !aegis.SecretBytes {
+    return try fs.readSecretFile(gpa, io, Io.Dir.cwd(), path, 1 << 20) orelse error.FileNotFound;
 }
 
 test "a certificate and key are read from one file or two, and each refusal has its name" {
@@ -146,20 +153,20 @@ test "a certificate and key are read from one file or two, and each refusal has 
         }
     }.f;
 
-    const two = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "key.pem") }, .{ .arena = arena });
+    const two = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "key.pem") }, .{});
     two.deinit();
-    const one = try load(gpa, io, .{ .cert = at(arena, base, "both.pem") }, .{ .arena = arena, .passphrase = null });
+    const one = try load(gpa, io, .{ .cert = at(arena, base, "both.pem") }, .{ .passphrase = null });
     one.deinit();
-    const opened = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = "correct-horse" });
+    const opened = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .passphrase = "correct-horse" });
     opened.deinit();
-    try testing.expect(keyIsEncrypted(arena, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }));
+    try testing.expect(keyIsEncrypted(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }));
 
-    try testing.expectError(error.SslClientKeyPassphraseRequired, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = null }));
-    try testing.expectError(error.SslClientKeyPassphraseWrong, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .arena = arena, .passphrase = "nope" }));
-    try testing.expectError(error.SslClientKeyMismatch, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "other.pem") }, .{ .arena = arena, .passphrase = null }));
-    try testing.expectError(error.SslClientKeyUnreadable, load(gpa, io, .{ .cert = at(arena, base, "cert.pem") }, .{ .arena = arena, .passphrase = null }));
-    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "nothere.pem") }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslClientKeyPassphraseRequired, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .passphrase = null }));
+    try testing.expectError(error.SslClientKeyPassphraseWrong, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .passphrase = "nope" }));
+    try testing.expectError(error.SslClientKeyMismatch, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "other.pem") }, .{ .passphrase = null }));
+    try testing.expectError(error.SslClientKeyUnreadable, load(gpa, io, .{ .cert = at(arena, base, "cert.pem") }, .{ .passphrase = null }));
+    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "nothere.pem") }, .{ .passphrase = null }));
     try testing.expectError(error.SslCertTypeUnsupported, Format.parse("P12"));
     try testing.expectEqual(Format.der, try Format.parse("der"));
-    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "both.pem"), .cert_format = .der }, .{ .arena = arena, .passphrase = null }));
+    try testing.expectError(error.SslClientCertificateUnreadable, load(gpa, io, .{ .cert = at(arena, base, "both.pem"), .cert_format = .der }, .{ .passphrase = null }));
 }

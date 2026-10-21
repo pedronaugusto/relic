@@ -127,7 +127,7 @@ test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 an
                 defer gpa.free(cert);
                 const key = try pki.path(try arena.print("{s}.{s}", .{ kind, if (encrypted) "enc.key" else "key" }));
                 defer gpa.free(key);
-                const auth = try client_cert.load(gpa, io, .{ .cert = cert, .key = key }, .{ .arena = arena, .passphrase = if (encrypted) passphrase else null });
+                const auth = try client_cert.load(gpa, io, .{ .cert = cert, .key = key }, .{ .passphrase = if (encrypted) passphrase else null });
                 defer auth.deinit();
                 const page = try relicGet(gpa, io, pki, server.port, auth);
                 defer gpa.free(page);
@@ -145,7 +145,7 @@ test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 an
         defer gpa.free(strange);
         const strange_key = try pki.path("p256.key");
         defer gpa.free(strange_key);
-        const stranger = try client_cert.load(gpa, io, .{ .cert = strange, .key = strange_key }, .{ .arena = arena_state.allocator(), .passphrase = null });
+        const stranger = try client_cert.load(gpa, io, .{ .cert = strange, .key = strange_key }, .{ .passphrase = null });
         defer stranger.deinit();
         try testing.expectError(error.ClientCertificateRejected, relicGet(gpa, io, pki, server.port, stranger));
     }

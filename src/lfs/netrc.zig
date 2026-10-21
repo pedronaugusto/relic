@@ -19,6 +19,7 @@
 const ErrorNamespace = @This();
 const std = @import("std");
 const shakedown = @import("shakedown");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 
 /// One entry.
@@ -36,11 +37,13 @@ pub const Machine = struct {
     }
 };
 
-/// A parsed file. Every slice is owned by its arena.
+/// A parsed file. The entries' strings are owned by `strings`, which wipes
+/// them when let go; the list of entries by the arena.
 pub const Netrc = struct {
     pub const Error = ErrorNamespace.Error;
 
     arena: std.heap.ArenaAllocator,
+    strings: aegis.SecretBytes,
     machines: []const Machine,
 
     /// Errors from `parse`.
@@ -49,9 +52,16 @@ pub const Netrc = struct {
     /// Read `text`, which is not kept. A file go-netrc refuses is
     /// `error.MalformedNetrc`, and git-lfs then uses none.
     pub fn parse(gpa: Allocator, text: []const u8) ParseError!Netrc {
-        var n: Netrc = .{ .arena = .init(gpa), .machines = &.{} };
+        // Every string is a token of `text`, apart from the others: they
+        // fit in its length.
+        var n: Netrc = .{ .arena = .init(gpa), .strings = try .init(gpa, text.len), .machines = &.{} };
+        errdefer n.strings.deinit();
         errdefer n.arena.deinit();
         const a = n.arena.allocator();
+        // unreachable: the owner was made with the text's length.
+        n.strings.resizeWithinCapacity(text.len) catch unreachable;
+        var fixed: std.heap.FixedBufferAllocator = .init(n.strings.exposeMut());
+        const s = fixed.allocator();
         var machines: std.ArrayList(Machine) = .empty;
         var scanner: Scanner = .{ .text = text };
         var default_seen = false;
@@ -68,7 +78,7 @@ pub const Netrc = struct {
                     current = .{ .name = "" };
                     if (keyword == .default) {
                         default_seen = true;
-                    } else current.?.name = try a.dupe(u8, try scanner.value());
+                    } else current.?.name = try s.dupe(u8, try scanner.value());
                 },
                 .login, .password, .account => {
                     const m = if (current) |*m| m else return error.MalformedNetrc;
@@ -78,7 +88,7 @@ pub const Netrc = struct {
                         else => &m.account,
                     };
                     if (field.len != 0) return error.MalformedNetrc;
-                    field.* = try a.dupe(u8, try scanner.value());
+                    field.* = try s.dupe(u8, try scanner.value());
                 },
             }
         }
@@ -103,6 +113,7 @@ pub const Netrc = struct {
 
     /// Release everything.
     pub fn deinit(n: *Netrc) void {
+        n.strings.deinit();
         n.arena.deinit();
         n.* = undefined;
     }

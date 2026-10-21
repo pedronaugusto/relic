@@ -154,6 +154,7 @@ const odb_mod = @import("../odb/odb.zig");
 const lfs = @import("lfs.zig");
 const mime_sniff = @import("mime_sniff.zig");
 const fs = @import("../fs/fs.zig");
+const aegis = @import("aegis");
 const object = @import("../object/object.zig");
 const netrc_mod = @import("netrc.zig");
 const time_text = @import("time_text.zig");
@@ -1225,7 +1226,7 @@ pub const Client = struct {
     /// The passphrases that opened client keys, by the key's path, as
     /// git-lfs keeps them in memory: a key is asked for once, however
     /// many hosts it is presented to. Under `mutex`, in `arena`.
-    key_passphrases: std.StringHashMapUnmanaged([]const u8) = .empty,
+    key_passphrases: std.StringHashMapUnmanaged(aegis.SecretBytes) = .empty,
     arena: std.heap.ArenaAllocator,
     mutex: Io.Mutex = .init,
     endpoints: [2]?Endpoint = .{ null, null },
@@ -1286,11 +1287,11 @@ pub const Client = struct {
         if (home.len == 0) return;
         var dir = Io.Dir.cwd().openDir(io, home, .{}) catch return;
         defer dir.close(io);
-        const text = (fs.readFileAlloc(c.gpa, io, dir, ".netrc", 1 << 20) catch null) orelse
-            (if (builtin.target.os.tag == .windows) (fs.readFileAlloc(c.gpa, io, dir, "_netrc", 1 << 20) catch null) else null) orelse
+        var text = (fs.readSecretFile(c.gpa, io, dir, ".netrc", 1 << 20) catch null) orelse
+            (if (builtin.target.os.tag == .windows) (fs.readSecretFile(c.gpa, io, dir, "_netrc", 1 << 20) catch null) else null) orelse
             return;
-        defer c.gpa.free(text);
-        c.netrc = netrc_mod.Netrc.parse(c.gpa, text) catch |err| switch (err) {
+        defer text.deinit();
+        c.netrc = netrc_mod.Netrc.parse(c.gpa, text.expose()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedNetrc => null,
         };
@@ -1300,7 +1301,7 @@ pub const Client = struct {
     /// server refused it already: git-lfs's netrc helper, which asks for the
     /// host as its `getNetrcHostname` reads the URL's (`netrcHost`) and the
     /// URL's user, decoded.
-    fn netrcAuth(c: *Client, a: Allocator, url: []const u8) Allocator.Error!?struct { header: []const u8, host: []const u8 } {
+    fn netrcAuth(c: *Client, a: Allocator, url: []const u8) Allocator.Error!?struct { header: aegis.SecretBytes, host: []const u8 } {
         const n = &(c.netrc orelse return null);
         const parts = UrlParts.parse(url) orelse return null;
         const host = netrcHost(parts.authority) orelse return null;
@@ -1309,7 +1310,7 @@ pub const Client = struct {
         }
         const user = if (parts.user) |u| try percentDecode(a, u) else null;
         const m = n.find(host, user) orelse return null;
-        return .{ .header = try basicHeader(a, m.login, m.password), .host = host };
+        return .{ .header = try basicHeader(c.gpa, m.login, m.password), .host = host };
     }
 
     /// Release everything, forgetting every credential.
@@ -1321,6 +1322,8 @@ pub const Client = struct {
         c.credentials.deinit(c.gpa);
         if (c.netrc) |*n| n.deinit();
         c.netrc_refused.deinit(c.gpa);
+        var passphrases = c.key_passphrases.valueIterator();
+        while (passphrases.next()) |p| p.deinit();
         c.access.deinit(c.gpa);
         c.learned.deinit(c.gpa);
         for (&c.ssh_transfers) |*slot| switch (slot.*) {
@@ -1581,25 +1584,25 @@ pub const Client = struct {
     /// `request_url`: the request's own when it is on another host than the
     /// API, else the remote's own URL when that is on the API's host, else
     /// the API's. `null` when a URL carries a password, which is then the
-    /// credential.
-    fn credentialUrl(c: *Client, request_url: []const u8, operation: Operation) ErrorNamespace.Error!struct { url: ?[]const u8, inline_auth: ?[]const u8 } {
+    /// credential, borrowed from the URL.
+    fn credentialUrl(c: *Client, request_url: []const u8, operation: Operation) ErrorNamespace.Error!struct { url: ?[]const u8, inline_auth: ?Userinfo = null } {
         const arena = c.arena.allocator();
         const e = try c.endpointLocked(operation);
-        const api_url = UrlParts.parse(e.url) orelse return .{ .url = request_url, .inline_auth = null };
-        const req = UrlParts.parse(request_url) orelse return .{ .url = request_url, .inline_auth = null };
+        const api_url = UrlParts.parse(e.url) orelse return .{ .url = request_url };
+        const req = UrlParts.parse(request_url) orelse return .{ .url = request_url };
         if (!std.mem.eql(u8, req.scheme, api_url.scheme) or !std.mem.eql(u8, req.authority, api_url.authority)) {
-            return .{ .url = request_url, .inline_auth = null };
+            return .{ .url = request_url };
         }
-        if (api_url.password) |password| return .{ .url = null, .inline_auth = try basicHeader(arena, api_url.user orelse "", password) };
+        if (api_url.password) |password| return .{ .url = null, .inline_auth = .{ .user = api_url.user orelse "", .password = password } };
         if (try gitRemoteUrl(arena, c.settings, c.remote, .{ .for_push = operation == .upload })) |remote_url| {
             if (UrlParts.parse(remote_url)) |r| {
                 if (std.mem.eql(u8, r.scheme, api_url.scheme) and std.mem.eql(u8, r.authority, api_url.authority)) {
-                    if (r.password) |password| return .{ .url = null, .inline_auth = try basicHeader(arena, r.user orelse "", password) };
-                    return .{ .url = remote_url, .inline_auth = null };
+                    if (r.password) |password| return .{ .url = null, .inline_auth = .{ .user = r.user orelse "", .password = password } };
+                    return .{ .url = remote_url };
                 }
             }
         }
-        return .{ .url = e.url, .inline_auth = null };
+        return .{ .url = e.url };
     }
 
     fn credentialFor(c: *Client, url: []const u8) ErrorNamespace.Error!*Cred {
@@ -1725,13 +1728,14 @@ pub const Client = struct {
         var refusal: Refusal = .{};
         while (true) {
             const access_url = request.access_url orelse url;
-            const attempt: Attempt = blk: {
+            var attempt: Attempt = blk: {
                 try c.mutex.lock(io);
                 defer c.mutex.unlock(io);
                 break :blk try c.authorize(scratch, io, url, access_url, operation, request.authenticated or has_auth, refusal);
             };
+            defer attempt.deinit();
 
-            const ex = c.exchangeOnce(io, current, url, attempt.header) catch |err| switch (err) {
+            const ex = c.exchangeOnce(io, current, url, attempt.headerValue()) catch |err| switch (err) {
                 error.ConnectionFailed => {
                     if (retries_left > 0) {
                         retries_left -= 1;
@@ -1743,7 +1747,7 @@ pub const Client = struct {
             };
             const status = ex.status();
             if (status == .unauthorized) {
-                try c.refused(scratch, io, ex, url, access_url, operation, has_auth, attempt, &refusal);
+                try c.refused(scratch, io, ex, url, access_url, operation, has_auth, &attempt, &refusal);
                 continue;
             }
             if (status.class() == .success) if (attempt.cred) |cr| {
@@ -1810,12 +1814,23 @@ pub const Client = struct {
 
     /// What one attempt of a request is sent with.
     const Attempt = struct {
-        header: ?[]const u8 = null,
+        /// Its own copy, wiped when the attempt is let go: the credential
+        /// it came from may be refused and wiped by another task meanwhile.
+        header: ?aegis.SecretBytes = null,
         /// The helpers' credential the header is, to approve or reject.
         cred: ?*Cred = null,
         /// The host whose `.netrc` entry the header is.
         netrc_host: ?[]const u8 = null,
         access: Access = .none,
+
+        fn deinit(a: *Attempt) void {
+            if (a.header) |*h| h.deinit();
+            a.* = undefined;
+        }
+
+        fn headerValue(a: *const Attempt) ?[]const u8 {
+            return if (a.header) |*h| h.expose() else null;
+        }
     };
 
     /// The authorization for an attempt at `url`, as git-lfs chooses it:
@@ -1839,13 +1854,13 @@ pub const Client = struct {
             // A password in the URL is sent whatever the access mode, as
             // git-lfs sends it.
             if (UrlParts.parse(url)) |parts| {
-                if (parts.password) |password| attempt.header = try basicHeader(scratch, parts.user orelse "", password);
+                if (parts.password) |password| attempt.header = try basicHeader(c.gpa, parts.user orelse "", password);
             }
             return attempt;
         }
         const found = try c.credentialUrl(url, operation);
-        if (found.inline_auth) |h| {
-            attempt.header = try scratch.dupe(u8, h);
+        if (found.inline_auth) |u| {
+            attempt.header = try basicHeader(c.gpa, u.user, u.password);
             return attempt;
         }
         if (try c.netrcAuth(scratch, found.url.?)) |n| {
@@ -1878,7 +1893,7 @@ pub const Client = struct {
             }
         }
         const h = cr.session.authorization() orelse return error.AuthenticationFailed;
-        attempt.header = try scratch.dupe(u8, h);
+        attempt.header = try secretCopy(c.gpa, h);
         attempt.cred = cr;
         return attempt;
     }
@@ -1896,7 +1911,7 @@ pub const Client = struct {
         access_url: []const u8,
         operation: Operation,
         has_auth: bool,
-        attempt: Attempt,
+        attempt: *const Attempt,
         refusal: *Refusal,
     ) ErrorNamespace.Error!void {
         const offers = ex.authenticateOffers();
@@ -2222,7 +2237,7 @@ pub const Client = struct {
         var session: ?credential.Session = null;
         defer if (session) |*s| s.deinit();
         var passphrase: ?[]const u8 = null;
-        if (client_cert.keyIsEncrypted(arena, io, files)) {
+        if (client_cert.keyIsEncrypted(c.gpa, io, files)) {
             // Git LFS names the key with slashes on Windows, unlike Git's
             // own certificate helper request.
             if (c.knownPassphrase(io, key_path)) |known| {
@@ -2235,7 +2250,7 @@ pub const Client = struct {
                 if (try s.fill(io, c.credentialOptions())) passphrase = s.exposePassword();
             }
         }
-        const auth = client_cert.load(c.gpa, io, files, .{ .arena = arena, .passphrase = passphrase }) catch |err| {
+        const auth = client_cert.load(c.gpa, io, files, .{ .passphrase = passphrase }) catch |err| {
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Canceled => error.Canceled,
@@ -2247,7 +2262,13 @@ pub const Client = struct {
             c.mutex.lockUncancelable(io);
             defer c.mutex.unlock(io);
             const a = c.arena.allocator();
-            try c.key_passphrases.put(a, try a.dupe(u8, key_path), try a.dupe(u8, p));
+            // A passphrase kept is never replaced, so one handed out stays.
+            if (!c.key_passphrases.contains(key_path)) {
+                const key = try a.dupe(u8, key_path);
+                var kept = try secretCopy(c.gpa, p);
+                errdefer kept.deinit();
+                try c.key_passphrases.put(a, key, kept);
+            }
         };
         return auth;
     }
@@ -2256,7 +2277,7 @@ pub const Client = struct {
     fn knownPassphrase(c: *Client, io: Io, path: []const u8) ?[]const u8 {
         c.mutex.lockUncancelable(io);
         defer c.mutex.unlock(io);
-        return c.key_passphrases.get(path);
+        return if (c.key_passphrases.getPtr(path)) |p| p.expose() else null;
     }
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
@@ -2808,13 +2829,36 @@ fn hasHeader(headers: []const http.Header, name: []const u8) bool {
     return false;
 }
 
-/// `Basic <base64 of user:password>`.
-fn basicHeader(a: Allocator, user: []const u8, password: []const u8) Allocator.Error![]const u8 {
-    const plain = try a.print("{s}:{s}", .{ user, password });
+/// A URL's user and password.
+const Userinfo = struct { user: []const u8, password: []const u8 };
+
+/// `Basic <base64 of user:password>`, and `user:password` on the way, each
+/// in an owner that wipes it.
+fn basicHeader(gpa: Allocator, user: []const u8, password: []const u8) Allocator.Error!aegis.SecretBytes {
+    const plain_len = user.len + 1 + password.len;
+    var plain = try aegis.SecretBytes.init(gpa, plain_len);
+    defer plain.deinit();
+    // unreachable: the owner was made with exactly this capacity.
+    plain.resizeWithinCapacity(plain_len) catch unreachable;
+    const bytes = plain.exposeMut();
+    @memcpy(bytes[0..user.len], user);
+    bytes[user.len] = ':';
+    @memcpy(bytes[user.len + 1 ..], password);
     const encoder = std.base64.standard.Encoder;
-    const out = try a.alloc(u8, "Basic ".len + encoder.calcSize(plain.len));
-    @memcpy(out[0.."Basic ".len], "Basic ");
-    _ = encoder.encode(out["Basic ".len..], plain);
+    const out_len = "Basic ".len + encoder.calcSize(plain_len);
+    var out = try aegis.SecretBytes.init(gpa, out_len);
+    // unreachable: the owner was made with exactly this capacity.
+    out.resizeWithinCapacity(out_len) catch unreachable;
+    @memcpy(out.exposeMut()[0.."Basic ".len], "Basic ");
+    _ = encoder.encode(out.exposeMut()["Basic ".len..], bytes);
+    return out;
+}
+
+/// `bytes` in an owner of its own that wipes them.
+fn secretCopy(gpa: Allocator, bytes: []const u8) Allocator.Error!aegis.SecretBytes {
+    var out = try aegis.SecretBytes.init(gpa, bytes.len);
+    // unreachable: a new allocation of the bytes' length, apart from them.
+    out.replace(bytes) catch unreachable;
     return out;
 }
 

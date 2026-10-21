@@ -357,7 +357,7 @@ pub const Session = struct {
         s.host = parts.host;
         s.path = parts.path;
         s.username = parts.username;
-        s.password = if (parts.password) |p| adopted(s.gpa, p) else null;
+        s.password = parts.password;
         s.username_from_url = parts.username_from_url;
     }
 
@@ -600,10 +600,12 @@ pub const Session = struct {
             else => {},
         }
         // git warns of a pattern holding a newline and skips it.
-        const want = UrlParts.read(arena, pattern, true) catch |err| switch (err) {
+        var want = UrlParts.read(arena, pattern, true) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,
         };
+        // The arena frees unwiped; a password in a pattern is wiped first.
+        defer if (want.password) |*secret| secret.deinit();
         return want.matches(s);
     }
 
@@ -999,7 +1001,8 @@ const UrlParts = struct {
     host: ?[]u8 = null,
     path: ?[]u8 = null,
     username: ?[]u8 = null,
-    password: ?[]u8 = null,
+    /// Decoded straight into its owner, so no copy of it is freed unwiped.
+    password: ?SecretBytes = null,
     /// A username that is not empty: git's `username_from_proto`.
     username_from_url: bool = false,
 
@@ -1007,7 +1010,7 @@ const UrlParts = struct {
         inline for (.{ "protocol", "host", "path", "username" }) |name| {
             if (@field(p, name)) |v| gpa.free(v);
         }
-        Session.secretFree(gpa, p.password);
+        if (p.password) |*secret| secret.deinit();
         p.* = undefined;
     }
 
@@ -1030,7 +1033,7 @@ const UrlParts = struct {
                 const user_end = if (colon) |c_rel| (if (cp + c_rel < a) cp + c_rel else a) else a;
                 p.username = try percent.decode(gpa, text[cp..user_end], .literal);
                 p.username_from_url = p.username.?.len != 0;
-                if (user_end != a) p.password = try percent.decode(gpa, text[user_end + 1 .. a], .literal);
+                if (user_end != a) p.password = try decodeSecret(gpa, text[user_end + 1 .. a]);
                 host_start = a + 1;
             }
         }
@@ -1046,10 +1049,25 @@ const UrlParts = struct {
             while (end > 1 and decoded[end - 1] == '/') end -= 1;
             p.path = try gpa.realloc(decoded, end);
         }
-        inline for (.{ "username", "password", "protocol", "host", "path" }) |name| {
+        inline for (.{ "username", "protocol", "host", "path" }) |name| {
             if (@field(p, name)) |v| if (std.mem.findScalar(u8, v, '\n') != null) return error.CredentialValueUnsafe;
         }
+        if (p.password) |*secret| if (std.mem.findScalar(u8, secret.expose(), '\n') != null) return error.CredentialValueUnsafe;
         return p;
+    }
+
+    /// `percent.decode` into a secret's owner: `decode` shrinks its
+    /// allocation afterwards, which may move it and free the first copy as
+    /// it was.
+    fn decodeSecret(gpa: Allocator, text: []const u8) Allocator.Error!SecretBytes {
+        var secret = try SecretBytes.init(gpa, text.len);
+        errdefer secret.deinit();
+        // unreachable: the owner was made with the text's length.
+        secret.resizeWithinCapacity(text.len) catch unreachable;
+        const len = percent.decodeInto(secret.exposeMut(), text, .literal);
+        // unreachable: a decoded text is no longer than the text.
+        secret.resizeWithinCapacity(len) catch unreachable;
+        return secret;
     }
 
     /// git's `credential_match` without the password: every part the
@@ -1169,7 +1187,7 @@ test "a URL's parts are read as git's credential_from_url reads them" {
     defer p.deinit(gpa);
     try testing.expectEqualStrings("https", p.protocol.?);
     try testing.expectEqualStrings("a@b", p.username.?);
-    try testing.expectEqualStrings("p:w", p.password.?);
+    try testing.expectEqualStrings("p:w", p.password.?.expose());
     try testing.expectEqualStrings("[::1]:8443", p.host.?);
     try testing.expectEqualStrings("org/r/x.git//?q", p.path.?);
     var empty = try UrlParts.read(gpa, "https://@h%00x/", false);

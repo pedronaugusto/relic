@@ -70,6 +70,7 @@ const authorities = @import("authorities.zig");
 const pinned_key = @import("pinned_key.zig");
 const uplink = @import("uplink");
 const cloak = @import("cloak");
+const aegis = @import("aegis");
 /// Whether relic was built with HTTP: the `http` build option.
 const http_enabled = @import("relic_options").http;
 const warning = @import("../report.zig").warning;
@@ -244,6 +245,7 @@ fn prepare(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: 
     errdefer h.arena.deinit();
     errdefer h.credentials.deinit();
     errdefer if (h.proxy_credentials) |*p| p.deinit();
+    errdefer if (h.proxy_secret) |*p| p.deinit();
     errdefer h.freeTls();
 
     const configured = try h.configure(url);
@@ -325,6 +327,9 @@ const Http = struct {
     credentials: credential.Session,
     /// The proxy's credential, when its URL names a user.
     proxy_credentials: ?credential.Session = null,
+    /// The user and password the proxy is answered with, which the
+    /// client's proxy borrows until it is let go.
+    proxy_secret: ?aegis.SecretBytes = null,
     /// `http.sslCAInfo` and `http.sslCAPath`, when they name authorities;
     /// `http.proxySSLCAInfo`, when it does.
     trust: ?cloak.Trust.Snapshot = null,
@@ -571,7 +576,7 @@ const Http = struct {
             const session = &session_slot.*.?;
             if (try session.fill(h.io, h.credentialOptions())) passphrase = session.exposePassword();
         }
-        return client_cert.load(h.gpa, h.io, files, .{ .arena = h.arena.allocator(), .passphrase = passphrase }) catch |err| {
+        return client_cert.load(h.gpa, h.io, files, .{ .passphrase = passphrase }) catch |err| {
             // Git for Windows leaves the helper's certificate passphrase in
             // place on a local key parse error; its curl backend does not
             // classify that error as a rejected credential.
@@ -636,7 +641,7 @@ const Http = struct {
     /// as git's `init_curl_proxy_auth` fills it.
     fn configureProxy(h: *Http, raw: []const u8, method_name: []const u8) Error!uplink.Proxy {
         const arena = h.arena.allocator();
-        var proxy = uplink.Proxy.parse(arena, raw, .lowercase) catch |err| return switch (err) {
+        var proxy = uplink.Proxy.parseKept(h.gpa, arena, &h.proxy_secret, raw, .lowercase) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidProxy => error.InvalidProxy,
         };
@@ -665,11 +670,17 @@ const Http = struct {
                 const filled = session.fill(h.io, h.credentialOptions()) catch |err| return h.proxyFailed(err);
                 if (!filled) return h.fail(error.ProxyAuthenticationFailed, "no password for the proxy");
             }
-            proxy.credential = .{
-                .user = try arena.dupe(u8, session.username orelse ""),
-                .password = try arena.dupe(u8, session.exposePassword() orelse ""),
-                .method = method,
-            };
+            const user = session.username orelse "";
+            const password = session.exposePassword() orelse "";
+            var kept = try aegis.SecretBytes.init(h.gpa, user.len + password.len);
+            // unreachable: the owner was made with exactly this capacity.
+            kept.resizeWithinCapacity(user.len + password.len) catch unreachable;
+            const bytes = kept.exposeMut();
+            @memcpy(bytes[0..user.len], user);
+            @memcpy(bytes[user.len..], password);
+            if (h.proxy_secret) |*old| old.deinit();
+            h.proxy_secret = kept;
+            proxy.credential = .{ .user = bytes[0..user.len], .password = bytes[user.len..], .method = method };
         }
         // curl's CONNECT: the answer to the proxy, git's user agent, and a
         // keep-alive the tunnel asks for.
@@ -1204,6 +1215,7 @@ const Http = struct {
         const h = self(context);
         h.endRequest();
         h.client.deinit(io);
+        if (h.proxy_secret) |*p| p.deinit();
         h.saveCookies(io);
         if (h.cookies) |*jar| jar.deinit(io);
         h.credentials.deinit();

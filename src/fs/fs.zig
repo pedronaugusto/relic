@@ -30,6 +30,7 @@ const conduit = @import("conduit");
 /// The end-of-operation policy for selected objects and checkout.
 pub const Durability = enum { none, durable };
 const airlock = @import("airlock");
+const aegis = @import("aegis");
 /// A requested durability level was refused by the filesystem.
 pub const SyncError = airlock.DirSyncError || airlock.SyncPathError || error{LevelUnavailable};
 
@@ -1455,6 +1456,50 @@ pub fn readFileAlloc(
     };
 }
 
+/// `readFileAlloc` for a file that holds a secret (`.netrc`, a private
+/// key): read into an owner that wipes its bytes when let go, growing
+/// through `reserve`, which wipes what it leaves, so no copy is freed
+/// unwiped on the way as a growing buffer's would be.
+pub fn readSecretFile(
+    gpa: Allocator,
+    io: Io,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    max_bytes: usize,
+) (Io.Dir.ReadFileAllocError)!?aegis.SecretBytes {
+    var file = dir.openFile(io, sub_path, .{ .allow_directory = builtin.os.tag != .windows }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.IsDir => return null,
+        else => |e| return e,
+    };
+    defer file.close(io);
+    // The length is a first guess: the file may change as it is read.
+    const guess = std.math.cast(usize, file.length(io) catch 0) orelse max_bytes;
+    var secret = try aegis.SecretBytes.init(gpa, @min(guess, max_bytes) + 1);
+    errdefer secret.deinit();
+    while (true) {
+        const have = secret.len();
+        if (have == secret.capacity()) {
+            if (have > max_bytes) return error.StreamTooLong;
+            try secret.reserve(@min(have *| 2, max_bytes + 1));
+        }
+        // unreachable: the capacity was just made room for.
+        secret.resizeWithinCapacity(secret.capacity()) catch unreachable;
+        const n = file.readStreaming(io, &.{secret.exposeMut()[have..]}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            error.IsDir => {
+                secret.deinit();
+                return null;
+            },
+            else => |e| return e,
+        };
+        // unreachable: the read filled no more than the capacity.
+        secret.resizeWithinCapacity(have + n) catch unreachable;
+        if (n == 0) break;
+    }
+    if (secret.len() > max_bytes) return error.StreamTooLong;
+    return secret;
+}
+
 /// Join path components with `/`, which is the separator every git format
 /// uses whatever the platform underneath. The result is the caller's.
 pub fn join(gpa: Allocator, parts: []const []const u8) Allocator.Error![]u8 {
@@ -1652,6 +1697,34 @@ test "a sized read gives the whole file whatever the size said" {
     try std.testing.expectEqualStrings("twelve bytes", empty);
 
     try std.testing.expectError(error.StreamTooLong, readFileSized(gpa, io, dir, "f", .{ .size = 12, .max_bytes = 4 }));
+}
+
+test "a secret file is read whole into its owner, and refused past its limit as readFileAlloc refuses it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = tmp.dir;
+
+    try dir.writeFile(io, .{ .sub_path = "f", .data = "twelve bytes" });
+    try dir.writeFile(io, .{ .sub_path = "empty", .data = "" });
+    try dir.createDirPath(io, "d");
+
+    var whole = (try readSecretFile(gpa, io, dir, "f", 1 << 20)).?;
+    defer whole.deinit();
+    try std.testing.expectEqualStrings("twelve bytes", whole.expose());
+
+    var at_limit = (try readSecretFile(gpa, io, dir, "f", 12)).?;
+    defer at_limit.deinit();
+    try std.testing.expectEqualStrings("twelve bytes", at_limit.expose());
+
+    var empty = (try readSecretFile(gpa, io, dir, "empty", 1 << 20)).?;
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.len());
+
+    try std.testing.expectError(error.StreamTooLong, readSecretFile(gpa, io, dir, "f", 4));
+    try std.testing.expect(try readSecretFile(gpa, io, dir, "missing", 1 << 20) == null);
+    try std.testing.expect(try readSecretFile(gpa, io, dir, "d", 1 << 20) == null);
 }
 
 test "a lock is refused, not broken, and says who holds it" {
