@@ -119,6 +119,7 @@ test {
         _ = @import("testing/pull.zig");
         _ = @import("testing/replay.zig");
         _ = @import("testing/history_command.zig");
+        _ = @import("testing/last_modified.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");

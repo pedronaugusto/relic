@@ -24,6 +24,7 @@ const attributes = @import("../patterns.zig").attributes;
 const user_diff = @import("user_diff.zig");
 const config_mod = @import("../config/config.zig");
 const glob = @import("../text.zig").glob;
+const pathspec = @import("../patterns.zig").pathspec;
 const whitespace = @import("../text.zig").whitespace;
 const c_quote = @import("../text.zig").c_quote;
 const paint = @import("paint.zig");
@@ -189,6 +190,16 @@ pub const TreeOptions = struct {
     /// changes come out in the order of the first pattern each path
     /// matches, the rest after them, otherwise as they were.
     order: Order = .{},
+    /// `-- <paths>`: only the paths these name, and the subtrees on the
+    /// way to them.
+    paths: ?*const pathspec.Pathspec = null,
+    /// `--max-depth=<n>`: a subtree below this many levels -- from the top,
+    /// or from the pathspec item it lies in -- is listed as one change, its
+    /// mode a tree's, and not entered. `null` enters every subtree. Never
+    /// with a wildcard in `paths`, which git refuses.
+    max_depth: ?u32 = null,
+    /// `-t`: a subtree entered is listed too, ahead of what changed in it.
+    trees: bool = false,
 };
 
 /// An order file, as git's `diffcore_order` reads and applies it: one
@@ -274,8 +285,10 @@ pub fn tree(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, option
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
+    // git's `diff_setup_done` refuses the two together; its walk asserts it.
+    if (options.max_depth != null) if (options.paths) |paths| std.debug.assert(!paths.hasWildcard());
     var changes: std.ArrayList(Change) = .empty;
-    var walk: Walk = .{ .arena = arena, .io = io, .db = db, .prefix = options.prefix, .out = &changes };
+    var walk: Walk = .{ .arena = arena, .io = io, .db = db, .prefix = options.prefix, .out = &changes, .paths = options.paths, .max_depth = options.max_depth, .list_trees = options.trees };
     try walk.trees(old, new, "", 0);
 
     // `--find-copies-harder` offers every file of the old tree as a source.
@@ -303,6 +316,9 @@ const Walk = struct {
     db: *odb_mod.Odb,
     prefix: []const u8,
     out: *std.ArrayList(Change),
+    paths: ?*const pathspec.Pathspec = null,
+    max_depth: ?u32 = null,
+    list_trees: bool = false,
 
     fn trees(w: *Walk, old: ?Oid, new: ?Oid, base: []const u8, depth: u32) Error!void {
         if (depth > object.max_tree_depth) return error.TreeTooDeep;
@@ -349,10 +365,14 @@ const Walk = struct {
     /// of a subtree.
     fn oneSide(w: *Walk, e: object.Tree.Entry, base: []const u8, status: Status, depth: u32) Error!void {
         const path = (try w.pathIfWanted(e, base)) orelse return;
-        if (e.mode.isTree()) {
+        const entry: Entry = .{ .path = path, .mode = e.mode, .oid = e.oid };
+        if (e.mode.isTree() and w.enters(path)) {
+            if (w.list_trees) try w.out.append(w.arena, if (status == .deleted)
+                .{ .status = .deleted, .old = entry, .new = null }
+            else
+                .{ .status = .added, .old = null, .new = entry });
             return if (status == .deleted) w.trees(e.oid, null, path, depth + 1) else w.trees(null, e.oid, path, depth + 1);
         }
-        const entry: Entry = .{ .path = path, .mode = e.mode, .oid = e.oid };
         try w.out.append(w.arena, if (status == .deleted)
             .{ .status = .deleted, .old = entry, .new = null }
         else
@@ -363,7 +383,8 @@ const Walk = struct {
     fn bothSides(w: *Walk, a: object.Tree.Entry, b: object.Tree.Entry, base: []const u8, depth: u32) Error!void {
         if (a.oid.eql(b.oid) and a.mode == b.mode) return;
         const path = (try w.pathIfWanted(a, base)) orelse return;
-        if (a.mode.isTree()) return w.trees(a.oid, b.oid, path, depth + 1);
+        const entered = a.mode.isTree() and w.enters(path);
+        if (entered and !w.list_trees) return w.trees(a.oid, b.oid, path, depth + 1);
         const status: Status = if (a.mode.isBlob() != b.mode.isBlob() or
             (a.mode == .symlink) != (b.mode == .symlink) or
             (a.mode == .gitlink) != (b.mode == .gitlink))
@@ -375,15 +396,28 @@ const Walk = struct {
             .old = .{ .path = path, .mode = a.mode, .oid = a.oid },
             .new = .{ .path = path, .mode = b.mode, .oid = b.oid },
         });
+        if (entered) return w.trees(a.oid, b.oid, path, depth + 1);
     }
 
-    /// The entry's path, or `null` when the prefix leaves it out: a file
-    /// outside it, or a subtree that neither lies inside it nor holds it.
+    /// git's `should_recurse`: whether the subtree at `path` is entered,
+    /// or listed as one change.
+    fn enters(w: *const Walk, path: []const u8) bool {
+        const max = w.max_depth orelse return true;
+        if (w.paths) |paths| return paths.entersAt(path, max);
+        return pathspec.entersTop(path, max);
+    }
+
+    /// The entry's path, or `null` when the prefix or the pathspec leaves
+    /// it out: a file outside them, or a subtree that neither lies inside
+    /// them nor holds what they name.
     fn pathIfWanted(w: *Walk, e: object.Tree.Entry, base: []const u8) Allocator.Error!?[]const u8 {
         const path = if (base.len == 0) try w.arena.dupe(u8, e.name) else try w.arena.print("{s}/{s}", .{ base, e.name });
-        if (underPrefix(path, w.prefix)) return path;
-        if (e.mode.isTree() and std.mem.startsWith(u8, w.prefix, path) and w.prefix[path.len] == '/') return path;
-        return null;
+        const in_prefix = underPrefix(path, w.prefix) or
+            (e.mode.isTree() and std.mem.startsWith(u8, w.prefix, path) and w.prefix[path.len] == '/');
+        if (!in_prefix) return null;
+        const paths = w.paths orelse return path;
+        if (e.mode.isTree()) return if (paths.matchesDir(path) or paths.couldMatchUnder(path)) path else null;
+        return if (paths.matches(path)) path else null;
     }
 };
 
@@ -406,8 +440,24 @@ fn underPrefix(path: []const u8, prefix: []const u8) bool {
     return path.len == prefix.len or path[prefix.len] == '/';
 }
 
+/// By path, in git's tree order: a subtree's path with `/` after it, so
+/// it comes where its contents do.
 fn lessThanChange(_: void, a: Change, b: Change) bool {
-    return std.mem.order(u8, a.path(), b.path()) == .lt;
+    const pa = a.path();
+    const pb = b.path();
+    const la = pa.len + @intFromBool(isTreeChange(a));
+    const lb = pb.len + @intFromBool(isTreeChange(b));
+    for (0..@min(la, lb)) |i| {
+        const ca: u8 = if (i < pa.len) pa[i] else '/';
+        const cb: u8 = if (i < pb.len) pb[i] else '/';
+        if (ca != cb) return ca < cb;
+    }
+    return la < lb;
+}
+
+fn isTreeChange(c: Change) bool {
+    const e = c.new orelse c.old.?;
+    return e.mode.isTree();
 }
 
 fn flatten(

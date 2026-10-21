@@ -120,6 +120,33 @@ pub const Pathspec = struct {
         return true;
     }
 
+    /// Whether an item holds a wildcard: git's `has_wildcard`.
+    pub fn hasWildcard(p: *const Pathspec) bool {
+        for (p.items) |item| {
+            if (item.nowildcard_len < item.match.len) return true;
+        }
+        return false;
+    }
+
+    /// Whether a tree diff limited to `max_depth` levels enters the
+    /// directory `dir`: git's `check_recursion_depth`. The levels are
+    /// counted below the top, or below the last item `dir` lies in; a
+    /// directory on the way to an item is always entered.
+    pub fn entersAt(p: *const Pathspec, dir: []const u8, max_depth: u32) bool {
+        if (p.items.len == 0) return entersTop(dir, max_depth);
+        var i = p.items.len;
+        while (i > 0) {
+            i -= 1;
+            const m = p.items[i].match;
+            if (dir.len >= m.len) {
+                if (!isDirPrefix(dir, m)) continue;
+                return withinDepth(dir[m.len..], 1, max_depth);
+            }
+            if (isDirPrefix(m, dir)) return true;
+        }
+        return false;
+    }
+
     /// Whether a path under `dir` could be named: a directory a walk must
     /// enter.
     pub fn couldMatchUnder(p: *const Pathspec, dir: []const u8) bool {
@@ -139,6 +166,29 @@ pub const Pathspec = struct {
         return false;
     }
 };
+
+/// `Pathspec.entersAt` with no pathspec: the levels counted from the top.
+pub fn entersTop(dir: []const u8, max_depth: u32) bool {
+    return withinDepth(dir, 1, max_depth);
+}
+
+/// git's `within_depth`: whether `name` holds few enough slashes that,
+/// counted from `depth`, it stays at or above `max_depth`.
+fn withinDepth(name: []const u8, depth: u32, max_depth: u32) bool {
+    var d = depth;
+    for (name) |c| {
+        if (c != '/') continue;
+        d += 1;
+        if (d > max_depth) return false;
+    }
+    return d <= max_depth;
+}
+
+/// git's `is_dir_prefix`: `dir` is `path` or one of its leading
+/// directories.
+fn isDirPrefix(path: []const u8, dir: []const u8) bool {
+    return std.mem.startsWith(u8, path, dir) and (path.len == dir.len or path[dir.len] == '/');
+}
 
 /// How a path was named, git's `MATCHED_*` in its order: a caller that
 /// keeps the strongest compares them.
