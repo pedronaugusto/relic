@@ -91,3 +91,7 @@ pub const ScheduleEntry = @import("maintenance/schedule.zig").Entry;
 pub const SchedulerRegistration = @import("maintenance/schedule.zig").Registration;
 pub const schedulerRegistration = @import("maintenance/schedule.zig").registration;
 pub const crontab = @import("maintenance/schedule.zig").crontab;
+pub const MigrateError = @import("maintenance/migrate.zig").Error;
+pub const MigrateOptions = @import("maintenance/migrate.zig").Options;
+pub const MigrateOutcome = @import("maintenance/migrate.zig").Outcome;
+pub const migrateRefs = @import("maintenance/migrate.zig").migrate;

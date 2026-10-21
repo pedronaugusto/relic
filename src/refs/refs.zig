@@ -1376,6 +1376,46 @@ pub fn create(io: Io, git_dir: Io.Dir, format: Format, options: CreateOptions) C
     }
 }
 
+/// Errors from `removeOnDisk`.
+pub const RemoveError = ReadError || Io.Dir.DeleteTreeError || Io.Dir.DeleteFileError || Io.Dir.DeleteDirError;
+
+/// git's `ref_store_remove_on_disk`: what `store` keeps in its git
+/// directory taken away, as `refs migrate` does before it moves another
+/// store in. The files format's `refs/`, `logs/`, root refs and
+/// `packed-refs`; a reftable's `reftable/` and the `HEAD` and
+/// `refs/heads` stubs beside it. `FETCH_HEAD` and the other special refs,
+/// files in either format, stay.
+pub fn removeOnDisk(gpa: Allocator, io: Io, store: *Store) RemoveError!void {
+    const dir = store.gitDir();
+    switch (store.refFormat()) {
+        .files => {
+            var roots = try store.root().list(gpa, io);
+            defer roots.deinit();
+            try dir.deleteTree(io, "refs");
+            try dir.deleteTree(io, "logs");
+            for (roots.entries) |entry| try deleteIfPresent(io, dir, entry.name);
+            for (roots.broken) |entry| try deleteIfPresent(io, dir, entry.name);
+            try deleteIfPresent(io, dir, "packed-refs");
+        },
+        .reftable => {
+            try dir.deleteTree(io, "reftable");
+            try deleteIfPresent(io, dir, "HEAD");
+            try deleteIfPresent(io, dir, "refs/heads");
+            dir.deleteDir(io, "refs") catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
+        },
+    }
+}
+
+fn deleteIfPresent(io: Io, dir: Io.Dir, name: []const u8) Io.Dir.DeleteFileError!void {
+    dir.deleteFile(io, name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => |e| return e,
+    };
+}
+
 fn makeDir(io: Io, dir: Io.Dir, sub_path: []const u8, shared: fs.Shared) Io.Dir.CreateDirPathError!void {
     fs.makeDirs(io, dir, sub_path, shared) catch |err| switch (err) {
         error.PathAlreadyExists => {},

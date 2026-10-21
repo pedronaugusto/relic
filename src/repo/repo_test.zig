@@ -1864,3 +1864,128 @@ test "config --unset-all, --add and --fixed-value leave each file as git's do, a
         };
     };
 }
+
+/// A history with what a migration carries: branches, an annotated and a
+/// lightweight tag, a symbolic ref, a root ref, a stash and their logs.
+fn migrationFixture(git: *testgit.Repo) !void {
+    const io = std.testing.io;
+    for (0..3) |i| {
+        var text: [32]u8 = undefined;
+        try git.writeFile(io, "a.txt", try std.mem.print(&text, "version {d}\n", .{i}));
+        try git.exec(io, &.{ "add", "a.txt" });
+        try git.exec(io, &.{ "commit", "-qm", try std.mem.print(&text, "commit {d}", .{i}) });
+    }
+    try git.exec(io, &.{ "branch", "side", "HEAD~1" });
+    try git.exec(io, &.{ "tag", "-a", "-m", "annotated", "v1" });
+    try git.exec(io, &.{ "tag", "light", "HEAD~2" });
+    try git.exec(io, &.{ "update-ref", "refs/remotes/origin/main", "HEAD" });
+    try git.exec(io, &.{ "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main" });
+    try git.exec(io, &.{ "update-ref", "ORIG_HEAD", "HEAD~1" });
+    try git.writeFile(io, "a.txt", "stashed\n");
+    try git.exec(io, &.{ "stash", "-q" });
+}
+
+/// What a migration leaves, as git reads it: every ref with its target,
+/// every log, the format settings, and for the files format the files.
+fn migrationState(git: *testgit.Repo) ![]u8 {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    const refs_text = try git.run(io, &.{ "for-each-ref", "--include-root-refs", "--format=%(refname) %(objectname) %(symref)" });
+    defer gpa.free(refs_text);
+    try out.appendSlice(gpa, refs_text);
+    const head = try git.run(io, &.{ "symbolic-ref", "HEAD" });
+    defer gpa.free(head);
+    try out.appendSlice(gpa, head);
+    for ([_][]const u8{ "HEAD", "refs/heads/main", "refs/heads/side", "refs/stash", "refs/remotes/origin/main" }) |name| {
+        const log = try git.run(io, &.{ "reflog", "show", "--format=%H %gn <%ge> %gd %gs", name });
+        defer gpa.free(log);
+        try out.print(gpa, "log {s}:\n{s}", .{ name, log });
+    }
+    for ([_][]const u8{ "extensions.refstorage", "core.repositoryformatversion" }) |key| {
+        var got = try git.capture(io, &.{ "config", "--get", key });
+        defer got.deinit(gpa);
+        try out.print(gpa, "{s} = {s}", .{ key, got.stdout });
+    }
+    const packed_refs = git.readFile(io, ".git/packed-refs") catch |err| switch (err) {
+        error.FileNotFound => try gpa.dupe(u8, "(none)\n"),
+        else => |e| return e,
+    };
+    defer gpa.free(packed_refs);
+    try out.print(gpa, "packed-refs:\n{s}", .{packed_refs});
+    for ([_][]const u8{ ".git/refs", ".git/logs" }) |top| {
+        var dir = git.dir.openDir(io, top, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var walker = try dir.walk(gpa);
+        defer walker.deinit();
+        var files: std.ArrayList([]u8) = .empty;
+        defer {
+            for (files.items) |f| gpa.free(f);
+            files.deinit(gpa);
+        }
+        while (try walker.next(io)) |entry| if (entry.kind == .file) try files.append(gpa, try gpa.dupe(u8, entry.path));
+        std.mem.sort([]u8, files.items, {}, struct {
+            fn less(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        for (files.items) |f| try out.print(gpa, "{s}/{s}\n", .{ top, f });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+const migrate_refs = @import("../maintenance/migrate.zig").migrate;
+
+test "refs migrate moves the refs and their logs into the other format as git's does, both ways" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for ([_]testgit.RefFormat{ .files, .reftable }) |from| {
+        const to: refs_mod.Format = if (from == .files) .reftable else .files;
+        var theirs = try testgit.Repo.init(gpa, io, from.initArgs());
+        defer theirs.deinit();
+        var ours = try testgit.Repo.init(gpa, io, from.initArgs());
+        defer ours.deinit();
+        try migrationFixture(&theirs);
+        try migrationFixture(&ours);
+        try theirs.exec(io, &.{ "refs", "migrate", if (to == .reftable) "--ref-format=reftable" else "--ref-format=files" });
+        {
+            var repo = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+            defer repo.deinit(io);
+            try std.testing.expectError(error.SameRefFormat, migrate_refs(gpa, io, &repo, .{ .format = if (from == .files) .files else .reftable }));
+            _ = try migrate_refs(gpa, io, &repo, .{ .format = to });
+        }
+        const expected = try migrationState(&theirs);
+        defer gpa.free(expected);
+        const actual = try migrationState(&ours);
+        defer gpa.free(actual);
+        std.testing.expectEqualStrings(expected, actual) catch |err| {
+            std.debug.print("migrating from {t}\n", .{from});
+            return err;
+        };
+        try ours.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+        // relic reads what it wrote.
+        var reopened = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+        defer reopened.deinit(io);
+        try std.testing.expectEqual(to, reopened.refStore().refFormat());
+    }
+}
+
+test "refs migrate --dry-run leaves the repository as it was and the new store in its directory" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try migrationFixture(&git);
+    const before = try migrationState(&git);
+    defer gpa.free(before);
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const outcome = try migrate_refs(gpa, io, &repo, .{ .format = .reftable, .dry_run = true });
+    defer gpa.free(outcome.dry_run_dir.?);
+    const after = try migrationState(&git);
+    defer gpa.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    var path_buf: [64]u8 = undefined;
+    try git.dir.access(io, try std.mem.print(&path_buf, ".git/{s}/reftable/tables.list", .{outcome.dry_run_dir.?}), .{});
+}
