@@ -76,12 +76,15 @@ pub const ReflogExpireOptions = struct {
     refs: ?[]const []const u8 = null,
     /// `--expire`: entries older than this go. `null` takes
     /// `gc.<pattern>.reflogExpire` for the first pattern the ref matches,
-    /// else `gc.reflogExpire`, else 90 days before `clock`.
+    /// else `gc.reflogExpire`, else 30 days before `clock`: git 2.55's
+    /// `REFLOG_EXPIRE_OPTIONS_INIT`, which its documentation gives as 90.
     expire: ?Expiry = null,
     /// `--expire-unreachable`: entries older than this go when their old
     /// or new value is a commit the ref's tip does not reach. `null` takes
     /// `gc.<pattern>.reflogExpireUnreachable`, `gc.reflogExpireUnreachable`,
-    /// else 30 days before `clock`.
+    /// else 90 days before `clock` (git's documentation says 30). With
+    /// both defaults git checks no reachability at all: every entry older
+    /// than 30 days goes.
     expire_unreachable: ?Expiry = null,
     /// `--rewrite`.
     rewrite: bool = false,
@@ -104,9 +107,9 @@ const Settings = struct {
 
     fn read(arena: Allocator, config: *const config_mod.Config, clock: date.Context) Self.Error!Settings {
         const now = clock.now.toSeconds();
-        // The documented defaults: git 2.55's REFLOG_EXPIRE_OPTIONS_INIT
-        // gives the two the other way round.
-        var settings: Settings = .{ .defaults = .{ .total = now - 90 * std.time.s_per_day, .unreached = now - 30 * std.time.s_per_day }, .patterns = &.{} };
+        // git 2.55's REFLOG_EXPIRE_OPTIONS_INIT: 30 days for every entry,
+        // 90 for unreachable ones, the other way round from its docs.
+        var settings: Settings = .{ .defaults = .{ .total = now - 30 * std.time.s_per_day, .unreached = now - 90 * std.time.s_per_day }, .patterns = &.{} };
         var patterns: std.ArrayList(PatternPolicy) = .empty;
         for (config.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.section, "gc")) continue;

@@ -265,6 +265,9 @@ fn expireInFormat(format: testgit.RefFormat) !void {
     const clock: @import("../text.zig").date.Context = .{ .now = .fromNanoseconds(@as(i96, now) * std.time.ns_per_s) };
     const both = [_][2][]const u8{ .{ "gc.reflogExpire", "90.days.ago" }, .{ "gc.reflogExpireUnreachable", "30.days.ago" } };
     const cases = [_]ExpireCase{
+        .{ .config = &.{}, .args = &.{"--all"}, .options = .{ .clock = clock } },
+        .{ .config = &.{&.{.{ "gc.reflogExpire", "90.days.ago" }}}, .args = &.{"--all"}, .options = .{ .clock = clock } },
+        .{ .config = &.{&.{.{ "gc.reflogExpireUnreachable", "never" }}}, .args = &.{"--all"}, .options = .{ .clock = clock } },
         .{ .config = &.{&both}, .args = &.{"--all"}, .options = .{ .clock = clock } },
         .{ .config = &.{ &both, &.{ .{ "gc.refs/heads/topic.reflogExpire", "never" }, .{ "gc.refs/heads/*.reflogExpireUnreachable", "5.days.ago" } } }, .args = &.{"--all"}, .options = .{ .clock = clock } },
         .{ .config = &.{&.{ .{ "gc.reflogExpire", "160.days.ago" }, .{ "gc.reflogExpireUnreachable", "never" } }}, .args = &.{"--all"}, .options = .{ .clock = clock } },
@@ -299,7 +302,7 @@ fn expireInFormat(format: testgit.RefFormat) !void {
     }
 }
 
-test "reflog expire keeps and drops what git's does: gc.reflogExpire*, patterns, refs/stash, HEAD, --rewrite and --updateref, in both ref formats" {
+test "reflog expire keeps and drops what git's does: git 2.55's defaults, gc.reflogExpire*, patterns, refs/stash, HEAD, --rewrite and --updateref, in both ref formats" {
     try testgit.eachRefFormat(expireInFormat);
 }
 
