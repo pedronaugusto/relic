@@ -63,3 +63,4 @@ pub const PathInputs = @import("checkout/checkout.zig").PathInputs;
 pub const VerifyInputs = @import("checkout/checkout.zig").VerifyInputs;
 pub const CompareInputs = @import("checkout/checkout.zig").CompareInputs;
 pub const SparseInputs = @import("checkout/checkout.zig").SparseInputs;
+pub const remove = @import("stage/remove.zig");

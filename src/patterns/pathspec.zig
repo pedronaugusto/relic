@@ -110,6 +110,19 @@ pub const Pathspec = struct {
         return best;
     }
 
+    /// `how`, and in `seen`, one per item in `parse`'s order, the strongest
+    /// way each item has named a path so far: git's `seen` of
+    /// `match_pathspec`, kept for a path an exclusion then takes back too,
+    /// as git keeps it.
+    pub fn howSeen(p: *const Pathspec, path: []const u8, flags: Flags, seen: []How) How {
+        for (p.items, seen) |item, *s| {
+            if (item.exclude) continue;
+            const h = howItem(item, path, flags, false);
+            if (@backingInt(h) > @backingInt(s.*)) s.* = h;
+        }
+        return p.how(path, flags);
+    }
+
     /// Whether no item's literal part agrees with `path` as far as both
     /// go: a walk passes such a path by without looking at it. git's
     /// `simplify_away`.

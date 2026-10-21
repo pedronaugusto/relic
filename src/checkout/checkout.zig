@@ -215,8 +215,8 @@ pub const AddOptions = struct {
     ignore_errors: bool = false,
     /// Where files skipped under `ignore_errors` are reported.
     error_report: ?*AddErrorReport = null,
-    /// A path prefix to limit the walk to, `/`-separated. Empty walks the
-    /// whole tree.
+    /// A path to limit the walk to, `/`-separated: a directory, whose
+    /// files are walked, or one file. Empty walks the whole tree.
     prefix: []const u8 = "",
     /// The permission to run the filter programs `rules.filters` names.
     programs: ?program.Programs = null,
@@ -344,7 +344,7 @@ pub fn addAll(
         .fresh = &fresh,
         .filling = &filling,
     };
-    try walker.walk(options.prefix, 0);
+    try walker.walkFrom(options.prefix);
     if (filling) |open| {
         // Out of the errdefer's reach before it is closed, because closing
         // it releases it whether it succeeded or not.
@@ -363,7 +363,7 @@ pub fn addAll(
         var gone: std.ArrayList([]const u8) = .empty;
         defer gone.deinit(gpa);
         for (index.entries.items) |entry| {
-            const under_prefix = options.prefix.len == 0 or
+            const under_prefix = options.prefix.len == 0 or std.mem.eql(u8, entry.path, options.prefix) or
                 (std.mem.startsWith(u8, entry.path, options.prefix) and
                     entry.path.len > options.prefix.len and
                     entry.path[options.prefix.len] == '/');
@@ -416,6 +416,23 @@ const Walker = struct {
     filling: *?Odb.OpenPack,
     /// New blobs this pass has written loose, for `NewBlobs.auto`.
     loose_new: u32 = 0,
+
+    /// The walk from `prefix`: the directory's files, or the one file it
+    /// names, under the rules of the directory that holds it.
+    fn walkFrom(w: *Walker, prefix: []const u8) Error!void {
+        if (prefix.len != 0) if (try fs.statAt(w.io, w.wt, prefix)) |found| switch (found.kind) {
+            .sym_link, .file => {
+                const parent = std.Io.Dir.path.dirnamePosix(prefix) orelse "";
+                if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, parent, 0);
+                defer if (w.options.rules.ignore) |rules| rules.popTo(2);
+                if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt, parent, 0);
+                defer if (w.options.rules.attrs) |attrs| attrs.popTo(1);
+                return w.stageFile(prefix, found);
+            },
+            else => {},
+        };
+        return w.walk(prefix, 0);
+    }
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
