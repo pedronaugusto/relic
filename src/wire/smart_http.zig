@@ -63,6 +63,7 @@ const connection = @import("connection.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const http_settings = @import("http_settings.zig");
+const Seconds = http_settings.Seconds;
 const decimal = @import("../text.zig").decimal;
 const policy = @import("policy.zig");
 const client_cert = @import("client_cert.zig");
@@ -255,7 +256,7 @@ fn prepare(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: 
     errdefer h.client.deinit(io);
     errdefer h.endRequest();
     const settings = configured.settings;
-    h.post_buffer = try h.arena.allocator().alloc(u8, @intCast(settings.post_buffer));
+    h.post_buffer = try h.arena.allocator().alloc(u8, (settings.post_buffer.convert(usize) catch return error.OutOfMemory).raw());
     h.body_buffer = try h.arena.allocator().alloc(u8, pkt_line.max_line);
     h.post = .{ .vtable = &.{ .drain = Http.drainPost }, .buffer = h.post_buffer };
     return h;
@@ -352,11 +353,11 @@ const Http = struct {
     /// `http.maxRetryTime`.
     rate_limit: RateLimit = .{},
 
-    /// git's answer to a 429, in seconds and attempts.
+    /// git's answer to a 429, in time and attempts.
     const RateLimit = struct {
-        retry_after: i64 = 0,
+        retry_after: Seconds = .fromRaw(0),
         max_retries: i64 = 0,
-        max_retry_time: i64 = 300,
+        max_retry_time: Seconds = .fromRaw(300),
     };
 
     /// What `configure` read: the settings, and the client they make.
@@ -464,9 +465,9 @@ const Http = struct {
         h.rate_limit = .{ .retry_after = settings.retry_after, .max_retries = settings.max_retries, .max_retry_time = settings.max_retry_time };
         var timeouts: uplink.Timeouts = .{};
         // git's `get_curl_handle`: both above zero, or neither applies.
-        if (settings.low_speed_limit > 0 and settings.low_speed_time > 0) timeouts.low_speed = .{
+        if (settings.low_speed_limit > 0 and settings.low_speed_time.compare(.fromRaw(0)) == .gt) timeouts.low_speed = .{
             .bytes_per_second = std.math.cast(u32, settings.low_speed_limit) orelse std.math.maxInt(u32),
-            .window = .fromRaw(@as(u64, @intCast(settings.low_speed_time)) * std.time.ns_per_s), // safe: a positive value of git's int
+            .window = settings.low_speed_time.convert(.nanosecond, u64, .exact) catch .fromRaw(std.math.maxInt(u64)),
         };
         return .{
             .settings = settings,
@@ -911,36 +912,38 @@ const Http = struct {
     fn waitToRetry(h: *Http, res: *uplink.Response, attempts: i64) Error!void {
         const limit = h.rate_limit;
         // curl's `CURLINFO_RETRY_AFTER`, which git takes when above zero.
-        var asked: i64 = 0;
+        const zero: Seconds = .fromRaw(0);
+        var asked = zero;
         if (res.headers.get("retry-after")) |raw| {
             const value = std.mem.trim(u8, raw, " \t");
             const read = decimal.strtol(value, 10, 64);
             if (read.end != 0) {
-                asked = @intCast(@max(read.value, 0)); // safe: strtol of 64 bits fits an i64
+                asked = .fromRaw(@intCast(@max(read.value, 0))); // safe: strtol of 64 bits fits an i64
             } else if (h.options.now) |now| if (uplink.wire.date.parse(value)) |at| {
-                asked = @max(at - now.toSeconds(), 0);
+                asked = .fromRaw(@max(at - now.toSeconds(), 0));
             };
         }
         var buf: [160]u8 = undefined;
         if (limit.max_retries > 0 and attempts >= limit.max_retries) {
-            const text = if (asked > 0)
-                std.mem.print(&buf, "rate limited, please try again in {d} seconds", .{asked}) catch unreachable // unreachable: two numbers and a sentence fit
+            const text = if (asked.compare(zero) == .gt)
+                std.mem.print(&buf, "rate limited, please try again in {d} seconds", .{asked.raw()}) catch unreachable // unreachable: two numbers and a sentence fit
             else
                 "rate limited, please try again later";
             return h.fail(error.RateLimited, text);
         }
-        const delay = if (asked > 0) delay: {
-            if (asked > limit.max_retry_time) return h.fail(error.RateLimited, std.mem.print(&buf, "response requested a delay greater than http.maxRetryTime ({d} > {d} seconds)", .{ asked, limit.max_retry_time }) catch unreachable); // unreachable: as above
+        const delay = if (asked.compare(zero) == .gt) delay: {
+            if (asked.compare(limit.max_retry_time) == .gt) return h.fail(error.RateLimited, std.mem.print(&buf, "response requested a delay greater than http.maxRetryTime ({d} > {d} seconds)", .{ asked.raw(), limit.max_retry_time.raw() }) catch unreachable); // unreachable: as above
             break :delay asked;
         } else delay: {
-            if (limit.retry_after > limit.max_retry_time) return h.fail(error.RateLimited, std.mem.print(&buf, "configured http.retryAfter exceeds http.maxRetryTime ({d} > {d} seconds)", .{ limit.retry_after, limit.max_retry_time }) catch unreachable); // unreachable: as above
+            if (limit.retry_after.compare(limit.max_retry_time) == .gt) return h.fail(error.RateLimited, std.mem.print(&buf, "configured http.retryAfter exceeds http.maxRetryTime ({d} > {d} seconds)", .{ limit.retry_after.raw(), limit.max_retry_time.raw() }) catch unreachable); // unreachable: as above
             break :delay limit.retry_after;
         };
         // The 429's body is read so its connection can carry the next.
         h.endRequest();
-        if (delay <= 0) return;
-        try warning.note(h.options.warnings, .{ .rate_limited = @intCast(delay) });
-        try h.io.sleep(.fromSeconds(delay), .awake);
+        if (delay.compare(zero) != .gt) return;
+        // unreachable: the delay is above zero, and a second count of an i64 fits a u64 and std's nanoseconds.
+        try warning.note(h.options.warnings, .{ .rate_limited = delay.convert(.second, u64, .exact) catch unreachable });
+        try h.io.sleep(delay.toIoDuration(), .awake);
     }
 
     /// Where a redirect leads: the target and path after it, from a

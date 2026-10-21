@@ -1131,7 +1131,7 @@ test "a 429 is answered as git answers it: http.maxRetries requests in all, Retr
             session.deinit(io);
             if (case.waited) |seconds| {
                 try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
-                try testing.expectEqual(seconds, warnings.items.items[0].rate_limited);
+                try testing.expectEqual(seconds, warnings.items.items[0].rate_limited.raw());
             } else try testing.expectEqual(@as(usize, 0), warnings.items.items.len);
             try testing.expectEqual(case.times, server.rate_limited);
         }

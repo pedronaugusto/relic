@@ -31,6 +31,7 @@ const url_mod = @import("url.zig");
 const urlmatch = @import("../text.zig").urlmatch;
 const decimal = @import("../text.zig").decimal;
 const Io = std.Io;
+const aegis = @import("aegis");
 const uplink = @import("uplink");
 const shakedown = @import("shakedown");
 /// Whether relic was built with HTTP: the `http` build option.
@@ -63,7 +64,7 @@ pub const Settings = struct {
     /// Every `http.extraHeader` value, in order.
     extra_headers: []const []const u8 = &.{},
     /// `http.postBuffer`: the largest request sent whole.
-    post_buffer: u64 = 1 << 20,
+    post_buffer: aegis.units.Bytes(u64) = .fromRaw(1 << 20),
     /// `http.userAgent`, when set.
     user_agent: ?[]const u8 = null,
     /// `http.proxyAuthMethod`: `anyauth`, `basic`, `digest`, `negotiate`,
@@ -95,12 +96,12 @@ pub const Settings = struct {
     /// than the limit, in bytes a second, for the time, in seconds, is
     /// given up on; only when both are above zero.
     low_speed_limit: i64 = -1,
-    low_speed_time: i64 = -1,
+    low_speed_time: Seconds = .fromRaw(-1),
     /// `http.retryAfter`, `http.maxRetries` and `http.maxRetryTime`: how
-    /// a 429 is answered, in seconds and attempts.
-    retry_after: i64 = 0,
+    /// a 429 is answered, in time and attempts.
+    retry_after: Seconds = .fromRaw(0),
     max_retries: i64 = 0,
-    max_retry_time: i64 = 300,
+    max_retry_time: Seconds = .fromRaw(300),
     /// The variables among `GIT_HTTP_LOW_SPEED_*` and `GIT_HTTP_*RETR*`
     /// that are not a number, which git warns of and leaves as they were.
     env_unparsed: []const []const u8 = &.{},
@@ -201,7 +202,7 @@ pub const Settings = struct {
         } else if (std.mem.eql(u8, name, "postbuffer")) {
             // `git_config_ssize_t`; below git's largest packet, that size.
             const n = config_mod.parseInteger(value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
-            settings.post_buffer = @intCast(@max(n, large_packet_max));
+            settings.post_buffer = .fromRaw(@intCast(@max(n, large_packet_max)));
         } else if (std.mem.eql(u8, name, "useragent")) {
             settings.user_agent = text;
         } else if (std.mem.eql(u8, name, "proxyauthmethod")) {
@@ -235,13 +236,13 @@ pub const Settings = struct {
         } else if (std.mem.eql(u8, name, "lowspeedlimit")) {
             settings.low_speed_limit = number;
         } else if (std.mem.eql(u8, name, "lowspeedtime")) {
-            settings.low_speed_time = number;
+            settings.low_speed_time = .fromRaw(number);
         } else if (std.mem.eql(u8, name, "retryafter")) {
-            settings.retry_after = number;
+            settings.retry_after = .fromRaw(number);
         } else if (std.mem.eql(u8, name, "maxretries")) {
             settings.max_retries = number;
         } else if (std.mem.eql(u8, name, "maxretrytime")) {
-            settings.max_retry_time = number;
+            settings.max_retry_time = .fromRaw(number);
         }
     }
 
@@ -295,19 +296,26 @@ pub const Settings = struct {
         // git's `set_long_from_env`: C's `strtol` over the whole value, a
         // value that is not one warned of and left alone.
         var unparsed: std.ArrayList([]const u8) = .empty;
-        const numbers = [_]struct { []const u8, *i64 }{
-            .{ "GIT_HTTP_LOW_SPEED_LIMIT", &settings.low_speed_limit },
-            .{ "GIT_HTTP_LOW_SPEED_TIME", &settings.low_speed_time },
-            .{ "GIT_HTTP_RETRY_AFTER", &settings.retry_after },
-            .{ "GIT_HTTP_MAX_RETRIES", &settings.max_retries },
-            .{ "GIT_HTTP_MAX_RETRY_TIME", &settings.max_retry_time },
+        const Number = union(enum) { count: *i64, time: *Seconds };
+        const numbers = [_]struct { []const u8, Number }{
+            .{ "GIT_HTTP_LOW_SPEED_LIMIT", .{ .count = &settings.low_speed_limit } },
+            .{ "GIT_HTTP_LOW_SPEED_TIME", .{ .time = &settings.low_speed_time } },
+            .{ "GIT_HTTP_RETRY_AFTER", .{ .time = &settings.retry_after } },
+            .{ "GIT_HTTP_MAX_RETRIES", .{ .count = &settings.max_retries } },
+            .{ "GIT_HTTP_MAX_RETRY_TIME", .{ .time = &settings.max_retry_time } },
         };
         for (numbers) |entry| {
             const v = env.get(entry[0]) orelse continue;
             const read = decimal.strtol(v, 10, 64);
             if (read.overflow or read.end == 0 or read.end != v.len) {
                 try unparsed.append(arena, entry[0]);
-            } else entry[1].* = @intCast(read.value); // safe: strtol of 64 bits fits an i64
+                continue;
+            }
+            const value: i64 = @intCast(read.value); // safe: strtol of 64 bits fits an i64
+            switch (entry[1]) {
+                .count => |to| to.* = value,
+                .time => |to| to.* = .fromRaw(value),
+            }
         }
         settings.env_unparsed = unparsed.items;
         if (!proxy_set) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .lowercase);
@@ -320,6 +328,10 @@ pub const Settings = struct {
         }
     }
 };
+
+/// A time git reads as a count of seconds, signed as git's `int` is: a
+/// value at or below zero is git's "none".
+pub const Seconds = aegis.units.Duration(.second, i64);
 
 /// Which redirects are followed, as git's `http.followRedirects` says.
 pub const FollowRedirects = enum {

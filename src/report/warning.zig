@@ -9,6 +9,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 
 /// One warning.
@@ -78,9 +79,8 @@ pub const Warning = union(enum) {
     /// `GIT_HTTP_RETRY_AFTER`, `GIT_HTTP_MAX_RETRIES` and
     /// `GIT_HTTP_MAX_RETRY_TIME` is not a number, and was left out: its name.
     http_env_unparsed: []const u8,
-    /// A server answered 429, and the request goes again after this many
-    /// seconds.
-    rate_limited: u64,
+    /// A server answered 429, and the request goes again after this long.
+    rate_limited: aegis.units.Duration(.second, u64),
     /// A remote URL carries a password, and `transfer.credentialsInUrl`
     /// is `warn`: the URL, its password replaced by `<redacted>`.
     credentials_in_url: []const u8,
@@ -131,7 +131,7 @@ pub const Warning = union(enum) {
             .cookie_file_stdin => "refusing to read cookies from http.cookiefile '-'",
             .save_cookies_without_file => "ignoring http.savecookies for empty http.cookiefile",
             .http_env_unparsed => |name| arena.print("failed to parse {s}", .{name}),
-            .rate_limited => |seconds| arena.print("rate limited, waiting {d} seconds before retry", .{seconds}),
+            .rate_limited => |wait| arena.print("rate limited, waiting {d} seconds before retry", .{wait.raw()}),
         };
     }
 };
