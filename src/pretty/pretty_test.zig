@@ -274,3 +274,35 @@ test "log.date and log.decorate shape a log format as they shape git log --forma
     defer bad.deinit();
     try std.testing.expectError(error.InvalidDateFormat, pretty.configuredDateMode(&bad));
 }
+
+test "%w wraps what follows it as git log --format wraps it, and a malformed one is no placeholder" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "a", "one\n");
+    try git.exec(io, &.{ "add", "a" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "A subject long enough to be wrapped more than once at a narrow width\n\nA body, with its own line\nand a second one that runs on past the width given.\n" });
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const head_hex = try git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_hex);
+    const head = try hash.Oid.parse(.sha1, head_hex);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "%w(20)%s",      "%w(30,4,8)%s%n%w(0)%b", "x%w(20,2)%s%w(10)%n%b",
+        "%w(25,-3,2)%s", "%w()%s",                "%w(12,1,1)%B%w(40,0,0)tail",
+        "%w(20%s",       "%w(20,1,2,3)%s",        "%w(a)%s",
+        "%w( )%s",       "%w(20000)%s",           "%+w(20)%s",
+        "%w(,4)%s",
+    }) |format| {
+        var out: std.ArrayList(u8) = .empty;
+        try pretty.formatCommit(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = head, .format = format }, &out, .{});
+        const arg = try std.mem.concat(arena.allocator(), u8, &.{ "--format=", format });
+        const theirs = try git.run(io, &.{ "log", "-1", arg });
+        defer gpa.free(theirs);
+        if (!std.mem.eql(u8, theirs, try std.mem.concat(arena.allocator(), u8, &.{ out.items, "\n" }))) std.debug.print("format {s}\n", .{format});
+        try std.testing.expectEqualStrings(theirs, try std.mem.concat(arena.allocator(), u8, &.{ out.items, "\n" }));
+    }
+}

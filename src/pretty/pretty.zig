@@ -33,6 +33,8 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const date = @import("../text.zig").date;
+const mailfmt = @import("../mail/format.zig");
+const decimal = @import("../text.zig").decimal;
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
 const shallow = @import("../walk/shallow.zig");
@@ -103,6 +105,12 @@ pub const Context = struct {
     /// (`%ar`, `%ah`) or a `-local` mode. Without them such a date is
     /// `error.DateNeedsClock`.
     clock: date.Clock = .{},
+    /// Where the commit stands in a numbered list, for `%(count)` and
+    /// `%(total)`: git's cover letter lists them so. `null` refuses both,
+    /// as git dies ("not supported by this command").
+    numbered: ?Numbered = null,
+
+    pub const Numbered = struct { nr: usize, total: usize };
 };
 
 /// What a log format colours with, as `git log --color` does: the
@@ -635,6 +643,12 @@ const State = struct {
     /// git's `auto_color`: whether `%C(auto)` is in force and colours
     /// what follows.
     auto_color: bool = false,
+    /// `%w(...)`: where the text it wraps starts, and how: git's
+    /// `wrap_start`, `width`, `indent1` and `indent2`.
+    wrap_start: usize = 0,
+    width: usize = 0,
+    indent1: usize = 0,
+    indent2: usize = 0,
 
     /// The colours the placeholders after `%C(auto)` paint with.
     fn autoColors(st: *const State) ?*const Colors {
@@ -796,6 +810,52 @@ fn colour(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
 
 /// One placeholder, `ph` being what follows the `%`. Returns how many
 /// bytes it took, zero for one git does not know.
+/// `%w(<width>[,<indent1>[,<indent2>]])`: what came since the last one
+/// wrapped as it asked, and what follows wrapped as this one asks. A
+/// malformed one, or one past git's 16 KiB of formatting, is no
+/// placeholder.
+fn wrap(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
+    if (ph.len < 2 or ph[1] != '(') return 0;
+    const end = std.mem.findScalarPos(u8, ph, 2, ')') orelse return 0;
+    var values = [3]usize{ 0, 0, 0 };
+    if (end > 2) {
+        var fields = std.mem.splitScalar(u8, ph[2..end], ',');
+        var i: usize = 0;
+        while (fields.next()) |field| : (i += 1) {
+            if (i == values.len) return 0;
+            values[i] = strtoul(field) orelse return 0;
+        }
+    }
+    const limit = 16 * 1024;
+    for (values) |v| if (v > limit) return 0;
+    try rewrap(st, out, values[0], values[1], values[2]);
+    return end + 1;
+}
+
+/// C's `strtoul` in base ten over a whole field: blanks, then a sign, then
+/// digits; null where anything else is left.
+fn strtoul(field: []const u8) ?usize {
+    const read = decimal.strtoul(field, 10, @bitSizeOf(usize));
+    if (read.end != field.len) return null;
+    // cast: `strtoul` gives a value in `usize`'s range, a minus sign
+    // taken modulo it
+    return @intCast(read.value);
+}
+
+/// git's `rewrap_message_tail`.
+fn rewrap(st: *State, out: *std.ArrayList(u8), width: usize, indent1: usize, indent2: usize) Allocator.Error!void {
+    if (st.width == width and st.indent1 == indent1 and st.indent2 == indent2) return;
+    if (st.wrap_start < out.items.len) {
+        const tail = try st.a.dupe(u8, out.items[st.wrap_start..]);
+        out.shrinkRetainingCapacity(st.wrap_start);
+        try mailfmt.appendWrapped(st.a, out, tail, @intCast(st.indent1), @intCast(st.indent2), @intCast(st.width));
+    }
+    st.wrap_start = out.items.len;
+    st.width = width;
+    st.indent1 = indent1;
+    st.indent2 = indent2;
+}
+
 fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
     const a = st.a;
     const io = st.io;
@@ -814,13 +874,23 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
             return 3;
         },
         'C' => return colour(st, out, ph),
-        'w', '<', '>' => return error.UnsupportedPlaceholder,
+        'w' => return wrap(st, out, ph),
+        '<', '>' => return error.UnsupportedPlaceholder,
         else => {},
     }
     if (std.mem.startsWith(u8, ph, "(decorate")) return decorate(st, out, ph);
     if (std.mem.startsWith(u8, ph, "(trailers")) return trailers(st, out, ph);
-    if (std.mem.startsWith(u8, ph, "(describe") or std.mem.startsWith(u8, ph, "(count)") or
-        std.mem.startsWith(u8, ph, "(total)")) return error.UnsupportedPlaceholder;
+    if (std.mem.startsWith(u8, ph, "(count)")) {
+        const n = ctx.numbered orelse return error.UnsupportedPlaceholder;
+        try out.print(a, "{d:0>[1]}", .{ n.nr, std.fmt.count("{d}", .{n.total}) });
+        return "(count)".len;
+    }
+    if (std.mem.startsWith(u8, ph, "(total)")) {
+        const n = ctx.numbered orelse return error.UnsupportedPlaceholder;
+        try out.print(a, "{d}", .{n.total});
+        return "(total)".len;
+    }
+    if (std.mem.startsWith(u8, ph, "(describe")) return error.UnsupportedPlaceholder;
     var hexbuf: [hash.max_hex_len]u8 = undefined;
     switch (ph[0]) {
         'H', 'h' => {
@@ -941,7 +1011,7 @@ pub fn formatCommit(a: Allocator, io: Io, inputs: CommitInputs, out: *std.ArrayL
     // the placeholders are expanded in UTF-8, the commit converted first
     const utf8 = try reencodeCommit(a, raw, "UTF-8");
     const commit = try object.Commit.parse(a, db.objectFormat(), utf8.bytes);
-    var st: State = .{ .a = a, .io = io, .db = db, .ctx = ctx, .p = .{ .oid = oid, .commit = commit, .raw = raw, .message = commit.message, .encoding = utf8.encoding } };
+    var st: State = .{ .a = a, .io = io, .db = db, .ctx = ctx, .p = .{ .oid = oid, .commit = commit, .raw = raw, .message = commit.message, .encoding = utf8.encoding }, .wrap_start = out.items.len };
     defer if (st.verdict) |*v| v.deinit();
     var at: usize = 0;
     while (at < format.len) {
@@ -983,6 +1053,7 @@ pub fn formatCommit(a: Allocator, io: Io, inputs: CommitInputs, out: *std.ArrayL
         }
         at = pct + 1 + @as(usize, @intFromBool(magic != 0)) + consumed;
     }
+    try rewrap(&st, out, 0, 0, 0);
     // then into the output's encoding: git converts the whole buffer it
     // was handed, what was in it before included
     const converted = try toOutput(a, out.items, outputEncoding(ctx.output_encoding, utf8.encoding));

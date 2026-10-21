@@ -32,6 +32,7 @@ const diff = @import("../diff/diff.zig");
 const driver = @import("../diff/driver.zig");
 const patch_id = @import("../diff/patch_id.zig");
 const rev_walk = @import("../walk/walk.zig");
+const rev_parse = @import("../rev_walk/rev_parse.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const c_quote = @import("../text.zig").c_quote;
 const mailfmt = @import("../mail/format.zig");
@@ -57,6 +58,20 @@ pub const Error = error{
     NotACommit,
     /// `keep_subject` with `numbered`, which git refuses.
     KeepSubjectWithNumbered,
+    /// A `format.*` value git dies on: `format.headers`, `to`, `cc` or a
+    /// setting holding text with no value, a boolean setting that is no
+    /// boolean, a `filenameMaxLength` that is no number, a `from` that is
+    /// no identity, an unknown `coverFromDescription`, or a
+    /// `commitListFormat` that is no format when a cover letter is
+    /// written.
+    InvalidFormatSetting,
+    /// A sign-off, a cover letter, threading or `format.from=true` asked
+    /// for the committer with no `Options.who`.
+    NoIdentity,
+    /// `--base=auto` or `format.useAutoBase=true` found no base: the
+    /// current branch has no upstream, or the series and it have no one
+    /// merge base, as git dies.
+    NoAutoBase,
     /// `keep_subject` with a subject prefix or `rfc`, which git refuses.
     KeepSubjectWithPrefix,
     /// `base` does not reach the commits being formatted, as git requires.
@@ -70,7 +85,7 @@ pub const Error = error{
     /// `i18n.logOutputEncoding` or `i18n.commitEncoding` set with no value,
     /// which git dies on.
     InvalidEncodingSetting,
-} || shortlog.Error || rev_walk.Error || diff.Error || diff.UnifiedError || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
+} || shortlog.Error || rev_walk.Error || diff.Error || diff.UnifiedError || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || rev_parse.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
     Io.Dir.ReadFileAllocError;
 
 /// A name and an address.
@@ -92,25 +107,56 @@ pub const Range = struct {
     exclude: []const Oid = &.{},
 };
 
-/// What the cover letter lists the commits as.
-pub const CoverFormat = enum {
+/// What the cover letter lists the commits as: `--commit-list-format`
+/// and `format.commitListFormat`.
+pub const CoverFormat = union(enum) {
     /// `Author (n):` and each subject under it, wrapped: git's default.
     shortlog,
     /// `[n/m] subject` for each, wrapped at 72.
     modern,
+    /// A line per commit in a pretty format, `%(count)` and `%(total)`
+    /// numbering them: `log:<format>`, or any value holding a `%`.
+    log: []const u8,
+
+    /// The value as git reads it, or null for one git refuses ("not a
+    /// valid format string").
+    pub fn parse(value: []const u8) ?CoverFormat {
+        if (std.mem.startsWith(u8, value, "log:")) return .{ .log = value["log:".len..] };
+        if (std.mem.eql(u8, value, "shortlog")) return .shortlog;
+        if (std.mem.eql(u8, value, "modern")) return .modern;
+        if (std.mem.findScalar(u8, value, '%') != null) return .{ .log = value };
+        return null;
+    }
 };
 
-/// A cover letter: `--cover-letter`.
+/// Whether a cover letter is written; `Options.cover` says how.
+pub const CoverLetter = enum {
+    /// What `format.coverLetter` says: `true`, `false` or `auto`; none
+    /// when it says nothing.
+    configured,
+    /// `--no-cover-letter`.
+    off,
+    /// `--cover-letter`.
+    on,
+    /// Only when there is more than one patch.
+    auto,
+};
+
+/// How a cover letter is written.
 pub const Cover = struct {
-    /// Who sends it and when: git's committer identity and the clock.
-    sender: object.Signature,
-    format: CoverFormat = .shortlog,
+    /// Who sends it and when; `null` is `Options.who`: git's committer
+    /// identity and the clock.
+    sender: ?object.Signature = null,
+    /// `--commit-list-format`; `null` takes `format.commitListFormat`,
+    /// `shortlog` when it says nothing.
+    format: ?CoverFormat = null,
     /// The branch description (`branch.<name>.description`) the subject
     /// and blurb come from; `null` writes git's `*** SUBJECT HERE ***` and
     /// `*** BLURB HERE ***`.
     description: ?[]const u8 = null,
-    /// `--cover-from-description`: how the description is used.
-    from_description: FromDescription = .message,
+    /// `--cover-from-description`: how the description is used; `null`
+    /// takes `format.coverFromDescription`, `message` when it says nothing.
+    from_description: ?FromDescription = null,
 
     pub const FromDescription = enum {
         /// The whole description is the blurb: git's default.
@@ -121,16 +167,64 @@ pub const Cover = struct {
         auto,
         /// Not used.
         none,
+
+        /// The value as git's `parse_cover_from_description` reads it,
+        /// or null where it dies.
+        pub fn parse(value: ?[]const u8) ?FromDescription {
+            const v = value orelse return .message;
+            if (std.mem.eql(u8, v, "default") or std.mem.eql(u8, v, "message")) return .message;
+            if (std.mem.eql(u8, v, "subject")) return .subject;
+            if (std.mem.eql(u8, v, "auto")) return .auto;
+            if (std.mem.eql(u8, v, "none")) return .none;
+            return null;
+        }
     };
 };
 
-/// How mails are threaded.
-pub const Thread = struct {
-    style: enum { shallow, deep } = .shallow,
-    /// The time git's message ids carry.
-    now: std.Io.Timestamp,
-    /// The address they end in: git's committer email.
-    email: []const u8,
+/// How mails are threaded; the message ids carry `Options.who`'s time and
+/// address.
+pub const Thread = enum {
+    /// What `format.thread` says: `shallow`, `deep` or a boolean (`true`
+    /// is shallow); none when it says nothing.
+    configured,
+    /// `--no-thread`.
+    off,
+    /// `--thread`: every mail a reply to the first.
+    shallow,
+    /// `--thread=deep`: each a reply to the one before.
+    deep,
+};
+
+/// An option a setting gives when the caller leaves it: `configured` takes
+/// the setting, `off` is the command line's `--no-<option>` and `on` its
+/// `--<option>`.
+pub fn Choice(comptime T: type) type {
+    return union(enum) { configured, off, on: T };
+}
+
+/// `--base`: the base tree information in the first mail.
+pub const Base = union(enum) {
+    /// What `format.useAutoBase` says: `true` is `auto`, `whenAble` is
+    /// `auto` where an upstream is there to find it, `false` or nothing
+    /// none.
+    configured,
+    /// `--no-base`.
+    off,
+    /// `--base=auto`: the merge base of the series and the current
+    /// branch's upstream.
+    auto,
+    /// `--base=<commit>`.
+    commit: Oid,
+};
+
+/// `--to`, `--cc` and `--add-header`: what the setting lists
+/// (`format.to`, `format.cc`, `format.headers`) unless `settings` is
+/// false, as `--no-to` clears it, then `given`. A header that starts `To: `
+/// or `Cc: ` in any case is an address, as git's `add_header` takes it,
+/// and `--no-add-header` clears all three.
+pub const Listed = struct {
+    settings: bool = true,
+    given: []const []const u8 = &.{},
 };
 
 /// `--attach` or `--inline`.
@@ -159,12 +253,17 @@ pub const Options = struct {
     /// `--relative`: only the changes under `directory`, named from it;
     /// `null` reads `diff.relative`.
     relative: ?bool = null,
-    /// `-n` or `-N`; `null` numbers when there is more than one mail.
+    /// `-n` or `-N`; `null` takes `format.numbered`, which numbers when
+    /// there is more than one mail unless it says `false`. With
+    /// `keep_subject` a setting's numbering is dropped, where `-n` is
+    /// refused.
     numbered: ?bool = null,
     /// `--start-number`.
     start_number: usize = 1,
-    /// `--subject-prefix`.
-    subject_prefix: []const u8 = "PATCH",
+    /// `--subject-prefix`; `null` takes `format.subjectPrefix`, `PATCH`
+    /// when it says nothing. Only a given one is refused with
+    /// `keep_subject`.
+    subject_prefix: ?[]const u8 = null,
     /// `--rfc[=<rfc>]`: put before the prefix, or after it when it starts
     /// with `-`.
     rfc: ?[]const u8 = null,
@@ -172,15 +271,19 @@ pub const Options = struct {
     reroll_count: ?[]const u8 = null,
     /// `-k`: the subject as it is, with no prefix.
     keep_subject: bool = false,
-    /// `-s`: a `Signed-off-by:` trailer for this identity.
-    signoff: ?Ident = null,
-    /// `--cover-letter`.
-    cover_letter: ?Cover = null,
-    /// `--base=<commit>`: base tree information in the first mail.
-    base: ?Oid = null,
-    /// The signature after `-- `; `null` is `--no-signature`. git's
-    /// default is its own version, which is not this package's to claim.
-    signature: ?[]const u8 = null,
+    /// `-s`: a `Signed-off-by:` trailer for `who`; `null` takes
+    /// `format.signOff`.
+    signoff: ?bool = null,
+    /// `--cover-letter`, and how one is written.
+    cover_letter: CoverLetter = .configured,
+    cover: Cover = .{},
+    /// `--base`.
+    base: Base = .configured,
+    /// The signature after `-- `: `--signature` or `--signature-file`'s
+    /// text, `--no-signature`, or `format.signature`, else
+    /// `format.signatureFile`'s text. git's default when none says is its
+    /// own version, which is not this package's to claim: none.
+    signature: Choice([]const u8) = .configured,
     /// `false` is `-p`: the patch with no diffstat.
     stat: bool = true,
     /// `false` is `--no-binary`: `Binary files ... differ`.
@@ -188,24 +291,29 @@ pub const Options = struct {
     /// `--zero-commit`.
     zero_commit: bool = false,
     /// `--from=<ident>`: the sender; a different author moves into the
-    /// body as an in-body `From:`.
-    from: ?Ident = null,
-    /// `--force-in-body-from`.
-    force_in_body_from: bool = false,
+    /// body as an in-body `From:`. `configured` takes `format.from`: an
+    /// identity, or `true` for `who`'s.
+    from: Choice(Ident) = .configured,
+    /// `--force-in-body-from`; `null` takes `format.forceInBodyFrom`.
+    force_in_body_from: ?bool = null,
     /// `--to`, `--cc`, `--add-header`.
-    to: []const []const u8 = &.{},
-    cc: []const []const u8 = &.{},
-    headers: []const []const u8 = &.{},
+    to: Listed = .{},
+    cc: Listed = .{},
+    headers: Listed = .{},
     /// `--in-reply-to`.
     in_reply_to: ?[]const u8 = null,
     /// `--thread`.
-    thread: ?Thread = null,
-    attach: ?Attach = null,
-    /// `--[no-]encode-email-headers`.
-    encode_email_headers: bool = true,
+    thread: Thread = .configured,
+    /// `--attach`, `--inline`, `--no-attach`; `configured` takes
+    /// `format.attach`: its value is the boundary, an empty one none, and
+    /// one with no value `version`.
+    attach: Choice(Attach) = .configured,
+    /// `--[no-]encode-email-headers`; `null` takes
+    /// `format.encodeEmailHeaders`, on when it says nothing.
+    encode_email_headers: ?bool = null,
     /// `--pretty=mboxrd` with `--stdout`: `From ` lines in the body get a
-    /// `>`.
-    mboxrd: bool = false,
+    /// `>`. `null` takes `format.mboxrd`.
+    mboxrd: ?bool = null,
     /// `--ignore-if-in-upstream`.
     ignore_if_in_upstream: bool = false,
     renames: Renames = .configured,
@@ -216,14 +324,28 @@ pub const Options = struct {
     /// `--topo-order`: the commits in the order of `git rev-list
     /// --topo-order`, reversed, rather than by date.
     topo_order: bool = false,
-    /// `--suffix`.
-    suffix: []const u8 = ".patch",
-    /// `--filename-max-length`.
-    filename_max_length: usize = 64,
+    /// `--suffix`; `null` takes `format.suffix`, `.patch` when it says
+    /// nothing.
+    suffix: ?[]const u8 = null,
+    /// `--filename-max-length`; `null` takes `format.filenameMaxLength`,
+    /// 64 when it says nothing.
+    filename_max_length: ?usize = null,
+    /// `-o`: where the mails' files go (`Series.directory`); `null` takes
+    /// `format.outputDirectory`, the current directory when it says
+    /// nothing.
+    output_directory: ?[]const u8 = null,
     /// `--numbered-files`.
     numbered_files: bool = false,
     /// `core.quotePath`; `null` reads it.
     quote_path: ?bool = null,
+    /// The committer and the time: what a sign-off, a cover letter's
+    /// sender, the message ids and `format.from=true` name, and the time
+    /// the message ids carry. One of them wanted with none given is
+    /// `error.NoIdentity`, where git asks for the committer's.
+    who: ?object.Signature = null,
+    /// What git writes as its own version: a `format.attach` with no
+    /// value is that boundary. A program gives its own.
+    version: []const u8 = "relic",
 };
 
 /// One mail.
@@ -242,6 +364,10 @@ pub const Series = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
     mails: []const Mail,
+    /// Where the mails' files go: `Options.output_directory` or
+    /// `format.outputDirectory`; empty for the current directory. A mail's
+    /// `name` is under it.
+    directory: []const u8 = "",
 
     pub fn deinit(s: *Series) void {
         var arena = s.arena.promote(s.gpa);
@@ -269,7 +395,7 @@ const Ctx = struct {
     io: Io,
     repo: *Repository,
     db: *odb_mod.Odb,
-    options: Options,
+    options: Plan,
     diff_options: diff.Options,
     renames: ?diff.RenameOptions,
     order: diff.Order,
@@ -292,18 +418,325 @@ const Ctx = struct {
     }
 };
 
+/// `Options` with the settings read: what formatting goes by.
+const Plan = struct {
+    order: ?diff.Order,
+    directory: []const u8,
+    relative: ?bool,
+    numbered: ?bool,
+    start_number: usize,
+    subject_prefix: []const u8,
+    rfc: ?[]const u8,
+    reroll_count: ?[]const u8,
+    keep_subject: bool,
+    signoff: ?Ident,
+    cover_letter: ?CoverPlan,
+    base: BasePlan,
+    signature: ?[]const u8,
+    stat: bool,
+    binary: bool,
+    zero_commit: bool,
+    from: ?Ident,
+    force_in_body_from: bool,
+    to: []const []const u8,
+    cc: []const []const u8,
+    headers: []const []const u8,
+    in_reply_to: ?[]const u8,
+    thread: ?MessageIds,
+    attach: ?Attach,
+    encode_email_headers: bool,
+    mboxrd: bool,
+    /// `format.noPrefix`: the patches with no `a/` and `b/`.
+    no_prefix: bool,
+    ignore_if_in_upstream: bool,
+    renames: Renames,
+    diff: ?diff.Options,
+    topo_order: bool,
+    suffix: []const u8,
+    filename_max_length: usize,
+    output_directory: []const u8,
+    numbered_files: bool,
+    quote_path: ?bool,
+};
+
+/// A cover letter as it is written.
+const CoverPlan = struct {
+    sender: object.Signature,
+    format: []const u8,
+    description: ?[]const u8,
+    from_description: Cover.FromDescription,
+    /// Only when there is more than one patch.
+    auto: bool,
+};
+
+/// Message ids: their threading, time and address.
+const MessageIds = struct {
+    style: enum { shallow, deep },
+    now: std.Io.Timestamp,
+    email: []const u8,
+};
+
+const BasePlan = union(enum) {
+    none,
+    /// `strict` dies where no base is found; otherwise there is none.
+    auto: struct { strict: bool },
+    commit: Oid,
+};
+
+/// What git's `git_format_config` reads, the last value of each deciding.
+const Settings = struct {
+    numbered: ?bool = null,
+    subject_prefix: ?[]const u8 = null,
+    signoff: bool = false,
+    cover_letter: CoverLetter = .off,
+    commit_list_format: ?[]const u8 = null,
+    from_description: Cover.FromDescription = .message,
+    auto_base: ?bool = null,
+    signature: ?[]const u8 = null,
+    signature_file: ?[]const u8 = null,
+    from: ?FromSetting = null,
+    force_in_body_from: bool = false,
+    to: std.ArrayList([]const u8) = .empty,
+    cc: std.ArrayList([]const u8) = .empty,
+    headers: std.ArrayList([]const u8) = .empty,
+    thread: ?@FieldType(MessageIds, "style") = null,
+    attach: ?[]const u8 = null,
+    encode_email_headers: bool = true,
+    mboxrd: bool = false,
+    no_prefix: bool = false,
+    suffix: []const u8 = ".patch",
+    filename_max_length: usize = 64,
+    output_directory: []const u8 = "",
+
+    const FromSetting = union(enum) { committer, ident: []const u8 };
+
+    fn read(a: Allocator, config: *const config_mod.Config, version: []const u8) Error!Settings {
+        var st: Settings = .{};
+        var it = config.iterate(&.{
+            "format.headers",              "format.suffix",        "format.to",            "format.cc",
+            "format.numbered",             "format.attach",        "format.thread",        "format.signoff",
+            "format.signature",            "format.signaturefile", "format.coverletter",   "format.commitlistformat",
+            "format.outputdirectory",      "format.useautobase",   "format.from",          "format.forceinbodyfrom",
+            "format.coverfromdescription", "format.mboxrd",        "format.subjectprefix", "format.filenamemaxlength",
+            "format.encodeemailheaders",   "format.noprefix",
+        });
+        while (it.next()) |e| {
+            const v = e.value;
+            const name = e.name;
+            if (std.mem.eql(u8, name, "headers")) {
+                try addHeader(a, &st.headers, &st.to, &st.cc, v orelse return error.InvalidFormatSetting);
+            } else if (std.mem.eql(u8, name, "to")) {
+                try st.to.append(a, v orelse return error.InvalidFormatSetting);
+            } else if (std.mem.eql(u8, name, "cc")) {
+                try st.cc.append(a, v orelse return error.InvalidFormatSetting);
+            } else if (std.mem.eql(u8, name, "suffix")) {
+                st.suffix = v orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "numbered")) {
+                st.numbered = if (v != null and std.ascii.eqlIgnoreCase(v.?, "auto")) null else try boolSetting(v);
+            } else if (std.mem.eql(u8, name, "attach")) {
+                st.attach = if (v) |text| (if (text.len == 0) null else text) else version;
+            } else if (std.mem.eql(u8, name, "thread")) {
+                st.thread = if (v != null and std.ascii.eqlIgnoreCase(v.?, "deep")) .deep else if (v != null and std.ascii.eqlIgnoreCase(v.?, "shallow")) .shallow else if (try boolSetting(v)) .shallow else null;
+            } else if (std.mem.eql(u8, name, "signoff")) {
+                st.signoff = try boolSetting(v);
+            } else if (std.mem.eql(u8, name, "signature")) {
+                st.signature = v orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "signaturefile")) {
+                st.signature_file = v orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "coverletter")) {
+                st.cover_letter = if (v != null and std.ascii.eqlIgnoreCase(v.?, "auto")) .auto else if (try boolSetting(v)) .on else .off;
+            } else if (std.mem.eql(u8, name, "commitlistformat")) {
+                st.commit_list_format = v orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "outputdirectory")) {
+                st.output_directory = v orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "useautobase")) {
+                st.auto_base = if (v != null and std.ascii.eqlIgnoreCase(v.?, "whenable")) false else if (try boolSetting(v)) true else null;
+            } else if (std.mem.eql(u8, name, "from")) {
+                st.from = if (maybeBool(v)) |b| (if (b) .committer else null) else .{ .ident = v.? };
+            } else if (std.mem.eql(u8, name, "forceinbodyfrom")) {
+                st.force_in_body_from = try boolSetting(v);
+            } else if (std.mem.eql(u8, name, "coverfromdescription")) {
+                st.from_description = Cover.FromDescription.parse(v) orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "mboxrd")) {
+                st.mboxrd = try boolSetting(v);
+            } else if (std.mem.eql(u8, name, "noprefix")) {
+                // git dies on a value that is no boolean, which it once
+                // took as true
+                st.no_prefix = maybeBool(v) orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "subjectprefix")) {
+                st.subject_prefix = v orelse return error.InvalidFormatSetting;
+            } else if (std.mem.eql(u8, name, "filenamemaxlength")) {
+                const n = config_mod.parseInteger(v orelse return error.InvalidFormatSetting) catch return error.InvalidFormatSetting;
+                _ = std.math.cast(i32, n) orelse return error.InvalidFormatSetting;
+                st.filename_max_length = if (n > 0) @intCast(n) else 0;
+            } else if (std.mem.eql(u8, name, "encodeemailheaders")) {
+                st.encode_email_headers = try boolSetting(v);
+            }
+        }
+        return st;
+    }
+};
+
+/// git's `git_config_bool`: a bare name is true; no boolean dies.
+fn boolSetting(value: ?[]const u8) Error!bool {
+    return config_mod.parseBool(value orelse return true) catch error.InvalidFormatSetting;
+}
+
+/// git's `git_parse_maybe_bool`: a boolean, or null for anything else.
+fn maybeBool(value: ?[]const u8) ?bool {
+    const v = value orelse return true;
+    if (v.len == 0) return false;
+    return config_mod.parseBool(v) catch null;
+}
+
+/// git's `add_header`: trailing newlines dropped, and a `To: ` or `Cc: `
+/// header, in any case, an address.
+fn addHeader(a: Allocator, headers: *std.ArrayList([]const u8), to: *std.ArrayList([]const u8), cc: *std.ArrayList([]const u8), value: []const u8) Allocator.Error!void {
+    const text = std.mem.trimEnd(u8, value, "\n");
+    if (text.len >= 4 and std.ascii.eqlIgnoreCase(text[0..4], "to: ")) return to.append(a, text[4..]);
+    if (text.len >= 4 and std.ascii.eqlIgnoreCase(text[0..4], "cc: ")) return cc.append(a, text[4..]);
+    try headers.append(a, text);
+}
+
+/// `split_ident_line`'s name and address, or null where it fails.
+fn parseIdent(text: []const u8) ?Ident {
+    const lt = std.mem.findScalar(u8, text, '<') orelse return null;
+    const gt = std.mem.findScalarPos(u8, text, lt, '>') orelse return null;
+    return .{ .name = std.mem.trim(u8, text[0..lt], " \t"), .email = text[lt + 1 .. gt] };
+}
+
+fn needWho(options: Options) Error!object.Signature {
+    return options.who orelse error.NoIdentity;
+}
+
+/// `options` with what the repository's settings say where it leaves them.
+fn resolve(a: Allocator, io: Io, repo: *Repository, options: Options) Error!Plan {
+    const config = repo.configuration();
+    const st = try Settings.read(a, config, options.version);
+
+    var to: std.ArrayList([]const u8) = .empty;
+    var cc: std.ArrayList([]const u8) = .empty;
+    var headers: std.ArrayList([]const u8) = .empty;
+    if (options.headers.settings) try headers.appendSlice(a, st.headers.items);
+    if (options.to.settings and options.headers.settings) try to.appendSlice(a, st.to.items);
+    if (options.cc.settings and options.headers.settings) try cc.appendSlice(a, st.cc.items);
+    for (options.to.given) |x| try to.append(a, x);
+    for (options.cc.given) |x| try cc.append(a, x);
+    for (options.headers.given) |h| try addHeader(a, &headers, &to, &cc, h);
+
+    const thread: ?@FieldType(MessageIds, "style") = switch (options.thread) {
+        .configured => st.thread,
+        .off => null,
+        .shallow => .shallow,
+        .deep => .deep,
+    };
+    const want_cover: CoverLetter = switch (options.cover_letter) {
+        .configured => st.cover_letter,
+        else => |c| c,
+    };
+    const signature: ?[]const u8 = switch (options.signature) {
+        .off => null,
+        .on => |text| text,
+        .configured => if (st.signature) |text| text else if (st.signature_file) |path| sig: {
+            const full = config_mod.interpolatePath(a, path, config.context.home) catch return error.InvalidFormatSetting;
+            break :sig try Io.Dir.cwd().readFileAlloc(io, full, a, .unlimited);
+        } else null,
+    };
+    const from: ?Ident = switch (options.from) {
+        .off => null,
+        .on => |ident| ident,
+        .configured => if (st.from) |f| switch (f) {
+            .committer => w: {
+                const who = try needWho(options);
+                break :w Ident{ .name = who.name, .email = who.email };
+            },
+            .ident => |text| parseIdent(text) orelse return error.InvalidFormatSetting,
+        } else null,
+    };
+    const signoff: ?Ident = if (options.signoff orelse st.signoff) s: {
+        const who = try needWho(options);
+        break :s Ident{ .name = who.name, .email = who.email };
+    } else null;
+    const message_ids: ?MessageIds = if (thread) |style| m: {
+        const who = try needWho(options);
+        break :m .{ .style = style, .now = .fromNanoseconds(@as(i96, who.when_secs) * std.time.ns_per_s), .email = who.email };
+    } else null;
+    const cover: ?CoverPlan = if (want_cover == .on or want_cover == .auto) .{
+        .sender = options.cover.sender orelse try needWho(options),
+        .format = if (options.cover.format) |f| switch (f) {
+            .shortlog => "shortlog",
+            .modern => "modern",
+            .log => |text| try a.print("log:{s}", .{text}),
+        } else st.commit_list_format orelse "shortlog",
+        .description = options.cover.description,
+        .from_description = options.cover.from_description orelse st.from_description,
+        .auto = want_cover == .auto,
+    } else null;
+    const base: BasePlan = switch (options.base) {
+        .off => .none,
+        .auto => .{ .auto = .{ .strict = true } },
+        .commit => |oid| .{ .commit = oid },
+        .configured => if (st.auto_base) |strict| .{ .auto = .{ .strict = strict } } else .none,
+    };
+    const attach: ?Attach = switch (options.attach) {
+        .off => null,
+        .on => |att| att,
+        .configured => if (st.attach) |boundary| .{ .boundary = boundary } else null,
+    };
+    return .{
+        .order = options.order,
+        .directory = options.directory,
+        .relative = options.relative,
+        .numbered = options.numbered orelse (if (options.keep_subject) null else st.numbered),
+        .start_number = options.start_number,
+        .subject_prefix = options.subject_prefix orelse st.subject_prefix orelse "PATCH",
+        .rfc = options.rfc,
+        .reroll_count = options.reroll_count,
+        .keep_subject = options.keep_subject,
+        .signoff = signoff,
+        .cover_letter = cover,
+        .base = base,
+        .signature = signature,
+        .stat = options.stat,
+        .binary = options.binary,
+        .zero_commit = options.zero_commit,
+        .from = from,
+        .force_in_body_from = options.force_in_body_from orelse st.force_in_body_from,
+        .to = to.items,
+        .cc = cc.items,
+        .headers = headers.items,
+        .in_reply_to = options.in_reply_to,
+        .thread = message_ids,
+        .attach = attach,
+        .encode_email_headers = options.encode_email_headers orelse st.encode_email_headers,
+        .mboxrd = options.mboxrd orelse st.mboxrd,
+        .no_prefix = st.no_prefix,
+        .ignore_if_in_upstream = options.ignore_if_in_upstream,
+        .renames = options.renames,
+        .diff = options.diff,
+        .topo_order = options.topo_order,
+        .suffix = options.suffix orelse st.suffix,
+        .filename_max_length = options.filename_max_length orelse st.filename_max_length,
+        .output_directory = options.output_directory orelse st.output_directory,
+        .numbered_files = options.numbered_files,
+        .quote_path = options.quote_path,
+    };
+}
+
 /// Format `range` as `git format-patch` would.
-pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: Options) Self.Error!Series {
+pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Options) Self.Error!Series {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
     const config = repo.configuration();
     const db = repo.objectDatabase();
 
-    if (options.keep_subject and options.numbered == true) return error.KeepSubjectWithNumbered;
-    if (options.keep_subject and (options.rfc != null or !std.mem.eql(u8, options.subject_prefix, "PATCH"))) return error.KeepSubjectWithPrefix;
+    if (given.keep_subject and given.numbered == true) return error.KeepSubjectWithNumbered;
+    if (given.keep_subject and (given.rfc != null or given.subject_prefix != null)) return error.KeepSubjectWithPrefix;
+    var options = try resolve(a, io, repo, given);
+    options.output_directory = try a.dupe(u8, options.output_directory);
 
-    var diff_options = options.diff orelse try diff.configured(config, .{ .prefixes = try diff.Prefixes.configured(config, .patches) });
+    var diff_options = try patchDiffOptions(config, options);
     const renames: ?diff.RenameOptions = switch (options.renames) {
         .off => null,
         .on => |r| r,
@@ -318,8 +751,11 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     defer if (own_attrs) |*x| x.leave();
     const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.workDirectory(), .config = config };
 
-    const selected = try selectCommits(gpa, a, io, db, range, options, drivers) orelse return emptySeries(gpa, &arena_instance);
+    const selected = try selectCommits(gpa, a, io, db, range, options, drivers) orelse return emptySeries(gpa, &arena_instance, options.output_directory);
     const list = selected.list;
+    if (options.cover_letter) |c| if (c.auto and list.len <= 1) {
+        options.cover_letter = null;
+    };
 
     // the boundary: the one commit outside the range the range grew from
     const origin = try findOrigin(gpa, io, db, selected.in_list, selected.walked);
@@ -359,7 +795,16 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
 
     // base tree information
     var bases: ?Bases = null;
-    if (options.base) |base| bases = try prepareBases(&ctx, base, list);
+    switch (options.base) {
+        .none => {},
+        .commit => |base| bases = try prepareBases(&ctx, base, list),
+        .auto => |auto| if (try autoBase(&ctx, list, auto.strict)) |base| {
+            bases = prepareBases(&ctx, base, list) catch |err| switch (err) {
+                error.BaseInRange, error.BaseNotAncestor => if (auto.strict) return err else null,
+                else => |e| return e,
+            };
+        },
+    }
 
     var mails: std.ArrayList(Mail) = .empty;
     if (options.cover_letter) |cover| {
@@ -396,7 +841,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         } else try printSignature(a, &text, options.signature);
         try mails.append(a, .{ .name = try fileName(&ctx, commit, null), .text = text.items, .commit = commit });
     }
-    return .{ .gpa = gpa, .arena = arena_instance.state, .mails = mails.items };
+    return .{ .gpa = gpa, .arena = arena_instance.state, .mails = mails.items, .directory = options.output_directory };
 }
 
 /// What a series formats: its commits, newest first, those of them a
@@ -407,7 +852,17 @@ const Selected = struct { list: []const Oid, in_list: []const Oid, walked: []con
 /// The commits of `range`, newest first, as `git format-patch` takes them:
 /// merges left out, at most `max_count`, and under `ignore_if_in_upstream`
 /// those whose patch id upstream has. `null` when there are none.
-fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, options: Options, drivers: driver.Drivers) Error!?Selected {
+/// What the patches are diffed with: the caller's own options, which are
+/// its command line and have the last word over `format.noPrefix` as
+/// `--default-prefix` has, or the configuration's.
+fn patchDiffOptions(config: *const config_mod.Config, options: Plan) Error!diff.Options {
+    if (options.diff) |given| return given;
+    return diff.configured(config, .{
+        .prefixes = if (options.no_prefix) .{ .src = "", .dst = "" } else try diff.Prefixes.configured(config, .patches),
+    });
+}
+
+fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, options: Plan, drivers: driver.Drivers) Error!?Selected {
     var list: std.ArrayList(Oid) = .empty;
     var walk = rev_walk.Walk.init(gpa, db);
     defer walk.deinit();
@@ -440,7 +895,7 @@ fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: 
 
 /// The subject prefix, as git builds it: `PATCH` or the caller's, with the
 /// RFC word before it (after it for `-word`) and the reroll count.
-fn subjectPrefix(a: Allocator, options: Options) Allocator.Error![]const u8 {
+fn subjectPrefix(a: Allocator, options: Plan) Allocator.Error![]const u8 {
     var prefix: std.ArrayList(u8) = .empty;
     try prefix.appendSlice(a, options.subject_prefix);
     if (options.rfc) |rfc| {
@@ -477,8 +932,23 @@ fn containsOid(oids: []const Oid, oid: Oid) bool {
     return false;
 }
 
-fn emptySeries(gpa: Allocator, arena: *std.heap.ArenaAllocator) Series {
-    return .{ .gpa = gpa, .arena = arena.state, .mails = &.{} };
+fn emptySeries(gpa: Allocator, arena: *std.heap.ArenaAllocator, directory: []const u8) Series {
+    return .{ .gpa = gpa, .arena = arena.state, .mails = &.{}, .directory = directory };
+}
+
+/// git's `get_base_commit` for `--base=auto`: the merge base of the
+/// current branch's upstream and the series, which must reach the series'
+/// own merge base and not be in it. Where it is not found, `strict` is
+/// `error.NoAutoBase` (or the base's own errors) and otherwise none.
+fn autoBase(ctx: *Ctx, list: []const Oid, strict: bool) Error!?Oid {
+    const upstream = rev_parse.resolve(ctx.gpa, ctx.io, ctx.repo, "@{upstream}") catch |err| switch (err) {
+        error.BadRevision, error.AmbiguousRevision => return if (strict) error.NoAutoBase else null,
+        else => |e| return e,
+    };
+    const bases = try rev_walk.mergeBasesMany(ctx.gpa, ctx.io, ctx.db, .{ .one = upstream, .others = list }, .{});
+    defer ctx.gpa.free(bases);
+    if (bases.len != 1) return if (strict) error.NoAutoBase else null;
+    return bases[0];
 }
 
 const mime_boundary_leader = "------------";
@@ -514,7 +984,7 @@ fn commitParents(gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error![]Oid
     return gpa.dupe(Oid, c.parents);
 }
 
-fn genMessageId(a: Allocator, base: []const u8, t: Thread) Allocator.Error![]const u8 {
+fn genMessageId(a: Allocator, base: []const u8, t: MessageIds) Allocator.Error![]const u8 {
     return a.print("{s}.{d}.git.{s}", .{ base, t.now.toSeconds(), t.email });
 }
 
@@ -1145,6 +1615,8 @@ fn showStats(ctx: *Ctx, out: *std.ArrayList(u8), files: []StatFile) Allocator.Er
     number_width = @max(decimalWidth(max_change), number_width);
     if (width < 16 + 6 + number_width) width = 16 + 6 + number_width;
     var graph_width: usize = if (max_change + 4 > bin_width) max_change else bin_width - 4;
+    // format-patch's widths are its own: git's never reads
+    // `diff.statNameWidth` or `diff.statGraphWidth` for it.
     var name_width: usize = max_len;
     if (name_width + number_width + 6 + graph_width > width) {
         const limit_signed: i64 = @as(i64, @intCast(width * 3 / 8)) - @as(i64, @intCast(number_width)) - 6;
@@ -1238,7 +1710,7 @@ fn statSummary(a: Allocator, out: *std.ArrayList(u8), files: usize, insertions: 
 // The cover letter
 //=========================================================================
 
-fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?Oid, list: []const Oid) Error!void {
+fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: CoverPlan, origin: ?Oid, list: []const Oid) Error!void {
     const a = ctx.a;
     const out = out_list;
     ctx.nr = 0;
@@ -1271,8 +1743,9 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?O
     try remainder(ctx, out, blurb);
     try out.append(a, '\n');
 
-    switch (cover.format) {
+    switch (CoverFormat.parse(cover.format) orelse return error.InvalidFormatSetting) {
         .shortlog => try coverShortlog(ctx, out, list),
+        .log => |fmt| try coverList(ctx, out, list, fmt),
         .modern => {
             const n = list.len;
             // git's `%w(72)[%(count)/%(total)] %s` with no output encoding:
@@ -1304,6 +1777,30 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: Cover, origin: ?O
         ctx.options.stat = saved;
         try out.append(a, '\n');
     }
+}
+
+/// git's `generate_commit_list_cover`: a line per commit in `fmt`,
+/// oldest first, `%(count)` and `%(total)` numbering them, then a blank
+/// line. As git's, the format has no output encoding: each line is written
+/// in its commit's own.
+fn coverList(ctx: *Ctx, out: *std.ArrayList(u8), list: []const Oid, fmt: []const u8) Error!void {
+    const a = ctx.a;
+    var map = try mailmap_mod.Mailmap.load(ctx.gpa, ctx.io, ctx.repo);
+    defer map.deinit();
+    const n = list.len;
+    for (1..n + 1) |i| {
+        var line: std.ArrayList(u8) = .empty;
+        try pretty.formatCommit(a, ctx.io, .{ .db = ctx.db, .oid = list[n - i], .format = fmt }, &line, .{
+            // git's `generate_commit_list_cover` formats with a zeroed
+            // context, whose abbreviation of 0 is the whole name.
+            .abbrev_len = ctx.db.objectFormat().hexLen(),
+            .mailmap = &map,
+            .numbered = .{ .nr = i, .total = n },
+        });
+        try out.appendSlice(a, line.items);
+        try out.append(a, '\n');
+    }
+    try out.append(a, '\n');
 }
 
 fn writeStatOnly(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change) Error!void {

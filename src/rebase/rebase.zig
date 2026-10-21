@@ -2996,12 +2996,19 @@ fn startApply(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8
         .tip = tip.orig_head,
         .exclude = if (r.restrict) |fork| &.{fork} else &.{},
     }, .{
+        // git's `format-patch -k --stdout --full-index --cherry-pick
+        // --right-only --default-prefix --no-renames --no-cover-letter
+        // --pretty=mboxrd --topo-order --no-base`: the other `format.*`
+        // settings still reach the mails `am` applies
         .keep_subject = true,
         .mboxrd = true,
         .ignore_if_in_upstream = true,
         .renames = .off,
+        .cover_letter = .off,
+        .base = .off,
         .topo_order = true,
         .diff = diff_options,
+        .who = r.options.who,
     });
     defer series.deinit();
     var mbox: Io.Writer.Allocating = .init(r.arena);

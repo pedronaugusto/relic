@@ -17,6 +17,10 @@ const object = @import("../object/object.zig");
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
 
+/// The committer the suite's git commits as, at the epoch: message ids
+/// carry the time, which `compare` reads past.
+const fixture: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
+
 fn oidOf(gpa: Allocator, io: Io, git: *testgit.Repo, rev: []const u8) !Oid {
     const text = try git.line(io, &.{ "rev-parse", rev });
     defer gpa.free(text);
@@ -119,25 +123,25 @@ test "a series of commits is written as the mails git format-patch writes" {
     const range: formatpatch.Range = .{ .upstream = base, .tip = head };
 
     try compare(gpa, io, &git, &repo, &.{"--no-signature"}, "base..HEAD", range, .{});
-    try compare(gpa, io, &git, &repo, &.{ "--signature=relic test", "-p" }, "base..HEAD", range, .{ .signature = "relic test", .stat = false });
+    try compare(gpa, io, &git, &repo, &.{ "--signature=relic test", "-p" }, "base..HEAD", range, .{ .signature = .{ .on = "relic test" }, .stat = false });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "-N", "--subject-prefix=PATCH foo", "--rfc", "-v3" }, "base..HEAD", range, .{ .numbered = false, .subject_prefix = "PATCH foo", .rfc = "RFC", .reroll_count = "3" });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "-k" }, "base..HEAD", range, .{ .keep_subject = true });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--start-number=7", "-n" }, "HEAD~1..HEAD", .{ .upstream = try oidOf(gpa, io, &git, "HEAD~1"), .tip = head }, .{ .start_number = 7, .numbered = true });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "-s", "--zero-commit" }, "base..HEAD", range, .{ .signoff = .{ .name = "Fixture", .email = "fixture@example.com" }, .zero_commit = true });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "-s", "--zero-commit" }, "base..HEAD", range, .{ .signoff = true, .who = fixture, .zero_commit = true });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--from=Sender Person <sender@example.com>", "--to=a@example.com", "--to=b@example.com", "--cc=c@example.com", "--add-header=X-Extra: yes" }, "base..HEAD", range, .{
-        .from = .{ .name = "Sender Person", .email = "sender@example.com" },
-        .to = &.{ "a@example.com", "b@example.com" },
-        .cc = &.{"c@example.com"},
-        .headers = &.{"X-Extra: yes"},
+        .from = .{ .on = .{ .name = "Sender Person", .email = "sender@example.com" } },
+        .to = .{ .given = &.{ "a@example.com", "b@example.com" } },
+        .cc = .{ .given = &.{"c@example.com"} },
+        .headers = .{ .given = &.{"X-Extra: yes"} },
     });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--no-encode-email-headers" }, "base..HEAD", range, .{ .encode_email_headers = false });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread=deep", "--in-reply-to=<start@example.com>" }, "base..HEAD", range, .{ .thread = .{ .style = .deep, .now = .zero, .email = "fixture@example.com" }, .in_reply_to = "<start@example.com>" });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread" }, "base..HEAD", range, .{ .thread = .{ .now = .zero, .email = "fixture@example.com" } });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--attach=BOUNDARY" }, "base..HEAD", range, .{ .attach = .{ .boundary = "BOUNDARY" } });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--inline=BOUNDARY" }, "base..HEAD", range, .{ .attach = .{ .boundary = "BOUNDARY", .@"inline" = true } });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread=deep", "--in-reply-to=<start@example.com>" }, "base..HEAD", range, .{ .thread = .deep, .who = fixture, .in_reply_to = "<start@example.com>" });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--thread" }, "base..HEAD", range, .{ .thread = .shallow, .who = fixture });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--attach=BOUNDARY" }, "base..HEAD", range, .{ .attach = .{ .on = .{ .boundary = "BOUNDARY" } } });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--inline=BOUNDARY" }, "base..HEAD", range, .{ .attach = .{ .on = .{ .boundary = "BOUNDARY", .@"inline" = true } } });
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "-2" }, "HEAD", .{ .tip = head, .max_count = 2 }, .{});
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--root" }, "HEAD", .{ .tip = head }, .{});
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--base=base" }, "base..HEAD", range, .{ .base = base });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--base=base" }, "base..HEAD", range, .{ .base = .{ .commit = base } });
 }
 
 test "a cover letter is written as git writes one, with its shortlog, its diffstat and the base" {
@@ -152,18 +156,150 @@ test "a cover letter is written as git writes one, with its shortlog, its diffst
     const head = try oidOf(gpa, io, &git, "HEAD");
     const range: formatpatch.Range = .{ .upstream = base, .tip = head };
     const sender: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--cover-letter" }, "base..HEAD", range, .{ .cover_letter = .{ .sender = sender } });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--cover-letter" }, "base..HEAD", range, .{ .cover_letter = .on, .cover = .{ .sender = sender } });
     try compare(gpa, io, &git, &repo, &.{ "--signature=sig", "--cover-letter", "--base=base", "--thread" }, "base..HEAD", range, .{
-        .cover_letter = .{ .sender = sender },
-        .base = base,
-        .signature = "sig",
-        .thread = .{ .now = .zero, .email = "fixture@example.com" },
+        .cover_letter = .on,
+        .cover = .{ .sender = sender },
+        .base = .{ .commit = base },
+        .signature = .{ .on = "sig" },
+        .thread = .shallow,
+        .who = fixture,
     });
     // `--commit-list-format` came in 2.54
     if (try testgit.gitAtLeast(gpa, io, 2, 54))
-        try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--cover-letter", "--commit-list-format=modern" }, "base..HEAD", range, .{ .cover_letter = .{ .sender = sender, .format = .modern } });
+        try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--cover-letter", "--commit-list-format=modern" }, "base..HEAD", range, .{ .cover_letter = .on, .cover = .{ .sender = sender, .format = .modern } });
     try git.exec(io, &.{ "config", "branch.main.description", "The series subject\n\nAnd what it is for." });
-    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--cover-letter", "--cover-from-description=subject", "main" }, "^base", range, .{ .cover_letter = .{ .sender = sender, .description = "The series subject\n\nAnd what it is for.", .from_description = .subject } });
+    try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--cover-letter", "--cover-from-description=subject", "main" }, "^base", range, .{ .cover_letter = .on, .cover = .{ .sender = sender, .description = "The series subject\n\nAnd what it is for.", .from_description = .subject } });
+}
+
+/// `compare` with `settings` in the repository's configuration, each
+/// added as `git config --add` adds it and taken out after.
+fn compareSet(gpa: Allocator, io: Io, git: *testgit.Repo, settings: []const [2][]const u8, args: []const []const u8, range_text: []const u8, range: formatpatch.Range, options: formatpatch.Options) !void {
+    for (settings) |kv| try git.exec(io, &.{ "config", "--add", kv[0], kv[1] });
+    defer for (settings) |kv| git.exec(io, &.{ "config", "--unset-all", kv[0] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try compare(gpa, io, git, &repo, args, range_text, range, options);
+}
+
+test "format-patch takes its format.* settings where the caller leaves them, as git's git_format_config reads them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try buildHistory(io, &git);
+    const base = try oidOf(gpa, io, &git, "base");
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    const range: formatpatch.Range = .{ .upstream = base, .tip = head };
+    const one: formatpatch.Range = .{ .upstream = try oidOf(gpa, io, &git, "HEAD~1"), .tip = head };
+    const w: formatpatch.Options = .{ .who = fixture };
+
+    try compareSet(gpa, io, &git, &.{ .{ "format.subjectPrefix", "FOO" }, .{ "format.numbered", "true" }, .{ "format.signature", "from the settings" } }, &.{}, "HEAD~1..HEAD", one, w);
+    try compareSet(gpa, io, &git, &.{ .{ "format.numbered", "false" }, .{ "format.signature", "sig" } }, &.{"--subject-prefix=BAR"}, "base..HEAD", range, .{ .who = fixture, .subject_prefix = "BAR" });
+    // a setting's number is dropped under -k, and its prefix too
+    try compareSet(gpa, io, &git, &.{ .{ "format.numbered", "true" }, .{ "format.subjectPrefix", "FOO" } }, &.{ "--no-signature", "-k" }, "base..HEAD", range, .{ .who = fixture, .keep_subject = true, .signature = .off });
+    try compareSet(gpa, io, &git, &.{
+        .{ "format.to", "a@example.com" },          .{ "format.to", "b@example.com" },
+        .{ "format.cc", "c@example.com" },          .{ "format.headers", "X-One: 1\n" },
+        .{ "format.headers", "Cc: d@example.com" }, .{ "format.headers", "to: e@example.com" },
+    }, &.{ "--no-signature", "--to=f@example.com" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .to = .{ .given = &.{"f@example.com"} } });
+    try compareSet(gpa, io, &git, &.{ .{ "format.to", "a@example.com" }, .{ "format.cc", "c@example.com" }, .{ "format.headers", "X-One: 1" } }, &.{ "--no-signature", "--no-to", "--cc=g@example.com" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .to = .{ .settings = false }, .cc = .{ .given = &.{"g@example.com"} } });
+    try compareSet(gpa, io, &git, &.{ .{ "format.to", "a@example.com" }, .{ "format.headers", "X-One: 1" } }, &.{ "--no-signature", "--no-add-header" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .headers = .{ .settings = false } });
+    try compareSet(gpa, io, &git, &.{ .{ "format.encodeEmailHeaders", "false" }, .{ "format.signOff", "true" }, .{ "format.thread", "deep" }, .{ "format.signature", "" } }, &.{}, "base..HEAD", range, w);
+    try compareSet(gpa, io, &git, &.{ .{ "format.thread", "true" }, .{ "format.from", "Sender Person <sender@example.com>" }, .{ "format.forceInBodyFrom", "true" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    // git takes the committer's identity when it reads `format.from`, so
+    // the identity is set before it: the harness's `-c` comes too late.
+    try compareSet(gpa, io, &git, &.{ .{ "user.name", "Fixture" }, .{ "user.email", "fixture@example.com" }, .{ "format.from", "true" }, .{ "format.thread", "shallow" }, .{ "format.thread", "false" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{ .{ "format.attach", "BOUNDARY" }, .{ "format.mboxrd", "true" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{.{ "format.attach", "BOUNDARY" }}, &.{ "--no-signature", "--no-attach" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .attach = .off });
+    try compareSet(gpa, io, &git, &.{ .{ "diff.statGraphWidth", "5" }, .{ "diff.statNameWidth", "8" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    // format-patch takes `format.noPrefix` and not `diff.noPrefix`
+    try compareSet(gpa, io, &git, &.{.{ "format.noprefix", "true" }}, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{.{ "diff.noprefix", "true" }}, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{ .{ "format.noprefix", "true" }, .{ "diff.srcPrefix", "x/" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+
+    // the cover letter: on, or only for more than one patch, as listed
+    try compareSet(gpa, io, &git, &.{ .{ "format.coverLetter", "auto" }, .{ "format.commitListFormat", "modern" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{.{ "format.coverLetter", "auto" }}, &.{"--no-signature"}, "HEAD~1..HEAD", one, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{ .{ "format.coverLetter", "true" }, .{ "format.commitListFormat", "log:[%(count)/%(total)] %s (%an)" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{ .{ "format.coverLetter", "true" }, .{ "format.commitListFormat", "%w(30,2,4)%(count). %s%w(0,0,0) <%h>" } }, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{.{ "format.coverLetter", "true" }}, &.{ "--no-signature", "--no-cover-letter" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .cover_letter = .off });
+}
+
+test "format.signatureFile, format.useAutoBase and format.outputDirectory are read as git reads them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try buildHistory(io, &git);
+    const base = try oidOf(gpa, io, &git, "base");
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    const range: formatpatch.Range = .{ .upstream = base, .tip = head };
+
+    try git.writeFile(io, "sig.txt", "a signature\nfrom a file\n");
+    const sig_path = try git.dir.realPathFileAlloc(io, "sig.txt", gpa);
+    defer gpa.free(sig_path);
+    try compareSet(gpa, io, &git, &.{.{ "format.signatureFile", sig_path }}, &.{}, "base..HEAD", range, .{ .who = fixture });
+    // format.signature wins over the file, whatever their order
+    try compareSet(gpa, io, &git, &.{ .{ "format.signature", "inline" }, .{ "format.signatureFile", sig_path } }, &.{}, "base..HEAD", range, .{ .who = fixture });
+
+    // whenAble with no upstream: no base; with one: the merge base
+    try compareSet(gpa, io, &git, &.{.{ "format.useAutoBase", "whenAble" }}, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try git.exec(io, &.{ "branch", "upstream", "base" });
+    try git.exec(io, &.{ "branch", "--set-upstream-to=upstream" });
+    try compareSet(gpa, io, &git, &.{.{ "format.useAutoBase", "true" }}, &.{"--no-signature"}, "base..HEAD", range, .{ .who = fixture, .signature = .off });
+    try compareSet(gpa, io, &git, &.{.{ "format.useAutoBase", "true" }}, &.{ "--no-signature", "--no-base" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .base = .off });
+
+    try git.exec(io, &.{ "config", "format.outputDirectory", "patches" });
+    defer git.exec(io, &.{ "config", "--unset", "format.outputDirectory" }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var series = try formatpatch.format(gpa, io, &repo, range, .{ .who = fixture });
+    defer series.deinit();
+    try std.testing.expectEqualStrings("patches", series.directory);
+    var given = try formatpatch.format(gpa, io, &repo, range, .{ .who = fixture, .output_directory = "elsewhere" });
+    defer given.deinit();
+    try std.testing.expectEqualStrings("elsewhere", given.directory);
+    // what git writes there, the names relic gives
+    const names = try git.run(io, &.{ "format-patch", "--no-signature", "base..HEAD" });
+    defer gpa.free(names);
+    var ours: std.ArrayList(u8) = .empty;
+    defer ours.deinit(gpa);
+    for (series.mails) |m| try ours.print(gpa, "{s}/{s}\n", .{ series.directory, m.name });
+    try std.testing.expectEqualStrings(names, ours.items);
+}
+
+test "a setting that needs the committer asks for one, and bad format.* values are refused where git dies" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try buildHistory(io, &git);
+    const range: formatpatch.Range = .{ .upstream = try oidOf(gpa, io, &git, "base"), .tip = try oidOf(gpa, io, &git, "HEAD") };
+    for ([_][2][]const u8{
+        .{ "format.signOff", "true" }, .{ "format.thread", "true" }, .{ "format.coverLetter", "true" }, .{ "format.from", "yes" },
+    }) |kv| {
+        try git.exec(io, &.{ "config", kv[0], kv[1] });
+        defer git.exec(io, &.{ "config", "--unset", kv[0] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        try std.testing.expectError(error.NoIdentity, formatpatch.format(gpa, io, &repo, range, .{}));
+    }
+    for ([_][2][]const u8{
+        .{ "format.numbered", "maybe" },         .{ "format.thread", "sideways" },
+        .{ "format.filenameMaxLength", "long" }, .{ "format.coverFromDescription", "all" },
+        .{ "format.from", "Nobody" },            .{ "format.useAutoBase", "sometimes" },
+    }) |kv| {
+        try git.exec(io, &.{ "config", kv[0], kv[1] });
+        defer git.exec(io, &.{ "config", "--unset", kv[0] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+        // git dies on each
+        git.report_failures = false;
+        try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "format-patch", "--stdout", "base..HEAD" }));
+        git.report_failures = true;
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        try std.testing.expectError(error.InvalidFormatSetting, formatpatch.format(gpa, io, &repo, range, .{ .who = fixture }));
+    }
 }
 
 test "the files format-patch -o writes are named as git names them" {
@@ -180,7 +316,7 @@ test "the files format-patch -o writes are named as git names them" {
     const names = try git.run(io, &.{ "format-patch", "-o", "out", "--no-signature", "--cover-letter", "-v2", "--filename-max-length=30", "base..HEAD" });
     defer gpa.free(names);
     const sender: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
-    var series = try formatpatch.format(gpa, io, &repo, .{ .upstream = base, .tip = head }, .{ .cover_letter = .{ .sender = sender }, .reroll_count = "2", .filename_max_length = 30 });
+    var series = try formatpatch.format(gpa, io, &repo, .{ .upstream = base, .tip = head }, .{ .cover_letter = .on, .cover = .{ .sender = sender }, .reroll_count = "2", .filename_max_length = 30 });
     defer series.deinit();
     var ours: std.ArrayList(u8) = .empty;
     defer ours.deinit(gpa);

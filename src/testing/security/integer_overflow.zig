@@ -62,7 +62,7 @@ test "CVE-2016-2324 (with CVE-2016-2315, no t/ test): an object walk names every
     try std.testing.expectEqual(@as(usize, depth * name.len + depth - 1), longest);
 }
 
-test "CVE-2022-41903, t4205-log-pretty-formats 'log --pretty with overflowing wrapping directive' and '...padding directive': the widths are refused by name, in a format and in export-subst" {
+test "CVE-2022-41903, t4205-log-pretty-formats 'log --pretty with overflowing wrapping directive' and '...padding directive': a wrap past git's limit is written as it stands, a padding refused by name, in a format and in export-subst" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var git = try testgit.Repo.init(gpa, io, &.{});
@@ -79,10 +79,18 @@ test "CVE-2022-41903, t4205-log-pretty-formats 'log --pretty with overflowing wr
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
+    // A wrap past git's `FORMATTING_LIMIT` is no placeholder: written as
+    // it stands, as t4205 expects.
+    for ([_][2][]const u8{
+        .{ "%w(2147483649,1,1)%x30", "%w(2147483649,1,1)0" },
+        .{ "%w(1,2147483649,1)%x30", "%w(1,2147483649,1)0" },
+        .{ "%w(1,1,2147483649)%x30", "%w(1,1,2147483649)0" },
+    }) |case| {
+        var out: std.ArrayList(u8) = .empty;
+        try pretty.formatCommit(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = commit, .format = case[0] }, &out, .{});
+        try std.testing.expectEqualStrings(case[1], out.items);
+    }
     for ([_][]const u8{
-        "%w(2147483649,1,1)%x30",
-        "%w(1,2147483649,1)%x30",
-        "%w(1,1,2147483649)%x30",
         "%<(2147483649)%x30",
         "%>(2147483646)%x41%41%>(2147483646)%x41",
         "%B%<(1)%x30",

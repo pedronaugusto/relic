@@ -276,7 +276,7 @@ test "commits in Latin-1 and UTF-8 are written as git log, git shortlog and git 
             const theirs = try r.run(io, &.{ "format-patch", "--stdout", "--no-signature", "--cover-letter", "main..topic" });
             defer gpa.free(theirs);
             const sender: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
-            var series = try formatpatch.format(gpa, io, &repo, .{ .upstream = main_oid, .tip = topic }, .{ .cover_letter = .{ .sender = sender } });
+            var series = try formatpatch.format(gpa, io, &repo, .{ .upstream = main_oid, .tip = topic }, .{ .cover_letter = .on, .cover = .{ .sender = sender } });
             defer series.deinit();
             var w: Io.Writer.Allocating = .init(a);
             try series.writeMbox(&w.writer);
