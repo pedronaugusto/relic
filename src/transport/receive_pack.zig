@@ -60,6 +60,8 @@ const program = @import("../process.zig").program;
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const decimal = @import("../text.zig").decimal;
+const checkout = @import("../checkout/checkout.zig");
+const three_way = @import("../merge/three_way.zig");
 const signing = @import("../object/signing.zig");
 const local = @import("local.zig");
 
@@ -763,12 +765,13 @@ pub const Server = struct {
             return "funny refname";
         }
         const checked_out = try s.checkedOut(arena, name);
-        if (checked_out) switch (s.settings.deny_current_branch) {
+        // `updateInstead` waits for every other check to pass first.
+        var update_worktree: ?CheckedOut = null;
+        if (checked_out) |wt| switch (s.settings.deny_current_branch) {
             .ignore => {},
             .warn => try s.rpWarning("updating the current branch", .{}),
-            // Updating the working tree in its place is not done; the push
-            // is refused as with no setting.
-            .refuse, .unconfigured, .update_instead => {
+            .update_instead => update_worktree = wt,
+            .refuse, .unconfigured => {
                 try s.rpError("refusing to update checked out branch: {s}", .{name});
                 if (s.settings.deny_current_branch == .unconfigured) try s.rpError("{s}", .{refuse_unconfigured_deny});
                 return "branch is currently checked out";
@@ -784,12 +787,13 @@ pub const Server = struct {
                 return "deletion prohibited";
             }
             const is_head = if (head_ref) |h| std.mem.eql(u8, h, name) else false;
-            if (checked_out or is_head) switch (s.settings.deny_delete_current) {
+            if (checked_out != null or is_head) switch (s.settings.deny_delete_current) {
                 .ignore => {},
                 .warn => try s.rpWarning("deleting the current branch", .{}),
                 .refuse, .unconfigured, .update_instead => {
-                    try s.rpError("refusing to delete the current branch: {s}", .{name});
+                    // The explanation first here, as git has it.
                     if (s.settings.deny_delete_current == .unconfigured) try s.rpError("{s}", .{refuse_unconfigured_deny_delete_current});
+                    try s.rpError("refusing to delete the current branch: {s}", .{name});
                     return "deletion of the current branch prohibited";
                 },
             };
@@ -813,6 +817,7 @@ pub const Server = struct {
             try s.rpError("hook declined to update {s}", .{name});
             return "hook declined";
         }
+        if (update_worktree) |wt| if (try s.updateWorktree(cmd.new, wt)) |why| return why;
         if (deletion) {
             var expected: refs_mod.Expected = .{ .matches = cmd.old };
             if (cmd.old.isZero() or !try s.db().exists(s.io, cmd.old)) {
@@ -1134,24 +1139,143 @@ pub const Server = struct {
 
     /// Whether `name` is the branch a working tree of this repository has
     /// checked out: git's `find_shared_symref` over its worktrees.
-    fn checkedOut(s: *Server, arena: Allocator, name: []const u8) Self.Error!bool {
-        if (!std.mem.startsWith(u8, name, "refs/heads/")) return false;
+    /// A working tree with a branch checked out: its path and its git
+    /// directory, absolute, and whether it is a linked one.
+    const CheckedOut = struct { path: []const u8, git_dir: []const u8, linked: bool };
+
+    /// The working tree of this repository that has the branch `name`
+    /// checked out: git's `find_shared_symref` over its worktrees, the
+    /// main one first.
+    fn checkedOut(s: *Server, arena: Allocator, name: []const u8) Self.Error!?CheckedOut {
+        if (!std.mem.startsWith(u8, name, "refs/heads/")) return null;
         if (!s.remote.repo.isBare()) {
             if (try s.remote.repo.refStore().currentBranch(arena, s.io)) |branch| {
-                if (std.mem.eql(u8, branch, name["refs/heads/".len..])) return true;
+                if (std.mem.eql(u8, branch, name["refs/heads/".len..])) return .{
+                    .path = try realPath(arena, s.io, s.remote.repo.topDirectory()),
+                    .git_dir = try realPath(arena, s.io, s.remote.repo.gitDirectory()),
+                    .linked = false,
+                };
             }
         }
         var listing = s.remote.repo.listWorktrees(s.io) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
-            else => return false,
+            else => return null,
         };
         defer listing.deinit();
         for (listing.entries) |entry| {
             const branch = entry.branch orelse continue;
-            if (std.mem.eql(u8, branch, name) or std.mem.eql(u8, branch, name["refs/heads/".len..])) return true;
+            if (std.mem.eql(u8, branch, name) or std.mem.eql(u8, branch, name["refs/heads/".len..])) {
+                const common = try realPath(arena, s.io, s.remote.repo.commonDirectory());
+                return .{
+                    .path = try arena.dupe(u8, entry.path),
+                    .git_dir = try Io.Dir.path.join(arena, &.{ common, "worktrees", entry.name }),
+                    .linked = true,
+                };
+            }
         }
-        return false;
+        return null;
+    }
+
+    /// git's `update_worktree`, for `receive.denyCurrentBranch=updateInstead`:
+    /// the working tree that has the branch checked out brought to `new`
+    /// before the branch moves, by the `push-to-checkout` hook when there is
+    /// one (`GIT_DIR` and `GIT_WORK_TREE` set, the commit its argument),
+    /// and otherwise as git's `push_to_deploy` brings it. The refusal, or
+    /// `null`.
+    fn updateWorktree(s: *Server, new: Oid, wt: CheckedOut) Self.Error!?[]const u8 {
+        if (s.runner) |*runner| if (runner.exists(s.io, "push-to-checkout")) {
+            var hex: [hash.max_hex_len]u8 = undefined;
+            const set = [_]program.Var{ .{ .name = "GIT_DIR", .value = wt.git_dir }, .{ .name = "GIT_WORK_TREE", .value = wt.path } };
+            const ran = try runner.run(s.io, "push-to-checkout", .{ .args = &.{new.hex(&hex)}, .set = &set });
+            // Not on the side band: git runs this hook without it.
+            defer runner.captured.clearRetainingCapacity();
+            try s.diagnostics(runner.captured.items);
+            return if (ran.succeeded()) null else "push-to-checkout hook declined";
+        };
+        return s.pushToDeploy(new, wt);
+    }
+
+    /// git's `push_to_deploy`: the working tree updated to `new` only when
+    /// nothing in it differs from `HEAD`, untracked files and submodules
+    /// aside, and nothing untracked is in the way; each step refused in
+    /// git's words.
+    fn pushToDeploy(s: *Server, new: Oid, wt: CheckedOut) Self.Error!?[]const u8 {
+        var opened: ?repo_mod.Repository = null;
+        defer if (opened) |*r| r.deinit(s.io);
+        const repo: *repo_mod.Repository = if (wt.linked) blk: {
+            var dir = Io.Dir.cwd().openDir(s.io, wt.path, .{}) catch return "Up-to-date check failed";
+            defer dir.close(s.io);
+            opened = repo_mod.Repository.open(s.gpa, s.io, dir, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => return "Up-to-date check failed",
+            };
+            break :blk &opened.?;
+        } else &s.remote.repo;
+
+        // `update-index -q --refresh`: the index's lock, and no conflict.
+        var locked = repo.lockIndex(s.io) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return "Up-to-date check failed",
+        };
+        defer locked.deinit(s.io);
+        const index = &locked.index;
+        for (index.entries.items) |entry| {
+            if (entry.stage != 0) return "Up-to-date check failed";
+        }
+        const head_tree = repo.headTree(s.io) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return "Up-to-date check failed",
+        };
+
+        // `diff-files --quiet --ignore-submodules`, then
+        // `diff-index --quiet --cached --ignore-submodules HEAD`.
+        const changes = deploy: {
+            const wt_dir = repo.workDirectory() orelse break :deploy error.BareRepository;
+            var rules = try repo.worktreeRules();
+            var attrs = try repo.loadAttrs(s.io);
+            defer attrs.deinit();
+            rules.attrs = &attrs;
+            break :deploy checkout.status(s.gpa, s.io, wt_dir, .{ .index = index, .db = repo.objectDatabase() }, .{
+                .rules = rules,
+                .head_tree = head_tree,
+                .untracked = .no,
+            });
+        };
+        var status = changes catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return "Up-to-date check failed",
+        };
+        defer status.deinit();
+        for (status.entries) |entry| {
+            if (entry.submodule != null) continue;
+            switch (entry.unstaged) {
+                .unmodified, .untracked, .ignored => {},
+                else => return "Working directory has unstaged changes",
+            }
+        }
+        for (status.entries) |entry| {
+            if (entry.submodule == null and entry.staged != .unmodified) return "Working directory has staged changes";
+        }
+
+        // `read-tree -u -m <new>`: what is checked out moved to `new`, an
+        // untracked file in its way refusing it.
+        const moved = move: {
+            const new_tree = repo.commitTree(s.io, new) catch |err| break :move err;
+            var outcome = three_way.fastForward(s.gpa, s.io, repo, .{ .index = index, .old = head_tree, .new = new_tree }, .{}) catch |err| break :move err;
+            outcome.deinit();
+            locked.commit(s.io) catch |err| break :move err;
+        };
+        moved catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return "Could not update working tree to new HEAD",
+        };
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -1334,6 +1458,16 @@ pub const Server = struct {
         stderr.interface.flush() catch {}; // glint-ignore: Z026 -- as above
     }
 
+    /// What git writes on its own standard error rather than the side band:
+    /// this process's, as git's is.
+    fn diagnostics(s: *Server, text: []const u8) Self.Error!void {
+        if (text.len == 0 or builtin.is_test) return;
+        var buffer: [256]u8 = undefined;
+        var stderr = Io.File.stderr().writerStreaming(s.io, &buffer);
+        stderr.interface.writeAll(text) catch {}; // glint-ignore: Z026 -- a message to a closed standard error has nowhere else to go, as git's has not
+        stderr.interface.flush() catch {}; // glint-ignore: Z026 -- as above
+    }
+
     fn rpError(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {
         try s.rpLine("error: " ++ fmt, args);
     }
@@ -1427,6 +1561,16 @@ fn readPushOptions(arena: Allocator, in: *Io.Reader, out: *std.ArrayList([]const
         const line = if (raw.len != 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
         try out.append(arena, try arena.dupe(u8, line));
     }
+}
+
+/// The absolute path of `dir`, in `arena`.
+fn realPath(arena: Allocator, io: Io, dir: Io.Dir) Self.Error![]const u8 {
+    var buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const len = dir.realPath(io, &buf) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.ProtocolError,
+    };
+    return arena.dupe(u8, buf[0..len]);
 }
 
 /// git's `prepare_push_cert_nonce`: `<stamp>-<hmac>`, the HMAC in the

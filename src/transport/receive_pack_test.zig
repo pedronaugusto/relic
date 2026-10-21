@@ -340,6 +340,34 @@ const Pair = struct {
         return true;
     }
 
+    /// `git status` and `git ls-files -s` alike in git's working tree at
+    /// `<theirs><suffix>` and relic's at `<ours><suffix>`.
+    fn expectSameWorktrees(p: *Pair, suffix: []const u8) !void {
+        var said: [2][2][]u8 = undefined;
+        for ([_][]const u8{ p.theirs, p.ours }, 0..) |target, i| {
+            const path = try p.gpa.print("{s}{s}", .{ target, suffix });
+            defer p.gpa.free(path);
+            var dir = try Io.Dir.cwd().openDir(p.io, path, .{});
+            defer dir.close(p.io);
+            said[i][0] = try testremote.gitInputEnv(p.gpa, p.io, dir, &p.env, &.{ "status", "--porcelain", "--untracked-files=all" }, "", true);
+            said[i][1] = try testremote.gitInputEnv(p.gpa, p.io, dir, &p.env, &.{ "ls-files", "-s" }, "", true);
+        }
+        defer for (said) |pair| for (pair) |text| p.gpa.free(text);
+        try testing.expectEqualStrings(said[0][0], said[1][0]);
+        try testing.expectEqualStrings(said[0][1], said[1][1]);
+    }
+
+    /// The same git command in both working trees at `<target><suffix>`.
+    fn gitBothAt(p: *Pair, suffix: []const u8, args: []const []const u8) !void {
+        for ([_][]const u8{ p.theirs, p.ours }) |target| {
+            const path = try p.gpa.print("{s}{s}", .{ target, suffix });
+            defer p.gpa.free(path);
+            var dir = try Io.Dir.cwd().openDir(p.io, path, .{});
+            defer dir.close(p.io);
+            try p.git(dir, args);
+        }
+    }
+
     fn markBoth(p: *Pair, name: []const u8, present: bool, bare: bool) !void {
         for ([_][]const u8{ p.theirs, p.ours }) |target| {
             var dir = try Io.Dir.cwd().openDir(p.io, target, .{});
@@ -559,4 +587,56 @@ test "a server that asks for no certificate takes an unsigned push, and git refu
     if (!try p.signWith("signer", true)) return error.SkipZigTest;
     try p.both(&.{ "--signed=if-asked", "main:refs/heads/main" });
     try p.both(&.{ "--signed", "main:refs/heads/signed" });
+}
+
+test "denyCurrentBranch=updateInstead brings the working tree along with its branch, or refuses as git does, push-to-checkout deciding when there is one" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, false, &.{.{ "receive.denyCurrentBranch", "updateInstead" }});
+    defer p.deinit();
+    // The branch unborn: its files appear.
+    try p.both(&.{"main~2:refs/heads/main"});
+    try p.expectSameWorktrees("");
+    // A change not staged, then a staged one, then an untracked file where
+    // the push puts one: each refused, the working tree left.
+    try p.fileBoth("src/a.txt", "changed\n", 0o644);
+    try p.both(&.{"main~1:refs/heads/main"});
+    try p.expectSameWorktrees("");
+    try p.gitBothAt("", &.{ "add", "src/a.txt" });
+    try p.both(&.{"main~1:refs/heads/main"});
+    try p.expectSameWorktrees("");
+    try p.gitBothAt("", &.{ "reset", "-q", "--hard" });
+    try p.fileBoth("files/1.txt", "in the way\n", 0o644);
+    try p.both(&.{"main~1:refs/heads/main"});
+    try p.expectSameWorktrees("");
+    try p.fileBoth("files/1.txt", null, 0o644);
+    // Clean: the branch and the working tree move together.
+    try p.both(&.{"main~1:refs/heads/main"});
+    try p.expectSameWorktrees("");
+    // A push-to-checkout hook decides in place of all that.
+    try p.fileBoth(".git/hooks/push-to-checkout",
+        \\#!/bin/sh
+        \\echo "push-to-checkout $1 ${GIT_DIR:+git-dir} ${GIT_WORK_TREE:+work-tree}" >>hook.log
+        \\test ! -e decline-checkout || exit 1
+        \\exec git read-tree -u -m HEAD "$1"
+        \\
+    , 0o755);
+    try p.markBoth("decline-checkout", true, false);
+    try p.both(&.{"main:refs/heads/main"});
+    try p.markBoth("decline-checkout", false, false);
+    try p.both(&.{"main:refs/heads/main"});
+    try p.expectSameWorktrees("");
+    try p.fileBoth(".git/hooks/push-to-checkout", null, 0o644);
+    // A linked working tree with the branch: it is the one brought along;
+    // and deleting a checked-out branch is still refused.
+    for ([_][]const u8{ p.theirs, p.ours }) |target| {
+        var dir = try Io.Dir.cwd().openDir(io, target, .{});
+        defer dir.close(io);
+        const linked = try gpa.print("{s}-linked", .{target});
+        defer gpa.free(linked);
+        try p.git(dir, &.{ "worktree", "add", "-q", "-b", "side", linked, "HEAD~2" });
+    }
+    try p.both(&.{"main:refs/heads/side"});
+    try p.expectSameWorktrees("-linked");
+    try p.both(&.{":refs/heads/side"});
 }
