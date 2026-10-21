@@ -69,6 +69,8 @@ const config_mod = @import("../config/config.zig");
 const unicode_width = @import("../text.zig").unicode_width;
 const rev_parse = @import("../rev_walk/rev_parse.zig");
 const fork_point = @import("../rev_walk/fork_point.zig");
+const am = @import("../patch/am.zig");
+const format_patch = @import("../patch/format.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -91,9 +93,6 @@ pub const Error = error{
     RebaseInProgress,
     /// There is no rebase to continue, skip or abort.
     NoRebaseInProgress,
-    /// The rebase git left in `.git/rebase-apply` is the apply backend's,
-    /// which this release does not continue.
-    ApplyBackendInProgress,
     /// A merge, cherry-pick or revert is waiting to be concluded.
     OperationInProgress,
     /// The index or the working tree has changes; a rebase starts clean and
@@ -121,11 +120,26 @@ pub const Error = error{
     /// `rebase.rebaseMerges` is neither a boolean nor a mode git knows:
     /// "Unknown rebase-merges mode".
     InvalidRebaseMergesSetting,
+    /// `rebase.backend` names neither `merge` nor `apply`: "Unknown rebase
+    /// backend".
+    UnknownRebaseBackend,
+    /// The apply backend asked for with an option only the merge backend
+    /// has: git's "<option> requires the merge backend", "apply options
+    /// and merge options cannot be used together".
+    RequiresMergeBackend,
+    /// The apply backend asked for while `rebase.rebaseMerges` asks for the
+    /// merges made again: "apply options are incompatible with
+    /// rebase.rebaseMerges".
+    ApplyWithRebaseMerges,
+    /// `--continue` with changes in the working tree not staged, which
+    /// the apply backend refuses: git's "You must edit all merge conflicts
+    /// and then mark them as resolved using git add".
+    UnstagedChanges,
     /// The commit is a merge; only `merge` and `drop` take one.
     MergeCommit,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || sequencer.Error || merging.Error || program.Error || patch_id.Error || rev_walk.Error || worktrees.Error || notes.Error || rev_parse.Error || fork_point.Error;
+} || sequencer.Error || merging.Error || program.Error || patch_id.Error || rev_walk.Error || worktrees.Error || notes.Error || rev_parse.Error || fork_point.Error || am.Error || format_patch.Error;
 
 /// A message a person would be shown in an editor, and what they would
 /// see.
@@ -196,6 +210,13 @@ pub const Options = struct {
     interactive: bool = false,
     /// Move `fixup!`, `squash!` and `amend!` commits after their targets.
     autosquash: bool = false,
+    /// `--apply` or `--merge`. `null` is the merge backend where an option
+    /// only it has is asked for (a sheet, `interactive`, `exec`,
+    /// `autosquash`, `update_refs`, `empty`, `reapply_cherry_picks`,
+    /// `strategy_options`, `keep_empty` off, merges made again), and
+    /// `rebase.backend` otherwise. `.apply` with one of them is
+    /// `RequiresMergeBackend`.
+    backend: ?Backend = null,
     /// `--fork-point` or `--no-fork-point`: only the commits after the
     /// branch's fork point from the upstream (`rev_walk.fork_point`, by
     /// the reflog of the ref `upstream_name` names) are replayed, so a
@@ -261,6 +282,22 @@ pub const Options = struct {
     /// it finishes, is aborted, or fails to begin. `Outcome.autostash` and
     /// `Outcome.restored`.
     autostash: ?bool = null,
+};
+
+/// Which of git's two ways a rebase replays the commits.
+pub const Backend = enum {
+    /// The sequencer, through an instruction sheet in `.git/rebase-merge`.
+    merge,
+    /// `--apply`: the commits written as `git format-patch` writes them
+    /// and applied by `git am --rebasing`, in `.git/rebase-apply`.
+    apply,
+
+    fn dir(b: Backend) []const u8 {
+        return switch (b) {
+            .merge => "rebase-merge",
+            .apply => "rebase-apply",
+        };
+    }
 };
 
 /// Whether the merges on the branch are made again, and where a branch
@@ -336,15 +373,18 @@ pub const Outcome = struct {
 // The state git keeps
 //=========================================================================
 
-const state_dir = "rebase-merge";
-
-fn path(comptime name: []const u8) []const u8 {
-    return state_dir ++ "/" ++ name;
+/// Whether a rebase is waiting: `.git/rebase-merge` is there, or
+/// `.git/rebase-apply` with no `git am` session in it.
+pub fn inProgress(io: Io, repo: *Repository) bool {
+    return backendInProgress(io, repo) != null;
 }
 
-/// Whether a rebase is waiting: `.git/rebase-merge` is there.
-pub fn inProgress(io: Io, repo: *Repository) bool {
-    return state_file.exists(io, repo.gitDirectory(), state_dir);
+/// The backend of the rebase that is waiting.
+fn backendInProgress(io: Io, repo: *Repository) ?Backend {
+    const dir = repo.gitDirectory();
+    if (state_file.exists(io, dir, Backend.merge.dir())) return .merge;
+    if (state_file.exists(io, dir, Backend.apply.dir()) and !state_file.exists(io, dir, "rebase-apply/applying")) return .apply;
+    return null;
 }
 
 /// A running or resumed rebase: its options, its sheet, and where it is.
@@ -369,6 +409,8 @@ const Run = struct {
     fork_point: bool,
     /// The fork point found: git's `restrict_revision`.
     restrict: ?Oid = null,
+    /// Which backend, and so which directory the state is in.
+    backend: Backend = .merge,
     /// What is left to do, the current instruction first.
     items: std.ArrayList(todo.Item) = .empty,
     done_nr: usize = 0,
@@ -383,20 +425,27 @@ const Run = struct {
     autostash: ?Oid = null,
     restored: ?stash.Restored = null,
 
+    /// `name` in the backend's directory.
+    fn statePath(r: *const Run, comptime name: []const u8) []const u8 {
+        return switch (r.backend) {
+            inline else => |b| comptime b.dir() ++ "/" ++ name,
+        };
+    }
+
     fn state(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
-        try state_file.write(r.io, r.repo.gitDirectory(), path(name), bytes);
+        try state_file.write(r.io, r.repo.gitDirectory(), r.statePath(name), bytes);
     }
 
     fn readState(r: *Run, comptime name: []const u8) Error!?[]u8 {
-        return state_file.read(r.arena, r.io, r.repo.gitDirectory(), path(name));
+        return state_file.read(r.arena, r.io, r.repo.gitDirectory(), r.statePath(name));
     }
 
     fn removeState(r: *Run, comptime name: []const u8) Error!void {
-        try state_file.remove(r.io, r.repo.gitDirectory(), path(name));
+        try state_file.remove(r.io, r.repo.gitDirectory(), r.statePath(name));
     }
 
     fn hasState(r: *Run, comptime name: []const u8) bool {
-        return state_file.exists(r.io, r.repo.gitDirectory(), path(name));
+        return state_file.exists(r.io, r.repo.gitDirectory(), r.statePath(name));
     }
 
     fn appendState(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
@@ -1195,8 +1244,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     // which dies on a value that is no boolean, asked for or not.
     const configured_autostash = try repo.configuration().getBool("rebase.autostash", false);
 
-    if (inProgress(io, repo)) return error.RebaseInProgress;
-    if (state_file.exists(io, repo.gitDirectory(), "rebase-apply")) return error.ApplyBackendInProgress;
+    if (inProgress(io, repo) or state_file.exists(io, repo.gitDirectory(), Backend.apply.dir())) return error.RebaseInProgress;
+    r.backend = try backendOf(&r);
     if (merging.inProgress(io, repo) or sequencer.inProgress(io, repo) != null) return error.OperationInProgress;
     if (options.exec.len != 0 and options.programs == null) return error.ExecNotPermitted;
 
@@ -1204,8 +1253,13 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     const onto = options.onto orelse upstream;
     const onto_name = options.onto_name orelse try r.hex(onto);
     if (options.autostash orelse configured_autostash) {
-        r.autostash = try stash.createAutostash(io, repo, autostash_place, .{ .who = options.who, .filters = options.filters, .programs = options.programs });
+        r.autostash = try stash.createAutostash(io, repo, autostashPlace(&r), .{ .who = options.who, .filters = options.filters, .programs = options.programs });
     }
+    if (r.backend == .apply) return startApply(&r, upstream, tip, onto, onto_name) catch |err| {
+        _ = try restoreAutostash(&r, true);
+        try removeState(&r);
+        return err;
+    };
     const begun = begin(&r, upstream, tip, onto, onto_name) catch |err| {
         // git's `cleanup_autostash`: a rebase that does not begin gives the
         // work back, and leaves no state.
@@ -1224,13 +1278,15 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     return runLoop(&r);
 }
 
-/// Where a rebase keeps its autostash.
-const autostash_place: stash.Autostash = .{ .file = path("autostash") };
+/// Where a rebase keeps its autostash: its backend's directory.
+fn autostashPlace(r: *const Run) stash.Autostash {
+    return .{ .file = r.statePath("autostash") };
+}
 
 /// Bring back the autostash, applied or, without `apply`, only put on the
 /// stash list.
 fn restoreAutostash(r: *Run, apply: bool) Error!?stash.Restored {
-    return stash.restoreAutostash(r.io, r.repo, autostash_place, .{
+    return stash.restoreAutostash(r.io, r.repo, autostashPlace(r), .{
         .who = r.options.who,
         .apply = apply,
         .hooks = r.options.hooks,
@@ -1239,11 +1295,11 @@ fn restoreAutostash(r: *Run, apply: bool) Error!?stash.Restored {
     });
 }
 
-/// Everything a rebase does before its first instruction: the sheet
-/// written and `onto` checked out, detached. `false` when the branch
-/// already sits on `onto` and there is nothing to do, the branch named to
-/// rebase switched to.
-fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Error!bool {
+/// What every rebase does before its backend's own work: the working tree
+/// must be clean, the fork point is found, a branch already on top of
+/// `onto` in a straight line is up to date (`false`, the branch named to
+/// rebase switched to), and `pre-rebase` may refuse.
+fn prepare(r: *Run, upstream: Oid, tip: Tip, onto: Oid) Error!bool {
     const gpa = r.gpa;
     const io = r.io;
     const repo = r.repo;
@@ -1277,11 +1333,25 @@ fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Err
         if (options.verify) _ = try runner.preRebase(io, options.upstream_name orelse try r.hex(upstream), options.branch);
     }
 
+    return true;
+}
+
+/// Everything a rebase does before its first instruction: the sheet
+/// written and `onto` checked out, detached. `false` when the branch
+/// already sits on `onto` and there is nothing to do, the branch named to
+/// rebase switched to.
+fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Error!bool {
+    const gpa = r.gpa;
+    const io = r.io;
+    const repo = r.repo;
+    const options = r.options;
+    if (!try prepare(r, upstream, tip, onto)) return false;
+
     // git's `do_interactive_rebase` reads the sequencer's settings first.
     try sequencer.initConfig(repo);
     // The sheet.
     var items: []todo.Item = try makeScript(r, upstream, tip.orig_head);
-    try repo.gitDirectory().createDirPath(io, state_dir);
+    try repo.gitDirectory().createDirPath(io, Backend.merge.dir());
     try r.state("interactive", "");
     try writeBasicState(r, tip, onto);
     if (items.len == 0) {
@@ -1527,7 +1597,7 @@ fn removeState(r: *Run) Error!void {
         }
         try r.repo.refStore().deleteRefs(r.repo.allocator(), r.io, labels.items, null);
     }
-    try r.repo.gitDirectory().deleteTree(r.io, state_dir);
+    try r.repo.gitDirectory().deleteTree(r.io, r.backend.dir());
 }
 
 //=========================================================================
@@ -2374,7 +2444,7 @@ fn doReset(r: *Run, arg: []const u8) Error!void {
 /// `update-ref`: remember where `HEAD` is for a ref to be moved when the
 /// rebase finishes.
 fn doUpdateRef(r: *Run, ref: []const u8) Error!void {
-    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), path("update-refs"))) orelse return;
+    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), r.statePath("update-refs"))) orelse return;
     const records = try parseUpdateRefs(r, text);
     const new = try r.headOid();
     for (records.items) |*rec| {
@@ -2789,6 +2859,30 @@ fn lookupRewritten(r: *Run, name: []const u8) bool {
 // Finishing, continuing, skipping, aborting
 //=========================================================================
 
+/// `move_to_original_branch`: the branch moved to `head_oid`, `HEAD`
+/// naming it again, with git's `(finish)` lines.
+fn returnToBranch(r: *Run, tip: Tip, onto: Oid, head_oid: Oid) Error!void {
+    const branch = tip.head_name orelse return;
+    const branch_log = try r.reflogMessage("finish", try r.arena.print("{s} onto {s}", .{ branch, try r.hex(onto) }));
+    try head_mod.moveBranch(r.io, r.repo, branch, .{ .expected = .{ .matches = tip.orig_head }, .new = head_oid }, .{ .who = r.options.who, .message = branch_log });
+    const head_log = try r.reflogMessage("finish", try r.arena.print("returning to {s}", .{branch}));
+    try head_mod.attach(r.io, r.repo, branch, head_oid, .{ .who = r.options.who, .message = head_log });
+}
+
+/// `<old> <new>` lines: a rewritten list.
+fn parseRewritten(r: *Run, text: []const u8) Error!std.ArrayList(Rewritten) {
+    var rewritten: std.ArrayList(Rewritten) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedState;
+        try rewritten.append(r.arena, .{
+            .old = Oid.parse(r.repo.objectFormat(), line[0..space]) catch return error.MalformedState,
+            .new = Oid.parse(r.repo.objectFormat(), line[space + 1 ..]) catch return error.MalformedState,
+        });
+    }
+    return rewritten;
+}
+
 /// The end of the sheet: the branch moves to where `HEAD` is, `HEAD` names
 /// it again, the refs `update-ref` lines asked for move, and the state goes.
 fn finish(r: *Run) Error!Outcome {
@@ -2796,25 +2890,10 @@ fn finish(r: *Run) Error!Outcome {
     const repo = r.repo;
     const tip = try readBasicState(r);
     const onto = try ontoOf(r);
-    const head_oid = try r.headOid();
-    if (tip.head_name) |branch| {
-        const branch_log = try r.reflogMessage("finish", try r.arena.print("{s} onto {s}", .{ branch, try r.hex(onto) }));
-        try head_mod.moveBranch(io, repo, branch, .{ .expected = .{ .matches = tip.orig_head }, .new = head_oid }, .{ .who = r.options.who, .message = branch_log });
-        const head_log = try r.reflogMessage("finish", try r.arena.print("returning to {s}", .{branch}));
-        try head_mod.attach(io, repo, branch, head_oid, .{ .who = r.options.who, .message = head_log });
-    }
+    try returnToBranch(r, tip, onto, try r.headOid());
     try flushRewritten(r);
     var rewritten: std.ArrayList(Rewritten) = .empty;
-    if (try r.readState("rewritten-list")) |text| {
-        var lines = std.mem.tokenizeScalar(u8, text, '\n');
-        while (lines.next()) |line| {
-            const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedState;
-            try rewritten.append(r.arena, .{
-                .old = Oid.parse(repo.objectFormat(), line[0..space]) catch return error.MalformedState,
-                .new = Oid.parse(repo.objectFormat(), line[space + 1 ..]) catch return error.MalformedState,
-            });
-        }
-    }
+    if (try r.readState("rewritten-list")) |text| rewritten = try parseRewritten(r, text);
     // `git notes copy --for-rewrite=rebase` with `rewritten-list`, whose
     // failure git does not mind; then `post-rewrite`, told on its standard
     // input what that list says, once the branch has moved.
@@ -2847,6 +2926,177 @@ fn finish(r: *Run) Error!Outcome {
     return out;
 }
 
+//=========================================================================
+// The apply backend
+//=========================================================================
+
+/// The backend a rebase starts with: git's choice among `--apply`,
+/// `--merge`, the options only the merge backend has, and `rebase.backend`.
+fn backendOf(r: *Run) Error!Backend {
+    const o = r.options;
+    const merge_only = o.interactive or o.todo != null or o.exec.len != 0 or o.autosquash or o.update_refs or
+        o.empty != null or o.reapply_cherry_picks or o.strategy_options.len != 0 or !o.keep_empty or
+        (o.rebase_merges != null and o.rebase_merges.? != .off);
+    if (o.backend == .apply) {
+        if (merge_only) return error.RequiresMergeBackend;
+        if (o.rebase_merges == null and r.merges != .off) return error.ApplyWithRebaseMerges;
+        return .apply;
+    }
+    if (merge_only or r.merges != .off) return .merge;
+    if (o.backend) |b| return b;
+    const configured = r.repo.configuration().get("rebase.backend") orelse return .merge;
+    if (std.mem.eql(u8, configured, "merge")) return .merge;
+    if (std.mem.eql(u8, configured, "apply")) return .apply;
+    return error.UnknownRebaseBackend;
+}
+
+/// The apply backend after the checks every rebase makes: `HEAD` detached
+/// at `onto`; a branch with no commits of its own fast-forwarded; else the
+/// branch's commits written as git's `format-patch -k --full-index
+/// --cherry-pick --right-only --no-renames --pretty=mboxrd --topo-order`
+/// writes them and applied by `am --rebasing`, which stops where a commit
+/// does not apply.
+fn startApply(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Error!Outcome {
+    const gpa = r.gpa;
+    const io = r.io;
+    const repo = r.repo;
+    if (!try prepare(r, upstream, tip, onto)) {
+        try finishApplyState(r);
+        return finishOutcome(r, .up_to_date, null, null);
+    }
+    try checkoutOnto(r, onto, tip.orig_head, r.options.onto_name orelse onto_name);
+    const branch_base = blk: {
+        const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = onto, .b = tip.orig_head }, .{});
+        defer gpa.free(bases);
+        break :blk if (bases.len == 1) bases[0] else null;
+    };
+    if (branch_base != null and branch_base.?.eql(tip.orig_head)) return finishApply(r, tip, onto);
+
+    var diff_options = try diff.configured(repo.configuration(), .{});
+    diff_options.full_index = true;
+    var series = try format_patch.format(gpa, io, repo, .{
+        .upstream = upstream,
+        .tip = tip.orig_head,
+        .exclude = if (r.restrict) |fork| &.{fork} else &.{},
+    }, .{
+        .keep_subject = true,
+        .mboxrd = true,
+        .ignore_if_in_upstream = true,
+        .renames = .off,
+        .topo_order = true,
+        .diff = diff_options,
+    });
+    defer series.deinit();
+    var mbox: Io.Writer.Allocating = .init(r.arena);
+    series.writeMbox(&mbox.writer) catch return error.OutOfMemory;
+    var applied = try am.start(gpa, io, repo, &.{mbox.written()}, try amOptions(r));
+    defer applied.deinit();
+    if (applied.stopped) |stop| {
+        try writeApplyState(r, tip, onto);
+        return stoppedApply(r, stop);
+    }
+    return finishApply(r, tip, onto);
+}
+
+/// What `am` is run with for a rebase: git's `run_am`.
+fn amOptions(r: *Run) Error!am.Options {
+    return .{
+        .committer = r.options.who,
+        .rebasing = true,
+        .mboxrd = true,
+        .reflog_action = try r.arena.print("{s} (pick)", .{r.action()}),
+        .hooks = r.options.hooks,
+        .signing = r.options.signing,
+        .signoff = r.options.signoff,
+    };
+}
+
+/// `rebase_write_basic_state` into `rebase-apply`, once `am` has stopped.
+fn writeApplyState(r: *Run, tip: Tip, onto: Oid) Error!void {
+    try r.state("head-name", try r.arena.print("{s}\n", .{tip.head_name orelse "detached HEAD"}));
+    try r.state("onto", try r.arena.print("{s}\n", .{try r.hex(onto)}));
+    try r.state("orig-head", try r.arena.print("{s}\n", .{try r.hex(tip.orig_head)}));
+    if (r.options.rerere_autoupdate) |on| try r.state("allow_rerere_autoupdate", if (on) "--rerere-autoupdate\n" else "--no-rerere-autoupdate\n");
+    if (r.options.signing.sign == .always) try r.state("gpg_sign_opt", try r.arena.print("-S{s}\n", .{r.options.signing.key orelse ""}));
+    if (r.options.signoff) try r.state("signoff", "--signoff\n");
+}
+
+fn stoppedApply(r: *Run, stop: am.Stop) Error!Outcome {
+    _ = stop;
+    const at = try r.repo.refStore().root().read(r.gpa, r.io, .rebase_head);
+    return finishOutcome(r, .stopped, .conflict, at);
+}
+
+/// `move_to_original_branch` and `finish_rebase`: the branch moved to
+/// `HEAD` and `HEAD` naming it again, then the state removed and the
+/// autostash brought back.
+fn finishApply(r: *Run, tip: Tip, onto: Oid) Error!Outcome {
+    try returnToBranch(r, tip, onto, try r.headOid());
+    var rewritten: std.ArrayList(Rewritten) = .empty;
+    if (try r.readState("rewritten")) |text| rewritten = try parseRewritten(r, text);
+    try finishApplyState(r);
+    var out = finishOutcome(r, .done, null, null);
+    out.rewritten = rewritten.items;
+    return out;
+}
+
+fn finishApplyState(r: *Run) Error!void {
+    try r.repo.refStore().root().delete(r.repo.allocator(), r.io, .rebase_head);
+    try r.repo.refStore().root().delete(r.repo.allocator(), r.io, .auto_merge);
+    r.restored = try restoreAutostash(r, true);
+    try removeState(r);
+}
+
+/// `--continue` for the apply backend: nothing left unstaged, then `am`
+/// commits what is staged and goes on.
+fn proceedApply(r: *Run) Error!Outcome {
+    if (try hasUnstagedChanges(r)) return error.UnstagedChanges;
+    const tip = try readBasicState(r);
+    const onto = try ontoOf(r);
+    var applied = try am.proceed(r.gpa, r.io, r.repo, try amOptions(r));
+    defer applied.deinit();
+    if (applied.stopped) |stop| return stoppedApply(r, stop);
+    return finishApply(r, tip, onto);
+}
+
+/// `--skip` for the apply backend: the index and the working tree back to
+/// `HEAD`, and `am --skip`.
+fn skipApply(r: *Run) Error!Outcome {
+    const tip = try readBasicState(r);
+    const onto = try ontoOf(r);
+    var applied = try am.skip(r.gpa, r.io, r.repo, try amOptions(r));
+    defer applied.deinit();
+    if (applied.stopped) |stop| return stoppedApply(r, stop);
+    return finishApply(r, tip, onto);
+}
+
+/// git's `has_unstaged_changes`, submodules aside: a path whose working
+/// tree differs from the index, or that is still conflicted.
+fn hasUnstagedChanges(r: *Run) Error!bool {
+    var index = try r.repo.openIndex(r.io);
+    defer index.deinit();
+    const wt = r.repo.workDirectory() orelse return error.BareRepository;
+    var rules = try r.repo.worktreeRules();
+    var attrs = try r.repo.loadAttrs(r.io);
+    defer attrs.deinit();
+    rules.attrs = &attrs;
+    var status = try worktree.status(r.gpa, r.io, wt, .{ .index = &index, .db = r.repo.objectDatabase() }, .{
+        .rules = rules,
+        .head_tree = try r.repo.headTree(r.io),
+        .untracked = .no,
+    });
+    defer status.deinit();
+    for (status.entries) |entry| {
+        if (entry.submodule != null) continue;
+        if (entry.conflicted) return true;
+        switch (entry.unstaged) {
+            .unmodified, .untracked, .ignored => {},
+            else => return true,
+        }
+    }
+    return false;
+}
+
 /// Load a rebase in progress, whoever started it, its sheet and all.
 fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Run {
     var r = try loadBareRun(gpa, io, repo, options);
@@ -2873,8 +3123,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
 /// and `--quit` start from, as git's read only what they undo, so a sheet
 /// it cannot read does not keep a rebase from being given up.
 fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Run {
-    if (state_file.exists(io, repo.gitDirectory(), "rebase-apply")) return error.ApplyBackendInProgress;
-    if (!inProgress(io, repo)) return error.NoRebaseInProgress;
+    const backend = backendInProgress(io, repo) orelse return error.NoRebaseInProgress;
     const arena_state = try gpa.create(std.heap.ArenaAllocator);
     arena_state.* = .init(gpa);
     errdefer {
@@ -2883,6 +3132,7 @@ fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Erro
     }
     var r = try newRun(gpa, io, arena_state, repo, options);
     r.allow_ff = !options.force;
+    r.backend = backend;
     return r;
 }
 
@@ -2890,6 +3140,11 @@ fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Erro
 /// staged, as git does, and carry on down the sheet.
 pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    if (backendInProgress(io, repo) == .apply) {
+        var r = try loadBareRun(gpa, io, repo, options);
+        errdefer freeRun(&r);
+        return proceedApply(&r);
+    }
     try sequencer.initConfig(repo);
     var r = try loadRun(gpa, io, repo, options);
     errdefer freeRun(&r);
@@ -3019,6 +3274,19 @@ const hooksEnv = ?hooks_mod.Runner.CommitEnv;
 /// carry on: `--skip`.
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
+    if (backendInProgress(io, repo) == .apply) {
+        var r = try loadBareRun(gpa, io, repo, options);
+        errdefer freeRun(&r);
+        // git's `--skip`: the working tree back to `HEAD`, the branch state
+        // gone, then `am --skip`.
+        try rerere.clear(gpa, io, repo);
+        var locked_index = try repo.lockIndex(io);
+        defer locked_index.deinit(io);
+        try reset.toTree(gpa, io, repo, .{ .index = &locked_index.index, .tree = try repo.commitTree(io, try r.headOid()), .mode = .hard, .blocked = options.blocked });
+        try locked_index.commit(io);
+        try merging.removeMergeState(io, repo, options.who);
+        return skipApply(&r);
+    }
     try sequencer.initConfig(repo);
     {
         var r = try loadRun(gpa, io, repo, options);

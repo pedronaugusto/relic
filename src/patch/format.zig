@@ -87,6 +87,8 @@ pub const Range = struct {
     tip: Oid,
     /// `-<n>`: at most this many, the newest.
     max_count: ?usize = null,
+    /// `^<commit>`: more commits left out, with everything they reach.
+    exclude: []const Oid = &.{},
 };
 
 /// What the cover letter lists the commits as.
@@ -209,6 +211,9 @@ pub const Options = struct {
     /// Context, algorithm and whitespace for the patches. `null` takes
     /// `diff.algorithm` and `diff.context`.
     diff: ?diff.Options = null,
+    /// `--topo-order`: the commits in the order of `git rev-list
+    /// --topo-order`, reversed, rather than by date.
+    topo_order: bool = false,
     /// `--suffix`.
     suffix: []const u8 = ".patch",
     /// `--filename-max-length`.
@@ -406,6 +411,8 @@ fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: 
     defer walk.deinit();
     try walk.push(range.tip);
     if (range.upstream) |u| try walk.hide(u);
+    for (range.exclude) |x| try walk.hide(x);
+    if (options.topo_order) walk.sort = .topological;
     var upstream_ids: std.ArrayList(Oid) = .empty;
     if (options.ignore_if_in_upstream and range.upstream != null) {
         if (range.upstream.?.eql(range.tip)) return null;

@@ -44,6 +44,10 @@ const rerere = @import("../merge/rerere.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
 const signing = @import("../object/signing.zig");
 const gitdate = @import("../text.zig").date;
+const pretty = @import("../pretty/pretty.zig");
+const text_encoding = @import("../text.zig").encoding;
+const diff = @import("../diff/diff.zig");
+const notes = @import("../commit/notes.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -90,7 +94,7 @@ pub const Error = error{
     LocalChangesWouldBeOverwritten,
 } || mailinfo.Error || apply_mod.Error || three_way.Error || rerere.Error || hooks_mod.Error ||
     repo_mod.WriteError || head_mod.Error || index_mod.ReadError || index_mod.WriteError || worktree.Error ||
-    Io.Dir.ReadFileAllocError || Io.Dir.DeleteTreeError || Io.Dir.RealPathError;
+    Io.Dir.ReadFileAllocError || Io.Dir.DeleteTreeError || Io.Dir.RealPathError || notes.Error || diff.UnifiedError || text_encoding.ReencodeError;
 
 /// `-k` and `--keep-non-patch`.
 pub const Keep = enum { no, subject, non_patch };
@@ -147,6 +151,17 @@ pub const Options = struct {
     signing: signing.Request = .{},
     /// For `proceed`: `--allow-empty`, an empty patch committed as it is.
     allow_empty: bool = false,
+    /// `--rebasing`, as `git rebase`'s apply backend runs `am`: each mail
+    /// is the commit its `From <commit>` line names, whose author, message
+    /// and patch are taken from the commit itself; the three-way fallback
+    /// is always on; `ORIG_HEAD` is the rebase's; each commit made is
+    /// recorded in `rewritten`, whose notes are copied and `post-rewrite`
+    /// told as a rebase's at the end; and the session's directory is left
+    /// for the rebase to remove. A stopped session remembers it.
+    rebasing: bool = false,
+    /// What the reflog lines begin with, before `: <subject>`: git's
+    /// `GIT_REFLOG_ACTION`. `am` when `null`.
+    reflog_action: ?[]const u8 = null,
 };
 
 /// Why a session stopped.
@@ -223,6 +238,10 @@ const Session = struct {
     msg: ?[]const u8 = null,
     commits: std.ArrayList(Oid) = .empty,
     skipped: usize = 0,
+    /// `--rebasing`, from the options or the session's `rebasing` file.
+    rebasing: bool = false,
+    /// The commit the current mail is, in a rebasing session.
+    orig_commit: ?Oid = null,
 
     fn path(s: *Session, name: []const u8) Allocator.Error![]const u8 {
         return s.a.print(state_dir ++ "/{s}", .{name});
@@ -378,12 +397,13 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
 pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []const u8, options: Options) Self.Error!Outcome {
     if (repo.workDirectory() == null) return error.BareRepository;
     if (inProgress(io, repo)) return error.AmInProgress;
-    if (state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
+    // A rebase made the directory for its autostash.
+    if (!options.rebasing and state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
     const config = repo.configuration();
-    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory() };
+    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory(), .rebasing = options.rebasing };
 
     const format: Format = if (options.mboxrd) .mboxrd else if (mailboxes.len == 0) .mbox else try detectFormat(mailboxes[0]);
 
@@ -409,7 +429,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     s.cur = 1;
     s.last = count;
 
-    s.three_way = options.three_way orelse (config.getBool("am.threeway", false) catch false);
+    s.three_way = options.rebasing or (options.three_way orelse (config.getBool("am.threeway", false) catch false));
     s.quiet = options.quiet;
     s.signoff = options.signoff;
     s.utf8 = options.utf8;
@@ -437,17 +457,17 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
         try quote.sq(a, &opt_text, w);
     }
     try s.writeText("apply-opt", opt_text.items);
-    try s.writeText("applying", "");
+    try s.writeText(if (s.rebasing) "rebasing" else "applying", "");
 
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     if (head.oid) |oid| {
         var hex: [hash.max_hex_len]u8 = undefined;
         try s.writeText("abort-safety", oid.hex(&hex));
-        try repo.refStore().root().write(repo.allocator(), io, .orig_head, oid);
+        if (!s.rebasing) try repo.refStore().root().write(repo.allocator(), io, .orig_head, oid);
     } else {
         try s.writeText("abort-safety", "");
-        try repo.refStore().root().delete(repo.allocator(), io, .orig_head);
+        if (!s.rebasing) try repo.refStore().root().delete(repo.allocator(), io, .orig_head);
     }
     try s.writeText("next", try a.print("{d}", .{s.cur}));
     try s.writeText("last", try a.print("{d}", .{s.last}));
@@ -496,6 +516,11 @@ fn reload(s: *Session) Error!void {
     const qcr = try s.readTrim("quoted-cr");
     s.quoted_cr = if (qcr.len == 0) null else std.meta.stringToEnum(mailinfo.QuotedCr, qcr) orelse return error.MalformedState;
     s.apply_opt = (try quote.sqDequoteWords(s.a, try s.readTrim("apply-opt"))) orelse return error.MalformedState;
+    s.rebasing = try s.exists("rebasing");
+    s.orig_commit = null;
+    if (try s.read("original-commit")) |text| {
+        s.orig_commit = Oid.parse(s.repo.objectFormat(), std.mem.trimEnd(u8, text, "\n")) catch return error.MalformedState;
+    }
 }
 
 //=========================================================================
@@ -563,6 +588,69 @@ fn parseMail(s: *Session, name: []const u8) Error!bool {
     s.author_email = author_email;
     s.author_date = author_date;
     return true;
+}
+
+/// `parse_mail_rebase`: the mail is the commit its `From <commit>` line
+/// names, and the author, the message and the patch are that commit's.
+fn parseMailRebase(s: *Session, name: []const u8) Error!bool {
+    const mail = (try s.read(name)).?;
+    const line = mail[0 .. std.mem.findScalar(u8, mail, '\n') orelse mail.len];
+    if (!std.mem.startsWith(u8, line, "From ")) return error.MalformedState;
+    const hex_len = s.repo.objectFormat().hexLen();
+    if (line.len < "From ".len + hex_len) return error.MalformedState;
+    const oid = Oid.parse(s.repo.objectFormat(), line["From ".len..][0..hex_len]) catch return error.MalformedState;
+    const db = s.repo.objectDatabase();
+    const found = try db.read(s.io, oid);
+    defer db.allocator().free(found.bytes);
+    if (found.type != .commit) return error.MalformedState;
+    // git's `get_commit_info`: the commit in its output encoding.
+    const shown = try pretty.reencodeCommit(s.a, try s.a.dupe(u8, found.bytes), try message.commitEncoding(s.repo.configuration()));
+    var commit = try object.Commit.parse(s.gpa, s.repo.objectFormat(), shown.bytes);
+    defer commit.deinit();
+    s.author_name = try s.a.dupe(u8, commit.author.name);
+    s.author_email = try s.a.dupe(u8, commit.author.email);
+    var date: std.ArrayList(u8) = .empty;
+    gitdate.show(s.a, &date, commit.author.when_secs, gitdate.tzInt(commit.author.offset_minutes), .{}, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedState,
+    };
+    s.author_date = date.items;
+    const body = std.mem.find(u8, shown.bytes, "\n\n") orelse return error.MalformedState;
+    s.msg = shown.bytes[body + 2 ..];
+    try writeCommitPatch(s, commit.parents, commit.tree);
+    s.orig_commit = oid;
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try s.writeText("original-commit", oid.hex(&hex));
+    try s.repo.refStore().root().write(s.repo.allocator(), s.io, .rebase_head, oid);
+    return true;
+}
+
+/// `write_commit_patch`: the commit's patch against its first parent, or
+/// the empty tree, with objects named in full and binary files as `GIT
+/// binary patch` hunks; renames not looked for and the diff settings not
+/// read, as `am` reads no diff configuration.
+fn writeCommitPatch(s: *Session, parents: []const Oid, tree: Oid) Error!void {
+    const db = s.repo.objectDatabase();
+    const parent_tree: ?Oid = if (parents.len == 0) null else try s.repo.commitTree(s.io, parents[0]);
+    var changes = try diff.tree(s.gpa, s.io, db, .{ .old = parent_tree, .new = tree }, .{});
+    defer changes.deinit();
+    var attrs = try s.repo.loadAttrs(s.io);
+    defer attrs.deinit();
+    defer attrs.leave();
+    var out: Io.Writer.Allocating = .init(s.a);
+    diff.unified(s.gpa, s.io, .{
+        .db = db,
+        .changes = changes.items,
+        .binary = .{ .attrs = &attrs, .work_dir = s.repo.workDirectory(), .config = s.repo.configuration() },
+    }, &out.writer, .{
+        .full_index = true,
+        .binary_patches = true,
+        .quote_path = s.repo.configuration().getBool("core.quotepath", true) catch true,
+    }) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    try s.write("patch", out.written());
 }
 
 fn subjectOf(msg: []const u8) []const u8 {
@@ -710,6 +798,9 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
     defer outcome.deinit();
     try locked_current.commit(io);
     if (!outcome.isClean()) {
+        // merge-ort's `merge_switch_to_result` records the conflicted
+        // result; `am` never removes it.
+        try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
         _ = try rerere.afterStop(gpa, io, repo, .{ .arena = s.a, .autoupdate = null });
         var paths: std.ArrayList([]const u8) = .empty;
         for (outcome.conflicts) |c| try paths.append(s.a, try s.a.dupe(u8, c.path));
@@ -762,9 +853,10 @@ fn doCommit(s: *Session) Error!void {
         .message = s.msg.?,
         .signing = s.options.signing,
     }, .{});
-    const log_message = try s.a.print("am: {s}", .{subjectOf(s.msg.?)});
+    const log_message = try s.a.print("{s}: {s}", .{ s.options.reflog_action orelse "am", subjectOf(s.msg.?) });
     try head_mod.advance(io, repo, head, commit, .{ .who = committer, .message = log_message });
     try s.commits.append(s.a, commit);
+    if (s.rebasing) try recordRewritten(s, commit);
     _ = try runHook(s, "post-applypatch", &.{});
 }
 
@@ -821,7 +913,7 @@ fn run(s: *Session, arena: *std.heap.ArenaAllocator, resume_in: bool) Error!Outc
         if (resuming) {
             if (s.msg == null or s.author_name == null) return error.MalformedState;
         } else {
-            pass = !try parseMail(s, name);
+            pass = if (s.rebasing) !try parseMailRebase(s, name) else !try parseMail(s, name);
             if (!pass) {
                 if (s.signoff) {
                     var msg: std.ArrayList(u8) = .empty;
@@ -865,8 +957,44 @@ fn run(s: *Session, arena: *std.heap.ArenaAllocator, resume_in: bool) Error!Outc
         if (resuming) try reload(s);
         resuming = false;
     }
-    try destroy(s.io, s.repo);
+    try rewriteDone(s);
+    // A rebase removes its own directory.
+    if (!s.rebasing) try destroy(s.io, s.repo);
     return finish(s, arena, null);
+}
+
+/// A rebasing session's `rewritten`: the commit the mail was, and the one
+/// made of it.
+fn recordRewritten(s: *Session, made: Oid) Error!void {
+    const orig = s.orig_commit orelse return error.MalformedState;
+    var old_hex: [hash.max_hex_len]u8 = undefined;
+    var new_hex: [hash.max_hex_len]u8 = undefined;
+    const line = try s.a.print("{s} {s}\n", .{ orig.hex(&old_hex), made.hex(&new_hex) });
+    const before = (try s.read("rewritten")) orelse "";
+    try s.write("rewritten", try std.mem.concat(s.a, u8, &.{ before, line }));
+}
+
+/// git's `copy_notes_for_rebase` and `run_post_rewrite_hook` once a
+/// session that rewrote commits is through.
+fn rewriteDone(s: *Session) Error!void {
+    const text = (try s.read("rewritten")) orelse return;
+    if (text.len == 0) return;
+    var pairs: std.ArrayList(hooks_mod.Runner.Rewrite) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedState;
+        try pairs.append(s.a, .{
+            .old = Oid.parse(s.repo.objectFormat(), line[0..space]) catch return error.MalformedState,
+            .new = Oid.parse(s.repo.objectFormat(), line[space + 1 ..]) catch return error.MalformedState,
+        });
+    }
+    // Whether the notes could be copied, git does not mind.
+    notes.copyForRewrite(s.gpa, s.io, s.repo, pairs.items, .{ .command = .rebase, .who = s.options.committer, .message = "Notes added by 'git rebase'" }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => {},
+    };
+    if (s.options.hooks) |runner| _ = try runner.run(s.io, "post-rewrite", .{ .args = &.{"rebase"}, .input = text });
 }
 
 /// `git am --continue`: commit what the index holds for the patch the
@@ -905,6 +1033,8 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     const index = &locked_index.index;
     try reset.toTree(gpa, io, repo, .{ .index = index, .tree = tree, .mode = .merge, .blocked = null });
     try locked_index.commit(io);
+    // A skipped commit is rewritten as the commit it was skipped on.
+    if (s.rebasing) try recordRewritten(&s, head.oid orelse return error.MalformedState);
     try next(&s);
     try reload(&s);
     return run(&s, &arena_instance, false);

@@ -979,6 +979,9 @@ pub const RewriteOptions = struct {
     command: hooks_mod.Runner.RewriteCommand,
     who: object.Signature,
     warnings: ?*warning.Warnings = null,
+    /// The notes commit's message, in place of the command's own: `git am
+    /// --rebasing` writes `Notes added by 'git rebase'`.
+    message: ?[]const u8 = null,
 };
 
 /// git's `copy_note_for_rewrite` after `options.command` rewrote commits: each old
@@ -1023,7 +1026,7 @@ pub fn copyForRewrite(
         }
     }
     if (!enabled) return;
-    const msg = switch (options.command) {
+    const msg = options.message orelse switch (options.command) {
         .amend => "Notes added by 'git commit --amend'",
         .rebase => "Notes added by 'git notes copy'",
     };
