@@ -71,9 +71,13 @@ pub const ReflogExpireOptions = struct {
     /// The time now, which relative dates are read against and the
     /// defaults count back from; relic reads no clock.
     clock: date.Context,
-    /// The logs to expire, full ref names; `null` for every log of this
-    /// worktree's store, git's `--all --single-worktree`.
+    /// The logs to expire, full ref names; `null` for every log, git's
+    /// `--all`.
     refs: ?[]const []const u8 = null,
+    /// With `refs` of `null`, only this worktree's logs and the shared
+    /// ones: `--single-worktree`. Otherwise every worktree's, each other
+    /// worktree's own named `worktrees/<id>/<name>`.
+    single_worktree: bool = false,
     /// `--expire`: entries older than this go. `null` takes
     /// `gc.<pattern>.reflogExpire` for the first pattern the ref matches,
     /// else `gc.reflogExpire`, else 30 days before `clock`: git 2.55's
@@ -157,11 +161,27 @@ pub fn expireReflogs(gpa: Allocator, io: Io, repo: *Repository, options: ReflogE
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     const settings = try Settings.read(arena, repo.configuration(), options.clock);
-    const names = options.refs orelse try repo.refStore().logNames(gpa, arena, io);
+    const names = options.refs orelse try repo.refStore().logNames(gpa, arena, io, .{ .every_worktree = !options.single_worktree });
     for (names) |name| {
         var keeper: Keeper = .{ .gpa = gpa, .io = io, .repo = repo, .ref = name, .policy = try settings.forRef(arena, name, options) };
         defer keeper.deinit();
-        try repo.refStore().expireLog(gpa, io, &keeper, .{ .name = name, .rewrite = options.rewrite, .update_ref = options.update_ref });
+        // Another worktree's own log is written by a store opened in it,
+        // under the same lock git's takes; the keeper reads by the full
+        // name, as git's does through the main store.
+        const where = ref_names.parseWorktreeRef(name);
+        switch (where.owner) {
+            .current, .shared => try repo.refStore().expireLog(gpa, io, &keeper, .{ .name = name, .rewrite = options.rewrite, .update_ref = options.update_ref }),
+            .main, .other => {
+                var admin = if (where.owner == .main) null else repo.commonDirectory().openDir(io, name[0 .. name.len - where.bare.len - 1], .{}) catch |err| switch (err) {
+                    error.FileNotFound, error.NotDir => continue,
+                    else => |e| return e,
+                };
+                defer if (admin) |*dir| dir.close(io);
+                var store = try repo.refStore().sibling(admin orelse repo.commonDirectory());
+                defer store.deinit();
+                try store.expireLog(gpa, io, &keeper, .{ .name = where.bare, .rewrite = options.rewrite, .update_ref = options.update_ref });
+            },
+        }
         if (keeper.failure) |err| return err;
     }
 }

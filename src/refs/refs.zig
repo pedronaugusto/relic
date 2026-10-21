@@ -224,6 +224,23 @@ pub const Store = struct {
     }
 
     /// Release the backend and every cached stack together.
+    /// A store over another worktree of this repository, with this one's
+    /// options: `git_dir` is that worktree's administrative directory,
+    /// `worktrees/<id>`, or the common directory for the main worktree.
+    /// It writes that worktree's own refs and logs, which this store
+    /// refuses. The directory is borrowed; release with `deinit`.
+    pub fn sibling(store: *const Store, git_dir: Io.Dir) Allocator.Error!Store {
+        const d = state_mod.get(store.state);
+        return Store.init(d.gpa, d.kind, git_dir, d.common_dir, .{
+            .format = d.format,
+            .reftable = d.options,
+            .shared = d.shared,
+            .fsync = d.fsync,
+            .packed_lock = d.packed_lock,
+            .precompose_unicode = d.precompose,
+        });
+    }
+
     pub fn deinit(store: *Store) void {
         state_mod.destroy(state_mod.get(store.state).gpa, store.state);
         store.* = undefined;
@@ -861,24 +878,74 @@ pub const Store = struct {
         return reflog.read(gpa, io, store.logDir(name, where), where.bare, store.objectFormat());
     }
 
+    /// Which logs `logNames` lists.
+    pub const LogNamesOptions = struct {
+        /// Every worktree's, as git's `reflog expire --all` and the
+        /// reachability `prune` walks take them: besides this worktree's,
+        /// each other linked worktree's own logs as `worktrees/<id>/<name>`
+        /// and, from a linked worktree, the main worktree's own as
+        /// `main-worktree/<name>`. Off, git's `--single-worktree`.
+        every_worktree: bool = false,
+    };
+
     /// The refs that have a log, sorted, in `arena`: git's
     /// `refs_for_each_reflog` over this worktree's store -- in the files
     /// format each file under `logs/` named as a ref may be, in a linked
     /// worktree its own per-worktree logs and the shared ones of the
-    /// common directory.
-    pub fn logNames(store: *const Store, gpa: Allocator, arena: Allocator, io: Io) ReadLogError![]const []const u8 {
-        if (store.refFormat() == .reftable) return stack_engine.logNames(gpa, arena, io, store);
+    /// common directory -- and with `every_worktree` the other worktrees'.
+    pub fn logNames(store: *const Store, gpa: Allocator, arena: Allocator, io: Io, options: LogNamesOptions) ReadLogError![]const []const u8 {
+        if (store.refFormat() == .reftable) return stack_engine.logNames(gpa, arena, io, store, options.every_worktree);
         var out: std.ArrayList([]const u8) = .empty;
-        const linked = store.gitDir().handle != store.commonDir().handle;
-        try walkLogs(arena, io, store.commonDir(), &out, if (linked) .shared else null);
-        if (linked) try walkLogs(arena, io, store.gitDir(), &out, .current);
+        const linked = store.isLinked();
+        try walkLogs(arena, io, store.commonDir(), &out, if (linked) .shared else null, "");
+        if (linked) try walkLogs(arena, io, store.gitDir(), &out, .current, "");
+        if (options.every_worktree) {
+            if (linked) try walkLogs(arena, io, store.commonDir(), &out, .current, "main-worktree/");
+            for (try store.otherWorktrees(arena, io)) |id| {
+                const prefix = try arena.print("worktrees/{s}/", .{id});
+                var admin = store.commonDir().openDir(io, prefix[0 .. prefix.len - 1], .{}) catch |err| switch (err) {
+                    error.FileNotFound, error.NotDir => continue,
+                    else => |e| return e,
+                };
+                defer admin.close(io);
+                try walkLogs(arena, io, admin, &out, .current, prefix);
+            }
+        }
         std.mem.sort([]const u8, out.items, {}, Transaction.lessThanName);
         return out.items;
     }
 
+    /// Whether this store is a linked worktree's.
+    fn isLinked(store: *const Store) bool {
+        return store.gitDir().handle != store.commonDir().handle;
+    }
+
+    /// The ids of the linked worktrees other than this one, in `arena`:
+    /// the directories under `worktrees/`, as git's `get_worktrees` finds
+    /// them, less the one this store was opened in.
+    pub fn otherWorktrees(store: *const Store, arena: Allocator, io: Io) ReadLogError![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        var dir = store.commonDir().openDir(io, "worktrees", .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return out.items,
+            else => |e| return e,
+        };
+        defer dir.close(io);
+        const own = if (store.isLinked()) try store.gitDir().stat(io) else null;
+        var it: fs.Names = .init(dir, store.precomposeUnicode());
+        while (try it.next(io)) |entry| {
+            if (entry.kind != .directory) continue;
+            if (own) |self| {
+                const other = dir.statFile(io, entry.name, .{}) catch continue;
+                if (other.inode == self.inode) continue;
+            }
+            try out.append(arena, try arena.dupe(u8, entry.name));
+        }
+        return out.items;
+    }
+
     /// Every log file under `dir`'s `logs/` whose name is a ref name and,
-    /// with `owner`, one that worktree keeps.
-    fn walkLogs(arena: Allocator, io: Io, dir: Io.Dir, out: *std.ArrayList([]const u8), owner: ?names.WorktreeRef.Owner) ReadLogError!void {
+    /// with `owner`, one that worktree keeps, each named with `prefix`.
+    fn walkLogs(arena: Allocator, io: Io, dir: Io.Dir, out: *std.ArrayList([]const u8), owner: ?names.WorktreeRef.Owner, prefix: []const u8) ReadLogError!void {
         var logs = dir.openDir(io, "logs", .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return,
             else => |e| return e,
@@ -892,7 +959,7 @@ pub const Store = struct {
             if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, name, std.fs.path.sep, '/');
             if (!isRefName(name)) continue;
             if (owner) |want| if (names.parseWorktreeRef(name).owner != want) continue;
-            try out.append(arena, name);
+            try out.append(arena, if (prefix.len == 0) name else try std.mem.concat(arena, u8, &.{ prefix, name }));
         }
     }
 

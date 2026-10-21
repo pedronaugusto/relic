@@ -327,3 +327,45 @@ test "the expiry words git reads" {
     try std.testing.expectEqual(@as(?gc.Expiry, 1_700_000_000 - 2 * day), gc.parseExpiry("2.days.ago", clock));
     try std.testing.expectEqual(@as(?gc.Expiry, null), gc.parseExpiry("not a date at all", clock));
 }
+
+fn worktreeLogsInFormat(format: testgit.RefFormat) !void {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const clock: @import("../text.zig").date.Context = .{ .now = .fromNanoseconds(@as(i96, now) * std.time.ns_per_s) };
+    var states: [2][]u8 = undefined;
+    for (0..2) |side| {
+        var repo = try testgit.Repo.init(gpa, io, format.initArgs());
+        defer repo.deinit();
+        for ([_]i64{ 100, 60, 50 }, 0..) |age, i| {
+            var message: [16]u8 = undefined;
+            try commitAt(&repo, now - age * day, try std.mem.print(&message, "c{d}", .{i}));
+        }
+        try at(&repo, now - 45 * day);
+        try repo.exec(io, &.{ "worktree", "add", "-q", "--detach", "linked", "HEAD~2" });
+        try at(&repo, now - 44 * day);
+        try repo.exec(io, &.{ "-C", "linked", "checkout", "-q", "--detach", "HEAD~0" });
+        try at(&repo, now - 5 * day);
+        try repo.exec(io, &.{ "-C", "linked", "checkout", "-q", "--detach", "main" });
+        if (side == 0) {
+            try repo.exec(io, &.{ "reflog", "expire", "--all", "--expire=40.days.ago" });
+        } else {
+            var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+            defer native.deinit(io);
+            try gc.expireReflogs(gpa, io, &native, .{ .clock = clock, .expire = now - 40 * day });
+        }
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        const main_state = try logsState(&repo, format);
+        defer gpa.free(main_state);
+        try out.appendSlice(gpa, main_state);
+        const linked = try repo.run(io, &.{ "-C", "linked", "reflog", "show", "--format=%H %gs %ct", "HEAD" });
+        defer gpa.free(linked);
+        try out.appendSlice(gpa, linked);
+        states[side] = try out.toOwnedSlice(gpa);
+    }
+    defer for (states) |s| gpa.free(s);
+    try std.testing.expectEqualStrings(states[0], states[1]);
+}
+
+test "reflog expire --all reaches every worktree's own logs, in both ref formats" {
+    try testgit.eachRefFormat(worktreeLogsInFormat);
+}

@@ -77,12 +77,16 @@ pub const MissingOptions = struct {
     /// What is left out. An object named in `include` is kept whatever the
     /// filter says, as git keeps one.
     filter: Filter = .none,
+    /// git's `ignore_missing_links`: a commit, tree or tag that is not
+    /// there, named or reached, is passed over rather than an error. What
+    /// `prune` walks from its recent objects.
+    ignore_missing_links: bool = false,
 };
 
 /// `missing`, walked with `options`.
 pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, options: MissingOptions) Error!Odb.Collected {
     const exclude = options.exclude;
-    if (options.use_bitmaps and options.boundary == null and options.filter == .none) {
+    if (options.use_bitmaps and options.boundary == null and options.filter == .none and !options.ignore_missing_links) {
         if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
             defer gpa.free(result.words);
             var collected: Odb.Collected = .{ .arena = .init(gpa), .entries = &.{} };
@@ -109,6 +113,7 @@ pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, options: 
         .db = db,
         .arena = .init(gpa),
         .boundary = options.boundary,
+        .ignore_missing = options.ignore_missing_links,
     };
     defer walk.deinit();
     var collected: Odb.Collected = .{ .arena = .init(gpa), .entries = &.{} };
@@ -131,30 +136,7 @@ pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, options: 
             .tag => unreachable,
         }
     }
-    for (include) |tip| {
-        var tags: std.ArrayList(Oid) = .empty;
-        defer tags.deinit(gpa);
-        const peeled = try walk.peel(tip, &tags);
-        for (tags.items) |tag| {
-            if (walk.had.contains(tag) or walk.added.contains(tag)) continue;
-            try walk.added.put(gpa, tag, {});
-            try entries.append(gpa, .{ .oid = tag });
-        }
-        switch (peeled.type) {
-            .commit => {
-                // Asked for by name: sent whatever the filter says, as git
-                // sends a wanted commit under `object:type=blob`.
-                try walk.named.put(gpa, peeled.oid, {});
-                try walk.enqueue(peeled.oid, 0);
-            },
-            .tree, .blob => {
-                // Asked for by name: sent whatever the filter says.
-                try walk.named.put(gpa, peeled.oid, {});
-                try pending.append(gpa, peeled.oid);
-            },
-            .tag => unreachable,
-        }
-    }
+    for (include) |tip| try walk.include(tip, &entries, &pending);
 
     const commits = try walk.walkCommits();
     defer gpa.free(commits);
@@ -217,6 +199,8 @@ const Walk = struct {
     /// Objects named in `include`, which no filter leaves out.
     named: Oid.Set = .empty,
     boundary: ?*const Oid.Set = null,
+    /// `MissingOptions.ignore_missing_links`.
+    ignore_missing: bool = false,
 
     fn deinit(w: *Walk) void {
         w.nodes.deinit(w.gpa);
@@ -245,6 +229,38 @@ const Walk = struct {
             current = tag.target;
         }
         return error.UnexpectedObjectType;
+    }
+
+    /// Take `tip` in as wanted: each tag on the way listed, a commit
+    /// queued, a tree or blob put in `pending`; with `ignore_missing`, a
+    /// tip that is not there, or a tag whose target is not, ends there.
+    fn include(w: *Walk, tip: Oid, entries: *std.ArrayList(odb_mod.PackEntry), pending: *std.ArrayList(Oid)) Error!void {
+        var tags: std.ArrayList(Oid) = .empty;
+        defer tags.deinit(w.gpa);
+        const peeled: ?Peeled = w.peel(tip, &tags) catch |err| switch (err) {
+            error.ObjectNotFound => if (w.ignore_missing) null else return err,
+            else => |e| return e,
+        };
+        for (tags.items) |tag| {
+            if (w.had.contains(tag) or w.added.contains(tag)) continue;
+            try w.added.put(w.gpa, tag, {});
+            try entries.append(w.gpa, .{ .oid = tag });
+        }
+        const found = peeled orelse return;
+        switch (found.type) {
+            .commit => {
+                // Asked for by name: sent whatever the filter says, as git
+                // sends a wanted commit under `object:type=blob`.
+                try w.named.put(w.gpa, found.oid, {});
+                try w.enqueue(found.oid, 0);
+            },
+            .tree, .blob => {
+                // Asked for by name: sent whatever the filter says.
+                try w.named.put(w.gpa, found.oid, {});
+                try pending.append(w.gpa, found.oid);
+            },
+            .tag => unreachable,
+        }
     }
 
     fn load(w: *Walk, oid: Oid) Error!*Node {
@@ -320,7 +336,10 @@ const Walk = struct {
             const time = node.time;
             const parents = node.parents;
             for (parents) |parent| {
-                try w.enqueue(parent, if (uninteresting) flag_uninteresting else 0);
+                w.enqueue(parent, if (uninteresting) flag_uninteresting else 0) catch |err| switch (err) {
+                    error.ObjectNotFound => if (!w.ignore_missing) return err,
+                    else => |e| return e,
+                };
             }
             if (uninteresting) {
                 const next = w.queue.peek() orelse break;
@@ -379,7 +398,10 @@ const Walk = struct {
             if (w.had.contains(item.oid) or w.added.contains(item.oid)) continue;
             try w.added.put(w.gpa, item.oid, {});
             try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
-            const found = try w.db.read(w.io, item.oid);
+            const found = w.db.read(w.io, item.oid) catch |err| switch (err) {
+                error.ObjectNotFound => if (w.ignore_missing) continue else return err,
+                else => |e| return e,
+            };
             defer w.db.allocator().free(found.bytes);
             if (found.type != .tree) return error.UnexpectedObjectType;
             var entries = object.Tree.parse(w.db.objectFormat(), found.bytes).iterate();

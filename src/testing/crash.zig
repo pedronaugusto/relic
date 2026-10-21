@@ -1,7 +1,7 @@
 //! Crashes during the writes a repository lives by (design §12c), on
 //! shakedown's simulated disk: a ref update, a received pack and the ref
-//! that publishes it, an index write, a checkout, `pack-refs` and
-//! `reflog expire`, each stopped before
+//! that publishes it, an index write, a checkout, `pack-refs`,
+//! `reflog expire` and `prune`, each stopped before
 //! every `Io` call it makes and every state the disk could come back in
 //! after that tried. airlock's syncs and renames reach the simulated disk
 //! through its seam, at the strength each one has.
@@ -31,6 +31,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs = @import("../refs/refs.zig");
 const gc = @import("../maintenance/gc.zig");
+const prune = @import("../maintenance/prune.zig");
 const date = @import("../text.zig").date;
 const Oid = hash.Oid;
 
@@ -44,7 +45,7 @@ const granularity: Io.Duration = .fromSeconds(1);
 
 const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
 
-const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire };
+const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire, prune };
 
 /// A directory tree held in memory: what is put on the simulated disk
 /// before a run, and what a crash state holds.
@@ -134,6 +135,9 @@ const Seeds = struct {
     before: Image,
     /// `main` at the first commit, checked out; `next` at the second; packed.
     after: Image,
+    /// `after` with what `prune` takes away: an unreachable blob and
+    /// commit, loose copies of packed objects, a stale temporary file.
+    pruning: Image,
     /// The second commit's objects that the first lacks.
     pack: []u8,
     first: [40]u8,
@@ -164,6 +168,35 @@ const Seeds = struct {
         seeds.after = try Image.read(gpa, io, git.dir);
         errdefer seeds.after.deinit(gpa);
 
+        const dangling = try git.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "nothing reaches this\n");
+        gpa.free(dangling);
+        const tree = try git.line(io, &.{ "rev-parse", "main^{tree}" });
+        defer gpa.free(tree);
+        gpa.free(try git.line(io, &.{ "commit-tree", tree, "-m", "nothing reaches this either" }));
+        try git.writeFile(io, ".git/objects/pack/tmp_pack_stale", "x");
+        seeds.pruning = try Image.read(gpa, io, git.dir);
+        errdefer seeds.pruning.deinit(gpa);
+        // Loose copies of packed objects: the first commit's, as they were
+        // before the repack. git writes none of an object a pack holds.
+        for (seeds.before.files.items) |f| {
+            if (!std.mem.startsWith(u8, f.path, ".git/objects/") or f.path.len != ".git/objects/".len + 41) continue;
+            const path = try gpa.dupe(u8, f.path);
+            errdefer gpa.free(path);
+            const bytes = try gpa.dupe(u8, f.bytes);
+            errdefer gpa.free(bytes);
+            try seeds.pruning.files.append(gpa, .{ .path = path, .bytes = bytes, .mtime = f.mtime });
+        }
+        for (seeds.before.dirs.items) |d| {
+            if (!std.mem.startsWith(u8, d, ".git/objects/") or d.len != ".git/objects/".len + 2) continue;
+            for (seeds.pruning.dirs.items) |have| {
+                if (std.mem.eql(u8, have, d)) break;
+            } else {
+                const dir = try gpa.dupe(u8, d);
+                errdefer gpa.free(dir);
+                try seeds.pruning.dirs.append(gpa, dir);
+            }
+        }
+
         const first = try git.line(io, &.{ "rev-parse", "main" });
         defer gpa.free(first);
         const second = try git.line(io, &.{ "rev-parse", "next" });
@@ -176,6 +209,7 @@ const Seeds = struct {
     fn deinit(seeds: *Seeds, gpa: std.mem.Allocator) void {
         seeds.before.deinit(gpa);
         seeds.after.deinit(gpa);
+        seeds.pruning.deinit(gpa);
         gpa.free(seeds.pack);
     }
 };
@@ -200,7 +234,11 @@ pub const Case = struct {
     }
 
     fn seed(c: *const Case) *const Image {
-        return if (c.kind == .pack_receive) &c.seeds.before else &c.seeds.after;
+        return switch (c.kind) {
+            .pack_receive => &c.seeds.before,
+            .prune => &c.seeds.pruning,
+            else => &c.seeds.after,
+        };
     }
 
     pub fn setUp(c: *Case, sim: *shakedown.Sim) !void {
@@ -269,6 +307,7 @@ pub const Case = struct {
             },
             .pack_refs => try gc.packRefs(io, &repo, .{ .include = &.{"*"} }),
             .reflog_expire => try gc.expireReflogs(gpa, io, &repo, .{ .clock = .{ .now = date.timestamp(testgit.fixture_date) }, .expire = gc.expire_all }),
+            .prune => _ = try prune.prune(gpa, io, &repo, .{}),
         }
         repo.deinit(io);
     }
@@ -369,9 +408,9 @@ pub const Case = struct {
                 try expectRef(io, git, "refs/heads/main", &.{ first, second });
                 try expectRef(io, git, "refs/heads/next", &.{second});
             },
-            // Packing moves no ref and expiring moves none: each is where
-            // it was at every crash.
-            .pack_refs, .reflog_expire => {
+            // Packing moves no ref, and expiring and pruning move none:
+            // each is where it was at every crash.
+            .pack_refs, .reflog_expire, .prune => {
                 try expectRef(io, git, "refs/heads/main", &.{first});
                 try expectRef(io, git, "refs/heads/next", &.{second});
             },
@@ -512,4 +551,12 @@ test "every crash: reflog expire, files" {
 
 test "every crash: reflog expire, reftable" {
     try inFormat(.reflog_expire, .reftable);
+}
+
+test "every crash: prune, files" {
+    try inFormat(.prune, .files);
+}
+
+test "every crash: prune, reftable" {
+    try inFormat(.prune, .reftable);
 }

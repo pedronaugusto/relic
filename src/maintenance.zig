@@ -30,3 +30,11 @@ pub const expire_all = @import("maintenance/gc.zig").expire_all;
 pub const parseExpiry = @import("maintenance/gc.zig").parseExpiry;
 pub const ReflogExpireOptions = @import("maintenance/gc.zig").ReflogExpireOptions;
 pub const expireReflogs = @import("maintenance/gc.zig").expireReflogs;
+
+pub const PruneError = @import("maintenance/prune.zig").Error;
+pub const PruneOptions = @import("maintenance/prune.zig").PruneOptions;
+pub const PruneReport = @import("maintenance/prune.zig").Report;
+pub const prune = @import("maintenance/prune.zig").prune;
+pub const pruneExpiry = @import("maintenance/prune.zig").pruneExpiry;
+pub const ReachOptions = @import("maintenance/prune.zig").ReachOptions;
+pub const reachableObjects = @import("maintenance/prune.zig").reachableObjects;

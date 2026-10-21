@@ -233,7 +233,7 @@ pub const ReadLogError = refs.ReadError || reflog.ReadError;
 /// holds, the marker of an empty log included, as git's reflog iterator
 /// yields them; in a linked worktree its own stack's for its own refs and
 /// the shared stack's for the rest. Sorted, in `arena`.
-pub fn logNames(gpa: Allocator, arena: Allocator, io: Io, store: anytype) ReadLogError![]const []const u8 {
+pub fn logNames(gpa: Allocator, arena: Allocator, io: Io, store: anytype, every_worktree: bool) ReadLogError![]const []const u8 {
     var owned: ?Stacks = null;
     var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
@@ -248,8 +248,29 @@ pub fn logNames(gpa: Allocator, arena: Allocator, io: Io, store: anytype) ReadLo
             try out.append(arena, record.name);
         }
     }
+    if (every_worktree) {
+        // The main worktree's own logs, seen from a linked one, and each
+        // other linked worktree's from its own stack.
+        if (stacks.worktree != null) try ownLogNames(gpa, arena, &stacks.main, "main-worktree/", &out);
+        for (try store.otherWorktrees(arena, io)) |id| {
+            var stack = (try loadWorktree(gpa, io, store, id)) orelse continue;
+            defer stack.deinit();
+            try ownLogNames(gpa, arena, &stack, try arena.print("worktrees/{s}/", .{id}), &out);
+        }
+    }
     std.mem.sort([]const u8, out.items, {}, lessThanText);
     return out.items;
+}
+
+/// The names of the per-worktree logs `stack` holds, each once, with
+/// `prefix`.
+fn ownLogNames(gpa: Allocator, arena: Allocator, stack: *const Stack, prefix: []const u8, out: *std.ArrayList([]const u8)) ReadLogError!void {
+    var last: []const u8 = "";
+    for (try allLogs(gpa, arena, stack.tables, true)) |record| {
+        if (!ref_names.isCurrentWorktree(record.name) or std.mem.eql(u8, last, record.name)) continue;
+        last = record.name;
+        try out.append(arena, try std.mem.concat(arena, u8, &.{ prefix, record.name }));
+    }
 }
 
 fn lessThanText(_: void, a: []const u8, b: []const u8) bool {

@@ -1564,6 +1564,212 @@ pub const Odb = struct {
         return set;
     }
 
+    /// The objects of this database's own directory -- not an alternate's
+    /// -- whose time is after `after`, in `gpa`: a loose object's file
+    /// time, a packed one's pack's. These are what git's `prune` and
+    /// `repack --cruft` keep beside what is reachable, with what they
+    /// reach (`add_unseen_recent_objects_to_traversal`).
+    pub fn recentObjects(odb: *Odb, gpa: Allocator, io: Io, after: i64) ErrorNamespace.Error![]Oid {
+        var out: std.ArrayList(Oid) = .empty;
+        errdefer out.deinit(gpa);
+        const source = odb.writableSource();
+        var loose: LooseNames = .{ .odb = odb, .remove_empty = false };
+        defer loose.deinit(io);
+        while (try loose.next(io)) |found| {
+            const oid = found.oid orelse continue;
+            const stat = found.dir.statFile(io, found.name, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            if (stat.mtime.toSeconds() > after) try out.append(gpa, oid);
+        }
+        if (source.pack_dir) |pack_dir| for (source.packs.items) |*named| {
+            var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
+            const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
+            const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            if (stat.mtime.toSeconds() <= after) continue;
+            var it = named.pack.index.iterate();
+            while (try it.next()) |entry| try out.append(gpa, entry.oid);
+        };
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// How `prune` treats the object directory.
+    pub const PruneOptions = struct {
+        /// The objects that stay whatever their time: what is reachable,
+        /// and what the recent objects reach.
+        keep: *const Oid.Set,
+        /// An unkept loose object, or a temporary file, whose time is not
+        /// after this goes: git's `--expire`. The greatest time takes
+        /// every one.
+        expire: i64,
+        /// git's `-n`: count what would go and remove nothing.
+        dry_run: bool = false,
+    };
+
+    /// What `prune` removed, or with `dry_run` would have.
+    pub const PruneReport = struct {
+        /// Loose objects neither kept nor newer than the expiry.
+        pruned: u32 = 0,
+        /// Loose objects a pack also holds: git's `prune-packed`.
+        packed_removed: u32 = 0,
+        /// Stale `tmp_obj_*` files beside the loose objects, and `tmp_*`
+        /// files and directories in `objects/` and `objects/pack/`.
+        temporary_removed: u32 = 0,
+    };
+
+    /// The removals of git's `prune` over this database's own directory,
+    /// in its order: each loose object `keep` does not hold and whose time
+    /// is not after `expire`, a `tmp_obj_*` file beside them no newer, the
+    /// fan-out directories left empty; then `prune-packed`, every loose
+    /// object a pack (an alternate's too) holds; then the `tmp_*` files
+    /// and directories no newer than `expire` in `objects/` and
+    /// `objects/pack/`, which failed writes leave. A file is only ever
+    /// removed: nothing is written, so a crash leaves fewer files.
+    pub fn prune(odb: *Odb, io: Io, options: PruneOptions) ErrorNamespace.Error!PruneReport {
+        var report: PruneReport = .{};
+        try odb.refresh(io);
+        {
+            var loose: LooseNames = .{ .odb = odb, .remove_empty = !options.dry_run };
+            defer loose.deinit(io);
+            while (try loose.next(io)) |found| {
+                if (found.oid) |oid| {
+                    if (options.keep.contains(oid)) continue;
+                    if (!try notAfter(io, found.dir, found.name, options.expire)) continue;
+                    report.pruned += 1;
+                    if (!options.dry_run) try deleteIfThere(io, found.dir, found.name);
+                } else if (std.mem.startsWith(u8, found.name, "tmp_obj_")) {
+                    report.temporary_removed += try pruneTemporary(io, found.dir, found.name, options);
+                }
+            }
+        }
+        {
+            var loose: LooseNames = .{ .odb = odb, .remove_empty = !options.dry_run };
+            defer loose.deinit(io);
+            while (try loose.next(io)) |found| {
+                if (found.oid) |oid| {
+                    var packed_somewhere = false;
+                    for (odb.backendData().sources.items) |*source| {
+                        if ((try source.findPack(oid, &odb.stats)) != null) packed_somewhere = true;
+                    }
+                    if (packed_somewhere) {
+                        report.packed_removed += 1;
+                        if (!options.dry_run) try deleteIfThere(io, found.dir, found.name);
+                    }
+                }
+            }
+        }
+        const source = odb.writableSource();
+        report.temporary_removed += try pruneTemporaries(io, source.dir, options);
+        if (source.pack_dir) |pack_dir| report.temporary_removed += try pruneTemporaries(io, pack_dir, options);
+        return report;
+    }
+
+    /// Whether `name`'s time is not after `expire`; a file already gone is
+    /// not.
+    fn notAfter(io: Io, dir: Io.Dir, name: []const u8, expire: i64) ErrorNamespace.Error!bool {
+        const stat = dir.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => |e| return e,
+        };
+        return stat.mtime.toSeconds() <= expire;
+    }
+
+    fn deleteIfThere(io: Io, dir: Io.Dir, name: []const u8) ErrorNamespace.Error!void {
+        dir.deleteFile(io, name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| return e,
+        };
+    }
+
+    /// git's `prune_tmp_file`: `name` goes, a directory with all it holds,
+    /// when its time is not after the expiry.
+    fn pruneTemporary(io: Io, dir: Io.Dir, name: []const u8, options: PruneOptions) ErrorNamespace.Error!u32 {
+        const stat = dir.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return 0,
+            else => |e| return e,
+        };
+        if (stat.mtime.toSeconds() > options.expire) return 0;
+        if (!options.dry_run) {
+            if (stat.kind == .directory) try dir.deleteTree(io, name) else try deleteIfThere(io, dir, name);
+        }
+        return 1;
+    }
+
+    /// git's `remove_temporary_files`: every `tmp_*` in `dir`.
+    fn pruneTemporaries(io: Io, dir: Io.Dir, options: PruneOptions) ErrorNamespace.Error!u32 {
+        var count: u32 = 0;
+        var iterable = dir.openDir(io, ".", .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => return 0,
+            else => |e| return e,
+        };
+        defer iterable.close(io);
+        var it = iterable.iterate();
+        while (try it.next(io)) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, "tmp_")) continue;
+            count += try pruneTemporary(io, iterable, entry.name, options);
+        }
+        return count;
+    }
+
+    /// The files in this database's own fan-out directories, `00` to `ff`
+    /// in order as git's `for_each_loose_file_in_source` takes them, each
+    /// with the object it names when its name is one.
+    const LooseNames = struct {
+        odb: *Odb,
+        /// git's `prune_subdir`: each directory, once listed, goes when it
+        /// is empty, and stays otherwise.
+        remove_empty: bool,
+        fan: u16 = 0,
+        dir: ?Io.Dir = null,
+        it: ?Io.Dir.Iterator = null,
+        hex: [2]u8 = undefined,
+        name_buf: [Io.Dir.max_name_bytes]u8 = undefined,
+
+        const Found = struct { dir: Io.Dir, name: []const u8, oid: ?Oid };
+
+        fn next(l: *LooseNames, io: Io) ErrorNamespace.Error!?Found {
+            while (true) {
+                if (l.it) |*it| {
+                    if (try it.next(io)) |entry| {
+                        @memcpy(l.name_buf[0..entry.name.len], entry.name);
+                        const name = l.name_buf[0..entry.name.len];
+                        return .{ .dir = l.dir.?, .name = name, .oid = l.parse(name) };
+                    }
+                    l.dir.?.close(io);
+                    l.dir = null;
+                    l.it = null;
+                    // glint-ignore: Z026 -- git's `prune_subdir` is an rmdir whose failure, a directory still holding files, is the answer
+                    if (l.remove_empty) l.odb.writableSource().dir.deleteDir(io, &l.hex) catch {};
+                    continue;
+                }
+                if (l.fan > 0xff) return null;
+                l.hex = std.fmt.hex(@as(u8, @intCast(l.fan)));
+                l.fan += 1;
+                const sub = (try opening.openDirectory(io, l.odb.writableSource().dir, &l.hex)) orelse continue;
+                l.dir = sub;
+                l.it = sub.iterate();
+            }
+        }
+
+        fn parse(l: *const LooseNames, name: []const u8) ?Oid {
+            const kind = l.odb.backendData().kind;
+            if (name.len != kind.hexLen() - 2) return null;
+            var full: [hash.max_hex_len]u8 = undefined;
+            @memcpy(full[0..2], &l.hex);
+            @memcpy(full[2..][0..name.len], name);
+            return Oid.parse(kind, full[0 .. 2 + name.len]) catch null;
+        }
+
+        fn deinit(l: *LooseNames, io: Io) void {
+            if (l.dir) |d| d.close(io);
+            l.* = undefined;
+        }
+    };
+
     /// Own and make every object reachable from `roots` durable before the
     /// caller records an intent using their IDs. Commits include parents and
     /// tags include targets; gitlinks and LFS payloads are separate stores.
