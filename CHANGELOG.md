@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-21
+
 ### Breaking
 
 - `transport.credential.Session` holds its secrets (`password`, `credential`, `oauth_refresh_token` and the `Authorization` header it makes) in aegis's `SecretBytes`, which wipes them when let go and refuses to format them; `Session.exposePassword()` hands the password on, explicitly. A prompt's answer is wiped as it is let go, and the `Basic` header's plain `user:password` lives in one such owner while it is encoded. relic depends on aegis 0.1.14 itself.
