@@ -797,3 +797,89 @@ test "repack -i keeps every delta within its object's islands, as git's" {
         try ours.exec(io, &.{ "fsck", "--no-progress" });
     }
 }
+
+/// The packs in `dir`, each as its objects with their `.mtimes` times.
+fn expiredPacks(repo: *testgit.Repo, sub: []const u8) ![]u8 {
+    var dir = try repo.dir.openDir(io, sub, .{ .iterate = true });
+    defer dir.close(io);
+    var lines: std.ArrayList([]u8) = .empty;
+    defer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        var index = try pack_mod.Index.open(gpa, io, dir, entry.name, .{ .kind = .sha1, .max_bytes = 1 << 30 });
+        defer index.deinit();
+        var name_buf: [128]u8 = undefined;
+        // A pack with no `.mtimes` is no cruft pack.
+        const times = mtimes.read(gpa, io, dir, try std.mem.print(&name_buf, "{s}.mtimes", .{entry.name[0 .. entry.name.len - 4]}), index.count) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => |e| return e,
+        };
+        defer gpa.free(times);
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(gpa);
+        try line.appendSlice(gpa, "cruft");
+        for (0..index.count) |i| {
+            var hex: [hash.max_hex_len]u8 = undefined;
+            try line.print(gpa, " {s}@{d}", .{ index.nameAt(@intCast(i)).hex(&hex), times[i] });
+        }
+        try lines.append(gpa, try line.toOwnedSlice(gpa));
+    }
+    var out: std.ArrayList(u8) = .empty;
+    for (lines.items) |l| try out.print(gpa, "{s}\n", .{l});
+    return out.toOwnedSlice(gpa);
+}
+
+test "repack --cruft -d --expire-to writes what goes into a cruft pack of its own, as git's" {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var theirs = try fixture(.files, now);
+    defer theirs.deinit();
+    var ours = try fixture(.files, now);
+    defer ours.deinit();
+    for ([_]*testgit.Repo{ &theirs, &ours }) |r| try r.dir.createDirPath(io, "expired");
+    var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try theirs.dir.realPath(io, &root_buf)];
+    var arg_buf: [Io.Dir.max_path_bytes + 32]u8 = undefined;
+    var date_buf: [48]u8 = undefined;
+    try theirs.exec(io, &.{ "repack", "-q", "-d", "--cruft", try std.mem.print(&date_buf, "--cruft-expiration=@{d}", .{now - 14 * day}), try std.mem.print(&arg_buf, "--expire-to={s}/expired/pack", .{root}) });
+    var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+    defer native.deinit(io);
+    var expired = try ours.dir.openDir(io, "expired", .{});
+    defer expired.close(io);
+    var pack_options = native.objectDatabase().packOptions();
+    pack_options.threads = 1;
+    const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .cruft, .delete = true, .cruft_expiration = now - 14 * day, .expire_to = .{ .dir = expired }, .pack = pack_options });
+    try std.testing.expectEqual(@as(u32, 1), report.expired_written);
+    const expected_expired = try expiredPacks(&theirs, "expired");
+    defer gpa.free(expected_expired);
+    const actual_expired = try expiredPacks(&ours, "expired");
+    defer gpa.free(actual_expired);
+    try std.testing.expect(expected_expired.len != 0);
+    // git 2.55's `want_cruft_object_mtime` reads a cruft pack's `.mtimes`
+    // by pack position where the file is in index order, so it may write a
+    // second copy of an object its own cruft pack holds; relic compares
+    // the object's own time. Those copies aside, the two are the same.
+    const own_cruft = try expiredPacks(&theirs, ".git/objects/pack");
+    defer gpa.free(own_cruft);
+    var expected_set: std.ArrayList(u8) = .empty;
+    defer expected_set.deinit(gpa);
+    var words = std.mem.tokenizeAny(u8, expected_expired, " \n");
+    while (words.next()) |w| {
+        if (std.mem.eql(u8, w, "cruft")) continue;
+        if (std.mem.find(u8, own_cruft, w[0..40]) != null) continue;
+        try expected_set.print(gpa, "{s}\n", .{w});
+    }
+    var actual_set: std.ArrayList(u8) = .empty;
+    defer actual_set.deinit(gpa);
+    words = std.mem.tokenizeAny(u8, actual_expired, " \n");
+    while (words.next()) |w| if (!std.mem.eql(u8, w, "cruft")) try actual_set.print(gpa, "{s}\n", .{w});
+    try std.testing.expectEqualStrings(expected_set.items, actual_set.items);
+    const expected = try state(&theirs);
+    defer gpa.free(expected);
+    const actual = try state(&ours);
+    defer gpa.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+}

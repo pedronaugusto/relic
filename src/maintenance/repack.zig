@@ -63,6 +63,11 @@ pub const Options = struct {
     /// newer than this, and that no newer one reaches, go into no cruft
     /// pack, and so go. `null` keeps every one.
     cruft_expiration: ?gc.Expiry = null,
+    /// `--expire-to`, with `--cruft` and `-d`: what the cruft pack leaves
+    /// to go -- every object of the packs taken away and every loose one
+    /// that no new pack holds -- written first into a cruft pack of its
+    /// own in `dir`, named `<prefix>-<name>.pack`, as git's `--expire-to=<dir>/<prefix>`.
+    expire_to: ?struct { dir: Io.Dir, prefix: []const u8 = "pack" } = null,
     /// `--max-cruft-size`: the largest cruft pack written; `null` takes
     /// `max_pack_bytes`.
     max_cruft_bytes: ?u64 = null,
@@ -114,6 +119,8 @@ pub const Report = struct {
     /// New packs of reachable objects, a promisor pack's included.
     packs_written: u32 = 0,
     cruft_written: u32 = 0,
+    /// Cruft packs `expire_to` wrote.
+    expired_written: u32 = 0,
     /// Packs taken away.
     packs_removed: u32 = 0,
     /// Unreachable objects written loose, for `-A`.
@@ -221,6 +228,21 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
         const limit: ?u64 = if (options.max_cruft_bytes) |l| @max(l, 1 << 20) else run.max_pack;
         run.report.cruft_written = try writeCruft(gpa, arena, io, repo, &run.existing, run.fresh.items, &run.retained, options, cruft_options, limit, pack_dir);
         try db.refresh(io);
+        // `--expire-to`: the same cruft pack again, the one just written
+        // among the packs it leaves out, with no expiration and nothing
+        // combined, so it holds what is about to go.
+        if (options.delete) if (options.expire_to) |to| {
+            var fresh: std.ArrayList([]const u8) = .empty;
+            try fresh.appendSlice(arena, run.fresh.items);
+            try fresh.appendSlice(arena, run.retained.items);
+            var expired_options = options;
+            expired_options.cruft_expiration = null;
+            expired_options.combine_cruft_below = 0;
+            var to_options = cruft_options;
+            to_options.prefix = to.prefix;
+            var elsewhere: std.ArrayList([]const u8) = .empty;
+            run.report.expired_written = try writeCruft(gpa, arena, io, repo, &run.existing, fresh.items, &elsewhere, expired_options, to_options, limit, to.dir);
+        };
     }
     if (main_written) |written| if (bitmaps != false and !run.kept_skipped and !options.write_midx) try run.writeBitmap(written);
     if (options.write_midx) run.report.midx = try run.writeMidx(if (geometry) |*g| g else null, bitmaps == true);

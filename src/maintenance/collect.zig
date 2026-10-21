@@ -64,6 +64,8 @@ pub const Options = struct {
     cruft: ?bool = null,
     /// `--max-cruft-size`; `null` takes `gc.maxCruftSize`.
     max_cruft_bytes: ?u64 = null,
+    /// `--expire-to`: `repack`'s, with cruft packs.
+    expire_to: @FieldType(repack_mod.Options, "expire_to") = null,
     /// `--keep-largest-pack`; `null` keeps the packs at least
     /// `gc.bigPackThreshold` large, when it is set.
     keep_largest_pack: ?bool = null,
@@ -198,7 +200,7 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    var plan: repack_mod.Options = .{ .delete = true, .local = true, .programs = options.programs, .pack = options.pack orelse repo.objectDatabase().packOptions() };
+    var plan: repack_mod.Options = .{ .delete = true, .local = true, .expire_to = options.expire_to, .programs = options.programs, .pack = options.pack orelse repo.objectDatabase().packOptions() };
     if (options.aggressive) {
         plan.pack.?.reuse_packed = false;
         if (s.aggressive_depth > 0) plan.pack.?.depth = std.math.cast(u32, s.aggressive_depth) orelse std.math.maxInt(u32);
@@ -368,11 +370,15 @@ fn basePacks(arena: Allocator, io: Io, repo: *Repository, limit: u64) Self.Error
 /// `add_repack_all_option`.
 fn allPacked(plan: *repack_mod.Options, s: *const Settings, keep: []const []const u8) void {
     plan.keep_packs = keep;
-    if (s.prune == .now) {
+    if (s.prune == .now and !(s.cruft and plan.expire_to != null)) {
         plan.mode = .all;
     } else if (s.cruft) {
         plan.mode = .cruft;
-        plan.cruft_expiration = if (s.prune == .at) s.prune.at else null;
+        plan.cruft_expiration = switch (s.prune) {
+            .never => null,
+            .now => gc.expire_all,
+            .at => |at| at,
+        };
         if (s.max_cruft != 0) plan.max_cruft_bytes = s.max_cruft;
     } else {
         plan.mode = .all_loosen;
