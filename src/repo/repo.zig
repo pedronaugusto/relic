@@ -583,6 +583,27 @@ pub const Repository = struct {
         return finish(gpa, io, discovered, options);
     }
 
+    /// A second handle on this repository, opened as this one was: its
+    /// working tree, or its git directory when it has none, with the same
+    /// configuration files and values, home and object database settings,
+    /// for work that runs beside this handle -- a fetch from several
+    /// remotes at once. Nothing is discovered or checked again. It borrows
+    /// what this handle keeps open, and must be deinited before it.
+    pub fn openAgain(repo: *const Repository, io: Io) Self.Error!Repository {
+        const config = repo.configuration();
+        return open(repo.data().gpa, io, repo.workDirectory() orelse repo.gitDirectory(), .{
+            .discover = false,
+            .ownership = .trust,
+            .odb = repo.objectDatabase().settings(),
+            .system_config = config.sources.system,
+            .xdg_config = config.sources.xdg,
+            .global_config = config.sources.global,
+            .home = config.context.home,
+            .config_overrides = config.sources.command,
+            .config_pairs = config.sources.pairs,
+        });
+    }
+
     /// The per-worktree directory at `dir`, as `open` with `discover`
     /// off finds it, without reading the repository: its `.git` folder,
     /// where a `.git` file points (a linked worktree, a submodule), or

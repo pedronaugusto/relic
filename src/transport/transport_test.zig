@@ -2150,3 +2150,83 @@ test "a fetch offers the haves git's negotiators offer: consecutive, skipping an
         };
     }
 }
+
+test "several remotes are fetched as git fetches them: fetch.all and skipFetchAll, a group, several names, and fetch.parallel" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var sources: [3]testgit.Repo = undefined;
+    var urls: [3][]u8 = undefined;
+    for (&sources, &urls, 0..) |*source, *url, i| {
+        source.* = try testgit.Repo.init(gpa, io, &.{});
+        try testremote.addCommits(gpa, io, source, i * 10, 2 + i);
+        const path = try testremote.absolutePath(gpa, io, source.dir);
+        defer gpa.free(path);
+        url.* = try gpa.print("file://{s}", .{path});
+    }
+    defer for (&sources, urls) |*source, url| {
+        source.deinit();
+        gpa.free(url);
+    };
+    const Case = struct { git_args: []const []const u8, selection: fetch_mod.Selection, settings: []const [2][]const u8 = &.{} };
+    const cases = [_]Case{
+        .{ .git_args = &.{}, .selection = .{}, .settings = &.{.{ "fetch.all", "true" }} },
+        .{ .git_args = &.{"--all"}, .selection = .{ .all = true }, .settings = &.{ .{ "remote.c.skipFetchAll", "false" }, .{ "remote.c.skipDefaultUpdate", "true" } } },
+        .{ .git_args = &.{"two"}, .selection = .{ .names = &.{"two"} } },
+        .{ .git_args = &.{ "--multiple", "a", "c" }, .selection = .{ .names = &.{ "a", "c" } } },
+        .{ .git_args = &.{"two"}, .selection = .{ .names = &.{"two"} }, .settings = &.{.{ "fetch.parallel", "2" }} },
+    };
+    for (cases) |case| {
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |twin| {
+            for ([_][]const u8{ "a", "b", "c" }, urls) |name, url| try twin.exec(io, &.{ "remote", "add", name, url });
+            try twin.exec(io, &.{ "config", "remote.c.skipFetchAll", "true" });
+            try twin.exec(io, &.{ "config", "remotes.two", "a b" });
+            for (case.settings) |kv| try twin.exec(io, &.{ "config", kv[0], kv[1] });
+        }
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "fetch", "-q" });
+        try args.appendSlice(gpa, case.git_args);
+        const out = try by_git.run(io, args.items);
+        gpa.free(out);
+        {
+            var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+            defer repo.deinit(io);
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const names = try fetch_mod.remotesToFetch(arena.allocator(), repo.configuration(), case.selection);
+            var many = try fetch_mod.fetchMany(gpa, io, &repo, names, .{ .who = test_who, .programs = .{ .environ = &env } }, null);
+            defer many.deinit();
+            try testing.expect(!many.anyFailed());
+        }
+        const format = "--format=%(refname) %(objectname)";
+        const theirs = try by_git.run(io, &.{ "for-each-ref", format });
+        defer gpa.free(theirs);
+        const ours = try by_relic.run(io, &.{ "for-each-ref", format });
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+        // Fetched at once, the remotes' lines come in the order they end.
+        var heads: [2][]u8 = undefined;
+        for ([_]*testgit.Repo{ &by_git, &by_relic }, 0..) |twin, i| {
+            const text = try twin.readFile(io, ".git/FETCH_HEAD");
+            defer gpa.free(text);
+            var lines: std.ArrayList([]const u8) = .empty;
+            defer lines.deinit(gpa);
+            var it = std.mem.tokenizeScalar(u8, text, '\n');
+            while (it.next()) |line| try lines.append(gpa, line);
+            std.mem.sort([]const u8, lines.items, {}, struct {
+                fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+                    return std.mem.lessThan(u8, x, y);
+                }
+            }.lessThan);
+            heads[i] = try std.mem.join(gpa, "\n", lines.items);
+        }
+        defer for (heads) |h| gpa.free(h);
+        try testing.expectEqualStrings(heads[0], heads[1]);
+    }
+}

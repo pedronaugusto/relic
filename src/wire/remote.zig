@@ -66,8 +66,9 @@ pub const Remote = struct {
     prune: ?bool = null,
     /// `remote.<name>.pruneTags`, else `fetch.pruneTags`.
     prune_tags: ?bool = null,
-    /// `remote.<name>.skipDefaultUpdate`: left out of the remotes fetched
-    /// together, as `maintenance`'s prefetch fetches them.
+    /// `remote.<name>.skipFetchAll`, or its older name `skipDefaultUpdate`,
+    /// the last of the two deciding: left out of the remotes fetched
+    /// together -- `fetch.all`, `maintenance`'s prefetch.
     skip_default_update: bool = false,
     /// `remote.<name>.negotiationRestrict`: the only refs a fetch
     /// negotiates from, when the caller names none.
@@ -149,7 +150,10 @@ pub const Remote = struct {
         }
         remote.prune = boolOf(config, try key("prune", arena, name)) orelse boolOf(config, "fetch.prune");
         remote.prune_tags = boolOf(config, try key("prunetags", arena, name)) orelse boolOf(config, "fetch.prunetags");
-        remote.skip_default_update = boolOf(config, try key("skipdefaultupdate", arena, name)) orelse false;
+        {
+            var it = config.iterate(&.{ try key("skipfetchall", arena, name), try key("skipdefaultupdate", arena, name) });
+            while (it.next()) |entry| remote.skip_default_update = config_mod.parseBool(entry.value orelse "true") catch remote.skip_default_update;
+        }
         remote.upload_pack = try valueOf(arena, config, try key("uploadpack", arena, name));
         remote.receive_pack = try valueOf(arena, config, try key("receivepack", arena, name));
         remote.mirror = boolOf(config, try key("mirror", arena, name)) orelse false;
@@ -342,6 +346,15 @@ fn valuesOf(arena: Allocator, config: *const Config, key: []const u8) Error![]co
     var out: std.ArrayList([]const u8) = .empty;
     for (raw) |value| try out.append(arena, try arena.dupe(u8, value));
     return out.items;
+}
+
+/// Whether the configuration says anything of a remote `name`: git's
+/// `remote_is_configured`, a `remote.<name>.*` setting of any kind.
+pub fn isConfigured(config: *const Config, name: []const u8) bool {
+    for (config.entries.items) |entry| {
+        if (entry.has_subsection and std.ascii.eqlIgnoreCase(entry.section, "remote") and std.mem.eql(u8, entry.subsection, name)) return true;
+    }
+    return false;
 }
 
 /// `remote.<name>.serverOption`, as git's transport takes it when its

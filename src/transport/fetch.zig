@@ -95,6 +95,12 @@ pub const Error = error{
     /// `fetch.negotiationAlgorithm` names none git knows: git's "unknown
     /// fetch negotiation algorithm".
     UnknownNegotiationAlgorithm,
+    /// `all` with remotes named: git's "fetch --all does not take a
+    /// repository argument".
+    AllTakesNoRemote,
+    /// Of several names, one is neither a remote nor a group: git's "no
+    /// such remote or remote group".
+    NoSuchRemoteOrGroup,
     /// A negotiation alone asked with no tips to restrict it to: git's
     /// "--negotiate-only needs one or more --negotiation-restrict=*".
     NegotiationRestrictNeeded,
@@ -165,6 +171,9 @@ pub const Options = struct {
     /// `--server-option`s, sent with every protocol v2 request; `null`
     /// takes `remote.<name>.serverOption`, as git does.
     server_options: ?[]const []const u8 = null,
+    /// Whether the commit graph is written after the fetch; `null` takes
+    /// `fetch.writeCommitGraph`.
+    write_commit_graph: ?bool = null,
     /// `--keep`: what came is kept as a pack, however few its objects;
     /// otherwise a pack of fewer than `fetch.unpackLimit` objects
     /// (`transfer.unpackLimit`, git's 100) is stored loose, as git's
@@ -442,7 +451,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, plan.fetch_head, options.append);
     try brought.settle(io, repo, &outcome, options.keep or promisor or (checks != null and checks.?.strict));
 
-    if (try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
+    if (options.write_commit_graph orelse try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
     outcome.updates = plan.updates;
     outcome.pruned = pruned;
     outcome.fetch_head = plan.fetch_head;
@@ -626,6 +635,128 @@ fn bringObjects(
 
     if (boundary_change.moved) try repo.writeShallow(io);
     return .{ .packs = .{ .{ .name = fetched.pack, .objects = fetched.objects, .keep = fetched.keep }, tag_pack }, .backfill = backfill };
+}
+
+/// Which remotes a fetch of several asks for.
+pub const Selection = struct {
+    /// Remotes, or groups of them under `remotes.<group>`.
+    names: []const []const u8 = &.{},
+    /// `--all`, `--no-all`; `null` takes `fetch.all` when no name is given.
+    all: ?bool = null,
+};
+
+/// git's choice of remotes for `git fetch`: with `all` (else, given no
+/// name, `fetch.all`) every remote but those `remote.<name>.skipFetchAll`
+/// leaves out; else each name, a group's (`remotes.<group>`, its names
+/// split at blanks) standing for its remotes; one name that is neither is
+/// itself, a URL, and of several such a name is refused. Each once, in
+/// git's order. `arena`'s.
+pub fn remotesToFetch(arena: Allocator, config: *const config_mod.Config, selection: Selection) Self.Error![]const []const u8 {
+    const all = selection.all orelse if (selection.names.len == 0) try config.getBool("fetch.all", false) else false;
+    var out: std.ArrayList([]const u8) = .empty;
+    if (all) {
+        if (selection.names.len != 0) return error.AllTakesNoRemote;
+        for (try remote_mod.names(arena, config)) |name| {
+            var remote = try remote_mod.Remote.get(arena, config, .sha1, name);
+            defer remote.deinit();
+            if (!remote.skip_default_update) try out.append(arena, name);
+        }
+        return out.items;
+    }
+    for (selection.names) |name| {
+        const before = out.items.len;
+        var it = config.iterate(&.{try arena.print("remotes.{s}", .{name})});
+        while (it.next()) |entry| {
+            var words = std.mem.tokenizeAny(u8, entry.value orelse "", " \t\n");
+            while (words.next()) |word| try appendOnce(arena, &out, word);
+        }
+        if (out.items.len != before) continue;
+        if (selection.names.len > 1 and !remote_mod.isConfigured(config, name)) return error.NoSuchRemoteOrGroup;
+        try appendOnce(arena, &out, name);
+    }
+    return out.items;
+}
+
+fn appendOnce(arena: Allocator, list: *std.ArrayList([]const u8), name: []const u8) Allocator.Error!void {
+    for (list.items) |have| if (std.mem.eql(u8, have, name)) return;
+    try list.append(arena, name);
+}
+
+/// One remote's part of `fetchMany`: what came, or why not.
+pub const Fetched = union(enum) {
+    fetched: Outcome,
+    failed: Self.Error,
+};
+
+/// What `fetchMany` did, remote by remote, in the order asked.
+pub const Many = struct {
+    names: []const []const u8,
+    results: []Fetched,
+    gpa: Allocator,
+
+    pub fn deinit(m: *Many) void {
+        for (m.results) |*r| switch (r.*) {
+            .fetched => |*outcome| outcome.deinit(),
+            .failed => {},
+        };
+        m.gpa.free(m.results);
+        m.* = undefined;
+    }
+
+    /// Whether any remote failed: git's exit status.
+    pub fn anyFailed(m: *const Many) bool {
+        for (m.results) |r| if (r == .failed) return true;
+        return false;
+    }
+};
+
+/// git's `fetch_multiple`: each of `names` fetched as `fetch` fetches it,
+/// `FETCH_HEAD` emptied first unless `options.append` and each remote's
+/// lines added to it, the commit graph written once after them all as
+/// `fetch.writeCommitGraph` says; one remote failing is noted and the rest
+/// still fetched. `jobs` at once (`null` takes `fetch.parallel`, 0 is one
+/// per processor) when the `Io` runs tasks beside each other, each on its
+/// own handle on the repository (`Repository.openAgain`).
+pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []const u8, options: Options, jobs: ?u32) Self.Error!Many {
+    const results = try gpa.alloc(Fetched, names.len);
+    errdefer gpa.free(results);
+    for (results) |*r| r.* = .{ .failed = error.Canceled };
+    if (!options.append and options.write_fetch_head) try writeFetchHead(gpa, io, repo, &.{}, false);
+    var each = options;
+    each.append = true;
+    each.write_commit_graph = false;
+    const configured = try repo.configuration().getInt("fetch.parallel", 1);
+    var limit: usize = jobs orelse @intCast(@max(configured, 0));
+    if (limit == 0) limit = std.Thread.getCpuCount() catch 1;
+    if (limit > 1 and names.len > 1) {
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        var next: usize = 0;
+        while (next < names.len) {
+            const batch_end = @min(names.len, next + limit);
+            for (next..batch_end) |i| group.concurrent(io, fetchOneAgain, .{ gpa, io, repo, names[i], each, &results[i] }) catch {
+                fetchOne(gpa, io, repo, names[i], each, &results[i]);
+            };
+            try group.await(io);
+            next = batch_end;
+        }
+    } else for (names, results) |name, *result| fetchOne(gpa, io, repo, name, each, result);
+    if (options.write_commit_graph orelse try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
+    return .{ .names = names, .results = results, .gpa = gpa };
+}
+
+fn fetchOne(gpa: Allocator, io: Io, repo: *Repository, name: []const u8, options: Options, result: *Fetched) void {
+    result.* = if (fetch(gpa, io, repo, name, options)) |outcome| .{ .fetched = outcome } else |err| .{ .failed = err };
+}
+
+/// `fetchOne` beside the others, on a handle of its own.
+fn fetchOneAgain(gpa: Allocator, io: Io, repo: *Repository, name: []const u8, options: Options, result: *Fetched) void {
+    var again = repo.openAgain(io) catch |err| {
+        result.* = .{ .failed = err };
+        return;
+    };
+    defer again.deinit(io);
+    fetchOne(gpa, io, &again, name, options, result);
 }
 
 /// git's `git fetch --negotiate-only`: the history from
