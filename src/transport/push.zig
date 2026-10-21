@@ -49,6 +49,9 @@ const object_walk = @import("../walk/object/walk.zig");
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
 const warning = @import("../report.zig").warning;
+const config_mod = @import("../config/config.zig");
+const signing = @import("../object/signing.zig");
+const url_mod = @import("../wire.zig").url;
 const progress_mod = @import("../report.zig").progress;
 
 const builtin = @import("builtin");
@@ -78,7 +81,17 @@ pub const Error = error{
     NoPushDestination,
     /// The `pre-push` hook refused the push.
     PrePushRefused,
-} || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error;
+    /// The push is to be signed and the server takes no push
+    /// certificate: git's "the receiving end does not support --signed
+    /// push".
+    SignedPushUnsupported,
+    /// The server asked for a certificate over a nonce git refuses to
+    /// sign: longer than 255 bytes, or holding other than letters, digits
+    /// and `-._/+=`.
+    InvalidPushCertNonce,
+    /// `push.gpgSign` is neither a boolean nor `if-asked`.
+    InvalidPushGpgSign,
+} || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error;
 
 /// What a `pre-push` hook is shown: one line of its input.
 pub const PrePushUpdate = struct {
@@ -136,6 +149,10 @@ pub const Options = struct {
     push_options: []const []const u8 = &.{},
     /// Work everything out and send nothing.
     dry_run: bool = false,
+    /// Sign the push with a certificate the server keeps: `--signed`.
+    /// `null` takes `push.gpgSign`. Signing runs `signing`'s programs,
+    /// which needs `programs`.
+    signed: ?send_pack.PushCert = null,
     /// Who the remote-tracking refs' log entries are written as, and when.
     who: object.Signature,
     pre_push: ?PrePush = null,
@@ -325,7 +342,9 @@ fn pushTo(
     // What a remote helper is told beside: the local ref and the `+`.
     var sources: std.ArrayList(?[]const u8) = .empty;
     var forced: std.ArrayList(bool) = .empty;
-    for (results, updates) |r, u| {
+    for (try sendOrder(arena, results, &remote_refs)) |i| {
+        const r = results[i];
+        const u = updates[i];
         if (r.status != .ok) continue;
         try commands.append(arena, .{ .name = r.remote_ref, .old = r.old, .new = r.new });
         try sources.append(arena, r.local_ref);
@@ -333,6 +352,23 @@ fn pushTo(
     }
 
     if (options.pre_push) |hook| try runPrePush(arena, hook, remote.name orelse url, url, results);
+
+    // Whether the server takes a signed push is asked before anything is
+    // sent, a dry run's included, as git's send-pack asks it.
+    var certificate_nonce: ?[]const u8 = null;
+    var helper_cert: send_pack.PushCert = .never;
+    const signed = options.signed orelse try pushCertSetting(repo.configuration());
+    if (signed != .never) switch (session.certOffer()) {
+        .helper => helper_cert = signed,
+        .nonce => |offered| if (offered) |nonce| {
+            if (!validNonce(nonce)) return error.InvalidPushCertNonce;
+            certificate_nonce = nonce;
+        } else switch (signed) {
+            .always => return error.SignedPushUnsupported,
+            .if_asked => if (options.warnings) |sink| try sink.add(.push_cert_not_asked),
+            .never => unreachable,
+        },
+    };
 
     if (options.dry_run) {
         for (results) |*r| {
@@ -343,6 +379,10 @@ fn pushTo(
     }
 
     if (commands.items.len != 0) {
+        const certificate = if (certificate_nonce) |nonce|
+            try pushCertificate(arena, gpa, io, repo, url, nonce, commands.items, options)
+        else
+            null;
         try send(arena, gpa, io, repo, &session, remote.name orelse url, remote_refs.refs, .{
             .commands = commands.items,
             .objects = &.{},
@@ -352,6 +392,8 @@ fn pushTo(
             .progress = options.progress,
             .sources = sources.items,
             .force = forced.items,
+            .certificate = certificate,
+            .push_cert = helper_cert,
         }, options, results, outcome);
     }
 
@@ -363,6 +405,78 @@ fn pushTo(
         }
     }
     try all_results.appendSlice(arena, results);
+}
+
+/// `push.gpgSign`, every value read as git's callback reads it: a
+/// boolean, or `if-asked`.
+fn pushCertSetting(config: *const config_mod.Config) Error!send_pack.PushCert {
+    var mode: send_pack.PushCert = .never;
+    var it = config.iterate(&.{"push.gpgsign"});
+    while (it.next()) |entry| {
+        const raw = entry.value orelse {
+            mode = .always;
+            continue;
+        };
+        if (config_mod.parseBool(raw)) |on| {
+            mode = if (on) .always else .never;
+        } else |_| {
+            if (!std.ascii.eqlIgnoreCase(raw, "if-asked")) return error.InvalidPushGpgSign;
+            mode = .if_asked;
+        }
+    }
+    return mode;
+}
+
+/// git's `reject_invalid_nonce`: what a server may ask to have signed.
+fn validNonce(nonce: []const u8) bool {
+    if (nonce.len >= 256) return false;
+    for (nonce) |c| {
+        if (std.ascii.isAlphanumeric(c)) continue;
+        if (std.mem.findScalar(u8, "-./+=_", c) == null) return false;
+    }
+    return true;
+}
+
+/// git's `generate_push_cert`: who pushes, where, the server's nonce and
+/// the push options, then the commands, signed as `signing` signs.
+fn pushCertificate(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    url: []const u8,
+    nonce: []const u8,
+    commands: []const send_pack.Command,
+    options: Options,
+) Error![]const u8 {
+    const programs = options.programs orelse return error.SigningRequiresPrograms;
+    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), programs);
+    defer signer.deinit();
+    const key_id = try signer.keyId(io, options.who);
+    defer gpa.free(key_id);
+    var cert: std.ArrayList(u8) = .empty;
+    const offset = options.who.offset_minutes;
+    const magnitude: u32 = @abs(offset);
+    try cert.print(arena, "certificate version 0.1\npusher {s} {d} {c}{d:0>2}{d:0>2}\n", .{
+        key_id, options.who.when_secs, @as(u8, if (offset < 0) '-' else '+'), magnitude / 60, magnitude % 60,
+    });
+    if (url.len != 0) {
+        // Over HTTP the URL git's send-pack is handed ends in `/`, which
+        // remote-curl adds.
+        const scheme = if (url_mod.Url.parse(url)) |parsed| parsed.scheme else |_| .local;
+        const slash = (scheme == .http or scheme == .https) and !std.mem.endsWith(u8, url, "/");
+        const anonymous = try url_mod.anonymize(gpa, url);
+        defer gpa.free(anonymous);
+        try cert.print(arena, "pushee {s}{s}\n", .{ anonymous, if (slash) "/" else "" });
+    }
+    if (nonce.len != 0) try cert.print(arena, "nonce {s}\n", .{nonce});
+    for (options.push_options) |option| try cert.print(arena, "push-option {s}\n", .{option});
+    try cert.append(arena, '\n');
+    for (commands) |c| try cert.print(arena, "{f} {f} {s}\n", .{ c.old, c.new, c.name });
+    const signature = try signer.sign(io, cert.items, null, options.who);
+    defer gpa.free(signature);
+    try cert.appendSlice(arena, signature);
+    return cert.items;
 }
 
 /// The session a push to `remote` at `url` talks over.
@@ -726,6 +840,23 @@ fn matchRefs(
         try kept.append(arena, u);
     }
     return kept.items;
+}
+
+/// The order git sends `results`' commands in, as positions: the remote's
+/// refs as it listed them, then those it lacks as they were matched, since
+/// git's `match_push_refs` adds a new ref at the end of the remote's list.
+fn sendOrder(arena: Allocator, results: []const RefResult, remote_refs: *const protocol.RefList) Allocator.Error![]const usize {
+    var at: std.StringHashMapUnmanaged(usize) = .empty;
+    for (results, 0..) |r, i| try at.put(arena, r.remote_ref, i);
+    var order: std.ArrayList(usize) = .empty;
+    try order.ensureTotalCapacity(arena, results.len);
+    for (remote_refs.refs) |r| {
+        if (at.fetchRemove(r.name)) |entry| order.appendAssumeCapacity(entry.value);
+    }
+    for (results, 0..) |r, i| {
+        if (at.contains(r.remote_ref)) order.appendAssumeCapacity(i);
+    }
+    return order.items;
 }
 
 /// git's `set_ref_status_for_push` for one update.
@@ -1201,6 +1332,153 @@ test "a proc-receive hook's report-status-v2 options move the remote-tracking re
         errdefer std.debug.print("{s}\n", .{answer});
         var outcome = try twins.pushBoth(&.{ "origin", "main:refs/for/main" }, .{ .who = test_who, .refspecs = &.{"main:refs/for/main"} });
         defer outcome.deinit();
+    }
+}
+
+/// What a remote's `pre-receive` hook says of a push certificate, to
+/// `hook.log`: its status, signer, key and nonce status, and its text with
+/// the time, the nonce and the remote's own name left out.
+const cert_hook =
+    \\#!/bin/sh
+    \\cat >/dev/null
+    \\if test -z "$GIT_PUSH_CERT"; then echo "no certificate" >>hook.log; exit 0; fi
+    \\echo "$GIT_PUSH_CERT_STATUS $GIT_PUSH_CERT_SIGNER $GIT_PUSH_CERT_KEY ${GIT_PUSH_CERT_NONCE:+nonce} $GIT_PUSH_CERT_NONCE_STATUS" >>hook.log
+    \\git cat-file blob "$GIT_PUSH_CERT" | sed -e '/^-----BEGIN/,$d' -e 's/^\(pusher [^ ]*\) .*/\1/' -e 's/remote-[a-z]*\.git/remote.git/' -e 's/^nonce .*/nonce/' >>hook.log
+    \\
+;
+
+/// Both remotes reached as `url_of` names them, through the fake `ssh`,
+/// asking for a certificate when `seed`, which an SSH key made beside
+/// them signs and they know. `false` when `ssh-keygen` is not installed.
+fn signedTwins(twins: *PushTwins, io: Io, server: ?*testremote.HttpServer, seed: bool) !bool {
+    const gpa = twins.gpa;
+    const fake = try testremote.fakeSsh(gpa, io, twins.root.dir);
+    defer gpa.free(fake);
+    const key = try gpa.print("{s}/signer", .{twins.root_path});
+    defer gpa.free(key);
+    var made = program.run(gpa, io, .{ .environ = &twins.env }, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "signer", "-f", key } }, .{}) catch return false;
+    made.deinit(gpa);
+    const public_path = try gpa.print("{s}.pub", .{key});
+    defer gpa.free(public_path);
+    const public = try Io.Dir.cwd().readFileAlloc(io, public_path, gpa, .limited(4096));
+    defer gpa.free(public);
+    const allowed = try gpa.print("signer@example.com namespaces=\"git\" {s}", .{public});
+    defer gpa.free(allowed);
+    try twins.root.dir.writeFile(io, .{ .sub_path = "allowed", .data = allowed });
+    const allowed_path = try gpa.print("{s}/allowed", .{twins.root_path});
+    defer gpa.free(allowed_path);
+    const ssh_path = try gpa.dupe(u8, twins.root_path);
+    defer gpa.free(ssh_path);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+    for ([_][2][]const u8{ .{ "work-git", "remote-git.git" }, .{ "work-relic", "remote-relic.git" } }) |pair| {
+        var work = try twins.root.dir.openDir(io, pair[0], .{});
+        defer work.close(io);
+        var remote_dir = try twins.root.dir.openDir(io, pair[1], .{});
+        defer remote_dir.close(io);
+        if (seed) {
+            try twins.git(remote_dir, &.{ "config", "receive.certNonceSeed", "a seed" });
+            // Over HTTP each request is a receive-pack of its own, a second
+            // apart at most.
+            try twins.git(remote_dir, &.{ "config", "receive.certNonceSlop", "60" });
+        }
+        try twins.git(remote_dir, &.{ "config", "receive.advertisePushOptions", "true" });
+        try twins.git(remote_dir, &.{ "config", "http.receivepack", "true" });
+        try twins.git(remote_dir, &.{ "config", "gpg.ssh.allowedSignersFile", allowed_path });
+        try remote_dir.writeFile(io, .{ .sub_path = "hooks/pre-receive", .data = cert_hook });
+        const hook = try remote_dir.openFile(io, "hooks/pre-receive", .{});
+        defer hook.close(io);
+        try hook.setPermissions(io, .fromMode(0o755));
+        const url = if (server) |s|
+            try s.url(gpa, pair[1])
+        else
+            try gpa.print("ssh://example.invalid{s}{s}/{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path, pair[1] });
+        defer gpa.free(url);
+        try twins.git(work, &.{ "remote", "set-url", "origin", url });
+        try twins.git(work, &.{ "config", "core.sshCommand", fake });
+        try twins.git(work, &.{ "config", "gpg.format", "ssh" });
+        try twins.git(work, &.{ "config", "user.signingKey", key });
+    }
+    return true;
+}
+
+/// The two remotes' `hook.log`s, alike.
+fn expectSameHookLogs(twins: *PushTwins, io: Io) !void {
+    var logs: [2][]u8 = undefined;
+    for ([_][]const u8{ "remote-git.git", "remote-relic.git" }, 0..) |name, i| {
+        var dir = try twins.root.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        logs[i] = try dir.readFileAlloc(io, "hook.log", twins.gpa, .unlimited);
+    }
+    defer for (logs) |l| twins.gpa.free(l);
+    try testing.expectEqualStrings(logs[0], logs[1]);
+}
+
+test "a signed push carries a certificate git's receive-pack checks, as git's push signs it, over ssh and HTTP" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hook is a shell script
+    for ([_]bool{ false, true }) |over_http| {
+        var twins = try PushTwins.init(gpa, io);
+        defer twins.deinit();
+        var server: ?*testremote.HttpServer = null;
+        defer if (server) |s| s.stop();
+        if (over_http) server = try testremote.HttpServer.start(gpa, io, twins.root.dir, .{});
+        if (!try signedTwins(&twins, io, server, true)) return error.SkipZigTest;
+        var outcome = try twins.pushBoth(&.{ "--signed", "-o", "an option", "origin", "main", "feature", ":refs/heads/side" }, .{
+            .refspecs = &.{ "main", "feature", ":refs/heads/side" },
+            .push_options = &.{"an option"},
+            .signed = .always,
+            .who = test_who,
+        });
+        defer outcome.deinit();
+        try expectSameHookLogs(&twins, io);
+        const log = try twins.root.dir.readFileAlloc(io, "remote-relic.git/hook.log", gpa, .unlimited);
+        defer gpa.free(log);
+        try testing.expect(std.mem.startsWith(u8, log, "G signer@example.com SHA256:"));
+        try testing.expect(std.mem.find(u8, log, " nonce OK\n") != null);
+    }
+}
+
+test "push.gpgSign signs a push, and a server asking for no certificate takes one only if asked, as git's push decides" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hook is a shell script
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    if (!try signedTwins(&twins, io, null, false)) return error.SkipZigTest;
+    // Asked only if the server asks: sent unsigned, with git's warning.
+    {
+        var warnings: warning.Warnings = .init(gpa);
+        defer warnings.deinit();
+        twins.git_settings = &.{ "-c", "push.gpgSign=if-asked" };
+        var outcome = try twins.pushBoth(&.{ "origin", "main" }, .{ .refspecs = &.{"main"}, .signed = .if_asked, .warnings = &warnings, .who = test_who });
+        defer outcome.deinit();
+        try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+        try testing.expectEqual(warning.Warning.push_cert_not_asked, warnings.items.items[0]);
+        try expectSameHookLogs(&twins, io);
+    }
+    var work = try twins.root.dir.openDir(io, "work-relic", .{});
+    defer work.close(io);
+    var repo = try Repository.open(gpa, io, work, .{});
+    defer repo.deinit(io);
+    // Signed always: git's push refuses, and so does this, from the
+    // setting as from the option.
+    var work_git = try twins.root.dir.openDir(io, "work-git", .{});
+    defer work_git.close(io);
+    const refused = try twins.gitOut(work_git, &.{ "push", "--signed", "origin", "feature" });
+    defer gpa.free(refused);
+    try testing.expectEqualStrings("failed", refused);
+    try testing.expectError(error.SignedPushUnsupported, push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"feature"}, .signed = .always }));
+    for ([_][2][]const u8{ .{ "true", "SignedPushUnsupported" }, .{ "sometimes", "InvalidPushGpgSign" } }) |case| {
+        try twins.git(work, &.{ "config", "push.gpgSign", case[0] });
+        var configured = try Repository.open(gpa, io, work, .{});
+        defer configured.deinit(io);
+        const got = push(gpa, io, &configured, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"feature"} });
+        if (got) |pushed| {
+            var outcome = pushed;
+            outcome.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try testing.expectEqualStrings(case[1], @errorName(err));
     }
 }
 

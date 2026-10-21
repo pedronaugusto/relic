@@ -69,6 +69,18 @@ pub const Request = struct {
     /// This repository's shallow boundary, which the server is told before
     /// the commands, as git's send-pack tells it.
     shallow: []const Oid = &.{},
+    /// A signed push certificate holding the commands, sent in their place
+    /// as git's `generate_push_cert` sends it: `push-cert` and the
+    /// capabilities, each of its lines, `push-cert-end`.
+    certificate: ?[]const u8 = null,
+};
+
+/// Whether a push is signed: git's `--signed` and `push.gpgSign`.
+pub const PushCert = enum {
+    never,
+    always,
+    /// When the server asks for a certificate, and otherwise not.
+    if_asked,
 };
 
 /// What the server said about one ref.
@@ -244,25 +256,34 @@ fn writeCommands(
     status_v2: bool,
     status: bool,
 ) pkt_line.WriteError!void {
-    // As git's send-pack writes them: no newline after a command, and the
-    // capabilities after the NUL each with the space before it.
-    for (request.commands, 0..) |command, i| {
+    // As git's send-pack writes them: the capabilities after the NUL each
+    // with the space before it.
+    var caps_buffer: [256]u8 = undefined;
+    var caps: Io.Writer = .fixed(&caps_buffer);
+    if (status_v2) {
+        try caps.writeAll(" report-status-v2");
+    } else if (status) try caps.writeAll(" report-status");
+    if (band) try caps.writeAll(" side-band-64k");
+    if (request.progress == null and adv.has("quiet")) try caps.writeAll(" quiet");
+    if (request.atomic) try caps.writeAll(" atomic");
+    if (request.push_options.len != 0) try caps.writeAll(" push-options");
+    if (adv.has("object-format")) try caps.print(" object-format={s}", .{adv.kind.name()});
+    if (adv.has("agent")) try caps.print(" agent={s}", .{protocol.agent});
+    if (request.certificate) |cert| {
+        // Each line a packet, its newline kept.
+        try pkt_line.print("push-cert\x00{s}", .{caps.buffered()}, w);
+        var at: usize = 0;
+        while (at < cert.len) {
+            const end = if (std.mem.findScalarPos(u8, cert, at, '\n')) |nl| nl + 1 else cert.len;
+            try pkt_line.write(w, cert[at..end]);
+            at = end;
+        }
+        try pkt_line.write(w, "push-cert-end\n");
+    } else for (request.commands, 0..) |command, i| {
+        // No newline after a command.
         if (i != 0) {
             try pkt_line.print("{f} {f} {s}", .{ command.old, command.new, command.name }, w);
-            continue;
-        }
-        var caps_buffer: [256]u8 = undefined;
-        var caps: Io.Writer = .fixed(&caps_buffer);
-        if (status_v2) {
-            try caps.writeAll(" report-status-v2");
-        } else if (status) try caps.writeAll(" report-status");
-        if (band) try caps.writeAll(" side-band-64k");
-        if (request.progress == null and adv.has("quiet")) try caps.writeAll(" quiet");
-        if (request.atomic) try caps.writeAll(" atomic");
-        if (request.push_options.len != 0) try caps.writeAll(" push-options");
-        if (adv.has("object-format")) try caps.print(" object-format={s}", .{adv.kind.name()});
-        if (adv.has("agent")) try caps.print(" agent={s}", .{protocol.agent});
-        try pkt_line.print("{f} {f} {s}\x00{s}", .{ command.old, command.new, command.name, caps.buffered() }, w);
+        } else try pkt_line.print("{f} {f} {s}\x00{s}", .{ command.old, command.new, command.name, caps.buffered() }, w);
     }
     try pkt_line.flush(w);
     if (request.push_options.len != 0) {

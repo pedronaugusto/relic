@@ -188,6 +188,8 @@ pub const PushOptions = struct {
     who: ?object.Signature = null,
     atomic: bool = false,
     push_options: []const []const u8 = &.{},
+    /// Whether the helper signs the push: `option pushcert`.
+    push_cert: send_pack.PushCert = .never,
 };
 
 /// A helper, running.
@@ -622,6 +624,11 @@ pub const Helper = struct {
     }
 
     fn commonPushOptions(h: *Helper, options: PushOptions) ErrorNamespace.Error!void {
+        switch (options.push_cert) {
+            .never => {},
+            .always => try h.requireOption("pushcert", "true", .raw),
+            .if_asked => try h.requireOption("pushcert", "if-asked", .raw),
+        }
         if (options.atomic) try h.requireOption("atomic", "true", .raw);
         for (options.push_options) |o| try h.requireOption("push-option", o, .quoted);
     }

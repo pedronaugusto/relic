@@ -40,6 +40,7 @@ const hook_scripts = [_][2][]const u8{
             \\"; then git cat-file -e "$new" && echo "pre-receive reads $ref" >>hook.log; fi
             \\done
             \\test -n "$GIT_QUARANTINE_PATH" && test -d "$GIT_QUARANTINE_PATH" && echo "pre-receive quarantined" >>hook.log
+            \\test -z "$GIT_PUSH_CERT" || { echo "pre-receive cert $GIT_PUSH_CERT_STATUS $GIT_PUSH_CERT_SIGNER $GIT_PUSH_CERT_KEY ${GIT_PUSH_CERT_NONCE:+nonce} $GIT_PUSH_CERT_NONCE_STATUS" >>hook.log; git cat-file blob "$GIT_PUSH_CERT" | sed -e '/^-----BEGIN/,$d' -e 's/^\(pusher [^ ]*\) .*/\1/' -e 's/^pushee .*/pushee/' -e 's/^nonce .*/nonce/' >>hook.log; }
             \\echo "hook says pre-receive"
             \\test ! -e decline-pre-receive
             \\
@@ -63,6 +64,7 @@ const hook_scripts = [_][2][]const u8{
         \\echo "post-receive options=$GIT_PUSH_OPTION_COUNT" >>hook.log
         \\while read old new ref; do echo "post-receive $old $new $ref" >>hook.log; done
         \\test -z "$GIT_QUARANTINE_PATH" || echo "post-receive quarantined" >>hook.log
+        \\test -z "$GIT_PUSH_CERT" || { echo "post-receive cert $GIT_PUSH_CERT_STATUS $GIT_PUSH_CERT_SIGNER $GIT_PUSH_CERT_KEY ${GIT_PUSH_CERT_NONCE:+nonce} $GIT_PUSH_CERT_NONCE_STATUS" >>hook.log; git cat-file blob "$GIT_PUSH_CERT" | sed -e '/^-----BEGIN/,$d' -e 's/^\(pusher [^ ]*\) .*/\1/' -e 's/^pushee .*/pushee/' -e 's/^nonce .*/nonce/' >>hook.log; }
         \\
     },
     .{
@@ -312,6 +314,32 @@ const Pair = struct {
         try p.fileBoth(name, out.items, 0o644);
     }
 
+    /// An SSH key the source signs with, made beside the repositories, and
+    /// the servers' allowed signers naming it when `known`. `false` when
+    /// `ssh-keygen` is not installed.
+    fn signWith(p: *Pair, name: []const u8, known: bool) !bool {
+        const dir = Io.Dir.path.dirname(p.ours).?;
+        const key = try p.gpa.print("{s}/{s}", .{ dir, name });
+        defer p.gpa.free(key);
+        var made = program.run(p.gpa, p.io, .{ .environ = &p.env }, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", key } }, .{}) catch return false;
+        made.deinit(p.gpa);
+        const public_path = try p.gpa.print("{s}.pub", .{key});
+        defer p.gpa.free(public_path);
+        const public = try Io.Dir.cwd().readFileAlloc(p.io, public_path, p.gpa, .limited(4096));
+        defer p.gpa.free(public);
+        const allowed = try p.gpa.print("{s}/allowed", .{dir});
+        defer p.gpa.free(allowed);
+        if (known) {
+            const line = try p.gpa.print("{s}@example.com namespaces=\"git\" {s}", .{ name, public });
+            defer p.gpa.free(line);
+            try Io.Dir.cwd().writeFile(p.io, .{ .sub_path = allowed, .data = line });
+        }
+        try p.source.exec(p.io, &.{ "config", "gpg.format", "ssh" });
+        try p.source.exec(p.io, &.{ "config", "user.signingKey", key });
+        try p.gitBoth(&.{ "config", "gpg.ssh.allowedSignersFile", allowed });
+        return true;
+    }
+
     fn markBoth(p: *Pair, name: []const u8, present: bool, bare: bool) !void {
         for ([_][]const u8{ p.theirs, p.ours }) |target| {
             var dir = try Io.Dir.cwd().openDir(p.io, target, .{});
@@ -502,4 +530,33 @@ test "receive.procReceiveRefs takes creations, deletions or other updates, and r
     // A creation under refs/review, an update there, an update under
     // refs/heads and one outside it, and a tag's deletion.
     try p.both(&.{ "main:refs/review/new", "main:refs/review/x", "main:refs/heads/main", "+main~1:refs/reviewed/x", ":refs/tags/v1" });
+}
+
+test "a signed push's certificate is checked and handed to the receive hooks, as git 2.55 hands it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{
+        .{ "receive.certNonceSeed", "a seed" },
+        .{ "receive.advertisePushOptions", "true" },
+    });
+    defer p.deinit();
+    if (!try p.signWith("signer", true)) return error.SkipZigTest;
+    try p.both(&.{ "--signed", "main~1:refs/heads/main", "v1" });
+    // Push options, which the certificate carries too; a deletion; a push
+    // signed only because the server asks.
+    try p.both(&.{ "--signed", "-o", "first", "-o", "second", "main:refs/heads/main", ":refs/tags/v1" });
+    try p.both(&.{ "--signed=if-asked", "main:refs/heads/asked" });
+    // A key the allowed signers do not name.
+    if (!try p.signWith("stranger", false)) return error.SkipZigTest;
+    try p.both(&.{ "--signed", "main~1:refs/heads/stranger" });
+}
+
+test "a server that asks for no certificate takes an unsigned push, and git refuses to send a signed one" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{});
+    defer p.deinit();
+    if (!try p.signWith("signer", true)) return error.SkipZigTest;
+    try p.both(&.{ "--signed=if-asked", "main:refs/heads/main" });
+    try p.both(&.{ "--signed", "main:refs/heads/signed" });
 }

@@ -57,6 +57,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .programs = .{ .environ = env },
         .inherited_alternates = env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"),
+        .service_dir = path.?,
     });
     defer server.deinit();
 

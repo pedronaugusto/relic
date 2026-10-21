@@ -78,6 +78,9 @@ pub const Error = error{
     UnknownSignature,
     /// No temporary directory to hand the signature through.
     NoTemporaryDirectory,
+    /// `ssh-keygen -lf` named no fingerprint for the SSH signing key, which
+    /// git dies on.
+    KeyFingerprintFailed,
 } || program.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
     Io.File.WritePositionalError || Io.Dir.DeleteFileError || Io.Dir.OpenError ||
     error{MalformedValue};
@@ -173,6 +176,13 @@ pub const Result = enum {
             .cannot_check => 'E',
             .none => 'N',
         };
+    }
+
+    /// The letter git's check itself records, which `%G?` then reads with
+    /// the key's trust: a good signature is `G` however far its key is
+    /// trusted. What a push certificate's `GIT_PUSH_CERT_STATUS` says.
+    pub fn checkLetter(r: Result) u8 {
+        return if (r == .good_untrusted) 'G' else r.letter();
     }
 };
 
@@ -450,6 +460,42 @@ pub const Signer = struct {
         const first = outcome.stdout[0..end];
         if (literalSshKey(first) == null) return error.NoSigningKey;
         return arena.dupe(u8, first);
+    }
+
+    /// A name for the key `sign` would use, as git's `get_signing_key_id`
+    /// gives it for a push certificate's `pusher`: for `gpg` and `gpgsm`
+    /// the key as configured or `identity`'s `Name <email>`, as they sign
+    /// with it; for SSH the key's fingerprint, as `ssh-keygen -lf` prints
+    /// it, the key read as git reads it there (a literal key on standard
+    /// input, a file as written). The result is the caller's.
+    pub fn keyId(signer: *Signer, io: Io, identity: ?object.Signature) Self.Error![]u8 {
+        var arena_instance: std.heap.ArenaAllocator = .init(signer.gpa);
+        defer arena_instance.deinit();
+        const arena = arena_instance.allocator();
+        switch (signer.format) {
+            .openpgp, .x509 => {
+                if (signer.signing_key) |key| return signer.gpa.dupe(u8, key);
+                const who = identity orelse return error.NoSigningKey;
+                return signer.gpa.print("{s} <{s}>", .{ who.name, who.email });
+            },
+            .ssh => {
+                const key = signer.signing_key orelse try signer.defaultSshKey(arena, io);
+                const literal = literalSshKey(key);
+                // git runs `ssh-keygen` itself here, not `gpg.ssh.program`.
+                var outcome = try program.run(signer.gpa, io, signer.programs, .{
+                    .argv = &.{ "ssh-keygen", "-lf", if (literal != null) "-" else key },
+                    .cwd = .{ .dir = signer.base },
+                }, .{ .input = literal orelse "" });
+                defer outcome.deinit(signer.gpa);
+                if (!outcome.succeeded()) return error.KeyFingerprintFailed;
+                // `<bits> <fingerprint> <comment> (<type>)`
+                var words = std.mem.splitScalar(u8, outcome.stdout, ' ');
+                _ = words.next();
+                const fingerprint = words.next() orelse return error.KeyFingerprintFailed;
+                if (words.peek() == null) return error.KeyFingerprintFailed;
+                return signer.gpa.dupe(u8, fingerprint);
+            },
+        }
     }
 
     /// Check `signature` over `payload`. `signed_at` is the committer's or

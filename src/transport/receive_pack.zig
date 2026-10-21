@@ -15,7 +15,10 @@
 //! `receive.procReceiveRefs` is the `proc-receive` hook's instead: it is
 //! handed the commands in a pkt-line conversation and answers for each,
 //! with what it made of them in report-status-v2's options, which the
-//! report and `post-receive` carry. The report follows —
+//! report and `post-receive` carry. Under `receive.certNonceSeed` a push
+//! may come signed: a certificate holding the commands, checked and handed
+//! to `pre-receive` and `post-receive` as git's `GIT_PUSH_CERT*`. The
+//! report follows —
 //! `report-status` or `report-status-v2`, on the side-band when the client
 //! asked for one, the hooks' output beside it on channel two — and then
 //! `post-receive` and `post-update`.
@@ -57,6 +60,7 @@ const program = @import("../process.zig").program;
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const decimal = @import("../text.zig").decimal;
+const signing = @import("../object/signing.zig");
 const local = @import("local.zig");
 
 const Oid = hash.Oid;
@@ -88,6 +92,11 @@ pub const Options = struct {
     /// it, which a hook reading the quarantine is handed after the
     /// repository's own.
     inherited_alternates: ?[]const u8 = null,
+    /// The repository's path as the server was asked to serve it, git's
+    /// `service_dir`, which a push certificate's nonce is made from: two
+    /// servers of one repository over HTTP take each other's nonces only
+    /// when they name it alike, and git's http-backend names it `.`.
+    service_dir: []const u8 = ".",
 };
 
 /// How a `receive.deny*` setting answers.
@@ -114,6 +123,12 @@ const Settings = struct {
     ofs_delta: bool,
     shallow_update: bool,
     max_input_size: ?u64,
+    /// `receive.certNonceSeed`: the secret a push certificate's nonce is
+    /// made with; with none, no certificate is asked for.
+    cert_nonce_seed: ?[]const u8,
+    /// `receive.certNonceSlop`: how many seconds apart another server's
+    /// nonce may be and still count as this one's.
+    cert_nonce_slop: u64,
 
     fn read(config: *const config_mod.Config) Settings {
         const max = config.getInt("receive.maxinputsize", 0) catch 0;
@@ -127,6 +142,8 @@ const Settings = struct {
             .ofs_delta = config.getBool("repack.usedeltabaseoffset", true) catch true,
             .shallow_update = config.getBool("receive.shallowupdate", false) catch false,
             .max_input_size = if (max > 0) @intCast(max) else null,
+            .cert_nonce_seed = config.get("receive.certnonceseed"),
+            .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
         };
     }
 };
@@ -195,6 +212,14 @@ pub const Server = struct {
     /// The boundary commits a shallow push brings, written once its refs
     /// are.
     new_shallow: Oid.Set = .empty,
+    /// The nonce this server asks a push certificate to carry, made when it
+    /// starts, as git's is.
+    nonce: ?[]u8 = null,
+    /// This push's certificate, in the request's arena.
+    certificate: ?[]const u8 = null,
+    /// What the receive hooks are told of it, made at the first hook that
+    /// runs, as git makes it.
+    certificate_vars: ?[]const program.Var = null,
 
     /// Serve `remote` in `version` — v2 is answered in v0, as git's is.
     /// The repository's refs are shown as `receive.hideRefs` leaves them.
@@ -208,6 +233,8 @@ pub const Server = struct {
             .options = options,
             .settings = .read(remote.repo.configuration()),
         };
+        if (s.settings.cert_nonce_seed) |seed| s.nonce = try certNonce(gpa, s.kind(), options.service_dir, seed, options.who.when_secs);
+        errdefer if (s.nonce) |n| gpa.free(n);
         if (options.programs) |programs| {
             // The receive hooks run in the git directory, bare or not, as
             // git runs them.
@@ -225,6 +252,7 @@ pub const Server = struct {
     pub fn deinit(s: *Server) void {
         if (s.runner) |*r| r.deinit();
         s.new_shallow.deinit(s.gpa);
+        if (s.nonce) |n| s.gpa.free(n);
         s.* = undefined;
     }
 
@@ -250,6 +278,7 @@ pub const Server = struct {
         try caps.appendSlice(s.gpa, "report-status report-status-v2 delete-refs side-band-64k quiet");
         if (s.settings.advertise_atomic) try caps.appendSlice(s.gpa, " atomic");
         if (s.settings.ofs_delta) try caps.appendSlice(s.gpa, " ofs-delta");
+        if (s.nonce) |nonce| try caps.print(s.gpa, " push-cert={s}", .{nonce});
         if (s.settings.advertise_push_options) try caps.appendSlice(s.gpa, " push-options");
         try caps.print(s.gpa, " object-format={s} agent={s}", .{ s.kind().name(), protocol.agent });
 
@@ -325,6 +354,12 @@ pub const Server = struct {
         s.asked = .{};
         s.out = out;
         defer s.out = null;
+        s.certificate = null;
+        s.certificate_vars = null;
+        defer {
+            s.certificate = null;
+            s.certificate_vars = null;
+        }
 
         var shallow: std.ArrayList(Oid) = .empty;
         const commands = try s.readCommands(arena, in, &shallow);
@@ -334,6 +369,9 @@ pub const Server = struct {
         }
         var push_options: std.ArrayList([]const u8) = .empty;
         if (s.asked.push_options) try readPushOptions(arena, in, &push_options);
+        if (s.certificate) |cert| if (!certificateOptionsMatch(cert, push_options.items)) {
+            for (commands) |*cmd| cmd.error_string = "inconsistent push options";
+        };
 
         var unpack_status: ?[]const u8 = null;
         var q: ?Quarantine = null;
@@ -368,7 +406,7 @@ pub const Server = struct {
 
         try s.execute(arena, commands, unpack_status, &q, &received, &keeps, push_options.items);
         try s.report(commands, unpack_status);
-        _ = try s.runReceiveHook("post-receive", commands, true, push_options.items, null);
+        _ = try s.runReceiveHook(arena, "post-receive", commands, true, push_options.items, null);
         try s.runPostUpdate(arena, commands);
         if (s.asked.band != .none) pkt_line.flush(out) catch return error.WriteFailed;
         out.flush() catch return error.WriteFailed;
@@ -399,8 +437,44 @@ pub const Server = struct {
             const nul = std.mem.findScalar(u8, chomped, 0);
             const line = chomped[0 .. nul orelse chomped.len];
             if (nul) |at| try s.takeCapabilities(chomped[at + 1 ..]);
+            if (std.mem.eql(u8, line, "push-cert")) {
+                // A signed push: the certificate's lines, newlines kept, to
+                // `push-cert-end`, or to a flush that ends the commands too.
+                var cert: std.ArrayList(u8) = .empty;
+                if (s.certificate) |earlier| try cert.appendSlice(arena, earlier);
+                const ended = while (true) {
+                    const part = pkt_line.read(in) catch |err| switch (err) {
+                        error.ReadFailed => return error.ReadFailed,
+                        else => return error.ProtocolError,
+                    };
+                    const text = switch (part) {
+                        .data => |d| d,
+                        .flush => break true,
+                        else => return error.ProtocolError,
+                    };
+                    if (std.mem.eql(u8, text, "push-cert-end\n")) break false;
+                    // As git's `strbuf_addstr`, to a NUL.
+                    try cert.appendSlice(arena, text[0 .. std.mem.findScalar(u8, text, 0) orelse text.len]);
+                };
+                s.certificate = cert.items;
+                if (ended) break;
+                continue;
+            }
             try commands.append(arena, try s.parseCommand(arena, line));
         }
+        // git's `queue_commands_from_cert`: the lines after the header's
+        // blank line, up to the signature.
+        if (s.certificate) |cert| if (cert.len != 0) {
+            if (commands.items.len != 0) return error.ProtocolError;
+            const body = (std.mem.find(u8, cert, "\n\n") orelse return error.ProtocolError) + 2;
+            const end = signing.signedOffset(cert);
+            var at = body;
+            while (at < end) {
+                const eol = std.mem.findScalarPos(u8, cert[0..end], at, '\n');
+                try commands.append(arena, try s.parseCommand(arena, cert[at .. eol orelse end]));
+                at = if (eol) |e| e + 1 else end;
+            }
+        };
         return commands.items;
     }
 
@@ -532,7 +606,7 @@ pub const Server = struct {
                 any_proc_receive = true;
             }
         }
-        if (!try s.runReceiveHook("pre-receive", commands, false, push_options, if (q.*) |*held| held else null)) {
+        if (!try s.runReceiveHook(arena, "pre-receive", commands, false, push_options, if (q.*) |*held| held else null)) {
             for (commands) |*cmd| {
                 if (cmd.standing()) cmd.error_string = "pre-receive hook declined";
             }
@@ -1089,7 +1163,7 @@ pub const Server = struct {
     /// and the quarantine for `pre-receive`. With `skip_broken`, a refused
     /// command or a deletion of nothing is left out, and with none left
     /// the hook does not run. Whether it succeeded.
-    fn runReceiveHook(s: *Server, event: []const u8, commands: []const Command, skip_broken: bool, push_options: []const []const u8, q: ?*const Quarantine) Self.Error!bool {
+    fn runReceiveHook(s: *Server, request_arena: Allocator, event: []const u8, commands: []const Command, skip_broken: bool, push_options: []const []const u8, q: ?*const Quarantine) Self.Error!bool {
         const runner = if (s.runner) |*r| r else return true;
         if (!runner.exists(s.io, event)) return true;
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
@@ -1111,9 +1185,106 @@ pub const Server = struct {
         if (q) |held| {
             for (try held.environment(arena, s.options.inherited_alternates)) |v| try set.append(arena, .{ .name = v.name, .value = v.value });
         }
+        try set.appendSlice(arena, try s.certificateVars(request_arena));
         const ran = try runner.run(s.io, event, .{ .input = input.items, .set = set.items });
         try s.sendHookOutput();
         return ran.succeeded();
+    }
+
+    /// git's `prepare_push_cert_sha1`: a signed push's certificate kept as a
+    /// blob, its signature checked and its nonce held to the one asked
+    /// for, told to the receive hooks as `GIT_PUSH_CERT` and the rest. Done
+    /// once, at the first hook that runs; nothing without a certificate.
+    fn certificateVars(s: *Server, arena: Allocator) Self.Error![]const program.Var {
+        if (s.certificate_vars) |done| return done;
+        const cert = s.certificate orelse return &.{};
+        if (cert.len == 0) return &.{};
+        var vars: std.ArrayList(program.Var) = .empty;
+        // In the repository itself, quarantine or not, as git writes it.
+        const oid: ?Oid = s.db().write(s.io, .blob, cert) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => null,
+        };
+        const at = signing.signedOffset(cert);
+        const payload = cert[0..at];
+        // git dies on a certificate whose signature it cannot name.
+        if (signing.Format.of(cert[at..]) == null) return error.ProtocolError;
+        var result: signing.Result = .none;
+        var signer_name: []const u8 = "";
+        var key: []const u8 = "";
+        verify: {
+            var signer = signing.Signer.init(s.gpa, s.io, s.remote.repo.configuration(), s.remote.repo.gitDirectory(), s.options.programs.?) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => break :verify,
+            };
+            defer signer.deinit();
+            var verdict = signer.verify(s.io, payload, cert[at..], null) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => break :verify,
+            };
+            defer verdict.deinit();
+            result = verdict.result;
+            if (verdict.signer) |name| signer_name = try arena.dupe(u8, name);
+            if (verdict.key) |k| key = try arena.dupe(u8, k);
+        }
+        const nonce = try s.checkNonce(arena, payload);
+        if (oid) |o| {
+            try vars.append(arena, .{ .name = "GIT_PUSH_CERT", .value = try arena.print("{f}", .{o}) });
+            try vars.append(arena, .{ .name = "GIT_PUSH_CERT_SIGNER", .value = signer_name });
+            try vars.append(arena, .{ .name = "GIT_PUSH_CERT_KEY", .value = key });
+            try vars.append(arena, .{ .name = "GIT_PUSH_CERT_STATUS", .value = try arena.dupe(u8, &.{result.checkLetter()}) });
+            if (s.nonce != null) {
+                try vars.append(arena, .{ .name = "GIT_PUSH_CERT_NONCE", .value = nonce.reported });
+                try vars.append(arena, .{ .name = "GIT_PUSH_CERT_NONCE_STATUS", .value = @tagName(nonce.status) });
+                if (nonce.status == .SLOP) try vars.append(arena, .{ .name = "GIT_PUSH_CERT_NONCE_SLOP", .value = try arena.print("{d}", .{nonce.slop}) });
+            }
+        }
+        s.certificate_vars = vars.items;
+        return vars.items;
+    }
+
+    const NonceStatus = enum { MISSING, UNSOLICITED, OK, BAD, SLOP };
+    const NonceCheck = struct {
+        status: NonceStatus,
+        /// The nonce the hooks are told was asked for: this server's, or
+        /// another's it takes as its own within `receive.certNonceSlop`.
+        reported: []const u8 = "",
+        /// How many seconds older the certificate's nonce is than this
+        /// server's.
+        slop: i64 = 0,
+    };
+
+    /// git's `check_nonce`: the certificate's `nonce` header against the
+    /// one this server asked for. Over HTTP, where each request is a
+    /// server of its own, another's nonce for this repository and seed is
+    /// recognised by its HMAC and judged by how far apart the two were
+    /// made.
+    fn checkNonce(s: *Server, arena: Allocator, payload: []const u8) Allocator.Error!NonceCheck {
+        const ours = s.nonce orelse "";
+        const span = object.findHeader(payload, 0, "nonce") orelse return .{ .status = .MISSING, .reported = ours };
+        const theirs = payload[span.start..span.end];
+        if (s.nonce == null) return .{ .status = .UNSOLICITED };
+        if (std.mem.eql(u8, ours, theirs)) return .{ .status = .OK, .reported = ours };
+        const bad: NonceCheck = .{ .status = .BAD, .reported = ours };
+        if (!s.options.stateless) return bad;
+        // `<seconds>-<hmac>`
+        if (theirs.len == 0 or theirs[0] <= '0' or theirs[0] > '9') return bad;
+        const stamp = decimal.strtoul(theirs, 10, 64);
+        if (stamp.end == 0 or stamp.end >= theirs.len or theirs[stamp.end] != '-') return bad;
+        if (stamp.value > std.math.maxInt(i64)) return bad;
+        const expect = try certNonce(arena, s.kind(), s.options.service_dir, s.settings.cert_nonce_seed.?, @intCast(stamp.value));
+        if (expect.len != theirs.len) return bad;
+        var differ: u8 = 0;
+        for (expect, theirs) |a, b| differ |= a ^ b;
+        if (differ != 0) return bad;
+        const issued = decimal.strtoul(ours, 10, 64).value;
+        const slop: i64 = @as(i64, @intCast(issued)) - @as(i64, @intCast(stamp.value));
+        const limit = s.settings.cert_nonce_slop;
+        if (limit != 0 and @abs(slop) <= limit) return .{ .status = .OK, .reported = theirs, .slop = slop };
+        return .{ .status = .SLOP, .reported = ours, .slop = slop };
     }
 
     /// `update <ref> <old> <new>`. Whether it let the command through.
@@ -1256,6 +1427,40 @@ fn readPushOptions(arena: Allocator, in: *Io.Reader, out: *std.ArrayList([]const
         const line = if (raw.len != 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
         try out.append(arena, try arena.dupe(u8, line));
     }
+}
+
+/// git's `prepare_push_cert_nonce`: `<stamp>-<hmac>`, the HMAC in the
+/// repository's hash keyed with `<dir>:<stamp>` over the seed, as git
+/// keys it.
+fn certNonce(gpa: Allocator, kind: hash.Kind, dir: []const u8, seed: []const u8, stamp: i64) Allocator.Error![]u8 {
+    const key = try gpa.print("{s}:{d}", .{ dir, stamp });
+    defer gpa.free(key);
+    var mac: [32]u8 = undefined;
+    const len: usize = switch (kind) {
+        .sha1 => blk: {
+            std.crypto.auth.hmac.HmacSha1.create(mac[0..20], seed, key);
+            break :blk 20;
+        },
+        .sha256 => blk: {
+            std.crypto.auth.hmac.sha2.HmacSha256.create(mac[0..32], seed, key);
+            break :blk 32;
+        },
+    };
+    return gpa.print("{d}-{x}", .{ stamp, mac[0..len] });
+}
+
+/// git's `check_cert_push_options`: the certificate's `push-option`
+/// headers are the push options sent, in order.
+fn certificateOptionsMatch(cert: []const u8, options: []const []const u8) bool {
+    if (cert.len == 0) return true;
+    var from: usize = 0;
+    var seen: usize = 0;
+    while (object.findHeader(cert, from, "push-option")) |span| {
+        if (seen >= options.len or !std.mem.eql(u8, options[seen], cert[span.start..span.end])) return false;
+        seen += 1;
+        from = span.end + 1;
+    }
+    return seen == options.len;
 }
 
 /// A packet's text without its one trailing newline, as git's reader
@@ -1494,6 +1699,92 @@ const InProcess = struct {
         c.gpa.destroy(c);
     }
 };
+
+const testremote = @import("../testing/remote.zig");
+
+test "a certificate's nonce is judged as git's check_nonce judges it: by its HMAC and age over HTTP, by itself otherwise" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .bare = true });
+    repo.deinit(io);
+    const config = try tmp.dir.readFileAlloc(io, "config", gpa, .unlimited);
+    defer gpa.free(config);
+    const with_seed = try std.mem.concat(gpa, u8, &.{ config, "[receive]\n\tcertNonceSeed = a seed\n\tcertNonceSlop = 10\n" });
+    defer gpa.free(with_seed);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = with_seed });
+    const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    var remote = try local.Remote.open(gpa, io, path, .{});
+    defer remote.deinit(io);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const who: object.Signature = .{ .name = "t", .email = "t@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
+    for ([_]bool{ true, false }) |stateless| {
+        var server: Server = try .init(gpa, io, &remote, .v0, .{ .stateless = stateless, .who = who });
+        defer server.deinit();
+        const ours = server.nonce.?;
+        try std.testing.expect(std.mem.startsWith(u8, ours, "1700000000-"));
+        const Case = struct { payload: []const u8, status: Server.NonceStatus, slop: i64 = 0, reported: []const u8 };
+        const near = try certNonce(arena, .sha1, ".", "a seed", 1_699_999_995);
+        const far = try certNonce(arena, .sha1, ".", "a seed", 1_699_999_000);
+        const forged = try certNonce(arena, .sha1, ".", "another seed", 1_699_999_995);
+        const cases = [_]Case{
+            .{ .payload = try arena.print("pusher k 1 +0000\nnonce {s}\n\n", .{ours}), .status = .OK, .reported = ours },
+            .{ .payload = "pusher k 1 +0000\n\nnonce 1-2\n", .status = .MISSING, .reported = ours },
+            .{ .payload = try arena.print("nonce {s}\n\n", .{near}), .status = if (stateless) .OK else .BAD, .slop = if (stateless) 5 else 0, .reported = if (stateless) near else ours },
+            .{ .payload = try arena.print("nonce {s}\n\n", .{far}), .status = if (stateless) .SLOP else .BAD, .slop = if (stateless) 1000 else 0, .reported = ours },
+            .{ .payload = try arena.print("nonce {s}\n\n", .{forged}), .status = .BAD, .reported = ours },
+            .{ .payload = "nonce 0170-abc\n\n", .status = .BAD, .reported = ours },
+            .{ .payload = "nonce 99999999999999999999-abc\n\n", .status = .BAD, .reported = ours },
+        };
+        for (cases) |case| {
+            const got = try server.checkNonce(arena, case.payload);
+            try std.testing.expectEqual(case.status, got.status);
+            try std.testing.expectEqual(case.slop, got.slop);
+            try std.testing.expectEqualStrings(case.reported, got.reported);
+        }
+    }
+    // The certificate's push options are the ones sent, in order; an empty
+    // certificate says nothing of them.
+    try std.testing.expect(certificateOptionsMatch("pusher k\npush-option x\npush-option y\n\npush-option z\n", &.{ "x", "y" }));
+    try std.testing.expect(!certificateOptionsMatch("push-option x\n\n", &.{ "x", "y" }));
+    try std.testing.expect(!certificateOptionsMatch("push-option y\npush-option x\n\n", &.{ "x", "y" }));
+    try std.testing.expect(!certificateOptionsMatch("push-option x\n\n", &.{}));
+    try std.testing.expect(certificateOptionsMatch("", &.{"x"}));
+}
+
+test "a push certificate's nonce is made as git 2.55's receive-pack makes it, in either object format" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_][]const u8{ "sha1", "sha256" }) |format| {
+        var root = std.testing.tmpDir(.{});
+        defer root.cleanup();
+        var env = try testremote.environ(gpa);
+        defer env.deinit();
+        const format_arg = try gpa.print("--object-format={s}", .{format});
+        defer gpa.free(format_arg);
+        const out = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "init", "-q", "--bare", format_arg, "repo.git" }, "", true);
+        gpa.free(out);
+        var repo_dir = try root.dir.openDir(io, "repo.git", .{});
+        defer repo_dir.close(io);
+        const set = try testremote.gitInputEnv(gpa, io, repo_dir, &env, &.{ "config", "receive.certNonceSeed", "a seed" }, "", true);
+        gpa.free(set);
+        // git keys the nonce with the path it was started on.
+        const advertised = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "receive-pack", "--advertise-refs", "repo.git" }, "", true);
+        defer gpa.free(advertised);
+        const start = (std.mem.find(u8, advertised, "push-cert=") orelse return error.TestUnexpectedResult) + "push-cert=".len;
+        const end = std.mem.findAnyPos(u8, advertised, start, " \n").?;
+        const theirs = advertised[start..end];
+        const dash = std.mem.findScalar(u8, theirs, '-').?;
+        const stamp: i64 = @intCast(decimal.strtol(theirs[0..dash], 10, 64).value);
+        const ours = try certNonce(gpa, if (std.mem.eql(u8, format, "sha1")) .sha1 else .sha256, "repo.git", "a seed", stamp);
+        defer gpa.free(ours);
+        try std.testing.expectEqualStrings(theirs, ours);
+    }
+}
 
 test "fuzz: whatever a client sends is answered or refused" {
     const gpa = std.testing.allocator;

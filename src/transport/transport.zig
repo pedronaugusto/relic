@@ -331,6 +331,8 @@ pub const Session = struct {
                 const conn = try receive_pack.connect(gpa, io, here, .{
                     .who = options.who orelse unknown_pusher,
                     .programs = options.programs,
+                    // The path git's receive-pack would be started on.
+                    .service_dir = parsed.path,
                 });
                 owned = false;
                 errdefer conn.deinit(io);
@@ -562,7 +564,26 @@ pub const Session = struct {
         sources: []const ?[]const u8 = &.{},
         /// For a remote helper: each command's `+`, by position.
         force: []const bool = &.{},
+        /// For a smart server: the signed certificate sent in place of the
+        /// commands (`certificateNonce`).
+        certificate: ?[]const u8 = null,
+        /// For a remote helper, which signs for itself: whether it is to.
+        push_cert: send_pack.PushCert = .never,
     };
+
+    /// What the remote says of a signed push, before one is made: a helper
+    /// is told the caller's word and signs for itself; a smart server
+    /// issues the nonce its certificate carries — `push-cert=<nonce>` —
+    /// or takes none (`null`).
+    pub const CertOffer = union(enum) { helper, nonce: ?[]const u8 };
+
+    pub fn certOffer(s: *const Session) CertOffer {
+        return switch (s.impl) {
+            .smart => |*smart| .{ .nonce = smart.advertisement.value("push-cert") },
+            .helper => .helper,
+            .local, .bundle => .{ .nonce = null },
+        };
+    }
 
     /// Send a push, reading the objects from `db`, and return the remote's
     /// report of each command.
@@ -590,6 +611,7 @@ pub const Session = struct {
                     .who = request.who,
                     .atomic = request.atomic,
                     .push_options = request.push_options,
+                    .push_cert = request.push_cert,
                 });
             },
             .smart => |*smart| {
@@ -612,6 +634,7 @@ pub const Session = struct {
                     .atomic = request.atomic,
                     .push_options = request.push_options,
                     .progress = request.progress,
+                    .certificate = request.certificate,
                 });
             },
         }
