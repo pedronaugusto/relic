@@ -317,7 +317,7 @@ const Run = struct {
             r.last = made;
             try r.replayed.put(r.gpa, walked.oid, made);
             if (setup.ref != null) continue;
-            if (decorations == null) decorations = try pretty.Decorations.load(r.gpa, r.io, r.repo, null);
+            if (decorations == null) decorations = try pretty.Decorations.load(r.gpa, r.io, r.repo, .{});
             var node = decorations.?.of(walked.oid);
             while (node) |d| : (node = d.next) {
                 if (d.kind != .local and d.kind != .head) continue;

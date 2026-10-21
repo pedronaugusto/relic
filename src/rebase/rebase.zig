@@ -942,7 +942,7 @@ fn scriptWithMerges(r: *Run, w: *Walker, s: MergesScript) Error![]todo.Item {
         defer r.gpa.free(bases);
         if (bases.len != 0) try labels.put(bases[0], "onto");
     }
-    var branches = try pretty.Decorations.load(r.gpa, r.io, r.repo, &.{ .include = &.{"refs/heads/"} });
+    var branches = try pretty.Decorations.load(r.gpa, r.io, r.repo, .{ .filter = &.{ .include = &.{"refs/heads/"} } });
     defer branches.deinit();
 
     var interesting: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;

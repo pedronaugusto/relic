@@ -356,7 +356,7 @@ const History = struct {
     fn onOriginal(h: *History, f: Finish, updates: *std.ArrayList(replay.Update)) Error!void {
         const head = try h.repo.refStore().read(h.a, h.io, "HEAD");
         const detached = if (head) |ref| ref != .symbolic else true;
-        var decorations = try pretty.Decorations.load(h.gpa, h.io, h.repo, null);
+        var decorations = try pretty.Decorations.load(h.gpa, h.io, h.repo, .{});
         defer decorations.deinit();
         var node = decorations.of(f.original);
         while (node) |d| : (node = d.next) {

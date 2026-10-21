@@ -37,7 +37,7 @@ test "a log format in colour is git log --format's: %C(...), %C(auto), the names
     try setup(io, &git);
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    var decorations = try pretty.Decorations.load(gpa, io, &repo, null);
+    var decorations = try pretty.Decorations.load(gpa, io, &repo, .{});
     defer decorations.deinit();
 
     const listed = try git.run(io, &.{ "rev-list", "--all" });
@@ -170,7 +170,7 @@ test "git log's decorations are filtered as git log filters them: the default na
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
         const filter = try pretty.Decorations.Filter.log(arena.allocator(), &config, case.given);
-        var decorations = try pretty.Decorations.load(gpa, io, &repo, &filter);
+        var decorations = try pretty.Decorations.load(gpa, io, &repo, .{ .filter = &filter });
         defer decorations.deinit();
 
         var args: std.ArrayList([]const u8) = .empty;
@@ -201,4 +201,76 @@ test "git log's decorations are filtered as git log filters them: the default na
             return err;
         };
     }
+}
+
+test "log.date and log.decorate shape a log format as they shape git log --format's" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try setup(io, &git);
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const listed = try git.run(io, &.{ "rev-list", "--all" });
+    defer gpa.free(listed);
+    const format = "%ad|%cd|%aD|%as|%d|%D";
+    const cases = [_]struct { date: ?[]const u8 = null, decorate: ?[]const u8 = null }{
+        .{},
+        .{ .date = "iso" },
+        .{ .date = "iso-strict" },
+        .{ .date = "rfc" },
+        .{ .date = "short" },
+        .{ .date = "raw" },
+        .{ .date = "unix" },
+        .{ .date = "format:%Y/%m/%d %H.%M %z" },
+        .{ .decorate = "full" },
+        .{ .decorate = "short" },
+        .{ .decorate = "false" },
+        .{ .date = "iso8601", .decorate = "full" },
+    };
+    for (cases) |case| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        var buffers: [2][]u8 = .{ &.{}, &.{} };
+        defer for (buffers) |b| gpa.free(b);
+        try text.appendSlice(gpa, "[log]\n");
+        if (case.date) |d| {
+            try text.print(gpa, "\tdate = \"{s}\"\n", .{d});
+            buffers[0] = try gpa.print("log.date={s}", .{d});
+            try args.appendSlice(gpa, &.{ "-c", buffers[0] });
+        }
+        if (case.decorate) |d| {
+            try text.print(gpa, "\tdecorate = {s}\n", .{d});
+            buffers[1] = try gpa.print("log.decorate={s}", .{d});
+            try args.appendSlice(gpa, &.{ "-c", buffers[1] });
+        }
+        try args.appendSlice(gpa, &.{ "log", "--all", "--format=" ++ format });
+        const theirs = try git.run(io, args.items);
+        defer gpa.free(theirs);
+
+        var config = try config_mod.Config.parseText(gpa, text.items, .local);
+        defer config.deinit();
+        var decorations = try pretty.Decorations.load(gpa, io, &repo, .{ .style = pretty.Decorations.configuredStyle(&config) });
+        defer decorations.deinit();
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        var ours: std.ArrayList(u8) = .empty;
+        var lines = std.mem.tokenizeScalar(u8, listed, '\n');
+        while (lines.next()) |hex| {
+            try pretty.formatCommit(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = try hash.Oid.parse(.sha1, hex), .format = format }, &ours, .{
+                .decorations = &decorations,
+                .date_mode = try pretty.configuredDateMode(&config),
+            });
+            try ours.append(arena.allocator(), '\n');
+        }
+        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+            std.debug.print("log.date {?s}, log.decorate {?s}\n", .{ case.date, case.decorate });
+            return err;
+        };
+    }
+    var bad = try config_mod.Config.parseText(gpa, "[log]\n\tdate = nonsense\n", .local);
+    defer bad.deinit();
+    try std.testing.expectError(error.InvalidDateFormat, pretty.configuredDateMode(&bad));
 }

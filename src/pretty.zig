@@ -7,6 +7,7 @@ pub const Colors = @import("pretty/pretty.zig").Colors;
 pub const Decorations = @import("pretty/pretty.zig").Decorations;
 pub const sanitizedSubject = @import("pretty/pretty.zig").sanitizedSubject;
 pub const formatCommit = @import("pretty/pretty.zig").formatCommit;
+pub const configuredDateMode = @import("pretty/pretty.zig").configuredDateMode;
 pub const Reencoded = @import("pretty/pretty.zig").Reencoded;
 pub const reencodeCommit = @import("pretty/pretty.zig").reencodeCommit;
 pub const outputEncoding = @import("pretty/pretty.zig").outputEncoding;

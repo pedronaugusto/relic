@@ -669,7 +669,7 @@ const Walk = struct {
     fn formatContext(wk: *Walk, format: []const u8) Error!pretty.Context {
         if (wk.mailmap == null and hasPlaceholder(format, "ac", "NEL")) wk.mailmap = try mailmap_mod.Mailmap.load(wk.gpa, wk.io, wk.repo);
         if (wk.decorations == null and (hasPlaceholder(format, "", "dD") or std.mem.find(u8, format, "%(decorate") != null))
-            wk.decorations = try pretty.Decorations.load(wk.gpa, wk.io, wk.repo, null);
+            wk.decorations = try pretty.Decorations.load(wk.gpa, wk.io, wk.repo, .{});
         if (wk.signer == null and hasPlaceholder(format, "", "G")) if (wk.options.programs) |programs| {
             wk.signer = try signing.Signer.init(wk.gpa, wk.io, wk.repo.configuration(), wk.repo.topDirectory(), programs);
         };

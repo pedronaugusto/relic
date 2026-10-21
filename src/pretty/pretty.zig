@@ -13,9 +13,10 @@
 //! to UTF-8 first and the output written in `Context.output_encoding`, as
 //! git's `format_commit_message` does. Colour (`%C(...)`, `%C(auto)`, the
 //! object names and decorations it paints) is written as `Context.colors`
-//! says, as a log writes it under `--color`. What needs more —
-//! `%(describe)`, relative and human dates, wrapping and padding — is
-//! refused as `error.UnsupportedPlaceholder`.
+//! says, as a log writes it under `--color`. Dates are git's `show_date`, `%ad` and
+//! `%cd` in `Context.date_mode`, a relative or human one by `Context.clock`.
+//! What needs more — `%(describe)`, wrapping and padding — is refused as
+//! `error.UnsupportedPlaceholder`.
 
 const ErrorNamespace = @This();
 const Self = @This();
@@ -31,7 +32,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const abbrev = @import("../odb/abbrev.zig");
-const mailfmt = @import("../mail/format.zig");
+const date = @import("../text.zig").date;
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
 const shallow = @import("../walk/shallow.zig");
@@ -62,7 +63,7 @@ pub const Error = error{
     /// A `%C(...)` whose colour does not parse, where git dies ("unable
     /// to parse --pretty format"). git reads it only when it writes it.
     InvalidColor,
-} || signing.Error || odb_mod.Error || object.ParseError || Allocator.Error;
+} || signing.Error || odb_mod.Error || object.ParseError || date.ShowError || Allocator.Error;
 
 /// What formatting needs besides the commit.
 pub const Context = struct {
@@ -95,6 +96,13 @@ pub const Context = struct {
     /// without: what `Colors.configured` gives. `%C(...)` writes its
     /// colour only where there are colours, unless it says `always`.
     colors: ?*const Colors = null,
+    /// How `%ad` and `%cd` show a date: `--date`, or what
+    /// `configuredDateMode` reads from `log.date`.
+    date_mode: date.Mode = .{},
+    /// The time now and the machine's zone, for a relative or human date
+    /// (`%ar`, `%ah`) or a `-local` mode. Without them such a date is
+    /// `error.DateNeedsClock`.
+    clock: date.Clock = .{},
 };
 
 /// What a log format colours with, as `git log --color` does: the
@@ -202,6 +210,7 @@ pub const Decorations = struct {
     /// The ref `HEAD` points at, written `HEAD -> <branch>` where both
     /// decorate one commit.
     head_branch: ?[]const u8 = null,
+    style: Style = .short,
 
     /// git's `decoration_type`.
     pub const Kind = enum { none, local, remote, tag, stash, head, grafted };
@@ -324,14 +333,33 @@ pub const Decorations = struct {
         }
     };
 
-    /// git's `load_ref_decorations`: every ref `filter` admits (every ref
-    /// with none, as `git archive` loads them), `HEAD` included, and the
-    /// grafts.
-    pub fn load(gpa: Allocator, io: Io, repo: *Repository, filter: ?*const Filter) LoadError!Decorations {
-        var d: Decorations = .{ .arena = .init(gpa) };
+    /// How a decoration names a ref: git's `DECORATE_SHORT_REFS`, a branch,
+    /// tag or remote-tracking branch by its short name, or
+    /// `DECORATE_FULL_REFS`, every ref whole.
+    pub const Style = enum { short, full };
+
+    /// `log.decorate`: `full` names refs whole; anything else, or nothing,
+    /// short, as git's `%d` loads them where the log shows none.
+    pub fn configuredStyle(config: *const config_mod.Config) Style {
+        const value = config.get("log.decorate") orelse return .short;
+        return if (std.mem.eql(u8, value, "full")) .full else .short;
+    }
+
+    /// What `load` reads.
+    pub const LoadOptions = struct {
+        /// The refs that decorate; `null` admits every ref, as `git
+        /// archive` loads them.
+        filter: ?*const Filter = null,
+        style: Style = .short,
+    };
+
+    /// git's `load_ref_decorations`: every ref `options.filter` admits,
+    /// `HEAD` included, and the grafts.
+    pub fn load(gpa: Allocator, io: Io, repo: *Repository, options: LoadOptions) LoadError!Decorations {
+        var d: Decorations = .{ .arena = .init(gpa), .style = options.style };
         errdefer d.deinit();
         const a = d.arena.allocator();
-        const patterns: ?Patterns = if (filter) |f| try .init(a, f) else null;
+        const patterns: ?Patterns = if (options.filter) |f| try .init(a, f) else null;
         const store = repo.refStore();
         var listing = try store.list(gpa, io, "refs/");
         defer listing.deinit();
@@ -458,14 +486,22 @@ pub const Decorations = struct {
             const own: []const u8 = if (colors) |c| c.of(n.kind) else "";
             if (prefix.len != 0) try out.print(a, "{s}{s}{s}", .{ commit, prefix, reset });
             if (opts.tag.len != 0 and n.kind == .tag) try out.print(a, "{s}{s}{s}", .{ own, opts.tag, reset });
-            try out.print(a, "{s}{s}{s}", .{ own, prettify(n.name), reset });
+            try out.print(a, "{s}{s}{s}", .{ own, d.named(n.name), reset });
             if (head_and_current) |current| if (n.kind == .head) {
                 try out.print(a, "{s}{s}{s}", .{ commit, opts.pointer, reset });
-                try out.print(a, "{s}{s}{s}", .{ if (colors) |c| c.of(current.kind) else "", prettify(current.name), reset });
+                try out.print(a, "{s}{s}{s}", .{ if (colors) |c| c.of(current.kind) else "", d.named(current.name), reset });
             };
             prefix = opts.separator;
         }
         if (opts.suffix.len != 0) try out.print(a, "{s}{s}{s}", .{ commit, opts.suffix, reset });
+    }
+
+    /// A ref's name as the style shows it.
+    fn named(d: *const Decorations, name: []const u8) []const u8 {
+        return switch (d.style) {
+            .short => prettify(name),
+            .full => name,
+        };
     }
 
     /// git's `prettify_refname`.
@@ -486,31 +522,17 @@ pub const Decorations = struct {
     };
 };
 
-const weekday_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+/// git's `show_ident_date`: `sig`'s date as `mode` shows it.
+fn showDate(a: Allocator, ctx: Context, out: *std.ArrayList(u8), sig: object.Signature, mode: date.Mode) Error!void {
+    try date.show(a, out, sig.when_secs, date.tzInt(sig.offset_minutes), mode, ctx.clock);
+}
 
-const DateMode = enum { normal, rfc2822, iso, iso_strict, short, unix };
-
-fn writeDate(a: Allocator, out: *std.ArrayList(u8), sig: object.Signature, mode: DateMode) Allocator.Error!void {
-    if (mode == .unix) {
-        try out.print(a, "{d}", .{sig.when_secs});
-        return;
-    }
-    const tz = mailfmt.tzInt(sig.offset_minutes);
-    const c = mailfmt.civil(sig.when_secs + @as(i64, sig.offset_minutes) * 60);
-    const sign: u8 = if (tz < 0) '-' else '+';
-    const abs_tz = @abs(tz);
-    switch (mode) {
-        .normal => try out.print(a, "{s} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {d} {c}{d:0>4}", .{ weekday_names[c.weekday], month_names[c.month - 1], c.day, c.hour, c.minute, c.second, c.year, sign, abs_tz }),
-        .rfc2822 => try out.print(a, "{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {c}{d:0>4}", .{ weekday_names[c.weekday], c.day, month_names[c.month - 1], c.year, c.hour, c.minute, c.second, sign, abs_tz }),
-        .iso => try out.print(a, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} {c}{d:0>4}", .{ @as(u64, @intCast(c.year)), c.month, c.day, c.hour, c.minute, c.second, sign, abs_tz }),
-        .iso_strict => {
-            try out.print(a, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(c.year)), c.month, c.day, c.hour, c.minute, c.second });
-            if (tz == 0) try out.append(a, 'Z') else try out.print(a, "{c}{d:0>2}:{d:0>2}", .{ sign, abs_tz / 100, abs_tz % 100 });
-        },
-        .short => try out.print(a, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(c.year)), c.month, c.day }),
-        .unix => unreachable,
-    }
+/// `log.date`: the mode `%ad` and `%cd` show a date in, git's default
+/// where it says nothing. A mode git does not know is
+/// `error.InvalidDateFormat`, which git dies on.
+pub fn configuredDateMode(config: *const config_mod.Config) error{InvalidDateFormat}!date.Mode {
+    const value = config.get("log.date") orelse return .{};
+    return date.Mode.parse(value) orelse error.InvalidDateFormat;
 }
 
 const Parsed = struct {
@@ -567,13 +589,15 @@ fn person(a: Allocator, ctx: Context, out: *std.ArrayList(u8), sig: object.Signa
             const at = std.mem.findScalar(u8, shown.email, '@') orelse shown.email.len;
             try out.appendSlice(a, shown.email[0..at]);
         },
-        't' => try writeDate(a, out, sig, .unix),
-        'd' => try writeDate(a, out, sig, .normal),
-        'D' => try writeDate(a, out, sig, .rfc2822),
-        'i' => try writeDate(a, out, sig, .iso),
-        'I' => try writeDate(a, out, sig, .iso_strict),
-        's' => try writeDate(a, out, sig, .short),
-        'r', 'h' => return error.UnsupportedPlaceholder,
+        // `%ad` in the mode `--date` or `log.date` says, the rest in their own.
+        'd' => try showDate(a, ctx, out, sig, ctx.date_mode),
+        't' => try showDate(a, ctx, out, sig, .{ .kind = .unix }),
+        'D' => try showDate(a, ctx, out, sig, .{ .kind = .rfc2822 }),
+        'i' => try showDate(a, ctx, out, sig, .{ .kind = .iso8601 }),
+        'I' => try showDate(a, ctx, out, sig, .{ .kind = .iso8601_strict }),
+        's' => try showDate(a, ctx, out, sig, .{ .kind = .short }),
+        'r' => try showDate(a, ctx, out, sig, .{ .kind = .relative }),
+        'h' => try showDate(a, ctx, out, sig, .{ .kind = .human }),
         else => return 0,
     }
     return 2;
@@ -988,9 +1012,9 @@ test "placeholders come out as git's do" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
-    try writeDate(arena.allocator(), &out, .{ .name = "", .email = "", .when_secs = 1700000000, .offset_minutes = 60 }, .normal);
+    try showDate(arena.allocator(), .{}, &out, .{ .name = "", .email = "", .when_secs = 1700000000, .offset_minutes = 60 }, .{});
     try std.testing.expectEqualStrings("Tue Nov 14 23:13:20 2023 +0100", out.items);
     out.clearRetainingCapacity();
-    try writeDate(arena.allocator(), &out, .{ .name = "", .email = "", .when_secs = 1700000000, .offset_minutes = 0 }, .iso_strict);
+    try showDate(arena.allocator(), .{}, &out, .{ .name = "", .email = "", .when_secs = 1700000000, .offset_minutes = 0 }, .{ .kind = .iso8601_strict });
     try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", out.items);
 }
