@@ -298,3 +298,61 @@ fn setupTracking(a: Allocator, io: Io, repo: *Repository, name: []const u8, orig
     _ = try repo.writeConfig(io, .local, edits.items, .{});
     return .{ .remote = remote_name orelse ".", .merge = sources.items, .rebase = rebase };
 }
+
+/// What `guessRemote` found.
+pub const Guess = struct {
+    /// The remote-tracking ref the new branch starts from and tracks, in
+    /// the caller's allocator; `null` when there is none to choose.
+    tracking: ?[]const u8 = null,
+    /// What `tracking` points at.
+    oid: ?Oid = null,
+    /// How many remotes have one: more than one, with none chosen, is
+    /// git's "matched multiple remote tracking branches".
+    matches: usize = 0,
+};
+
+/// git's `unique_tracking_name`, which `git checkout <name>`, `git switch
+/// <name>` and `git worktree add` (under `worktree.guessRemote`) second
+/// guess a branch no local ref has by: each remote, in the configuration's
+/// order, whose fetch refspecs map `refs/heads/<name>` to a ref that is
+/// here. One is the answer; of several, the one `checkout.defaultRemote`
+/// names; else none, `matches` saying how many there were.
+pub fn guessRemote(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!Guess {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const a = arena_instance.allocator();
+    const config = repo.configuration();
+    const default_remote = config.get("checkout.defaultremote");
+    const source = try std.mem.concat(a, u8, &.{ "refs/heads/", name });
+    const Found = struct { ref: []const u8, oid: Oid };
+    var first: ?Found = null;
+    var chosen: ?Found = null;
+    var matches: usize = 0;
+    for (try remote_mod.names(a, config)) |each| {
+        var remote = try remote_mod.Remote.get(a, config, repo.objectFormat(), each);
+        defer remote.deinit();
+        const tracking = (try remote.trackingRef(a, source)) orelse continue;
+        const resolved = (try repo.refStore().resolve(a, io, tracking)) orelse continue;
+        matches += 1;
+        if (default_remote) |wanted| if (std.mem.eql(u8, each, wanted)) {
+            chosen = .{ .ref = tracking, .oid = resolved.oid };
+        };
+        if (first == null) first = .{ .ref = tracking, .oid = resolved.oid };
+    }
+    const found = if (matches == 1) first else chosen;
+    const pick = found orelse return .{ .matches = matches };
+    return .{ .tracking = try gpa.dupe(u8, pick.ref), .oid = pick.oid, .matches = matches };
+}
+
+/// Whether a branch no local ref has is second guessed from the remotes:
+/// `checkout.guess` for `checkout` and `switch` (on unless set), and
+/// `worktree.guessRemote` for `worktree add` (off unless set).
+pub const Guessing = struct { checkout: bool, worktree: bool };
+
+/// `Guessing` as the configuration says.
+pub fn guessing(config: *const config_mod.Config) config_mod.ValueError!Guessing {
+    return .{
+        .checkout = try config.getBool("checkout.guess", true),
+        .worktree = try config.getBool("worktree.guessremote", false),
+    };
+}

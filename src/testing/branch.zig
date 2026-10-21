@@ -216,3 +216,51 @@ test "branch.<name>.mergeOptions are git merge's options under the caller's, as 
         };
     }
 }
+
+test "a branch no local ref has is guessed from the one remote that has it, or checkout.defaultRemote's, as git's checkout does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const repo_mod = @import("../repo/repo.zig");
+    const Guessed = struct { default_remote: ?[]const u8 = null, name: []const u8 };
+    for ([_]Guessed{
+        .{ .name = "only-origin" },
+        .{ .name = "both" },
+        .{ .name = "both", .default_remote = "upstream" },
+        .{ .name = "both", .default_remote = "elsewhere" },
+        .{ .name = "nowhere" },
+        .{ .name = "only-upstream" },
+    }, 0..) |case, n| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        try repo.writeFile(io, "a", "a\n");
+        try repo.exec(io, &.{ "add", "a" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+        try repo.exec(io, &.{ "remote", "add", "origin", "../origin" });
+        try repo.exec(io, &.{ "remote", "add", "upstream", "../upstream" });
+        try repo.exec(io, &.{ "config", "remote.upstream.fetch", "+refs/heads/*:refs/remotes/up/*" });
+        for ([_][]const u8{ "refs/remotes/origin/only-origin", "refs/remotes/origin/both", "refs/remotes/up/both", "refs/remotes/up/only-upstream" }) |ref| try repo.exec(io, &.{ "update-ref", ref, "HEAD" });
+        if (case.default_remote) |r| try repo.exec(io, &.{ "config", "checkout.defaultRemote", r });
+
+        var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+        defer native.deinit(io);
+        const guess = try branch.guessRemote(gpa, io, &native, case.name);
+        defer if (guess.tracking) |t| gpa.free(t);
+
+        repo.report_failures = false;
+        const checked_out = repo.exec(io, &.{ "checkout", "-q", case.name });
+        repo.report_failures = true;
+        if (checked_out) |_| {
+            const upstream = try repo.line(io, &.{ "rev-parse", "--symbolic-full-name", "@{upstream}" });
+            defer gpa.free(upstream);
+            std.testing.expectEqualStrings(upstream, guess.tracking orelse "") catch |err| {
+                std.debug.print("guess case {d}\n", .{n});
+                return err;
+            };
+        } else |_| {
+            std.testing.expect(guess.tracking == null) catch |err| {
+                std.debug.print("guess case {d}: git refused, relic chose {?s}\n", .{ n, guess.tracking });
+                return err;
+            };
+        }
+    }
+}
