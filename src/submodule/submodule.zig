@@ -1281,17 +1281,20 @@ pub fn removeFromGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *c
     return written.sections_removed != 0;
 }
 
-/// Point the `.gitmodules` section whose path is `old` at `new`: git's
-/// `update_path_in_gitmodules`. Whether it did; with no file, or no section
-/// for the path, nothing changes.
-pub fn moveInGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, old: []const u8, new: []const u8) Self.Error!bool {
+/// A submodule's path before and after a move.
+pub const PathMove = struct { old: []const u8, new: []const u8 };
+
+/// Point the `.gitmodules` section whose path is `move.old` at `move.new`:
+/// git's `update_path_in_gitmodules`. Whether it did; with no file, or no
+/// section for the path, nothing changes.
+pub fn moveInGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, move: PathMove) Self.Error!bool {
     var modules = (try gitmodulesToEdit(gpa, io, repo, index)) orelse return false;
     defer modules.deinit();
-    const module = modules.byPath(old) orelse return false;
+    const module = modules.byPath(move.old) orelse return false;
     const wt = repo.workDirectory() orelse return error.BareRepository;
     const key = try std.mem.concat(gpa, u8, &.{ "submodule.", module.name, ".path" });
     defer gpa.free(key);
-    _ = try repo.writeConfigFile(io, wt, ".gitmodules", &.{.{ .set = .{ .name = key, .value = new } }});
+    _ = try repo.writeConfigFile(io, wt, ".gitmodules", &.{.{ .set = .{ .name = key, .value = move.new } }});
     return true;
 }
 

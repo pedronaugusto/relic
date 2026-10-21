@@ -412,7 +412,7 @@ const Mover = struct {
             }
             try renamed.append(m.arena, .{ .source = item.source, .destination = item.destination });
             if (item.gitfile) |gitfile| {
-                if (try submodule.moveInGitmodules(m.gpa, io, m.repo, m.index, item.source, item.destination)) gitmodules_modified = true;
+                if (try submodule.moveInGitmodules(m.gpa, io, m.repo, m.index, .{ .old = item.source, .new = item.destination })) gitmodules_modified = true;
                 switch (gitfile) {
                     .with_git_dir => {},
                     .path => |git_dir| try submodule.connectGitDir(m.gpa, io, m.repo, item.destination, git_dir),

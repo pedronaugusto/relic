@@ -40,6 +40,7 @@ pub const Walk = @import("submodule/submodule.zig").Walk;
 pub const walk = @import("submodule/submodule.zig").walk;
 pub const gitmodulesStaged = @import("submodule/submodule.zig").gitmodulesStaged;
 pub const removeFromGitmodules = @import("submodule/submodule.zig").removeFromGitmodules;
+pub const PathMove = @import("submodule/submodule.zig").PathMove;
 pub const moveInGitmodules = @import("submodule/submodule.zig").moveInGitmodules;
 pub const gitDirOf = @import("submodule/submodule.zig").gitDirOf;
 pub const connectGitDir = @import("submodule/submodule.zig").connectGitDir;
