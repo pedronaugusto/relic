@@ -447,3 +447,45 @@ test "a path as deep as git's tree limit imports as git's does, and a deeper one
     var copy_input: Io.Reader = .fixed(both.items);
     try std.testing.expectError(error.TreeTooDeep, fast_import.import(gpa, io, &repo, &copy_input, .{ .who = who }));
 }
+
+/// How many loose objects and packs `git count-objects -v` finds.
+fn objectCounts(gpa: Allocator, io: Io, repo: *testgit.Repo) ![]u8 {
+    const counted = try repo.run(io, &.{ "count-objects", "-v" });
+    defer gpa.free(counted);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, counted, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "count:") or std.mem.startsWith(u8, line, "in-pack:") or std.mem.startsWith(u8, line, "packs:")) try out.print(gpa, "{s}\n", .{line});
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "a pack of no more objects than fastimport.unpackLimit, else transfer.unpackLimit, is written loose, as git's end_packfile unpacks it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const stream = "blob\ndata 2\na\nblob\ndata 2\nb\nblob\ndata 2\nc\n";
+    for ([_][]const []const u8{
+        &.{},
+        &.{ "fastimport.unpackLimit", "2" },
+        &.{ "fastimport.unpackLimit", "3" },
+        &.{ "fastimport.unpackLimit", "0" },
+        &.{ "transfer.unpackLimit", "2" },
+        &.{ "transfer.unpackLimit", "2", "fastimport.unpackLimit", "5" },
+    }, 0..) |settings, n| {
+        var pair: Pair = try .init(gpa, io);
+        defer pair.deinit();
+        var at: usize = 0;
+        while (at < settings.len) : (at += 2) for ([_]*testgit.Repo{ &pair.theirs, &pair.mine }) |repo| try repo.exec(io, &.{ "config", settings[at], settings[at + 1] });
+        var report = try pair.import(gpa, io, stream, &.{}, .{ .who = who });
+        defer report.deinit();
+        const want = try objectCounts(gpa, io, &pair.theirs);
+        defer gpa.free(want);
+        const got = try objectCounts(gpa, io, &pair.mine);
+        defer gpa.free(got);
+        std.testing.expectEqualStrings(want, got) catch |err| {
+            std.debug.print("unpack limit case {d}\n", .{n});
+            return err;
+        };
+    }
+}

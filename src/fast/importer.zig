@@ -10,6 +10,9 @@
 //! git keeps them, in memory, each a tree changed in place and written out
 //! at its next commit; a notes ref's fanout follows its count as git's
 //! does. At the end — and at a `checkpoint` — the objects are one pack,
+//! or loose objects when the pack holds no more than
+//! `fastimport.unpackLimit` of them (else `transfer.unpackLimit`, else
+//! 100), as git's `end_packfile` unpacks a small one;
 //! each branch is updated when the new tip contains the old one (or
 //! `force` says to), every tag is written, and the marks are saved.
 //!
@@ -24,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const config_mod = @import("../config/config.zig");
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -117,7 +121,7 @@ pub const Error = error{
     /// `object.max_tree_depth`. git's fast-import writes such a tree, which
     /// git's own walks then refuse; relic stops at the stream.
     TreeTooDeep,
-} || Allocator.Error || odb_mod.Error || refs_mod.ReadError || refs_mod.TransactionError || rev_walk.Error ||
+} || Allocator.Error || config_mod.ValueError || odb_mod.Error || refs_mod.ReadError || refs_mod.TransactionError || rev_walk.Error ||
     Io.Reader.Error || Io.Writer.Error || Io.Dir.ReadFileAllocError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError;
 
 /// How the dates in identities are written: git's `--date-format`.
@@ -354,6 +358,14 @@ const Pending = struct { type: object.Type, bytes: []u8 };
 /// the size past which it is closed so they can be read back from it.
 const pending_limit: usize = 64 << 20;
 
+/// `fastimport.unpackLimit`, else `transfer.unpackLimit`, else git's 100.
+fn unpackLimitOf(config: *const config_mod.Config) config_mod.ValueError!i64 {
+    for ([_][]const u8{ "fastimport.unpacklimit", "transfer.unpacklimit" }) |key| {
+        if (config.get(key) != null) return config.getInt(key, 100);
+    }
+    return 100;
+}
+
 const Importer = struct {
     gpa: Allocator,
     io: Io,
@@ -391,6 +403,9 @@ const Importer = struct {
     ignore_case: bool,
     quote_path: bool,
     empty_tree: Oid,
+    /// `fastimport.unpackLimit`, else `transfer.unpackLimit`, else 100: a
+    /// pack of no more objects than this is written loose.
+    unpack_limit: i64,
 
     fn init(gpa: Allocator, io: Io, repo: *Repository, input: *Io.Reader, options: Options) Error!Importer {
         const config = repo.configuration();
@@ -416,6 +431,7 @@ const Importer = struct {
             .ignore_case = config.getBool("core.ignorecase", false) catch false,
             .quote_path = config.getBool("core.quotepath", true) catch true,
             .empty_tree = hash.Hasher.object(kind, "tree", ""),
+            .unpack_limit = try unpackLimitOf(config),
         };
     }
 
@@ -1574,7 +1590,14 @@ const Importer = struct {
     fn closePack(imp: *Importer) Error!void {
         const p = imp.pack orelse return;
         imp.pack = null;
-        _ = try imp.repo.objectDatabase().finishPack(imp.io, p);
+        const db = imp.repo.objectDatabase();
+        if (p.writer.count() <= imp.unpack_limit) {
+            // git's `loosen_small_pack`: `unpack-objects` of the pack, which
+            // is then dropped. Its objects are all still here.
+            db.abortPack(imp.io, p);
+            var loose = imp.pending.valueIterator();
+            while (loose.next()) |v| _ = try db.write(imp.io, v.type, v.bytes);
+        } else _ = try db.finishPack(imp.io, p);
         var it = imp.pending.valueIterator();
         while (it.next()) |v| imp.gpa.free(v.bytes);
         imp.pending.clearRetainingCapacity();
