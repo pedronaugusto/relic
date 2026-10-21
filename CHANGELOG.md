@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-21
+
 ### Breaking
 
 - `clone.Error` has `BundleUriShallow` (`bundle_uri` with a depth, `shallow_since` or `shallow_exclude`, which git refuses together); `warning.Warning` has `bundle_uri_clone_failed` and `bundle_uri_fetch_failed`.
