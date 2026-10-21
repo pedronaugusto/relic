@@ -2290,3 +2290,69 @@ test "core.hideDotFiles and core.unsetenvvars, read on Windows as git for Window
     try std.testing.expectEqual(@as(usize, 1), with.unset.len);
     try std.testing.expectEqualStrings("PERL5LIB", with.unset[0]);
 }
+
+test "core.preferSymlinkRefs: a symbolic ref written as a link, and one git linked read as symbolic, as git's do" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var linked: [2][]u8 = undefined;
+    for (0..2, [_]bool{ true, false }) |side, by_git| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        try repo.writeFile(io, "a", "a\n");
+        try repo.exec(io, &.{ "add", "a" });
+        try repo.exec(io, &.{ "commit", "-qm", "a" });
+        try repo.exec(io, &.{ "branch", "other" });
+        try repo.exec(io, &.{ "config", "core.preferSymlinkRefs", "true" });
+        if (by_git) {
+            try repo.exec(io, &.{ "symbolic-ref", "HEAD", "refs/heads/other" });
+            // relic reads git's link as the symbolic ref it is.
+            var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+            defer native.deinit(io);
+            const head = (try native.head(io)).?;
+            defer gpa.free(head.name);
+            try std.testing.expectEqualStrings("refs/heads/other", head.name);
+        } else {
+            var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+            defer native.deinit(io);
+            var tx = native.beginRefs();
+            defer tx.deinit(io);
+            try tx.update("HEAD", .{ .symbolic = "refs/heads/other" }, .any);
+            try tx.commit(io, null);
+        }
+        var buf: [256]u8 = undefined;
+        const len = try repo.dir.readLink(io, ".git/HEAD", &buf);
+        linked[side] = try gpa.dupe(u8, buf[0..len]);
+        try std.testing.expectError(error.FileNotFound, repo.dir.access(io, ".git/HEAD.lock", .{}));
+        const status = try repo.run(io, &.{ "symbolic-ref", "HEAD" });
+        defer gpa.free(status);
+        try std.testing.expectEqualStrings("refs/heads/other\n", status);
+    }
+    defer for (linked) |l| gpa.free(l);
+    try std.testing.expectEqualStrings(linked[0], linked[1]);
+}
+
+test "core.createObject: what relic writes under either mode git reads, and a mode git does not know is refused" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{ "link", "rename" }) |mode| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        try repo.exec(io, &.{ "config", "core.createObject", mode });
+        try repo.writeFile(io, "a", "content\n");
+        const hex = try repo.line(io, &.{ "hash-object", "a" });
+        defer gpa.free(hex);
+
+        var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+        defer native.deinit(io);
+        // New: written, and readable by git.
+        _ = try native.objectDatabase().write(io, .blob, "content\n");
+        const shown = try repo.run(io, &.{ "cat-file", "-p", hex });
+        defer gpa.free(shown);
+        try std.testing.expectEqualStrings("content\n", shown);
+    }
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "config", "core.createObject", "copy" });
+    try std.testing.expectError(error.MalformedValue, repo_mod.Repository.open(gpa, io, repo.dir, .{}));
+}

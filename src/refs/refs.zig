@@ -16,6 +16,7 @@ const ErrorNamespace = @This();
 const reftable = @import("reftable/table.zig");
 /// What a ref may be named, and the names git treats apart.
 const names = @import("../names.zig").ref;
+const builtin = @import("builtin");
 const stack_engine = @import("reftable/stack/transaction.zig");
 
 const std = @import("std");
@@ -146,6 +147,7 @@ pub const Store = struct {
         state_mod.get(state).options.fsync = options.fsync;
         state_mod.get(state).locks = options.locks;
         state_mod.get(state).precompose = options.precompose_unicode;
+        state_mod.get(state).symlink_refs = options.prefer_symlink_refs;
         return .{ .state = state };
     }
 
@@ -164,6 +166,11 @@ pub const Store = struct {
         /// file name is spelled decomposed is listed under its composed
         /// name, as git's `readdir` gives it.
         precompose_unicode: bool = false,
+        /// `core.preferSymlinkRefs`, which git 2.55 keeps for the files
+        /// format and means to remove: a symbolic ref is written as a
+        /// symbolic link to its target's name, where the platform makes one
+        /// (not Windows), and read as one either way.
+        prefer_symlink_refs: bool = false,
     };
 
     /// Choose the backend and its cache once, before the store is published.
@@ -237,6 +244,12 @@ pub const Store = struct {
         state_mod.get(store.state).precompose = precompose_unicode;
     }
 
+    /// Write symbolic refs as symbolic links from here on, or not, as a
+    /// refreshed configuration's `core.preferSymlinkRefs` says.
+    pub fn configureSymlinkRefs(store: *Store, prefer: bool) void {
+        state_mod.get(store.state).symlink_refs = prefer;
+    }
+
     /// Whether loose ref names are read composed (`configureNames`).
     pub fn precomposeUnicode(store: *const Store) bool {
         return state_mod.get(store.state).precompose;
@@ -257,6 +270,7 @@ pub const Store = struct {
             .fsync = d.fsync,
             .locks = d.locks,
             .precompose_unicode = d.precompose,
+            .prefer_symlink_refs = d.symlink_refs,
         });
     }
 
@@ -343,6 +357,13 @@ pub const Store = struct {
         // further lines, of any length, after the first object name. One
         // byte past the limit says whether a symbolic ref was cut short.
         var buffer: [max_loose_ref + 1]u8 = undefined;
+        // git's `files_read_raw_ref`: a symbolic link naming a ref is that
+        // symbolic ref, as `core.preferSymlinkRefs` writes one; one that
+        // names anything else is followed.
+        if (builtin.target.os.tag != .wasi) if (dir.readLink(io, path, &buffer)) |len| {
+            const target = buffer[0..len];
+            if (std.mem.startsWith(u8, target, "refs/") and names.checkFormat(target, .{})) return .{ .symbolic = try gpa.dupe(u8, target) };
+        } else |_| {};
         const bytes = dir.readFile(io, path, &buffer) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => return null,
             else => |e| return e,
@@ -1053,6 +1074,12 @@ pub const Store = struct {
         var hex: [hash.max_hex_len]u8 = undefined;
         lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed;
         try lock.commit(io);
+    }
+
+    /// `core.preferSymlinkRefs` (`configureSymlinkRefs`), where a link can be
+    /// made: not on Windows, where git has `NO_SYMLINK_HEAD`.
+    pub fn preferSymlinkRefs(store: *const Store) bool {
+        return builtin.target.os.tag != .windows and state_mod.get(store.state).symlink_refs;
     }
 
     /// Remove `name`'s log and every entry in it, as git's
@@ -2024,6 +2051,10 @@ pub const Transaction = struct {
                     lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed;
                 },
                 .symbolic => |target| {
+                    // git's `create_ref_symlink`: the ref a link to its
+                    // target's name, its lock given up with the rest; where
+                    // no link can be made, the text after all.
+                    if (tx.store.preferSymlinkRefs() and symlinkRef(io, tx.store.dirFor(edit.name), edit.name, target)) continue;
                     lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed;
                 },
             }
@@ -3296,3 +3327,14 @@ test "the watch scopes cover every ref and HEAD move, in a linked worktree too" 
 
 /// All errors reported by this namespace.
 pub const Error = ReadError || TransactionError || LogReadError || Store.ReadLogError || Store.ExpireLogError || CreateError || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.DeleteFileError;
+
+/// git's `create_ref_symlink`: `name` in `dir` replaced by a symbolic link
+/// to `target`. Whether it was; where it was not, git falls back to the text.
+fn symlinkRef(io: Io, dir: Io.Dir, name: []const u8, target: []const u8) bool {
+    fs.deleteFile(io, dir, name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return false,
+    };
+    dir.symLink(io, target, name, .{}) catch return false;
+    return true;
+}

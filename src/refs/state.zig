@@ -29,6 +29,8 @@ pub const Data = struct {
     locks: Locks = .{},
     /// `core.precomposeUnicode` on macOS: loose ref names read composed.
     precompose: bool = false,
+    /// `core.preferSymlinkRefs`: a symbolic ref written as a symbolic link.
+    symlink_refs: bool = false,
 };
 
 /// How a store's locks behave, as the configuration says: how long a

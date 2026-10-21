@@ -298,6 +298,16 @@ const RepositoryData = struct {
 /// The `core` settings engines take, read once from a published
 /// configuration with git's defaults: what the working tree is like and how
 /// far to believe it.
+/// `core.createObject`: `rename` or `link`, git's default; anything else, a
+/// bare name among them, git's "invalid mode for object creation".
+fn createObjectOf(config: *const config_mod.Config) ErrorNamespace.Error!odb_policy.CreateObject {
+    const entry = config.find("core.createobject") orelse return .link;
+    const value = entry.value orelse return error.MalformedValue;
+    if (std.mem.eql(u8, value, "rename")) return .rename;
+    if (std.mem.eql(u8, value, "link")) return .link;
+    return error.MalformedValue;
+}
+
 /// git for Windows' `core.unsetenvvars`: its names, split at each comma as
 /// git's `do_unset_environment_variables` splits them, `PERL5LIB` unset;
 /// none outside Windows. Owned.
@@ -350,6 +360,10 @@ pub const Settings = struct {
     /// `core.lockfilePid`: each lock names its holder in a `~pid.lock`
     /// beside it while it is held.
     lockfile_pid: bool,
+    /// `core.preferSymlinkRefs`: a symbolic ref written as a symbolic link.
+    prefer_symlink_refs: bool,
+    /// `core.createObject`: how a new loose object takes its name.
+    create_object: odb_policy.CreateObject,
     /// git for Windows' `core.hideDotFiles`: what is made hidden. Read on
     /// Windows alone, as git reads it; elsewhere nothing is hidden.
     hide_dot_files: fs.HideDotFiles,
@@ -391,6 +405,8 @@ pub const Settings = struct {
             .ignore_stat = try config.getBool("core.ignorestat", false),
             .lockfile_pid = try config.getBool("core.lockfilepid", false),
             .hide_dot_files = try hideDotFilesOf(config),
+            .prefer_symlink_refs = try config.getBool("core.prefersymlinkrefs", false),
+            .create_object = try createObjectOf(config),
             .max_tree_depth = @intCast(depth),
             .protect = .{
                 .ntfs = try config.getBool("core.protectntfs", true),
@@ -864,6 +880,7 @@ pub const Repository = struct {
         odb_options.shared = repo.data().shared;
         odb_options.fsync = repo.data().fsync;
         odb_options.pid_file = repo.data().settings.lockfile_pid;
+        odb_options.create_object = repo.data().settings.create_object;
         odb_options.packing = try packingOf(repo.configuration());
         repo.data().odb = try odb_mod.Odb.open(gpa, io, repo.data().common_dir, format.kind, odb_options);
         errdefer repo.data().odb.deinit(io);
@@ -880,6 +897,7 @@ pub const Repository = struct {
             .fsync = repo.data().fsync,
             .locks = try refLocks(repo.configuration()),
             .precompose_unicode = repo.data().settings.precompose_unicode,
+            .prefer_symlink_refs = repo.data().settings.prefer_symlink_refs,
         });
         repo.data().refs_state = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
         return repo;
@@ -1640,8 +1658,10 @@ pub const Repository = struct {
         repo.refStore().configureWrites(policy.shared, policy.fsync);
         repo.refStore().configureNames(policy.settings.precompose_unicode);
         repo.refStore().configureLocks(policy.locks);
+        repo.refStore().configureSymlinkRefs(policy.settings.prefer_symlink_refs);
         repo.data().odb.configureWrites(policy.shared, policy.fsync);
         repo.data().odb.configureLockPid(policy.settings.lockfile_pid);
+        repo.data().odb.configureCreateObject(policy.settings.create_object);
         repo.data().odb.configurePacking(policy.packing);
         repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;

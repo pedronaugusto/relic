@@ -214,6 +214,12 @@ pub const Odb = struct {
         db.backendData().options.pid_file = pid_file;
     }
 
+    /// Take `mode` for every loose object from here on, as a refreshed
+    /// configuration's `core.createObject` says.
+    pub fn configureCreateObject(db: *Odb, mode: policy_mod.CreateObject) void {
+        db.backendData().options.create_object = mode;
+    }
+
     /// `core.lockfilePid`, as `configureLockPid` last said.
     pub fn lockfilePid(db: *const Odb) bool {
         return db.backendData().options.pid_file;
@@ -1206,13 +1212,7 @@ pub const Odb = struct {
             return err;
         };
 
-        // An object's name is the hash of its content, so a rename over an
-        // object that is already there replaces it with the same bytes.
-        fs.rename(io, source.dir, temp, final) catch |err| {
-            // glint-ignore: Z026 -- the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
-            source.dir.deleteFile(io, temp) catch {};
-            return err;
-        };
+        try finalizeLoose(io, source.dir, temp, final, odb.backendData().options.create_object);
         odb.noteLooseObject(oid, fan_out_made);
         odb.stats.loose_written += 1;
     }
@@ -5708,4 +5708,92 @@ test "a batch of loose objects is made durable by one flush of each directory th
     seam.reset();
     try odb.syncBatch(io);
     try std.testing.expectEqual(@as(u32, 0), seam.count(.sync_dir));
+}
+
+/// The rename of git's `finalize_object_file`: none when `final` is there
+/// already, which is then compared. `temp` goes when the rename fails.
+fn renameUnlessThere(io: Io, dir: Io.Dir, temp: []const u8, final: []const u8) Error!bool {
+    if (try fs.statAt(io, dir, final) != null) return false;
+    fs.rename(io, dir, temp, final) catch |err| {
+        dir.deleteFile(io, temp) catch |e| std.log.warn("unable to unlink '{s}': {t}", .{ temp, e });
+        return err;
+    };
+    return true;
+}
+
+/// git's `check_collision`: whether two files hold the same bytes, or the
+/// second went while they were read.
+fn sameObjectFile(io: Io, dir: Io.Dir, a: []const u8, b: []const u8) Error!enum { same, differs, vanished } {
+    var first = try dir.openFile(io, a, .{});
+    defer first.close(io);
+    var second = dir.openFile(io, b, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .vanished,
+        else => |e| return e,
+    };
+    defer second.close(io);
+    var buf_a: [4096]u8 = undefined;
+    var buf_b: [4096]u8 = undefined;
+    var reader_a = first.reader(io, &.{});
+    var reader_b = second.reader(io, &.{});
+    while (true) {
+        const n_a = try reader_a.interface.readSliceShort(&buf_a);
+        const n_b = try reader_b.interface.readSliceShort(&buf_b);
+        if (n_a != n_b or !std.mem.eql(u8, buf_a[0..n_a], buf_b[0..n_b])) return .differs;
+        if (n_a < buf_a.len) return .same;
+    }
+}
+
+/// git's `finalize_object_file`: `temp` given the name `final` as
+/// `core.createObject` says -- linked, or where no link can be made renamed,
+/// or renamed -- and where an object is there already, kept: the two files
+/// compared, `temp` removed when they are the same and
+/// `error.LooseObjectDiffers` when not, `temp` left for `gc`.
+fn finalizeLoose(io: Io, dir: Io.Dir, temp: []const u8, final: []const u8, mode: policy_mod.CreateObject) Error!void {
+    var retries: u8 = 0;
+    while (true) : (retries += 1) {
+        const placed = switch (mode) {
+            .link => if (fs.hardLink(io, dir, temp, final)) |_| blk: {
+                dir.deleteFile(io, temp) catch |err| std.log.warn("unable to unlink '{s}': {t}", .{ temp, err });
+                break :blk true;
+            } else |err| switch (err) {
+                error.PathAlreadyExists => false,
+                // git's fallback for a filesystem with no links.
+                else => try renameUnlessThere(io, dir, temp, final),
+            },
+            .rename => try renameUnlessThere(io, dir, temp, final),
+        };
+        if (placed) return;
+        switch (try sameObjectFile(io, dir, temp, final)) {
+            .same => {
+                dir.deleteFile(io, temp) catch |err| std.log.warn("unable to unlink '{s}': {t}", .{ temp, err });
+                return;
+            },
+            .vanished => if (retries >= 5) return error.LooseObjectVanishing,
+            .differs => return error.LooseObjectDiffers,
+        }
+    }
+}
+
+test "a loose object takes its name as core.createObject says, and one already there is kept and compared" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_]policy_mod.CreateObject{ .link, .rename }) |mode| {
+        // New: in place, the temporary gone.
+        try tmp.dir.writeFile(io, .{ .sub_path = "tmp", .data = "bytes" });
+        try finalizeLoose(io, tmp.dir, "tmp", "obj", mode);
+        var buf: [32]u8 = undefined;
+        try std.testing.expectEqualStrings("bytes", try tmp.dir.readFile(io, "obj", &buf));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "tmp", .{}));
+        // There already with the same bytes: kept, the temporary gone.
+        try tmp.dir.writeFile(io, .{ .sub_path = "tmp", .data = "bytes" });
+        try finalizeLoose(io, tmp.dir, "tmp", "obj", mode);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "tmp", .{}));
+        // There already with other bytes: kept, and refused.
+        try tmp.dir.writeFile(io, .{ .sub_path = "tmp", .data = "other" });
+        try std.testing.expectError(error.LooseObjectDiffers, finalizeLoose(io, tmp.dir, "tmp", "obj", mode));
+        try std.testing.expectEqualStrings("bytes", try tmp.dir.readFile(io, "obj", &buf));
+        try tmp.dir.deleteFile(io, "tmp");
+        try tmp.dir.deleteFile(io, "obj");
+    }
 }

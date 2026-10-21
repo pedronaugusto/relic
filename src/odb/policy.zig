@@ -75,6 +75,11 @@ pub const Options = struct {
     /// multi-pack index, its commit graph -- names its holder in a
     /// `~pid.lock` beside it.
     pid_file: bool = false,
+    /// `core.createObject`: how a new loose object takes its name -- a
+    /// hard link, git's default, falling back to a rename where the
+    /// filesystem makes none, or a rename. Either way an object already
+    /// there is kept and compared, never replaced.
+    create_object: CreateObject = .link,
     /// What the configuration says packs and loose objects are written
     /// with, and whether a multi-pack index is read.
     packing: Packing = .{},
@@ -97,6 +102,9 @@ pub const Packing = struct {
     /// `core.multiPackIndex`: off, no multi-pack index is read.
     multi_pack_index: bool = true,
 };
+
+/// `core.createObject`'s two ways.
+pub const CreateObject = enum { link, rename };
 
 /// Errors from the object database.
 pub const Error = error{
@@ -123,6 +131,13 @@ pub const Error = error{
     InvalidAlternatePath,
     /// Adding a path would pass the supported alternates-file size.
     AlternatesTooLarge,
+    /// A loose object already there whose file is not the one just written
+    /// for the same name: git's "files differ in contents", the check
+    /// that keeps a colliding object from replacing the one a name had.
+    LooseObjectDiffers,
+    /// The object already there kept vanishing while it was compared: git's
+    /// "unable to write repeatedly vanishing file".
+    LooseObjectVanishing,
 } || pack.Error || pack.WriteError || object.HeaderParseError ||
     object.ParseError || object.TreeParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
