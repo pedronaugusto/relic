@@ -2232,7 +2232,7 @@ pub const Client = struct {
                 if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, helper_path, '\\', '/');
                 session = .forCertificate(c.gpa, helper_path);
                 const s = &session.?;
-                if (try s.fill(io, c.credentialOptions())) passphrase = s.password;
+                if (try s.fill(io, c.credentialOptions())) passphrase = s.exposePassword();
             }
         }
         const auth = client_cert.load(c.gpa, io, files, .{ .arena = arena, .passphrase = passphrase }) catch |err| {

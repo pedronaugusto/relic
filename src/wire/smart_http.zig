@@ -569,7 +569,7 @@ const Http = struct {
         if (ask) {
             session_slot.* = .forCertificate(h.gpa, files.cert);
             const session = &session_slot.*.?;
-            if (try session.fill(h.io, h.credentialOptions())) passphrase = session.password;
+            if (try session.fill(h.io, h.credentialOptions())) passphrase = session.exposePassword();
         }
         return client_cert.load(h.gpa, h.io, files, .{ .arena = h.arena.allocator(), .passphrase = passphrase }) catch |err| {
             // Git for Windows leaves the helper's certificate passphrase in
@@ -667,7 +667,7 @@ const Http = struct {
             }
             proxy.credential = .{
                 .user = try arena.dupe(u8, session.username orelse ""),
-                .password = try arena.dupe(u8, session.password orelse ""),
+                .password = try arena.dupe(u8, session.exposePassword() orelse ""),
                 .method = method,
             };
         }

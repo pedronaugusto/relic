@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `transport.credential.Session` holds its secrets (`password`, `credential`, `oauth_refresh_token` and the `Authorization` header it makes) in aegis's `SecretBytes`, which wipes them when let go and refuses to format them; `Session.exposePassword()` hands the password on, explicitly. A prompt's answer is wiped as it is let go, and the `Basic` header's plain `user:password` lives in one such owner while it is encoded. relic depends on aegis 0.1.14 itself.
 - `warning.Warning` has `advertised_bundles_failed` and `bundle_uri` (git's words on the way through a bundle URI: a download that failed, a file that is neither a bundle nor a list, a `creationToken` that does not parse, a recursion past four lists, a server's list that does not read).
 - `commit.Error` and `rebase.Error` take `notes.Error`, with its new `InvalidRewriteSetting`; `warning.Warning` has `notes`.
 

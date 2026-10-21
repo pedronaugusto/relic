@@ -30,6 +30,8 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
+const SecretBytes = aegis.SecretBytes;
 const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const urlmatch = @import("../text.zig").urlmatch;
@@ -140,12 +142,13 @@ pub const Session = struct {
     host: ?[]u8 = null,
     path: ?[]u8 = null,
     username: ?[]u8 = null,
-    password: ?[]u8 = null,
+    /// The secrets, each in an owner that wipes its bytes when let go.
+    password: ?SecretBytes = null,
     /// `authtype` and `credential`, from a helper that announced the
     /// `authtype` capability.
     authtype: ?[]u8 = null,
-    credential: ?[]u8 = null,
-    oauth_refresh_token: ?[]u8 = null,
+    credential: ?SecretBytes = null,
+    oauth_refresh_token: ?SecretBytes = null,
     password_expiry_utc: u64 = no_expiry,
     ephemeral: bool = false,
     /// A helper answered `continue=1`: a refusal of this credential is the
@@ -168,7 +171,8 @@ pub const Session = struct {
     challenges: std.ArrayList([]u8) = .empty,
     /// The `credential.*` settings, read once: git's `configured`.
     settings: ?Settings = null,
-    header: ?[]u8 = null,
+    /// The `Authorization` header's value, made from the secrets.
+    header: ?SecretBytes = null,
     initialised: bool = false,
     /// The URL's parts hold a newline: nothing is filled for it.
     unsafe_url: bool = false,
@@ -238,6 +242,23 @@ pub const Session = struct {
         }
     }
 
+    /// Let a secret go, wiping its bytes.
+    fn wipe(slot: *?SecretBytes) void {
+        if (slot.*) |*secret| secret.deinit();
+        slot.* = null;
+    }
+
+    /// A secret's bytes, borrowed until it is let go or replaced.
+    fn reveal(slot: *const ?SecretBytes) ?[]const u8 {
+        return if (slot.*) |*secret| secret.expose() else null;
+    }
+
+    /// The password, for a caller that hands it on: a key's passphrase,
+    /// git-lfs's `credential fill` answer.
+    pub fn exposePassword(s: *const Session) ?[]const u8 {
+        return reveal(&s.password);
+    }
+
     fn freeList(gpa: Allocator, list: *std.ArrayList([]u8)) void {
         for (list.items) |v| gpa.free(v);
         list.clearRetainingCapacity();
@@ -245,12 +266,9 @@ pub const Session = struct {
 
     /// git's `credential_clear_secrets`.
     fn clearSecrets(s: *Session) void {
-        secretFree(s.gpa, s.password);
-        secretFree(s.gpa, s.credential);
-        secretFree(s.gpa, s.header);
-        s.password = null;
-        s.credential = null;
-        s.header = null;
+        wipe(&s.password);
+        wipe(&s.credential);
+        wipe(&s.header);
     }
 
     /// git's `credential_clear`: every part, setting and capability, as
@@ -261,8 +279,7 @@ pub const Session = struct {
             if (@field(s, name)) |v| s.gpa.free(v);
             @field(s, name) = null;
         }
-        secretFree(s.gpa, s.oauth_refresh_token);
-        s.oauth_refresh_token = null;
+        wipe(&s.oauth_refresh_token);
         if (s.settings) |*settings| settings.deinit(s.gpa);
         s.settings = null;
         freeList(s.gpa, &s.challenges);
@@ -340,7 +357,7 @@ pub const Session = struct {
         s.host = parts.host;
         s.path = parts.path;
         s.username = parts.username;
-        s.password = parts.password;
+        s.password = if (parts.password) |p| adopted(s.gpa, p) else null;
         s.username_from_url = parts.username_from_url;
     }
 
@@ -353,28 +370,28 @@ pub const Session = struct {
     /// `Basic` over the username and password.
     pub fn authorization(s: *Session) ?[]const u8 {
         s.fromOrigin() catch return null;
-        if (s.header) |h| return h;
-        if (s.authtype) |kind| if (s.credential) |value| {
-            s.header = s.gpa.print("{s} {s}", .{ kind, value }) catch return null;
-            return s.header;
+        if (reveal(&s.header)) |h| return h;
+        if (s.authtype) |kind| if (reveal(&s.credential)) |value| {
+            s.header = adopted(s.gpa, s.gpa.print("{s} {s}", .{ kind, value }) catch return null);
+            return reveal(&s.header);
         };
         const user = s.username orelse return null;
-        const password = s.password orelse return null;
+        const password = reveal(&s.password) orelse return null;
         const encoder = std.base64.standard.Encoder;
         const plain_len = user.len + 1 + password.len;
-        const plain = s.gpa.alloc(u8, plain_len) catch return null;
-        defer {
-            std.crypto.secureZero(u8, plain);
-            s.gpa.free(plain);
-        }
+        var plain_secret = SecretBytes.init(s.gpa, plain_len) catch return null;
+        defer plain_secret.deinit();
+        // unreachable: the owner was made with exactly this capacity.
+        plain_secret.resizeWithinCapacity(plain_len) catch unreachable;
+        const plain = plain_secret.exposeMut();
         @memcpy(plain[0..user.len], user);
         plain[user.len] = ':';
         @memcpy(plain[user.len + 1 ..], password);
         const header = s.gpa.alloc(u8, "Basic ".len + encoder.calcSize(plain_len)) catch return null;
         @memcpy(header[0.."Basic ".len], "Basic ");
         _ = encoder.encode(header["Basic ".len..], plain);
-        s.header = header;
-        return header;
+        s.header = adopted(s.gpa, header);
+        return reveal(&s.header);
     }
 
     /// Whether a credential is in hand before any helper was asked: the
@@ -396,8 +413,7 @@ pub const Session = struct {
     /// known; `false` means the person was asked and declined.
     pub fn fill(s: *Session, io: Io, opts: Options) Self.Error!bool {
         try s.fromOrigin();
-        secretFree(s.gpa, s.header);
-        s.header = null;
+        wipe(&s.header);
         if (s.hasCredential()) return true;
         s.nextState();
         s.multistage = false;
@@ -445,7 +461,7 @@ pub const Session = struct {
         }
         if (s.password == null) {
             const prompt = try s.promptText(arena, "Password");
-            s.password = try s.ask(io, opts, .password, prompt) orelse return false;
+            s.password = adopted(s.gpa, try s.ask(io, opts, .password, prompt) orelse return false);
         }
         s.source = .prompt;
         return true;
@@ -522,8 +538,7 @@ pub const Session = struct {
         s.clearSecrets();
         if (s.username) |u| s.gpa.free(u);
         s.username = null;
-        secretFree(s.gpa, s.oauth_refresh_token);
-        s.oauth_refresh_token = null;
+        wipe(&s.oauth_refresh_token);
         s.password_expiry_utc = no_expiry;
         s.approved = false;
         s.source = .none;
@@ -659,15 +674,15 @@ pub const Session = struct {
         if (state) try w.item("capability[]", "state");
         if (authtype) {
             try w.optional("authtype", s.authtype);
-            try w.optional("credential", s.credential);
+            try w.optional("credential", reveal(&s.credential));
             if (s.ephemeral) try w.item("ephemeral", "1");
         }
         try w.item("protocol", s.protocol.?);
         try w.item("host", s.host.?);
         try w.optional("path", s.path);
         try w.optional("username", s.username);
-        try w.optional("password", s.password);
-        try w.optional("oauth_refresh_token", s.oauth_refresh_token);
+        try w.optional("password", reveal(&s.password));
+        try w.optional("oauth_refresh_token", reveal(&s.oauth_refresh_token));
         if (s.password_expiry_utc != no_expiry) {
             var buf: [24]u8 = undefined;
             // unreachable: a u64 is at most 20 digits.
@@ -768,21 +783,21 @@ pub const Session = struct {
             const key = c_line[0..eq];
             const value = c_line[eq + 1 ..];
             if (std.mem.eql(u8, key, "username")) {
-                try replace(s.gpa, &s.username, value, false);
+                try replace(s.gpa, &s.username, value);
                 s.username_from_url = true;
                 any = true;
             } else if (std.mem.eql(u8, key, "password")) {
-                try replace(s.gpa, &s.password, value, true);
+                try replaceSecret(s.gpa, &s.password, value);
                 any = true;
             } else if (std.mem.eql(u8, key, "credential")) {
-                try replace(s.gpa, &s.credential, value, true);
+                try replaceSecret(s.gpa, &s.credential, value);
                 any = true;
             } else if (std.mem.eql(u8, key, "protocol")) {
-                try replace(s.gpa, &s.protocol, value, false);
+                try replace(s.gpa, &s.protocol, value);
             } else if (std.mem.eql(u8, key, "host")) {
-                try replace(s.gpa, &s.host, value, false);
+                try replace(s.gpa, &s.host, value);
             } else if (std.mem.eql(u8, key, "path")) {
-                try replace(s.gpa, &s.path, value, false);
+                try replace(s.gpa, &s.path, value);
             } else if (std.mem.eql(u8, key, "ephemeral")) {
                 s.ephemeral = try answerBool(value);
             } else if (std.mem.eql(u8, key, "wwwauth[]")) {
@@ -802,9 +817,9 @@ pub const Session = struct {
                 const expiry: u64 = @intCast(read.value);
                 s.password_expiry_utc = if (read.overflow or expiry == 0) no_expiry else expiry;
             } else if (std.mem.eql(u8, key, "oauth_refresh_token")) {
-                try replace(s.gpa, &s.oauth_refresh_token, value, true);
+                try replaceSecret(s.gpa, &s.oauth_refresh_token, value);
             } else if (std.mem.eql(u8, key, "authtype")) {
-                try replace(s.gpa, &s.authtype, value, false);
+                try replace(s.gpa, &s.authtype, value);
             } else if (std.mem.eql(u8, key, "url")) {
                 // git's `credential_from_url`: the credential starts over.
                 s.takeUrl(value) catch |err| switch (err) {
@@ -832,7 +847,7 @@ pub const Session = struct {
         s.prompted = true;
         const answer = try ask_fn(s.gpa, p.context, field, prompt);
         const owned = answer orelse return null;
-        defer s.gpa.free(owned);
+        defer secretFree(s.gpa, owned);
         const copy = try s.gpa.dupe(u8, owned);
         return copy;
     }
@@ -874,10 +889,25 @@ pub const Session = struct {
     }
 };
 
-fn replace(gpa: Allocator, slot: *?[]u8, value: []const u8, secret: bool) Allocator.Error!void {
+fn replace(gpa: Allocator, slot: *?[]u8, value: []const u8) Allocator.Error!void {
     const owned = try gpa.dupe(u8, value);
-    if (secret) Session.secretFree(gpa, slot.*) else if (slot.*) |old| gpa.free(old);
+    if (slot.*) |old| gpa.free(old);
     slot.* = owned;
+}
+
+/// `replace` for a secret: the old one wiped as it goes.
+fn replaceSecret(gpa: Allocator, slot: *?SecretBytes, value: []const u8) Allocator.Error!void {
+    var fresh = try SecretBytes.init(gpa, value.len);
+    // unreachable: a new allocation of the value's length, apart from it.
+    fresh.replace(value) catch unreachable;
+    if (slot.*) |*old| old.deinit();
+    slot.* = fresh;
+}
+
+/// An allocation of `gpa`'s, whole, owned as a secret from here on.
+fn adopted(gpa: Allocator, bytes: []u8) SecretBytes {
+    // unreachable: the live length is the allocation's own.
+    return SecretBytes.adopt(gpa, bytes, bytes.len) catch unreachable;
 }
 
 fn appendOwned(gpa: Allocator, list: *std.ArrayList([]u8), value: []const u8) Allocator.Error!void {
@@ -939,7 +969,7 @@ const Settings = struct {
             grown[grown.len - 1] = owned;
             settings.helpers = grown;
         } else if (std.ascii.eqlIgnoreCase(name, "username")) {
-            if (!s.username_from_url) try replace(gpa, &s.username, value, false);
+            if (!s.username_from_url) try replace(gpa, &s.username, value);
         } else if (std.ascii.eqlIgnoreCase(name, "usehttppath")) {
             settings.use_http_path = try settingBool(value);
         } else if (std.ascii.eqlIgnoreCase(name, "sanitizeprompt")) {
@@ -1188,8 +1218,8 @@ test "a value with a newline is never written to a helper, nor one with a carria
             defer session.deinit();
             try session.fromOrigin();
             try session.configure(with);
-            try replace(testing.allocator, &session.path, case.path, false);
-            if (case.username) |u| try replace(testing.allocator, &session.username, u, false);
+            try replace(testing.allocator, &session.path, case.path);
+            if (case.username) |u| try replace(testing.allocator, &session.username, u);
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(testing.allocator);
             if (with != null and case.cr) {
@@ -1219,7 +1249,7 @@ test "a helper's answer is read a line at a time, to an empty line or one with n
     try session.fromOrigin();
     try testing.expect(try session.readAnswer("username=a\x00b\npassword=p\r\r\nbroken\nhost=other\n"));
     try testing.expectEqualStrings("a", session.username.?);
-    try testing.expectEqualStrings("p\r", session.password.?);
+    try testing.expectEqualStrings("p\r", session.exposePassword().?);
     try testing.expectEqualStrings("h", session.host.?);
     try testing.expectError(error.InvalidCredentialAnswer, session.readAnswer("quit=maybe\n"));
     _ = try session.readAnswer("password_expiry_utc=-1\n");

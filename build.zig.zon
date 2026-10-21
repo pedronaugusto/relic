@@ -2,6 +2,11 @@
     .name = .relic,
     .version = "0.27.0",
     .dependencies = .{
+        .aegis = .{
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.14#5852ab956e97a47926af73abbb7dced5361f9267",
+            .hash = "aegis-0.1.14-rsxouiwFCACpt6FVOECFUhpjUaetlNneWpaDTj95q514",
+        },
+
         .conduit = .{
             .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.9.3#9478e91d80cf10453da73dea0d36d73d3cf9cb4a",
             .hash = "conduit-0.9.3-4rIA7_ftFABg9VCm81kwvwuJdKa5rI39Hro8KisDbj0b",

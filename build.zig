@@ -2,15 +2,15 @@ const std = @import("std");
 /// airlock's build, for its test seam and the aegis it is built on.
 const airlock_build = @import("airlock");
 
-/// What a project that depends on relic builds: the `relic` module, on conduit,
-/// sweep, parallax, airlock, warp and xenoglyph, and with `http` (the default) uplink,
+/// What a project that depends on relic builds: the `relic` module, on aegis,
+/// conduit, sweep, parallax, airlock, warp and xenoglyph, and with `http` (the default) uplink,
 /// cloak and strand. The tests, examples, benchmarks and gate are `dev`'s.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
-    // The module. Conduit runs programs and carries its platform linkage;
+    // The module. aegis owns its secrets; conduit runs programs and carries its platform linkage;
     // command preparation and the permission to run remain here. sweep
     // matches git's globs, parallax diffs and merges lines, warp compresses,
     // airlock makes writes durable and xenoglyph composes the names macOS
@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
 }
 
 /// What the `relic` module imports, from `p`, relic's own build, for `target`
-/// and `optimize`: conduit, sweep, parallax, airlock, warp and xenoglyph, the
+/// and `optimize`: aegis, conduit, sweep, parallax, airlock, warp and xenoglyph, the
 /// `relic_options` that say whether `http` is on, and with it uplink, cloak
 /// and strand, each once the build has fetched it. The tests and the
 /// benchmarks build their roots on the same.
@@ -42,7 +42,7 @@ fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const features = p.addOptions();
     features.addOption(bool, "http", http);
     var imports: std.ArrayList(std.Build.Module.Import) = .empty;
-    for ([_][]const u8{ "conduit", "sweep", "parallax", "airlock", "warp", "xenoglyph" }) |name| {
+    for ([_][]const u8{ "aegis", "conduit", "sweep", "parallax", "airlock", "warp", "xenoglyph" }) |name| {
         imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
     }
     imports.append(p.allocator, .{ .name = "relic_options", .module = features.createModule() }) catch @panic("out of memory");
@@ -349,8 +349,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         },
     });
     // A project that depends on relic by path with `.http = false`: the
-    // build a consumer gets, with conduit, sweep, parallax, airlock, warp and
-    // xenoglyph to fetch, and aegis and reactor beneath them, and none of uplink,
+    // build a consumer gets, with aegis, conduit, sweep, parallax, airlock, warp and
+    // xenoglyph to fetch, and reactor beneath them, and none of uplink,
     // cloak and strand. Its program names the entry points that may speak
     // HTTP, so each must compile without them.
     const conduit_dependency = p.dependency("conduit", .{ .target = target, .optimize = optimize });
@@ -359,8 +359,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         .program = p.path("ci/consumer.zig"),
         .packages = &.{
             conduit_dependency,
-            // The aegis and reactor conduit was built with are its own to pin.
-            conduit_dependency.builder.dependency("aegis", .{}),
+            p.dependency("aegis", .{}),
+            // The reactor conduit was built with is its own to pin.
             conduit_dependency.builder.dependency("reactor", .{}),
             p.dependency("sweep", .{}),
             p.dependency("parallax", .{}),
