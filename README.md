@@ -630,6 +630,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `worktree.snapshot` | `Store`, `capture`, `adoptTree`, `restore`, `diff`: working trees whose complete Git object closure belongs to a private store. |
 | `worktree.renames` | `find`, `configured`: the renames `git status` finds among the staged changes, through diff's rename detection, and what `status.renames` asks for. |
 | `worktree.remove` | `git rm`: the index entries a pathspec names removed, and their files and submodules, after git's check for what the removal would lose. |
+| `worktree.move` | `git mv`: files, directories and submodules renamed in the working tree and the index together, after git's checks of every source. |
 | `worktree.sparse` | Module within `worktree`. |
 | `worktree.ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
 | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |

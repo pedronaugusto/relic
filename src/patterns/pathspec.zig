@@ -294,7 +294,7 @@ fn matchItem(item: Item, name: []const u8, is_dir: bool) bool {
 /// The path with `.` and empty components gone and `..` taken back, a
 /// trailing `/` kept: git's `normalize_path_copy`, so `.` names the whole
 /// tree and `./src/` names `src/`.
-fn normalize(a: Allocator, path: []const u8) Error![]u8 {
+pub fn normalize(a: Allocator, path: []const u8) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {

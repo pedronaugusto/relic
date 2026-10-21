@@ -34,7 +34,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "fast", .patterns = &.{ "src/fast.zig", "src/fast/**" } },
     .{ .name = "transport", .patterns = &.{"src/transport/**"} },
     .{ .name = "submodule", .patterns = &.{"src/submodule/**"} },
-    .{ .name = "stage", .patterns = &.{"src/stage/**"} },
+    .{ .name = "stage", .patterns = &.{ "src/stage/**", "src/stage.zig" } },
     .{ .name = "archive", .patterns = &.{"src/archive.zig"} },
     .{ .name = "clean", .patterns = &.{"src/clean.zig"} },
     .{ .name = "grep", .patterns = &.{"src/grep.zig"} },

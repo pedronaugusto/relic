@@ -11,9 +11,9 @@ const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
 const repo_mod = @import("../repo/repo.zig");
 const checkout = @import("../checkout/checkout.zig");
+const sparse_index = @import("../index/sparse_index.zig");
 const pathspec_mod = @import("../patterns.zig").pathspec;
 const submodule = @import("../submodule/submodule.zig");
-const config_write = @import("../config/write.zig");
 const Repository = repo_mod.Repository;
 
 /// What `remove` is asked: `git rm`'s options.
@@ -66,7 +66,7 @@ pub const Outcome = struct {
 
 /// Failures of `remove`.
 pub const Error = repo_mod.Error || Repository.LockIndexError || Repository.WriteIndexError || checkout.Error || pathspec_mod.Error ||
-    submodule.Error || config_write.Error || Io.Dir.DeleteTreeError || Io.Dir.DeleteFileError || error{
+    submodule.Error || sparse_index.Error || Io.Dir.DeleteTreeError || Io.Dir.DeleteFileError || error{
     /// No pathspec: git's "No pathspec was given".
     NoPathspec,
     /// A pathspec that names no entry, without `ignore_unmatch`: git's
@@ -97,6 +97,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     var locked = try repo.lockIndex(io);
     defer locked.deinit(io);
     const index = &locked.index;
+    try sparse_index.expand(gpa, io, index, repo.objectDatabase(), null);
     const wt = repo.workDirectory();
 
     // Every entry the pathspec names, once a path.
@@ -138,10 +139,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     const head_tree = try repo.headTree(io);
     var status: ?checkout.Status = null;
     defer if (status) |*s| s.deinit();
-    const needs_status = !options.force or for (picked.items) |p| {
-        if (p.gitlink) break true;
-    } else false;
-    if (needs_status) if (wt) |work| {
+    if (!options.force) if (wt) |work| {
         var probe = try submodule.StatusProbe.init(gpa, io, repo, index, options.submodules);
         defer probe.deinit();
         status = try checkout.status(gpa, io, work, .{ .index = index, .db = repo.objectDatabase() }, .{
@@ -151,9 +149,8 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
             .submodules = probe.probe(),
         });
     };
-    // `is_staging_gitmodules_ok`.
     for (picked.items) |p| if (p.gitlink) {
-        if (status) |*s| if (s.find(".gitmodules")) |gm| if (gm.unstaged != .unmodified) return error.GitmodulesNotStaged;
+        if (!try submodule.gitmodulesStaged(gpa, io, repo, index)) return error.GitmodulesNotStaged;
         break;
     };
 
@@ -163,6 +160,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     var removed: std.ArrayList([]const u8) = .empty;
     for (picked.items) |p| {
         try removed.append(arena, try arena.dupe(u8, p.path));
+        if (index.cache_tree) |*tree| tree.invalidate(p.path);
         _ = index.remove(p.path);
     }
     outcome.removed = removed.items;
@@ -175,7 +173,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
             if (p.gitlink) {
                 work.deleteTree(io, path) catch |err| return err;
                 any_removed = true;
-                if (try dropGitmodulesSection(gpa, io, repo, work, path)) gitmodules_changed = true;
+                if (try submodule.removeFromGitmodules(gpa, io, repo, index, path)) gitmodules_changed = true;
                 continue;
             }
             if (removePath(io, work, path)) {
@@ -262,17 +260,4 @@ fn removePath(io: Io, work: Io.Dir, path: []const u8) bool {
         work.deleteDir(io, d) catch break;
     }
     return true;
-}
-
-/// `remove_path_from_gitmodules`: the `submodule.<name>` section whose
-/// path is `path` taken out of `.gitmodules`. Whether it was.
-fn dropGitmodulesSection(gpa: Allocator, io: Io, repo: *Repository, work: Io.Dir, path: []const u8) Self.Error!bool {
-    work.access(io, ".gitmodules", .{}) catch return false;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    var modules = try submodule.loadGitmodules(gpa, io, repo, &index);
-    defer modules.deinit();
-    const name = (modules.byPath(path) orelse return false).name;
-    const outcome = try config_write.editFile(gpa, io, work, ".gitmodules", .local, .umask, &.{.{ .remove_section = .{ .section = "submodule", .subsection = name } }});
-    return outcome.sections_removed != 0;
 }

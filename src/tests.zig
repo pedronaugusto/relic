@@ -88,6 +88,8 @@ test {
         _ = @import("maintenance/run_test.zig");
         _ = @import("stage/remove.zig");
         _ = @import("stage/remove_test.zig");
+        _ = @import("stage/move.zig");
+        _ = @import("stage/move_test.zig");
         _ = @import("checkout/checkout_test.zig");
         _ = @import("repo/repo_test.zig");
         _ = @import("testing/concurrency.zig");

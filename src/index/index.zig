@@ -1378,6 +1378,31 @@ pub const Index = struct {
         return removed;
     }
 
+    /// Move the stage-0 entry at `from` to `to`, whole, as git's
+    /// `rename_index_entry_at` does, and drop what it would collide with
+    /// there, as `add_index_entry` replacing does: `to` at every stage, the
+    /// entries under `to/`, and one for a directory above `to`. The cache
+    /// tree forgets both paths. `false` when `from` has no stage-0 entry.
+    pub fn rename(index: *Index, from: []const u8, to: []const u8) Allocator.Error!bool {
+        const found = index.find(from) orelse return false;
+        var moved = found.*;
+        moved.path = to;
+        if (index.cache_tree) |*tree| {
+            tree.invalidate(from);
+            tree.invalidate(to);
+        }
+        _ = index.remove(from);
+        _ = index.remove(to);
+        _ = try index.removeDirectory(to);
+        var above = to;
+        while (std.mem.findScalarLast(u8, above, '/')) |slash| {
+            above = above[0..slash];
+            _ = index.remove(above);
+        }
+        try index.add(moved);
+        return true;
+    }
+
     /// Remove every entry under the directory `dir`. Returns how many went.
     pub fn removeDirectory(index: *Index, dir: []const u8) Allocator.Error!usize {
         const prefix = try index.gpa.print("{s}/", .{dir});

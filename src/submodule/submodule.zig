@@ -111,6 +111,8 @@ pub const Error = error{
     GitDirExists,
     /// A submodule nested deeper than `max_depth`.
     NestingTooDeep,
+    /// `.gitmodules` is unmerged in the index, so it cannot be edited.
+    GitmodulesUnmerged,
     /// The superproject has no working tree.
     BareRepository,
     /// The `Transport` failed; it says why.
@@ -1252,6 +1254,110 @@ fn relocate(
     var module_dir = try repo.gitDirectory().openDir(io, target, .{});
     defer module_dir.close(io);
     try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+}
+
+//=========================================================================
+// What git rm and git mv do to a submodule
+//=========================================================================
+
+/// Whether `.gitmodules` in the working tree holds what the index does, so
+/// an edit to it can be staged without taking other changes along: git's
+/// `is_staging_gitmodules_ok`. No file, or no entry for one, is fine.
+pub fn gitmodulesStaged(gpa: Allocator, io: Io, repo: *Repository, index: *const Index) Self.Error!bool {
+    const wt = repo.workDirectory() orelse return true;
+    const entry = index.find(".gitmodules") orelse return true;
+    return !try worktree.differsFromIndex(gpa, io, wt, .{ .index = index, .entry = entry.* }, try repo.worktreeRules());
+}
+
+/// Take the `submodule.<name>` section whose path is `path` out of
+/// `.gitmodules`: git's `remove_path_from_gitmodules`. Whether it went; with
+/// no file, or no section for the path, nothing changes.
+pub fn removeFromGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, path: []const u8) Self.Error!bool {
+    var modules = (try gitmodulesToEdit(gpa, io, repo, index)) orelse return false;
+    defer modules.deinit();
+    const module = modules.byPath(path) orelse return false;
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const written = try repo.writeConfigFile(io, wt, ".gitmodules", &.{.{ .remove_section = .{ .section = "submodule", .subsection = module.name } }});
+    return written.sections_removed != 0;
+}
+
+/// Point the `.gitmodules` section whose path is `old` at `new`: git's
+/// `update_path_in_gitmodules`. Whether it did; with no file, or no section
+/// for the path, nothing changes.
+pub fn moveInGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, old: []const u8, new: []const u8) Self.Error!bool {
+    var modules = (try gitmodulesToEdit(gpa, io, repo, index)) orelse return false;
+    defer modules.deinit();
+    const module = modules.byPath(old) orelse return false;
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const key = try std.mem.concat(gpa, u8, &.{ "submodule.", module.name, ".path" });
+    defer gpa.free(key);
+    _ = try repo.writeConfigFile(io, wt, ".gitmodules", &.{.{ .set = .{ .name = key, .value = new } }});
+    return true;
+}
+
+/// `.gitmodules` as an edit to it reads it, or `null` when the working tree
+/// has none.
+fn gitmodulesToEdit(gpa: Allocator, io: Io, repo: *Repository, index: *const Index) Error!?Gitmodules {
+    const wt = repo.workDirectory() orelse return null;
+    if (try fs.statAt(io, wt, ".gitmodules") == null) return null;
+    if (isUnmerged(index, ".gitmodules")) return error.GitmodulesUnmerged;
+    return try loadGitmodules(gpa, io, repo, index);
+}
+
+/// The git directory the `.git` file in the submodule at `path` names, as
+/// an absolute path in `arena`; `null` when `<path>/.git` is not a `.git`
+/// file, a directory among them. git's `read_gitfile`, which `mv` asks
+/// before the working tree moves and the file's relative path with it.
+pub fn gitDirOf(arena: Allocator, io: Io, repo: *Repository, path: []const u8) Self.Error!?[]const u8 {
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    var work = try wt.openDir(io, path, .{});
+    defer work.close(io);
+    const named = (try gitfile.read(arena, io, work, ".git")) orelse return null;
+    var git_dir = try gitfile.open(io, work, named, .{});
+    defer git_dir.close(io);
+    return try absolutePath(arena, io, git_dir);
+}
+
+/// Connect the working tree at `path` and the git directory `git_dir`, an
+/// absolute path, to each other, then each active submodule inside it to
+/// its own: git's `connect_work_tree_and_git_dir` after a move.
+pub fn connectGitDir(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, git_dir: []const u8) Self.Error!void {
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    try connectAt(gpa, io, repo, wt, path, git_dir, 0);
+}
+
+fn connectAt(gpa: Allocator, io: Io, repo: *Repository, wt: Io.Dir, path: []const u8, git_dir: []const u8, depth: u32) Error!void {
+    if (depth > max_depth) return error.NestingTooDeep;
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    // Both made if they are not there, as git's are.
+    try fs.makeDirs(io, wt, path, repo.sharedPermissions());
+    try fs.makeDirs(io, Io.Dir.cwd(), git_dir, repo.sharedPermissions());
+    var work = try wt.openDir(io, path, .{});
+    defer work.close(io);
+    var module_dir = try Io.Dir.openDirAbsolute(io, git_dir, .{});
+    defer module_dir.close(io);
+    try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+
+    // `connect_wt_gitdir_in_nested`: a working tree no repository opens at
+    // has nothing nested to connect.
+    var sub = openSubmodule(gpa, io, repo, path, .{}) catch return;
+    defer sub.deinit(io);
+    const sub_wt = sub.workDirectory() orelse return;
+    var index = try sub.openIndex(io);
+    defer index.deinit();
+    var modules = try loadGitmodules(gpa, io, &sub, &index);
+    defer modules.deinit();
+    const sub_git_dir = try absolutePath(arena, io, sub.gitDirectory());
+    for (index.items(), 0..) |entry, i| {
+        if (entry.mode != .gitlink) continue;
+        if (i > 0 and std.mem.eql(u8, index.items()[i - 1].path, entry.path)) continue;
+        const module = modules.byPath(entry.path) orelse continue;
+        if (!try isActive(arena, &sub, module.name, entry.path)) continue;
+        const nested = try arena.print("{s}/{s}", .{ sub_git_dir, try modulePath(arena, module.name) });
+        try connectAt(gpa, io, &sub, sub_wt, entry.path, nested, depth + 1);
+    }
 }
 
 //=========================================================================

@@ -48,6 +48,7 @@
 //! | `worktree.snapshot` | Module within `worktree`. |
 //! | `worktree.renames` | Module within `worktree`. |
 //! | `worktree.remove` | `git rm`: the index entries a pathspec names removed, and their files and submodules, after git's check for what the removal would lose. |
+//! | `worktree.move` | `git mv`: files, directories and submodules renamed in the working tree and the index together, after git's checks of every source. |
 //! | `worktree.sparse` | Module within `worktree`. |
 //! | `worktree.ignore` | Module within `worktree`. |
 //! | `worktree.attributes` | Module within `worktree`. |

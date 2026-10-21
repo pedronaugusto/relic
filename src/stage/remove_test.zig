@@ -29,13 +29,17 @@ fn fixture() !testgit.Repo {
     return repo;
 }
 
-/// The index and the working tree's files.
-fn state(repo: *testgit.Repo) ![]u8 {
+/// The index, the tree it writes, the working tree's files, and each
+/// submodule's `.git` file and `core.worktree`.
+pub fn state(repo: *testgit.Repo) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     const listed = try repo.run(io, &.{ "ls-files", "-s" });
     defer gpa.free(listed);
     try out.appendSlice(gpa, listed);
+    const tree = try repo.run(io, &.{"write-tree"});
+    defer gpa.free(tree);
+    try out.print(gpa, "tree {s}", .{tree});
     var walker = try repo.dir.walk(gpa);
     defer walker.deinit();
     var files: std.ArrayList([]u8) = .empty;
@@ -44,6 +48,12 @@ fn state(repo: *testgit.Repo) ![]u8 {
         files.deinit(gpa);
     }
     while (try walker.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.eql(u8, entry.basename, ".git")) {
+            const text = try entry.dir.readFileAlloc(io, ".git", gpa, .unlimited);
+            defer gpa.free(text);
+            try files.append(gpa, try gpa.print("{s}: {s}", .{ entry.path, text }));
+            continue;
+        }
         if (isGitDir(entry.path)) continue;
         try files.append(gpa, try gpa.print("{s}{s}", .{ entry.path, if (entry.kind == .directory) "/" else "" }));
     }
@@ -60,12 +70,20 @@ fn state(repo: *testgit.Repo) ![]u8 {
     var gits = repo.dir.openDir(io, ".git/modules", .{ .iterate = true }) catch return out.toOwnedSlice(gpa);
     defer gits.close(io);
     var it = gits.iterate();
-    while (try it.next(io)) |entry| try out.print(gpa, "module {s}\n", .{entry.name});
+    while (try it.next(io)) |entry| {
+        try out.print(gpa, "module {s}\n", .{entry.name});
+        const config_path = try gpa.print("{s}/config", .{entry.name});
+        defer gpa.free(config_path);
+        const config = try gits.readFileAlloc(io, config_path, gpa, .unlimited);
+        defer gpa.free(config);
+        var lines = std.mem.splitScalar(u8, config, '\n');
+        while (lines.next()) |line| if (std.mem.find(u8, line, "worktree") != null) try out.print(gpa, "{s}\n", .{line});
+    }
     return out.toOwnedSlice(gpa);
 }
 
 /// A repository's own `.git`, or a submodule's.
-fn isGitDir(path: []const u8) bool {
+pub fn isGitDir(path: []const u8) bool {
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| if (std.mem.eql(u8, part, ".git")) return true;
     return false;
@@ -139,9 +157,9 @@ test "rm removes, keeps and refuses what git's does" {
 
 /// Two submodules checked out in place, their `.git` still directories,
 /// and one file in the superproject.
-const Change = enum { none, untracked, modified, gitmodules };
+pub const Change = enum { none, untracked, modified, gitmodules };
 
-fn submodules(change: Change) !testgit.Repo {
+pub fn submodules(change: Change) !testgit.Repo {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     errdefer repo.deinit();
     try repo.writeFile(io, "top", "top\n");
@@ -189,7 +207,7 @@ test "rm takes a submodule's working tree and .gitmodules section as git's does"
 }
 
 /// A cone-mode sparse checkout of `keep`: `out` is outside it.
-fn sparse() !testgit.Repo {
+pub fn sparse() !testgit.Repo {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     errdefer repo.deinit();
     for ([_][]const u8{ "top.txt", "keep/k.txt", "out/o.txt" }) |path| try repo.writeFile(io, path, "first\n");
