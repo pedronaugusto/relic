@@ -65,6 +65,8 @@ const repo_mod = @import("../repo/repo.zig");
 const worktrees = @import("../checkout/worktrees.zig");
 const rerere = @import("../merge/rerere.zig");
 const diagnostic = @import("../report.zig").diagnostic;
+const config_mod = @import("../config/config.zig");
+const unicode_width = @import("../text.zig").unicode_width;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -114,6 +116,9 @@ pub const Error = error{
     UnsupportedStrategy,
     /// The branch given does not name a branch or a commit.
     NotACommit,
+    /// `rebase.rebaseMerges` is neither a boolean nor a mode git knows:
+    /// "Unknown rebase-merges mode".
+    InvalidRebaseMergesSetting,
     /// The commit is a merge; only `merge` and `drop` take one.
     MergeCommit,
     /// The message left after cleanup is empty.
@@ -189,6 +194,10 @@ pub const Options = struct {
     interactive: bool = false,
     /// Move `fixup!`, `squash!` and `amend!` commits after their targets.
     autosquash: bool = false,
+    /// `--rebase-merges[=<mode>]` or `--no-rebase-merges`; `null` takes
+    /// `rebase.rebaseMerges`. The sheet then makes the merges again:
+    /// `label`, `reset` and `merge` lines, as git writes them.
+    rebase_merges: ?RebaseMerges = null,
     /// Add `update-ref` lines for the other branches that point at the
     /// replayed commits, so they move with them: `--update-refs`. git's
     /// `rebase.updateRefs` is the caller's to read.
@@ -239,6 +248,17 @@ pub const Options = struct {
     /// it finishes, is aborted, or fails to begin. `Outcome.autostash` and
     /// `Outcome.restored`.
     autostash: ?bool = null,
+};
+
+/// Whether the merges on the branch are made again, and where a branch
+/// that did not leave from the branch's own commits goes.
+pub const RebaseMerges = enum {
+    /// The merges left out and their branches flattened.
+    off,
+    /// `no-rebase-cousins`: such a branch keeps the commit it left from.
+    no_rebase_cousins,
+    /// `rebase-cousins`: such a branch is moved onto `onto`.
+    rebase_cousins,
 };
 
 /// Why a rebase stopped.
@@ -328,6 +348,9 @@ const Run = struct {
     abbrev_len: usize,
     allow_ff: bool,
     empty: Empty,
+    /// `rebase_merges`, or `rebase.rebaseMerges`, which is read and
+    /// checked whichever decides, as git reads its configuration.
+    merges: RebaseMerges,
     /// What is left to do, the current instruction first.
     items: std.ArrayList(todo.Item) = .empty,
     done_nr: usize = 0,
@@ -409,6 +432,10 @@ fn newRun(gpa: Allocator, io: Io, arena_state: *std.heap.ArenaAllocator, repo: *
         .abbrev_len = abbrev.defaultLength(repo.configuration(), repo.objectDatabase()),
         .allow_ff = !options.force and !options.signoff,
         .empty = options.empty orelse if (interactive) .stop else .drop,
+        .merges = blk: {
+            const configured = try configuredRebaseMerges(repo.configuration());
+            break :blk options.rebase_merges orelse configured;
+        },
     };
 }
 
@@ -576,34 +603,14 @@ fn originallyEmpty(w: *Walker, oid: Oid) Error!bool {
 
 /// The sheet git writes for `upstream...orig_head`: `pick <name> # <subject>`
 /// for each commit to replay, `# empty` after one that was empty to begin
-/// with.
+/// with; with `--rebase-merges`, `make_script_with_merges`'s.
 fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
     var w: Walker = .{ .gpa = r.gpa, .arena = r.arena, .io = r.io, .repo = r.repo };
     const sides = try symmetricDifference(&w, upstream, orig_head);
-
-    // Commits upstream already has, by patch id.
-    var same: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
-    if (!r.options.reapply_cherry_picks and sides.left.len != 0 and sides.right.len != 0) {
-        // A file the attributes call binary is one by its names alone, as
-        // git's patch ids take it.
-        var attrs = try r.repo.loadAttrs(r.io);
-        defer attrs.deinit();
-        defer attrs.leave();
-        const binary: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
-        var ids: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
-        for (sides.left) |oid| {
-            if ((try w.load(oid)).parents.len > 1) continue;
-            const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
-            try ids.put(r.arena, id.bytes, {});
-        }
-        for (sides.right) |oid| {
-            if ((try w.load(oid)).parents.len > 1) continue;
-            const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
-            if (ids.contains(id.bytes)) try same.put(r.arena, oid.bytes, {});
-        }
-    }
-
+    const same = try upstreamHas(r, &w, sides.left, sides.right);
     const ordered = try graphOrderOldestFirst(&w, sides.right);
+    if (r.merges != .off) return scriptWithMerges(r, &w, .{ .ordered = ordered, .same = &same, .upstream = upstream, .orig_head = orig_head, .cousins = r.merges == .rebase_cousins });
+
     var items: std.ArrayList(todo.Item) = .empty;
     for (ordered) |oid| {
         const node = try w.load(oid);
@@ -611,16 +618,290 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
         const empty = try originallyEmpty(&w, oid);
         if (!empty and same.contains(oid.bytes)) continue;
         if (empty and !r.options.keep_empty) continue;
-        // the sheet's subjects are in the log's encoding
-        const commit = (try readIn(r, oid, try message.logOutputEncoding(r.repo.configuration()))).commit;
-        const subject = try message.onelineSubject(r.arena, commit.message);
-        const arg = if (empty)
-            try r.arena.print("{s} {s} empty", .{ r.comment, subject })
-        else
-            try r.arena.print("{s} {s}", .{ r.comment, subject });
-        try items.append(r.arena, .{ .command = .pick, .commit = oid, .arg = arg });
+        try items.append(r.arena, .{ .command = .pick, .commit = oid, .arg = try pickArg(r, oid, empty) });
     }
     return items.items;
+}
+
+/// The commits of `right` whose patch id one of `left` has: what git's
+/// `--cherry-mark` marks.
+fn upstreamHas(r: *Run, w: *Walker, left: []const Oid, right: []const Oid) Error!std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) {
+    var same: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    if (r.options.reapply_cherry_picks or left.len == 0 or right.len == 0) return same;
+    // A file the attributes call binary is one by its names alone, as
+    // git's patch ids take it.
+    var attrs = try r.repo.loadAttrs(r.io);
+    defer attrs.deinit();
+    defer attrs.leave();
+    const binary: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
+    var ids: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    for (left) |oid| {
+        if ((try w.load(oid)).parents.len > 1) continue;
+        const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
+        try ids.put(r.arena, id.bytes, {});
+    }
+    for (right) |oid| {
+        if ((try w.load(oid)).parents.len > 1) continue;
+        const id = (try patch_id.ofCommit(r.gpa, r.io, r.repo.objectDatabase(), oid, binary)) orelse continue;
+        if (ids.contains(id.bytes)) try same.put(r.arena, oid.bytes, {});
+    }
+    return same;
+}
+
+/// The line git's sheet gives a commit: `rebase.instructionFormat`'s
+/// default, `# %s`, in the log's encoding; the `#` is git's own, whatever
+/// the comment string.
+fn sheetOneline(r: *Run, oid: Oid) Error![]const u8 {
+    const commit = (try readIn(r, oid, try message.logOutputEncoding(r.repo.configuration()))).commit;
+    return r.arena.print("# {s}", .{try message.onelineSubject(r.arena, commit.message)});
+}
+
+/// A pick's line after its commit: the oneline, and `<comment> empty`
+/// after a commit that was empty to begin with.
+fn pickArg(r: *Run, oid: Oid, empty: bool) Error![]const u8 {
+    const line = try sheetOneline(r, oid);
+    if (!empty) return line;
+    return r.arena.print("{s} {s} empty", .{ line, r.comment });
+}
+
+/// `rebase.rebaseMerges`: a boolean, or `rebase-cousins` or
+/// `no-rebase-cousins`, the last setting deciding; another value is
+/// refused wherever it is, as git dies on it reading its configuration.
+fn configuredRebaseMerges(config: *const config_mod.Config) Error!RebaseMerges {
+    var mode: RebaseMerges = .off;
+    for (config.entries.items) |entry| {
+        if (!std.ascii.eqlIgnoreCase(entry.section, "rebase") or entry.subsection.len != 0) continue;
+        if (!std.ascii.eqlIgnoreCase(entry.name, "rebasemerges")) continue;
+        const value = entry.value orelse {
+            mode = .no_rebase_cousins;
+            continue;
+        };
+        if (config_mod.parseBool(value)) |on| {
+            mode = if (on) .no_rebase_cousins else .off;
+        } else |_| if (std.mem.eql(u8, value, "no-rebase-cousins")) {
+            mode = .no_rebase_cousins;
+        } else if (std.mem.eql(u8, value, "rebase-cousins")) {
+            mode = .rebase_cousins;
+        } else return error.InvalidRebaseMergesSetting;
+    }
+    return mode;
+}
+
+/// What `make_script_with_merges` works from.
+const MergesScript = struct {
+    /// The commits on the branch and not upstream, in the order git's
+    /// walk gives them.
+    ordered: []const Oid,
+    /// The ones upstream has by patch id.
+    same: *const std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void),
+    upstream: Oid,
+    orig_head: Oid,
+    /// `rebase-cousins`.
+    cousins: bool,
+};
+
+/// git's `label_state`: the label each commit has, and the labels taken.
+const Labels = struct {
+    r: *Run,
+    by_commit: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, []const u8) = .empty,
+    taken: std.StringHashMapUnmanaged(void) = .empty,
+    /// `rebase.maxLabelLength`.
+    max_len: i64,
+
+    fn of(l: *const Labels, oid: Oid) ?[]const u8 {
+        return l.by_commit.get(oid.bytes);
+    }
+
+    fn put(l: *Labels, oid: Oid, label: []const u8) Error!void {
+        try l.taken.put(l.r.arena, label, {});
+        try l.by_commit.put(l.r.arena, oid.bytes, label);
+    }
+
+    /// git's `label_oid`: the label `oid` has, or a new one made of
+    /// `wanted` -- its letters and digits and UTF-8, the rest one dash
+    /// between words, cut to the length -- and a number after it where it
+    /// is taken, a full object name, or `#`. With no `wanted`, a commit
+    /// that is not rebased, which has no label to make: its shortest
+    /// unique name that no label is.
+    fn make(l: *Labels, oid: Oid, wanted: ?[]const u8) Error![]const u8 {
+        if (l.of(oid)) |label| return label;
+        const r = l.r;
+        var hex_buf: [hash.max_hex_len]u8 = undefined;
+        const full = oid.hex(&hex_buf);
+        var label: []const u8 = undefined;
+        if (wanted) |text| {
+            var buf: std.ArrayList(u8) = .empty;
+            var is_utf8 = true;
+            var i: usize = 0;
+            while (i < text.len and @as(i64, @intCast(buf.items.len)) + 1 < l.max_len) : (i += 1) {
+                const c = text[i];
+                if (std.ascii.isAlphanumeric(c) or (!is_utf8 and c & 0x80 != 0)) {
+                    try buf.append(r.arena, c);
+                } else if (c & 0x80 != 0) {
+                    if (unicode_width.decode(text[i..])) |char| {
+                        if (@as(i64, @intCast(buf.items.len + char.len)) > l.max_len) break;
+                        try buf.appendSlice(r.arena, text[i..][0..char.len]);
+                        i += char.len - 1;
+                    } else {
+                        is_utf8 = false;
+                        try buf.append(r.arena, c);
+                    }
+                } else if (buf.items.len != 0 and buf.items[buf.items.len - 1] != '-') {
+                    // No dash first, and none twice.
+                    try buf.append(r.arena, '-');
+                }
+            }
+            if (buf.items.len == 0) try buf.print(r.arena, "rev-{s}", .{try r.short(oid)});
+            label = buf.items;
+            const hexlike = label.len == full.len and isHex(label);
+            if (hexlike or std.mem.eql(u8, label, "#") or l.taken.contains(label)) {
+                var n: usize = 2;
+                while (true) : (n += 1) {
+                    const numbered = try r.arena.print("{s}-{d}", .{ label, n });
+                    if (!l.taken.contains(numbered)) {
+                        label = numbered;
+                        break;
+                    }
+                }
+            }
+        } else {
+            label = try r.short(oid);
+            if (l.taken.contains(label)) {
+                var len = label.len + 1;
+                while (len < full.len and l.taken.contains(full[0..len])) len += 1;
+                label = try r.arena.dupe(u8, full[0..len]);
+            }
+        }
+        try l.put(oid, label);
+        return label;
+    }
+};
+
+fn isHex(text: []const u8) bool {
+    for (text) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
+}
+
+/// git's `make_script_with_merges`: each run of commits on the branch,
+/// from a branch's tip back to where it leaves the branch's other runs,
+/// written after a `reset` to where it starts and given `label`s where
+/// another run starts from it or a merge takes it in; a merge made again
+/// by `merge -C <commit>` with the labels of the tips it merges.
+fn scriptWithMerges(r: *Run, w: *Walker, s: MergesScript) Error![]todo.Item {
+    const a = r.arena;
+    var labels: Labels = .{ .r = r, .max_len = try r.repo.configuration().getInt("rebase.maxlabellength", 255 - ".lock".len - 16) };
+    // The merge base, where the walk's range begins, is `onto`.
+    {
+        const bases = try rev_walk.mergeBases(r.gpa, r.io, r.repo.objectDatabase(), .{ .a = s.upstream, .b = s.orig_head }, .{});
+        defer r.gpa.free(bases);
+        if (bases.len != 0) try labels.put(bases[0], "onto");
+    }
+    var branches = try pretty.Decorations.load(r.gpa, r.io, r.repo, &.{ .include = &.{"refs/heads/"} });
+    defer branches.deinit();
+
+    var interesting: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    var to_do: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, todo.Item) = .empty;
+    var tips: std.ArrayList(Oid) = .empty;
+    // First: each commit's line, and a label for each branch a merge takes
+    // in.
+    for (s.ordered) |oid| {
+        try interesting.put(a, oid.bytes, {});
+        const empty = try originallyEmpty(w, oid);
+        if (!empty and s.same.contains(oid.bytes)) continue;
+        if (empty and !r.options.keep_empty) continue;
+        const node = try w.load(oid);
+        if (node.parents.len < 2) {
+            try to_do.put(a, oid.bytes, .{ .command = .pick, .commit = oid, .arg = try pickArg(r, oid, empty) });
+            continue;
+        }
+        const line = try sheetOneline(r, oid);
+        const from_message = mergedName(line);
+        var arg: std.ArrayList(u8) = .empty;
+        for (node.parents[1..]) |parent| {
+            if (arg.items.len != 0) try arg.append(a, ' ');
+            if (!interesting.contains(parent.bytes)) {
+                try arg.appendSlice(a, try labels.make(parent, null));
+                continue;
+            }
+            try tips.append(a, parent);
+            // The branch at the tip, by its newest name, as git's first
+            // decoration; a graft's is no branch.
+            var wanted = from_message;
+            if (branches.of(parent)) |d| if (std.mem.startsWith(u8, d.name, "refs/heads/")) {
+                wanted = d.name["refs/heads/".len..];
+            };
+            try arg.appendSlice(a, try labels.make(parent, wanted));
+        }
+        try arg.print(a, " {s}", .{line});
+        try to_do.put(a, oid.bytes, .{ .command = .merge, .commit = oid, .arg = arg.items });
+    }
+
+    // Second: a label where a second child leaves a commit, and the
+    // branch's own tip last among the tips.
+    var child_seen: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    for (s.ordered, 0..) |oid, i| {
+        for ((try w.load(oid)).parents) |parent| {
+            if (!interesting.contains(parent.bytes)) continue;
+            if ((try child_seen.getOrPut(a, parent.bytes)).found_existing) _ = try labels.make(parent, "branch-point");
+        }
+        if (i == s.ordered.len - 1) try tips.append(a, oid);
+    }
+
+    // Third: from each tip back along first parents to a commit written
+    // already or not rebased, then forwards from there.
+    var items: std.ArrayList(todo.Item) = .empty;
+    var shown: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
+    try items.append(a, .{ .command = .label, .arg = "onto" });
+    for (tips.items) |tip| {
+        if (shown.contains(tip.bytes)) continue;
+        try items.append(a, .{ .command = .comment, .arg = "" });
+        if (labels.of(tip)) |label| try items.append(a, .{ .command = .comment, .arg = try a.print("{s} Branch {s}", .{ r.comment, label }) });
+        var run: std.ArrayList(Oid) = .empty;
+        var at: ?Oid = tip;
+        while (at) |oid| {
+            if (!interesting.contains(oid.bytes) or shown.contains(oid.bytes)) break;
+            try run.append(a, oid);
+            const parents = (try w.load(oid)).parents;
+            at = if (parents.len == 0) null else parents[0];
+        }
+        try items.append(a, try resetTo(r, &labels, at, s.cousins));
+        var i = run.items.len;
+        while (i > 0) {
+            i -= 1;
+            const oid = run.items[i];
+            if (to_do.get(oid.bytes)) |item| try items.append(a, item);
+            if (labels.of(oid)) |label| try items.append(a, .{ .command = .label, .arg = label });
+            try shown.put(a, oid.bytes, {});
+        }
+    }
+    return items.items;
+}
+
+/// Where a run of commits starts: `reset onto`, `reset [new root]` for a
+/// run from a root commit, or the label of the commit it leaves from, with
+/// its oneline. A commit not rebased is reset to by its own name, or, with
+/// `rebase-cousins`, the run is moved to `onto`.
+fn resetTo(r: *Run, labels: *Labels, from: ?Oid, cousins: bool) Error!todo.Item {
+    const oid = from orelse return .{ .command = .reset, .arg = if (cousins) "onto" else "[new root]" };
+    const to = labels.of(oid) orelse if (cousins) null else try labels.make(oid, null);
+    if (to == null or std.mem.eql(u8, to.?, "onto")) return .{ .command = .reset, .arg = "onto" };
+    return .{ .command = .reset, .arg = try r.arena.print("{s} {s}", .{ to.?, try sheetOneline(r, oid) }) };
+}
+
+/// The branch a merge's oneline names, which labels the tips it merged
+/// when no branch does: `# Merge ... '<branch>'...`, `# Merge pull request
+/// ... from <branch>`, or the whole oneline.
+fn mergedName(line: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, line, "# Merge ")) {
+        const rest = line["# Merge ".len..];
+        if (std.mem.findScalar(u8, rest, '\'')) |open| {
+            if (std.mem.findScalar(u8, rest[open + 1 ..], '\'')) |close| return rest[open + 1 ..][0..close];
+        }
+    }
+    if (std.mem.startsWith(u8, line, "# Merge pull request ")) {
+        if (std.mem.find(u8, line["# Merge pull request ".len..], " from ")) |at| return line["# Merge pull request ".len + at + " from ".len ..];
+    }
+    return line;
 }
 
 //=========================================================================

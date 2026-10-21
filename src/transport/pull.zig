@@ -53,9 +53,6 @@ pub const Error = error{
     InvalidRebaseSetting,
     /// `pull.ff` is neither a boolean nor `only`.
     InvalidFastForwardSetting,
-    /// A rebase that keeps merges, `merges`: relic's rebase writes no
-    /// sheet with merges yet.
-    RebaseMergesNotSupported,
     /// The branch has no commit and the index has something added: git's
     /// "Updating an unborn branch with changes added to the index."
     UnbornWithStagedChanges,
@@ -175,7 +172,6 @@ pub fn pull(gpa: Allocator, io: Io, repo: *Repository, remote: ?[]const u8, opti
     defer orig.deinit(gpa);
     var forked: ?Oid = null;
     if (plan.mode != .merge) {
-        if (plan.mode == .rebase_merges) return error.RebaseMergesNotSupported;
         plan.autostash = plan.autostash orelse try repo.configuration().getBool("rebase.autostash", false);
         if (orig.oid == null and !try indexEmpty(io, repo)) return error.UnbornWithStagedChanges;
         if (!plan.autostash.?) try rebase.requireCleanWorkTree(gpa, io, repo, options.rebasing.blocked);
@@ -260,6 +256,9 @@ fn reconcile(gpa: Allocator, io: Io, repo: *Repository, r: Reconciling, options:
     rebase_options.upstream_name = null;
     rebase_options.autostash = plan.autostash;
     rebase_options.interactive = plan.mode == .rebase_interactive;
+    // `--rebase-merges`, with no mode; any other rebase reads
+    // `rebase.rebaseMerges` itself.
+    if (plan.mode == .rebase_merges) rebase_options.rebase_merges = .no_rebase_cousins;
     rebase_options.reflog_action = plan.reflog_action;
     return .{ .rebased = try rebase.start(gpa, io, repo, upstream, rebase_options) };
 }

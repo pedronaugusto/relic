@@ -83,10 +83,11 @@ pub fn main(init: std.process.Init) !void {
             const file = try Io.Dir.cwd().createFile(io, name, .{});
             file.close(io);
         }
-    } else if (std.mem.eql(u8, args[1], "copy-file")) {
+    } else if (std.mem.eql(u8, args[1], "copy-file") or std.mem.eql(u8, args[1], "keep-copy")) {
         if (args.len < 4) return error.MissingPath;
-        const contents = try Io.Dir.cwd().readFileAlloc(io, args[2], init.arena.allocator(), .limited(1 << 20));
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = contents });
+        const from: usize = if (std.mem.eql(u8, args[1], "keep-copy")) 3 else 2;
+        const contents = try Io.Dir.cwd().readFileAlloc(io, args[from], init.arena.allocator(), .limited(1 << 20));
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[5 - from], .data = contents });
     } else if (std.mem.eql(u8, args[1], "fsmonitor")) {
         // A file monitor's hook, run in the working tree with a version and
         // a token: each question is logged to `.git/fsmonitor-log`, and the

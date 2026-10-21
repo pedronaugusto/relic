@@ -636,7 +636,7 @@ fn revList(gpa: Allocator, io: Io, repo: *testgit.Repo, range: []const u8) ![]Oi
     return out.toOwnedSlice(gpa);
 }
 
-fn oidOf(gpa: Allocator, io: Io, repo: *testgit.Repo, rev: []const u8) !Oid {
+pub fn oidOf(gpa: Allocator, io: Io, repo: *testgit.Repo, rev: []const u8) !Oid {
     const text = try repo.line(io, &.{ "rev-parse", rev });
     defer gpa.free(text);
     return Oid.parse(.sha1, text);
@@ -1506,7 +1506,7 @@ test "a pick's pseudo-refs are found and removed in a reftable repository, as gi
 const rebase = @import("../commit/rebase.zig");
 const commit_mod = @import("../commit/commit.zig");
 
-const rebase_state = [_][]const u8{
+pub const rebase_state = [_][]const u8{
     "rebase-merge/author-script",             "rebase-merge/done",
     "rebase-merge/drop_redundant_commits",    "rebase-merge/keep_redundant_commits",
     "rebase-merge/end",                       "rebase-merge/git-rebase-todo",
