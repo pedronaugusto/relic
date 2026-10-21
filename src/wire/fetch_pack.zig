@@ -56,6 +56,12 @@ pub const Error = error{
     /// that does not speak of shallow history — or does not have the kind of
     /// deepening asked for.
     ShallowUnsupportedByServer,
+    /// A negotiation alone asked of a server below protocol v2: git's
+    /// "--negotiate-only requires protocol v2".
+    NegotiateOnlyNeedsV2,
+    /// A negotiation alone asked of a server whose `fetch` does not take
+    /// `wait-for-done`: git's "server does not support wait-for-done".
+    WaitForDoneUnsupported,
 } || protocol.Error || index_pack.Error || odb_mod.Error || object.ParseError;
 
 /// What to ask for.
@@ -167,6 +173,72 @@ pub const Options = struct {
 };
 
 pub const Inputs = struct { advertisement: *const protocol.Advertisement, db: *Odb, request: Request };
+
+/// git's `negotiate_using_fetch` (`git fetch --negotiate-only`): the
+/// haves from `inputs.request.tips` and its `include_haves` offered to a v2
+/// server under `wait-for-done`, round after round, until every tip reaches
+/// a commit known to be common or nothing is left to offer; no pack. The
+/// commits the server acknowledged, in the order it did, the caller's.
+pub fn negotiateOnly(gpa: Allocator, io: Io, conn: *Connection, inputs: Inputs) Self.Error![]Oid {
+    const adv = inputs.advertisement;
+    const request = inputs.request;
+    if (adv.version != .v2) return error.NegotiateOnlyNeedsV2;
+    if (!adv.commandHas("fetch", "wait-for-done")) return error.WaitForDoneUnsupported;
+    try protocol.checkServerOptions(adv, request.server_options);
+    var negotiator: Negotiator = .{ .gpa = gpa, .io = io, .db = inputs.db, .arena = .init(gpa), .algorithm = request.negotiation };
+    defer negotiator.deinit();
+    for (request.tips) |tip| try negotiator.addTip(tip);
+    var acked: std.ArrayList(Oid) = .empty;
+    errdefer acked.deinit(gpa);
+    var haves_to_send: usize = 16;
+    var in_vain: usize = 0;
+    var seen_ack = false;
+    var last = false;
+    while (!last) {
+        const w = try conn.request();
+        (write: {
+            protocol.writeCommand(w, adv, "fetch", .{ .session_id = request.session_id, .server_options = request.server_options }) catch |e| break :write e;
+            pkt_line.write(w, "wait-for-done") catch |e| break :write e;
+            for (request.include_haves) |oid| {
+                if (!try negotiator.haveSent(oid)) continue;
+                pkt_line.print("have {f}\n", .{oid}, w) catch |e| break :write e;
+            }
+            var added: usize = 0;
+            while (added < haves_to_send) {
+                const oid = (try negotiator.next()) orelse break;
+                pkt_line.print("have {f}\n", .{oid}, w) catch |e| break :write e;
+                added += 1;
+            }
+            haves_to_send = nextFlush(haves_to_send);
+            in_vain += added;
+            if (added == 0 or (seen_ack and in_vain >= max_in_vain)) last = true;
+            pkt_line.flush(w) catch |e| break :write e;
+        }) catch |err| return conn.writeFailed(err);
+        const in = try conn.response();
+        try expectSection(conn, in, "acknowledgments");
+        while (true) {
+            const packet = try conn.readPacket(in);
+            const raw = switch (packet) {
+                .flush => break,
+                .data => |unparsed| unparsed.readForParse(),
+                else => return error.ProtocolError,
+            };
+            const line = std.mem.trimEnd(u8, raw, "\n");
+            if (std.mem.eql(u8, line, "NAK")) continue;
+            // A pack is never asked for here: git's "unexpected 'ready'".
+            if (!std.mem.startsWith(u8, line, "ACK ")) return error.ProtocolError;
+            const oid = Oid.parse(adv.kind, line[4..]) catch return error.ProtocolError;
+            _ = try negotiator.ack(oid);
+            in_vain = 0;
+            seen_ack = true;
+            var known = false;
+            for (acked.items) |c| known = known or c.eql(oid);
+            if (!known) try acked.append(gpa, oid);
+        }
+        if (try negotiator.everyTipCommon(request.tips)) last = true;
+    }
+    return acked.toOwnedSlice(gpa);
+}
 
 /// Fetch a pack for `inputs.request` over `conn`, which opened with `adv`, into
 /// `pack_dir`, which is `db`'s `objects/pack`.
@@ -1035,6 +1107,27 @@ const Negotiator = struct {
             .consecutive => try n.markCommon(found.oid, .{ .ancestors_only = false, .dont_parse = true }),
         }
         return known;
+    }
+
+    /// git's `can_all_from_reach_with_flag` with `COMMON`: whether each of
+    /// `tips` reaches a commit the negotiation holds common.
+    fn everyTipCommon(n: *Negotiator, tips: []const Oid) NegotiateError!bool {
+        for (tips) |tip| {
+            const start = (try n.load(tip)) orelse return false;
+            var seen: Oid.Set = .empty;
+            defer seen.deinit(n.gpa);
+            var stack: std.ArrayList(Oid) = .empty;
+            defer stack.deinit(n.gpa);
+            try stack.append(n.gpa, start.oid);
+            const reached = while (stack.pop()) |oid| {
+                if ((try seen.getOrPut(n.gpa, oid)).found_existing) continue;
+                const found = (try n.load(oid)) orelse continue;
+                if (found.node.common) break true;
+                for (found.node.parents) |parent| try stack.append(n.gpa, parent);
+            } else false;
+            if (!reached) return false;
+        }
+        return true;
     }
 
     /// git's `have_sent`: `oid`, offered whatever the negotiator chose,

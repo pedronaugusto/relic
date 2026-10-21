@@ -233,6 +233,24 @@ pub const Session = struct {
         },
     },
 
+    /// git's `--negotiate-only`: the haves from `request.tips` and its
+    /// `include_haves` offered to a v2 server until it has said what it
+    /// holds of them; no pack. The commits it acknowledged, the caller's.
+    /// Only a smart server speaks it.
+    pub fn negotiateOnly(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: FetchRequest) Self.Error![]Oid {
+        return switch (s.impl) {
+            .local, .bundle, .helper => error.NegotiateOnlyNeedsV2,
+            .smart => |*smart| {
+                // The server is told nothing more after it.
+                smart.done = true;
+                var with_id = request;
+                with_id.session_id = s.sessionId();
+                if (with_id.server_options.len == 0) with_id.server_options = s.server_options;
+                return fetch_pack.negotiateOnly(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = with_id });
+            },
+        };
+    }
+
     pub const OpenInputs = struct { service: Service, kind: ?hash.Kind = null };
 
     /// Open the remote at `remote_url` for `inputs.service`. `kind` is the local

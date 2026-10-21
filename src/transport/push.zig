@@ -422,7 +422,8 @@ fn pushTo(
             try pushCertificate(arena, gpa, io, repo, url, nonce, commands.items, options)
         else
             null;
-        try send(arena, gpa, io, repo, &session, remote.name orelse url, remote_refs.refs, .{
+        const commons = if (try repo.configuration().getBool("push.negotiate", false)) try negotiatedCommons(arena, gpa, io, repo, remote, url, commands.items, options) else &.{};
+        try send(arena, gpa, io, repo, &session, remote.name orelse url, remote_refs.refs, commons, .{
             .commands = commands.items,
             .objects = &.{},
             .atomic = options.atomic,
@@ -445,6 +446,37 @@ fn pushTo(
     }
     if (options.set_upstream) try setUpstreams(arena, gpa, io, repo, remote.name orelse url, results, outcome);
     try all_results.appendSlice(arena, results);
+}
+
+/// git's `get_commons_through_negotiation` (`push.negotiate`): what a
+/// fetch's negotiation with `url` finds the remote has of the history
+/// being pushed -- from `remote.<name>.negotiationRestrict`, else from each
+/// new value, with `negotiationInclude` -- left out of the pack. Useful and
+/// not needed: a negotiation that fails leaves nothing out.
+fn negotiatedCommons(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, url: []const u8, commands: []const send_pack.Command, options: Options) Error![]const Oid {
+    var restrict: std.ArrayList([]const u8) = .empty;
+    if (remote.negotiation_restrict.len != 0) {
+        try restrict.appendSlice(arena, remote.negotiation_restrict);
+    } else for (commands) |c| {
+        if (!c.new.isZero()) try restrict.append(arena, try arena.print("{f}", .{c.new}));
+    }
+    if (restrict.items.len == 0 and remote.negotiation_include.len == 0) return &.{};
+    const acked = fetch_mod.negotiateOnly(gpa, io, repo, url, .{
+        .who = options.who,
+        .programs = options.programs,
+        .proxy = options.proxy,
+        .prompt = options.prompt,
+        .warnings = options.warnings,
+        .from_user = options.from_user,
+        .negotiation_restrict = restrict.items,
+        .negotiation_include = remote.negotiation_include,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => return &.{},
+    };
+    defer gpa.free(acked);
+    return arena.dupe(Oid, acked);
 }
 
 /// git's `set_upstreams`: each branch the remote took or had already, to a
@@ -632,6 +664,7 @@ fn send(
     session: *transport.Session,
     remote_name: []const u8,
     remote_refs: []const protocol.RemoteRef,
+    commons: []const Oid,
     request: transport.Session.PushRequest,
     options: Options,
     results: []RefResult,
@@ -650,6 +683,7 @@ fn send(
         if (r.unborn) continue;
         if (try repo.objectDatabase().exists(io, r.oid)) try exclude.append(arena, r.oid);
     }
+    try exclude.appendSlice(arena, commons);
     var objects = try object_walk.missing(gpa, io, repo.objectDatabase(), include.items, .{ .exclude = exclude.items });
     defer objects.deinit();
 
@@ -1424,6 +1458,56 @@ test "--force-if-includes and push.useForceIfIncludes refuse a lease the local r
     var forced = try twins.pushBoth(&.{ "--force-with-lease", "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"}, .leases = lease });
     defer forced.deinit();
     try testing.expectEqual(RefResult.Status.ok, forced.refs[0].status);
+}
+
+test "push.negotiate leaves out what a negotiation finds the remote has, asking git's upload-pack as git's push asks it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    const fake = try testremote.fakeSsh(gpa, io, twins.root.dir);
+    defer gpa.free(fake);
+    for ([_][2][]const u8{ .{ "work-git", "remote-git.git" }, .{ "work-relic", "remote-relic.git" } }) |pair| {
+        var dir = try twins.root.dir.openDir(io, pair[0], .{});
+        defer dir.close(io);
+        const url = try gpa.print("example.invalid:{s}/{s}", .{ twins.root_path, pair[1] });
+        defer gpa.free(url);
+        try twins.git(dir, &.{ "remote", "set-url", "origin", url });
+        try twins.git(dir, &.{ "config", "core.sshCommand", fake });
+        try twins.git(dir, &.{ "config", "push.negotiate", "true" });
+    }
+    var heard: [2][]u8 = undefined;
+    for ([_][]const u8{ "work-git", "work-relic" }, 0..) |name, i| {
+        const trace = try gpa.print("{s}/negotiate-{d}", .{ twins.root_path, i });
+        defer gpa.free(trace);
+        try twins.env.put("GIT_TRACE_PACKET", trace);
+        defer _ = twins.env.swapRemove("GIT_TRACE_PACKET");
+        var dir = try twins.root.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        if (i == 0) {
+            try twins.git(dir, &.{ "push", "-q", "origin", "main" });
+        } else {
+            var repo = try Repository.open(gpa, io, dir, .{});
+            defer repo.deinit(io);
+            var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"main"} });
+            defer outcome.deinit();
+            try testing.expect(!outcome.anyRejected());
+        }
+        const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+        defer gpa.free(traced);
+        var said: std.ArrayList(u8) = .empty;
+        var lines = std.mem.tokenizeScalar(u8, traced, '\n');
+        while (lines.next()) |line| {
+            const at = std.mem.find(u8, line, "upload-pack< ") orelse continue;
+            const text = std.mem.trimEnd(u8, line[at + "upload-pack< ".len ..], " ");
+            if (std.mem.startsWith(u8, text, "have ") or std.mem.eql(u8, text, "wait-for-done") or std.mem.eql(u8, text, "0000")) try said.print(gpa, "{s}\n", .{text});
+        }
+        heard[i] = try said.toOwnedSlice(gpa);
+    }
+    defer for (heard) |text| gpa.free(text);
+    try testing.expect(std.mem.find(u8, heard[0], "wait-for-done") != null);
+    try testing.expectEqualStrings(heard[0], heard[1]);
+    try twins.expectSame();
 }
 
 test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stale lease, and atomic all or none" {

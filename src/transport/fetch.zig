@@ -95,6 +95,9 @@ pub const Error = error{
     /// `fetch.negotiationAlgorithm` names none git knows: git's "unknown
     /// fetch negotiation algorithm".
     UnknownNegotiationAlgorithm,
+    /// A negotiation alone asked with no tips to restrict it to: git's
+    /// "--negotiate-only needs one or more --negotiation-restrict=*".
+    NegotiationRestrictNeeded,
 } || alternate_refs.Error || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || fsck.LoadError || config_mod.Config.SetError ||
     rev_walk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
@@ -623,6 +626,32 @@ fn bringObjects(
 
     if (boundary_change.moved) try repo.writeShallow(io);
     return .{ .packs = .{ .{ .name = fetched.pack, .objects = fetched.objects, .keep = fetched.keep }, tag_pack }, .backfill = backfill };
+}
+
+/// git's `git fetch --negotiate-only`: the history from
+/// `options.negotiation_restrict` (else `remote.<name>.negotiationRestrict`),
+/// with `negotiation_include`, offered to the remote under protocol v2
+/// until it has said which of it it has; nothing is fetched and nothing
+/// here changes. The commits it acknowledged, the caller's, as `git push`
+/// asks for them under `push.negotiate`.
+pub fn negotiateOnly(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Self.Error![]Oid {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), repo.objectFormat(), remote_name);
+    defer remote.deinit();
+    const restrict_names = options.negotiation_restrict orelse remote.negotiation_restrict;
+    if (restrict_names.len == 0) return error.NegotiationRestrictNeeded;
+    const restrict = try resolveTips(arena, gpa, io, repo, restrict_names, "--negotiation-restrict", options.warnings);
+    const include = try resolveTips(arena, gpa, io, repo, options.negotiation_include orelse remote.negotiation_include, "--negotiation-include", options.warnings);
+    var session = try openSession(gpa, io, repo, &remote, remote.urls[0], options);
+    defer session.deinit(io);
+    return session.negotiateOnly(gpa, io, repo.objectDatabase(), .{
+        .wants = &.{},
+        .tips = restrict orelse &.{},
+        .include_haves = include orelse &.{},
+        .negotiation = try negotiationAlgorithm(repo.configuration()),
+    });
 }
 
 /// The shallow boundary across a fetch: the one before it, put back if
