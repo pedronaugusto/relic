@@ -8,8 +8,8 @@
         },
 
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.9.3#9478e91d80cf10453da73dea0d36d73d3cf9cb4a",
-            .hash = "conduit-0.9.3-4rIA7_ftFABg9VCm81kwvwuJdKa5rI39Hro8KisDbj0b",
+            .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.10.1#e5ca7806d272dda60fc3f16821f00ebb6c4149c9",
+            .hash = "conduit-0.10.1-4rIA7zYPFQD_olleG3lEGQkaHTXW3uQewXyV-BtnifPv",
         },
 
         .sweep = .{

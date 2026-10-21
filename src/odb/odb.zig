@@ -3092,6 +3092,57 @@ pub const Odb = struct {
         return removed;
     }
 
+    /// git's `gc` over what `prepare_packed_git_one` reports as garbage in
+    /// this database's own pack directory: the files of each base name
+    /// that has an `.idx` and no `.pack` (its `.rev`, `.bitmap`, `.keep`,
+    /// `.promisor` and `.mtimes` with it); the multi-pack index's files and
+    /// any other name are left. Every pack is closed first, and opened
+    /// again after. How many files went.
+    pub fn removePackGarbage(odb: *Odb, io: Io) ErrorNamespace.Error!u32 {
+        const gpa = odb.backendData().gpa;
+        const pack_dir = odb.writableSource().pack_dir orelse return 0;
+        var names: std.ArrayList([]u8) = .empty;
+        defer freeNames(gpa, &names);
+        var it = pack_dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (std.mem.startsWith(u8, entry.name, "multi-pack-index")) continue;
+            for ([_][]const u8{ ".idx", ".rev", ".pack", ".bitmap", ".keep", ".promisor", ".mtimes" }) |ext| {
+                if (std.mem.endsWith(u8, entry.name, ext)) break;
+            } else continue;
+            try names.append(gpa, try gpa.dupe(u8, entry.name));
+        }
+        std.mem.sort([]u8, names.items, {}, struct {
+            fn less(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        var doomed: std.ArrayList([]const u8) = .empty;
+        defer doomed.deinit(gpa);
+        // `report_pack_garbage`: the names in order, each base up to its
+        // last dot, a base whose files hold an `.idx` and no `.pack`.
+        var first: usize = 0;
+        while (first < names.items.len) {
+            const base = names.items[first][0 .. std.mem.findScalarLast(u8, names.items[first], '.').? + 1];
+            var last = first;
+            var seen_pack = false;
+            var seen_idx = false;
+            while (last < names.items.len and std.mem.startsWith(u8, names.items[last], base)) : (last += 1) {
+                const ext = names.items[last][base.len..];
+                seen_pack = seen_pack or std.mem.eql(u8, ext, "pack");
+                seen_idx = seen_idx or std.mem.eql(u8, ext, "idx");
+            }
+            if (seen_idx and !seen_pack) for (names.items[first..last]) |name| try doomed.append(gpa, name);
+            first = last;
+        }
+        if (doomed.items.len == 0) return 0;
+        odb.closePacks(0, io);
+        // glint-ignore: Z026 -- the removal's error is the one to report; a read that misses re-scans the packs left
+        errdefer odb.scanPacks(io, 0) catch {};
+        for (doomed.items) |name| try deleteIfThere(io, pack_dir, name);
+        try odb.scanPacks(io, 0);
+        return @intCast(doomed.items.len);
+    }
+
     /// The packs of this database's own directory that `names` names --
     /// base names, `pack-<name>` -- taken away as git's repack removes a
     /// redundant pack: each one's files in `unlink_pack_path`'s order, a

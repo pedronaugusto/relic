@@ -18,16 +18,16 @@ const hash = @import("../hash/hash.zig");
 const io = std.testing.io;
 const gpa = std.testing.allocator;
 
-const day = std.time.s_per_day;
+pub const day = std.time.s_per_day;
 
-fn at(repo: *testgit.Repo, secs: i64) !void {
+pub fn at(repo: *testgit.Repo, secs: i64) !void {
     var buffer: [32]u8 = undefined;
     const value = try std.mem.print(&buffer, "@{d} +0000", .{secs});
     try repo.isolated.?.put("GIT_AUTHOR_DATE", value);
     try repo.isolated.?.put("GIT_COMMITTER_DATE", value);
 }
 
-fn commitAt(repo: *testgit.Repo, secs: i64, message: []const u8) !void {
+pub fn commitAt(repo: *testgit.Repo, secs: i64, message: []const u8) !void {
     try at(repo, secs);
     try repo.writeFile(io, "file.txt", message);
     try repo.exec(io, &.{ "add", "file.txt" });
@@ -39,7 +39,7 @@ fn setTime(dir: Io.Dir, name: []const u8, secs: i64) !void {
 }
 
 /// Every loose file's time, and every pack file's, set to `secs`.
-fn ageAll(repo: *testgit.Repo, secs: i64) !void {
+pub fn ageAll(repo: *testgit.Repo, secs: i64) !void {
     var objects = try repo.dir.openDir(io, ".git/objects", .{ .iterate = true });
     defer objects.close(io);
     var it = objects.iterate();
@@ -53,20 +53,20 @@ fn ageAll(repo: *testgit.Repo, secs: i64) !void {
     }
 }
 
-fn touchObject(repo: *testgit.Repo, hex: []const u8, secs: i64) !void {
+pub fn touchObject(repo: *testgit.Repo, hex: []const u8, secs: i64) !void {
     var buffer: [128]u8 = undefined;
     const path = try std.mem.print(&buffer, ".git/objects/{s}/{s}", .{ hex[0..2], hex[2..] });
     try setTime(repo.dir, path, secs);
 }
 
-fn blob(repo: *testgit.Repo, bytes: []const u8) ![]u8 {
+pub fn blob(repo: *testgit.Repo, bytes: []const u8) ![]u8 {
     const out = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, bytes);
     defer gpa.free(out);
     return gpa.dupe(u8, std.mem.trim(u8, out, "\n"));
 }
 
 /// A commit nothing names, on a tree of its own holding one new blob.
-fn dangling(repo: *testgit.Repo, contents: []const u8, parent: ?[]const u8, message: []const u8) ![]u8 {
+pub fn dangling(repo: *testgit.Repo, contents: []const u8, parent: ?[]const u8, message: []const u8) ![]u8 {
     const b = try blob(repo, contents);
     defer gpa.free(b);
     var listing: [256]u8 = undefined;
@@ -81,7 +81,7 @@ fn dangling(repo: *testgit.Repo, contents: []const u8, parent: ?[]const u8, mess
 /// branches and an annotated tag, a reflog-only commit, an index-only
 /// blob, objects nothing reaches -- old and recent, loose and packed, one
 /// recent commit reaching old ones -- and a kept pack.
-fn fixture(format: testgit.RefFormat, now: i64) !testgit.Repo {
+pub fn fixture(format: testgit.RefFormat, now: i64) !testgit.Repo {
     var repo = try testgit.Repo.init(gpa, io, format.initArgs());
     errdefer repo.deinit();
     try commitAt(&repo, now - 100 * day, "one");
@@ -136,7 +136,7 @@ fn fixture(format: testgit.RefFormat, now: i64) !testgit.Repo {
 /// lists it, `preferred` when it is the index's preferred pack), the loose
 /// objects with their times, whether the index has a bitmap, then
 /// `.git/shallow` and the dumb HTTP files.
-fn state(repo: *testgit.Repo) ![]u8 {
+pub fn state(repo: *testgit.Repo) ![]u8 {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();

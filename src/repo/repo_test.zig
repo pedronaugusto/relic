@@ -402,13 +402,16 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
         try std.testing.expect(locked.entries[0].locked);
         try std.testing.expect(locked.entries[0].prunable);
     }
-    const skipped = try repo.pruneWorktrees(io);
-    try std.testing.expectEqual(@as(u32, 0), skipped.removed);
+    var skipped = try repo.pruneWorktrees(io, .{});
+    defer skipped.deinit();
+    try std.testing.expectEqual(@as(usize, 0), skipped.pruned.len);
     try std.testing.expectEqual(@as(u32, 1), skipped.skipped_locked);
 
     try worktrees.unlock(io, repo.commonDirectory(), "one");
-    const pruned = try repo.pruneWorktrees(io);
-    try std.testing.expectEqual(@as(u32, 1), pruned.removed);
+    var pruned = try repo.pruneWorktrees(io, .{});
+    defer pruned.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pruned.pruned.len);
+    try std.testing.expectEqual(worktrees.PruneReason.gone, pruned.pruned[0].reason);
 
     var after = try repo.listWorktrees(io);
     defer after.deinit();
@@ -416,6 +419,104 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     const after_git = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(after_git);
     try std.testing.expect(std.mem.find(u8, after_git, "trees/one") == null);
+}
+
+const io_test = std.testing.io;
+
+/// Worktrees of every kind `worktree prune` judges: two whose trees are
+/// gone, one with an old index and one with a recent one; a locked one
+/// gone too; an entry that is a file, one with no `gitdir`, one with an
+/// empty one; a second entry at the path of a live one; and the live one.
+fn pruneFixture(git: *testgit.Repo, now: i64) !void {
+    try git.writeFile(io_test, "a.txt", "a\n");
+    try git.exec(io_test, &.{ "add", "a.txt" });
+    try git.exec(io_test, &.{ "commit", "-qm", "one" });
+    for ([_][]const u8{ "old", "recent", "held", "live" }) |name| {
+        var path: [64]u8 = undefined;
+        try git.exec(io_test, &.{ "worktree", "add", "-q", "--detach", try std.mem.print(&path, "trees/{s}", .{name}) });
+    }
+    try git.exec(io_test, &.{ "worktree", "lock", "trees/held" });
+    for ([_][]const u8{ "old", "recent", "held" }) |name| {
+        var path: [64]u8 = undefined;
+        try git.dir.deleteTree(io_test, try std.mem.print(&path, "trees/{s}", .{name}));
+    }
+    const day = std.time.s_per_day;
+    for ([_]struct { []const u8, i64 }{ .{ "old", now - 10 * day }, .{ "recent", now - day } }) |aged| {
+        var path: [64]u8 = undefined;
+        try git.dir.setTimestamps(io_test, try std.mem.print(&path, ".git/worktrees/{s}/index", .{aged[0]}), .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, aged[1]) * std.time.ns_per_s) } });
+    }
+    try git.writeFile(io_test, ".git/worktrees/a-file", "");
+    try git.dir.createDirPath(io_test, ".git/worktrees/no-gitdir");
+    try git.dir.createDirPath(io_test, ".git/worktrees/empty-gitdir");
+    try git.writeFile(io_test, ".git/worktrees/empty-gitdir/gitdir", "\n");
+    // `zz-twin` sorts after `live`, so it is the duplicate.
+    try git.dir.createDirPath(io_test, ".git/worktrees/zz-twin");
+    const live_gitdir = try git.readFile(io_test, ".git/worktrees/live/gitdir");
+    defer std.testing.allocator.free(live_gitdir);
+    try git.writeFile(io_test, ".git/worktrees/zz-twin/gitdir", live_gitdir);
+}
+
+/// What `worktrees/` holds, one name a line, or `(none)`.
+fn worktreeIds(git: *testgit.Repo) ![]u8 {
+    const gpa = std.testing.allocator;
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
+    }
+    var dir = git.dir.openDir(io_test, ".git/worktrees", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return gpa.dupe(u8, "(none)\n"),
+        else => |e| return e,
+    };
+    defer dir.close(io_test);
+    var it = dir.iterate();
+    while (try it.next(io_test)) |entry| try names.append(gpa, try gpa.dupe(u8, entry.name));
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    var out: std.ArrayList(u8) = .empty;
+    for (names.items) |n| try out.print(gpa, "{s}\n", .{n});
+    return out.toOwnedSlice(gpa);
+}
+
+test "worktree prune takes away what git's takes, --expire and -n included" {
+    const gpa = std.testing.allocator;
+    const now = std.Io.Clock.real.now(io_test).toSeconds();
+    const week = 7 * std.time.s_per_day;
+    var expire_arg: [32]u8 = undefined;
+    const cases = [_]struct { args: []const []const u8, options: worktrees.PruneOptions }{
+        .{ .args = &.{}, .options = .{} },
+        .{ .args = &.{ "--expire", try std.mem.print(&expire_arg, "@{d}", .{now - week}) }, .options = .{ .expire = now - week } },
+        .{ .args = &.{"-n"}, .options = .{ .dry_run = true } },
+    };
+    for (cases, 0..) |case, n| {
+        var theirs = try testgit.Repo.init(gpa, io_test, &.{});
+        defer theirs.deinit();
+        var ours = try testgit.Repo.init(gpa, io_test, &.{});
+        defer ours.deinit();
+        try pruneFixture(&theirs, now);
+        try pruneFixture(&ours, now);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "worktree", "prune" });
+        try args.appendSlice(gpa, case.args);
+        try theirs.exec(io_test, args.items);
+        var repo = try repo_mod.Repository.open(gpa, io_test, ours.dir, .{});
+        defer repo.deinit(io_test);
+        var outcome = try repo.pruneWorktrees(io_test, case.options);
+        defer outcome.deinit();
+        const expected = try worktreeIds(&theirs);
+        defer gpa.free(expected);
+        const actual = try worktreeIds(&ours);
+        defer gpa.free(actual);
+        std.testing.expectEqualStrings(expected, actual) catch |err| {
+            std.debug.print("worktree prune case {d}\n", .{n});
+            return err;
+        };
+        try std.testing.expectEqual(@as(u32, 1), outcome.skipped_locked);
+    }
 }
 
 test "worktree remove takes the tree and the admin directory with it" {

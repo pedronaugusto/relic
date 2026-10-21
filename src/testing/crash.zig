@@ -2,7 +2,7 @@
 //! shakedown's simulated disk: a ref update, a received pack and the ref
 //! that publishes it, an index write, a checkout, `pack-refs`,
 //! `reflog expire`, `prune` and `repack` (`-a -d`, `--cruft -d` and
-//! `--geometric=2 -d --write-midx`),
+//! `--geometric=2 -d --write-midx`) and the commit graph `gc` writes,
 //! each stopped before
 //! every `Io` call it makes and every state the disk could come back in
 //! after that tried. airlock's syncs and renames reach the simulated disk
@@ -35,6 +35,7 @@ const refs = @import("../refs/refs.zig");
 const gc = @import("../maintenance/gc.zig");
 const prune = @import("../maintenance/prune.zig");
 const repack = @import("../maintenance/repack.zig");
+const maintenance = @import("../maintenance/maintenance.zig");
 const date = @import("../text.zig").date;
 const Oid = hash.Oid;
 
@@ -48,7 +49,7 @@ const granularity: Io.Duration = .fromSeconds(1);
 
 const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
 
-const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire, prune, repack, repack_cruft, repack_geometric };
+const Kind = enum { ref_update, pack_receive, index_write, checkout, pack_refs, reflog_expire, prune, repack, repack_cruft, repack_geometric, commit_graph };
 
 /// A directory tree held in memory: what is put on the simulated disk
 /// before a run, and what a crash state holds.
@@ -245,7 +246,7 @@ pub const Case = struct {
     fn seed(c: *const Case) *const Image {
         return switch (c.kind) {
             .pack_receive => &c.seeds.before,
-            .prune, .repack, .repack_cruft, .repack_geometric => &c.seeds.pruning,
+            .prune, .repack, .repack_cruft, .repack_geometric, .commit_graph => &c.seeds.pruning,
             else => &c.seeds.after,
         };
     }
@@ -320,6 +321,7 @@ pub const Case = struct {
             .repack => _ = try repack.repack(gpa, io, &repo, .{ .mode = .all, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
             .repack_cruft => _ = try repack.repack(gpa, io, &repo, .{ .mode = .cruft, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
             .repack_geometric => _ = try repack.repack(gpa, io, &repo, .{ .geometric = 2, .delete = true, .write_midx = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
+            .commit_graph => _ = try maintenance.writeConfiguredCommitGraph(gpa, io, &repo, .gc),
         }
         repo.deinit(io);
     }
@@ -422,7 +424,7 @@ pub const Case = struct {
             },
             // Packing moves no ref, and expiring and pruning move none:
             // each is where it was at every crash.
-            .pack_refs, .reflog_expire, .prune => {
+            .pack_refs, .reflog_expire, .prune, .commit_graph => {
                 try expectRef(io, git, "refs/heads/main", &.{first});
                 try expectRef(io, git, "refs/heads/next", &.{second});
             },
@@ -613,4 +615,12 @@ test "every crash: repack --geometric=2 -d --write-midx, files" {
 
 test "every crash: repack --geometric=2 -d --write-midx, reftable" {
     try inFormat(.repack_geometric, .reftable);
+}
+
+test "every crash: the commit graph gc writes, files" {
+    try inFormat(.commit_graph, .files);
+}
+
+test "every crash: the commit graph gc writes, reftable" {
+    try inFormat(.commit_graph, .reftable);
 }

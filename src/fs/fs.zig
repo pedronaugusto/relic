@@ -1314,7 +1314,8 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
     return .{ .held = true, .pid = pid, .holder_alive = processAlive(pid) };
 }
 
-fn currentPid() u32 {
+/// This process's id.
+pub fn currentPid() u32 {
     return switch (builtin.target.os.tag) {
         .windows => std.os.windows.GetCurrentProcessId(),
         .wasi => 0,
@@ -1334,9 +1335,21 @@ test "currentPid uses the host process API" {
 /// Whether a process has the id `pid`, as conduit asks the system; a
 /// number the platform's ids cannot hold names no process at all: the file
 /// was written by something else.
-fn processAlive(pid: u32) ?bool {
+pub fn processAlive(pid: u32) ?bool {
     const id = std.math.cast(conduit.Child.Id, pid) orelse return false;
     return conduit.processExists(id);
+}
+
+/// The longest host name `hostName` gives.
+pub const max_host_name = conduit.max_host_name;
+
+/// Failures of `hostName`.
+pub const HostNameError = conduit.HostNameError;
+
+/// This machine's name, as git's `xgethostname` reads it: what a lock
+/// that names its holder by host and process says, as `gc.pid` does.
+pub fn hostName(buf: *[max_host_name]u8) HostNameError![]const u8 {
+    return conduit.hostName(buf);
 }
 
 /// Whether `<sub_path>.lock` exists in `dir`.

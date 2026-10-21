@@ -21,7 +21,7 @@ pub const writeConfiguredCommitGraph = @import("maintenance/maintenance.zig").wr
 pub const BitmapInputs = @import("maintenance/maintenance.zig").BitmapInputs;
 pub const MidxBitmapInputs = @import("maintenance/maintenance.zig").MidxBitmapInputs;
 
-pub const GcError = @import("maintenance/gc.zig").Error;
+pub const HousekeepingError = @import("maintenance/gc.zig").Error;
 pub const PackRefsOptions = @import("maintenance/gc.zig").PackRefsOptions;
 pub const packRefs = @import("maintenance/gc.zig").packRefs;
 pub const Expiry = @import("maintenance/gc.zig").Expiry;
@@ -29,6 +29,15 @@ pub const expire_all = @import("maintenance/gc.zig").expire_all;
 pub const parseExpiry = @import("maintenance/gc.zig").parseExpiry;
 pub const ReflogExpireOptions = @import("maintenance/gc.zig").ReflogExpireOptions;
 pub const expireReflogs = @import("maintenance/gc.zig").expireReflogs;
+
+pub const GcError = @import("maintenance/collect.zig").Error;
+pub const GcOptions = @import("maintenance/collect.zig").Options;
+pub const GcPrune = @import("maintenance/collect.zig").Prune;
+pub const GcOutcome = @import("maintenance/collect.zig").Outcome;
+pub const GcHolder = @import("maintenance/collect.zig").Holder;
+pub const GcReport = @import("maintenance/collect.zig").Report;
+pub const gc = @import("maintenance/collect.zig").collect;
+pub const parseGcPrune = @import("maintenance/collect.zig").parsePrune;
 
 pub const PruneError = @import("maintenance/prune.zig").Error;
 pub const PruneOptions = @import("maintenance/prune.zig").PruneOptions;

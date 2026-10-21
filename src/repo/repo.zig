@@ -1874,10 +1874,13 @@ pub const Repository = struct {
         return worktrees.list(repo.data().gpa, io, repo.refStore());
     }
 
-    /// Remove the administrative directories whose working tree is gone,
-    /// skipping any with a `locked` file.
-    pub fn pruneWorktrees(repo: *Repository, io: Io) worktrees.Error!worktrees.PruneOutcome {
-        return worktrees.prune(repo.data().gpa, io, repo.refStore());
+    /// git's `worktree prune`: the administrative directories that hold no
+    /// worktree go, but for any with a `locked` file, as `options` asks;
+    /// `core.ignoreCase` in place of `options.ignore_case`.
+    pub fn pruneWorktrees(repo: *Repository, io: Io, options: worktrees.PruneOptions) (worktrees.Error || config_mod.ValueError)!worktrees.PruneOutcome {
+        var asked = options;
+        asked.ignore_case = try repo.configuration().getBool("core.ignorecase", false);
+        return worktrees.prune(repo.data().gpa, io, repo.refStore(), asked);
     }
 };
 

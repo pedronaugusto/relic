@@ -451,33 +451,166 @@ pub fn remove(
     if (files_error) |err| return err;
 }
 
-/// What `prune` removed.
-pub const PruneOutcome = struct {
-    removed: u32 = 0,
-    /// Worktrees skipped because they carry a `locked` file.
-    skipped_locked: u32 = 0,
+/// What `prune` is asked: git's `worktree prune` options.
+pub const PruneOptions = struct {
+    /// `--expire`: a worktree whose working tree is gone goes only when its
+    /// `index` is no newer than this, or missing; `null` takes every one,
+    /// git's default.
+    expire: ?i64 = null,
+    /// `-n`: what would go is reported, and nothing goes.
+    dry_run: bool = false,
+    /// `core.ignoreCase`: two worktrees at paths that differ only in case
+    /// are one, as git's `fspathcmp` compares them.
+    ignore_case: bool = false,
 };
 
-/// Remove the administrative directories whose working tree is gone.
-///
-/// A worktree with a `locked` file beside it is skipped whatever its state,
-/// which is what git does and is the whole point of that file.
-pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!PruneOutcome {
-    const common_dir = refs.commonDir();
-    var outcome: PruneOutcome = .{};
-    var listing = try list(gpa, io, refs);
-    defer listing.deinit();
+/// Why `prune` takes an administrative directory away, as git's
+/// `should_prune_worktree` and `prune_dups` say it.
+pub const PruneReason = enum {
+    /// "not a valid directory": an entry of `worktrees/` that is no
+    /// directory.
+    not_a_directory,
+    /// "gitdir file does not exist".
+    no_gitdir,
+    /// "unable to read gitdir file".
+    unreadable_gitdir,
+    /// "invalid gitdir file": empty, line endings aside.
+    invalid_gitdir,
+    /// "gitdir file points to non-existent location", and its `index` is
+    /// no newer than the expiry.
+    gone,
+    /// "duplicate entry": a second worktree at a path the main one or
+    /// another holds.
+    duplicate,
+};
 
-    for (listing.entries) |entry| {
-        if (entry.locked) {
-            outcome.skipped_locked += 1;
-            continue;
-        }
-        if (!entry.prunable) continue;
-        remove(gpa, io, common_dir, entry.name, .{ .force = false, .delete_files = false }) catch continue;
-        outcome.removed += 1;
+/// One administrative directory `prune` took away, or with `dry_run`
+/// would have.
+pub const Pruned = struct { id: []const u8, reason: PruneReason };
+
+/// What `prune` did. Release it with `deinit`.
+pub const PruneOutcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    gpa: Allocator,
+    arena: std.heap.ArenaAllocator.State,
+    /// In git's order: the directory's, then the duplicates by path.
+    pruned: []const Pruned,
+    /// Worktrees left because they carry a `locked` file.
+    skipped_locked: u32,
+
+    pub fn deinit(outcome: *PruneOutcome) void {
+        var arena = outcome.arena.promote(outcome.gpa);
+        arena.deinit();
+        outcome.* = undefined;
     }
-    return outcome;
+};
+
+/// git's `worktree prune` (`prune_worktrees`): each administrative
+/// directory that holds no worktree goes, unless a `locked` file keeps it;
+/// then each worktree at a path the main working tree or an earlier one
+/// holds; then `worktrees/` itself when it is empty.
+pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store, options: PruneOptions) Self.Error!PruneOutcome {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const common_dir = refs.commonDir();
+    var pruned: std.ArrayList(Pruned) = .empty;
+    var skipped_locked: u32 = 0;
+    const worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return .{ .gpa = gpa, .arena = arena_instance.state, .pruned = &.{}, .skipped_locked = 0 },
+        else => |e| return e,
+    };
+    defer worktrees_dir.close(io);
+
+    // The worktrees that stay, by the `.git` their `gitdir` file names;
+    // the main one first, its id `null`.
+    var kept: std.ArrayList(Kept) = .empty;
+    var common_buf: [4096]u8 = undefined;
+    try kept.append(arena, .{ .path = try arena.dupe(u8, try absolutePath(io, common_dir, &common_buf)), .id = null });
+    var it: fs.Names = .init(worktrees_dir, refs.precomposeUnicode());
+    while (try it.next(io)) |entry| {
+        const id = try arena.dupe(u8, entry.name);
+        const verdict = try judge(arena, io, worktrees_dir, entry.name, options.expire);
+        switch (verdict) {
+            .locked => skipped_locked += 1,
+            .keep => |path| try kept.append(arena, .{ .path = path, .id = id }),
+            .prune => |reason| try pruned.append(arena, .{ .id = id, .reason = reason }),
+        }
+    }
+    // `prune_dups`: by path, the main working tree ahead of any linked
+    // one, then by id; each after the first at a path goes.
+    std.mem.sort(Kept, kept.items, options.ignore_case, Kept.less);
+    for (kept.items[1..], 1..) |k, i| {
+        if (pathOrder(k.path, kept.items[i - 1].path, options.ignore_case) == .eq) try pruned.append(arena, .{ .id = k.id.?, .reason = .duplicate });
+    }
+    if (!options.dry_run) {
+        for (pruned.items) |p| {
+            worktrees_dir.deleteTree(io, p.id) catch |err| switch (err) {
+                error.NotDir => try worktrees_dir.deleteFile(io, p.id),
+                else => |e| return e,
+            };
+        }
+        // glint-ignore: Z026 -- git's `delete_worktrees_dir_if_empty`: a directory that still holds something, or any other failure, is let be
+        common_dir.deleteDir(io, "worktrees") catch {};
+    }
+    return .{ .gpa = gpa, .arena = arena_instance.state, .pruned = pruned.items, .skipped_locked = skipped_locked };
+}
+
+/// A worktree `prune` keeps, by its `.git`; `id` `null` for the main one.
+const Kept = struct {
+    path: []const u8,
+    id: ?[]const u8,
+
+    fn less(ignore_case: bool, a: Kept, b: Kept) bool {
+        const by_path = pathOrder(a.path, b.path, ignore_case);
+        if (by_path != .eq) return by_path == .lt;
+        if (a.id == null) return b.id != null;
+        if (b.id == null) return false;
+        return std.mem.order(u8, a.id.?, b.id.?) == .lt;
+    }
+};
+
+/// git's `fspathcmp`.
+fn pathOrder(a: []const u8, b: []const u8, ignore_case: bool) std.math.Order {
+    if (!ignore_case) return std.mem.order(u8, a, b);
+    for (a[0..@min(a.len, b.len)], b[0..@min(a.len, b.len)]) |x, y| {
+        const order = std.math.order(std.ascii.toLower(x), std.ascii.toLower(y));
+        if (order != .eq) return order;
+    }
+    return std.math.order(a.len, b.len);
+}
+
+const Verdict = union(enum) { locked, keep: []const u8, prune: PruneReason };
+
+/// git's `should_prune_worktree` for the entry `entry` of `worktrees/`.
+fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expire: ?i64) Self.Error!Verdict {
+    var admin = worktrees_dir.openDir(io, name, .{}) catch |err| switch (err) {
+        error.NotDir, error.FileNotFound => return .{ .prune = .not_a_directory },
+        else => |e| return e,
+    };
+    defer admin.close(io);
+    const locked = if (admin.access(io, "locked", .{})) |_| true else |err| switch (err) {
+        error.FileNotFound => false,
+        else => |e| return e,
+    };
+    if (locked) return .locked;
+    const read = fs.readFileAlloc(arena, io, admin, "gitdir", 1 << 20) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return .{ .prune = .unreadable_gitdir },
+    };
+    const text = read orelse return .{ .prune = .no_gitdir };
+    const written = std.mem.trimEnd(u8, text, "\r\n");
+    if (written.len == 0) return .{ .prune = .invalid_gitdir };
+    const dot_git = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
+        var buf: [4096]u8 = undefined;
+        break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try absolutePath(io, admin, &buf), written });
+    };
+    if (std.Io.Dir.accessAbsolute(io, dot_git, .{})) |_| {} else |_| {
+        const stat = admin.statFile(io, "index", .{}) catch return .{ .prune = .gone };
+        if (expire == null or stat.mtime.toSeconds() <= expire.?) return .{ .prune = .gone };
+    }
+    return .{ .keep = dot_git };
 }
 
 /// A worktree's id names a directory under `worktrees/`, so every entry
