@@ -89,6 +89,8 @@ pub const Error = error{
     /// git does not know, or `notes.rewriteMode` or `notes.rewriteRef`
     /// with no value: git stops on each.
     InvalidRewriteSetting,
+    /// `notes.displayRef` with no value, which git stops on.
+    InvalidDisplaySetting,
 } || Allocator.Error || odb_mod.Error || object.ParseError || object.TreeParseError || refs_mod.ReadError ||
     refs_mod.TransactionError || repo_mod.WriteError || rev_parse.Error || rev_walk.Error || diff.Error ||
     head_mod.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
@@ -1290,6 +1292,79 @@ pub fn formatNote(io: Io, t: *Notes, obj: Oid, w: *Io.Writer, options: FormatOpt
     }
 }
 
+/// Which notes are shown under each commit: git's `display_notes_opt`, as
+/// `--notes`, `--notes=<ref>`, `--no-notes` and `--[no-]standard-notes`
+/// leave it.
+pub const Display = struct {
+    /// Whether the default notes ref, and `notes.displayRef`'s, are shown:
+    /// `true` for `--notes` or `--standard-notes`, `false` for
+    /// `--no-standard-notes`; `null` shows them when `refs` names none.
+    standard: ?bool = null,
+    /// `--notes=<ref>`: more refs, each as `expandRef` spells it, a glob
+    /// standing for every ref it matches.
+    refs: []const []const u8 = &.{},
+    /// `GIT_NOTES_DISPLAY_REF`: colon-separated globs read in place of
+    /// `notes.displayRef`. `null` reads the setting; this package reads no
+    /// environment.
+    env_display_ref: ?[]const u8 = null,
+    /// Where git's "notes ref ... is invalid" goes.
+    warnings: ?*warning.Warnings = null,
+};
+
+/// The notes trees a `Display` shows, open: git's `display_notes_trees`.
+pub const DisplayNotes = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    gpa: Allocator,
+    trees: []Notes,
+
+    /// git's `load_display_notes`: the default notes ref (`core.notesRef`,
+    /// else `refs/notes/commits`) and every ref `notes.displayRef` names,
+    /// unless `display` says otherwise, then `display.refs`, each once, in
+    /// that order.
+    pub fn load(gpa: Allocator, io: Io, repo: *Repository, display: Display) Self.Error!DisplayNotes {
+        var arena_state: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var refs: std.ArrayList([]const u8) = .empty;
+        const standard = display.standard orelse (display.refs.len == 0);
+        if (standard) {
+            try refs.append(arena, try defaultRef(arena, repo));
+            if (display.env_display_ref) |globs| {
+                var it = std.mem.tokenizeScalar(u8, globs, ':');
+                while (it.next()) |glob| try addRefsByGlob(arena, io, repo, &refs, glob, display.warnings);
+            } else for (repo.configuration().entries.items) |e| {
+                if (e.has_subsection or !std.mem.eql(u8, e.section, "notes") or !std.mem.eql(u8, e.name, "displayref")) continue;
+                try addRefsByGlob(arena, io, repo, &refs, e.value orelse return error.InvalidDisplaySetting, display.warnings);
+            }
+        }
+        for (display.refs) |ref| try addRefsByGlob(arena, io, repo, &refs, try expandRef(arena, ref), display.warnings);
+
+        var trees: std.ArrayList(Notes) = .empty;
+        errdefer {
+            for (trees.items) |*t| t.deinit();
+            trees.deinit(gpa);
+        }
+        for (refs.items) |ref| {
+            try trees.ensureUnusedCapacity(gpa, 1);
+            trees.appendAssumeCapacity(try Notes.open(gpa, io, repo, ref, .ignore));
+        }
+        return .{ .gpa = gpa, .trees = try trees.toOwnedSlice(gpa) };
+    }
+
+    /// git's `format_display_notes`: `obj`'s note in each tree, in order,
+    /// as `formatNote` writes one.
+    pub fn format(d: *DisplayNotes, io: Io, obj: Oid, w: *Io.Writer, options: FormatOptions) FormatNoteError!void {
+        for (d.trees) |*t| try formatNote(io, t, obj, w, options);
+    }
+
+    pub fn deinit(d: *DisplayNotes) void {
+        for (d.trees) |*t| t.deinit();
+        d.gpa.free(d.trees);
+        d.* = undefined;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Merging: git's `notes-merge.c`.
 
@@ -2076,4 +2151,68 @@ fn fuzzNotes(repo: *Repository, case: *shakedown.Case) anyerror!void {
     defer gpa.free(entries);
     try std.testing.expectEqual(model.count(), entries.len);
     for (entries) |e| try std.testing.expect(model.get(e.object).?.eql(e.note));
+}
+
+test "display notes are the trees git's load_display_notes shows, in its order" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "f", "f\n");
+    try git.exec(io, &.{ "add", "f" });
+    try git.exec(io, &.{ "commit", "-qm", "one" });
+    try git.exec(io, &.{ "notes", "add", "-m", "default note" });
+    try git.exec(io, &.{ "notes", "--ref=review", "add", "-m", "review note\nsecond line" });
+    try git.exec(io, &.{ "notes", "--ref=other", "add", "-m", "other note" });
+    try git.exec(io, &.{ "notes", "--ref=refs/notes/x/deep", "add", "-m", "deep note" });
+    const head_text = try git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    const head = try Oid.parse(.sha1, head_text);
+
+    const Case = struct { args: []const []const u8, display: Display, config: []const []const u8 = &.{} };
+    const cases = [_]Case{
+        .{ .args = &.{}, .display = .{} },
+        .{ .args = &.{"--notes=review"}, .display = .{ .refs = &.{"review"} } },
+        .{ .args = &.{ "--notes", "--notes=review" }, .display = .{ .standard = true, .refs = &.{"review"} } },
+        .{ .args = &.{ "--notes=notes/other", "--notes=refs/notes/review" }, .display = .{ .refs = &.{ "notes/other", "refs/notes/review" } } },
+        .{ .args = &.{"--notes=x/*"}, .display = .{ .refs = &.{"x/*"} } },
+        .{ .args = &.{}, .display = .{}, .config = &.{ "notes.displayRef", "refs/notes/o*" } },
+        .{ .args = &.{ "--no-standard-notes", "--notes=review" }, .display = .{ .standard = false, .refs = &.{"review"} }, .config = &.{ "notes.displayRef", "refs/notes/o*" } },
+        .{ .args = &.{}, .display = .{}, .config = &.{ "core.notesRef", "refs/notes/review" } },
+    };
+    for (cases) |case| {
+        var i: usize = 0;
+        while (i < case.config.len) : (i += 2) try git.exec(io, &.{ "config", case.config[i], case.config[i + 1] });
+        defer {
+            var j: usize = 0;
+            while (j < case.config.len) : (j += 2) git.exec(io, &.{ "config", "--unset", case.config[j] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key that is gone is fine
+        }
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        var display = try DisplayNotes.load(gpa, io, &repo, case.display);
+        defer display.deinit();
+        for ([_]bool{ true, false }) |raw| {
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(gpa);
+            // `log` shows notes without `--notes` only in its own format:
+            // a `--format` of any kind turns them off.
+            try argv.appendSlice(gpa, if (raw) &.{ "log", "-1", "--format=%N" } else &.{ "log", "-1" });
+            try argv.appendSlice(gpa, case.args);
+            const theirs = try git.run(io, argv.items);
+            defer gpa.free(theirs);
+            var ours: Io.Writer.Allocating = .init(gpa);
+            defer ours.deinit();
+            try display.format(io, head, &ours.writer, .{ .raw = raw });
+            if (raw) {
+                // `%N` and the line `log` ends each commit with.
+                try ours.writer.writeByte('\n');
+                try std.testing.expectEqualStrings(theirs, ours.written());
+            } else {
+                std.testing.expect(std.mem.endsWith(u8, theirs, ours.written())) catch |err| {
+                    std.debug.print("git log {any}:\n{s}\nours:\n{s}\n", .{ case.args, theirs, ours.written() });
+                    return err;
+                };
+            }
+        }
+    }
 }
