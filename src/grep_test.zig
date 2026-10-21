@@ -486,3 +486,36 @@ test "git grep --color=always comes out byte for byte, under color.grep.<slot> a
     defer config.deinit();
     try std.testing.expectError(error.UnknownColorSlot, grep_mod.Colors.configured(&config, color.Output.always));
 }
+
+test "grep --recurse-submodules searches submodules as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try @import("submodule/move_test.zig").fixture(true);
+    defer git.deinit();
+    try git.writeFile(io, "sub/t", "t1 changed\n");
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const two_text = try git.line(io, &.{ "rev-parse", "two" });
+    defer gpa.free(two_text);
+    const two = try hash.Oid.parse(.sha1, two_text);
+
+    try compare(gpa, io, &git, &repo, &.{ "--recurse-submodules", "-e", "1" }, .{ .patterns = &.{"1"}, .recurse_submodules = true });
+    try compare(gpa, io, &git, &repo, &.{ "--recurse-submodules", "--cached", "-n", "1" }, .{ .patterns = &.{"1"}, .recurse_submodules = true, .source = .index, .line_number = true });
+    try compare(gpa, io, &git, &repo, &.{ "--recurse-submodules", "-e", "2", "two" }, .{ .patterns = &.{"2"}, .recurse_submodules = true, .source = .{ .tree = .{ .oid = two, .name = "two" } } });
+    try compare(gpa, io, &git, &repo, &.{ "--recurse-submodules", "-e", "1", "--", "sub/inner" }, .{ .patterns = &.{"1"}, .recurse_submodules = true, .pathspecs = &.{"sub/inner"} });
+    try compare(gpa, io, &git, &repo, &.{ "--recurse-submodules", "-l", "2", "two", "--", "sub/s", "top" }, .{ .patterns = &.{"2"}, .recurse_submodules = true, .show = .files_with_matches, .pathspecs = &.{ "sub/s", "top" }, .source = .{ .tree = .{ .oid = two, .name = "two" } } });
+    try compare(gpa, io, &git, &repo, &.{ "--recurse-submodules", "-l", "2", "two", "--", "sub", "top" }, .{ .patterns = &.{"2"}, .recurse_submodules = true, .show = .files_with_matches, .pathspecs = &.{ "sub", "top" }, .source = .{ .tree = .{ .oid = two, .name = "two" } } });
+    try compare(gpa, io, &git, &repo, &.{ "--recurse-submodules", "-l", "1", "--", "sub/s", "top" }, .{ .patterns = &.{"1"}, .recurse_submodules = true, .show = .files_with_matches, .pathspecs = &.{ "sub/s", "top" } });
+    try compare(gpa, io, &git, &repo, &.{ "-e", "1" }, .{ .patterns = &.{"1"} });
+
+    try git.exec(io, &.{ "config", "submodule.recurse", "true" });
+    _ = try repo.refreshConfig(io, .{});
+    try compare(gpa, io, &git, &repo, &.{ "-c", "1" }, .{ .patterns = &.{"1"}, .show = .count });
+    try git.exec(io, &.{ "config", "submodule.inner.active", "false" });
+    try git.exec(io, &.{ "-C", "sub", "config", "submodule.inner.active", "false" });
+    _ = try repo.refreshConfig(io, .{});
+    try compare(gpa, io, &git, &repo, &.{"1"}, .{ .patterns = &.{"1"} });
+    try git.exec(io, &.{ "config", "submodule.sub.active", "false" });
+    _ = try repo.refreshConfig(io, .{});
+    try compare(gpa, io, &git, &repo, &.{"1"}, .{ .patterns = &.{"1"} });
+}

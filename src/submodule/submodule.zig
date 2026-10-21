@@ -54,6 +54,8 @@ const worktree = @import("../checkout/checkout.zig");
 const program = @import("../process.zig").program;
 const pathspec_mod = @import("../patterns.zig").pathspec;
 const remote_mod = @import("../wire.zig").remote;
+const three_way = @import("../merge/three_way.zig");
+const branch_mod = @import("../commit/branch.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -125,7 +127,9 @@ pub const Error = error{
     /// before it is cloned: git's "directory not empty", which keeps a
     /// clone from landing beside files already there.
     DirectoryNotEmpty,
-} || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
+    /// `branch --recurse-submodules` without `submodule.propagateBranches`.
+    BranchesNotPropagated,
+} || branch_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
     Repository.WriteConfigError || refs_mod.TransactionError || program.Error || gitlink.Error ||
     Io.Dir.RealPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError;
 
@@ -516,6 +520,33 @@ fn openSubmodule(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, op
     o.discover = false;
     return Repository.open(gpa, io, dir, o);
 }
+
+/// The repository of the submodule `name` at `path`, as git's
+/// `repo_submodule_init` finds it: the one its working tree's `.git`
+/// opens, else its repository in `modules`, which has no working tree;
+/// `null` when neither is there.
+pub fn openRepository(gpa: Allocator, io: Io, repo: *Repository, module: PathName, options: Repository.OpenOptions) Self.Error!?Repository {
+    const wt = repo.workDirectory() orelse return error.BareRepository;
+    if (try gitlink.isRepository(gpa, io, wt, module.path)) return try openSubmodule(gpa, io, repo, module.path, options);
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const where = moduleDir(arena_instance.allocator(), io, repo, module.name, module.path, null) catch |err| switch (err) {
+        error.NoSubmoduleGitDir, error.GitDirInsideGitDir => return null,
+        else => |e| return e,
+    };
+    var dir = where.base.openDir(io, where.path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => |e| return e,
+    };
+    defer dir.close(io);
+    if (!discover.directory.isGitDirectory(io, dir)) return null;
+    var o = options;
+    o.discover = false;
+    return try Repository.open(gpa, io, dir, o);
+}
+
+/// A submodule's path and its name in `.gitmodules`.
+pub const PathName = struct { path: []const u8, name: []const u8 };
 
 /// The commit a repository's `HEAD` resolves to, or `null`.
 fn headOf(gpa: Allocator, io: Io, repo: *Repository) Error!?Oid {
@@ -1920,6 +1951,444 @@ fn runUpdateCommand(
     }, .{});
     defer outcome.deinit(gpa);
     if (!outcome.succeeded()) return refuse(options.refusal, display, command, error.UpdateCommandFailed);
+}
+
+//=========================================================================
+// --recurse-submodules
+//=========================================================================
+
+/// What a `Mover` moves submodules with.
+pub const MoverOptions = struct {
+    /// Who the line in each submodule's `HEAD` log says moved it. No line
+    /// is written without one, because this package reads no clock and no
+    /// identity.
+    who: ?object.Signature = null,
+    /// What each submodule's repository is opened with.
+    open: Repository.OpenOptions = .{},
+    /// The permission to run the filters a submodule's files are written
+    /// through.
+    programs: ?program.Programs = null,
+    refusal: ?*Refusal = null,
+};
+
+/// Why a `Mover` refused a move: a submodule's reason or its checkout's.
+pub const MoveError = Error || three_way.Error;
+
+/// git's `submodule_move_head`: what moves a submodule when a checkout, a
+/// reset or a merge under `--recurse-submodules` writes or removes its
+/// gitlink. `submodules` is what `worktree.Rules.submodules`,
+/// `reset.Options.submodules` and `three_way.Options.submodules` take.
+///
+/// Only an active submodule moves, and one moved from a commit only where
+/// it is populated. Unforced, a submodule whose index has changes staged
+/// against its `HEAD` is `error.DirtyIndex`, and its checkout moves as
+/// `read-tree -m -u` moves one, refusing to lose its work; forced, as
+/// `read-tree --reset -u`. Its `HEAD` is then detached at the new commit;
+/// or, when the gitlink goes, its `.git` file goes, its directory once
+/// empty, and its repository's `core.worktree`. A `.git` directory in its
+/// working tree is absorbed into the superproject's `modules` first. Its
+/// own submodules move with it, by a mover of its own.
+///
+/// A submodule that comes into being is made from its repository in
+/// `modules`, which must be there with the commit: git, without one, dies
+/// halfway through the checkout; this refuses the move before anything is
+/// written, as `error.NotCloned` or `error.CommitMissing`.
+pub const Mover = struct {
+    gpa: Allocator,
+    /// The superproject.
+    repo: *Repository,
+    /// The superproject's index as the update has it, which `.gitmodules`
+    /// is read from where the working tree has none.
+    index: *const Index,
+    options: MoverOptions = .{},
+    /// Where the superproject is, from the top one, `/`-terminated.
+    prefix: []const u8 = "",
+    depth: u32 = 0,
+    /// Why the last refused move was refused. `options.refusal` says which
+    /// submodule.
+    failure: ?MoveError = null,
+
+    /// What an update moves its submodules with.
+    pub fn submodules(m: *Mover) worktree.SubmoduleMover {
+        return .{ .context = m, .moveFn = moveFn };
+    }
+
+    fn moveFn(io: Io, context: *anyopaque, request: worktree.SubmoduleMove) worktree.Error!void {
+        const m: *Mover = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Mover
+        m.move(io, request) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            // A nested mover's, already recorded here.
+            error.SubmoduleNotUpdated => return error.SubmoduleNotUpdated,
+            else => |e| {
+                m.failure = e;
+                return error.SubmoduleNotUpdated;
+            },
+        };
+    }
+
+    fn move(m: *Mover, io: Io, request: worktree.SubmoduleMove) MoveError!void {
+        if (m.depth > max_depth) return error.NestingTooDeep;
+        var arena_instance: std.heap.ArenaAllocator = .init(m.gpa);
+        defer arena_instance.deinit();
+        const arena = arena_instance.allocator();
+        const repo = m.repo;
+        const wt = repo.workDirectory() orelse return error.BareRepository;
+        const display = try join(arena, m.prefix, request.path);
+        errdefer if (m.options.refusal) |r| {
+            if (r.path().len == 0) r.set(display, "");
+        };
+
+        var modules = try loadGitmodules(m.gpa, io, repo, m.index);
+        defer modules.deinit();
+        const module = modules.byPath(request.path) orelse return;
+        if (!try isActive(arena, repo, module.name, request.path)) return;
+        try validatePath(io, wt, request.path, display, m.options.refusal, repo.settings().protect);
+        if (request.from != .none and !try gitlink.isRepository(m.gpa, io, wt, request.path)) return;
+        const where = try moduleDir(arena, io, repo, module.name, display, m.options.refusal);
+        const target: Target = .{ .request = request, .where = where, .display = display };
+        if (request.from == .none) return m.populate(arena, io, target);
+        return m.moveFrom(arena, io, target);
+    }
+
+    const Target = struct { request: worktree.SubmoduleMove, where: ModuleDir, display: []const u8 };
+
+    /// A populated submodule, moved from its `HEAD` or a recorded commit.
+    fn moveFrom(m: *Mover, arena: Allocator, io: Io, target: Target) MoveError!void {
+        const request = target.request;
+        const wt = m.repo.workDirectory().?;
+        if (!request.force) {
+            var sub = try openSubmodule(m.gpa, io, m.repo, request.path, m.options.open);
+            defer sub.deinit(io);
+            var index = try sub.openIndex(io);
+            defer index.deinit();
+            if (try three_way.indexDiffers(arena, io, sub.objectDatabase(), &index, try sub.headTree(io)) != null) {
+                if (m.options.refusal) |r| r.set(target.display, "index");
+                return error.DirtyIndex;
+            }
+        }
+        if (!request.dry_run) {
+            const dot_git = try arena.print("{s}/.git", .{request.path});
+            const found = try fs.statAt(io, wt, dot_git);
+            if (found != null and found.?.kind == .directory) {
+                _ = try absorbGitDirs(m.gpa, io, m.repo, .{ .paths = &.{request.path}, .open = m.options.open, .refusal = m.options.refusal });
+            }
+            if (request.force) try connectGitDir(m.gpa, io, m.repo, request.path, try target.where.absolute(arena, io));
+        }
+        var sub = try openSubmodule(m.gpa, io, m.repo, request.path, m.options.open);
+        defer sub.deinit(io);
+        const from: Oid = switch (request.from) {
+            .head => (try headOf(m.gpa, io, &sub)) orelse return refuse(m.options.refusal, target.display, "HEAD", error.NoCurrentRevision),
+            .commit => |commit| commit,
+            .none => unreachable,
+        };
+        try m.checkoutIn(arena, io, &sub, from, target);
+    }
+
+    /// A submodule coming into being: its working tree connected to its
+    /// repository in `modules`, an empty index, and its commit checked
+    /// out, as git's `submodule_move_head` with no old head makes one.
+    fn populate(m: *Mover, arena: Allocator, io: Io, target: Target) MoveError!void {
+        const request = target.request;
+        const wt = m.repo.workDirectory().?;
+        var module_dir = target.where.base.openDir(io, target.where.path, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return refuse(m.options.refusal, target.display, target.where.path, error.NotCloned),
+            else => |e| return e,
+        };
+        defer module_dir.close(io);
+        if (!discover.directory.isGitDirectory(io, module_dir)) return refuse(m.options.refusal, target.display, target.where.path, error.NotCloned);
+        if (request.dry_run) {
+            var sub = try Repository.open(m.gpa, io, module_dir, .{ .discover = false });
+            defer sub.deinit(io);
+            const to = request.to orelse return;
+            var hex: [hash.max_hex_len]u8 = undefined;
+            if (!try sub.objectDatabase().exists(io, to)) return refuse(m.options.refusal, target.display, to.hex(&hex), error.CommitMissing);
+            return;
+        }
+        try fs.makeDirs(io, wt, request.path, m.repo.sharedPermissions());
+        var work = try wt.openDir(io, request.path, .{});
+        defer work.close(io);
+        try connect(arena, io, m.repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+        // git's `submodule_reset_index`: whatever index the repository
+        // kept from an earlier checkout is not this one's.
+        module_dir.deleteFile(io, "index") catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| return e,
+        };
+        var sub = try openSubmodule(m.gpa, io, m.repo, request.path, m.options.open);
+        defer sub.deinit(io);
+        try m.checkoutIn(arena, io, &sub, null, target);
+    }
+
+    /// `read-tree --recurse-submodules` in the submodule, from `from` to
+    /// the request's commit, then its `HEAD` detached there, or the
+    /// submodule taken away.
+    fn checkoutIn(m: *Mover, arena: Allocator, io: Io, sub: *Repository, from: ?Oid, target: Target) MoveError!void {
+        const request = target.request;
+        var hex: [hash.max_hex_len]u8 = undefined;
+        const new_tree: Oid = if (request.to) |to|
+            try commitTreeOf(sub, io, to) orelse return refuse(m.options.refusal, target.display, to.hex(&hex), error.CommitMissing)
+        else
+            sub.objectFormat().emptyTree();
+        if (request.force and request.dry_run) return;
+
+        var locked: ?Repository.LockedIndex = if (request.dry_run) null else try sub.lockIndex(io);
+        defer if (locked) |*l| l.deinit(io);
+        var plain: ?Index = if (request.dry_run) try sub.openIndex(io) else null;
+        defer if (plain) |*p| p.deinit();
+        const index: *Index = if (locked) |*l| &l.index else &plain.?;
+
+        var nested: Mover = .{
+            .gpa = m.gpa,
+            .repo = sub,
+            .index = index,
+            .options = m.options,
+            .prefix = try arena.print("{s}/", .{target.display}),
+            .depth = m.depth + 1,
+        };
+        if (request.force) {
+            var ignore_rules = try sub.loadIgnore(io);
+            defer ignore_rules.deinit();
+            var attrs = try sub.loadAttrs(io);
+            defer attrs.deinit();
+            var rules = try sub.worktreeRules();
+            rules.ignore = &ignore_rules;
+            rules.attrs = &attrs;
+            rules.required_filters = try sub.requiredFilters(arena);
+            rules.submodules = nested.submodules();
+            _ = worktree.checkout(m.gpa, io, sub.workDirectory().?, .{ .index = index, .db = sub.objectDatabase(), .tree = new_tree }, .{
+                .rules = rules,
+                .force = true,
+                .programs = m.options.programs,
+            }) catch |err| return m.passOn(&nested, err);
+        } else {
+            const old_tree: ?Oid = if (from) |commit|
+                try commitTreeOf(sub, io, commit) orelse return refuse(m.options.refusal, target.display, commit.hex(&hex), error.CommitMissing)
+            else
+                null;
+            var outcome = three_way.fastForward(m.gpa, io, sub, .{ .index = index, .old = old_tree, .new = new_tree }, .{
+                .submodules = nested.submodules(),
+                .dry_run = request.dry_run,
+                .programs = m.options.programs,
+            }) catch |err| return m.passOn(&nested, err);
+            outcome.deinit();
+        }
+        if (request.dry_run) return;
+        try locked.?.commit(io);
+        if (request.to) |to| return m.detach(io, sub, to);
+        try m.takeAway(io, target);
+    }
+
+    /// A nested mover's refusal is this one's.
+    fn passOn(m: *Mover, nested: *const Mover, err: MoveError) MoveError {
+        if (err == error.SubmoduleNotUpdated) m.failure = nested.failure;
+        return err;
+    }
+
+    /// `update-ref --no-deref HEAD <commit>` in the submodule.
+    fn detach(m: *Mover, io: Io, sub: *Repository, to: Oid) MoveError!void {
+        var tx = sub.beginRefs();
+        defer tx.deinit(io);
+        try tx.change("HEAD", .{ .direct = to }, .any, .{ .no_deref = true });
+        const log: ?refs_mod.LogMessage = if (m.options.who) |who| .{ .who = who, .message = "", .policy = sub.reflogPolicy() } else null;
+        try tx.commit(io, log);
+    }
+
+    /// The submodule's `.git` file, its directory once empty, and its
+    /// repository's `core.worktree`, gone.
+    fn takeAway(m: *Mover, io: Io, target: Target) MoveError!void {
+        const wt = m.repo.workDirectory().?;
+        var work = try wt.openDir(io, target.request.path, .{});
+        defer work.close(io);
+        work.deleteFile(io, ".git") catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| return e,
+        };
+        wt.deleteDir(io, target.request.path) catch |err| switch (err) {
+            error.DirNotEmpty, error.FileNotFound => {},
+            else => |e| return e,
+        };
+        var module_dir = try target.where.base.openDir(io, target.where.path, .{});
+        defer module_dir.close(io);
+        try setCoreWorktree(io, m.repo, module_dir, null);
+    }
+};
+
+/// The tree of `commit` in `repo`, or `null` when the repository does not
+/// have it.
+fn commitTreeOf(repo: *Repository, io: Io, commit: Oid) Error!?Oid {
+    if (!try repo.objectDatabase().exists(io, commit)) return null;
+    return try repo.commitTree(io, commit);
+}
+
+//=========================================================================
+// git branch --recurse-submodules
+//=========================================================================
+
+/// The `.gitmodules` the tree `tree` carries at its top, as git reads it
+/// for a revision (`gitmodules_config_oid`); none is an empty one.
+pub fn gitmodulesOfTree(gpa: Allocator, io: Io, repo: *Repository, tree: Oid) Self.Error!Gitmodules {
+    const db = repo.objectDatabase();
+    const found = try db.read(io, tree);
+    defer db.allocator().free(found.bytes);
+    if (found.type != .tree) return error.UnexpectedObjectType;
+    const parsed: object.Tree = .parse(repo.objectFormat(), found.bytes);
+    const entry = (try parsed.find(".gitmodules")) orelse return .empty(gpa);
+    const blob = try db.read(io, entry.oid);
+    defer db.allocator().free(blob.bytes);
+    if (blob.type != .blob) return .empty(gpa);
+    return Gitmodules.parse(gpa, blob.bytes);
+}
+
+/// Whether a checkout, a reset or a `read-tree` moves the submodules:
+/// `--recurse-submodules` or `--no-recurse-submodules` (`explicit`), else
+/// `submodule.recurse`. One that does hands a `Mover` to the update.
+pub fn updatesRecurse(config: *const config_mod.Config, explicit: ?bool) Self.Error!bool {
+    return explicit orelse try config.getBool("submodule.recurse", false);
+}
+
+/// Whether `git branch` makes its branches in the submodules too:
+/// `--recurse-submodules` (`explicit`) or `submodule.recurse`, and either
+/// only under `submodule.propagateBranches`. `explicit` without it is
+/// `error.BranchesNotPropagated`, which git dies on.
+pub fn branchesRecurse(config: *const config_mod.Config, explicit: bool) Self.Error!bool {
+    const propagate = try config.getBool("submodule.propagatebranches", false);
+    if (explicit and !propagate) return error.BranchesNotPropagated;
+    return (explicit or try config.getBool("submodule.recurse", false)) and propagate;
+}
+
+/// How `createBranches` makes its branches.
+pub const BranchOptions = struct {
+    /// Who each reflog line is by.
+    who: object.Signature,
+    /// `-f`.
+    force: bool = false,
+    /// As `commit.branch.Options.track`; `null` takes
+    /// `branch.autoSetupMerge`, in each submodule its own.
+    track: ?branch_mod.Track = null,
+    /// What each submodule's repository is opened with.
+    open: Repository.OpenOptions = .{},
+    refusal: ?*Refusal = null,
+};
+
+/// git's `create_branches_recursively`, `git branch --recurse-submodules
+/// <name> <start>`: the branch made in the superproject at `start`, and in
+/// each active submodule the start's tree has, at the commit its gitlink
+/// records, theirs in turn. Every one is checked before any is made: a
+/// submodule whose repository is nowhere is `error.NotCloned`, one where
+/// the branch cannot be made its reason. Each submodule's branch is set up
+/// to track what the superproject's start is, as its own remotes map it.
+pub fn createBranches(gpa: Allocator, io: Io, repo: *Repository, inputs: branch_mod.Inputs, options: BranchOptions) Self.Error!void {
+    try branchesIn(gpa, io, repo, .{ .name = inputs.name, .start = inputs.start, .track = options.track }, options, true);
+    try branchesIn(gpa, io, repo, .{ .name = inputs.name, .start = inputs.start, .track = options.track }, options, false);
+}
+
+/// One repository's part of `createBranches`: `tracking` the
+/// superproject's branch point, `null` at the top, where it is the start's
+/// own; `track` what the command line said, `null` the repository's
+/// configuration.
+const BranchesAt = struct {
+    name: []const u8,
+    start: []const u8,
+    tracking: ?[]const u8 = null,
+    track: ?branch_mod.Track,
+    prefix: []const u8 = "",
+    depth: u32 = 0,
+};
+
+fn branchesIn(gpa: Allocator, io: Io, repo: *Repository, at: BranchesAt, options: BranchOptions, dry_run: bool) Error!void {
+    if (at.depth > max_depth) return refuse(options.refusal, at.prefix, "", error.NestingTooDeep);
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const start = try branch_mod.resolveStart(arena, io, repo, at.start, false);
+    const tracking = at.tracking orelse start.ref;
+    const how = at.track orelse try branch_mod.configuredTrack(repo.configuration());
+    // What `submodule_create_branch` passes on: `--no-track`,
+    // `--track=direct`, `--track=inherit`, or nothing.
+    const passed: ?branch_mod.Track = switch (how) {
+        .never => .never,
+        .always, .explicit => .explicit,
+        .inherit => .inherit,
+        .remote, .simple => null,
+    };
+
+    var subs: std.ArrayList(TreeSubmodule) = .empty;
+    defer for (subs.items) |*s| if (s.repo) |*r| r.deinit(io);
+    const root = try repo.commitTree(io, start.oid);
+    var modules = try gitmodulesOfTree(gpa, io, repo, root);
+    defer modules.deinit();
+    try submodulesOfTree(arena, io, repo, &modules, .{ .oid = root }, options.open, &subs);
+    for (subs.items) |s| {
+        if (s.repo == null) return refuse(options.refusal, try join(arena, at.prefix, s.path), s.name, error.NotCloned);
+    }
+    var hex: [hash.max_hex_len]u8 = undefined;
+    for (subs.items) |*s| {
+        const inner: BranchesAt = .{
+            .name = at.name,
+            .start = try arena.dupe(u8, s.oid.hex(&hex)),
+            .tracking = tracking,
+            .track = passed,
+            .prefix = try arena.print("{s}{s}/", .{ at.prefix, s.path }),
+            .depth = at.depth + 1,
+        };
+        try branchesIn(gpa, io, &s.repo.?, inner, options, true);
+    }
+    var created = try branch_mod.create(gpa, io, repo, .{ .name = at.name, .start = at.start }, .{
+        .who = options.who,
+        .force = options.force,
+        .track = .never,
+        .dry_run = dry_run,
+    });
+    created.deinit();
+    if (dry_run) return;
+    if (tracking) |orig| _ = try branch_mod.setTracking(arena, io, repo, .{ .name = at.name, .orig = orig, .how = how });
+    for (subs.items) |*s| {
+        const inner: BranchesAt = .{
+            .name = at.name,
+            .start = try arena.dupe(u8, s.oid.hex(&hex)),
+            .tracking = tracking,
+            .track = passed,
+            .prefix = try arena.print("{s}{s}/", .{ at.prefix, s.path }),
+            .depth = at.depth + 1,
+        };
+        try branchesIn(gpa, io, &s.repo.?, inner, options, false);
+    }
+}
+
+/// An active submodule a tree has: git's `submodule_tree_entry`.
+const TreeSubmodule = struct { path: []const u8, name: []const u8, oid: Oid, repo: ?Repository };
+
+/// git's `submodules_of_tree`: the active gitlinks under a tree, in tree
+/// order, each with its repository, `null` where it is nowhere.
+fn submodulesOfTree(
+    arena: Allocator,
+    io: Io,
+    repo: *Repository,
+    modules: *const Gitmodules,
+    tree: struct { oid: Oid, prefix: []const u8 = "" },
+    open: Repository.OpenOptions,
+    out: *std.ArrayList(TreeSubmodule),
+) Error!void {
+    const db = repo.objectDatabase();
+    const found = try db.read(io, tree.oid);
+    defer db.allocator().free(found.bytes);
+    const parsed: object.Tree = .parse(repo.objectFormat(), found.bytes);
+    var it = parsed.iterate();
+    while (try it.next()) |entry| {
+        const path = if (tree.prefix.len == 0) try arena.dupe(u8, entry.name) else try arena.print("{s}/{s}", .{ tree.prefix, entry.name });
+        switch (entry.mode) {
+            .gitlink => {
+                const module = modules.byPath(path) orelse continue;
+                if (!try isActive(arena, repo, module.name, path)) continue;
+                const name = try arena.dupe(u8, module.name);
+                try out.append(arena, .{ .path = path, .name = name, .oid = entry.oid, .repo = null });
+                out.items[out.items.len - 1].repo = try openRepository(repo.allocator(), io, repo, .{ .path = path, .name = name }, open);
+            },
+            .tree => try submodulesOfTree(arena, io, repo, modules, .{ .oid = entry.oid, .prefix = path }, open, out),
+            else => {},
+        }
+    }
 }
 
 //=========================================================================

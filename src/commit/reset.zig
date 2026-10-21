@@ -48,6 +48,14 @@ pub const Options = struct {
     tree: Oid,
     mode: Mode = .merge,
     blocked: ?*three_way.Blocked = null,
+    /// `--recurse-submodules`: what moves the submodules, as
+    /// `worktree.Rules.submodules`. `hard` moves every one to the commit
+    /// the tree records, forced, as git's `read-tree --reset`; `merge`
+    /// moves those whose gitlink changes, refused where a submodule would
+    /// lose work. Without one a submodule's checkout is left where it is.
+    submodules: ?worktree.SubmoduleMover = null,
+    /// Where a refused submodule is listed.
+    obstructions: ?*worktree.Obstructions = null,
 };
 
 /// Make `index` and the working tree hold `tree`, as `mode` allows.
@@ -70,6 +78,7 @@ pub fn toTree(
     const db = repo.objectDatabase();
 
     var rules = try repo.worktreeRules();
+    rules.submodules = options.submodules;
     rules.required_filters = try repo.requiredFilters(arena);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
@@ -90,7 +99,9 @@ pub fn toTree(
         if (!is_conflicted) {
             const e = entry.?;
             if (want != null and want.?.mode == e.mode and want.?.oid.eql(e.oid)) {
-                if (mode == .hard and !e.skip_worktree and try differs(gpa, io, wt, index, e, rules)) {
+                // `read-tree --reset` brings every submodule to its commit.
+                const moved = e.mode == .gitlink and rules.submodules != null;
+                if (mode == .hard and !e.skip_worktree and (moved or try differs(gpa, io, wt, index, e, rules))) {
                     try rewrite.append(arena, path);
                 }
                 continue;
@@ -117,6 +128,14 @@ pub fn toTree(
     }
     std.mem.sort([]const u8, rewrite.items, {}, lessThanPath);
     std.mem.sort([]const u8, remove.items, {}, lessThanPath);
+    if (rules.submodules) |mover| {
+        try worktree.verifySubmoduleMoves(gpa, io, wt, .{ .index = index, .updates = &try changedPaths(arena, &wanted, &current, remove.items, rewrite.items) }, .{
+            .mover = mover,
+            .force = mode == .hard,
+            .obstructions = options.obstructions,
+        });
+        worktree.gitmodulesFirst(rewrite.items);
+    }
 
     // Git's checkout reads attributes from the index it is installing.
     // Keep the old rules for the local-change checks above, then use the
@@ -126,11 +145,7 @@ pub fn toTree(
     try worktree.addTreeAttributes(arena, io, db, &write_attrs, &wanted);
     rules.attrs = &write_attrs;
 
-    var i = remove.items.len;
-    while (i > 0) {
-        i -= 1;
-        try worktree.removeEntry(io, wt, remove.items[i], rules.protect);
-    }
+    try removeAll(io, wt, remove.items, &current, rules);
     var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
@@ -142,8 +157,12 @@ pub fn toTree(
     var stats: std.StringHashMapUnmanaged(fs.Stat) = .empty;
     for (rewrite.items) |path| {
         const want = wanted.get(path).?;
+        const old = current.get(path) orelse null;
+        const was_gitlink = old != null and old.?.mode == .gitlink;
         if (try fs.statAt(io, wt, path)) |found| {
-            if (found.kind == .directory) try wt.deleteTree(io, path);
+            // A submodule's checkout stays, for the mover to move or, with
+            // none, as git leaves it.
+            if (found.kind == .directory and !(want.mode == .gitlink and was_gitlink)) try wt.deleteTree(io, path);
         }
         // Validate before `enter` consults a directory in the working tree.
         if (path_mod.checkEntry(path, .worktree, want.mode == .symlink, rules.protect) != null) return error.UnsafePath;
@@ -220,6 +239,46 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
 
 /// Whether the file for `entry` is something other than the index says. A
 /// missing file loses nothing.
+/// Remove `paths`, sorted, last first: a submodule as `rules.submodules`
+/// takes it away, anything else as a file.
+fn removeAll(io: Io, wt: Io.Dir, paths: []const []const u8, current: *const std.array_hash_map.String(?index_mod.Entry), rules: worktree.Rules) Error!void {
+    var i = paths.len;
+    while (i > 0) {
+        i -= 1;
+        const old = current.get(paths[i]).?;
+        if (old != null and old.?.mode == .gitlink) {
+            try worktree.removeGitlink(io, wt, paths[i], rules);
+        } else {
+            try worktree.removeEntry(io, wt, paths[i], rules.protect);
+        }
+    }
+}
+
+/// The paths whose index entry the reset changes, each to what `wanted`
+/// has there, `null` for the ones it removes: what git checks a
+/// submodule's move over. A path rewritten only because its file changed
+/// is not one.
+fn changedPaths(
+    arena: Allocator,
+    wanted: *const std.StringHashMapUnmanaged(worktree.TreeEntry),
+    current: *const std.array_hash_map.String(?index_mod.Entry),
+    remove: []const []const u8,
+    rewrite: []const []const u8,
+) Allocator.Error!std.array_hash_map.String(?worktree.TreeEntry) {
+    var updates: std.array_hash_map.String(?worktree.TreeEntry) = .empty;
+    for (remove) |path| try updates.put(arena, path, null);
+    for (rewrite) |path| {
+        const want = wanted.get(path).?;
+        if (current.get(path)) |maybe| {
+            if (maybe) |old| {
+                if (old.mode == want.mode and old.oid.eql(want.oid)) continue;
+            }
+        }
+        try updates.put(arena, path, want);
+    }
+    return updates;
+}
+
 fn differs(gpa: Allocator, io: Io, wt: Io.Dir, index: *const Index, entry: index_mod.Entry, rules: worktree.Rules) Error!bool {
     return worktree.differsFromIndex(gpa, io, wt, .{ .index = index, .entry = entry }, rules);
 }

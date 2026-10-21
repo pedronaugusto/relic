@@ -15,7 +15,6 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
-const names_path = @import("../names/path.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -95,6 +94,15 @@ pub const Options = struct {
     /// git's `init_basic_merge_options`, as `git replay` and `git history`
     /// merge: `diff.algorithm` is not read.
     basic: bool = false,
+    /// `--recurse-submodules`: what moves the submodules whose gitlinks the
+    /// working tree takes, as `worktree.Rules.submodules`. Without one a
+    /// submodule's checkout is left where it is.
+    submodules: ?worktree.SubmoduleMover = null,
+    /// `read-tree -n`: every change checked as `read-tree` without `-u`
+    /// checks it -- what has changes of its own, not what stands in the
+    /// way, since nothing is written -- and nothing written. The outcome
+    /// says nothing was.
+    dry_run: bool = false,
 };
 
 /// The index and tree identities for one working-tree merge.
@@ -402,16 +410,6 @@ fn sameEntry(current: ?*const index_mod.Entry, tree: ?TreeEntry) bool {
     return c.mode == t.mode and c.oid.eql(t.oid);
 }
 
-/// Remove the directory at `path` if it is empty, as git's `rmdir` for a
-/// submodule's checkout: one with files in it, or already gone, stays as
-/// it is.
-fn removeIfEmpty(io: Io, wt: Io.Dir, path: []const u8) Io.Dir.DeleteDirError!void {
-    wt.deleteDir(io, path) catch |err| switch (err) {
-        error.DirNotEmpty, error.FileNotFound, error.NotDir => {},
-        else => return err,
-    };
-}
-
 /// Carry a merge from `ours` to `merged` into the index and the working
 /// tree, everything it would overwrite checked first. The outcome takes
 /// over `arena_instance`.
@@ -422,11 +420,13 @@ fn carry(
     index: *Index,
     arena_instance: *std.heap.ArenaAllocator,
     ours: ?Oid,
-    rules: worktree.Rules,
+    caller_rules: worktree.Rules,
     merged: Merged,
     options: Options,
 ) Error!Outcome {
     const arena = arena_instance.allocator();
+    var rules = caller_rules;
+    rules.submodules = options.submodules;
     const wt = repo.workDirectory() orelse return error.BareRepository;
     const db = repo.objectDatabase();
     const desired = try desiredChanges(gpa, arena, io, db, index, .{ .ours = ours, .merged = merged }, options.blocked);
@@ -442,21 +442,24 @@ fn carry(
         try updates.put(arena, path, want);
     }
     std.mem.sort([]const u8, changes.items, {}, lessThanPath);
+    if (rules.submodules != null) worktree.gitmodulesFirst(changes.items);
 
     // Nothing is written until every change has been checked, by the same
     // rules a checkout keeps.
-    var ignore_rules = try repo.loadIgnore(io);
-    defer ignore_rules.deinit();
-    var obstructions: worktree.Obstructions = .init(gpa);
-    defer obstructions.deinit();
-    worktree.verifyUpdates(gpa, io, wt, .{ .index = index, .updates = &updates }, .{ .rules = rules, .ignore = &ignore_rules, .obstructions = &obstructions }) catch |err| {
-        if (obstructions.first()) |path| {
-            if (options.blocked) |b| b.set(path);
-        }
-        return err;
+    try verifyCarry(gpa, io, repo, .{ .index = index, .updates = &updates }, rules, options);
+    if (options.dry_run) return .{
+        .gpa = gpa,
+        .arena = arena_instance.state,
+        .conflicts = &.{},
+        .tree = null,
+        .auto_merge = merged.tree,
+        .written = 0,
+        .removed = 0,
+        .messages = messages,
+        .renames_clean = merged.renames_clean,
     };
 
-    const outcome_removed = try removeGone(io, wt, index, changes.items, &desired, rules.protect);
+    const outcome_removed = try removeGone(io, wt, index, changes.items, &desired, rules);
     var write_attrs = try repo.loadAttrs(io);
     defer write_attrs.deinit();
     try mergedAttributes(arena, io, db, &write_attrs, merged, changes.items);
@@ -525,10 +528,30 @@ fn carry(
 /// `null` where it has nothing.
 const Desired = std.array_hash_map.String(?TreeEntry);
 
+/// `worktree.verifyUpdates` over what a merge carries into the working
+/// tree, the first path refused into `options.blocked`.
+fn verifyCarry(gpa: Allocator, io: Io, repo: *Repository, inputs: worktree.VerifyInputs, rules: worktree.Rules, options: Options) Error!void {
+    var ignore_rules = try repo.loadIgnore(io);
+    defer ignore_rules.deinit();
+    var obstructions: worktree.Obstructions = .init(gpa);
+    defer obstructions.deinit();
+    worktree.verifyUpdates(gpa, io, repo.workDirectory().?, inputs, .{
+        .rules = rules,
+        .ignore = &ignore_rules,
+        .obstructions = &obstructions,
+        .untracked = !options.dry_run,
+    }) catch |err| {
+        if (obstructions.first()) |path| {
+            if (options.blocked) |b| b.set(path);
+        }
+        return err;
+    };
+}
+
 /// Remove what the merge takes away, last path first, so that a directory
 /// the merge turns into a file is gone before the file is written. How
 /// many went.
-fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const u8, desired: *const Desired, protect: names_path.Protect) Error!u32 {
+fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const u8, desired: *const Desired, rules: worktree.Rules) Error!u32 {
     var removed: u32 = 0;
     var i = changes.len;
     while (i > 0) {
@@ -539,12 +562,11 @@ fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const 
         const entry = index.find(path).?;
         if (entry.skip_worktree) continue;
         if (entry.mode == .gitlink) {
-            // Only an empty submodule directory goes, as with git.
-            if (try worktree.realLeadingPath(io, wt, path)) try removeIfEmpty(io, wt, path);
+            try worktree.removeGitlink(io, wt, path, rules);
             removed += 1;
             continue;
         }
-        try worktree.removeEntry(io, wt, path, protect);
+        try worktree.removeEntry(io, wt, path, rules.protect);
         removed += 1;
     }
     return removed;
@@ -617,14 +639,11 @@ fn writeChanged(
         if (if (in_tree) try fs.statAt(w.io, w.wt, path) else null) |found| {
             if (found.kind == .directory) {
                 // A submodule's checkout is left as it is, as git leaves it
-                // without `--recurse-submodules`; the index records the
-                // new commit.
-                if (want.mode == .gitlink) {
-                    if (w.index.find(path)) |old| {
-                        if (old.mode == .gitlink) continue;
-                    }
-                }
-                try w.wt.deleteTree(w.io, path);
+                // without `--recurse-submodules`, the index recording the
+                // new commit; with it, the mover moves the submodule.
+                const was_gitlink = if (w.index.find(path)) |old| old.mode == .gitlink else false;
+                if (want.mode == .gitlink and was_gitlink and w.rules.submodules == null) continue;
+                if (!(want.mode == .gitlink and was_gitlink)) try w.wt.deleteTree(w.io, path);
             }
         }
         try w.attrs.enter(w.io, w.wt, path);
@@ -906,7 +925,7 @@ fn requireIndexIs(arena: Allocator, io: Io, db: *odb_mod.Odb, index: *Index, our
 
 /// The first path where `index` is not the tree `ours` (`null` the empty
 /// tree), or `null` when it is that tree exactly.
-fn indexDiffers(arena: Allocator, io: Io, db: *odb_mod.Odb, index: *Index, ours: ?Oid) Error!?[]const u8 {
+pub fn indexDiffers(arena: Allocator, io: Io, db: *odb_mod.Odb, index: *Index, ours: ?Oid) Error!?[]const u8 {
     const tree = ours orelse return if (index.entries.items.len == 0) null else index.entries.items[0].path;
     var plain = true;
     for (index.entries.items) |entry| {

@@ -66,6 +66,11 @@ pub const Error = error{
     /// A `SubmoduleProbe` could not read a submodule's repository. The probe
     /// says which and why.
     SubmoduleUnreadable,
+    /// A `SubmoduleMover` could not move a submodule, or found before
+    /// anything was written that it could not: git's "Cannot update
+    /// submodule", with every such path in `Obstructions`. The mover says
+    /// why.
+    SubmoduleNotUpdated,
     /// A repository inside the working tree has no commit checked out, so a
     /// gitlink for it would have nothing to record. git's `add` stops there
     /// too. `AddOptions.refusal` says which.
@@ -135,6 +140,10 @@ pub const Rules = struct {
     /// `core.ignoreStat`: an entry an add or a write takes the stat of is
     /// marked `assume_valid`, which nothing compares against the disk.
     ignore_stat: bool = false,
+    /// `--recurse-submodules` and `submodule.recurse`: what moves the
+    /// submodules whose gitlinks are written or removed. Without one a
+    /// gitlink is written as an empty directory.
+    submodules: ?SubmoduleMover = null,
 
     /// Put the stat an add or a write found into `entry`: git's
     /// `fill_stat_cache_info`, which under `ignore_stat` marks the entry
@@ -816,6 +825,53 @@ pub const SubmoduleState = struct {
     /// Whether none of the three holds.
     pub fn isClean(s: SubmoduleState) bool {
         return !s.new_commits and !s.modified_content and !s.untracked_content;
+    }
+};
+
+/// One move a checkout asks of a submodule: git's `submodule_move_head`,
+/// its working tree and index taken from the commit `from` to the commit
+/// `to`, its `HEAD` detached at `to`.
+pub const SubmoduleMove = struct {
+    /// Relative to the superproject's working tree.
+    path: []const u8,
+    from: From,
+    /// `null` takes the submodule away: its `.git` file and, once empty,
+    /// its directory go.
+    to: ?Oid,
+    /// `SUBMODULE_MOVE_HEAD_FORCE`: the submodule's own changes are
+    /// overwritten, as `read-tree --reset` overwrites them, and its index
+    /// is not asked to be clean.
+    force: bool,
+    /// `SUBMODULE_MOVE_HEAD_DRY_RUN`: only whether the move would go
+    /// through, as `read-tree -n` answers it. Nothing is written.
+    dry_run: bool = false,
+
+    pub const From = union(enum) {
+        /// Nothing: the submodule's working tree is made, from its
+        /// repository in the superproject's `modules`.
+        none,
+        /// Its `HEAD`.
+        head,
+        /// This commit, as the superproject's index records it.
+        commit: Oid,
+    };
+};
+
+/// How a checkout moves the submodules it changes, as git does under
+/// `--recurse-submodules`. Without one a gitlink is an empty directory to
+/// the working tree, and a submodule's own checkout is left where it is.
+///
+/// The working-tree layer cannot open another repository, so the moves go
+/// through here; `submodule.Mover` makes them the way git does, a
+/// submodule's own submodules with them. A move that cannot be made is
+/// `error.SubmoduleNotUpdated`, and the mover says which and why.
+pub const SubmoduleMover = struct {
+    context: *anyopaque,
+    moveFn: *const fn (io: Io, context: *anyopaque, move: SubmoduleMove) Error!void,
+
+    /// Make `move`, or with `move.dry_run` say whether it would go through.
+    pub fn move(m: SubmoduleMover, io: Io, request: SubmoduleMove) Self.Error!void {
+        return m.moveFn(io, m.context, request);
     }
 };
 
@@ -1868,9 +1924,18 @@ pub fn checkout(
     defer conv.deinit(io);
 
     try refuseUnsafeTree(arena, &wanted, options);
-    if (!options.force) try verifyCheckout(gpa, arena, io, wt, index, &wanted, options);
+    if (!options.force) {
+        try verifyCheckout(gpa, arena, io, wt, index, &wanted, options);
+    } else if (options.rules.submodules) |mover| {
+        const updates = try checkoutUpdates(arena, index, &wanted);
+        try verifySubmoduleMoves(gpa, io, wt, .{ .index = index, .updates = &updates }, .{
+            .mover = mover,
+            .force = true,
+            .obstructions = options.obstructions,
+        });
+    }
     try refuseDirectoriesInTheWay(arena, io, wt, index, &wanted, options.force, options.rules.precompose_unicode);
-    var removed_dirs = try removeUnwanted(arena, io, wt, index, &wanted, &outcome);
+    var removed_dirs = try removeUnwanted(arena, io, wt, index, &wanted, options.rules, &outcome);
 
     // Write what the tree has, in path order.
     var paths = try arena.alloc([]const u8, wanted.count());
@@ -1882,6 +1947,7 @@ pub fn checkout(
     }
     assert(n == paths.len);
     std.mem.sort([]const u8, paths, {}, lessThanName);
+    if (options.rules.submodules != null) gitmodulesFirst(paths);
     try removeEmptiedDirectories(io, wt, index, paths, &wanted, options.force);
 
     var writing: CheckoutWrite = .{
@@ -1971,6 +2037,28 @@ fn refuseCollidingPaths(
     }
 }
 
+/// Each path a checkout of `wanted` changes in `index`, to what the tree
+/// has there, `null` where it has nothing.
+fn checkoutUpdates(
+    arena: Allocator,
+    index: *const Index,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+) Allocator.Error!std.array_hash_map.String(?TreeEntry) {
+    var updates: std.array_hash_map.String(?TreeEntry) = .empty;
+    for (index.entries.items) |entry| {
+        if (entry.stage != 0) continue;
+        const want = wanted.get(entry.path);
+        if (want != null and want.?.mode == entry.mode and want.?.oid.eql(entry.oid)) continue;
+        try updates.put(arena, entry.path, want);
+    }
+    var want_it = wanted.iterator();
+    while (want_it.next()) |item| {
+        if (index.find(item.key_ptr.*) != null) continue;
+        try updates.put(arena, item.key_ptr.*, item.value_ptr.*);
+    }
+    return updates;
+}
+
 /// Without `force`, refuse a checkout that would lose work: every path the
 /// tree changes, against what is on the disk.
 fn verifyCheckout(
@@ -1982,18 +2070,10 @@ fn verifyCheckout(
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
     options: CheckoutOptions,
 ) Error!void {
-    var updates: std.array_hash_map.String(?TreeEntry) = .empty;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnmergedIndex;
-        const want = wanted.get(entry.path);
-        if (want != null and want.?.mode == entry.mode and want.?.oid.eql(entry.oid)) continue;
-        try updates.put(arena, entry.path, want);
     }
-    var want_it = wanted.iterator();
-    while (want_it.next()) |item| {
-        if (index.find(item.key_ptr.*) != null) continue;
-        try updates.put(arena, item.key_ptr.*, item.value_ptr.*);
-    }
+    const updates = try checkoutUpdates(arena, index, wanted);
     try verifyUpdates(gpa, io, wt, .{ .index = index, .updates = &updates }, .{
         .rules = options.rules,
         .ignore = options.ignore,
@@ -2036,6 +2116,7 @@ fn removeUnwanted(
     wt: Io.Dir,
     index: *Index,
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    rules: Rules,
     outcome: *CheckoutOutcome,
 ) Error!std.StringHashMapUnmanaged(void) {
     var removed_dirs: std.StringHashMapUnmanaged(void) = .empty;
@@ -2054,13 +2135,7 @@ fn removeUnwanted(
         if (!try leading.real(io, wt, std.Io.Dir.path.dirnamePosix(entry.path) orelse "")) {
             // Past a symbolic link: nothing of the working tree's to remove.
         } else if (entry.mode == .gitlink) {
-            // A submodule nobody populated leaves with its empty directory;
-            // a populated one's directory stays where it is, as git leaves
-            // it with a warning.
-            wt.deleteDir(io, entry.path) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir, error.DirNotEmpty => {},
-                else => |e| return e,
-            };
+            try removeGitlink(io, wt, entry.path, rules);
         } else fs.deleteFile(io, wt, entry.path) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => {},
             else => |e| return e,
@@ -2099,6 +2174,20 @@ fn removeEmptiedDirectories(
     }
 }
 
+const gitmodules_path = ".gitmodules";
+
+/// Put `.gitmodules` first in the sorted `paths`, when it is there: git
+/// checks it out before anything else when it moves submodules
+/// (`load_gitmodules_file`), so every move reads the names the new one
+/// gives.
+pub fn gitmodulesFirst(paths: [][]const u8) void {
+    for (paths, 0..) |path, i| {
+        if (!std.mem.eql(u8, path, gitmodules_path)) continue;
+        std.mem.rotate([]const u8, paths[0 .. i + 1], i);
+        return;
+    }
+}
+
 /// What `checkout` writes the tree's paths with.
 const CheckoutWrite = struct {
     gpa: Allocator,
@@ -2133,6 +2222,7 @@ const CheckoutWrite = struct {
                 try leading.make(c.io, c.wt, parent, c.options.force, c.options.refusal);
             }
             try c.one(&batch, &leading, path, want);
+            if (c.options.rules.submodules != null and std.mem.eql(u8, path, gitmodules_path)) try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
         }
         try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
     }
@@ -2141,6 +2231,9 @@ const CheckoutWrite = struct {
     /// with `force`, a file whose stat says it is the one the index has.
     fn unchanged(c: *const CheckoutWrite, path: []const u8, want: TreeEntry) Error!bool {
         if (keeps(c.index, path, want, c.options.force)) return true;
+        // A forced checkout moves every submodule to its commit, as git's
+        // `oneway_merge` updates every gitlink under `--recurse-submodules`.
+        if (want.mode == .gitlink and c.options.rules.submodules != null) return false;
         const entry = c.index.find(path) orelse return false;
         if (!entry.oid.eql(want.oid) or entry.mode != want.mode or c.index.isRacy(entry.*)) return false;
         const on_disk = try fs.statAt(c.io, c.wt, path) orelse return false;
@@ -2152,7 +2245,7 @@ const CheckoutWrite = struct {
     fn one(c: *const CheckoutWrite, batch: *WriteBatch, leading: *LeadingDirs, path: []const u8, want: TreeEntry) Error!void {
         switch (want.mode) {
             .gitlink => {
-                try leading.make(c.io, c.wt, path, c.options.force, c.options.refusal);
+                try writeGitlink(c.gpa, c.io, c.wt, leading, .{ .path = path, .oid = want.oid, .rules = c.options.rules, .force = c.options.force, .refusal = c.options.refusal });
                 c.outcome.gitlinks += 1;
             },
             .symlink => {
@@ -2614,12 +2707,12 @@ pub fn writePaths(
         if (std.Io.Dir.path.dirnamePosix(w.path)) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
         if (try fs.statAt(io, wt, w.path)) |found| {
             // An empty directory gives way; one with anything in it is
-            // someone's work.
-            if (found.kind == .directory) wt.deleteDir(io, w.path) catch return error.UntrackedWouldBeOverwritten;
+            // someone's work, or a submodule's checkout.
+            if (found.kind == .directory and want.mode != .gitlink) wt.deleteDir(io, w.path) catch return error.UntrackedWouldBeOverwritten;
         }
         switch (want.mode) {
             .gitlink => {
-                try leading.make(io, wt, w.path, options.force, options.refusal);
+                try writeGitlink(gpa, io, wt, &leading, .{ .path = w.path, .oid = want.oid, .rules = options.rules, .force = options.force, .refusal = options.refusal });
                 outcome.gitlinks += 1;
             },
             .symlink => {
@@ -2733,7 +2826,8 @@ pub const Written = struct {
 /// a file through `conv` -- `ident`, line endings and the smudge filter or
 /// relic's own LFS, as the attributes say -- with the executable bit set
 /// where the filesystem keeps one, a symlink made or written as a file
-/// holding its target, a gitlink made as an empty directory. Whatever is at
+/// holding its target, a gitlink's submodule moved by `rules.submodules` or
+/// else made as an empty directory. Whatever is at
 /// `path` is replaced; the directories above it are made. `conv` must not
 /// be one that may hand a file over late.
 pub const WriteEntryOptions = struct { db: *Odb, conv: *convert.Session, path: []const u8, mode: object.Mode, oid: Oid, rules: Rules };
@@ -2751,7 +2845,7 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
     switch (mode) {
         .gitlink => {
             var leading: LeadingDirs = .{ .hide = rules.hide_dot_files };
-            try leading.make(io, wt, path, false, null);
+            try writeGitlink(gpa, io, wt, &leading, .{ .path = path, .oid = oid, .rules = rules });
         },
         .symlink => {
             const found = try db.read(io, oid);
@@ -2819,6 +2913,54 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
     return written;
 }
 
+/// Write the gitlink at `path`: git's `checkout_entry` on one. Without a
+/// mover it is an empty directory. With one, a populated submodule there
+/// is moved from its `HEAD` to `oid`, forced, as git's `check_updates`
+/// forces every entry it writes: what would lose work was refused before
+/// anything was written, and a change the move does not touch goes with
+/// the rest. Anything else there gives way to the submodule's directory,
+/// and the submodule is made in it from its repository, unforced where
+/// something was there, as git makes it.
+fn writeGitlink(gpa: Allocator, io: Io, wt: Io.Dir, leading: *LeadingDirs, link: GitlinkWrite) Error!void {
+    const mover = link.rules.submodules orelse return leading.make(io, wt, link.path, link.force, link.refusal);
+    var force = true;
+    if (try fs.statAt(io, wt, link.path)) |found| {
+        if (found.kind == .directory and try gitlink.isRepository(gpa, io, wt, link.path)) {
+            return mover.move(io, .{ .path = link.path, .from = .head, .to = link.oid, .force = true });
+        }
+        if (found.kind != .directory) try fs.deleteFile(io, wt, link.path);
+        force = false;
+    }
+    try leading.make(io, wt, link.path, link.force, link.refusal);
+    try mover.move(io, .{ .path = link.path, .from = .none, .to = link.oid, .force = force });
+}
+
+/// `force` is the checkout's, for the directories made on the way.
+const GitlinkWrite = struct { path: []const u8, oid: Oid, rules: Rules, force: bool = false, refusal: ?*Refusal = null };
+
+/// Take the submodule at `path` away, as git's `unlink_entry` does: with
+/// `rules.submodules`, the mover takes its working tree away, forced, and
+/// what it could not is left; then its directory goes once empty. A
+/// populated submodule without a mover keeps its directory, as git keeps
+/// it with a warning.
+pub fn removeGitlink(io: Io, wt: Io.Dir, path: []const u8, rules: Rules) Self.Error!void {
+    if (safe_path.check(path, .worktree, rules.protect) != null) return error.UnsafePath;
+    if (!try realLeadingPath(io, wt, path)) return;
+    if (rules.submodules) |mover| {
+        if (try fs.statAt(io, wt, path) != null) {
+            mover.move(io, .{ .path = path, .from = .head, .to = null, .force = true }) catch |err| switch (err) {
+                // git's `unlink_entry` goes on whatever the move says.
+                error.SubmoduleNotUpdated => {},
+                else => |e| return e,
+            };
+        }
+    }
+    wt.deleteDir(io, path) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.DirNotEmpty => {},
+        else => |e| return e,
+    };
+}
+
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
 pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8, protect: safe_path.Protect) Self.Error!void {
@@ -2845,6 +2987,8 @@ pub const Obstructions = struct {
     changed: std.ArrayList([]u8) = .empty,
     /// Untracked paths the update would overwrite, sorted.
     untracked: std.ArrayList([]u8) = .empty,
+    /// Submodules the `Rules.submodules` mover could not move, sorted.
+    submodules: std.ArrayList([]u8) = .empty,
 
     /// An empty list, allocating from `gpa`.
     pub fn init(gpa: Allocator) Obstructions {
@@ -2855,15 +2999,19 @@ pub const Obstructions = struct {
     pub fn deinit(o: *Obstructions) void {
         for (o.changed.items) |p| o.gpa.free(p);
         for (o.untracked.items) |p| o.gpa.free(p);
+        for (o.submodules.items) |p| o.gpa.free(p);
         o.changed.deinit(o.gpa);
         o.untracked.deinit(o.gpa);
+        o.submodules.deinit(o.gpa);
         o.* = undefined;
     }
 
-    /// The first path listed, changed ones first, or `null`.
+    /// The first path listed, changed ones first, then untracked ones, or
+    /// `null`.
     pub fn first(o: *const Obstructions) ?[]const u8 {
         if (o.changed.items.len != 0) return o.changed.items[0];
         if (o.untracked.items.len != 0) return o.untracked.items[0];
+        if (o.submodules.items.len != 0) return o.submodules.items[0];
         return null;
     }
 };
@@ -2877,6 +3025,10 @@ pub const VerifyOptions = struct {
     /// ignored.
     ignore: ?*ignore.Rules = null,
     obstructions: ?*Obstructions = null,
+    /// Whether what stands in the way of a new path is looked for. An
+    /// update that writes nothing, `read-tree` without `-u`, does not look:
+    /// git's `verify_absent` asks only of one that updates the working tree.
+    untracked: bool = true,
 };
 
 /// `verify_uptodate` and `verify_absent` from git's `unpack-trees`, over
@@ -2922,7 +3074,7 @@ pub fn verifyUpdates(
             if (try differsFromIndex(gpa, io, wt, .{ .index = index, .entry = entry.* }, options.rules)) try changed.append(arena, path);
             continue;
         }
-        if (want == null) continue;
+        if (want == null or !options.untracked) continue;
         var at: usize = 0;
         while (true) {
             const slash = std.mem.findScalarPos(u8, path, at, '/');
@@ -2943,13 +3095,107 @@ pub fn verifyUpdates(
             at = (slash orelse break) + 1;
         }
     }
-    if (changed.items.len == 0 and untracked.items.len == 0) return;
+    var submodules: std.ArrayList([]const u8) = .empty;
+    if (options.rules.submodules) |mover| try refusedMoves(arena, io, wt, inputs, .{ .mover = mover }, paths, &submodules);
+    if (changed.items.len == 0 and untracked.items.len == 0 and submodules.items.len == 0) return;
     if (options.obstructions) |out| {
         for (changed.items) |p| try out.changed.append(out.gpa, try out.gpa.dupe(u8, p));
         for (untracked.items) |p| try out.untracked.append(out.gpa, try out.gpa.dupe(u8, p));
+        for (submodules.items) |p| try out.submodules.append(out.gpa, try out.gpa.dupe(u8, p));
     }
     if (changed.items.len != 0) return error.LocalChangesWouldBeOverwritten;
-    return error.UntrackedWouldBeOverwritten;
+    if (untracked.items.len != 0) return error.UntrackedWouldBeOverwritten;
+    return error.SubmoduleNotUpdated;
+}
+
+/// What `verifySubmoduleMoves` is told.
+pub const SubmoduleCheck = struct {
+    mover: SubmoduleMover,
+    /// `read-tree --reset`: each move asked as a forced one, and a
+    /// submodule's `HEAD` not asked to be where its gitlink was.
+    force: bool = false,
+    obstructions: ?*Obstructions = null,
+};
+
+/// git's `check_submodule_move_head` over the gitlinks an update changes:
+/// every move the mover would make, asked of it as a dry run before
+/// anything is written. `verifyUpdates` does this itself when its rules
+/// carry a mover; a forced update, which checks nothing else, asks here.
+/// A refused move is `error.SubmoduleNotUpdated`, with every such path in
+/// `options.obstructions`.
+pub fn verifySubmoduleMoves(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    inputs: VerifyInputs,
+    options: SubmoduleCheck,
+) Self.Error!void {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const paths = try arena.dupe([]const u8, inputs.updates.keys());
+    std.mem.sort([]const u8, paths, {}, lessThanName);
+    var refused: std.ArrayList([]const u8) = .empty;
+    try refusedMoves(arena, io, wt, inputs, options, paths, &refused);
+    if (refused.items.len == 0) return;
+    if (options.obstructions) |out| {
+        for (refused.items) |p| try out.submodules.append(out.gpa, try out.gpa.dupe(u8, p));
+    }
+    return error.SubmoduleNotUpdated;
+}
+
+/// The paths of `paths`, sorted, whose submodule would not move: git asks
+/// a gitlink the update changes or removes to be at the commit the index
+/// records (`verify_uptodate`), unless forced; one it removes, or one it
+/// writes where the index had nothing, to give way, from that commit to
+/// nothing (`verify_absent`); and one it writes to take the move from the
+/// old one (`merged_entry`). A path with nothing on the disk has no
+/// submodule to ask.
+fn refusedMoves(
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    inputs: VerifyInputs,
+    check: SubmoduleCheck,
+    paths: []const []const u8,
+    refused: *std.ArrayList([]const u8),
+) Error!void {
+    for (paths) |path| {
+        const want = inputs.updates.get(path).?;
+        const old = inputs.index.find(path);
+        if (old != null and old.?.skip_worktree) continue;
+        const old_link: ?Oid = if (old != null and old.?.mode == .gitlink) old.?.oid else null;
+        const new_link: ?Oid = if (want != null and want.?.mode == .gitlink) want.?.oid else null;
+        if (old_link == null and new_link == null) continue;
+        if (try fs.statAt(io, wt, path) == null) continue;
+        var moves: [3]?SubmoduleMove = .{ null, null, null };
+        if (old_link) |recorded| {
+            if (!check.force) moves[0] = .{ .path = path, .from = .head, .to = recorded, .force = false, .dry_run = true };
+            if (want == null) moves[1] = .{ .path = path, .from = .{ .commit = recorded }, .to = null, .force = check.force, .dry_run = true };
+        } else if (old == null and new_link != null) {
+            moves[1] = .{ .path = path, .from = .{ .commit = new_link.? }, .to = null, .force = check.force, .dry_run = true };
+        }
+        if (new_link) |to| {
+            // A file the index has there is no submodule to move from.
+            if (old == null or old_link != null) moves[2] = .{
+                .path = path,
+                .from = if (old_link) |from| .{ .commit = from } else .none,
+                .to = to,
+                .force = check.force,
+                .dry_run = true,
+            };
+        }
+        for (moves) |maybe| {
+            const move = maybe orelse continue;
+            check.mover.move(io, move) catch |err| switch (err) {
+                error.SubmoduleNotUpdated => {
+                    try refused.append(arena, path);
+                    break;
+                },
+                else => |e| return e,
+            };
+        }
+    }
 }
 
 /// Whether everything under the directory at `dir_path` is a file the

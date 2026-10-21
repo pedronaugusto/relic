@@ -16,7 +16,8 @@
 //! in path order.
 //!
 //! `-P` (PCRE) is the caller's to bring, as a `Matcher`; without one it is
-//! refused by name, as are submodule recursion and `--no-index`.
+//! refused by name, as is `--no-index`. Under `--recurse-submodules` each
+//! active submodule is searched in its gitlink's place.
 
 const Self = @This();
 
@@ -39,6 +40,8 @@ const driver_mod = @import("diff/driver.zig");
 const textconv_mod = @import("diff/textconv.zig");
 const color = @import("config/color.zig");
 const config_mod = @import("config/config.zig");
+const gitmodules_mod = @import("config/gitmodules.zig");
+const submodule_mod = @import("submodule/submodule.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -74,7 +77,7 @@ pub const Error = error{
     /// The tree nests deeper than `core.maxTreeDepth`.
     TreeTooDeep,
 } || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || attributes.Error || Io.Writer.Error ||
-    odb_mod.Error || object.TreeParseError || textconv_mod.Error || driver_mod.Error;
+    odb_mod.Error || object.TreeParseError || textconv_mod.Error || driver_mod.Error || submodule_mod.Error;
 
 /// How patterns are read: `-G`, `-E`, `-F`, `-P`.
 pub const Syntax = enum { basic, extended, fixed, perl };
@@ -192,6 +195,12 @@ pub const Options = struct {
     /// The colours the output is written in, `null` for none:
     /// `Colors.configured` gives git's.
     colors: ?*const Colors = null,
+    /// `--recurse-submodules`: each active submodule the pathspecs reach
+    /// is searched too, in its gitlink's place, its files named from the
+    /// top -- from its index and working tree, or, in a tree, at the
+    /// commit its gitlink records, its repository found in `modules` when
+    /// it is not checked out. `null` reads `submodule.recurse`.
+    recurse_submodules: ?bool = null,
 };
 
 /// `git grep`'s colours: git's defaults under `color.grep.<slot>`.
@@ -923,48 +932,168 @@ const Item = struct {
     rule: ?*const driver_mod.Rule = null,
     /// Its driver's `textconv`, under `--textconv`.
     conversion: ?driver_mod.Conversion = null,
+    /// The repository it is in, by its place in `Repos`.
+    owner: u16 = 0,
 };
 
-fn collectIndex(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, cached: bool, items: *std.ArrayList(Item)) Error!void {
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    const entries = index.items();
-    var i: usize = 0;
-    while (i < entries.len) : (i += 1) {
-        const e = entries[i];
-        if (!cached and e.skip_worktree) continue;
-        if ((e.mode == .file or e.mode == .exec) and spec.matches(e.path)) {
-            const path = try a.dupe(u8, e.path);
-            if (cached or e.assume_valid) {
-                if (e.stage == 0 and !e.intent_to_add) try items.append(a, .{ .name = path, .path = path, .source = .{ .blob = e.oid } });
-            } else try items.append(a, .{ .name = path, .path = path, .source = .file });
-        }
-        if (e.stage != 0) {
-            while (i + 1 < entries.len and std.mem.eql(u8, entries[i + 1].path, e.path)) i += 1;
-        }
-    }
-}
+/// The repositories a grep reads: the one asked first, then each
+/// submodule it recurses into, with the attributes of each.
+const Repos = struct {
+    list: std.ArrayList(*Repository) = .empty,
+    attrs: std.ArrayList(?attributes.Attrs) = .empty,
 
-fn collectTree(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, tree_oid: Oid, prefix: []const u8, name_prefix: []const u8, items: *std.ArrayList(Item), depth: u32) Error!void {
-    if (depth > repo.settings().max_tree_depth) return error.TreeTooDeep;
-    const db = repo.objectDatabase();
-    const found = try db.read(io, tree_oid);
-    defer db.allocator().free(found.bytes);
-    if (found.type != .tree) return error.NotATree;
-    const tree = object.Tree.parse(db.objectFormat(), found.bytes);
-    var it = tree.iterate();
-    while (try it.next()) |entry| {
-        const path = if (prefix.len == 0) try a.dupe(u8, entry.name) else try a.print("{s}/{s}", .{ prefix, entry.name });
-        switch (entry.mode) {
-            .file, .exec => if (spec.matches(path)) {
-                const name = try std.mem.concat(a, u8, &.{ name_prefix, path });
-                try items.append(a, .{ .name = name, .path = path, .source = .{ .blob = entry.oid } });
-            },
-            .tree => if (spec.couldMatchUnder(path)) try collectTree(a, io, repo, spec, entry.oid, path, name_prefix, items, depth + 1),
-            else => {},
+    /// Each repository's attributes, where it has a working tree.
+    fn loadAttrs(r: *Repos, a: Allocator, io: Io) Error!void {
+        for (r.list.items) |repo| {
+            try r.attrs.append(a, if (repo.workDirectory() != null) try repo.loadAttrs(io) else null);
         }
     }
-}
+
+    fn deinit(r: *Repos, io: Io) void {
+        for (r.attrs.items) |*maybe| if (maybe.*) |*x| {
+            x.leave();
+            x.deinit();
+        };
+        if (r.list.items.len > 1) for (r.list.items[1..]) |sub| sub.deinit(io);
+    }
+};
+
+/// What gathers the files a grep searches, in the order git searches
+/// them: a submodule's, under `--recurse-submodules`, in its gitlink's
+/// place, named from the top.
+const Collector = struct {
+    a: Allocator,
+    gpa: Allocator,
+    io: Io,
+    spec: *const pathspec_mod.Pathspec,
+    recurse: bool,
+    repos: *Repos,
+    items: *std.ArrayList(Item),
+
+    /// One repository's place: which it is, the path the names of its
+    /// files start with, `/`-terminated, and how deep in submodules.
+    const At = struct { owner: u16 = 0, prefix: []const u8 = "", depth: u32 = 0 };
+
+    /// One tree's place in its repository: `base` its path, `name_prefix`
+    /// what each name is printed after, `root` the repository's top tree,
+    /// whose `.gitmodules` names its submodules.
+    const TreeAt = struct { oid: Oid, base: []const u8 = "", name_prefix: []const u8, root: Oid, depth: u32 = 0 };
+
+    /// The files `from` names, in the repository grepped.
+    fn source(c: *const Collector, from: Source) Error!void {
+        switch (from) {
+            .worktree => {
+                if (c.repos.list.items[0].workDirectory() == null) return error.BareRepository;
+                try c.index(.{}, false);
+            },
+            .index => try c.index(.{}, true),
+            .tree => |t| {
+                const root = try peelToTree(c.io, c.repos.list.items[0], t.oid);
+                const prefix = if (t.name.len == 0) "" else try std.mem.concat(c.a, u8, &.{ t.name, ":" });
+                try c.tree(.{}, .{ .oid = root, .name_prefix = prefix, .root = root });
+            },
+        }
+    }
+
+    fn repo(c: *const Collector, at: At) *Repository {
+        return c.repos.list.items[at.owner];
+    }
+
+    /// Whether the pathspecs reach the submodule an index has at `full`,
+    /// or into it: git's `submodule_path_match`.
+    fn reaches(c: *const Collector, full: []const u8) bool {
+        return c.spec.matches(full) or c.spec.couldMatchUnder(full);
+    }
+
+    fn index(c: *const Collector, at: At, cached: bool) Error!void {
+        var idx = try c.repo(at).openIndex(c.io);
+        defer idx.deinit();
+        var modules: ?gitmodules_mod.Gitmodules = null;
+        defer if (modules) |*m| m.deinit();
+        const entries = idx.items();
+        var i: usize = 0;
+        while (i < entries.len) : (i += 1) {
+            const e = entries[i];
+            if (!cached and e.skip_worktree) continue;
+            const full = try std.mem.concat(c.a, u8, &.{ at.prefix, e.path });
+            if ((e.mode == .file or e.mode == .exec) and c.spec.matches(full)) {
+                const path = try c.a.dupe(u8, e.path);
+                if (cached or e.assume_valid) {
+                    if (e.stage == 0 and !e.intent_to_add) try c.items.append(c.a, .{ .name = full, .path = path, .source = .{ .blob = e.oid }, .owner = at.owner });
+                } else try c.items.append(c.a, .{ .name = full, .path = path, .source = .file, .owner = at.owner });
+            } else if (c.recurse and e.mode == .gitlink and c.reaches(full)) {
+                if (modules == null) modules = try submodule_mod.loadGitmodules(c.gpa, c.io, c.repo(at), &idx);
+                try c.submodule(at, &modules.?, .{ .path = e.path, .full = full }, .{ .cached = cached });
+            }
+            if (e.stage != 0) {
+                while (i + 1 < entries.len and std.mem.eql(u8, entries[i + 1].path, e.path)) i += 1;
+            }
+        }
+    }
+
+    fn tree(c: *const Collector, at: At, t: TreeAt) Error!void {
+        const r = c.repo(at);
+        if (t.depth > r.settings().max_tree_depth) return error.TreeTooDeep;
+        const db = r.objectDatabase();
+        const found = try db.read(c.io, t.oid);
+        defer db.allocator().free(found.bytes);
+        if (found.type != .tree) return error.NotATree;
+        const parsed = object.Tree.parse(db.objectFormat(), found.bytes);
+        var it = parsed.iterate();
+        while (try it.next()) |entry| {
+            const path = if (t.base.len == 0) try c.a.dupe(u8, entry.name) else try c.a.print("{s}/{s}", .{ t.base, entry.name });
+            const full = try std.mem.concat(c.a, u8, &.{ at.prefix, path });
+            switch (entry.mode) {
+                .file, .exec => if (c.spec.matches(full)) {
+                    const name = try std.mem.concat(c.a, u8, &.{ t.name_prefix, full });
+                    try c.items.append(c.a, .{ .name = name, .path = path, .source = .{ .blob = entry.oid }, .owner = at.owner });
+                },
+                .tree => if (c.spec.couldMatchUnder(full)) {
+                    var inner = t;
+                    inner.oid = entry.oid;
+                    inner.base = path;
+                    inner.depth += 1;
+                    try c.tree(at, inner);
+                },
+                // git's `tree_entry_interesting` takes a gitlink only where
+                // a pathspec matches it, not one that names a path in it.
+                .gitlink => if (c.recurse and c.spec.matches(full)) {
+                    var modules = try submodule_mod.gitmodulesOfTree(c.gpa, c.io, r, t.root);
+                    defer modules.deinit();
+                    try c.submodule(at, &modules, .{ .path = path, .full = full }, .{ .commit = entry.oid, .name_prefix = t.name_prefix });
+                },
+                else => {},
+            }
+        }
+    }
+
+    const Gitlink = struct { path: []const u8, full: []const u8 };
+    const Into = struct { commit: ?Oid = null, cached: bool = false, name_prefix: []const u8 = "" };
+
+    /// git's `grep_submodule`: an active submodule's files, from its index
+    /// and working tree, or under a tree from the commit its gitlink
+    /// records. One whose repository is nowhere is passed over.
+    fn submodule(c: *const Collector, at: At, modules: *const gitmodules_mod.Gitmodules, link: Gitlink, into: Into) Error!void {
+        if (at.depth >= submodule_mod.max_depth) return error.NestingTooDeep;
+        const r = c.repo(at);
+        const module = modules.byPath(link.path) orelse return;
+        if (!try submodule_mod.isActive(c.a, r, module.name, link.path)) return;
+        const opened = (try submodule_mod.openRepository(c.gpa, c.io, r, .{ .path = link.path, .name = module.name }, .{})) orelse return;
+        const sub = try c.a.create(Repository);
+        sub.* = opened;
+        try c.repos.list.append(c.a, sub);
+        const inner: At = .{
+            .owner = @intCast(c.repos.list.items.len - 1),
+            .prefix = try std.mem.concat(c.a, u8, &.{ link.full, "/" }),
+            .depth = at.depth + 1,
+        };
+        if (into.commit) |commit| {
+            const root = try peelToTree(c.io, sub, commit);
+            return c.tree(inner, .{ .oid = root, .name_prefix = into.name_prefix, .root = root });
+        }
+        return c.index(inner, into.cached);
+    }
+};
 
 fn peelToTree(io: Io, repo: *Repository, oid: Oid) Error!Oid {
     var current = oid;
@@ -993,11 +1122,12 @@ fn peelToTree(io: Io, repo: *Repository, oid: Oid) Error!Oid {
 /// What the drivers are asked for besides whether a file is binary.
 const Wanted = struct { functions: bool, conversions: bool };
 
-fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, wanted: Wanted, rules: *std.array_hash_map.String(*driver_mod.Rule)) Error!void {
-    const config = repo.configuration();
+fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repos: *Repos, items: []Item, wanted: Wanted, rules: *std.array_hash_map.String(*driver_mod.Rule)) Error!void {
+    const config = repos.list.items[0].configuration();
     for (items) |*item| {
         var state: ?attributes.State = null;
-        if (attrs) |at| {
+        const repo = repos.list.items[item.owner];
+        if (repos.attrs.items[item.owner]) |*at| {
             if (repo.workDirectory()) |w| try at.enter(io, w, item.path);
             state = (try at.lookup(a, item.path, .file)).get("diff");
         }
@@ -1076,22 +1206,6 @@ fn patternSyntax(repo: *Repository, options: Options) Syntax {
     return syntax;
 }
 
-/// The files `source` names under `spec`, in the order git searches them.
-fn collect(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, source: Source, items: *std.ArrayList(Item)) Error!void {
-    switch (source) {
-        .worktree => {
-            if (repo.workDirectory() == null) return error.BareRepository;
-            try collectIndex(a, io, repo, spec, false, items);
-        },
-        .index => try collectIndex(a, io, repo, spec, true, items),
-        .tree => |t| {
-            const tree = try peelToTree(io, repo, t.oid);
-            const prefix = if (t.name.len == 0) "" else try std.mem.concat(a, u8, &.{ t.name, ":" });
-            try collectTree(a, io, repo, spec, tree, "", prefix, items, 0);
-        },
-    }
-}
-
 /// One batch of files read for the tasks: as many as fit the byte budget,
 /// each with its bytes (`null` for a file that could not be read) and
 /// whether it is binary.
@@ -1101,17 +1215,19 @@ const Batch = struct {
 
     contents: std.ArrayList(?[]const u8) = .empty,
     binaries: std.ArrayList(bool) = .empty,
-    /// The bytes read, the object database allocator's to free.
-    owned: std.ArrayList([]u8) = .empty,
+    /// The bytes read, each the allocator's of the object database of the
+    /// repository it came from.
+    owned: std.ArrayList(struct { bytes: []u8, owner: u16 }) = .empty,
 
     /// Read the files from `start` on until the budget is spent, at least
     /// one; returns where the batch ends.
-    fn load(batch: *Batch, a: Allocator, gpa: Allocator, io: Io, repo: *Repository, items: []const Item, at: Place) Error!usize {
+    fn load(batch: *Batch, a: Allocator, gpa: Allocator, io: Io, repos: *const Repos, items: []const Item, at: Place) Error!usize {
         const start = at.start;
         var end = start;
         var bytes: usize = 0;
         while (end < items.len and (end == start or bytes < batch_bytes)) : (end += 1) {
             const item = items[end];
+            const repo = repos.list.items[item.owner];
             const content: ?[]u8 = switch (item.source) {
                 .blob => |oid| blk: {
                     const found = try repo.objectDatabase().read(io, oid);
@@ -1120,7 +1236,7 @@ const Batch = struct {
                 .file => (fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?, item.path, 1 << 31) catch null) orelse null,
             };
             if (content) |c| {
-                try batch.owned.append(gpa, c);
+                try batch.owned.append(gpa, .{ .bytes = c, .owner = item.owner });
                 bytes += c.len;
             }
             var searched: ?[]const u8 = content;
@@ -1147,8 +1263,8 @@ const Batch = struct {
         return end;
     }
 
-    fn deinit(batch: *Batch, gpa: Allocator, repo: *Repository) void {
-        for (batch.owned.items) |b| repo.objectDatabase().allocator().free(b);
+    fn deinit(batch: *Batch, gpa: Allocator, repos: *const Repos) void {
+        for (batch.owned.items) |b| repos.list.items[b.owner].objectDatabase().allocator().free(b.bytes);
         batch.owned.deinit(gpa);
         batch.* = undefined;
     }
@@ -1184,16 +1300,25 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     var spec = try pathspec_mod.parse(gpa, options.pathspecs);
     defer spec.deinit();
     var items: std.ArrayList(Item) = .empty;
-    try collect(a, io, repo, &spec, options.source, &items);
+    var repos: Repos = .{};
+    defer repos.deinit(io);
+    try repos.list.append(a, repo);
+    var collector: Collector = .{
+        .a = a,
+        .gpa = gpa,
+        .io = io,
+        .spec = &spec,
+        .recurse = options.recurse_submodules orelse (config.getBool("submodule.recurse", false) catch false),
+        .repos = &repos,
+        .items = &items,
+    };
+    try collector.source(options.source);
 
-    var attrs: ?attributes.Attrs = null;
-    defer if (attrs) |*x| x.deinit();
-    if (repo.workDirectory() != null) attrs = try repo.loadAttrs(io);
-    defer if (attrs) |*x| x.leave();
+    try repos.loadAttrs(a, io);
     var rules: std.array_hash_map.String(*driver_mod.Rule) = .empty;
     defer for (rules.values()) |rule| rule.deinit();
     const functions = fmt.funcname or fmt.funcbody;
-    try applyAttributes(a, gpa, io, repo, if (attrs) |*x| x else null, items.items, .{ .functions = functions, .conversions = options.textconv != null }, &rules);
+    try applyAttributes(a, gpa, io, &repos, items.items, .{ .functions = functions, .conversions = options.textconv != null }, &rules);
     var func_program: usize = 0;
     for (rules.values()) |rule| func_program = @max(func_program, rule.programLen());
 
@@ -1213,8 +1338,8 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     var start: usize = 0;
     while (start < items.items.len) {
         var batch: Batch = .{};
-        defer batch.deinit(gpa, repo);
-        const end = try batch.load(a, gpa, io, repo, items.items, .{ .start = start, .textconv = options.textconv });
+        defer batch.deinit(gpa, &repos);
+        const end = try batch.load(a, gpa, io, &repos, items.items, .{ .start = start, .textconv = options.textconv });
         const n = end - start;
         const outputs = try a.alloc(?[]const u8, n);
         @memset(outputs, null);

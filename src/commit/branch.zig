@@ -90,6 +90,9 @@ pub const Options = struct {
     /// `--track[=inherit]` or `--no-track`; `null` takes
     /// `branch.autoSetupMerge`.
     track: ?Track = null,
+    /// `--dry-run`: everything checked as it would be, and nothing
+    /// written.
+    dry_run: bool = false,
 };
 
 /// The upstream a branch was set to track.
@@ -136,7 +139,7 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();
     const a = arena_state.allocator();
-    const track = options.track orelse try configuredTrack(repo.configuration());
+    const how = options.track orelse try configuredTrack(repo.configuration());
     const autorebase = try configuredRebase(repo.configuration());
 
     const ref = try branchRef(a, name);
@@ -146,7 +149,8 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options
         const busy = try head_mod.checkedOutBranches(a, io, repo);
         if (busy.get(ref) != null) return error.BranchCheckedOut;
     }
-    const at = try dwimStart(a, io, repo, start, track == .explicit);
+    const at = try resolveStart(a, io, repo, start, how == .explicit);
+    if (options.dry_run) return .{ .arena = arena_state.state, .gpa = gpa, .oid = at.oid, .upstream = null };
 
     var tx = repo.beginRefs();
     defer tx.deinit(io);
@@ -155,8 +159,8 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options
     try tx.commit(io, .{ .who = options.who, .message = message, .policy = repo.reflogPolicy() });
 
     var upstream: ?Upstream = null;
-    if (at.ref) |orig| if (track != .never) {
-        upstream = try setupTracking(a, io, repo, name, orig, track, autorebase);
+    if (at.ref) |orig| if (how != .never) {
+        upstream = try setupTracking(a, io, repo, name, orig, how, autorebase);
     };
     return .{ .arena = arena_state.state, .gpa = gpa, .oid = at.oid, .upstream = upstream };
 }
@@ -168,8 +172,20 @@ pub fn setUpstream(arena: Allocator, io: Io, repo: *Repository, name: []const u8
     const ref = try branchRef(arena, name);
     if ((try repo.refStore().resolve(arena, io, ref)) == null) return error.NoSuchBranch;
     const autorebase = try configuredRebase(repo.configuration());
-    const at = try dwimStart(arena, io, repo, upstream, true);
+    const at = try resolveStart(arena, io, repo, upstream, true);
     return setupTracking(arena, io, repo, name, at.ref.?, .explicit, autorebase);
+}
+
+/// A branch to set an upstream for: `name`, to track the ref `orig` as
+/// `how` says.
+pub const Tracking = struct { name: []const u8, orig: []const u8, how: Track };
+
+/// git's `setup_tracking`: the existing branch set up to track as
+/// `tracking` says, `branch.autoSetupRebase` read. `null` where `how` sets
+/// up none. The result is `arena`'s.
+pub fn setTracking(arena: Allocator, io: Io, repo: *Repository, tracking: Tracking) Self.Error!?Upstream {
+    if (tracking.how == .never) return null;
+    return setupTracking(arena, io, repo, tracking.name, tracking.orig, tracking.how, try configuredRebase(repo.configuration()));
 }
 
 /// `strbuf_check_branch_ref`: `refs/heads/<name>`, where that is a ref
@@ -182,7 +198,7 @@ fn branchRef(a: Allocator, name: []const u8) Self.Error![]const u8 {
 }
 
 /// `branch.autoSetupMerge`: a boolean, `always`, `inherit` or `simple`.
-fn configuredTrack(config: *const config_mod.Config) Self.Error!Track {
+pub fn configuredTrack(config: *const config_mod.Config) Self.Error!Track {
     const entry = config.find("branch.autosetupmerge") orelse return .remote;
     const value = entry.value orelse return .remote;
     if (std.mem.eql(u8, value, "always")) return .always;
@@ -202,10 +218,12 @@ fn configuredRebase(config: *const config_mod.Config) Self.Error!AutoRebase {
 
 /// Where a branch starts, and the branch it starts from when it starts
 /// from one that can be tracked.
-const Start = struct { oid: Oid, ref: ?[]const u8 };
+pub const Start = struct { oid: Oid, ref: ?[]const u8 };
 
-/// git's `dwim_branch_start`.
-fn dwimStart(a: Allocator, io: Io, repo: *Repository, start: []const u8, explicit: bool) Self.Error!Start {
+/// git's `dwim_branch_start`: the commit `start` names, and the branch it
+/// is when it is one a branch can track; `explicit`, as `--track`, it must
+/// be one. The ref is `a`'s.
+pub fn resolveStart(a: Allocator, io: Io, repo: *Repository, start: []const u8, explicit: bool) Self.Error!Start {
     _ = rev_parse.resolve(a, io, repo, start) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,

@@ -99,6 +99,8 @@ test {
         _ = @import("diff/blame_test.zig");
         _ = @import("diff/blame/ignore.zig");
         _ = @import("submodule/submodule_test.zig");
+        _ = @import("submodule/move_test.zig");
+        _ = @import("submodule/branch_test.zig");
         _ = @import("checkout/filter_test.zig");
         _ = @import("lfs/lfs_test.zig");
         _ = @import("testing/eol.zig");
