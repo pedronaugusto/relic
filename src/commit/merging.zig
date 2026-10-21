@@ -36,6 +36,7 @@ const rerere = @import("../merge/rerere.zig");
 const rev_parse = @import("../rev_walk/rev_parse.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("../repo/head.zig");
+const quote = @import("../text.zig").quote;
 const message = @import("../object/message.zig");
 const glob_mod = @import("../text.zig").glob;
 const worktree = @import("../checkout/checkout.zig");
@@ -101,6 +102,14 @@ pub const Error = error{
     /// has no value, or a `diff.renames` or `diff.renameLimit` is one
     /// `git merge`'s diff settings die on (three_way's other cases).
     InvalidMergeSetting,
+    /// `branch.<name>.mergeOptions` is not a line git reads as `git merge`
+    /// options: an open quote, a word it does not know, or an option
+    /// without its value.
+    InvalidMergeOptions,
+    /// `branch.<name>.mergeOptions` asks for what this merge does not do:
+    /// `--squash`, `--log`, `-F`, `--into-name`, a strategy other than
+    /// `ort`, `--no-overwrite-ignore`, or an action.
+    UnsupportedMergeOption,
     /// `merge.branchdesc` lists a merged branch whose
     /// `branch.<name>.description` has no value, which git dies on.
     InvalidBranchDescription,
@@ -294,20 +303,22 @@ pub const Options = struct {
     who: object.Signature,
     /// Who the merge commit is by. The committer when `null`.
     author: ?object.Signature = null,
-    /// `null` asks `merge.ff`.
+    /// `null` asks `branch.<name>.mergeOptions`, then `merge.ff`.
     fast_forward: ?FastForward = null,
     /// `false` stops before committing even a clean merge: `--no-commit`.
-    commit: bool = true,
+    /// `null` asks `branch.<name>.mergeOptions`, and commits.
+    commit: ?bool = null,
     /// The merge commit's message, in place of the title git would write:
     /// `-m`. `merge.log`'s list still follows it, as it follows git's.
     message: ?[]const u8 = null,
-    /// `--signoff`.
-    signoff: bool = false,
+    /// `--signoff`; `null` asks `branch.<name>.mergeOptions`.
+    signoff: ?bool = null,
     /// How the message is cleaned: `--cleanup`. `null` asks
     /// `commit.cleanup`, whose default, with no editor, is `whitespace`.
     cleanup: ?message.Cleanup = null,
-    /// `--allow-unrelated-histories`.
-    allow_unrelated_histories: bool = false,
+    /// `--allow-unrelated-histories`; `null` asks
+    /// `branch.<name>.mergeOptions`.
+    allow_unrelated_histories: ?bool = null,
     /// `null` asks `merge.conflictStyle`.
     conflict_style: ?merge.ConflictStyle = null,
     /// `-X`: the strategy options, in the order given, as
@@ -323,7 +334,8 @@ pub const Options = struct {
     /// runs them.
     hooks: ?*hooks_mod.Runner = null,
     /// `false` skips `pre-merge-commit` and `commit-msg`: `--no-verify`.
-    verify: bool = true,
+    /// `null` asks `branch.<name>.mergeOptions`, and runs them.
+    verify: ?bool = null,
     /// Whether and how the commits are signed: `-S`, `-S<key>`,
     /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
     /// that sign.
@@ -444,20 +456,228 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
 /// does. A target `HEAD` or another target already reaches is dropped
 /// first. One left is merged by ort; two or more by git's octopus,
 /// `three_way.applyOctopus`, whose commit leaves `HEAD` out of its parents
+/// `options` under the branch's `branch.<name>.mergeOptions`: what that
+/// setting says fills what the caller left `null`, and its `-X` words come
+/// before the caller's, as git parses it before the command line.
+fn withBranchMergeOptions(arena: Allocator, io: Io, repo: *Repository, given: Options) Error!Options {
+    var head = try head_mod.read(arena, io, repo);
+    defer head.deinit(arena);
+    const branch = head.branch orelse return given;
+    if (!std.mem.startsWith(u8, branch, "refs/heads/")) return given;
+    const key = try arena.print("branch.{s}.mergeoptions", .{branch["refs/heads/".len..]});
+    const text = repo.configuration().get(key) orelse return given;
+    var set: Options = .{ .who = given.who };
+    try parseMergeOptions(arena, text, &set);
+    var out = given;
+    inline for (.{ "fast_forward", "commit", "message", "signoff", "cleanup", "allow_unrelated_histories", "verify", "rerere_autoupdate", "autostash", "verify_signatures" }) |field| {
+        if (@field(out, field) == null) @field(out, field) = @field(set, field);
+    }
+    if (out.signing.sign == .config) {
+        out.signing.sign = set.signing.sign;
+        out.signing.key = set.signing.key;
+    }
+    out.strategy_options = try std.mem.concat(arena, []const u8, &.{ set.strategy_options, given.strategy_options });
+    return out;
+}
+
+/// `git merge`'s options, as `parse_options` reads `builtin_merge_options`
+/// from a `branch.<name>.mergeOptions` split as `split_cmdline` splits it:
+/// long options by any unique beginning, `--no-` for those that take it,
+/// short ones bundled, and words that are no option passed over. What only
+/// a command line shows is read and left (`--stat`, `-q`, `--edit`,
+/// `--progress`); what this merge does not do -- `--squash`, `--log`, a
+/// strategy other than `ort` -- is `UnsupportedMergeOption`, and a word
+/// git does not know `InvalidMergeOptions`.
+fn parseMergeOptions(arena: Allocator, text: []const u8, set: *Options) Error!void {
+    const words = (try quote.splitCmdline(arena, text)) orelse return error.InvalidMergeOptions;
+    var messages: std.ArrayList([]const u8) = .empty;
+    var xopts: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < words.len) : (i += 1) {
+        const word = words[i];
+        if (std.mem.eql(u8, word, "--")) break;
+        if (std.mem.startsWith(u8, word, "--")) {
+            var name = word[2..];
+            var value: ?[]const u8 = null;
+            if (std.mem.findScalar(u8, name, '=')) |eq| {
+                value = name[eq + 1 ..];
+                name = name[0..eq];
+            }
+            const negated = std.mem.startsWith(u8, name, "no-");
+            const option = findLong(if (negated) name[3..] else name, negated) orelse return error.InvalidMergeOptions;
+            if (negated and !option.negatable) return error.InvalidMergeOptions;
+            if (option.takes == .none and value != null) return error.InvalidMergeOptions;
+            if (option.takes == .required and value == null and !negated) {
+                i += 1;
+                if (i == words.len) return error.InvalidMergeOptions;
+                value = words[i];
+            }
+            try applyMergeOption(arena, set, &messages, &xopts, option.which, !negated, value);
+            continue;
+        }
+        if (word.len < 2 or word[0] != '-') continue;
+        var at: usize = 1;
+        while (at < word.len) : (at += 1) {
+            const option = findShort(word[at]) orelse return error.InvalidMergeOptions;
+            var value: ?[]const u8 = null;
+            if (option.takes != .none) {
+                if (at + 1 < word.len) {
+                    value = word[at + 1 ..];
+                } else if (option.takes == .required) {
+                    i += 1;
+                    if (i == words.len) return error.InvalidMergeOptions;
+                    value = words[i];
+                }
+                try applyMergeOption(arena, set, &messages, &xopts, option.which, true, value);
+                break;
+            }
+            try applyMergeOption(arena, set, &messages, &xopts, option.which, true, null);
+        }
+    }
+    if (messages.items.len != 0) set.message = try std.mem.join(arena, "\n\n", messages.items);
+    set.strategy_options = xopts.items;
+}
+
+const MergeOption = enum {
+    stat,
+    no_stat_short,
+    compact_summary,
+    log,
+    squash,
+    commit,
+    edit,
+    cleanup,
+    ff,
+    ff_only,
+    rerere_autoupdate,
+    verify_signatures,
+    strategy,
+    strategy_option,
+    message,
+    file,
+    into_name,
+    quiet,
+    verbose,
+    abort,
+    quit,
+    @"continue",
+    allow_unrelated_histories,
+    progress,
+    gpg_sign,
+    autostash,
+    overwrite_ignore,
+    signoff,
+    verify,
+};
+
+const OptionSpec = struct {
+    long: ?[]const u8,
+    short: ?u8 = null,
+    which: MergeOption,
+    takes: enum { none, required, optional } = .none,
+    negatable: bool = true,
+};
+
+/// git 2.55's `builtin_merge_options`, in its order.
+const merge_options = [_]OptionSpec{
+    .{ .long = null, .short = 'n', .which = .no_stat_short, .negatable = false },
+    .{ .long = "stat", .which = .stat },
+    .{ .long = "summary", .which = .stat },
+    .{ .long = "compact-summary", .which = .compact_summary },
+    .{ .long = "log", .which = .log, .takes = .optional },
+    .{ .long = "squash", .which = .squash },
+    .{ .long = "commit", .which = .commit },
+    .{ .long = "edit", .short = 'e', .which = .edit },
+    .{ .long = "cleanup", .which = .cleanup, .takes = .required },
+    .{ .long = "ff", .which = .ff },
+    .{ .long = "ff-only", .which = .ff_only, .negatable = false },
+    .{ .long = "rerere-autoupdate", .which = .rerere_autoupdate },
+    .{ .long = "verify-signatures", .which = .verify_signatures },
+    .{ .long = "strategy", .short = 's', .which = .strategy, .takes = .required },
+    .{ .long = "strategy-option", .short = 'X', .which = .strategy_option, .takes = .required },
+    .{ .long = "message", .short = 'm', .which = .message, .takes = .required },
+    .{ .long = "file", .short = 'F', .which = .file, .takes = .required, .negatable = false },
+    .{ .long = "into-name", .which = .into_name, .takes = .required },
+    .{ .long = "quiet", .short = 'q', .which = .quiet },
+    .{ .long = "verbose", .short = 'v', .which = .verbose },
+    .{ .long = "abort", .which = .abort },
+    .{ .long = "quit", .which = .quit },
+    .{ .long = "continue", .which = .@"continue" },
+    .{ .long = "allow-unrelated-histories", .which = .allow_unrelated_histories },
+    .{ .long = "progress", .which = .progress },
+    .{ .long = "gpg-sign", .short = 'S', .which = .gpg_sign, .takes = .optional },
+    .{ .long = "autostash", .which = .autostash },
+    .{ .long = "overwrite-ignore", .which = .overwrite_ignore },
+    .{ .long = "signoff", .which = .signoff },
+    .{ .long = "verify", .which = .verify },
+};
+
+/// The option a long name names, exactly or by a beginning only it has.
+fn findLong(name: []const u8, negated: bool) ?OptionSpec {
+    var found: ?OptionSpec = null;
+    var count: usize = 0;
+    for (merge_options) |o| {
+        const long = o.long orelse continue;
+        if (negated and !o.negatable) continue;
+        if (std.mem.eql(u8, long, name)) return o;
+        if (name.len != 0 and std.mem.startsWith(u8, long, name)) {
+            found = o;
+            count += 1;
+        }
+    }
+    return if (count == 1) found else null;
+}
+
+fn findShort(c: u8) ?OptionSpec {
+    for (merge_options) |o| if (o.short == c) return o;
+    return null;
+}
+
+fn applyMergeOption(arena: Allocator, set: *Options, messages: *std.ArrayList([]const u8), xopts: *std.ArrayList([]const u8), which: MergeOption, on: bool, value: ?[]const u8) Error!void {
+    switch (which) {
+        // What only a command line shows, or an editor would.
+        .stat, .no_stat_short, .compact_summary, .edit, .quiet, .verbose, .progress => {},
+        .overwrite_ignore => if (!on) return error.UnsupportedMergeOption,
+        .commit => set.commit = on,
+        .ff => set.fast_forward = if (on) .allow else .never,
+        .ff_only => set.fast_forward = .only,
+        .rerere_autoupdate => set.rerere_autoupdate = on,
+        .verify_signatures => set.verify_signatures = on,
+        .allow_unrelated_histories => set.allow_unrelated_histories = on,
+        .autostash => set.autostash = on,
+        .signoff => set.signoff = on,
+        .verify => set.verify = on,
+        .cleanup => set.cleanup = if (on) message.Cleanup.parse(value.?) orelse return error.InvalidMergeOptions else null,
+        .message => if (on) try messages.append(arena, value.?) else messages.clearRetainingCapacity(),
+        .strategy_option => if (on) try xopts.append(arena, value.?) else xopts.clearRetainingCapacity(),
+        .strategy => if (on) {
+            const name = value.?;
+            if (!std.mem.eql(u8, name, "ort") and !std.mem.eql(u8, name, "recursive")) return error.UnsupportedMergeOption;
+        },
+        .gpg_sign => {
+            set.signing.sign = if (on) .always else .never;
+            set.signing.key = if (on and value != null and value.?.len != 0) value else null;
+        },
+        .squash, .log, .file, .into_name, .abort, .quit, .@"continue" => if (on or which == .log) return error.UnsupportedMergeOption,
+    }
+}
+
 /// when a target already contains it and a fast-forward is allowed.
 pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, given: Options) Self.Error!Outcome {
     diagnostic.reset(given.diagnostic);
     // git's `cmd_merge` reads `commit.cleanup` before it merges anything,
     // and dies there on a mode it does not know.
-    var options = given;
-    const cleanup_setting = try message.cleanupSetting(repo.configuration());
-    options.cleanup = given.cleanup orelse try message.cleanupMode(cleanup_setting, false);
-    // The conflicts list is written as for an editor, whether one runs or
-    // not, as git's `suggest_conflicts` writes it.
-    const hint_cleanup = given.cleanup orelse try message.cleanupMode(cleanup_setting, true);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
+    // `branch.<name>.mergeOptions`, under what the caller gives.
+    var options = try withBranchMergeOptions(arena, io, repo, given);
+    const asked_cleanup = options.cleanup;
+    const cleanup_setting = try message.cleanupSetting(repo.configuration());
+    options.cleanup = asked_cleanup orelse try message.cleanupMode(cleanup_setting, false);
+    // The conflicts list is written as for an editor, whether one runs or
+    // not, as git's `suggest_conflicts` writes it.
+    const hint_cleanup = asked_cleanup orelse try message.cleanupMode(cleanup_setting, true);
 
     if (targets.len == 0) return error.NoMergeTarget;
     if (inProgress(io, repo)) return error.MergeInProgress;
@@ -530,7 +750,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     // A target `HEAD` has is no target, as git's `reduce_parents` leaves
     // it, and its signature is not asked about.
     const signatures = try verifySignatures(gpa, arena, io, repo, reduced.heads, options);
-    if (bases.len == 0 and !options.allow_unrelated_histories) return error.UnrelatedHistories;
+    if (bases.len == 0 and !(options.allow_unrelated_histories orelse false)) return error.UnrelatedHistories;
 
     const forward = fast_forward != .never and bases.len == 1 and bases[0].eql(ours);
     if (!forward and fast_forward == .only) return error.NotFastForward;
@@ -760,7 +980,7 @@ fn octopus(
     const heads = try arena.alloc(Oid, reduced.heads.len);
     for (reduced.heads, heads) |target, *oid| oid.* = target.oid;
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
-    if (!options.allow_unrelated_histories and !try shareHistory(gpa, arena, io, repo, ours, heads)) return error.UnrelatedHistories;
+    if (!(options.allow_unrelated_histories orelse false) and !try shareHistory(gpa, arena, io, repo, ours, heads)) return error.UnrelatedHistories;
     // Up to date when `HEAD` reaches every head.
     for (heads) |one| {
         const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = one }, .{});
@@ -879,12 +1099,12 @@ fn commitOrStop(
         try merge_heads.append(arena, '\n');
     }
 
-    if (outcome.isClean() and options.commit) {
+    if (outcome.isClean() and (options.commit orelse true)) {
         // `prepare_to_commit`: `pre-merge-commit` first, then the message,
         // signed off, into `MERGE_MSG` beside `MERGE_HEAD` for the message
         // hooks, and back out of it.
-        const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
-        if (options.signoff) try message.appendSignoff(arena, &msg, options.who, try message.trailerSettings(arena, repo.configuration()));
+        const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify orelse true });
+        if (options.signoff orelse false) try message.appendSignoff(arena, &msg, options.who, try message.trailerSettings(arena, repo.configuration()));
         var text: []const u8 = msg.items;
         if (h.runner) |runner| {
             const e = try h.env(arena, null);

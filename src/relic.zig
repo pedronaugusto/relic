@@ -84,6 +84,7 @@
 //! | `commit` | Public concern. |
 //! | `commit.notes` | Module within `commit`. |
 //! | `commit.todo` | Module within `commit`. |
+//! | `commit.branch` | Module within `commit`. |
 //! | `commit.rebase` | Module within `commit`. |
 //! | `commit.replay` | Module within `commit`. |
 //! | `commit.history` | Module within `commit`. |

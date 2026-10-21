@@ -246,7 +246,11 @@ pub const Edit = struct {
     /// log gains the line, and its own value is left alone. The line's
     /// values are those of the edit at `via`.
     via: ?usize = null,
-    /// This edit's own log text, owned: `EditOptions.message`.
+    /// Set by `prepare` when the ref is not symbolic and already holds the
+    /// new value: git's no-op update, which writes neither the ref nor a
+    /// log line for it (a ref logged through it still gains its line).
+    unchanged: bool = false,
+    //// This edit's own log text, owned: `EditOptions.message`.
     message: ?[]const u8 = null,
     /// Set by `prepare` on the ref at the end of a symbolic chain: the
     /// edit it was split from, whose name git's messages give.
@@ -357,6 +361,15 @@ pub fn originalName(tx: anytype, index: usize) []const u8 {
 
 /// Whether `edit` changes nothing: refused, or only logged through a ref
 /// that was refused.
+/// Whether a ref whose value is `current` already holds `new`: both
+/// direct and equal, git's no-op update. A symbolic ref is always written.
+pub fn isUnchanged(current: ?Ref, new: ?Ref) bool {
+    const now = current orelse return false;
+    const want = new orelse return false;
+    if (now != .direct or want != .direct) return false;
+    return now.direct.eql(want.direct);
+}
+
 pub fn leftOut(edits: []const Edit, edit: Edit) bool {
     if (edit.rejected) return true;
     const at = edit.via orelse return false;

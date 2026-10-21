@@ -1702,6 +1702,7 @@ pub const Transaction = struct {
                 }
             }
             edit.old = current_oid;
+            edit.unchanged = value_mod.isUnchanged(current, edit.new);
             if (!try value_mod.checkExpected(tx, i, current != null, current_oid)) continue;
             if (edit.new != null and current == null) try to_check.append(tx.gpa, i);
         }
@@ -1998,7 +1999,7 @@ pub const Transaction = struct {
         var hex: [hash.max_hex_len]u8 = undefined;
         for (tx.edits.items) |*edit| {
             // Its lock is given up with the rest, the file as it was.
-            if (edit.via != null or edit.rejected) continue;
+            if (edit.via != null or edit.rejected or edit.unchanged) continue;
             const new = edit.new orelse continue;
             const lock = &edit.lock.?;
             switch (new) {
@@ -2034,6 +2035,7 @@ pub const Transaction = struct {
             defer tx.gpa.free(shared);
             for (tx.edits.items) |edit| {
                 if (value_mod.leftOut(tx.edits.items, edit)) continue;
+                if (edit.via == null and edit.unchanged) continue;
                 // A deleted ref's log went with it.
                 if (edit.via == null and edit.new == null) continue;
                 // A ref logged through records what the ref at the end of it

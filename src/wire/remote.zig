@@ -107,6 +107,10 @@ pub const Remote = struct {
         if (configured.len == 0) {
             remote.urls = try arena.dupe([]const u8, &.{try rewrite(arena, config, name, .fetch) orelse try arena.dupe(u8, name)});
             remote.push_urls = try pushUrlsFor(arena, config, &.{name});
+            // git's `add_url_alias`: the name is the URL, and what the
+            // configuration says of a remote by that name still holds.
+            remote.fetch = try refspecsOf(arena, config, try arena.print("remote.{s}.fetch", .{name}), .fetch, object_format, &remote.invalid);
+            remote.push = try refspecsOf(arena, config, try arena.print("remote.{s}.push", .{name}), .push, object_format, &remote.invalid);
             return remote;
         }
 
@@ -155,6 +159,33 @@ pub const Remote = struct {
         for (remote.fetch) |spec| {
             if (spec.negative) continue;
             if (try spec.mapSource(gpa, name)) |tracking| return tracking;
+        }
+        return null;
+    }
+
+    /// The ref on the remote that `tracking`, a ref here, tracks: git's
+    /// `remote_find_tracking` asked by destination, the first fetch
+    /// refspec that maps to it deciding. `null` when none does, or when a
+    /// negative refspec excludes what git's `query_matches_negative_refspec`
+    /// finds for it: each pattern's mapping back, `tracking` itself for a
+    /// matching refspec, and an exact refspec's source where that source is
+    /// `tracking`, as git compares it. The result is the caller's.
+    pub fn sourceOf(remote: *const Remote, gpa: Allocator, tracking: []const u8) Allocator.Error!?[]u8 {
+        for (remote.fetch) |spec| {
+            if (spec.negative) continue;
+            const reversed: ?[]u8 = if (spec.pattern)
+                try spec.mapDestination(gpa, tracking)
+            else if (spec.matching or std.mem.eql(u8, spec.src, tracking))
+                try gpa.dupe(u8, tracking)
+            else
+                null;
+            const name = reversed orelse continue;
+            defer gpa.free(name);
+            if (refspec.excluded(remote.fetch, name)) return null;
+        }
+        for (remote.fetch) |spec| {
+            if (spec.negative) continue;
+            if (try spec.mapDestination(gpa, tracking)) |source| return source;
         }
         return null;
     }

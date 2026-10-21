@@ -2587,7 +2587,7 @@ fn addUpdateRefCommands(r: *Run, items: []todo.Item, write: bool) Error![]todo.I
     defer listing.deinit();
     var head = try r.head();
     defer head.deinit(r.gpa);
-    var busy = try checkedOutBranches(r);
+    var busy = try head_mod.checkedOutBranches(r.arena, r.io, r.repo);
 
     var out: std.ArrayList(todo.Item) = .empty;
     var records: std.ArrayList(UpdateRef) = .empty;
@@ -2665,71 +2665,6 @@ fn hasUpdateRefLine(r: *Run, ref: []const u8) bool {
         if (item.command == .update_ref and std.mem.eql(u8, item.arg, ref)) return true;
     }
     return false;
-}
-
-/// The branches some worktree holds, and where that worktree is, as git's
-/// `branch_checked_out` finds them: each worktree's `HEAD`, the branch a
-/// rebase there is rebasing, the branch a bisection started from, and the
-/// refs a rebase there will move.
-fn checkedOutBranches(r: *Run) Error!std.StringHashMapUnmanaged([]const u8) {
-    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
-    const repo = r.repo;
-    const io = r.io;
-
-    // The main worktree, unless the repository is bare.
-    const bare = repo.configuration().getBool("core.bare", false) catch false;
-    if (!bare) main: {
-        var buf: [4096]u8 = undefined;
-        const len = repo.commonDirectory().realPath(io, &buf) catch break :main;
-        const common = buf[0..len];
-        const main_path = if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common;
-        try addWorktreeBranches(r, &map, repo.commonDirectory(), "main-worktree/HEAD", try r.arena.dupe(u8, main_path));
-    }
-    var listing = try worktrees.list(r.gpa, io, repo.refStore());
-    defer listing.deinit();
-    for (listing.entries) |entry| {
-        const sub = try r.arena.print("worktrees/{s}", .{entry.name});
-        var admin = repo.commonDirectory().openDir(io, sub, .{}) catch continue;
-        defer admin.close(io);
-        try addWorktreeBranches(r, &map, admin, try r.arena.print("{s}/HEAD", .{sub}), try r.arena.dupe(u8, entry.path));
-    }
-    return map;
-}
-
-/// The branches the worktree whose `HEAD` is `head` holds: that `HEAD`,
-/// read through the ref store, which a reftable repository keeps in its
-/// tables, and what the operation in progress in `dir` is on.
-fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), dir: Io.Dir, head: []const u8, where: []const u8) Error!void {
-    const arena = r.arena;
-    const head_value = r.repo.refStore().read(arena, r.io, head) catch |err| switch (err) {
-        // git's `get_worktrees` reads a `HEAD` it cannot take as nothing.
-        error.MalformedRef => null,
-        else => |e| return e,
-    };
-    if (head_value) |value| switch (value) {
-        .symbolic => |target| try map.put(arena, target, where),
-        .direct => {},
-    };
-    for ([_][]const u8{ "rebase-apply/head-name", "rebase-merge/head-name" }) |sub| {
-        const text = (try state_file.read(arena, r.io, dir, sub)) orelse continue;
-        // `get_branch`: one newline off the end.
-        const name = if (std.mem.endsWith(u8, text, "\n")) text[0 .. text.len - 1] else text;
-        if (std.mem.startsWith(u8, name, "refs/heads/")) try map.put(arena, name, where);
-        break;
-    }
-    if (try state_file.read(arena, r.io, dir, "BISECT_START")) |text| {
-        const name = std.mem.trim(u8, text, " \t\r\n");
-        // A bisection started from a detached `HEAD` names a commit.
-        if (name.len != 0) {
-            if (Oid.parse(r.repo.objectFormat(), name)) |_| {} else |_| {
-                try map.put(arena, try arena.print("refs/heads/{s}", .{name}), where);
-            }
-        }
-    }
-    if (try state_file.read(arena, r.io, dir, "rebase-merge/update-refs")) |text| {
-        const records = try parseUpdateRefs(r, text);
-        for (records.items) |rec| try map.put(arena, rec.ref, where);
-    }
 }
 
 /// `merge`: a merge commit of `HEAD` and the label it names, with the

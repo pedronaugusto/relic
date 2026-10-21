@@ -435,6 +435,7 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
         // A ref only logged through is neither read nor checked.
         if (edit.via != null) continue;
         const current = try readIn(gpa, &stacks, edit.name);
+        edit.unchanged = refs.isUnchanged(current, edit.new);
         var current_oid: ?Oid = null;
         if (current) |value| switch (value) {
             .direct => |oid| current_oid = oid,
@@ -789,6 +790,8 @@ fn addTable(
         // moved, keeps its value and gains the log line: git's
         // `REF_LOG_ONLY`.
         const source = if (edit.via) |at| tx.edits.items[at] else edit;
+        // A ref that already holds its value is left out, its log too.
+        if (edit.via == null and edit.unchanged) continue;
         if (edit.via == null) {
             const value: reftable.RefValue = if (edit.new) |new| switch (new) {
                 .direct => |oid| if (tx.peeler) |p| (if (p.peel(io, p.context, oid)) |target|

@@ -666,6 +666,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `commit` | Making a commit the way `git commit` does, its hooks in git's order. |
 | `commit.notes` | `Notes`, `add`, `append`, `copy`, `remove`, `prune`, `show`, `merge`, `mergeCommit`, `mergeAbort`, `formatNote`: `refs/notes/*` read and written as `git notes` does, git's fanout and every merge strategy included. |
 | `commit.todo` | Module within `commit`. |
+| `commit.branch` | `create`, `setUpstream` — `git branch <name> <start>` and `--set-upstream-to`: a branch made at a revision, tracking what `branch.autoSetupMerge` and `branch.autoSetupRebase` say. |
 | `commit.rebase` | Module within `commit`. |
 | `commit.history` | `fixup`, `reword`, `split` — `git history`: one commit rewritten where it stands, its descendants replayed onto it and their branches moved. |
 | `commit.replay` | `replay` — `git replay`: commits made again in memory onto `--onto`, `--advance` or `--revert`, and the refs that pointed at them moved in one transaction. |

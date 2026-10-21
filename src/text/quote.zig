@@ -118,3 +118,41 @@ test "single quotes round trip, a quote and a bang backslashed outside them" {
     try std.testing.expectEqualStrings("b c", words[1]);
     try std.testing.expect(try sqDequoteWords(a, "'a''b'") == null);
 }
+
+/// git's `split_cmdline`: words split at unquoted whitespace (each run of
+/// it one break, so leading or trailing whitespace makes an empty word),
+/// `'` and `"` quoting, and a backslash taking the next character literally
+/// outside single quotes. `null` for a quote left open or a backslash at
+/// the end, which git refuses. The words and the slice are `arena`'s.
+pub fn splitCmdline(arena: Allocator, line: []const u8) Allocator.Error!?[]const []const u8 {
+    var words: std.ArrayList([]const u8) = .empty;
+    var word: std.ArrayList(u8) = .empty;
+    var quoted: u8 = 0;
+    var at: usize = 0;
+    while (at < line.len) {
+        const c = line[at];
+        if (quoted == 0 and ctype.isSpace(c)) {
+            try words.append(arena, try word.toOwnedSlice(arena));
+            at += 1;
+            while (at < line.len and ctype.isSpace(line[at])) at += 1;
+        } else if (quoted == 0 and (c == '\'' or c == '"')) {
+            quoted = c;
+            at += 1;
+        } else if (c == quoted) {
+            quoted = 0;
+            at += 1;
+        } else {
+            var ch = c;
+            if (c == '\\' and quoted != '\'') {
+                at += 1;
+                if (at == line.len) return null;
+                ch = line[at];
+            }
+            try word.append(arena, ch);
+            at += 1;
+        }
+    }
+    if (quoted != 0) return null;
+    try words.append(arena, try word.toOwnedSlice(arena));
+    return words.items;
+}

@@ -12,7 +12,7 @@
 const Self = @This();
 
 const std = @import("std");
-const ctype = @import("../text.zig").ctype;
+const text_quote = @import("../text.zig").quote;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
@@ -179,39 +179,12 @@ pub const SplitError = error{
 pub fn split(arena: Allocator, line_in: []const u8) Self.SplitError![]const []const u8 {
     var line = line_in;
     if (line.len != 0 and line[0] == ' ') line = line[1..];
-    var words: std.ArrayList([]const u8) = .empty;
-    var word: std.ArrayList(u8) = .empty;
-    var quoted: u8 = 0;
-    var at: usize = 0;
-    while (at < line.len) {
-        const c = line[at];
-        if (quoted == 0 and ctype.isSpace(c)) {
-            try words.append(arena, try word.toOwnedSlice(arena));
-            at += 1;
-            while (at < line.len and ctype.isSpace(line[at])) at += 1;
-        } else if (quoted == 0 and (c == '\'' or c == '"')) {
-            quoted = c;
-            at += 1;
-        } else if (c == quoted) {
-            quoted = 0;
-            at += 1;
-        } else {
-            var ch = c;
-            if (c == '\\' and quoted != '\'') {
-                at += 1;
-                if (at == line.len) return error.MalformedStrategyOptions;
-                ch = line[at];
-            }
-            try word.append(arena, ch);
-            at += 1;
-        }
-    }
-    if (quoted != 0) return error.MalformedStrategyOptions;
-    try words.append(arena, try word.toOwnedSlice(arena));
-    for (words.items) |*w| {
+    const split_words = (try text_quote.splitCmdline(arena, line)) orelse return error.MalformedStrategyOptions;
+    const words = try arena.dupe([]const u8, split_words);
+    for (words) |*w| {
         if (std.mem.startsWith(u8, w.*, "--")) w.* = w.*[2..];
     }
-    return words.items;
+    return words;
 }
 
 test "strategy options set what git's parse_merge_opt sets, the later word winning" {
