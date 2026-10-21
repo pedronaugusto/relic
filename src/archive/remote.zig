@@ -98,8 +98,11 @@ pub const Served = enum {
     refused,
 };
 
+/// Errors from either side.
+pub const Error = ServeError || FetchError;
+
 /// git's `upload-archive`, over `in` and `out`, for `repo`.
-pub fn serve(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, out: *Io.Writer, options: ServeOptions) ServeError!Served {
+fn converse(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, out: *Io.Writer, options: ServeOptions) ServeError!Served {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -358,9 +361,16 @@ pub const FetchError = error{
     UnsupportedTransport,
 } || connection.Error || ssh.Error || url_mod.ParseError || local.Error || Allocator.Error || Io.Cancelable;
 
-/// git's `git archive --remote=<url> [<args>]`: `args` sent as git's
-/// client sends them, and the archive written to `out`.
-pub fn fetch(gpa: Allocator, io: Io, url: []const u8, args: []const []const u8, out: *Io.Writer, options: FetchOptions) FetchError!void {
+/// What a client asks for: the repository, and `git archive`'s arguments.
+pub const Request = struct {
+    url: []const u8,
+    args: []const []const u8,
+};
+
+/// git's `git archive --remote=<url> [<args>]`: the arguments sent as
+/// git's client sends them, and the archive written to `out`.
+pub fn fetch(gpa: Allocator, io: Io, request: Request, out: *Io.Writer, options: FetchOptions) FetchError!void {
+    const url = request.url;
     const parsed = try url_mod.Url.parse(url);
     const conn: *Connection = switch (parsed.scheme) {
         .local, .file => blk: {
@@ -391,7 +401,7 @@ pub fn fetch(gpa: Allocator, io: Io, url: []const u8, args: []const []const u8, 
     errdefer if (options.said) |said| said.keep(conn.message());
 
     const w = try conn.request();
-    for (args) |arg| pkt_line.print("argument {s}\n", .{arg}, w) catch |err| return conn.writeFailed(err);
+    for (request.args) |arg| pkt_line.print("argument {s}\n", .{arg}, w) catch |err| return conn.writeFailed(err);
     pkt_line.flush(w) catch |err| return conn.writeFailed(err);
     const in = try conn.response();
     const first = pkt_line.read(in) catch return error.ProtocolError;
@@ -435,8 +445,13 @@ pub const Server = struct {
 
     pub fn advertise(_: *Server, _: *Io.Writer) ServeError!void {}
 
+    /// One client, over `in` and `out`.
+    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) ServeError!Served {
+        return converse(s.gpa, s.io, s.repo, in, out, s.options);
+    }
+
     pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) ServeError!void {
-        _ = try serve(s.gpa, s.io, s.repo, in, out, s.options);
+        _ = try s.serve(in, out);
     }
 };
 

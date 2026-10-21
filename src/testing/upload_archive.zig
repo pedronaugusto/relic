@@ -28,10 +28,11 @@ pub fn main(init: std.process.Init) !void {
     var in = Io.File.stdin().readerStreaming(io, in_buffer);
     const out_buffer = try arena.alloc(u8, pkt_line.max_line);
     var out = Io.File.stdout().writerStreaming(io, out_buffer);
-    const served = try remote.serve(gpa, io, &here.repo, &in.interface, &out.interface, .{
+    var server: remote.Server = .{ .gpa = gpa, .io = io, .repo = &here.repo, .options = .{
         .programs = .{ .environ = init.environ_map },
         .now = Io.Clock.real.now(io),
-    });
+    } };
+    const served = try server.serve(&in.interface, &out.interface);
     try out.interface.flush();
     if (served == .refused) {
         var err_buffer: [256]u8 = undefined;

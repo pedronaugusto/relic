@@ -222,7 +222,7 @@ test "relic's client takes git's archive, here and from git's upload-archive ove
             defer theirs.deinit(gpa);
             var out: Io.Writer.Allocating = .init(gpa);
             defer out.deinit();
-            try remote.fetch(gpa, io, url, args, &out.writer, .{
+            try remote.fetch(gpa, io, .{ .url = url, .args = args }, &out.writer, .{
                 .programs = .{ .environ = &env },
                 .config = repo.configuration(),
                 .now = Io.Clock.real.now(io),
@@ -235,7 +235,7 @@ test "relic's client takes git's archive, here and from git's upload-archive ove
         var said: remote.Said = .{};
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try std.testing.expectError(error.ArchiveFailed, remote.fetch(gpa, io, url, &.{"nowhere"}, &out.writer, .{
+        try std.testing.expectError(error.ArchiveFailed, remote.fetch(gpa, io, .{ .url = url, .args = &.{"nowhere"} }, &out.writer, .{
             .programs = .{ .environ = &env },
             .config = repo.configuration(),
             .said = &said,
