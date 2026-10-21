@@ -663,6 +663,8 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `commit.notes` | `Notes`, `add`, `append`, `copy`, `remove`, `prune`, `show`, `merge`, `mergeCommit`, `mergeAbort`, `formatNote`: `refs/notes/*` read and written as `git notes` does, git's fanout and every merge strategy included. |
 | `commit.todo` | Module within `commit`. |
 | `commit.rebase` | Module within `commit`. |
+| `commit.history` | `fixup`, `reword`, `split` — `git history`: one commit rewritten where it stands, its descendants replayed onto it and their branches moved. |
+| `commit.replay` | `replay` — `git replay`: commits made again in memory onto `--onto`, `--advance` or `--revert`, and the refs that pointed at them moved in one transaction. |
 | `commit.sequencer` | Module within `commit`. |
 | `commit.merging` | Module within `commit`. |
 | `commit.stash` | `push`, `create`, `store`, `apply`, `pop`, `list`, `show`, `drop`, `clear`; the autostash a merge or a rebase makes and brings back. |

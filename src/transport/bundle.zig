@@ -45,7 +45,6 @@ const fs = @import("../fs/fs.zig");
 const ignore = @import("../patterns.zig").ignore;
 const progress_mod = @import("../report.zig").progress;
 const rev_index = @import("../odb/rev_index.zig");
-const ref_names = @import("../names.zig").ref;
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -672,34 +671,17 @@ fn topoOrder(a: Allocator, io: Io, repo: *Repository, list: []const Oid) CreateE
     return out.items;
 }
 
-/// `repo_dwim_ref` as `write_bundle_refs` uses it: the name a revision is
-/// written under, or `null` when it names no ref or more than one.
+/// The name `write_bundle_refs` writes a revision under: the ref
+/// `repo_dwim_ref` finds for it, or `null` when it finds none or more than
+/// one; a symbolic ref asked for by its own name keeps that name.
 fn dwimRef(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!?[]const u8 {
-    const store = repo.refStore();
-    const rules = [_][2][]const u8{
-        .{ "", "" },
-        .{ "refs/", "" },
-        .{ "refs/tags/", "" },
-        .{ "refs/heads/", "" },
-        .{ "refs/remotes/", "" },
-        .{ "refs/remotes/", "/HEAD" },
-    };
-    var found: ?[]const u8 = null;
-    var count: usize = 0;
-    for (rules) |rule| {
-        const full = try std.mem.concat(a, u8, &.{ rule[0], name, rule[1] });
-        if (!ref_names.checkFormat(full, .{ .allow_onelevel = true }) and !std.mem.eql(u8, full, "HEAD")) continue;
-        const resolved = (store.resolve(a, io, full) catch continue) orelse continue;
-        count += 1;
-        if (found == null) found = resolved.name;
-    }
-    if (count != 1) return null;
-    // A symbolic ref asked for by its own name is written by that name.
-    if (store.read(a, io, name) catch null) |direct| switch (direct) {
+    const found = (try rev_parse.dwimRef(a, io, repo, name)) orelse return null;
+    if (found.count != 1) return null;
+    if (repo.refStore().read(a, io, name) catch null) |direct| switch (direct) {
         .symbolic => return name,
         .direct => {},
     };
-    return found;
+    return found.ref;
 }
 
 test "fuzz: any bytes are a bundle header or a named error" {

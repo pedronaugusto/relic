@@ -116,6 +116,8 @@ test {
         _ = @import("testing/history.zig");
         _ = @import("testing/autostash.zig");
         _ = @import("testing/pull.zig");
+        _ = @import("testing/replay.zig");
+        _ = @import("testing/history_command.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");

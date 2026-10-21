@@ -375,6 +375,12 @@ pub const Decorations = struct {
         return d;
     }
 
+    /// git's `get_name_decoration`: what decorates `oid`, the last loaded
+    /// first, or `null`.
+    pub fn of(d: *const Decorations, oid: Oid) ?*const Decoration {
+        return d.by_object.get(oid);
+    }
+
     pub fn deinit(d: *Decorations) void {
         d.arena.deinit();
         d.* = undefined;

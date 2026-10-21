@@ -76,6 +76,36 @@ pub fn resolveAt(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, cl
     return resolveWith(gpa, io, repo, expr, clock);
 }
 
+/// A short name taken as git takes it for a ref: `repo_dwim_ref`.
+pub const Dwim = struct {
+    /// How many of git's rules name a ref: all of them are tried, unless
+    /// `core.warnAmbiguousRefs` is off, when the first that names one
+    /// stops the search.
+    count: usize,
+    /// The first such ref, through any symbolic ref to the one it ends at.
+    ref: []const u8,
+    oid: Oid,
+};
+
+/// git's `repo_dwim_ref`: `name` with `@`, `@{-<n>}`, `<branch>@{upstream}`
+/// and `<branch>@{push}` put in place (`substitute_branch_name`), then
+/// looked up by `ref_rev_parse_rules`; `null` when no rule names a ref.
+/// What it returns is in `arena`.
+pub fn dwimRef(arena: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!?Dwim {
+    var r: Resolver = .{ .gpa = arena, .a = arena, .io = io, .repo = repo, .clock = null };
+    const full = try r.substituteBranch(name);
+    const warn = repo.configuration().getBool("core.warnambiguousrefs", true) catch true;
+    var found: ?Dwim = null;
+    const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
+    inline for (rules) |rule| {
+        if (try r.resolvedRef(try arena.print(rule, .{full}))) |got| {
+            if (found) |*f| f.count += 1 else found = .{ .count = 1, .ref = got.name, .oid = got.oid };
+            if (!warn) return found;
+        }
+    }
+    return found;
+}
+
 fn resolveWith(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: ?Clock) Error!Oid {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -209,6 +239,14 @@ const Resolver = struct {
     }
 
     fn refMaybe(r: *Resolver, full: []const u8) Error!?Oid {
+        const got = (try r.resolvedRef(full)) orelse return null;
+        r.gpa.free(got.name);
+        return got.oid;
+    }
+
+    /// The ref `full` ends at and its value, or `null` for none. The name
+    /// is `r.gpa`'s.
+    fn resolvedRef(r: *Resolver, full: []const u8) Error!?struct { name: []const u8, oid: Oid } {
         // Only names a ref can have: `HEAD` and its kind at the top,
         // everything under `refs/`, and another worktree's,
         // `main-worktree/HEAD` and `worktrees/<id>/HEAD`.
@@ -219,8 +257,25 @@ const Resolver = struct {
             return mapped;
         };
         const got = resolved orelse return null;
-        r.gpa.free(got.name);
-        return got.oid;
+        return .{ .name = got.name, .oid = got.oid };
+    }
+
+    /// git's `substitute_branch_name`: `@` is `HEAD`, `@{-<n>}` the branch
+    /// left n checkouts ago, `<branch>@{upstream}` and `<branch>@{push}` the
+    /// refs that track them; anything else, or a `@{-<n>}` naming no
+    /// checkout, as it is.
+    fn substituteBranch(r: *Resolver, name: []const u8) Error![]const u8 {
+        if (std.mem.eql(u8, name, "@")) return "HEAD";
+        if (name.len == 0 or name[name.len - 1] != '}') return name;
+        const at = std.mem.findLast(u8, name, "@{") orelse return name;
+        const base = name[0..at];
+        const what = name[at + 2 .. name.len - 1];
+        if (std.ascii.eqlIgnoreCase(what, "u") or std.ascii.eqlIgnoreCase(what, "upstream")) return r.upstreamOf(try r.branchOf(base));
+        if (std.ascii.eqlIgnoreCase(what, "push")) return r.pushOf(try r.branchOf(base));
+        if (at != 0 or what.len < 2 or what[0] != '-') return name;
+        const read = decimal.strtol(what[1..], 10, 64);
+        if (read.end != what.len - 1 or read.value <= 0) return name;
+        return (try r.previousName(std.math.cast(u32, read.value) orelse std.math.maxInt(u32))) orelse name;
     }
 
     fn ref(r: *Resolver, full: []const u8) Error!Oid {
@@ -372,7 +427,22 @@ const Resolver = struct {
 
     /// `@{-<n>}`: the branch `HEAD`'s reflog says was left n checkouts ago.
     fn previousBranch(r: *Resolver, n: u32) Error!Oid {
-        if (n == 0) return error.BadRevision;
+        const from = (try r.previousName(n)) orelse return error.BadRevision;
+        // The name a checkout left, which is an object name when it
+        // left a detached HEAD, or a ref, and is never read as a
+        // revision: a log line naming `@{-1}` would otherwise name
+        // itself without end. git's `get_oid_basic` reads it so.
+        if (from.len == r.repo.objectFormat().hexLen()) {
+            if (Oid.parse(r.repo.objectFormat(), from)) |oid| return oid else |_| {}
+        }
+        if (try r.refMaybe(try r.a.print("refs/heads/{s}", .{from}))) |oid| return oid;
+        return (try r.dwim(from)) orelse error.BadRevision;
+    }
+
+    /// git's `interpret_nth_prior_checkout`: the name the n-th checkout
+    /// back moved from, as `HEAD`'s reflog says it, or `null`.
+    fn previousName(r: *Resolver, n: u32) Error!?[]const u8 {
+        if (n == 0) return null;
         var log = r.repo.readLog(r.io, "HEAD") catch |err| return revisionError(err);
         defer log.deinit();
         var seen: u32 = 0;
@@ -385,19 +455,9 @@ const Resolver = struct {
             const rest = message[prefix.len..];
             const to = std.mem.find(u8, rest, " to ") orelse continue;
             seen += 1;
-            if (seen != n) continue;
-            const from = rest[0..to];
-            // The name a checkout left, which is an object name when it
-            // left a detached HEAD, or a ref, and is never read as a
-            // revision: a log line naming `@{-1}` would otherwise name
-            // itself without end. git's `get_oid_basic` reads it so.
-            if (from.len == r.repo.objectFormat().hexLen()) {
-                if (Oid.parse(r.repo.objectFormat(), from)) |oid| return oid else |_| {}
-            }
-            if (try r.refMaybe(try r.a.print("refs/heads/{s}", .{from}))) |oid| return oid;
-            return (try r.dwim(from)) orelse error.BadRevision;
+            if (seen == n) return try r.a.dupe(u8, rest[0..to]);
         }
-        return error.BadRevision;
+        return null;
     }
 
     const Want = enum { commit, tree, blob, tag, any };

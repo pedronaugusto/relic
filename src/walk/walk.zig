@@ -111,6 +111,11 @@ pub const Walk = struct {
     /// that matter -- one not reached from a hidden commit, or one given
     /// hidden -- has that parent alone, so the others are not walked.
     paths: ?*const pathspec.Pathspec = null,
+    /// `--ancestry-path=<commit>`, each commit given: only these, the
+    /// commits that reach one of them and the commits one of them reaches,
+    /// each through the commits walked, are kept. `--ancestry-path` alone
+    /// is the commits given hidden. Empty keeps every commit.
+    ancestry_path: []const Oid = &.{},
     /// `core.maxTreeDepth`, how deep `paths` may look into a tree: a caller
     /// with a repository gives `Repository.settings().max_tree_depth`.
     max_tree_depth: u32 = object_depth.max_tree_depth,
@@ -138,6 +143,9 @@ pub const Walk = struct {
         /// Given hidden: git's `BOTTOM`.
         bottom: bool = false,
         treesame: bool = false,
+        /// One of `ancestry_path`, or reached from one through commits
+        /// walked: git's `ANCESTRY_PATH`.
+        ancestry: bool = false,
     };
 
     const Queued = struct { node: *Node, seq: u64 };
@@ -243,6 +251,8 @@ pub const Walk = struct {
         for (n.parents) |parent_oid| {
             const p = try walk.nodeOf(parent_oid);
             if (n.uninteresting) p.uninteresting = true;
+            // git passes its flag to the parents of a commit it keeps.
+            if (n.ancestry and !n.uninteresting) p.ancestry = true;
             try walk.parse(io, p);
             if (n.uninteresting and p.parents.len != 0) try walk.markParentsUninteresting(p);
             if (!p.seen) {
@@ -307,6 +317,7 @@ pub const Walk = struct {
         defer queue.deinit(walk.gpa);
         var seq: u64 = 0;
         var limited = false;
+        for (walk.ancestry_path) |oid| (try walk.nodeOf(oid)).ancestry = true;
         for (walk.pending.items) |given| {
             const n = try walk.nodeOf(given.oid);
             try walk.parse(io, n);
@@ -324,6 +335,7 @@ pub const Walk = struct {
 
         var list: std.ArrayList(*Node) = .empty;
         defer list.deinit(walk.gpa);
+        if (walk.ancestry_path.len != 0) limited = true;
         if (limited) {
             // `limit_list`.
             const slop_start = 5;
@@ -355,6 +367,7 @@ pub const Walk = struct {
             }
         }
 
+        if (walk.ancestry_path.len != 0) try walk.limitToAncestry(list.items);
         if (walk.sort != .date) try walk.sortTopologically(&list);
         try walk.ordered.ensureTotalCapacity(walk.gpa, list.items.len);
         for (list.items) |n| {
@@ -363,6 +376,39 @@ pub const Walk = struct {
         }
         if (walk.reverse) std.mem.reverse(Commit, walk.ordered.items);
         walk.prepared = true;
+    }
+
+    /// git's `limit_to_ancestry`: the commits in `list` that reach one of
+    /// `ancestry_path`, or that one reaches, stay; the rest become
+    /// uninteresting. The walk has marked what they reach; what reaches
+    /// them is marked here, the list gone through from the oldest, as it
+    /// is newest first, until nothing more is marked.
+    fn limitToAncestry(walk: *Walk, list: []const *Node) Allocator.Error!void {
+        var marked: std.AutoHashMapUnmanaged(*Node, void) = .empty;
+        defer marked.deinit(walk.gpa);
+        for (walk.ancestry_path) |oid| {
+            if (walk.nodes.get(OidKey.of(oid))) |n| try marked.put(walk.gpa, n, {});
+        }
+        var progress = true;
+        while (progress) {
+            progress = false;
+            var i = list.len;
+            while (i > 0) {
+                i -= 1;
+                const n = list[i];
+                if (n.uninteresting or marked.contains(n)) continue;
+                for (n.parents) |parent| {
+                    const p = walk.nodes.get(OidKey.of(parent)) orelse continue;
+                    if (!marked.contains(p)) continue;
+                    try marked.put(walk.gpa, n, {});
+                    progress = true;
+                    break;
+                }
+            }
+        }
+        for (list) |n| {
+            if (!marked.contains(n) and !n.ancestry) n.uninteresting = true;
+        }
     }
 
     /// `sort_in_topological_order`: a parent is ready once its last child

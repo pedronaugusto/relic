@@ -1816,29 +1816,6 @@ pub const Listing = struct {
         return false;
     }
 
-    /// git's `repo_dwim_ref`: how many of the rules find `name`, and the
-    /// first one's resolved name and object.
-    fn dwimRef(l: *Listing, name: []const u8) ErrorNamespace.Error!struct { count: usize, ref: []const u8 = "", oid: ?Oid = null } {
-        var count: usize = 0;
-        var first: []const u8 = "";
-        var first_oid: ?Oid = null;
-        const warn = l.repo.configuration().getBool("core.warnambiguousrefs", true) catch true;
-        for (rev_parse_rules) |rule| {
-            const candidate = try expandRule(l.a(), rule, name);
-            const resolved = l.repo.refStore().resolve(l.gpa, l.io, candidate) catch continue;
-            if (resolved) |r| {
-                defer l.gpa.free(r.name);
-                if (count == 0) {
-                    first = try l.a().dupe(u8, r.name);
-                    first_oid = r.oid;
-                }
-                count += 1;
-                if (!warn) break;
-            }
-        }
-        return .{ .count = count, .ref = first, .oid = first_oid };
-    }
-
     fn worktreePath(l: *Listing, name: []const u8) ErrorNamespace.Error![]const u8 {
         if (l.worktree_map == null) {
             var map: std.StringHashMapUnmanaged([]const u8) = .empty;
@@ -1904,8 +1881,9 @@ pub const Listing = struct {
             const value = try l.a().dupe(u8, tracking);
             return value;
         }
-        const found = try l.dwimRef(merge);
-        if (found.count == 1) return found.ref;
+        if (try revparse_mod.dwimRef(l.a(), l.io, l.repo, merge)) |found| {
+            if (found.count == 1) return found.ref;
+        }
         const value = try l.a().dupe(u8, merge);
         return value;
     }
@@ -2101,17 +2079,17 @@ pub const Listing = struct {
             if (std.mem.eql(u8, target, "HEAD")) target = try l.showOid(.short, noid);
             target = try l.a().dupe(u8, target);
             var from: []const u8 = undefined;
-            const found = try l.dwimRef(target);
+            const found = try revparse_mod.dwimRef(l.a(), l.io, l.repo, target);
             var matched = false;
-            if (found.count == 1) {
-                if (found.oid.?.eql(noid)) {
+            if (found) |f| if (f.count == 1) {
+                if (f.oid.eql(noid)) {
                     matched = true;
-                } else if (try l.peelToCommit(found.oid.?)) |c| {
+                } else if (try l.peelToCommit(f.oid)) |c| {
                     matched = c.eql(noid);
                 }
-            }
+            };
             if (matched) {
-                from = found.ref;
+                from = found.?.ref;
                 if (std.mem.startsWith(u8, from, "refs/tags/")) {
                     from = from["refs/tags/".len..];
                 } else if (std.mem.startsWith(u8, from, "refs/remotes/")) {

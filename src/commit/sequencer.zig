@@ -569,7 +569,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
             base_label = label;
             next_tree = if (parent) |p| try repo.commitTree(io, p) else null;
             next_label = if (parent != null) parent_label else "(empty tree)";
-            try revertMessage(r, &msg, subject, oid, if (commit.parents.len > 1) parent else null);
+            try revertMessage(r.arena, &msg, subject, oid, if (commit.parents.len > 1) parent else null);
         },
         .pick => {
             base_tree = if (parent) |p| try repo.commitTree(io, p) else null;
@@ -731,9 +731,9 @@ fn emptyTree(io: Io, repo: *Repository) Error!Oid {
 }
 
 /// `sequencer_format_revert_message`: `Revert "<subject>"`, or `Reapply
-/// "<subject>"` for a revert of a revert, and the commit reverted.
-fn revertMessage(r: *Replay, msg: *std.ArrayList(u8), subject: []const u8, oid: Oid, merge_parent: ?Oid) Error!void {
-    const arena = r.arena;
+/// "<subject>"` for a revert of a revert, and the commit reverted, and for
+/// a merge the parent its changes are reversed against.
+pub fn revertMessage(arena: Allocator, msg: *std.ArrayList(u8), subject: []const u8, oid: Oid, merge_parent: ?Oid) Allocator.Error!void {
     const prefix = "Revert \"";
     if (std.mem.startsWith(u8, subject, prefix) and !std.mem.startsWith(u8, subject[prefix.len..], prefix)) {
         try msg.appendSlice(arena, "Reapply \"");

@@ -63,6 +63,7 @@
 //! | `rev_walk` | Public concern. |
 //! | `rev_walk.bisect` | Module within `rev_walk`. |
 //! | `rev_walk.describe` | Module within `rev_walk`. |
+//! | `rev_walk.fork_point` | Module within `rev_walk`. |
 //! | `rev_walk.mailmap` | Module within `rev_walk`. |
 //! | `rev_walk.rev_parse` | Module within `rev_walk`. |
 //! | `rev_walk.shallow` | Module within `rev_walk`. |
@@ -80,6 +81,8 @@
 //! | `commit.notes` | Module within `commit`. |
 //! | `commit.todo` | Module within `commit`. |
 //! | `commit.rebase` | Module within `commit`. |
+//! | `commit.replay` | Module within `commit`. |
+//! | `commit.history` | Module within `commit`. |
 //! | `commit.sequencer` | Module within `commit`. |
 //! | `commit.merging` | Module within `commit`. |
 //! | `commit.stash` | Module within `commit`. |
@@ -100,6 +103,7 @@
 //! | `transport.push` | Module within `transport`. |
 //! | `transport.clone` | Module within `transport`. |
 //! | `transport.fetch` | Module within `transport`. |
+//! | `transport.pull` | Module within `transport`. |
 //! | `transport.refspec` | Module within `transport`. |
 //! | `transport.remote` | Module within `transport`. |
 //! | `transport.url` | Module within `transport`. |

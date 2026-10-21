@@ -194,3 +194,45 @@ test "a commit's tree and parents are read where git reads them, whatever header
     }
     try testing.expectEqualStrings(theirs_list, listed.items);
 }
+
+test "an ancestry-path walk lists what git rev-list --ancestry-path lists, for every pair" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var repo = try skewedHistory(gpa, io);
+    defer repo.deinit();
+    const oids = try marks(gpa, io, &repo);
+    defer gpa.free(oids);
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    var tip_hex: [hash.max_hex_len]u8 = undefined;
+    var hidden_hex: [hash.max_hex_len]u8 = undefined;
+    var path_hex: [hash.max_hex_len]u8 = undefined;
+    // `--ancestry-path` alone, the hidden commit the bottom; then
+    // `--ancestry-path=<commit>` under the root hidden.
+    for ([_]bool{ false, true }) |explicit| for (oids, 1..) |tip, tip_mark| for (oids, 1..) |other, other_mark| {
+        const hidden = if (explicit) oids[0] else other;
+        const flag = if (explicit) try gpa.print("--ancestry-path={s}", .{other.hex(&path_hex)}) else try gpa.dupe(u8, "--ancestry-path");
+        defer gpa.free(flag);
+        const theirs = try repo.run(io, &.{ "rev-list", "--topo-order", flag, tip.hex(&tip_hex), "--not", hidden.hex(&hidden_hex) });
+        defer gpa.free(theirs);
+        var walk: rev_walk.Walk = .init(gpa, &db);
+        defer walk.deinit();
+        walk.sort = .topological;
+        walk.ancestry_path = &.{other};
+        try walk.push(tip);
+        try walk.hide(hidden);
+        var walked: std.ArrayList(u8) = .empty;
+        defer walked.deinit(gpa);
+        while (try walk.next(io)) |commit| {
+            var hex: [hash.max_hex_len]u8 = undefined;
+            try walked.print(gpa, "{s}\n", .{commit.oid.hex(&hex)});
+        }
+        testing.expectEqualStrings(theirs, walked.items) catch |err| {
+            std.debug.print("explicit {} tip :{d} other :{d}\n", .{ explicit, tip_mark, other_mark });
+            return err;
+        };
+    };
+}

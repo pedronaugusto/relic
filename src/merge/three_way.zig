@@ -92,6 +92,9 @@ pub const Options = struct {
     /// Directory rename detection; `null` reads `merge.directoryRenames`.
     /// `git am`'s three-way fallback turns it off.
     directory_renames: ?ort.DirectoryRenames = null,
+    /// git's `init_basic_merge_options`, as `git replay` and `git history`
+    /// merge: `diff.algorithm` is not read.
+    basic: bool = false,
 };
 
 /// The index and tree identities for one working-tree merge.
@@ -235,57 +238,13 @@ fn run(
     defer attrs.deinit();
     rules.attrs = &attrs;
     rules.filters = options.filters;
-    // The merge reads attributes of its own: a renormalizing merge puts
-    // the merged `.gitattributes` at the top where the working tree has
-    // none (git's `attr_index`), and those say nothing about what the
-    // working tree holds now. The check of the working tree before
-    // anything is written reads the working tree's and the index's, as
-    // git's refresh before a merge does: an entry racily clean in its
-    // second is compared through those, never through the merge's.
-    var merge_attrs = try repo.loadAttrs(io);
-    defer merge_attrs.deinit();
-
-    const merge_config = try MergeConfig.read(repo.configuration());
-    const settings = try configuredSettings(repo, merge_config, options);
-    // Renormalizing takes each side out and back in, and asks no index
-    // whether a stored version kept its CRLF endings.
-    var normalizer: convert.Session = .open(gpa, io, .{
-        .wt = wt,
-        .kind = db.objectFormat(),
-        .core = rules.core,
-        .required_filters = rules.required_filters,
-        .drivers = rules.filters,
-        .programs = options.programs,
-    });
-    defer normalizer.deinit(io);
-    var submodules: SubmoduleOpener = .{ .gpa = gpa, .io = io, .wt = wt };
-    defer submodules.deinit();
-    var ort_options: ort.Options = .{
-        .labels = options.blob.labels,
-        .conflict_style = options.blob.conflict_style,
-        .resolve = settings.resolve,
-        .algorithm = settings.algorithm,
-        .minimal = settings.minimal,
-        .renames = settings.renames,
-        .rename_score = settings.rename_score,
-        .whitespace = settings.whitespace,
-        .subtree_shift = settings.subtree_shift,
-        .rename_limit = merge_config.rename_limit,
-        .directory_renames = options.directory_renames orelse merge_config.directory_renames,
-        .attributes = &merge_attrs,
-        .attributes_dir = wt,
-        .configured_drivers = try configuredDrivers(arena, repo),
-        .default_driver = repo.configuration().get("merge.default"),
-        .submodules = .{ .context = &submodules, .openFn = SubmoduleOpener.open },
-        .abbrev_len = abbrev.defaultLength(repo.configuration(), db),
-        .blocked = options.blocked,
-        .renormalize = if (settings.renormalize) &normalizer else null,
-        .attributes_from_merge = if (wt.access(io, ".gitattributes", .{})) |_| false else |_| true,
-        .inner_messages = options.inner_messages or (repo.configuration().getInt("merge.verbosity", 2) catch 2) >= 5,
-    };
+    var machinery: Machinery = undefined;
+    try machinery.init(gpa, arena, io, repo, .{ .wt = wt, .rules = rules, .options = options });
+    defer machinery.deinit(io);
     var merged = switch (sides) {
-        .trees => |t| try ort.trees(gpa, io, db, .{ .base = t.base, .ours = t.ours, .theirs = t.theirs }, ort_options),
+        .trees => |t| try ort.trees(gpa, io, db, .{ .base = t.base, .ours = t.ours, .theirs = t.theirs }, machinery.ort),
         .commits => |c| blk: {
+            var ort_options = machinery.ort;
             ort_options.labels.base = "";
             break :blk try ort.commits(gpa, io, db, .{ .ours = c.ours, .theirs = c.theirs, .bases = c.bases }, ort_options);
         },
@@ -770,6 +729,103 @@ const SubmoduleOpener = struct {
     }
 };
 
+/// A merge of three trees made in memory: git's `merge_incore_nonrecursive`.
+/// Nothing but objects is written, and neither the index nor the working
+/// tree is read; the merge's settings and attributes are read as for a
+/// merge in the working tree, which a bare repository has none of.
+pub const InCoreInputs = struct { base: ?Oid = null, ours: Oid, theirs: Oid };
+
+pub fn inCore(gpa: Allocator, io: Io, repo: *Repository, inputs: InCoreInputs, options: Options) Self.Error!ort.Result {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var rules = try repo.worktreeRules();
+    rules.required_filters = try repo.requiredFilters(arena);
+    rules.filters = options.filters;
+    var machinery: Machinery = undefined;
+    try machinery.init(gpa, arena, io, repo, .{ .wt = repo.workDirectory(), .rules = rules, .options = options });
+    defer machinery.deinit(io);
+    return ort.trees(gpa, io, repo.objectDatabase(), .{ .base = inputs.base, .ours = inputs.ours, .theirs = inputs.theirs }, machinery.ort);
+}
+
+/// What git's merge machinery is set up with, and what it holds while it
+/// merges: the merge's own attributes, the renormalizing session and the
+/// submodules it opens. Set up in place, since the options point into it.
+const Machinery = struct {
+    attrs: attributes.Attrs,
+    normalizer: convert.Session,
+    submodules: ?SubmoduleOpener,
+    ort: ort.Options,
+
+    const Setup = struct {
+        /// The working tree, or `null` in a bare repository: the merged
+        /// paths' `.gitattributes` and the submodules are read from it.
+        wt: ?Io.Dir,
+        rules: worktree.Rules,
+        options: Options,
+    };
+
+    fn init(m: *Machinery, gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, setup: Setup) Error!void {
+        const options = setup.options;
+        const rules = setup.rules;
+        const merge_config = try MergeConfig.read(repo.configuration());
+        const settings = try configuredSettings(repo, merge_config, options);
+        // The merge reads attributes of its own: a renormalizing merge puts
+        // the merged `.gitattributes` at the top where the working tree has
+        // none (git's `attr_index`), and those say nothing about what the
+        // working tree holds now. The check of the working tree before
+        // anything is written reads the working tree's and the index's, as
+        // git's refresh before a merge does: an entry racily clean in its
+        // second is compared through those, never through the merge's.
+        m.attrs = try repo.loadAttrs(io);
+        errdefer m.attrs.deinit();
+        // Renormalizing takes each side out and back in, and asks no index
+        // whether a stored version kept its CRLF endings. A filter runs
+        // where git runs it, in the working tree or the bare repository.
+        m.normalizer = .open(gpa, io, .{
+            .wt = setup.wt orelse repo.gitDirectory(),
+            .kind = repo.objectFormat(),
+            .core = rules.core,
+            .required_filters = rules.required_filters,
+            .drivers = rules.filters,
+            .programs = options.programs,
+        });
+        errdefer m.normalizer.deinit(io);
+        m.submodules = if (setup.wt) |wt| .{ .gpa = gpa, .io = io, .wt = wt } else null;
+        const db = repo.objectDatabase();
+        m.ort = .{
+            .labels = options.blob.labels,
+            .conflict_style = options.blob.conflict_style,
+            .resolve = settings.resolve,
+            .algorithm = settings.algorithm,
+            .minimal = settings.minimal,
+            .renames = settings.renames,
+            .rename_score = settings.rename_score,
+            .whitespace = settings.whitespace,
+            .subtree_shift = settings.subtree_shift,
+            .rename_limit = merge_config.rename_limit,
+            .directory_renames = options.directory_renames orelse merge_config.directory_renames,
+            .attributes = &m.attrs,
+            .attributes_dir = setup.wt,
+            .configured_drivers = try configuredDrivers(arena, repo),
+            .default_driver = repo.configuration().get("merge.default"),
+            .submodules = if (m.submodules) |*s| .{ .context = s, .openFn = SubmoduleOpener.open } else null,
+            .abbrev_len = abbrev.defaultLength(repo.configuration(), db),
+            .blocked = options.blocked,
+            .renormalize = if (settings.renormalize) &m.normalizer else null,
+            .attributes_from_merge = if (setup.wt) |wt| (if (wt.access(io, ".gitattributes", .{})) |_| false else |_| true) else true,
+            .inner_messages = options.inner_messages or (repo.configuration().getInt("merge.verbosity", 2) catch 2) >= 5,
+        };
+    }
+
+    fn deinit(m: *Machinery, io: Io) void {
+        if (m.submodules) |*s| s.deinit();
+        m.normalizer.deinit(io);
+        m.attrs.deinit();
+        m.* = undefined;
+    }
+};
+
 /// What the merge does with content and renames: `options.blob`'s start,
 /// then configuration -- `diff.algorithm`, `merge.renames`,
 /// `merge.renormalize` -- then each strategy option in turn, as git's merge
@@ -783,9 +839,9 @@ fn configuredSettings(repo: *Repository, merge_config: MergeConfig, options: Opt
         .renames = merge_config.renames,
         .renormalize = merge_config.renormalize,
     };
-    if (repo.configuration().get("diff.algorithm")) |text| {
+    if (!options.basic) if (repo.configuration().get("diff.algorithm")) |text| {
         settings.configureAlgorithm(text) orelse return error.UnknownDiffAlgorithm;
-    }
+    };
     for (options.strategy_options) |word| try settings.apply(word);
     return settings;
 }
