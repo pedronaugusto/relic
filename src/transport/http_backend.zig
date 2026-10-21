@@ -88,18 +88,8 @@ pub const Backend = struct {
         const path = try percent.decode(arena, request.path, .decode);
         const route = Route.of(path) orelse return notFound(io, response);
         const relative = std.mem.trim(u8, path[0 .. path.len - route.suffix().len], "/");
-        if (!safe(relative)) return notFound(io, response);
-        const location = try std.Io.Dir.path.join(arena, &.{ b.root, relative });
-
-        var remote = local.Remote.open(b.gpa, io, location, .{}) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Canceled => return error.Canceled,
-            else => return notFound(io, response),
-        };
+        var remote = (try openServed(b.gpa, io, b.root, relative, b.options.export_all)) orelse return notFound(io, response);
         defer remote.deinit(io);
-        if (!b.options.export_all) {
-            remote.repo.gitDirectory().access(io, "git-daemon-export-ok", .{}) catch return notFound(io, response);
-        }
 
         const service: Service = switch (route) {
             .info_refs => Service.named(queryValue(request.query, "service") orelse "") orelse return notFound(io, response),
@@ -225,6 +215,31 @@ const Route = enum {
         };
     }
 };
+
+/// Errors from `openServed`.
+pub const OpenServedError = Allocator.Error || Io.Cancelable;
+
+/// The repository at `relative` under `root`, opened, when it is served:
+/// a path with no `..` and nothing absolute in it, to a repository with
+/// `git-daemon-export-ok` unless `export_all`. `null` for any other, which
+/// a server answers as not found. The caller deinits it.
+pub fn openServed(gpa: Allocator, io: Io, root: []const u8, relative: []const u8, export_all: bool) OpenServedError!?local.Remote {
+    if (!safe(relative)) return null;
+    const location = try std.Io.Dir.path.join(gpa, &.{ root, relative });
+    defer gpa.free(location);
+    var remote = local.Remote.open(gpa, io, location, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    if (!export_all) {
+        remote.repo.gitDirectory().access(io, "git-daemon-export-ok", .{}) catch {
+            remote.deinit(io);
+            return null;
+        };
+    }
+    return remote;
+}
 
 /// A repository path with no `..` and nothing absolute: git's
 /// `daemon_avoid_alias`.

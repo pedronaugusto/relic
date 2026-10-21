@@ -136,6 +136,7 @@
 //! | `lfs.transfer` | Module within `lfs`. |
 //! | `lfs.custom` | Module within `lfs`. |
 //! | `lfs.api` | Module within `lfs`. |
+//! | `lfs.server` | Module within `lfs`. |
 //! | `patch` | Public concern. |
 //! | `patch.am` | Module within `patch`. |
 //! | `patch.mail` | Module within `patch`. |

@@ -256,6 +256,95 @@ fn writeLockArray(s: *std.json.Stringify, locks: []const Lock) WriteLockError!vo
     try s.endArray();
 }
 
+/// A request's `ref`, which names the branch a lock is for.
+pub const RefJson = struct { name: []const u8 = "" };
+
+/// `POST /locks`, as a server reads it (git-lfs's `lockRequest`).
+pub const LockRequest = struct {
+    path: []const u8 = "",
+    ref: ?RefJson = null,
+};
+
+/// `POST /locks/<id>/unlock`, as a server reads it (`unlockRequest`).
+pub const UnlockRequest = struct {
+    force: bool = false,
+    ref: ?RefJson = null,
+};
+
+/// `POST /locks/verify`, as a server reads it (`lockVerifiableRequest`).
+pub const VerifyRequest = struct {
+    cursor: []const u8 = "",
+    limit: i64 = 0,
+    ref: ?RefJson = null,
+};
+
+/// Errors from reading a request.
+pub const ParseRequestError = Allocator.Error || error{MalformedResponse};
+
+/// A request body read into `T` (`LockRequest`, `UnlockRequest` or
+/// `VerifyRequest`) as git-lfs's Go reads JSON. An empty body is every
+/// field's default, as git-lfs sends no body for an unlock it does not
+/// force.
+pub fn parseRequest(comptime T: type, arena: Allocator, bytes: []const u8) ParseRequestError!T {
+    if (std.mem.trim(u8, bytes, " \t\r\n").len == 0) return .{};
+    return lfsapi.parseJson(T, arena, bytes, .program);
+}
+
+/// Errors from writing an answer.
+pub const WriteAnswerError = WriteLockError;
+
+/// An answer to taking or giving back a lock, as git-lfs's Go writes one
+/// (`lockResponse`): the lock, and a message when there is one.
+pub fn writeLockAnswer(w: *Io.Writer, l: ?Lock, message: ?[]const u8) WriteAnswerError!void {
+    var s: std.json.Stringify = .{ .writer = w };
+    try s.beginObject();
+    if (l) |held| {
+        try s.objectField("lock");
+        try writeLock(&s, held);
+    }
+    if (message) |text| {
+        try s.objectField("message");
+        try s.write(text);
+    }
+    try s.endObject();
+}
+
+/// A page of `GET /locks` (`lockList`).
+pub fn writeListPage(w: *Io.Writer, page: []const Lock, next_cursor: ?[]const u8) WriteAnswerError!void {
+    var s: std.json.Stringify = .{ .writer = w };
+    try s.beginObject();
+    try s.objectField("locks");
+    try writeLockArray(&s, page);
+    if (next_cursor) |c| {
+        try s.objectField("next_cursor");
+        try s.write(c);
+    }
+    try s.endObject();
+}
+
+/// A page of `POST /locks/verify` (`lockVerifiableList`).
+pub fn writeVerifyPage(w: *Io.Writer, ours: []const Lock, theirs: []const Lock, next_cursor: ?[]const u8) WriteAnswerError!void {
+    var s: std.json.Stringify = .{ .writer = w };
+    try s.beginObject();
+    try s.objectField("ours");
+    try writeLockArray(&s, ours);
+    try s.objectField("theirs");
+    try writeLockArray(&s, theirs);
+    if (next_cursor) |c| {
+        try s.objectField("next_cursor");
+        try s.write(c);
+    }
+    try s.endObject();
+}
+
+/// Locks as a bare array, as git-lfs writes its `remote` cache, a line
+/// break after it; `parseListPage` reads it back.
+pub fn writeLockList(w: *Io.Writer, held: []const Lock) WriteAnswerError!void {
+    var s: std.json.Stringify = .{ .writer = w };
+    try writeLockArray(&s, held);
+    try w.writeByte('\n');
+}
+
 //=====================================================================
 // Operations
 //=====================================================================

@@ -10,6 +10,7 @@ pub const locks = @import("lfs/locks.zig");
 pub const transfer = @import("lfs/transfer.zig");
 pub const custom = @import("lfs/custom.zig");
 pub const api = @import("lfs/api.zig");
+pub const server = @import("lfs/server.zig");
 pub const spec_version = @import("lfs/lfs.zig").spec_version;
 pub const accepted_versions = @import("lfs/lfs.zig").accepted_versions;
 pub const pointer_size_cutoff = @import("lfs/lfs.zig").pointer_size_cutoff;

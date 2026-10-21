@@ -273,6 +273,18 @@ pub const BatchObject = struct {
     /// Read as git-lfs reads it; nothing uses it.
     path: []const u8 = "",
 
+    /// Written as git-lfs's Go writes `tq.Transfer`: every member but
+    /// `size` left out when it is empty.
+    pub const strand = .{ .fields = .{
+        .name = .{ .omit = .default_value },
+        .oid = .{ .omit = .default_value },
+        .authenticated = .{ .omit = .default_value },
+        .actions = .{ .omit = .default_value },
+        ._links = .{ .omit = .default_value },
+        .@"error" = .{ .omit = .null_value },
+        .path = .{ .omit = .default_value },
+    } };
+
     /// The action named `rel`, from `actions` or else `_links`, as git-lfs's
     /// `Transfer.Rel` finds it.
     pub fn action(o: *const BatchObject, rel: Rel) ?Action {
@@ -305,7 +317,14 @@ pub const Action = struct {
     /// read from JSON, as git-lfs's `json:"-"`.
     id: ?[]const u8 = null,
     token: ?[]const u8 = null,
-    pub const strand = .{ .fields = .{ .id = .{ .skip_decode = true }, .token = .{ .skip_decode = true } } };
+    /// Written as git-lfs's Go writes `tq.Action`: `header` and
+    /// `expires_in` left out when empty, `expires_at` always there.
+    pub const strand = .{ .fields = .{
+        .header = .{ .omit = .default_value },
+        .expires_in = .{ .omit = .default_value },
+        .id = .{ .skip_decode = true, .skip_encode = true },
+        .token = .{ .skip_decode = true, .skip_encode = true },
+    } };
 
     /// Whether the action, answered at `now`, expires within five seconds
     /// of it.
@@ -363,6 +382,56 @@ fn isOid(text: []const u8) bool {
         else => return false,
     };
     return true;
+}
+
+/// A batch request as a server reads it (git-lfs's `tq.batchRequest`).
+pub const BatchRequest = struct {
+    operation: []const u8 = "",
+    /// The transfer adapters the client offers; none means `basic`.
+    transfers: []const []const u8 = &.{},
+    ref: ?struct { name: []const u8 = "" } = null,
+    objects: []const RequestObject = &.{},
+    hash_algo: []const u8 = "",
+};
+
+/// One object a batch request names.
+pub const RequestObject = struct {
+    oid: []const u8 = "",
+    size: i64 = 0,
+};
+
+/// Errors from `parseBatchRequest`.
+pub const ParseBatchRequestError = Allocator.Error || error{MalformedResponse};
+
+/// Read a batch request as git-lfs's Go reads JSON; one that does not
+/// parse, or names an object `null`, is `error.MalformedResponse`. Strings
+/// are allocated in `arena`.
+pub fn parseBatchRequest(arena: Allocator, bytes: []const u8) ParseBatchRequestError!BatchRequest {
+    const Json = struct {
+        operation: []const u8 = "",
+        transfers: []const []const u8 = &.{},
+        ref: ?struct { name: []const u8 = "" } = null,
+        objects: []const ?RequestObject = &.{},
+        hash_algo: []const u8 = "",
+    };
+    const parsed = try lfsapi.parseJson(Json, arena, bytes, .program);
+    const objects = try arena.alloc(RequestObject, parsed.objects.len);
+    for (parsed.objects, objects) |entry, *to| to.* = entry orelse return error.MalformedResponse;
+    return .{
+        .operation = parsed.operation,
+        .transfers = parsed.transfers,
+        .ref = if (parsed.ref) |r| .{ .name = r.name } else null,
+        .objects = objects,
+        .hash_algo = parsed.hash_algo,
+    };
+}
+
+/// Errors from `writeBatch`.
+pub const WriteBatchError = strand.json.WriteError(BatchResponse);
+
+/// A batch answer, as git-lfs's Go writes `tq.BatchResponse`.
+pub fn writeBatch(w: *Io.Writer, answer: BatchResponse) WriteBatchError!void {
+    return strand.json.write(w, answer, .{});
 }
 
 /// The body of a batch request, as git-lfs writes it: the operation, the

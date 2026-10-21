@@ -209,3 +209,57 @@ fn lock(w: *Io.Writer, l: locks.Lock) Io.Writer.Error!void {
     try time(w, l.locked_at);
     try w.writeByte(')');
 }
+
+test "a server's batch answer is written as git-lfs's Go writes tq.BatchResponse" {
+    const header = [_]strand_pair{.{ .key = "Authorization", .value = "Basic eA==" }};
+    const download = [_]action_pair{.{ .key = "download", .value = .{ .href = "http://h/o", .header = .{ .items = &header } } }};
+    const upload = [_]action_pair{.{ .key = "upload", .value = .{ .href = "https://s/o?sig", .expires_in = 900 } }};
+    const objects = [_]transfer.BatchObject{
+        .{ .oid = &oid_a, .size = 3, .authenticated = true, .actions = .{ .items = &download } },
+        .{ .oid = &oid_b, .size = 4, .actions = .{ .items = &upload } },
+        .{ .oid = &oid_c, .size = 5 },
+        .{ .oid = &oid_d, .size = 6, .@"error" = .{ .code = 404, .message = "Object does not exist" } },
+    };
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try transfer.writeBatch(&out.writer, .{ .transfer = "basic", .objects = &objects, .hash_algo = "sha256" });
+    const zero = "\"expires_at\":\"0001-01-01T00:00:00Z\"";
+    try testing.expectEqualStrings("{\"transfer\":\"basic\",\"objects\":[" ++
+        "{\"oid\":\"" ++ oid_a ++ "\",\"size\":3,\"authenticated\":true,\"actions\":{\"download\":{\"href\":\"http://h/o\",\"header\":{\"Authorization\":\"Basic eA==\"}," ++ zero ++ "}}}," ++
+        "{\"oid\":\"" ++ oid_b ++ "\",\"size\":4,\"actions\":{\"upload\":{\"href\":\"https://s/o?sig\"," ++ zero ++ ",\"expires_in\":900}}}," ++
+        "{\"oid\":\"" ++ oid_c ++ "\",\"size\":5}," ++
+        "{\"oid\":\"" ++ oid_d ++ "\",\"size\":6,\"error\":{\"code\":404,\"message\":\"Object does not exist\"}}" ++
+        "],\"hash_algo\":\"sha256\"}", out.written());
+    // And read back as the client reads it.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const back = try transfer.parseBatch(arena.allocator(), out.written());
+    try testing.expectEqualStrings("http://h/o", back.objects[0].action(.download).?.href);
+    try testing.expectEqual(@as(i64, 900), back.objects[1].action(.upload).?.expires_in);
+    try testing.expectEqual(@as(i64, 404), back.objects[3].@"error".?.code);
+}
+
+test "a batch request is read as a server's Go reads tq.batchRequest" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const objects = [_]transfer.Object{.{ .oid = oid_e, .size = 7, .name = "x.bin" }};
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try transfer.writeBatchRequestOffering(&out.writer, .upload, &objects, "refs/heads/main", &.{"lfs-standalone-file"});
+    const read = try transfer.parseBatchRequest(arena.allocator(), out.written());
+    try testing.expectEqualStrings("upload", read.operation);
+    try testing.expectEqualStrings("refs/heads/main", read.ref.?.name);
+    try testing.expectEqual(@as(usize, 2), read.transfers.len);
+    try testing.expectEqualStrings(&oid_e, read.objects[0].oid);
+    try testing.expectEqual(@as(i64, 7), read.objects[0].size);
+    try testing.expectError(error.MalformedResponse, transfer.parseBatchRequest(arena.allocator(), "{\"objects\":[null]}"));
+}
+
+const strand_pair = @typeInfo(@FieldType(lfsapi.HeaderMap, "items")).pointer.child;
+const action_pair = @typeInfo(@FieldType(transfer.ActionSet, "items")).pointer.child;
+
+const oid_a: [64]u8 = @splat('a');
+const oid_b: [64]u8 = @splat('b');
+const oid_c: [64]u8 = @splat('c');
+const oid_d: [64]u8 = @splat('d');
+const oid_e: [64]u8 = @splat('e');
