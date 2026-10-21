@@ -82,6 +82,8 @@ pub const WriteOptions = struct {
     seen: Seen,
     /// What `core.sharedRepository` asks of the file's permissions.
     shared: fs.Shared = .umask,
+    /// `core.lockfilePid`: the lock names its holder.
+    pid_file: bool = false,
 };
 
 /// Replace the file with `set`, sorted as git sorts it, or remove it when
@@ -89,7 +91,7 @@ pub const WriteOptions = struct {
 /// back, for the next write to check against.
 pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set, options: WriteOptions) Self.Error!Seen {
     var buffer: [4096]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, common_dir, .{ .sub_path = file_name, .buffer = &buffer }, .{ .sync = .none, .shared = options.shared });
+    var lock = try fs.LockFile.open(gpa, io, common_dir, .{ .sub_path = file_name, .buffer = &buffer }, .{ .sync = .none, .shared = options.shared, .write_pid = options.pid_file });
     defer lock.deinit(io);
     if (!same(try seen(io, common_dir), options.seen)) return error.ShallowChanged;
     if (set.count() == 0) {

@@ -71,6 +71,10 @@ pub const Options = struct {
     /// What `core.sharedRepository` asks of the permissions of what is
     /// written: the objects, the packs and their directories.
     shared: fs.Shared = .umask,
+    /// `core.lockfilePid`: each lock this database takes -- its
+    /// multi-pack index, its commit graph -- names its holder in a
+    /// `~pid.lock` beside it.
+    pid_file: bool = false,
     /// What the configuration says packs and loose objects are written
     /// with, and whether a multi-pack index is read.
     packing: Packing = .{},

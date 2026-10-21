@@ -267,7 +267,7 @@ pub const ExpireError = errors: {
 /// Returns the newest kept entry's new value, or `null` when none was kept
 /// or there is no log, which is left as it is. The caller holds the ref's
 /// own lock, as git holds it, so the log and the ref move together.
-pub const ExpireOptions = struct { ref: []const u8, kind: hash.Kind, shared: fs.Shared = .umask, sync: fs.Sync = .none, rewrite: bool = false };
+pub const ExpireOptions = struct { ref: []const u8, kind: hash.Kind, shared: fs.Shared = .umask, sync: fs.Sync = .none, rewrite: bool = false, pid_file: bool = false };
 
 pub fn expire(
     gpa: Allocator,
@@ -284,7 +284,7 @@ pub fn expire(
     defer gpa.free(path);
     if (!try exists(gpa, io, git_dir, ref)) return null;
     var buffer: [4096]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, git_dir, .{ .sub_path = path, .buffer = &buffer }, .{ .shared = shared, .sync = options.sync });
+    var lock = try fs.LockFile.open(gpa, io, git_dir, .{ .sub_path = path, .buffer = &buffer }, .{ .shared = shared, .sync = options.sync, .write_pid = options.pid_file });
     defer lock.deinit(io);
     // Read under the lock: an append that took it first is in the file.
     const bytes = (try fs.readFileAlloc(gpa, io, git_dir, path, 1 << 28)) orelse try gpa.alloc(u8, 0);

@@ -208,6 +208,17 @@ pub const Odb = struct {
         db.backendData().options.fsync = fsync;
     }
 
+    /// Name each lock's holder from here on, or not, as a refreshed
+    /// configuration's `core.lockfilePid` says.
+    pub fn configureLockPid(db: *Odb, pid_file: bool) void {
+        db.backendData().options.pid_file = pid_file;
+    }
+
+    /// `core.lockfilePid`, as `configureLockPid` last said.
+    pub fn lockfilePid(db: *const Odb) bool {
+        return db.backendData().options.pid_file;
+    }
+
     /// Take `packing`, the configuration's settings for what is written,
     /// for every write from here on.
     pub fn configurePacking(db: *Odb, packing: policy_mod.Packing) void {

@@ -25,11 +25,21 @@ pub const Data = struct {
     shared: fs.Shared = .umask,
     /// `core.fsync`: refs, `packed-refs` and logs are references.
     fsync: fs.Fsync = .default,
-    /// `core.packedRefsTimeout`: how long a writer waits for
-    /// `packed-refs.lock`. git waits a second unless told otherwise.
-    packed_lock: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
+    /// How the store's locks wait and say who holds them.
+    locks: Locks = .{},
     /// `core.precomposeUnicode` on macOS: loose ref names read composed.
     precompose: bool = false,
+};
+
+/// How a store's locks behave, as the configuration says: how long a
+/// writer waits for a held one -- `core.packedRefsTimeout` for
+/// `packed-refs`, a second unless set; `core.filesRefLockTimeout` for a
+/// loose ref, a tenth of one -- and whether each names its holder in a
+/// `~pid.lock` beside it, `core.lockfilePid`.
+pub const Locks = struct {
+    packed_refs: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
+    loose: fs.OnContention = .{ .wait = .fromMilliseconds(100) },
+    pid_file: bool = false,
 };
 
 pub fn get(state: *State) *Data {

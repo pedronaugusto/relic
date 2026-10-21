@@ -99,7 +99,7 @@ pub fn prepare(
     dir: Io.Dir,
     sub_path: []const u8,
     level: config.Level,
-    shared: fs.Shared,
+    lock_options: LockOptions,
     edits: []const Edit,
 ) Error!Pending {
     for (edits) |edit| switch (edit) {
@@ -110,7 +110,7 @@ pub fn prepare(
     };
     const buffer = try gpa.alloc(u8, 16 * 1024);
     errdefer gpa.free(buffer);
-    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, .{ .shared = shared, .sync = .none });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, .{ .shared = lock_options.shared, .sync = .none, .write_pid = lock_options.pid_file });
     errdefer lock.deinit(io);
 
     const text = (try fs.readFileAlloc(gpa, io, dir, sub_path, config.max_file_bytes)) orelse try gpa.alloc(u8, 0);
@@ -132,6 +132,11 @@ pub fn prepare(
     return .{ .gpa = gpa, .dir = dir, .sub_path = sub_path, .lock = lock, .buffer = buffer, .bytes = bytes, .outcome = outcome };
 }
 
+/// How a configuration file's lock is taken: with the permissions
+/// `core.sharedRepository` asks for, and naming its holder in a
+/// `~pid.lock` beside it under `core.lockfilePid`.
+pub const LockOptions = struct { shared: fs.Shared = .umask, pid_file: bool = false };
+
 /// A whole write of one file: `prepare`, then put it in place.
 pub fn editFile(
     gpa: Allocator,
@@ -139,10 +144,10 @@ pub fn editFile(
     dir: Io.Dir,
     sub_path: []const u8,
     level: config.Level,
-    shared: fs.Shared,
+    lock_options: LockOptions,
     edits: []const Edit,
 ) Error!Outcome {
-    var pending = try prepare(gpa, io, dir, sub_path, level, shared, edits);
+    var pending = try prepare(gpa, io, dir, sub_path, level, lock_options, edits);
     defer pending.deinit(io);
     pending.commit(io) catch |err| switch (err) {
         error.WriteFailed => return error.WriteFailed,
@@ -157,7 +162,7 @@ test "an edit lands in the file as it is under the lock, every other line kept" 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "# kept\n[core]\n\tbare = false\n[gone \"x\"]\n\ta = 1\n" });
-    const outcome = try editFile(gpa, io, tmp.dir, "config", .local, .umask, &.{
+    const outcome = try editFile(gpa, io, tmp.dir, "config", .local, .{}, &.{
         .{ .set = .{ .name = "core.bare", .value = "true" } },
         .{ .set = .{ .name = "remote.origin.url", .value = "/a b" } },
         .{ .remove_section = .{ .section = "gone", .subsection = "x" } },
@@ -171,9 +176,9 @@ test "an edit lands in the file as it is under the lock, every other line kept" 
         try tmp.dir.readFile(io, "config", &buf),
     );
     // A file that is not there starts empty.
-    _ = try editFile(gpa, io, tmp.dir, "config.worktree", .worktree, .umask, &.{.{ .set = .{ .name = "core.sparseCheckout", .value = "true" } }});
+    _ = try editFile(gpa, io, tmp.dir, "config.worktree", .worktree, .{}, &.{.{ .set = .{ .name = "core.sparseCheckout", .value = "true" } }});
     try std.testing.expectEqualStrings("[core]\n\tsparseCheckout = true\n", try tmp.dir.readFile(io, "config.worktree", &buf));
     // A key git refuses is refused before the lock is taken.
-    try std.testing.expectError(error.InvalidKey, editFile(gpa, io, tmp.dir, "config", .local, .umask, &.{.{ .set = .{ .name = "nodot", .value = "x" } }}));
+    try std.testing.expectError(error.InvalidKey, editFile(gpa, io, tmp.dir, "config", .local, .{}, &.{.{ .set = .{ .name = "nodot", .value = "x" } }}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "config.lock", .{}));
 }

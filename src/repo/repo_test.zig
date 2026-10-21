@@ -1854,7 +1854,7 @@ test "config --unset-all, --add and --fixed-value leave each file as git's do, a
         try args.appendSlice(gpa, op.args);
         var ran = try git.capture(io, args.items);
         ran.deinit(gpa);
-        _ = try config_write.editFile(gpa, io, git.dir, "ours", .global, .umask, &.{op.edit});
+        _ = try config_write.editFile(gpa, io, git.dir, "ours", .global, .{}, &.{op.edit});
         const expected = try git.readFile(io, "theirs");
         defer gpa.free(expected);
         const actual = try git.readFile(io, "ours");
@@ -2194,5 +2194,68 @@ test "init takes its branch, object format and ref format from the user's config
                 return err;
             };
         }
+    }
+}
+
+test "core.lockfilePid: a lock relic holds names relic to git, as git's own do" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "a", "a\n");
+    for ([_]bool{ false, true }) |on| {
+        try repo.exec(io, &.{ "config", "core.lockfilePid", if (on) "true" else "false" });
+        var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+        defer native.deinit(io);
+        var locked = try native.lockIndex(io);
+        defer locked.deinit(io);
+        repo.report_failures = false;
+        var ran = try repo.capture(io, &.{ "add", "a" });
+        defer ran.deinit(gpa);
+        repo.report_failures = true;
+        try std.testing.expect(ran.code != 0);
+        var want: [64]u8 = undefined;
+        const named = try std.mem.print(&want, "held by process {d}", .{fs_mod.currentPid()});
+        try std.testing.expectEqual(on, std.mem.find(u8, ran.stderr, named) != null);
+    }
+}
+
+test "core.filesRefLockTimeout: how long a loose ref's lock is waited for, as git waits" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "a", "a\n");
+    try repo.exec(io, &.{ "add", "a" });
+    try repo.exec(io, &.{ "commit", "-qm", "a" });
+    const head = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head);
+    // Held by another writer, which never lets go.
+    try repo.writeFile(io, ".git/refs/heads/held.lock", "");
+    const Case = struct { setting: ?[]const u8, at_least_ms: i64, at_most_ms: i64 };
+    for ([_]Case{
+        .{ .setting = "0", .at_least_ms = 0, .at_most_ms = 50 },
+        .{ .setting = null, .at_least_ms = 70, .at_most_ms = 2000 },
+        .{ .setting = "400", .at_least_ms = 290, .at_most_ms = 4000 },
+    }) |case| {
+        if (case.setting) |s| try repo.exec(io, &.{ "config", "core.filesRefLockTimeout", s }) else {
+            // Unset or never set, git exits 5 either way: the default is what is asked for.
+            repo.report_failures = false;
+            repo.exec(io, &.{ "config", "--unset", "core.filesRefLockTimeout" }) catch |err| std.debug.assert(err == error.GitFailed);
+            repo.report_failures = true;
+        }
+        var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+        defer native.deinit(io);
+        const oid = try Oid.parse(.sha1, head);
+        var tx = native.beginRefs();
+        defer tx.deinit(io);
+        try tx.update("refs/heads/held", .{ .direct = oid }, .any);
+        const started = std.Io.Clock.awake.now(io);
+        try std.testing.expectError(error.LockHeld, tx.commit(io, null));
+        const waited = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+        std.testing.expect(waited >= case.at_least_ms and waited <= case.at_most_ms) catch |err| {
+            std.debug.print("filesRefLockTimeout {?s}: waited {d} ms\n", .{ case.setting, waited });
+            return err;
+        };
     }
 }

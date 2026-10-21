@@ -115,7 +115,7 @@ fn writeFormat(gpa: Allocator, io: Io, repo: *Repository, format: refs_mod.Forma
         try edits.append(gpa, .{ .set = .{ .name = "extensions.submodulepathconfig", .value = "true" } });
     }
     try edits.append(gpa, .{ .set = .{ .name = "core.repositoryformatversion", .value = version } });
-    _ = try config_write.editFile(gpa, io, repo.commonDirectory(), "config", .local, repo.refStore().sharedPermissions(), edits.items);
+    _ = try config_write.editFile(gpa, io, repo.commonDirectory(), "config", .local, repo.configLock(), edits.items);
 }
 
 /// `ref_migration.XXXXXX`, made in `git_dir` as `mkdtemp` makes it.

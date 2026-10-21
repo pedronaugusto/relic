@@ -484,7 +484,7 @@ fn holderOf(io: Io, repo: *Repository, clock: date.Context) Self.Error!?Holder {
 /// unless `force`; else `gc.pid` written as `<pid> <host>`.
 fn lockGc(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!?Holder {
     var buffer: [256]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, repo.commonDirectory(), .{ .sub_path = "gc.pid", .buffer = &buffer }, .{ .sync = .none, .write_pid = false });
+    var lock = try fs.LockFile.open(gpa, io, repo.commonDirectory(), .{ .sub_path = "gc.pid", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() });
     defer lock.deinit(io);
     if (!options.force) if (try holderOf(io, repo, options.clock)) |holder| return holder;
     var host_buf: [fs.max_host_name]u8 = undefined;
@@ -496,7 +496,7 @@ fn lockGc(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Erro
 /// `gc.log` replaced, through its lock, by what a detached gc printed.
 fn writeLog(gpa: Allocator, io: Io, repo: *Repository, comptime format: []const u8, args: anytype) Self.Error!void {
     var buffer: [256]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, repo.gitDirectory(), .{ .sub_path = "gc.log", .buffer = &buffer }, .{ .sync = .none, .write_pid = false });
+    var lock = try fs.LockFile.open(gpa, io, repo.gitDirectory(), .{ .sub_path = "gc.log", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() });
     defer lock.deinit(io);
     try lock.writer().print(format, args);
     try lock.commit(io);

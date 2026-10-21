@@ -138,7 +138,7 @@ const Run = struct {
 
     /// Take `MERGE_RR.lock`. `r` stays where it is until `release`.
     fn hold(r: *Run) Error!void {
-        r.lock = try fs.LockFile.open(r.gpa, r.io, r.repo.gitDirectory(), .{ .sub_path = "MERGE_RR", .buffer = &r.lock_buffer }, .{ .sync = .none, .shared = r.repo.sharedPermissions() });
+        r.lock = try fs.LockFile.open(r.gpa, r.io, r.repo.gitDirectory(), .{ .sub_path = "MERGE_RR", .buffer = &r.lock_buffer }, .{ .sync = .none, .shared = r.repo.sharedPermissions(), .write_pid = r.repo.lockfilePid() });
     }
 
     /// Give `MERGE_RR.lock` up, `MERGE_RR` unchanged unless it was written.

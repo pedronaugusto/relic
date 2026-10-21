@@ -267,7 +267,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, options: RunOptions) Self.
     if (options.auto and options.schedule != null) return error.IncompatibleOptions;
     var report: RunReport = .{ .selection = try selectTasks(repo, options.tasks, options.schedule) };
     var buffer: [64]u8 = undefined;
-    var lock = fs.LockFile.open(gpa, io, repo.objectDatabase().objectsDirectory(), .{ .sub_path = "maintenance", .buffer = &buffer }, .{ .sync = .none }) catch |err| switch (err) {
+    var lock = fs.LockFile.open(gpa, io, repo.objectDatabase().objectsDirectory(), .{ .sub_path = "maintenance", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() }) catch |err| switch (err) {
         error.LockHeld => return .{ .locked = true, .selection = report.selection },
         else => |e| return e,
     };
@@ -572,7 +572,7 @@ pub fn register(gpa: Allocator, io: Io, repo: *Repository, options: RegisterOpti
     if (!repo.configuration().has("maintenance.strategy")) try edits.append(gpa, .{ .set = .{ .name = "maintenance.strategy", .value = "incremental" } });
     _ = try repo.writeConfig(io, .local, edits.items, .{});
     if (listed(repo.configuration(), path)) return;
-    _ = try config_write.editFile(gpa, io, options.dir, options.sub_path, .global, .umask, &.{.{ .add = .{ .name = "maintenance.repo", .value = path } }});
+    _ = try config_write.editFile(gpa, io, options.dir, options.sub_path, .global, .{}, &.{.{ .add = .{ .name = "maintenance.repo", .value = path } }});
     _ = try repo.refreshConfig(io, .{});
 }
 
@@ -590,7 +590,7 @@ pub fn unregister(gpa: Allocator, io: Io, repo: *Repository, options: RegisterOp
         if (options.force) return;
         return error.NotRegistered;
     }
-    _ = try config_write.editFile(gpa, io, options.dir, options.sub_path, .global, .umask, &.{.{ .unset = .{ .name = "maintenance.repo", .value = path } }});
+    _ = try config_write.editFile(gpa, io, options.dir, options.sub_path, .global, .{}, &.{.{ .unset = .{ .name = "maintenance.repo", .value = path } }});
     _ = try repo.refreshConfig(io, .{});
 }
 

@@ -417,7 +417,7 @@ const Op = struct {
         const repo = op.repo;
         try makeInfoDir(op.io, repo);
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(repo.allocator(), op.io, repo.gitDirectory(), .{ .sub_path = pattern_file, .buffer = &buffer }, .{ .shared = repo.sharedPermissions(), .sync = .none });
+        var lock = try fs.LockFile.open(repo.allocator(), op.io, repo.gitDirectory(), .{ .sub_path = pattern_file, .buffer = &buffer }, .{ .shared = repo.sharedPermissions(), .sync = .none, .write_pid = repo.lockfilePid() });
         defer lock.deinit(op.io);
 
         var patterns = try sparse.Patterns.fromText(repo.allocator(), text, .{ .case_fold = op.fold, .cone = op.state.cone });

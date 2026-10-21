@@ -315,6 +315,9 @@ pub const Settings = struct {
     /// `core.ignoreStat`: what an add or a write takes the stat of is
     /// assumed unchanged from then on.
     ignore_stat: bool,
+    /// `core.lockfilePid`: each lock names its holder in a `~pid.lock`
+    /// beside it while it is held.
+    lockfile_pid: bool,
     /// `core.maxTreeDepth`: how deep a tree may nest (git's default 2048).
     max_tree_depth: u32,
     /// `core.protectNTFS` (on everywhere) and `core.protectHFS` (on macOS):
@@ -351,6 +354,7 @@ pub const Settings = struct {
             .check_stat = check,
             .trust_ctime = try config.getBool("core.trustctime", true),
             .ignore_stat = try config.getBool("core.ignorestat", false),
+            .lockfile_pid = try config.getBool("core.lockfilepid", false),
             .max_tree_depth = @intCast(depth),
             .protect = .{
                 .ntfs = try config.getBool("core.protectntfs", true),
@@ -821,6 +825,7 @@ pub const Repository = struct {
         var odb_options = options.odb;
         odb_options.shared = repo.data().shared;
         odb_options.fsync = repo.data().fsync;
+        odb_options.pid_file = repo.data().settings.lockfile_pid;
         odb_options.packing = try packingOf(repo.configuration());
         repo.data().odb = try odb_mod.Odb.open(gpa, io, repo.data().common_dir, format.kind, odb_options);
         errdefer repo.data().odb.deinit(io);
@@ -835,7 +840,7 @@ pub const Repository = struct {
             .reftable = stack_options,
             .shared = repo.data().shared,
             .fsync = repo.data().fsync,
-            .packed_lock = try lockTimeout(repo.configuration(), "core.packedrefstimeout", 1000),
+            .locks = try refLocks(repo.configuration()),
             .precompose_unicode = repo.data().settings.precompose_unicode,
         });
         repo.data().refs_state = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
@@ -979,7 +984,18 @@ pub const Repository = struct {
     /// How the index lock is taken and synced: `core.sharedRepository`'s
     /// permissions and `core.fsync`'s `index`.
     pub fn indexLock(repo: *const Repository) fs.LockFile.Options {
-        return .{ .shared = repo.data().shared, .sync = repo.data().fsync.sync(.index) };
+        return .{ .shared = repo.data().shared, .sync = repo.data().fsync.sync(.index), .write_pid = repo.data().settings.lockfile_pid };
+    }
+
+    /// How a configuration file of this repository is locked.
+    pub fn configLock(repo: *const Repository) config_write.LockOptions {
+        return .{ .shared = repo.data().shared, .pid_file = repo.data().settings.lockfile_pid };
+    }
+
+    /// `core.lockfilePid`: whether a lock taken for this repository names
+    /// its holder in a `~pid.lock` beside it.
+    pub fn lockfilePid(repo: *const Repository) bool {
+        return repo.data().settings.lockfile_pid;
     }
 
     /// How `index` is written, as git's `do_write_index` reads its settings:
@@ -1088,12 +1104,22 @@ pub const Repository = struct {
         const factor = try config.getInt("reftable.geometricfactor", options.geometric_factor);
         if (factor > 0 and factor <= std.math.maxInt(u8)) options.geometric_factor = @intCast(factor);
         options.lock = try lockTimeout(config, "reftable.locktimeout", 100);
+        options.pid_file = try config.getBool("core.lockfilepid", false);
         return options;
     }
 
     /// A lock timeout in milliseconds, as git reads one: zero means try
     /// once, a negative number means wait for ever, which here is as long
     /// as a wait can be written down.
+    /// How the refs' locks wait and name their holders, as `config` says.
+    fn refLocks(config: *const config_mod.Config) ErrorNamespace.Error!refs_mod.Locks {
+        return .{
+            .packed_refs = try lockTimeout(config, "core.packedrefstimeout", 1000),
+            .loose = try lockTimeout(config, "core.filesreflocktimeout", 100),
+            .pid_file = try config.getBool("core.lockfilepid", false),
+        };
+    }
+
     fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: i64) ErrorNamespace.Error!fs.OnContention {
         const timeout = try config.getInt(key, default);
         if (timeout == 0) return .fail;
@@ -1266,7 +1292,7 @@ pub const Repository = struct {
             try edits.append(gpa, .{ .set = .{ .name = "core.sharedrepository", .value = value } });
             try edits.append(gpa, .{ .set = .{ .name = "receive.denyNonFastforwards", .value = "true" } });
         }
-        _ = config_write.editFile(gpa, io, git_dir, "config", .local, shared, edits.items) catch |err| switch (err) {
+        _ = config_write.editFile(gpa, io, git_dir, "config", .local, .{ .shared = shared }, edits.items) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // unreachable: every key is one of git's own, and the one file
             // read is the one written
@@ -1419,9 +1445,9 @@ pub const Repository = struct {
         const current = repo.configuration();
         const worktree_file = file == .worktree and current.sources.worktree != null;
         var pending = if (worktree_file)
-            try config_write.prepare(repo.data().gpa, io, repo.data().git_dir, "config.worktree", .worktree, repo.data().shared, edits)
+            try config_write.prepare(repo.data().gpa, io, repo.data().git_dir, "config.worktree", .worktree, repo.configLock(), edits)
         else
-            try config_write.prepare(repo.data().gpa, io, repo.data().common_dir, "config", .local, repo.data().shared, edits);
+            try config_write.prepare(repo.data().gpa, io, repo.data().common_dir, "config", .local, repo.configLock(), edits);
         defer pending.deinit(io);
 
         var sources = current.sources;
@@ -1455,7 +1481,7 @@ pub const Repository = struct {
     /// read again under its lock and given this repository's permissions,
     /// as `writeConfig` does; what this repository publishes is unchanged.
     pub fn writeConfigFile(repo: *const Repository, io: Io, dir: Io.Dir, sub_path: []const u8, edits: []const ConfigEdit) config_write.Error!WriteOutcome {
-        return config_write.editFile(repo.data().gpa, io, dir, sub_path, .local, repo.data().shared, edits);
+        return config_write.editFile(repo.data().gpa, io, dir, sub_path, .local, repo.configLock(), edits);
     }
 
     /// Errors from `editConfig`.
@@ -1518,6 +1544,7 @@ pub const Repository = struct {
         settings: Settings,
         packing: odb_policy.Packing,
         submodule_path_config: bool,
+        locks: refs_mod.Locks,
     };
 
     /// Whether `next` may be published, and the policy it sets: the same
@@ -1542,6 +1569,7 @@ pub const Repository = struct {
             .settings = try Settings.of(next),
             .packing = try packingOf(next),
             .submodule_path_config = format.submodule_path_config,
+            .locks = try refLocks(next),
         };
     }
 
@@ -1555,7 +1583,9 @@ pub const Repository = struct {
         // `core.sharedRepository` used to reach none of them.
         repo.refStore().configureWrites(policy.shared, policy.fsync);
         repo.refStore().configureNames(policy.settings.precompose_unicode);
+        repo.refStore().configureLocks(policy.locks);
         repo.data().odb.configureWrites(policy.shared, policy.fsync);
+        repo.data().odb.configureLockPid(policy.settings.lockfile_pid);
         repo.data().odb.configurePacking(policy.packing);
         repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;
@@ -1821,7 +1851,7 @@ pub const Repository = struct {
     /// refuses it.
     pub fn writeShallow(repo: *Repository, io: Io) WriteShallowError!void {
         const d = repo.data();
-        d.shallow_seen = try shallow.write(d.gpa, io, d.common_dir, &d.odb.shallow, .{ .seen = d.shallow_seen, .shared = d.shared });
+        d.shallow_seen = try shallow.write(d.gpa, io, d.common_dir, &d.odb.shallow, .{ .seen = d.shallow_seen, .shared = d.shared, .pid_file = d.settings.lockfile_pid });
     }
 
     /// Errors from `lockIndex`.

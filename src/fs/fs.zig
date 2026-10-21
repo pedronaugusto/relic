@@ -689,9 +689,9 @@ pub const LockFile = struct {
     target: []const u8,
     /// `<target>.lock`, owned by this lock.
     lock_name: []u8,
-    /// How many bytes of `pid <n>` the lock holds until its contents are
-    /// written, zero when it holds none.
-    pid_len: u8 = 0,
+    /// `<target>~pid.lock`, which names this process while the lock is
+    /// held, owned; `null` when there is none.
+    pid_name: ?[]u8 = null,
     gpa: Allocator,
     file_writer: Io.File.Writer,
     sync: Sync,
@@ -707,13 +707,12 @@ pub const LockFile = struct {
         /// for the files git syncs under none (config, state files), as git
         /// writes them. No default, so every lock says which it is.
         sync: Sync,
-        /// Whether the lock names this process while it is held, so that a
-        /// later writer that meets it can say who holds it (`staleReport`).
-        /// The name is the lock's own first bytes, `pid <n>`, which the new
-        /// contents then write over: no reader of the file the lock
-        /// replaces ever sees them, git reads nothing from a lock, and it
-        /// costs one write rather than a file of its own beside each lock.
-        write_pid: bool = true,
+        /// git's `core.lockfilePid`: while the lock is held,
+        /// `<target>~pid.lock` beside it says `pid <n>`, so that a later
+        /// writer that meets it -- git or relic -- can say who holds it
+        /// (`staleReport`). It goes with the lock. A file that cannot be
+        /// made is none, as git's.
+        write_pid: bool = false,
         /// Sync the target's parent directory after the commit rename, so
         /// the new name is flushed too. Independent of the file sync policy.
         sync_directory: bool = false,
@@ -747,24 +746,14 @@ pub const LockFile = struct {
         errdefer pending.discard(io);
         adjustShared(io, dir, lock_name, options.shared);
 
-        var pid_len: u8 = 0;
-        if (options.write_pid) {
-            var text: [32]u8 = undefined;
-            // unreachable: a u32 pid is at most ten digits
-            const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
-            // Only a name for a report: a lock that could not say it is
-            // still the lock.
-            if (pending.file().writePositionalAll(io, line, 0)) |_| {
-                pid_len = @intCast(line.len); // safe: the line is at most eighteen bytes
-            } else |_| {}
-        }
+        const pid_name: ?[]u8 = if (options.write_pid) try writePidFile(gpa, io, dir, sub_path, options.shared) else null;
 
         return .{
             .pending = pending,
             .dir = dir,
             .target = sub_path,
             .lock_name = lock_name,
-            .pid_len = pid_len,
+            .pid_name = pid_name,
             .gpa = gpa,
             .file_writer = pending.file().writer(io, buffer),
             .sync = options.sync,
@@ -782,8 +771,6 @@ pub const LockFile = struct {
     pub fn commit(lock: *LockFile, io: Io) Self.CommitError!void {
         assert(!lock.finished);
         try lock.file_writer.interface.flush();
-        // Contents shorter than the `pid` line under them leave its tail.
-        if (lock.file_writer.pos < lock.pid_len) try lock.pending.file().setLength(io, lock.file_writer.pos);
         // The lock's own descriptor is synced before the rename, which is the
         // step that prevents every corruption the field reports: an empty
         // ref, a truncated index, a zero-length loose object. A batch differs
@@ -793,6 +780,7 @@ pub const LockFile = struct {
         try syncFile(io, lock.pending.file(), .{ .policy = lock.sync });
         _ = try lock.pending.commit(io, .{ .level = .none });
         lock.finished = true;
+        lock.removePidFile(io);
         if (lock.sync_directory) {
             // `target` may be refs/heads/main relative to the repository: it
             // is heads, not the repository directory, that was changed.
@@ -807,10 +795,42 @@ pub const LockFile = struct {
     /// `commit`, which is what makes `defer lock.deinit(io)` the right shape.
     pub fn deinit(lock: *LockFile, io: Io) void {
         lock.pending.discard(io);
+        lock.removePidFile(io);
         lock.gpa.free(lock.lock_name);
         lock.* = undefined;
     }
+
+    fn removePidFile(lock: *LockFile, io: Io) void {
+        const name = lock.pid_name orelse return;
+        lock.dir.deleteFile(io, name) catch |err| std.log.warn("unable to remove '{s}': {t}", .{ name, err });
+        lock.gpa.free(name);
+        lock.pid_name = null;
+    }
 };
+
+/// git's `create_lock_pid_file`: `<sub_path>~pid.lock` made exclusively and
+/// given `pid <n>`, or `null` where it cannot be, which leaves the lock
+/// itself as good.
+fn writePidFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Allocator.Error!?[]u8 {
+    const name = try gpa.print("{s}~pid.lock", .{sub_path});
+    errdefer gpa.free(name);
+    const file = dir.createFile(io, name, .{ .exclusive = true }) catch {
+        gpa.free(name);
+        return null;
+    };
+    defer file.close(io);
+    adjustShared(io, dir, name, shared);
+    var text: [32]u8 = undefined;
+    // unreachable: a u32 pid is at most ten digits
+    const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
+    file.writePositionalAll(io, line, 0) catch |err| {
+        std.log.warn("could not write lock pid file '{s}': {t}", .{ name, err });
+        dir.deleteFile(io, name) catch |e| std.log.warn("unable to remove '{s}': {t}", .{ name, e });
+        gpa.free(name);
+        return null;
+    };
+    return name;
+}
 
 /// Where the last path component of `path` starts.
 fn baseStart(path: []const u8) usize {
@@ -1301,16 +1321,18 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
     const lock_name = std.mem.print(&name_buf, "{s}.lock", .{sub_path}) catch return .{ .held = false, .pid = null, .holder_alive = null };
     dir.access(io, lock_name, .{}) catch return .{ .held = false, .pid = null, .holder_alive = null };
 
-    // The lock's own first bytes while it is held: `pid <n>`.
-    var contents: [64]u8 = undefined;
-    // Holds the longest line `LockFile.open` writes.
-    comptime assert(contents.len >= "pid 4294967295\n".len);
-    const text = dir.readFile(io, lock_name, &contents) catch
+    // git's `read_lock_pid`: `<sub_path>~pid.lock`, at most 32 bytes,
+    // `pid <n>` once the trailing space is gone.
+    var pid_buf: [512]u8 = undefined;
+    const pid_name = std.mem.print(&pid_buf, "{s}~pid.lock", .{sub_path}) catch return .{ .held = true, .pid = null, .holder_alive = null };
+    var contents: [32]u8 = undefined;
+    const text = dir.readFile(io, pid_name, &contents) catch
         return .{ .held = true, .pid = null, .holder_alive = null };
-    const line = text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
+    const line = std.mem.trimEnd(u8, text, " \t\n\r");
     if (!std.mem.startsWith(u8, line, "pid ")) return .{ .held = true, .pid = null, .holder_alive = null };
     const pid = decimal.digits(u32, line[4..]) orelse
         return .{ .held = true, .pid = null, .holder_alive = null };
+    if (pid == 0) return .{ .held = true, .pid = null, .holder_alive = null };
     return .{ .held = true, .pid = pid, .holder_alive = processAlive(pid) };
 }
 
@@ -1793,7 +1815,7 @@ test "a lock is refused, not broken, and says who holds it" {
     try dir.writeFile(io, .{ .sub_path = "thing", .data = "old\n" });
 
     var buf: [64]u8 = undefined;
-    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
+    var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file, .write_pid = true });
     defer lock.deinit(io);
 
     var buf2: [64]u8 = undefined;
@@ -1814,30 +1836,43 @@ test "a lock is refused, not broken, and says who holds it" {
     try std.testing.expect(!lockHeld(io, dir, "thing"));
 }
 
-test "a lock names its holder in its own bytes, and no file but the lock is made" {
+test "a lock names its holder in ~pid.lock beside it only when asked, as git's core.lockfilePid, and the name goes with it" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const dir = tmp.dir;
-    // Contents shorter than the name under them, and none at all.
-    for ([_][]const u8{ "x", "" }) |contents| {
+    for ([_]bool{ false, true }) |write_pid| for ([_]bool{ true, false }) |committed| {
         var buf: [64]u8 = undefined;
-        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
-        defer lock.deinit(io);
-        var count: usize = 0;
-        var it = dir.iterate();
-        while (try it.next(io)) |entry| {
-            if (std.mem.eql(u8, entry.name, "thing")) continue;
-            try std.testing.expectEqualStrings("thing.lock", entry.name);
-            count += 1;
+        var lock = try LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file, .write_pid = write_pid });
+        var names: std.ArrayList([]u8) = .empty;
+        defer {
+            for (names.items) |n| gpa.free(n);
+            names.deinit(gpa);
         }
-        try std.testing.expectEqual(@as(usize, 1), count);
-        try lock.writer().writeAll(contents);
-        try lock.commit(io);
-        var read_buf: [64]u8 = undefined;
-        try std.testing.expectEqualStrings(contents, try dir.readFile(io, "thing", &read_buf));
-    }
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| if (!std.mem.eql(u8, entry.name, "thing")) try names.append(gpa, try gpa.dupe(u8, entry.name));
+        std.mem.sort([]u8, names.items, {}, struct {
+            fn less(_: void, x: []u8, y: []u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.less);
+        try std.testing.expectEqual(@as(usize, if (write_pid) 2 else 1), names.items.len);
+        try std.testing.expectEqualStrings("thing.lock", names.items[0]);
+        if (write_pid) {
+            try std.testing.expectEqualStrings("thing~pid.lock", names.items[1]);
+            var pid_buf: [32]u8 = undefined;
+            var want: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.mem.print(&want, "pid {d}\n", .{currentPid()}), try dir.readFile(io, "thing~pid.lock", &pid_buf));
+        }
+        if (committed) {
+            try lock.writer().writeAll("x");
+            try lock.commit(io);
+        }
+        lock.deinit(io);
+        try std.testing.expectError(error.FileNotFound, dir.access(io, "thing~pid.lock", .{}));
+        try std.testing.expectError(error.FileNotFound, dir.access(io, "thing.lock", .{}));
+    };
 }
 
 test "a lock syncs the target's directory after rename only when asked" {

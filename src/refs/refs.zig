@@ -34,6 +34,8 @@ const testgit = @import("../testing/git.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
 const state_mod = @import("state.zig");
+/// How a store's locks behave: see `state.Locks`.
+pub const Locks = state_mod.Locks;
 const packed_cache = @import("packed.zig");
 const value_mod = @import("value.zig");
 // The files backend's logs, private to this namespace: every log is read
@@ -142,7 +144,7 @@ pub const Store = struct {
         state_mod.get(state).shared = options.shared;
         state_mod.get(state).fsync = options.fsync;
         state_mod.get(state).options.fsync = options.fsync;
-        state_mod.get(state).packed_lock = options.packed_lock;
+        state_mod.get(state).locks = options.locks;
         state_mod.get(state).precompose = options.precompose_unicode;
         return .{ .state = state };
     }
@@ -156,9 +158,8 @@ pub const Store = struct {
         /// `core.fsync`: which writes are synced; refs, `packed-refs`, logs
         /// and reftable tables are its `reference`.
         fsync: fs.Fsync = .default,
-        /// `core.packedRefsTimeout`: how long a writer waits for
-        /// `packed-refs.lock`, with git's backoff. git waits a second.
-        packed_lock: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
+        /// How the store's locks wait and say who holds them.
+        locks: Locks = .{},
         /// `core.precomposeUnicode`, acted on on macOS: a loose ref whose
         /// file name is spelled decomposed is listed under its composed
         /// name, as git's `readdir` gives it.
@@ -218,6 +219,18 @@ pub const Store = struct {
         data.options.fsync = fsync;
     }
 
+    /// Take `locks` for every lock from here on, as a refreshed
+    /// configuration says.
+    pub fn configureLocks(store: *Store, wanted: Locks) void {
+        state_mod.get(store.state).locks = wanted;
+        state_mod.get(store.state).options.pid_file = wanted.pid_file;
+    }
+
+    /// How the store's locks behave (`configureLocks`).
+    pub fn locks(store: *const Store) Locks {
+        return state_mod.get(store.state).locks;
+    }
+
     /// Read the names of loose refs composed or not, as a newly published
     /// `core.precomposeUnicode` says.
     pub fn configureNames(store: *Store, precompose_unicode: bool) void {
@@ -242,7 +255,7 @@ pub const Store = struct {
             .reftable = d.options,
             .shared = d.shared,
             .fsync = d.fsync,
-            .packed_lock = d.packed_lock,
+            .locks = d.locks,
             .precompose_unicode = d.precompose,
         });
     }
@@ -666,7 +679,8 @@ pub const Store = struct {
             .shared = store.sharedPermissions(),
             .sync = store.referenceSync(),
             .sync_directory = store.referenceSync() != .none,
-            .on_contention = data.packed_lock,
+            .on_contention = data.locks.packed_refs,
+            .write_pid = data.locks.pid_file,
         });
     }
 
@@ -798,7 +812,7 @@ pub const Store = struct {
         const data = state_mod.get(store.state);
         const dir = store.dirFor(name);
         var buffer: [max_loose_ref]u8 = undefined;
-        var lock = fs.LockFile.open(data.gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync() }) catch |err| switch (err) {
+        var lock = fs.LockFile.open(data.gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync(), .on_contention = data.locks.loose, .write_pid = data.locks.pid_file }) catch |err| switch (err) {
             // Another writer has it: the ref is its to change, as git's
             // pruning gives up on it.
             error.LockHeld => return false,
@@ -1023,9 +1037,10 @@ pub const Store = struct {
         // git's `files_reflog_expire` takes the ref's lock first, which every
         // transaction moving the ref or appending to its log also takes.
         var buffer: [max_loose_ref]u8 = undefined;
-        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync() });
+        const locks_now = store.locks();
+        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync(), .on_contention = locks_now.loose, .write_pid = locks_now.pid_file });
         defer lock.deinit(io);
-        const newest = try reflog.expire(gpa, io, dir, keeper, .{ .ref = name, .kind = store.objectFormat(), .shared = store.sharedPermissions(), .sync = store.referenceSync(), .rewrite = options.rewrite });
+        const newest = try reflog.expire(gpa, io, dir, keeper, .{ .ref = name, .kind = store.objectFormat(), .shared = store.sharedPermissions(), .sync = store.referenceSync(), .rewrite = options.rewrite, .pid_file = locks_now.pid_file });
         if (!options.update_ref) return;
         const oid = newest orelse return;
         if (try store.readLoose(gpa, io, name)) |own| switch (own) {
@@ -1313,10 +1328,12 @@ pub const SpecialRefs = struct {
 
     /// `<ref>.lock`, waiting as long as git waits on a ref's lock.
     fn takeLock(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, buffer: []u8) TransactionError!fs.LockFile {
+        const locks_now = s.store.locks();
         return fs.LockFile.open(gpa, io, s.store.gitDir(), .{ .sub_path = ref.name(), .buffer = buffer }, .{
-            .on_contention = .{ .wait = .fromMilliseconds(100) },
+            .on_contention = locks_now.loose,
             .sync = .none,
             .shared = s.store.sharedPermissions(),
+            .write_pid = locks_now.pid_file,
         });
     }
 
@@ -1675,7 +1692,7 @@ pub const Transaction = struct {
             }
             const buffer = try tx.gpa.alloc(u8, 4096);
             edit.lock_buffer = buffer;
-            edit.lock = fs.LockFile.open(tx.gpa, io, dir, .{ .sub_path = edit.name, .buffer = buffer }, .{ .shared = tx.store.sharedPermissions(), .sync = tx.store.referenceSync() }) catch |err| switch (err) {
+            edit.lock = fs.LockFile.open(tx.gpa, io, dir, .{ .sub_path = edit.name, .buffer = buffer }, .{ .shared = tx.store.sharedPermissions(), .sync = tx.store.referenceSync(), .on_contention = tx.store.locks().loose, .write_pid = tx.store.locks().pid_file }) catch |err| switch (err) {
                 error.LockHeld => return error.LockHeld,
                 else => |e| return e,
             };
@@ -2487,7 +2504,7 @@ test "a deletion holds packed-refs.lock from prepare, so git cannot pack a ref i
 
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{ .packed_lock = .fail });
+    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{ .locks = .{ .packed_refs = .fail } });
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);

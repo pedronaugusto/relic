@@ -397,7 +397,7 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, options: Options) refs.Tran
     const buffer = try gpa.alloc(u8, 4096);
     errdefer gpa.free(buffer);
     const sync = options.fsync.sync(.reference);
-    const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = sync, .sync_directory = namesDurable(sync) });
+    const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = sync, .sync_directory = namesDurable(sync), .write_pid = options.pid_file });
     return .{ .dir = dir, .lock = lock, .buffer = buffer, .shared = options.shared, .sync = sync };
 }
 
@@ -922,7 +922,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     };
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
-    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference), .sync_directory = namesDurable(options.fsync.sync(.reference)) });
+    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference), .sync_directory = namesDurable(options.fsync.sync(.reference)), .write_pid = options.pid_file });
     defer if (list_lock) |*lock| lock.deinit(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
@@ -978,7 +978,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
 
     // The list again, as it is now: writers may have added tables, and the
     // merged ones are wherever it has them, in the order they were merged.
-    list_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference), .sync_directory = namesDurable(options.fsync.sync(.reference)) });
+    list_lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = &buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = options.fsync.sync(.reference), .sync_directory = namesDurable(options.fsync.sync(.reference)), .write_pid = options.pid_file });
     const listed = (try fs.readFileAlloc(gpa, io, dir, "tables.list", 1 << 20)) orelse try gpa.alloc(u8, 0);
     defer gpa.free(listed);
     var current: std.ArrayList([]const u8) = .empty;
