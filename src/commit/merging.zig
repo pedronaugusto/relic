@@ -82,6 +82,15 @@ pub const Error = error{
     NotFastForward,
     /// The name given does not name a commit.
     NotACommit,
+    /// A commit to merge has no signature, or one that is not good:
+    /// `--verify-signatures`. `Options.unverified` names it.
+    MissingSignature,
+    /// A commit to merge has a bad signature. `Options.unverified` names it.
+    BadSignature,
+    /// A commit to merge has a good signature from a key not trusted
+    /// enough: below marginal, or below `gpg.minTrustLevel` when that is
+    /// set. `Options.unverified` names it.
+    UntrustedSignature,
     /// The name given is an annotated tag. git merges its commit and quotes
     /// the tag's message in the merge commit's; this release does not.
     AnnotatedTag,
@@ -261,6 +270,41 @@ pub const Options = struct {
     /// the merge and brought back at its end, or, when it stops, once it is
     /// concluded or aborted. `Outcome.autostash` and `Outcome.restored`.
     autostash: ?bool = null,
+    /// `--verify-signatures`, `--no-verify-signatures`, or
+    /// `merge.verifySignatures` when `null`: every commit merged must carry
+    /// a good signature from a trusted key, checked with `signing`'s
+    /// programs, or the merge is refused before anything is written.
+    /// `Outcome.signatures`.
+    verify_signatures: ?bool = null,
+    /// Where a refused signature check writes the commit and who its
+    /// signature claims to be by.
+    unverified: ?*Unverified = null,
+};
+
+/// A commit whose signature a merge refused, and who the signature claims
+/// to be by.
+pub const Unverified = struct {
+    commit: ?Oid = null,
+    buffer: [256]u8 = undefined,
+    len: usize = 0,
+
+    /// Who the signature claims to be by, or empty.
+    pub fn signer(u: *const Unverified) []const u8 {
+        return u.buffer[0..u.len];
+    }
+
+    fn set(u: *Unverified, commit: Oid, text: []const u8) void {
+        u.commit = commit;
+        u.len = @min(text.len, u.buffer.len);
+        @memcpy(u.buffer[0..u.len], text[0..u.len]);
+    }
+};
+
+/// A commit merged with a good signature: git's "Commit <name> has a good
+/// GPG signature by <signer>".
+pub const Verified = struct {
+    commit: Oid,
+    signer: []const u8,
 };
 
 /// What a merge did.
@@ -285,6 +329,8 @@ pub const Outcome = struct {
     autostash: ?Oid = null,
     /// What became of `MERGE_AUTOSTASH` when the merge finished.
     restored: ?stash.Restored = null,
+    /// The commits merged whose signatures were verified, in order.
+    signatures: []const Verified = &.{},
 
     pub const Result = enum {
         /// The commit was already part of the branch; nothing changed.
@@ -349,6 +395,8 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     // which dies on a value that is no boolean, asked for or not.
     const configured_autostash = try repo.configuration().getBool("merge.autostash", false);
     options.autostash = given.autostash orelse configured_autostash;
+    const configured_verify = try repo.configuration().getBool("merge.verifysignatures", false);
+    options.verify_signatures = given.verify_signatures orelse configured_verify;
 
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -386,7 +434,12 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const already_merged = settings.log != 0 and targets.len == 1 and
         try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = reduced.heads[0].oid, .descendant = ours }, .{});
     const merge_message = if (reduced.heads.len == 0 or already_merged) "" else try mergeMessage(arena, io, repo, .{ .targets = reduced.heads, .head = head, .given = options.message, .settings = settings });
-    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, .{ .head = head, .reduced = reduced, .reflog_action = reflog_action, .fast_forward = fast_forward, .message = merge_message, .hint_cleanup = hint_cleanup }, options);
+    if (reduced.heads.len > 1) {
+        const signatures = try verifySignatures(gpa, arena, io, repo, reduced.heads, options);
+        var out = try octopus(gpa, io, repo, &arena_instance, .{ .head = head, .reduced = reduced, .reflog_action = reflog_action, .fast_forward = fast_forward, .message = merge_message, .hint_cleanup = hint_cleanup }, options);
+        out.signatures = signatures;
+        return out;
+    }
 
     try repo.refStore().root().write(repo.allocator(), io, .orig_head, ours);
     if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
@@ -394,10 +447,13 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const bases = try rev_walk.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = ours, .b = target.oid }, .{});
     defer gpa.free(bases);
 
-    if (bases.len == 0 and !options.allow_unrelated_histories) return error.UnrelatedHistories;
     if (bases.len == 1 and bases[0].eql(target.oid)) {
         return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
     }
+    // A target `HEAD` has is no target, as git's `reduce_parents` leaves
+    // it, and its signature is not asked about.
+    const signatures = try verifySignatures(gpa, arena, io, repo, reduced.heads, options);
+    if (bases.len == 0 and !options.allow_unrelated_histories) return error.UnrelatedHistories;
 
     const forward = fast_forward != .never and bases.len == 1 and bases[0].eql(ours);
     if (!forward and fast_forward == .only) return error.NotFastForward;
@@ -416,7 +472,41 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
         return err;
     };
     out.autostash = stashed;
+    out.signatures = signatures;
     return out;
+}
+
+/// git's `verify_merge_signature` for each commit to merge, when asked: a
+/// good signature from a trusted key, or the merge is refused. The trust is
+/// git's own check, marginal at least, only when `gpg.minTrustLevel` is not
+/// set; when it is, the signature's check against it decides. What was
+/// verified lives in `arena`.
+fn verifySignatures(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, heads: []const Target, options: Options) Error![]const Verified {
+    if (!options.verify_signatures.?) return &.{};
+    const programs = options.signing.programs orelse return error.SigningRequiresPrograms;
+    var signer = try signing_mod.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), programs);
+    defer signer.deinit();
+    const check_trust = !repo.configuration().has("gpg.mintrustlevel");
+    const verified = try arena.alloc(Verified, heads.len);
+    for (heads, verified) |target, *out| {
+        const found = try repo.objectDatabase().read(io, target.oid);
+        defer repo.objectDatabase().allocator().free(found.bytes);
+        var verdict = try signing_mod.verifyCommit(io, &signer, repo.objectFormat(), found.bytes);
+        defer verdict.deinit();
+        const by = verdict.signer orelse "";
+        const refused: ?Error = switch (verdict.result) {
+            .good => if (!verdict.verified(signer.min_trust) or
+                (check_trust and @backingInt(verdict.trust) < @backingInt(signing_mod.Trust.marginal))) error.UntrustedSignature else null,
+            .bad => error.BadSignature,
+            else => error.MissingSignature,
+        };
+        if (refused) |err| {
+            if (options.unverified) |u| u.set(target.oid, by);
+            return err;
+        }
+        out.* = .{ .commit = target.oid, .signer = try arena.dupe(u8, by) };
+    }
+    return verified;
 }
 
 /// git's `create_autostash_ref`: when asked, the changes in the merge's way

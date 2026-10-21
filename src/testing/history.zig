@@ -4149,6 +4149,113 @@ test "merges, picks, reverts and rebases are signed with an OpenPGP key as git s
     try signedHistory(.openpgp);
 }
 
+test "a merge verifying signatures takes a good one and refuses a missing, unknown, bad or untrusted one, as git's does" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, cleanScript);
+            defer pair.deinit();
+            var keys = std.testing.tmpDir(.{});
+            defer keys.cleanup();
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const dir = try gpa.dupe(u8, buf[0..try keys.dir.realPath(io, &buf)]);
+            defer gpa.free(dir);
+            var gnupg: testgit.GnupgHome = try .init(gpa, io);
+            defer gnupg.deinit(io);
+            if (!try makeSigningKey(&pair, io, dir, gnupg.path(), .ssh)) return error.SkipZigTest;
+            // A key the allowed signers do not name.
+            const stranger = try std.Io.Dir.path.join(gpa, &.{ dir, "stranger" });
+            defer gpa.free(stranger);
+            const made = try std.process.run(gpa, io, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "stranger", "-f", stranger }, .environ_map = &pair.env });
+            gpa.free(made.stdout);
+            gpa.free(made.stderr);
+            const stranger_key = try gpa.print("user.signingKey={s}", .{stranger});
+            defer gpa.free(stranger_key);
+
+            // The same commits in both: an ed25519 signature is the same
+            // bytes every time.
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                try r.exec(io, &.{ "config", "--unset", "commit.gpgSign" });
+                try r.exec(io, &.{ "tag", "before" });
+                try r.exec(io, &.{ "checkout", "-q", "-b", "signed", "clean" });
+                try r.exec(io, &.{ "commit", "-q", "-S", "--allow-empty", "-m", "signed" });
+                try r.exec(io, &.{ "checkout", "-q", "-b", "unsigned", "clean" });
+                try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "unsigned" });
+                try r.exec(io, &.{ "checkout", "-q", "-b", "stranger", "clean" });
+                try r.exec(io, &.{ "-c", stranger_key, "commit", "-q", "-S", "--allow-empty", "-m", "stranger" });
+                // The signed commit with its message changed under the
+                // signature.
+                const raw = try r.run(io, &.{ "cat-file", "commit", "signed" });
+                defer gpa.free(raw);
+                const forged = try std.mem.replaceOwned(u8, gpa, raw, "\nsigned\n", "\nforged\n");
+                defer gpa.free(forged);
+                const oid = try r.runInput(io, &.{ "hash-object", "-t", "commit", "-w", "--stdin" }, forged);
+                defer gpa.free(oid);
+                try r.exec(io, &.{ "branch", "forged", std.mem.trimEnd(u8, oid, "\n") });
+                try r.exec(io, &.{ "checkout", "-q", "main" });
+            }
+            const programs: program.Programs = .{ .environ = &pair.env };
+
+            const Case = struct { name: []const u8, refused: ?merging.Error, config: []const []const u8 = &.{} };
+            const cases = [_]Case{
+                .{ .name = "unsigned", .refused = error.MissingSignature },
+                .{ .name = "stranger", .refused = error.MissingSignature },
+                .{ .name = "forged", .refused = error.BadSignature },
+                .{ .name = "signed", .refused = error.UntrustedSignature, .config = &.{ "gpg.minTrustLevel", "ultimate" } },
+                .{ .name = "signed", .refused = null },
+            };
+            for (cases) |case| {
+                for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                    try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+                    if (case.config.len != 0) try r.exec(io, &.{ "config", case.config[0], case.config[1] }) else try gitMayFail(io, r, &.{ "config", "--unset", "gpg.minTrustLevel" });
+                }
+                try gitMayFail(io, &pair.git, &.{ "merge", "--verify-signatures", "--no-edit", case.name });
+                {
+                    var repo = try pair.open(io);
+                    defer repo.deinit(io);
+                    const target = try merging.resolve(gpa, io, &repo, case.name);
+                    var unverified: merging.Unverified = .{};
+                    const options: merging.Options = .{ .who = who, .verify_signatures = true, .signing = .{ .programs = programs }, .unverified = &unverified };
+                    if (case.refused) |err| {
+                        try std.testing.expectError(err, merging.start(gpa, io, &repo, target, options));
+                        try std.testing.expect(unverified.commit.?.eql(target.oid));
+                    } else {
+                        var outcome = try merging.start(gpa, io, &repo, target, options);
+                        defer outcome.deinit();
+                        try std.testing.expectEqual(@as(usize, 1), outcome.signatures.len);
+                        try std.testing.expectEqualStrings("fixture@example.com", outcome.signatures[0].signer);
+                    }
+                }
+                try expectSameState(&pair, io, &merge_state, &main_logs);
+            }
+
+            // By `merge.verifySignatures`, and not asked of a commit already
+            // merged.
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "merge.verifySignatures", "true" });
+            try pair.git.exec(io, &.{ "merge", "clean" });
+            {
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                const target = try merging.resolve(gpa, io, &repo, "clean");
+                var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+                defer outcome.deinit();
+                try std.testing.expectEqual(merging.Outcome.Result.up_to_date, outcome.result);
+            }
+            try gitMayFail(io, &pair.git, &.{ "merge", "--no-edit", "unsigned" });
+            {
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                const target = try merging.resolve(gpa, io, &repo, "unsigned");
+                try std.testing.expectError(error.SigningRequiresPrograms, merging.start(gpa, io, &repo, target, .{ .who = who }));
+                try std.testing.expectError(error.MissingSignature, merging.start(gpa, io, &repo, target, .{ .who = who, .signing = .{ .programs = programs } }));
+            }
+            try expectSameState(&pair, io, &merge_state, &main_logs);
+        }
+    }.inFormat);
+}
+
 //=========================================================================
 // merge.default, the upstream, and the merge's own attributes
 //=========================================================================
