@@ -197,6 +197,9 @@ pub const Options = struct {
     check_objects: ?bool = null,
     /// What the new repository's object database is opened with.
     odb: odb_mod.Options = .{},
+    /// `--server-option`s, sent with every protocol v2 request; `null`
+    /// takes `remote.<name>.serverOption`, as git does.
+    server_options: ?[]const []const u8 = null,
     /// Whether the person named this remote themselves:
     /// `transport.Options.from_user`.
     /// A submodule's clone and fetch pass false, so a `.gitmodules` cannot
@@ -522,6 +525,7 @@ fn transferOptions(local_copy: bool, settings: ?*const config_mod.Config, repo: 
         .who = options.who,
         .cloning = true,
         .from_user = options.from_user,
+        .server_options = options.server_options,
     };
 }
 

@@ -37,6 +37,7 @@ const smart_http = @import("../wire.zig").smart_http;
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
 const protocol = @import("../wire.zig").protocol;
+const remote_mod = @import("../wire.zig").remote;
 const connection = @import("../wire.zig").connection;
 const pkt_line = @import("../codec.zig").pkt_line;
 
@@ -132,6 +133,11 @@ pub const Options = struct {
     who: ?object.Signature = null,
     /// The repository is a clone's, new: a remote helper is told so.
     cloning: bool = false,
+    /// `--server-option`s for every v2 request of the session, `ls-refs`
+    /// and `fetch`, as git's transport sends them; a v0 or v1 server is
+    /// refused them. `null` takes `remote.<remote_name>.serverOption` from
+    /// `config`, as git's handshake does. Borrowed for the session's life.
+    server_options: ?[]const []const u8 = null,
     /// Whether the person named this remote themselves, which a transport
     /// git allows only for the person — `file`, a remote helper — needs.
     /// A submodule's URL was not named by the person: false. `null` takes
@@ -196,6 +202,10 @@ pub const Session = struct {
     /// none.
     session_id_buf: [protocol.session_id_len]u8 = undefined,
     session_id_len: usize = 0,
+    /// `Options.server_options`, or the remote's, owned in
+    /// `owned_server_options`.
+    server_options: []const []const u8 = &.{},
+    owned_server_options: [][]u8 = &.{},
     impl: union(enum) {
         local: *local.Remote,
         /// A bundle file named by a path, as git's bundle transport reads
@@ -241,6 +251,12 @@ pub const Session = struct {
         var session = try openUnanswered(gpa, io, remote_url, service, kind, options);
         errdefer session.deinit(io);
         try session.answerPromisors(options);
+        if (options.server_options) |given| {
+            session.server_options = given;
+        } else if (options.config) |config| if (options.remote_name) |name| {
+            session.owned_server_options = try remote_mod.serverOptions(gpa, config, name);
+            session.server_options = session.owned_server_options;
+        };
         if (options.config) |config| if (config.getBool("transfer.advertisesid", false) catch false) {
             session.session_id_len = protocol.sessionId(io, &session.session_id_buf).len;
         };
@@ -483,6 +499,7 @@ pub const Session = struct {
                 smart.conn.deinit(io);
             },
         }
+        remote_mod.freeList(s.gpa, s.owned_server_options);
         s.* = undefined;
     }
 
@@ -536,7 +553,7 @@ pub const Session = struct {
         return switch (s.impl) {
             .local => |here| here.listRefs(gpa, io, prefixes),
             .bundle => |f| bundleRefs(gpa, f),
-            .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes }),
+            .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes, .server_options = s.server_options }),
             .helper => |helper| helper.h.list(gpa, helper.repository, .{ .for_push = s.service == .receive_pack }),
         };
     }
@@ -743,6 +760,7 @@ pub const Session = struct {
                 smart.done = true;
                 var with_id = request;
                 with_id.session_id = s.sessionId();
+                if (with_id.server_options.len == 0) with_id.server_options = s.server_options;
                 const result = try fetch_pack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = with_id }, options);
                 return .{ .pack = result.name, .objects = result.objects, .keep = result.keep };
             },

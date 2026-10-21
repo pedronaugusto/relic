@@ -62,6 +62,12 @@ pub const Error = error{
     ObjectFormatMismatch,
     /// An `object-format` this release has no hash for.
     UnknownObjectFormat,
+    /// Server options for a server that speaks v0 or v1: git's "server
+    /// options require protocol version 2 or later".
+    ServerOptionsNeedV2,
+    /// Server options for a v2 server that does not advertise
+    /// `server-option`: git's "server doesn't support 'server-option'".
+    ServerOptionNotSupported,
 } || connection.Error;
 
 /// One ref the server has.
@@ -273,7 +279,18 @@ pub const RefList = struct {
 pub const ListOptions = struct {
     /// Only refs beginning with one of these; empty asks for every ref.
     prefixes: []const []const u8 = &.{},
+    /// `--server-option`s, which only a v2 server takes.
+    server_options: []const []const u8 = &.{},
 };
+
+/// Whether `server_options` can go to the server: none, or a v2 one that
+/// takes them, as git's `die_if_server_options` and
+/// `ensure_server_supports_v2` decide.
+pub fn checkServerOptions(adv: *const Advertisement, server_options: []const []const u8) Self.Error!void {
+    if (server_options.len == 0) return;
+    if (adv.version != .v2) return error.ServerOptionsNeedV2;
+    if (!adv.has("server-option")) return error.ServerOptionNotSupported;
+}
 
 /// The refs the server has, asking with `ls-refs` under v2 and taking them
 /// from the advertisement under v0 and v1.
@@ -281,6 +298,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
     var list: RefList = .{ .arena = .init(gpa), .refs = &.{} };
     errdefer list.arena.deinit();
     const arena = list.arena.allocator();
+    try checkServerOptions(adv, options.server_options);
     var refs: std.ArrayList(RemoteRef) = .empty;
 
     if (adv.version != .v2) {
@@ -308,7 +326,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
     }
 
     const w = try conn.request();
-    writeCommand(w, adv, "ls-refs", null) catch |err| return conn.writeFailed(err);
+    writeCommand(w, adv, "ls-refs", .{ .server_options = options.server_options }) catch |err| return conn.writeFailed(err);
     const unborn = adv.commandHas("ls-refs", "unborn");
     (struct {
         fn args(out: *Io.Writer, prefixes: []const []const u8, want_unborn: bool) !void {
@@ -375,19 +393,33 @@ fn matchesPrefix(name: []const u8, prefixes: []const []const u8) bool {
 
 /// The head of a v2 command: `command=<name>`, the capabilities this side
 /// sends back, and the delimiter before the arguments.
-pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8, session_id: ?[]const u8) pkt_line.WriteError!void {
+/// What a v2 command's capabilities carry beside the server's own.
+pub const CommandExtras = struct {
+    /// `session-id`, to a server that advertises it.
+    session_id: ?[]const u8 = null,
+    /// `server-option` lines, checked first with `checkServerOptions`.
+    server_options: []const []const u8 = &.{},
+};
+
+pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8, extras: CommandExtras) pkt_line.WriteError!void {
     // As git writes them: `ls-refs` and `bundle-uri` with a newline,
     // `fetch` without (they are separate functions in git), the
     // capabilities without, the arguments with; `bundle-uri` after the
-    // capabilities, which git's `get_remote_bundle_uri` sends first.
+    // capabilities, which git's `get_remote_bundle_uri` sends first. A
+    // fetch's server options come before its object format, as git's
+    // `write_fetch_command_and_capabilities` writes them, and the others'
+    // after every capability, as `get_remote_refs` does.
     const bundle_uri = std.mem.eql(u8, command, "bundle-uri");
+    const fetch = std.mem.eql(u8, command, "fetch");
     if (std.mem.eql(u8, command, "ls-refs")) {
         try pkt_line.print("command={s}\n", .{command}, w);
     } else if (!bundle_uri) try pkt_line.print("command={s}", .{command}, w);
     if (adv.has("agent")) try pkt_line.print("agent={s}", .{agent}, w);
-    if (session_id) |sid| if (adv.has("session-id")) try pkt_line.print("session-id={s}", .{sid}, w);
+    if (extras.session_id) |sid| if (adv.has("session-id")) try pkt_line.print("session-id={s}", .{sid}, w);
+    if (fetch) for (extras.server_options) |option| try pkt_line.print("server-option={s}", .{option}, w);
     if (adv.has("object-format")) try pkt_line.print("object-format={s}", .{adv.kind.name()}, w);
     if (adv.promisor_reply) |names| try pkt_line.print("promisor-remote={s}", .{names}, w);
+    if (!fetch) for (extras.server_options) |option| try pkt_line.print("server-option={s}", .{option}, w);
     if (bundle_uri) try pkt_line.write(w, "command=bundle-uri\n");
     try pkt_line.delim(w);
 }
@@ -401,7 +433,7 @@ pub fn bundleUri(arena: Allocator, conn: *Connection, adv: *const Advertisement)
     const w = try conn.request();
     (struct {
         fn send(out: *Io.Writer, a: *const Advertisement) !void {
-            try writeCommand(out, a, "bundle-uri", null);
+            try writeCommand(out, a, "bundle-uri", .{});
             try pkt_line.flush(out);
         }
     }).send(w, adv) catch |err| return conn.writeFailed(err);

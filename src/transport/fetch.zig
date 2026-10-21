@@ -141,6 +141,9 @@ pub const Options = struct {
     /// `.git/shallow`. Without it those refs are left, and each is a
     /// warning, as git leaves and warns.
     update_shallow: bool = false,
+    /// `--server-option`s, sent with every protocol v2 request; `null`
+    /// takes `remote.<name>.serverOption`, as git does.
+    server_options: ?[]const []const u8 = null,
     /// `--keep`: what came is kept as a pack, however few its objects;
     /// otherwise a pack of fewer than `fetch.unpackLimit` objects
     /// (`transfer.unpackLimit`, git's 100) is stored loose, as git's
@@ -789,6 +792,7 @@ fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_
         .repository = repo,
         .who = options.who,
         .from_user = options.from_user,
+        .server_options = options.server_options,
     });
     return session;
 }

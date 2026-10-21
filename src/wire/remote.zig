@@ -69,6 +69,12 @@ pub const Remote = struct {
     /// `remote.<name>.skipDefaultUpdate`: left out of the remotes fetched
     /// together, as `maintenance`'s prefetch fetches them.
     skip_default_update: bool = false,
+    /// `remote.<name>.negotiationRestrict`: the only refs a fetch
+    /// negotiates from, when the caller names none.
+    negotiation_restrict: []const []const u8 = &.{},
+    /// `remote.<name>.negotiationInclude`: refs whose objects a fetch
+    /// offers as haves whatever its negotiator chooses.
+    negotiation_include: []const []const u8 = &.{},
     /// `remote.<name>.uploadpack`, the program a fetch asks the other side
     /// to run.
     upload_pack: ?[]const u8 = null,
@@ -103,7 +109,7 @@ pub const Remote = struct {
         const arena = remote.arena.allocator();
 
         const url_key = try arena.print("remote.{s}.url", .{name});
-        const configured = try valuesOf(arena, config, url_key);
+        const configured = try listOf(arena, config, url_key);
         if (configured.len == 0) {
             remote.urls = try arena.dupe([]const u8, &.{try rewrite(arena, config, name, .fetch) orelse try arena.dupe(u8, name)});
             remote.push_urls = try pushUrlsFor(arena, config, &.{name});
@@ -125,7 +131,7 @@ pub const Remote = struct {
         for (configured) |raw| try urls.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
         remote.urls = urls.items;
 
-        const pushurls = try valuesOf(arena, config, try key("pushurl", arena, name));
+        const pushurls = try listOf(arena, config, try key("pushurl", arena, name));
         if (pushurls.len != 0) {
             var rewritten: std.ArrayList([]const u8) = .empty;
             for (pushurls) |raw| try rewritten.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
@@ -147,6 +153,8 @@ pub const Remote = struct {
         remote.upload_pack = try valueOf(arena, config, try key("uploadpack", arena, name));
         remote.receive_pack = try valueOf(arena, config, try key("receivepack", arena, name));
         remote.mirror = boolOf(config, try key("mirror", arena, name)) orelse false;
+        remote.negotiation_restrict = try listOf(arena, config, try key("negotiationrestrict", arena, name));
+        remote.negotiation_include = try listOf(arena, config, try key("negotiationinclude", arena, name));
         return remote;
     }
 
@@ -327,13 +335,58 @@ fn valueOf(arena: Allocator, config: *const Config, key: []const u8) Error!?[]co
     return copy;
 }
 
-/// Every value of a multi-valued key, with git's rule that an empty value
-/// clears the ones before it.
+/// Every value of a multi-valued key.
 fn valuesOf(arena: Allocator, config: *const Config, key: []const u8) Error![]const []const u8 {
     const raw = try config.all(key);
     defer config.gpa.free(raw);
     var out: std.ArrayList([]const u8) = .empty;
     for (raw) |value| try out.append(arena, try arena.dupe(u8, value));
+    return out.items;
+}
+
+/// `remote.<name>.serverOption`, as git's transport takes it when its
+/// caller names none: the values after the last empty one. The slice and
+/// each value are `gpa`'s; `freeList` releases them.
+pub fn serverOptions(gpa: Allocator, config: *const Config, remote_name: []const u8) Allocator.Error![][]u8 {
+    const name = try gpa.print("remote.{s}.serveroption", .{remote_name});
+    defer gpa.free(name);
+    const raw = try config.all(name);
+    defer config.gpa.free(raw);
+    var start: usize = 0;
+    for (raw, 0..) |value, i| if (value.len == 0) {
+        start = i + 1;
+    };
+    const out = try gpa.alloc([]u8, raw.len - start);
+    var made: usize = 0;
+    errdefer {
+        for (out[0..made]) |value| gpa.free(value);
+        gpa.free(out);
+    }
+    for (raw[start..]) |value| {
+        out[made] = try gpa.dupe(u8, value);
+        made += 1;
+    }
+    return out;
+}
+
+/// Release what `serverOptions` returned.
+pub fn freeList(gpa: Allocator, list: [][]u8) void {
+    for (list) |value| gpa.free(value);
+    gpa.free(list);
+}
+
+/// Every value of a list git resets with an empty value -- a remote's
+/// `url` and `pushurl` (`add_url`), and its transport options
+/// (`parse_transport_option`): the values after the last empty one.
+fn listOf(arena: Allocator, config: *const Config, key: []const u8) Error![]const []const u8 {
+    const raw = try config.all(key);
+    defer config.gpa.free(raw);
+    var out: std.ArrayList([]const u8) = .empty;
+    for (raw) |value| {
+        if (value.len == 0) {
+            out.clearRetainingCapacity();
+        } else try out.append(arena, try arena.dupe(u8, value));
+    }
     return out.items;
 }
 
@@ -392,6 +445,41 @@ test "a configured remote carries its URLs, refspecs and tag rule" {
     try testing.expectEqual(TagMode.none, remote.tags);
     try testing.expectEqual(@as(?bool, true), remote.prune);
     try testing.expectEqual(@as(?bool, true), remote.prune_tags);
+}
+
+test "an empty url, pushurl or transport option clears the values before it, as git's add_url and parse_transport_option" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa,
+        \\[remote "origin"]
+        \\    url = https://example.com/old.git
+        \\    url =
+        \\    url = https://example.com/repo.git
+        \\    pushurl = ssh://example.com/old.git
+        \\    pushurl =
+        \\    negotiationRestrict = refs/heads/old
+        \\    negotiationRestrict =
+        \\    negotiationRestrict = refs/heads/main
+        \\    serverOption = old
+        \\    serverOption =
+        \\    serverOption = new
+        \\[branch "main"]
+        \\    merge = refs/heads/main
+        \\    merge =
+        \\
+    , .local);
+    defer config.deinit();
+    var remote = try Remote.get(gpa, &config, .sha1, "origin");
+    defer remote.deinit();
+    try std.testing.expectEqual(@as(usize, 1), remote.urls.len);
+    try std.testing.expectEqualStrings("https://example.com/repo.git", remote.urls[0]);
+    // No push URL left: pushes go to the URL.
+    try std.testing.expectEqualStrings("https://example.com/repo.git", remote.push_urls[0]);
+    try std.testing.expectEqual(@as(usize, 1), remote.negotiation_restrict.len);
+    try std.testing.expectEqualStrings("refs/heads/main", remote.negotiation_restrict[0]);
+    const options = try serverOptions(gpa, &config, "origin");
+    defer freeList(gpa, options);
+    try std.testing.expectEqual(@as(usize, 1), options.len);
+    try std.testing.expectEqualStrings("new", options[0]);
 }
 
 test "a remote ref is tracked where the first fetch refspec maps it, unless excluded" {

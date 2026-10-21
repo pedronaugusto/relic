@@ -84,6 +84,8 @@ pub const Request = struct {
     filter: ?[]const u8 = null,
     /// `session-id=`, for a server that takes one: `transfer.advertiseSID`.
     session_id: ?[]const u8 = null,
+    /// `server-option=` lines, which only a v2 server takes.
+    server_options: []const []const u8 = &.{},
 };
 
 /// How deep the history is to be: git's `--depth`, `--deepen`,
@@ -158,6 +160,7 @@ pub fn fetch(
     const adv = inputs.advertisement;
     const db = inputs.db;
     const request = inputs.request;
+    try protocol.checkServerOptions(adv, request.server_options);
     var negotiator: Negotiator = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa) };
     defer negotiator.deinit();
     for (request.common_tips) |tip| try negotiator.knownCommon(tip);
@@ -288,7 +291,7 @@ fn writeFetchV2(
     no_progress: bool,
     done: *bool,
 ) (pkt_line.WriteError || Negotiator.NegotiateError)!void {
-    try protocol.writeCommand(w, adv, "fetch", request.session_id);
+    try protocol.writeCommand(w, adv, "fetch", .{ .session_id = request.session_id, .server_options = request.server_options });
     // Newlines where git's fetch-pack writes them, and none where not.
     try pkt_line.write(w, "thin-pack");
     if (no_progress) try pkt_line.write(w, "no-progress");

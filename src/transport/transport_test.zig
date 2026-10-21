@@ -1969,3 +1969,97 @@ test "a fetch stores fewer objects than fetch.unpackLimit loose and the rest in 
         try expectSameFetch(gpa, io, &by_git, &by_relic);
     }
 }
+
+/// The request lines git's upload-pack received, as its packet trace
+/// shows them, less the ones that name a program or a session: what the
+/// client chose to send, in its order.
+fn serverHeard(gpa: Allocator, io: Io, trace_path: []const u8) ![]u8 {
+    const traced = Io.Dir.cwd().readFileAlloc(io, trace_path, gpa, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return gpa.dupe(u8, ""),
+        else => |e| return e,
+    };
+    defer gpa.free(traced);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.tokenizeScalar(u8, traced, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.find(u8, line, "upload-pack< ") orelse continue;
+        const said = line[at + "upload-pack< ".len ..];
+        if (std.mem.startsWith(u8, said, "agent=") or std.mem.startsWith(u8, said, "session-id=")) continue;
+        if (!std.mem.startsWith(u8, said, "command=") and !std.mem.startsWith(u8, said, "server-option=") and !std.mem.startsWith(u8, said, "object-format=") and !std.mem.eql(u8, said, "0001")) continue;
+        try out.print(gpa, "{s}\n", .{said});
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "server options go with each v2 request as git sends them, from the remote's settings or the caller's, and a v0 server is refused them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tools = testing.tmpDir(.{ .iterate = true });
+    defer tools.cleanup();
+    const fake = try testremote.fakeSsh(gpa, io, tools.dir);
+    defer gpa.free(fake);
+    const tools_path = try testremote.absolutePath(gpa, io, tools.dir);
+    defer gpa.free(tools_path);
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const url = try gpa.print("example.invalid:{s}", .{source_path});
+    defer gpa.free(url);
+
+    const Case = struct { settings: []const [2][]const u8 = &.{}, given: ?[]const []const u8 = null };
+    const cases = [_]Case{
+        .{ .settings = &.{ .{ "remote.origin.serverOption", "first" }, .{ "remote.origin.serverOption", "second" } } },
+        .{ .settings = &.{ .{ "remote.origin.serverOption", "gone" }, .{ "remote.origin.serverOption", "" }, .{ "remote.origin.serverOption", "kept" } } },
+        .{ .settings = &.{.{ "remote.origin.serverOption", "configured" }}, .given = &.{ "given=1", "given two" } },
+    };
+    for (cases, 0..) |case, n| {
+        var heard: [2][]u8 = undefined;
+        for (0..2) |i| {
+            var twin = try testgit.Repo.init(gpa, io, &.{});
+            defer twin.deinit();
+            try twin.exec(io, &.{ "remote", "add", "origin", url });
+            try twin.exec(io, &.{ "config", "core.sshCommand", fake });
+            for (case.settings) |kv| try twin.exec(io, &.{ "config", "--add", kv[0], kv[1] });
+            const trace = try gpa.print("{s}/trace-{d}-{d}", .{ tools_path, n, i });
+            defer gpa.free(trace);
+            var env = try testremote.environ(gpa);
+            defer env.deinit();
+            try env.put("GIT_TRACE_PACKET", trace);
+            if (i == 0) {
+                var args: std.ArrayList([]const u8) = .empty;
+                defer args.deinit(gpa);
+                try args.appendSlice(gpa, &.{ "-c", "protocol.version=2", "fetch", "-q" });
+                if (case.given) |given| for (given) |option| try args.appendSlice(gpa, &.{ "-o", option });
+                try args.append(gpa, "origin");
+                const out = try testremote.gitInputEnv(gpa, io, twin.dir, &env, args.items, "", true);
+                gpa.free(out);
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, twin.dir, .{});
+                defer repo.deinit(io);
+                var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .server_options = case.given });
+                defer outcome.deinit();
+            }
+            heard[i] = try serverHeard(gpa, io, trace);
+        }
+        defer for (heard) |text| gpa.free(text);
+        try testing.expect(std.mem.find(u8, heard[0], "server-option=") != null);
+        try testing.expectEqualStrings(heard[0], heard[1]);
+    }
+
+    // A v0 server takes none: git refuses, and so does relic.
+    var twin = try testgit.Repo.init(gpa, io, &.{});
+    defer twin.deinit();
+    try twin.exec(io, &.{ "remote", "add", "origin", url });
+    try twin.exec(io, &.{ "config", "core.sshCommand", fake });
+    try twin.exec(io, &.{ "config", "protocol.version", "0" });
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const said = try gitFailure(gpa, io, twin.dir, &env, &.{ "fetch", "-q", "-o", "any", "origin" });
+    defer gpa.free(said);
+    try testing.expect(std.mem.find(u8, said, "server options require protocol version 2 or later") != null);
+    var repo = try repo_mod.Repository.open(gpa, io, twin.dir, .{});
+    defer repo.deinit(io);
+    try testing.expectError(error.ServerOptionsNeedV2, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .server_options = &.{"any"} }));
+}
