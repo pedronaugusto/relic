@@ -61,6 +61,7 @@ const program = @import("../process.zig").program;
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const decimal = @import("../text.zig").decimal;
+const progress_mod = @import("../report.zig").progress;
 const checkout = @import("../checkout/checkout.zig");
 const three_way = @import("../merge/three_way.zig");
 const signing = @import("../object/signing.zig");
@@ -132,6 +133,9 @@ const Settings = struct {
     /// `receive.certNonceSlop`: how many seconds apart another server's
     /// nonce may be and still count as this one's.
     cert_nonce_slop: u64,
+    /// `receive.keepAlive`: the seconds of quiet after which a keepalive
+    /// is sent on the side band; zero or less sends none.
+    keepalive_secs: i64,
     /// `receive.unpackLimit`, else `transfer.unpackLimit`, else git's 100:
     /// a pack of fewer objects is stored loose.
     unpack_limit: u64,
@@ -150,6 +154,7 @@ const Settings = struct {
             .max_input_size = if (max > 0) .fromRaw(@intCast(max)) else null,
             .cert_nonce_seed = config.get("receive.certnonceseed"),
             .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
+            .keepalive_secs = config.getInt("receive.keepalive", 5) catch 5,
             .unpack_limit = limit: {
                 for ([_][]const u8{ "receive.unpacklimit", "transfer.unpacklimit" }) |key| {
                     const value = config.getInt(key, -1) catch -1;
@@ -196,6 +201,19 @@ const Report = struct {
     forced: bool = false,
 };
 
+/// The client's end of a push under way: what the push writes to, and
+/// when the client last heard anything, which the keepalive measures.
+const Channel = struct {
+    out: ?*Io.Writer = null,
+    band: side_band.Band = .none,
+    /// When anything was last sent, on the awake clock.
+    last: Io.Timestamp = .zero,
+    /// Keepalives are due when nothing is sent for `receive.keepAlive`:
+    /// from the pack's end on, as git's muxers send them once index-pack
+    /// has read it.
+    keepalive: bool = false,
+};
+
 /// The capabilities the client asked for.
 const Asked = struct {
     report_status: bool = false,
@@ -220,8 +238,9 @@ pub const Server = struct {
     runner: ?hooks.Runner = null,
     /// What the client asked for, once it has.
     asked: Asked = .{},
-    /// Where the conversation's messages go: the client's side-band.
-    out: ?*Io.Writer = null,
+    /// Where the report and the messages go, written by the push and by
+    /// the tasks beside it one at a time.
+    channel: aegis.BlockingGuarded(Channel) = .init(.{}),
     /// The boundary commits a shallow push brings, written once its refs
     /// are.
     new_shallow: Oid.Set = .empty,
@@ -365,8 +384,8 @@ pub const Server = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         s.asked = .{};
-        s.out = out;
-        defer s.out = null;
+        s.setChannel(.{ .out = out, .last = Io.Clock.awake.now(s.io) });
+        defer s.setChannel(.{});
         s.certificate = null;
         s.certificate_vars = null;
         defer {
@@ -379,6 +398,18 @@ pub const Server = struct {
         if (commands.len == 0) {
             out.flush() catch return error.WriteFailed;
             return;
+        }
+        {
+            var guard = s.channel.acquireUncancelable(s.io);
+            defer guard.deinit(s.io);
+            guard.value().band = s.asked.band;
+        }
+        // Keepalives beside the push, on the side band, where a second
+        // task can run.
+        var keeper: ?Io.Future(void) = null;
+        defer if (keeper) |*task| task.cancel(s.io);
+        if (s.asked.band != .none and s.settings.keepalive_secs > 0 and canRunBeside(s.io)) {
+            keeper = s.io.concurrent(keepAlive, .{s}) catch null;
         }
         var push_options: std.ArrayList([]const u8) = .empty;
         if (s.asked.push_options) try readPushOptions(arena, in, &push_options);
@@ -409,7 +440,7 @@ pub const Server = struct {
             const loose = count < s.settings.unpack_limit;
             q = try Quarantine.begin(s.gpa, s.io, s.db());
             var diagnostic: index_pack.Diagnostic = .{};
-            received = s.unpack(in, &q.?, &diagnostic) catch |err| switch (err) {
+            received = s.unpack(in, &q.?, &diagnostic, .{ .context = s, .report = endOfInput }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
                 else => blk: {
@@ -427,14 +458,90 @@ pub const Server = struct {
             if (received) |*r| r.loose = loose;
             if (received != null) try s.checkShallow(arena, commands, shallow.items, &received.?);
         }
+        // Whatever came of the pack, the rest of the push is kept alive.
+        s.startKeepalive();
 
         try s.execute(arena, commands, unpack_status, &q, &received, &keeps, push_options.items);
         if (received) |*r| try s.settleLoose(r, &keeps);
         try s.report(commands, unpack_status);
         _ = try s.runReceiveHook(arena, "post-receive", commands, true, push_options.items, null);
         try s.runPostUpdate(arena, commands);
-        if (s.asked.band != .none) pkt_line.flush(out) catch return error.WriteFailed;
+        if (keeper) |*task| {
+            task.cancel(s.io);
+            keeper = null;
+        }
+        if (s.asked.band != .none) try s.send(.raw, "0000");
         out.flush() catch return error.WriteFailed;
+    }
+
+    fn setChannel(s: *Server, channel: Channel) void {
+        var guard = s.channel.acquireUncancelable(s.io);
+        defer guard.deinit(s.io);
+        guard.value().* = channel;
+    }
+
+    /// The indexer's last object read is the pack's end: keepalives are
+    /// due from there, as git's index-pack tells its muxer with a NUL.
+    fn endOfInput(context: ?*anyopaque, event: progress_mod.Event) void {
+        const s: *Server = @ptrCast(@alignCast(context.?)); // safe: unpack hands this function the server itself
+        switch (event) {
+            .indexed => |count| if (count.done == count.total) s.startKeepalive(),
+            else => {},
+        }
+    }
+
+    fn startKeepalive(s: *Server) void {
+        var guard = s.channel.acquireUncancelable(s.io);
+        defer guard.deinit(s.io);
+        guard.value().keepalive = true;
+    }
+
+    /// What a task beside the push does: a keepalive -- an empty packet on
+    /// channel one, `0005\x01` -- whenever the client has heard nothing for
+    /// `receive.keepAlive` seconds, as git's `copy_to_sideband` sends it.
+    fn keepAlive(s: *Server) void {
+        const period: Io.Duration = .fromSeconds(s.settings.keepalive_secs);
+        var wait = period;
+        while (true) {
+            s.io.sleep(wait, .awake) catch return;
+            var guard = s.channel.acquireUncancelable(s.io);
+            defer guard.deinit(s.io);
+            const channel = guard.value();
+            const now = Io.Clock.awake.now(s.io);
+            const quiet = channel.last.durationTo(now);
+            if (!channel.keepalive or quiet.nanoseconds < period.nanoseconds) {
+                wait = if (channel.keepalive) .{ .nanoseconds = period.nanoseconds - quiet.nanoseconds } else period;
+                continue;
+            }
+            wait = period;
+            // A packet is written whole, whatever asks this task to stop.
+            const protection = s.io.swapCancelProtection(.blocked);
+            defer _ = s.io.swapCancelProtection(protection);
+            const out = channel.out orelse return;
+            out.writeAll("0005\x01") catch return;
+            out.flush() catch return;
+            channel.last = now;
+        }
+    }
+
+    /// What goes to the client: the report on channel one, a message on
+    /// channel two, or packets as they are. Sent at once, and noted for
+    /// the keepalive.
+    const Sent = enum { report, message, raw };
+
+    fn send(s: *Server, what: Sent, bytes: []const u8) Self.Error!void {
+        var guard = s.channel.acquireUncancelable(s.io);
+        defer guard.deinit(s.io);
+        const channel = guard.value();
+        const out = channel.out orelse return;
+        switch (what) {
+            .raw => out.writeAll(bytes) catch return error.WriteFailed,
+            .report, .message => if (channel.band != .none) {
+                side_band.send(out, channel.band, if (what == .report) 1 else 2, bytes) catch return error.WriteFailed;
+            } else out.writeAll(bytes) catch return error.WriteFailed,
+        }
+        out.flush() catch return error.WriteFailed;
+        channel.last = Io.Clock.awake.now(s.io);
     }
 
     /// git's `read_head_info`: shallow lines and commands to a flush, the
@@ -556,7 +663,7 @@ pub const Server = struct {
 
     /// git's `unpack`: the pack indexed into the quarantine and checked by
     /// `receive.fsckObjects`'s rules.
-    fn unpack(s: *Server, in: *Io.Reader, q: *Quarantine, diagnostic: *index_pack.Diagnostic) !Received {
+    fn unpack(s: *Server, in: *Io.Reader, q: *Quarantine, diagnostic: *index_pack.Diagnostic, progress: progress_mod.Progress) !Received {
         const config = s.remote.repo.configuration();
         var rules = try fsck.forTransfer(s.gpa, s.io, config, .{ .kind = s.kind(), .scope = .receive, .base = s.remote.repo.gitDirectory() }, .{});
         defer if (rules) |*r| r.deinit(s.gpa);
@@ -572,6 +679,7 @@ pub const Server = struct {
             .links = &received.links,
             .threads = index_pack.configuredThreads(config),
             .diagnostic = diagnostic,
+            .progress = progress,
         });
         errdefer received.result.deinit(s.io);
         if (received.result.name) |name| {
@@ -1536,11 +1644,7 @@ pub const Server = struct {
     }
 
     fn message(s: *Server, text: []const u8) Self.Error!void {
-        const out = s.out orelse return;
-        if (s.asked.band != .none) {
-            side_band.send(out, s.asked.band, 2, text) catch return error.WriteFailed;
-            return;
-        }
+        if (s.asked.band != .none) return s.send(.message, text);
         if (builtin.is_test) return;
         var buffer: [256]u8 = undefined;
         var stderr = Io.File.stderr().writerStreaming(s.io, &buffer);
@@ -1606,10 +1710,7 @@ pub const Server = struct {
             }
             pkt_line.flush(w) catch |e| break :write e;
         }) catch return error.OutOfMemory;
-        const out = s.out.?;
-        if (s.asked.band != .none) {
-            side_band.send(out, s.asked.band, 1, buf.written()) catch return error.WriteFailed;
-        } else out.writeAll(buf.written()) catch return error.WriteFailed;
+        try s.send(.report, buf.written());
     }
 };
 

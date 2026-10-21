@@ -24,7 +24,8 @@ const zero = "0000000000000000000000000000000000000000";
 /// Hooks that write what they were shown to `hook.log` in the git
 /// directory, the quarantine and what it holds included, and say a word
 /// back to the pusher; `update` declines a branch named `declined…`, and
-/// `pre-receive` declines everything while `decline-pre-receive` exists.
+/// `pre-receive` declines everything while `decline-pre-receive` exists,
+/// and takes three seconds while `slow` does.
 /// `update` for `refs/heads/meddle` moves refs behind the push's back,
 /// while `meddle` exists: `race` back one commit, `made` created, `gone`
 /// deleted. `reference-transaction` logs every state and line.
@@ -42,6 +43,7 @@ const hook_scripts = [_][2][]const u8{
             \\test -n "$GIT_QUARANTINE_PATH" && test -d "$GIT_QUARANTINE_PATH" && echo "pre-receive quarantined" >>hook.log
             \\test -z "$GIT_PUSH_CERT" || { echo "pre-receive cert $GIT_PUSH_CERT_STATUS $GIT_PUSH_CERT_SIGNER $GIT_PUSH_CERT_KEY ${GIT_PUSH_CERT_NONCE:+nonce} $GIT_PUSH_CERT_NONCE_STATUS" >>hook.log; git cat-file blob "$GIT_PUSH_CERT" | sed -e '/^-----BEGIN/,$d' -e 's/^\(pusher [^ ]*\) .*/\1/' -e 's/^pushee .*/pushee/' -e 's/^nonce .*/nonce/' >>hook.log; }
             \\echo "hook says pre-receive"
+            \\test ! -e slow || sleep 3
             \\test ! -e decline-pre-receive
             \\
     },
@@ -292,6 +294,32 @@ const Pair = struct {
             defer dir.close(p.io);
             try p.git(dir, args);
         }
+    }
+
+    /// How many keepalives a push from the source to `target` hears,
+    /// through relic's receive-pack when `ours`: the empty channel-one
+    /// packets git's packet trace shows as `sideband< \1`.
+    fn keepalives(p: *Pair, target: []const u8, ours: bool, args: []const []const u8) !usize {
+        var env = try p.env.clone(p.gpa);
+        defer env.deinit();
+        try env.put("GIT_TRACE_PACKET", "1");
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(p.gpa);
+        try argv.appendSlice(p.gpa, &.{ "git", "push", "-q" });
+        if (ours) try argv.appendSlice(p.gpa, &.{ "--receive-pack", p.helper });
+        const url = try p.gpa.print("file://{s}", .{target});
+        defer p.gpa.free(url);
+        try argv.append(p.gpa, url);
+        try argv.appendSlice(p.gpa, args);
+        var outcome = try program.run(p.gpa, p.io, .{ .environ = &env }, .{ .argv = argv.items, .cwd = .{ .dir = p.source.dir } }, .{});
+        defer outcome.deinit(p.gpa);
+        try testing.expect(outcome.succeeded());
+        var count: usize = 0;
+        var lines = std.mem.tokenizeScalar(u8, outcome.stderr, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.endsWith(u8, line, "sideband< \\1")) count += 1;
+        }
+        return count;
     }
 
     /// The same file in both git directories, or none with `null`.
@@ -677,4 +705,22 @@ test "a pack below receive.unpackLimit is stored loose and one at it kept, as gi
     try p.gitBoth(&.{ "config", "transfer.unpackLimit", "1" });
     try testremote.addCommits(gpa, io, &p.source, 3, 1);
     try p.both(&.{"main:refs/heads/main"});
+}
+
+test "a push kept waiting hears a keepalive every receive.keepAlive seconds, as git's receive-pack sends them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{.{ "receive.keepAlive", "1" }});
+    defer p.deinit();
+    try p.markBoth("slow", true, true);
+    // A push with a pack, and one that only deletes: a pre-receive of three
+    // seconds is two keepalives at least, from either server.
+    for ([_][]const []const u8{ &.{"main:refs/heads/other"}, &.{":refs/heads/other"} }) |args| {
+        try testing.expect(try p.keepalives(p.theirs, false, args) >= 2);
+        try testing.expect(try p.keepalives(p.ours, true, args) >= 2);
+    }
+    // None at all when it is zero.
+    try p.gitBoth(&.{ "config", "receive.keepAlive", "0" });
+    try testing.expectEqual(@as(usize, 0), try p.keepalives(p.theirs, false, &.{"main:refs/heads/again"}));
+    try testing.expectEqual(@as(usize, 0), try p.keepalives(p.ours, true, &.{"main:refs/heads/again2"}));
 }
