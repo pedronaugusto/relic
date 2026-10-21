@@ -2,10 +2,10 @@
 //! object directory and `.git/shallow` compared.
 
 const std = @import("std");
+const date = @import("../text.zig").date;
 const Io = std.Io;
 const testgit = @import("../testing/git.zig");
 const prune_mod = @import("prune.zig");
-const gc = @import("gc.zig");
 const repo_mod = @import("../repo/repo.zig");
 const io = std.testing.io;
 const gpa = std.testing.allocator;
@@ -222,11 +222,11 @@ test "gc.pruneExpire as git's gc reads it" {
     const clock: @import("../text.zig").date.Context = .{ .now = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s) };
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
-    try std.testing.expectEqual(@as(?gc.Expiry, 1_700_000_000 - 14 * day), try prune_mod.pruneExpiry(&native, clock));
+    try std.testing.expectEqual(@as(?date.Expiry, 1_700_000_000 - 14 * day), try prune_mod.pruneExpiry(&native, clock));
     try native.editConfig(io, &.{.{ .name = "gc.pruneExpire", .value = "never" }}, .{});
-    try std.testing.expectEqual(@as(?gc.Expiry, null), try prune_mod.pruneExpiry(&native, clock));
+    try std.testing.expectEqual(@as(?date.Expiry, null), try prune_mod.pruneExpiry(&native, clock));
     try native.editConfig(io, &.{.{ .name = "gc.pruneExpire", .value = "now" }}, .{});
-    try std.testing.expectEqual(@as(?gc.Expiry, gc.expire_all), try prune_mod.pruneExpiry(&native, clock));
+    try std.testing.expectEqual(@as(?date.Expiry, date.expire_all), try prune_mod.pruneExpiry(&native, clock));
 }
 
 /// A blob's name as `hash-object` gives it, the blob not written.

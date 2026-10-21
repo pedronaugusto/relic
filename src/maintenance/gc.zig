@@ -50,22 +50,6 @@ pub fn packRefs(io: Io, repo: *Repository, options: PackRefsOptions) Self.Error!
     });
 }
 
-/// An expiry: an entry dated before it goes. `never` is 0, which nothing
-/// is before; `now` and `all` are the greatest time.
-pub const Expiry = i64;
-
-/// The greatest expiry, which every entry is before: `now`, `all`.
-pub const expire_all: Expiry = std.math.maxInt(i64);
-
-/// git's `parse_expiry_date`: `never` and `false` are 0, `all` and `now`
-/// the greatest time, and anything else a date as `approxidate_careful`
-/// reads it against `clock`; `null` where git reports an error.
-pub fn parseExpiry(value: []const u8, clock: date.Context) ?Expiry {
-    if (std.mem.eql(u8, value, "never") or std.mem.eql(u8, value, "false")) return 0;
-    if (std.mem.eql(u8, value, "all") or std.mem.eql(u8, value, "now")) return expire_all;
-    return date.approximate(value, clock);
-}
-
 /// How `expireReflogs` treats each log: git's `reflog expire` options.
 pub const ReflogExpireOptions = struct {
     /// The time now, which relative dates are read against and the
@@ -82,14 +66,14 @@ pub const ReflogExpireOptions = struct {
     /// `gc.<pattern>.reflogExpire` for the first pattern the ref matches,
     /// else `gc.reflogExpire`, else 30 days before `clock`: git 2.55's
     /// `REFLOG_EXPIRE_OPTIONS_INIT`, which its documentation gives as 90.
-    expire: ?Expiry = null,
+    expire: ?date.Expiry = null,
     /// `--expire-unreachable`: entries older than this go when their old
     /// or new value is a commit the ref's tip does not reach. `null` takes
     /// `gc.<pattern>.reflogExpireUnreachable`, `gc.reflogExpireUnreachable`,
     /// else 90 days before `clock` (git's documentation says 30). With
     /// both defaults git checks no reachability at all: every entry older
     /// than 30 days goes.
-    expire_unreachable: ?Expiry = null,
+    expire_unreachable: ?date.Expiry = null,
     /// `--rewrite`.
     rewrite: bool = false,
     /// `--updateref`.
@@ -97,7 +81,7 @@ pub const ReflogExpireOptions = struct {
 };
 
 /// The two expiries of one log.
-const Policy = struct { total: Expiry, unreached: Expiry };
+const Policy = struct { total: date.Expiry, unreached: date.Expiry };
 
 /// One `gc.<pattern>.*` section's expiries; a slot the section does not
 /// set is 0, never, as git's zeroed entry leaves it.
@@ -121,7 +105,7 @@ const Settings = struct {
                 true
             else if (std.mem.eql(u8, entry.name, "reflogexpire")) false else continue;
             const value = entry.value orelse return error.InvalidExpiryDate;
-            const expiry = parseExpiry(value, clock) orelse return error.InvalidExpiryDate;
+            const expiry = date.parseExpiry(value, clock) orelse return error.InvalidExpiryDate;
             const policy: *Policy = if (!entry.has_subsection) &settings.defaults else blk: {
                 for (patterns.items) |*p| if (std.mem.eql(u8, p.pattern, entry.subsection)) break :blk &p.policy;
                 try patterns.append(arena, .{ .pattern = entry.subsection, .policy = .{ .total = 0, .unreached = 0 } });

@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `maintenance.Expiry`, `maintenance.expire_all` and `maintenance.parseExpiry` are `text.date.Expiry`, `expire_all` and `parseExpiry`: git's `parse_expiry_date` is date reading, and the index's shared files expire by it too.
 - `index.Index.version` is 0 for an index made here, not 2; `WriteOptions.version` `.auto` keeps the version the index carries (a version 4 index stays 4), as git's `do_write_index` does, and `WriteOptions.new_version` is the one an index made here is first written in.
 - `maintenance.RepackOptions.pack`, `GcOptions.pack`, `RunOptions.pack`, `transport.bundle`'s `pack` and `transport.local.Remote.CopyOptions.pack` are optional: `null` takes the repository's pack settings (`Odb.packOptions`).
 - `commit.merging.conclude` returns `Concluded` (the commit, and what became of `MERGE_AUTOSTASH`); `merging.abort` takes `AbortOptions` and returns `?stash.Restored`; `merging.removeMergeState` takes who saves a leftover `MERGE_AUTOSTASH`.

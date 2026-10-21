@@ -29,7 +29,7 @@ pub const PruneOptions = struct {
     /// time is not after this goes, and unreachable objects newer than it
     /// are spared with what they reach. git's default takes every one;
     /// `gc` passes `gc.pruneExpire` (`pruneExpiry`).
-    expire: gc.Expiry = gc.expire_all,
+    expire: date.Expiry = date.expire_all,
     /// `<head>...`: objects kept as if a ref named them.
     heads: []const Oid = &.{},
     /// `-n`: report and remove nothing.
@@ -72,8 +72,8 @@ pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: PruneOptions) S
 
 /// `gc.pruneExpire` as git's `gc` reads it: `2.weeks.ago` when unset,
 /// `null` for `never`, which runs no prune.
-pub fn pruneExpiry(repo: *Repository, clock: date.Context) Self.Error!?gc.Expiry {
+pub fn pruneExpiry(repo: *Repository, clock: date.Context) Self.Error!?date.Expiry {
     const value = repo.configuration().get("gc.pruneexpire") orelse "2.weeks.ago";
-    const expiry = gc.parseExpiry(value, clock) orelse return error.InvalidExpiryDate;
+    const expiry = date.parseExpiry(value, clock) orelse return error.InvalidExpiryDate;
     return if (expiry == 0) null else expiry;
 }

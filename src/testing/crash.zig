@@ -318,7 +318,7 @@ pub const Case = struct {
                 try c.moveRef(io, &repo, "HEAD", .{ .symbolic = "refs/heads/next" });
             },
             .pack_refs => try gc.packRefs(io, &repo, .{ .include = &.{"*"} }),
-            .reflog_expire => try gc.expireReflogs(gpa, io, &repo, .{ .clock = .{ .now = date.timestamp(testgit.fixture_date) }, .expire = gc.expire_all }),
+            .reflog_expire => try gc.expireReflogs(gpa, io, &repo, .{ .clock = .{ .now = date.timestamp(testgit.fixture_date) }, .expire = date.expire_all }),
             .prune => _ = try prune.prune(gpa, io, &repo, .{}),
             .repack => _ = try repack.repack(gpa, io, &repo, .{ .mode = .all, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
             .repack_cruft => _ = try repack.repack(gpa, io, &repo, .{ .mode = .cruft, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),

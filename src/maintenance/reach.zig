@@ -6,6 +6,7 @@
 
 const Self = @This();
 const std = @import("std");
+const date = @import("../text.zig").date;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
@@ -15,7 +16,6 @@ const index_mod = @import("../index/index.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const object_walk = @import("../walk/object.zig").walk;
-const gc = @import("gc.zig");
 const program = @import("../process/program.zig");
 const Repository = repo_mod.Repository;
 
@@ -47,7 +47,7 @@ pub const ReachOptions = struct {
     /// git's `mark_recent`, a cruft pack's objects each by its own time.
     /// So are those a `gc.recentObjectsHook` command names, whatever their
     /// time. 0 keeps none, and runs no hook.
-    recent: gc.Expiry = 0,
+    recent: date.Expiry = 0,
     /// What runs the `gc.recentObjectsHook` commands. With none given and
     /// a hook set, `error.ProgramsNotGranted`.
     programs: ?program.Programs = null,

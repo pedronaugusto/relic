@@ -473,6 +473,33 @@ pub fn approximate(text_in: []const u8, ctx: Context) ?i64 {
     return a.update(0);
 }
 
+/// An expiry: an entry dated before it goes. `never` is 0, which nothing
+/// is before; `now` and `all` are the greatest time.
+pub const Expiry = i64;
+
+/// The greatest expiry, which every entry is before: `now`, `all`.
+pub const expire_all: Expiry = std.math.maxInt(i64);
+
+/// git's `parse_expiry_date`: `never` and `false` are 0, `all` and `now`
+/// the greatest time, and anything else a date as `approxidate_careful`
+/// reads it against `clock`; `null` where git reports an error.
+pub fn parseExpiry(value: []const u8, clock: Context) ?Expiry {
+    if (std.mem.eql(u8, value, "never") or std.mem.eql(u8, value, "false")) return 0;
+    if (std.mem.eql(u8, value, "all") or std.mem.eql(u8, value, "now")) return expire_all;
+    return approximate(value, clock);
+}
+
+test "the expiry words git reads" {
+    const clock: Context = .{ .now = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s) };
+    const day = 24 * 60 * 60;
+    try std.testing.expectEqual(@as(?Expiry, 0), parseExpiry("never", clock));
+    try std.testing.expectEqual(@as(?Expiry, 0), parseExpiry("false", clock));
+    try std.testing.expectEqual(@as(?Expiry, expire_all), parseExpiry("now", clock));
+    try std.testing.expectEqual(@as(?Expiry, expire_all), parseExpiry("all", clock));
+    try std.testing.expectEqual(@as(?Expiry, 1_700_000_000 - 2 * day), parseExpiry("2.days.ago", clock));
+    try std.testing.expectEqual(@as(?Expiry, null), parseExpiry("not a date at all", clock));
+}
+
 /// `approxidate_str`'s state: the date being built, the time now, a
 /// number waiting for the word that says what it counts, and whether any
 /// word meant anything.

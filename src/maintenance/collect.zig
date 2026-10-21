@@ -44,7 +44,7 @@ pub const Prune = union(enum) {
     /// object goes.
     now,
     /// Any other date: unreachable objects no newer than it go.
-    at: gc.Expiry,
+    at: date.Expiry,
 };
 
 /// git's `gc` options. Those left `null` are read from the repository's
@@ -153,8 +153,8 @@ const Settings = struct {
     cruft: bool,
     max_cruft: u64,
     prune: Prune,
-    worktree_expire: gc.Expiry,
-    log_expire: gc.Expiry,
+    worktree_expire: date.Expiry,
+    log_expire: date.Expiry,
     big_pack: u64,
 
     fn read(repo: *Repository, clock: date.Context) Self.Error!Settings {
@@ -187,8 +187,8 @@ fn isNever(config: *const config_mod.Config, name: []const u8, clock: date.Conte
     return try parseDate(value, clock) == 0;
 }
 
-fn parseDate(value: []const u8, clock: date.Context) Self.Error!gc.Expiry {
-    return gc.parseExpiry(value, clock) orelse error.InvalidExpiryDate;
+fn parseDate(value: []const u8, clock: date.Context) Self.Error!date.Expiry {
+    return date.parseExpiry(value, clock) orelse error.InvalidExpiryDate;
 }
 
 /// A prune date as `cmd_gc` keeps it: `now` by its spelling.
@@ -273,7 +273,7 @@ pub fn repackAll(repo: *Repository, clock: date.Context, plan: *repack_mod.Optio
 }
 
 /// `gc.worktreePruneExpire`, three months unless set.
-pub fn worktreeExpiry(repo: *Repository, clock: date.Context) Self.Error!gc.Expiry {
+pub fn worktreeExpiry(repo: *Repository, clock: date.Context) Self.Error!date.Expiry {
     return (try Settings.read(repo, clock)).worktree_expire;
 }
 
@@ -335,7 +335,7 @@ fn background(gpa: Allocator, io: Io, repo: *Repository, options: Options, s: *c
         report.repack = try repack_mod.repack(gpa, io, repo, plan);
         switch (s.prune) {
             .never => {},
-            .now => report.prune = try prune_mod.prune(gpa, io, repo, .{ .expire = gc.expire_all, .programs = options.programs }),
+            .now => report.prune = try prune_mod.prune(gpa, io, repo, .{ .expire = date.expire_all, .programs = options.programs }),
             .at => |at| report.prune = try prune_mod.prune(gpa, io, repo, .{ .expire = at, .programs = options.programs }),
         }
     }
@@ -430,7 +430,7 @@ fn allPacked(plan: *repack_mod.Options, s: *const Settings, keep: []const []cons
         plan.mode = .cruft;
         plan.cruft_expiration = switch (s.prune) {
             .never => null,
-            .now => gc.expire_all,
+            .now => date.expire_all,
             .at => |at| at,
         };
         if (s.max_cruft != 0) plan.max_cruft_bytes = s.max_cruft;
@@ -441,7 +441,7 @@ fn allPacked(plan: *repack_mod.Options, s: *const Settings, keep: []const []cons
 }
 
 /// `report_last_gc_error`: `gc.log` newer than the expiry, and not empty.
-fn lastFailed(io: Io, repo: *Repository, expire: gc.Expiry) Self.Error!bool {
+fn lastFailed(io: Io, repo: *Repository, expire: date.Expiry) Self.Error!bool {
     const dir = repo.gitDirectory();
     const stat = dir.statFile(io, "gc.log", .{}) catch |err| switch (err) {
         error.FileNotFound => return false,

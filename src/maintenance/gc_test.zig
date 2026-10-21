@@ -2,6 +2,7 @@
 //! twice, git's command run in one and relic's in the other, and what each
 //! left compared.
 const std = @import("std");
+const date = @import("../text.zig").date;
 const testgit = @import("../testing/git.zig");
 const gc = @import("gc.zig");
 const repo_mod = @import("../repo/repo.zig");
@@ -272,7 +273,7 @@ fn expireInFormat(format: testgit.RefFormat) !void {
         .{ .config = &.{ &both, &.{ .{ "gc.refs/heads/topic.reflogExpire", "never" }, .{ "gc.refs/heads/*.reflogExpireUnreachable", "5.days.ago" } } }, .args = &.{"--all"}, .options = .{ .clock = clock } },
         .{ .config = &.{&.{ .{ "gc.reflogExpire", "160.days.ago" }, .{ "gc.reflogExpireUnreachable", "never" } }}, .args = &.{"--all"}, .options = .{ .clock = clock } },
         .{ .config = &.{&.{ .{ "gc.reflogExpire", "1.day.ago" }, .{ "gc.refs/stash.reflogExpire", "never" } }}, .args = &.{"--all"}, .options = .{ .clock = clock } },
-        .{ .config = &.{&both}, .args = &.{ "--expire-unreachable=now", "--rewrite", "--updateref", "refs/heads/main", "HEAD" }, .options = .{ .clock = clock, .refs = &.{ "refs/heads/main", "HEAD" }, .expire_unreachable = gc.expire_all, .rewrite = true, .update_ref = true } },
+        .{ .config = &.{&both}, .args = &.{ "--expire-unreachable=now", "--rewrite", "--updateref", "refs/heads/main", "HEAD" }, .options = .{ .clock = clock, .refs = &.{ "refs/heads/main", "HEAD" }, .expire_unreachable = date.expire_all, .rewrite = true, .update_ref = true } },
         .{ .config = &.{&both}, .args = &.{ "--expire=40.days.ago", "--all" }, .options = .{ .clock = clock, .expire = now - 40 * day } },
     };
     for (cases, 0..) |case, n| {
@@ -316,16 +317,6 @@ test "an expiry git dies on is refused" {
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
     try std.testing.expectError(error.InvalidExpiryDate, gc.expireReflogs(gpa, io, &native, .{ .clock = .{ .now = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s) } }));
-}
-
-test "the expiry words git reads" {
-    const clock: @import("../text.zig").date.Context = .{ .now = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s) };
-    try std.testing.expectEqual(@as(?gc.Expiry, 0), gc.parseExpiry("never", clock));
-    try std.testing.expectEqual(@as(?gc.Expiry, 0), gc.parseExpiry("false", clock));
-    try std.testing.expectEqual(@as(?gc.Expiry, gc.expire_all), gc.parseExpiry("now", clock));
-    try std.testing.expectEqual(@as(?gc.Expiry, gc.expire_all), gc.parseExpiry("all", clock));
-    try std.testing.expectEqual(@as(?gc.Expiry, 1_700_000_000 - 2 * day), gc.parseExpiry("2.days.ago", clock));
-    try std.testing.expectEqual(@as(?gc.Expiry, null), gc.parseExpiry("not a date at all", clock));
 }
 
 fn worktreeLogsInFormat(format: testgit.RefFormat) !void {

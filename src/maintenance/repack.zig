@@ -10,6 +10,7 @@
 
 const Self = @This();
 const std = @import("std");
+const date = @import("../text.zig").date;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
@@ -21,7 +22,6 @@ const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const object_walk = @import("../walk/object.zig").walk;
 const program = @import("../process/program.zig");
-const gc = @import("gc.zig");
 const reach = @import("reach.zig");
 const ops = @import("maintenance.zig");
 const server_info = @import("server_info.zig");
@@ -58,11 +58,11 @@ pub const Options = struct {
     /// whose pack is no newer than this, and which no recent object
     /// reaches, is not turned loose but dropped. `null` turns every one
     /// loose.
-    unpack_unreachable: ?gc.Expiry = null,
+    unpack_unreachable: ?date.Expiry = null,
     /// `--cruft-expiration`: with `--cruft`, the unreachable objects no
     /// newer than this, and that no newer one reaches, go into no cruft
     /// pack, and so go. `null` keeps every one.
-    cruft_expiration: ?gc.Expiry = null,
+    cruft_expiration: ?date.Expiry = null,
     /// `--expire-to`, with `--cruft` and `-d`: what the cruft pack leaves
     /// to go -- every object of the packs taken away and every loose one
     /// that no new pack holds -- written first into a cruft pack of its
