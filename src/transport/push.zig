@@ -103,7 +103,27 @@ pub const Error = error{
     InvalidPushCertNonce,
     /// `push.gpgSign` is neither a boolean nor `if-asked`.
     InvalidPushGpgSign,
-} || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error || branch_mod.Error || refs_mod.Store.ReadLogError;
+    /// `push.recurseSubmodules` is not `check`, `on-demand`, `only` or a
+    /// false boolean: git's "bad push.recursesubmodules argument".
+    InvalidPushRecurse,
+    /// Submodules hold commits the push records that no remote of theirs
+    /// has: git's "The following submodule paths contain changes that can
+    /// not be found on any remote" and "Aborting.". Each is a warning.
+    UnpushedSubmodules,
+    /// A submodule's push failed: git's "failed to push all needed
+    /// submodules". Each is a warning.
+    SubmodulePushFailed,
+    /// The remote is not configured in a submodule that needs pushing:
+    /// git's "remote '<name>' not configured".
+    SubmoduleRemoteNotConfigured,
+    /// A refspec's `HEAD` names, in a submodule, a branch other than the
+    /// superproject's, or none: git's "HEAD does not match the named
+    /// branch in the superproject".
+    SubmoduleHeadMismatch,
+    /// A refspec's source names no single ref in a submodule: git's "src
+    /// refspec '<src>' must name a ref".
+    SubmoduleRefspecUnmatched,
+} || sub_changes.Error || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error || branch_mod.Error || refs_mod.Store.ReadLogError;
 
 /// What a `pre-push` hook is shown: one line of its input.
 pub const PrePushUpdate = struct {
@@ -180,6 +200,17 @@ pub const Options = struct {
     set_upstream: bool = false,
     /// Work everything out and send nothing.
     dry_run: bool = false,
+    /// `--recurse-submodules`: whether the submodules' commits the push
+    /// records must be on a remote of theirs (`check`), are pushed first
+    /// (`on_demand`), or are pushed alone (`only`), as git's
+    /// `transport_push` has it. `null` takes `push.recurseSubmodules` or
+    /// `submodule.recurse` (`on_demand` when true), the later set.
+    recurse_submodules: ?Recurse = null,
+    /// git's `--recurse-submodules=only-is-on-demand`, what a
+    /// superproject's push asks of a submodule's: `only` from the
+    /// configuration is taken as `on_demand`, with git's warning, since
+    /// the superproject needs the submodule's own refs pushed too.
+    in_superproject: bool = false,
     /// Sign the push with a certificate the server keeps: `--signed`.
     /// `null` takes `push.gpgSign`. Signing runs `signing`'s programs,
     /// which needs `programs`.
@@ -208,6 +239,9 @@ pub const Options = struct {
     /// it may.
     from_user: ?bool = null,
 };
+
+/// git's `--recurse-submodules` values for a push.
+pub const Recurse = enum { no, check, on_demand, only };
 
 /// What happened to one ref.
 pub const RefResult = struct {
@@ -341,6 +375,7 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     settled.push_options = options.push_options orelse try remote_mod.resetList(arena, repo.configuration(), "push.pushoption");
     settled.follow_tags = options.follow_tags orelse try repo.configuration().getBool("push.followtags", false);
     settled.force_if_includes = options.force_if_includes orelse try repo.configuration().getBool("push.useforceifincludes", false);
+    settled.recurse_submodules = try recursion(repo.configuration(), options);
 
     var results: std.ArrayList(RefResult) = .empty;
     for (remote.push_urls) |url| {
@@ -391,6 +426,17 @@ fn pushTo(
     }
 
     if (options.pre_push) |hook| try runPrePush(arena, hook, remote.name orelse url, url, results);
+    const recurse = options.recurse_submodules.?;
+    if (recurse != .no and repo.workDirectory() != null) try checkSubmodules(arena, gpa, io, repo, .{ .remote = remote.name orelse url, .specs = specs, .results = results }, options);
+    // `only` sends nothing of its own, and moves no remote-tracking ref.
+    if (recurse == .only) {
+        for (results) |*r| if (r.status == .ok) {
+            r.status = .not_sent;
+        };
+        if (options.set_upstream) try setUpstreams(arena, gpa, io, repo, remote.name orelse url, results, outcome);
+        try all_results.appendSlice(arena, results);
+        return;
+    }
 
     // Whether the server takes a signed push is asked before anything is
     // sent, a dry run's included, as git's send-pack asks it.
@@ -446,6 +492,179 @@ fn pushTo(
     }
     if (options.set_upstream) try setUpstreams(arena, gpa, io, repo, remote.name orelse url, results, outcome);
     try all_results.appendSlice(arena, results);
+}
+
+/// `recurse_submodules`, else the later of `push.recurseSubmodules` and
+/// `submodule.recurse`; `only` in a submodule's push taken as `on_demand`.
+fn recursion(config: *const config_mod.Config, options: Options) Error!Recurse {
+    var found: Recurse = .no;
+    if (options.recurse_submodules) |r| {
+        found = r;
+    } else {
+        var it = config.iterate(&.{ "push.recursesubmodules", "submodule.recurse" });
+        while (it.next()) |entry| {
+            const text = entry.value orelse "true";
+            if (std.ascii.eqlIgnoreCase(entry.section, "submodule")) {
+                found = if (config_mod.parseBool(text) catch return error.MalformedValue) .on_demand else .no;
+                continue;
+            }
+            found = if (config_mod.parseBool(text)) |on| (if (on) return error.InvalidPushRecurse else .no) else |_| if (std.mem.eql(u8, text, "on-demand"))
+                .on_demand
+            else if (std.mem.eql(u8, text, "check"))
+                .check
+            else if (std.mem.eql(u8, text, "only"))
+                .only
+            else
+                return error.InvalidPushRecurse;
+        }
+    }
+    if (options.in_superproject and found == .only) {
+        try warning.note(options.warnings, .push_recurse_only_on_demand);
+        found = .on_demand;
+    }
+    return found;
+}
+
+/// What `checkSubmodules` measures the push by.
+const Pushing = struct { remote: []const u8, specs: []const Refspec, results: []const RefResult };
+
+/// git's `transport_push` for the submodules: under `on_demand` and
+/// `only`, each that needs it pushed first, after git's push-check in it
+/// when the remote is configured; then, under `check`, or those two when
+/// something is sent, every submodule's recorded commits on a remote of
+/// its own, or `error.UnpushedSubmodules`.
+fn checkSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, p: Pushing, options: Options) Error!void {
+    const recurse = options.recurse_submodules.?;
+    var commits: std.ArrayList(Oid) = .empty;
+    for (p.results) |r| if (!r.new.isZero()) try commits.append(arena, r.new);
+    const range: sub_changes.PushRange = .{ .commits = commits.items, .remote = p.remote };
+    if (recurse == .on_demand or recurse == .only) {
+        const needs = try sub_changes.unpushedSubmodules(arena, gpa, io, repo, range);
+        if (needs.len != 0) try pushSubmodules(arena, gpa, io, repo, needs, p, options);
+    }
+    if (recurse == .check or !options.dry_run) {
+        const left = try sub_changes.unpushedSubmodules(arena, gpa, io, repo, range);
+        for (left) |u| try warning.note(options.warnings, .{ .submodule_unpushed = u.path });
+        if (left.len != 0) return error.UnpushedSubmodules;
+    }
+}
+
+/// git's `push_unpushed_submodules`: with a configured remote, the
+/// push-check in each first, then each pushed to that remote with the
+/// push's refspecs -- else to its own default, as a plain `git push` --
+/// with the push's options and `in_superproject`.
+fn pushSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, needs: []const sub_changes.Unpushed, p: Pushing, options: Options) Error!void {
+    const configured = remote_mod.isConfigured(repo.configuration(), p.remote);
+    var raw: std.ArrayList([]const u8) = .empty;
+    for (p.specs) |spec| try raw.append(arena, try refspecText(arena, spec));
+    if (configured) {
+        const head = try headName(gpa, io, repo);
+        defer gpa.free(head);
+        for (needs) |u| {
+            var sub = (try submodule.openRepository(gpa, io, repo, .{ .path = u.path, .name = u.name }, .{})) orelse continue;
+            defer sub.deinit(io);
+            try pushCheck(gpa, io, &sub, .{ .head = head, .remote = p.remote, .specs = p.specs });
+        }
+    }
+    var failed = false;
+    for (needs) |u| {
+        var sub = (try submodule.openRepository(gpa, io, repo, .{ .path = u.path, .name = u.name }, .{})) orelse continue;
+        defer sub.deinit(io);
+        var tracking = try sub.refStore().list(gpa, io, "refs/remotes/");
+        const has_remote = tracking.entries.len != 0;
+        tracking.deinit();
+        if (!has_remote) continue;
+        const target = if (configured) p.remote else try defaultPushRemote(arena, gpa, io, &sub);
+        var pushed = push(gpa, io, &sub, target, .{
+            .refspecs = if (configured) raw.items else &.{},
+            .push_options = options.push_options,
+            .dry_run = options.dry_run,
+            .in_superproject = true,
+            .who = options.who,
+            .programs = options.programs,
+            .proxy = options.proxy,
+            .prompt = options.prompt,
+            .auth_failure = options.auth_failure,
+            .warnings = options.warnings,
+            .progress = options.progress,
+            .from_user = options.from_user,
+        }) catch {
+            try warning.note(options.warnings, .{ .submodule_push_failed = u.path });
+            failed = true;
+            continue;
+        };
+        defer pushed.deinit();
+        if (pushed.anyRejected()) {
+            try warning.note(options.warnings, .{ .submodule_push_failed = u.path });
+            failed = true;
+        }
+    }
+    if (failed) return error.SubmodulePushFailed;
+}
+
+/// What `HEAD` names, in full, or `HEAD` itself when it is detached.
+fn headName(gpa: Allocator, io: Io, repo: *Repository) Error![]u8 {
+    if (try repo.refStore().currentBranch(gpa, io)) |short| {
+        defer gpa.free(short);
+        return gpa.print("refs/heads/{s}", .{short});
+    }
+    return gpa.dupe(u8, "HEAD");
+}
+
+/// The remote a plain `git push` in `repo` goes to: its branch's push
+/// remote, else the fallback.
+fn defaultPushRemote(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository) Error![]const u8 {
+    const config = repo.configuration();
+    const current = (try repo.refStore().currentBranch(gpa, io)) orelse return arena.dupe(u8, remote_mod.fallback(config));
+    defer gpa.free(current);
+    var branch = try remote_mod.Branch.get(gpa, config, current);
+    defer branch.deinit();
+    return arena.dupe(u8, branch.pushRemote(config));
+}
+
+/// The text a refspec was written as.
+fn refspecText(arena: Allocator, spec: Refspec) Allocator.Error![]const u8 {
+    if (spec.matching) return if (spec.force) "+:" else ":";
+    return arena.print("{s}{s}{s}{s}{s}", .{
+        if (spec.force) "+" else "",
+        if (spec.negative) "^" else "",
+        spec.src,
+        if (spec.dst != null) ":" else "",
+        spec.dst orelse "",
+    });
+}
+
+/// What a superproject's push asks a submodule to check.
+const PushCheck = struct { head: []const u8, remote: []const u8, specs: []const Refspec };
+
+/// git's `submodule--helper push-check`, in `sub`: the remote configured
+/// there, and each refspec's source, but a pattern or `:`, one ref of its
+/// own -- or `HEAD` on the branch the superproject's `HEAD` is on.
+fn pushCheck(gpa: Allocator, io: Io, sub: *Repository, c: PushCheck) Error!void {
+    if (!remote_mod.isConfigured(sub.configuration(), c.remote)) return error.SubmoduleRemoteNotConfigured;
+    var refs = try sub.refStore().list(gpa, io, "refs/");
+    defer refs.deinit();
+    for (c.specs) |spec| {
+        if (spec.pattern or spec.matching) continue;
+        var strong: usize = 0;
+        var weak: usize = 0;
+        for (refs.entries) |ref| {
+            if (refnameMatch(spec.src, ref.name) == 0) continue;
+            // git's `count_refspec_match`: a match outside heads and tags,
+            // named neither in full nor from below `refs/`, is weak.
+            const full = ref.name.len == spec.src.len or spec.src.len + 5 == ref.name.len;
+            if (!full and !std.mem.startsWith(u8, ref.name, "refs/heads/") and !std.mem.startsWith(u8, ref.name, "refs/tags/")) weak += 1 else strong += 1;
+        }
+        const count = if (strong != 0) strong else weak;
+        if (count == 1) continue;
+        if (count == 0 and std.mem.eql(u8, spec.src, "HEAD")) {
+            const head = try headName(gpa, io, sub);
+            defer gpa.free(head);
+            if (!std.mem.eql(u8, head, "HEAD") and std.mem.eql(u8, head, c.head)) continue;
+            return error.SubmoduleHeadMismatch;
+        }
+        return error.SubmoduleRefspecUnmatched;
+    }
 }
 
 /// git's `get_commons_through_negotiation` (`push.negotiate`): what a
@@ -1160,6 +1379,8 @@ fn updateOneTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const r
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
 const fetch_mod = @import("fetch.zig");
+const submodule = @import("../submodule/submodule.zig");
+const sub_changes = @import("../submodule/changes.zig");
 const testremote = @import("../testing/remote.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };

@@ -2525,3 +2525,95 @@ test "a clone with --recurse-submodules is git's: the pathspecs active, shallow 
         try expectSameRecursiveClone(gpa, io, &world);
     }
 }
+
+/// `world`'s twin, with every repository's pushes going to its bare
+/// repository, and a new commit on the branch of `inner` (within `lib`),
+/// of `lib` and of the superproject, each recording the one below.
+fn changeUnderTwin(gpa: Allocator, io: Io, world: *SubmoduleWorld) !void {
+    try world.twin(gpa, io, "twin");
+    for ([_][2][]const u8{ .{ "twin", "super" }, .{ "twin/lib", "lib" }, .{ "twin/lib/inner", "inner" }, .{ "twin/vendor/inner", "inner" } }) |pair| {
+        const bare = try gpa.print("{s}/{s}.git", .{ world.root_path, pair[1] });
+        defer gpa.free(bare);
+        try world.git(gpa, io, pair[0], &.{ "config", "remote.origin.pushurl", bare });
+    }
+    for ([_][]const u8{ "twin/lib/inner", "twin/lib", "twin" }) |path| {
+        if (!std.mem.eql(u8, path, "twin")) try world.git(gpa, io, path, &.{ "checkout", "-q", "main" });
+        var dir = try world.work.dir.openDir(io, path, .{});
+        defer dir.close(io);
+        try dir.writeFile(io, .{ .sub_path = "CHANGED", .data = path });
+        try world.git(gpa, io, path, &.{ "add", "-A" });
+        try world.git(gpa, io, path, &.{ "commit", "-q", "-m", "change" });
+    }
+}
+
+test "a push goes into the submodules as git's transport_push does: check refuses, on-demand pushes them first, only pushes them alone, a submodule's only is on-demand" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const Case = struct {
+        git_args: []const []const u8,
+        options: push_mod.Options,
+        /// Settings in the superproject, and in `lib`.
+        config: []const [2][]const u8 = &.{},
+        lib_config: []const [2][]const u8 = &.{},
+        refused: ?anyerror = null,
+    };
+    const cases = [_]Case{
+        .{ .git_args = &.{"--recurse-submodules=check"}, .options = .{ .who = test_who, .recurse_submodules = .check }, .refused = error.UnpushedSubmodules },
+        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .options = .{ .who = test_who, .recurse_submodules = .on_demand } },
+        .{ .git_args = &.{"--recurse-submodules=only"}, .options = .{ .who = test_who, .recurse_submodules = .only } },
+        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "push.recurseSubmodules", "on-demand" }}, .lib_config = &.{.{ "push.recurseSubmodules", "only" }} },
+        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "submodule.recurse", "true" }} },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .no }, .config = &.{.{ "push.recurseSubmodules", "check" }} },
+    };
+    for (cases) |case| {
+        var worlds: [2]SubmoduleWorld = .{ try SubmoduleWorld.init(gpa, io), try SubmoduleWorld.init(gpa, io) };
+        defer for (&worlds) |*w| w.deinit(gpa);
+        for (&worlds) |*world| {
+            try changeUnderTwin(gpa, io, world);
+            for (case.config) |pair| try world.git(gpa, io, "twin", &.{ "config", pair[0], pair[1] });
+            for (case.lib_config) |pair| try world.git(gpa, io, "twin/lib", &.{ "config", pair[0], pair[1] });
+        }
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "push", "-q" });
+        try argv.appendSlice(gpa, case.git_args);
+        var git_dir = try worlds[0].work.dir.openDir(io, "twin", .{});
+        defer git_dir.close(io);
+        const by_git = testremote.gitInputEnv(gpa, io, git_dir, &env, argv.items, "", false);
+
+        var dir = try worlds[1].work.dir.openDir(io, "twin", .{});
+        defer dir.close(io);
+        var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        var options = case.options;
+        options.programs = .{ .environ = &env };
+        var warnings: warning.Warnings = .init(gpa);
+        defer warnings.deinit();
+        options.warnings = &warnings;
+        const pushed = push_mod.push(gpa, io, &repo, "origin", options);
+        if (case.refused) |err| {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(err, pushed);
+            try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+        } else {
+            gpa.free(try by_git);
+            var outcome = try pushed;
+            outcome.deinit();
+        }
+        // Each upstream as git left its own.
+        for ([_][]const u8{ "super", "lib", "inner" }) |name| {
+            var listed: [2][]u8 = undefined;
+            for (&worlds, &listed) |*world, *out| {
+                const bare = try gpa.print("{s}/{s}.git", .{ world.root_path, name });
+                defer gpa.free(bare);
+                var root = try world.work.dir.openDir(io, ".", .{});
+                defer root.close(io);
+                out.* = try testremote.gitInput(gpa, io, root, &.{ "--git-dir", bare, "for-each-ref", "--format=%(refname) %(objectname)" }, "");
+            }
+            defer for (listed) |l| gpa.free(l);
+            try testing.expectEqualStrings(listed[0], listed[1]);
+        }
+    }
+}

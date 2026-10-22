@@ -67,3 +67,6 @@ pub const parseRecurse = @import("submodule/changes.zig").parseRecurse;
 pub const fetchJobs = @import("submodule/changes.zig").fetchJobs;
 pub const defaultRemote = @import("submodule/submodule.zig").defaultRemote;
 pub const CloneRequest = @import("submodule/submodule.zig").CloneRequest;
+pub const Unpushed = @import("submodule/changes.zig").Unpushed;
+pub const PushRange = @import("submodule/changes.zig").PushRange;
+pub const unpushedSubmodules = @import("submodule/changes.zig").unpushedSubmodules;

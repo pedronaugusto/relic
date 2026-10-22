@@ -414,3 +414,61 @@ pub fn fetchJobs(repo: *Repository, modules: *const Gitmodules, explicit: ?u32) 
     if (jobs == 0) return @intCast(std.Thread.getCpuCount() catch 1);
     return @intCast(@min(jobs, std.math.maxInt(u32)));
 }
+
+//=========================================================================
+// What a push would leave the remote without
+//=========================================================================
+
+/// A submodule whose commits a push records and no remote of its own has.
+pub const Unpushed = struct { name: []const u8, path: []const u8 };
+
+/// What a push sends: the new values, and the remote they go to.
+pub const PushRange = struct { commits: []const Oid, remote: []const u8 };
+
+/// git's `find_unpushed_submodules`: each submodule the commits pushed
+/// move -- those `refs/remotes/<remote>/` does not reach -- that is checked
+/// out at its path in the working tree's `.gitmodules`, holds every commit
+/// recorded, has remote-tracking refs, and has a commit none of them
+/// reaches. `arena`'s.
+pub fn unpushedSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, range: PushRange) Self.Error![]const Unpushed {
+    var hidden: std.ArrayList(Oid) = .empty;
+    var tracking = try repo.refStore().list(gpa, io, try arena.print("refs/remotes/{s}/", .{range.remote}));
+    defer tracking.deinit();
+    for (tracking.entries) |ref| switch (ref.target) {
+        .direct => |oid| try hidden.append(arena, oid),
+        .symbolic => {},
+    };
+    const changed = try changedSubmodules(arena, gpa, io, repo, .{ .tips = range.commits, .hidden = hidden.items });
+    if (changed.len == 0) return &.{};
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    var modules = try submodule.loadGitmodules(gpa, io, repo, &index);
+    defer modules.deinit();
+    var out: std.ArrayList(Unpushed) = .empty;
+    for (changed) |c| {
+        const path = if (modules.byName(c.name)) |m| try arena.dupe(u8, m.path orelse c.name) else try populatedPath(gpa, io, repo, c.name) orelse continue;
+        if (try needsPushing(gpa, io, repo, .{ .path = path, .name = c.name }, c.commits)) try out.append(arena, .{ .name = c.name, .path = path });
+    }
+    return out.items;
+}
+
+/// git's `submodule_needs_pushing`: a submodule not checked out, or
+/// without every commit, is taken not to need it, as git takes it.
+fn needsPushing(gpa: Allocator, io: Io, repo: *Repository, module: submodule.PathName, commits: []const Oid) Self.Error!bool {
+    if (try populatedPath(gpa, io, repo, module.path) == null) return false;
+    var sub = (try submodule.openRepository(gpa, io, repo, module, .{})) orelse return false;
+    defer sub.deinit(io);
+    if (!try hasCommits(gpa, io, &sub, commits)) return false;
+    var remotes = try sub.refStore().list(gpa, io, "refs/remotes/");
+    defer remotes.deinit();
+    if (remotes.entries.len == 0) return false;
+    // `git rev-list <commits> --not --remotes -n 1` printing something.
+    var walk: rev_walk.Walk = .init(gpa, sub.objectDatabase());
+    defer walk.deinit();
+    for (commits) |oid| try walk.push(oid);
+    for (remotes.entries) |ref| switch (ref.target) {
+        .direct => |oid| if (try commitOf(io, &sub, oid)) |commit| try walk.hide(commit),
+        .symbolic => {},
+    };
+    return try walk.next(io) != null;
+}
