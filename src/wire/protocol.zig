@@ -19,6 +19,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
+const object = @import("../object/object.zig");
+const decimal = @import("../text.zig").decimal;
 const pkt_line = @import("../codec.zig").pkt_line;
 const connection = @import("connection.zig");
 
@@ -68,6 +70,12 @@ pub const Error = error{
     /// Server options for a v2 server that does not advertise
     /// `server-option`: git's "server doesn't support 'server-option'".
     ServerOptionNotSupported,
+    /// `object-info` of a server that speaks v0 or v1: git's "object-info
+    /// requires protocol v2".
+    ObjectInfoNeedsV2,
+    /// `object-info` of a v2 server that does not advertise it: git's
+    /// "object-info capability is not enabled on the server".
+    ObjectInfoNotEnabled,
 } || connection.Error;
 
 /// One ref the server has.
@@ -411,15 +419,19 @@ pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u
     // after every capability, as `get_remote_refs` does.
     const bundle_uri = std.mem.eql(u8, command, "bundle-uri");
     const fetch = std.mem.eql(u8, command, "fetch");
+    const object_info = std.mem.eql(u8, command, "object-info");
     if (std.mem.eql(u8, command, "ls-refs")) {
         try pkt_line.print(w, "command={s}\n", .{command});
     } else if (!bundle_uri) try pkt_line.print(w, "command={s}", .{command});
     if (adv.has("agent")) try pkt_line.print(w, "agent={s}", .{agent});
     if (extras.session_id) |sid| if (adv.has("session-id")) try pkt_line.print(w, "session-id={s}", .{sid});
-    if (fetch) for (extras.server_options) |option| try pkt_line.print(w, "server-option={s}", .{option});
+    if (fetch or object_info) for (extras.server_options) |option| try pkt_line.print(w, "server-option={s}", .{option});
     if (adv.has("object-format")) try pkt_line.print(w, "object-format={s}", .{adv.kind.name()});
-    if (adv.promisor_reply) |names| try pkt_line.print(w, "promisor-remote={s}", .{names});
-    if (!fetch) for (extras.server_options) |option| try pkt_line.print(w, "server-option={s}", .{option});
+    // git's `send_capabilities`, which `ls-refs` and `bundle-uri` send;
+    // `fetch` and `object-info` go through `write_command_and_capabilities`,
+    // which has none.
+    if (!fetch and !object_info) if (adv.promisor_reply) |names| try pkt_line.print(w, "promisor-remote={s}", .{names});
+    if (!fetch and !object_info) for (extras.server_options) |option| try pkt_line.print(w, "server-option={s}", .{option});
     if (bundle_uri) try pkt_line.write(w, "command=bundle-uri\n");
     try pkt_line.delim(w);
 }
@@ -447,6 +459,102 @@ pub fn bundleUri(arena: Allocator, conn: *Connection, adv: *const Advertisement)
         }
     }
     return lines.items;
+}
+
+/// What an `object-info` request asks of each object.
+pub const ObjectInfoRequest = struct {
+    oids: []const Oid,
+    size: bool = false,
+    type: bool = false,
+    extras: CommandExtras = .{},
+};
+
+/// What a v2 server's `object-info` answers, one entry per object asked:
+/// git 2.56's `fetch_object_info_results`. An attribute the server does
+/// not advertise in `object-info=` is not asked, and its list is `null`.
+pub const ObjectInfo = struct {
+    sizes: ?[]const u64 = null,
+    types: ?[]const object.Type = null,
+    /// The objects the server does not have.
+    unrecognized: []const bool,
+};
+
+/// Ask a v2 server `object-info` of `request.oids`: git 2.56's
+/// `fetch_object_info`, which cat-file's `remote-object-info` asks. The
+/// attributes asked are those wanted that the server names in its
+/// `object-info=`; with none, the request is an existence check. An answer
+/// out of git's shape is `error.ProtocolError`. The lists are `arena`'s.
+pub fn objectInfo(arena: Allocator, conn: *Connection, adv: *const Advertisement, request: ObjectInfoRequest) Self.Error!ObjectInfo {
+    if (adv.version != .v2) return error.ObjectInfoNeedsV2;
+    const offered = adv.value("object-info") orelse return error.ObjectInfoNotEnabled;
+    const ask_size = request.size and hasFeature(offered, "size");
+    const ask_type = request.type and hasFeature(offered, "type");
+    const w = try conn.request();
+    (struct {
+        fn send(out: *Io.Writer, a: *const Advertisement, r: ObjectInfoRequest, size: bool, kind: bool) !void {
+            try writeCommand(out, a, "object-info", r.extras);
+            if (size) try pkt_line.write(out, "size");
+            if (kind) try pkt_line.write(out, "type");
+            for (r.oids) |oid| try pkt_line.print(out, "oid {f}", .{oid});
+            try pkt_line.flush(out);
+        }
+    }).send(w, adv, request, ask_size, ask_type) catch |err| return conn.writeFailed(err);
+    const in = try conn.response();
+
+    // The attributes, in the order the server answers them.
+    const wanted = @as(usize, @intFromBool(ask_size)) + @intFromBool(ask_type);
+    var size_at: ?usize = null;
+    var type_at: ?usize = null;
+    for (0..wanted) |i| {
+        const line = switch (try conn.readPacket(in)) {
+            .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
+            else => return error.ProtocolError,
+        };
+        if (std.mem.eql(u8, line, "size") and ask_size and size_at == null) {
+            size_at = i;
+        } else if (std.mem.eql(u8, line, "type") and ask_type and type_at == null) {
+            type_at = i;
+        } else return error.ProtocolError;
+    }
+    const sizes: ?[]u64 = if (size_at != null) try arena.alloc(u64, request.oids.len) else null;
+    const types: ?[]object.Type = if (type_at != null) try arena.alloc(object.Type, request.oids.len) else null;
+    const unrecognized = try arena.alloc(bool, request.oids.len);
+    @memset(unrecognized, false);
+    var hex_buf: [hash.max_hex_len]u8 = undefined;
+    for (request.oids, 0..) |oid, i| {
+        const line = switch (try conn.readPacket(in)) {
+            .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
+            else => return error.ProtocolError,
+        };
+        var values: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.splitScalar(u8, line, ' ');
+        while (it.next()) |v| try values.append(arena, v);
+        if (!std.mem.eql(u8, values.items[0], oid.hex(&hex_buf))) return error.ProtocolError;
+        // `<oid> ` alone: the server does not have it.
+        if (values.items.len >= 2 and values.items[1].len == 0) {
+            unrecognized[i] = true;
+            continue;
+        }
+        if (values.items.len != wanted + 1) return error.ProtocolError;
+        if (size_at) |at| {
+            const text = values.items[at + 1];
+            sizes.?[i] = decimal.digits(u64, text) orelse return error.ProtocolError;
+        }
+        if (type_at) |at| types.?[i] = object.Type.parse(values.items[at + 1]) catch return error.ProtocolError;
+    }
+    switch (try conn.readPacket(in)) {
+        .flush => {},
+        else => return error.ProtocolError,
+    }
+    return .{ .sizes = sizes, .types = types, .unrecognized = unrecognized };
+}
+
+/// Whether a capability's value, its features separated by spaces, names
+/// `feature`: git's `server_supports_feature`.
+fn hasFeature(value: []const u8, feature: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, value, ' ');
+    while (it.next()) |f| if (std.mem.eql(u8, f, feature)) return true;
+    return false;
 }
 
 const testing = std.testing;

@@ -74,6 +74,10 @@ pub const Error = error{
     /// A transport relic does not have: `git://`, `rsync://`, a remote
     /// helper's `<helper>::<address>`.
     UnsupportedTransport,
+    /// `object-info` asked of a bundle file, a remote helper or a
+    /// repository read directly: git's "remote does not support
+    /// object-info".
+    ObjectInfoUnsupported,
     /// A URL that does not parse.
     MalformedUrl,
     /// `GIT_ALLOW_PROTOCOL`, `protocol.<name>.allow`, `protocol.allow` or
@@ -599,6 +603,23 @@ pub const Session = struct {
             .local => |here| if (upload_pack.advertisesBundleUris(here.repo.configuration())) try upload_pack.bundleSettings(arena, here.repo.configuration(), warnings) else &.{},
             .bundle, .helper => null,
             .smart => |*smart| try protocol.bundleUri(arena, smart.conn, &smart.advertisement),
+        };
+    }
+
+    /// What the remote's `object-info` says of `request.oids`: git 2.56's
+    /// `transport_fetch_object_info`, which cat-file's `remote-object-info`
+    /// asks. Only a server speaking protocol v2 answers it, over ssh, HTTP
+    /// or a repository on this machine through upload-pack; the session's
+    /// id and server options go with it. The lists are `arena`'s.
+    pub fn objectInfo(s: *Session, arena: Allocator, request: protocol.ObjectInfoRequest) Self.Error!protocol.ObjectInfo {
+        return switch (s.impl) {
+            .local, .bundle, .helper => error.ObjectInfoUnsupported,
+            .smart => |*smart| {
+                var with_id = request;
+                with_id.extras.session_id = s.sessionId();
+                if (with_id.extras.server_options.len == 0) with_id.extras.server_options = s.server_options;
+                return protocol.objectInfo(arena, smart.conn, &smart.advertisement, with_id);
+            },
         };
     }
 

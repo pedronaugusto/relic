@@ -13,6 +13,7 @@ const Io = std.Io;
 const testing = std.testing;
 
 const object = @import("../object/object.zig");
+const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
@@ -21,6 +22,7 @@ const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const local = @import("local.zig");
 const upload_pack_mod = @import("upload_pack.zig");
+const transport = @import("transport.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
 const program = @import("../process.zig").program;
 
@@ -478,6 +480,58 @@ test "uploadpack.allowRefInWant and uploadpackfilter.* are held to as git's uplo
         // A fetch of one more ref by name.
         for ([_]Io.Dir{ a, b }) |d| gpa.free(try git(gpa, io, d, &env, &.{ "-c", "protocol.version=2", "fetch", "-q", "origin", "refs/heads/main:refs/heads/fetched" }));
         try expectSame(gpa, io, &env, a, b);
+    }
+}
+
+test "git 2.56, a client's object-info says what cat-file's remote-object-info says, of a repository on this machine and over HTTP" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const bare = try served(gpa, io, root.dir);
+    defer gpa.free(bare);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var served_dir = try Io.Dir.cwd().openDir(io, bare, .{});
+    defer served_dir.close(io);
+    gpa.free(try git(gpa, io, served_dir, &env, &.{ "config", "transfer.advertiseObjectInfo", "true" }));
+    const named = try git(gpa, io, served_dir, &env, &.{ "rev-parse", "main", "main^{tree}", "main~3", "main:file" });
+    defer gpa.free(named);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var oids: std.ArrayList(hash.Oid) = .empty;
+    var it = std.mem.tokenizeScalar(u8, named, '\n');
+    while (it.next()) |hex| try oids.append(arena, try hash.Oid.parse(.sha1, hex));
+    try oids.append(arena, try hash.Oid.parse(.sha1, "1111111111111111111111111111111111111111"));
+
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .protocol_v2 = true });
+    defer server.stop();
+    const urls = [_][]const u8{ try arena.print("file://{s}", .{bare}), try server.url(arena, "repo.git") };
+    for (urls) |url| {
+        errdefer std.debug.print("url: {s}\n", .{url});
+        // git's: cat-file --batch-command in a repository with the remote.
+        var client = try testgit.Repo.init(gpa, io, &.{});
+        defer client.deinit();
+        try client.exec(io, &.{ "remote", "add", "origin", url });
+        var input: std.ArrayList(u8) = .empty;
+        try input.appendSlice(arena, "remote-object-info origin");
+        for (oids.items) |oid| try input.print(arena, " {f}", .{oid});
+        try input.append(arena, '\n');
+        const theirs = try testremote.gitInputEnv(gpa, io, client.dir, &env, &.{ "-c", "protocol.version=2", "cat-file", "--batch-command=%(objectname) %(objecttype) %(objectsize)" }, input.items, true);
+        defer gpa.free(theirs);
+
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .protocol_v2 = true, .programs = .{ .environ = &env } });
+        defer session.deinit(io);
+        const info = try session.objectInfo(arena, .{ .oids = oids.items, .size = true, .type = true });
+        var ours: std.ArrayList(u8) = .empty;
+        for (oids.items, 0..) |oid, i| {
+            if (info.unrecognized[i]) {
+                try ours.print(arena, "{f} missing\n", .{oid});
+            } else try ours.print(arena, "{f} {s} {d}\n", .{ oid, info.types.?[i].name(), info.sizes.?[i] });
+        }
+        try testing.expectEqualStrings(theirs, ours.items);
     }
 }
 
