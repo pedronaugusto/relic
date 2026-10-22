@@ -12,6 +12,9 @@
 //! `branch.<name>.rebase` where `branch.autoSetupRebase` asks for it. The
 //! ref is written with git's `branch: Created from <start>` reflog line,
 //! or `branch: Reset to <start>` when an existing branch is forced.
+//!
+//! `deleteMerged` is git 2.56's `git branch --delete-merged`: the branches
+//! whose work has landed on the upstream they track, deleted.
 
 const ErrorNamespace = @This();
 const Self = @This();
@@ -29,11 +32,15 @@ const config_mod = @import("../config/config.zig");
 const ref_names = @import("../names.zig").ref;
 const remote_mod = @import("../wire.zig").remote;
 const rev_parse = @import("../repo/rev_parse.zig");
+const refs_pretty = @import("../pretty/refs.zig");
+const refspec = @import("../wire.zig").refspec;
+const rev_walk = @import("../walk/walk.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 
-/// Errors from making a branch or setting its upstream.
+/// Errors from making a branch, setting its upstream, or deleting the
+/// merged ones.
 pub const Error = error{
     /// "'<name>' is not a valid branch name".
     InvalidBranchName,
@@ -60,7 +67,10 @@ pub const Error = error{
     InvalidBranchSetting,
     /// The branch to set an upstream for does not exist.
     NoSuchBranch,
-} || rev_parse.Error || head_mod.CheckedOutError || remote_mod.Error || Repository.WriteConfigError || refs_mod.TransactionError;
+    /// A `--delete-merged` pattern that is neither a glob nor a branch:
+    /// "'<pattern>' is not a valid branch or pattern".
+    NotABranchOrPattern,
+} || refs_pretty.Error || rev_parse.Error || head_mod.CheckedOutError || remote_mod.Error || Repository.WriteConfigError || refs_mod.TransactionError;
 
 /// How a new branch takes an upstream: git's `branch_track`.
 pub const Track = enum {
@@ -395,4 +405,181 @@ pub fn guessing(config: *const config_mod.Config) config_mod.ValueError!Guessing
         .checkout = try config.getBool("checkout.guess", true),
         .worktree = try config.getBool("worktree.guessremote", false),
     };
+}
+
+/// What `deleteMerged` is asked: `git branch --delete-merged`'s arguments.
+pub const MergedInputs = struct {
+    /// The `--delete-merged` patterns as given, each read as
+    /// `pretty.refs.forkedPattern` reads `--forked`'s: the upstreams a
+    /// branch must track to be considered.
+    upstreams: []const []const u8,
+    /// The `<branch-pattern>`s: globs over a branch's name after
+    /// `refs/heads/`, the branches considered; none is every branch.
+    branches: []const []const u8 = &.{},
+};
+
+/// How `deleteMerged` goes.
+pub const MergedOptions = struct {
+    /// `--dry-run`: find what would go and touch nothing.
+    dry_run: bool = false,
+};
+
+/// A branch `deleteMerged` took.
+pub const Deleted = struct {
+    /// Its short name.
+    name: []const u8,
+    /// What it pointed at: git's "(was <abbrev>)".
+    oid: Oid,
+    /// The ref it named, for a symbolic one, which git says instead of
+    /// the object.
+    target: ?[]const u8 = null,
+};
+
+/// What `deleteMerged` did.
+pub const MergedOutcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    arena: std.heap.ArenaAllocator,
+    /// The branches deleted, or under `dry_run` those that would be, by
+    /// name: git's "Deleted branch <name> (was <abbrev>)." and "Would
+    /// delete branch ...", which it gives in its hash set's order.
+    deleted: []const Deleted,
+    /// The merged branches `branch.<name>.deleteMerged` keeps, by name:
+    /// git's "Skipping '<name>' (branch.<name>.deleteMerged is false)".
+    kept: []const []const u8,
+
+    /// Release everything.
+    pub fn deinit(o: *MergedOutcome) void {
+        o.arena.deinit();
+        o.* = undefined;
+    }
+};
+
+/// git 2.56's `git branch --delete-merged`: each local branch that tracks
+/// an upstream `inputs.upstreams` names and whose tip that upstream
+/// reaches, deleted with its `branch.<name>` section. A branch stays when
+/// its upstream is gone, a worktree holds it (`head.checkedOutBranches`),
+/// a push of it to its remote would update that upstream (the remote's
+/// push refspecs, else its own name, through the fetch refspecs: such a
+/// branch looks merged right after a pull), another branch that stays
+/// tracks it, or `branch.<name>.deleteMerged` is false. A branch kept as
+/// another's upstream has its own upstream configuration cleared when
+/// that upstream goes, as git's does.
+pub fn deleteMerged(gpa: Allocator, io: Io, repo: *Repository, inputs: MergedInputs, options: MergedOptions) Self.Error!MergedOutcome {
+    var outcome: MergedOutcome = .{ .arena = .init(gpa), .deleted = &.{}, .kept = &.{} };
+    errdefer outcome.arena.deinit();
+    const a = outcome.arena.allocator();
+    const config = repo.configuration();
+
+    const forked = try a.alloc([]const u8, inputs.upstreams.len);
+    for (inputs.upstreams, forked) |arg, *pattern| {
+        pattern.* = (try refs_pretty.forkedPattern(a, io, repo, arg)) orelse return error.NotABranchOrPattern;
+    }
+    var listing = refs_pretty.Listing.init(gpa, io, repo, .{});
+    defer listing.deinit();
+    try listing.collect(.{ .kinds = .{ .branches = true }, .patterns = inputs.branches, .match_as_path = false, .forked = forked });
+
+    const busy = try head_mod.checkedOutBranches(a, io, repo);
+    var deletable: std.array_hash_map.String(Deleted) = .empty;
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (listing.items.items) |item| {
+        const name = item.name["refs/heads/".len..];
+        if (busy.contains(item.name)) continue;
+        const upstream = (try listing.upstreamOf(name)) orelse continue;
+        const theirs = (try repo.refStore().resolve(a, io, upstream)) orelse continue;
+        if (try pushesToUpstream(a, repo, name, upstream)) continue;
+        if (!try reachedFrom(gpa, io, repo, item.oid, theirs.oid)) continue;
+        if (!try config.getBool(try a.print("branch.{s}.deletemerged", .{name}), true)) {
+            try kept.append(a, try a.dupe(u8, name));
+            continue;
+        }
+        try deletable.put(a, try a.dupe(u8, name), .{
+            .name = try a.dupe(u8, name),
+            .oid = item.oid,
+            .target = if (item.symref) |t| try a.dupe(u8, t) else null,
+        });
+    }
+
+    // git's `protect_stacked_branch_bases`: a branch some branch that stays
+    // builds on stays too, judged against the first choice in one pass.
+    var protected: std.ArrayList([]const u8) = .empty;
+    var branches = try repo.refStore().list(gpa, io, "refs/heads/");
+    defer branches.deinit();
+    for (branches.entries) |entry| {
+        const name = entry.name["refs/heads/".len..];
+        if (deletable.contains(name)) continue;
+        const base = localUpstream(try listing.upstreamOf(name)) orelse continue;
+        if (deletable.contains(base)) try protected.append(a, try a.dupe(u8, base));
+    }
+    for (protected.items) |name| _ = deletable.orderedRemove(name);
+
+    const Order = struct {
+        keys: []const []const u8,
+        pub fn lessThan(ctx: @This(), l: usize, r: usize) bool {
+            return std.mem.order(u8, ctx.keys[l], ctx.keys[r]) == .lt;
+        }
+    };
+    deletable.sort(Order{ .keys = deletable.keys() });
+    std.mem.sort([]const u8, kept.items, {}, lessThanName);
+    outcome.deleted = deletable.values();
+    outcome.kept = kept.items;
+    if (options.dry_run or deletable.count() == 0) return outcome;
+
+    var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
+    for (deletable.keys()) |name| try edits.append(a, .{ .remove_section = .{ .section = "branch", .subsection = name } });
+    // git's `clear_deleted_upstreams`: a kept base whose own upstream went.
+    for (protected.items) |name| {
+        const base = localUpstream(try listing.upstreamOf(name)) orelse continue;
+        if (!deletable.contains(base)) continue;
+        try edits.append(a, .{ .unset = .{ .name = try a.print("branch.{s}.merge", .{name}) } });
+        try edits.append(a, .{ .unset = .{ .name = try a.print("branch.{s}.remote", .{name}) } });
+    }
+    const doomed = try a.alloc([]const u8, deletable.count());
+    for (deletable.keys(), doomed) |name, *ref| ref.* = try a.print("refs/heads/{s}", .{name});
+    try repo.refStore().deleteRefs(gpa, io, doomed, null);
+    _ = try repo.writeConfig(io, .local, edits.items, .{});
+    return outcome;
+}
+
+fn lessThanName(_: void, l: []const u8, r: []const u8) bool {
+    return std.mem.order(u8, l, r) == .lt;
+}
+
+/// The branch an upstream is, when it is one here.
+fn localUpstream(upstream: ?[]const u8) ?[]const u8 {
+    const full = upstream orelse return null;
+    if (!std.mem.startsWith(u8, full, "refs/heads/")) return null;
+    return full["refs/heads/".len..];
+}
+
+/// git's `branch_pushes_to_upstream`: whether a push of the branch `name`
+/// to the remote it fetches from would update `upstream`, by the remote's
+/// push refspecs (else the branch's own name) and then its fetch ones.
+fn pushesToUpstream(a: Allocator, repo: *Repository, name: []const u8, upstream: []const u8) Self.Error!bool {
+    const config = repo.configuration();
+    var branch = try remote_mod.Branch.get(a, config, name);
+    defer branch.deinit();
+    var remote = try remote_mod.Remote.get(a, config, repo.objectFormat(), branch.fetchRemote(config));
+    defer remote.deinit();
+    const full = try a.print("refs/heads/{s}", .{name});
+    const pushed = if (remote.push.len != 0) (try refspec.map(a, remote.push, full)) orelse return false else full;
+    const tracking = (try refspec.map(a, remote.fetch, pushed)) orelse return false;
+    return std.mem.eql(u8, tracking, upstream);
+}
+
+/// git's `branch_merged` with no `HEAD` to fall back on: whether the
+/// commit `ours` names is one `theirs` reaches; neither a commit, no.
+fn reachedFrom(gpa: Allocator, io: Io, repo: *Repository, ours: Oid, theirs: Oid) Self.Error!bool {
+    const ours_commit = (try commitOf(io, repo, ours)) orelse return false;
+    const theirs_commit = (try commitOf(io, repo, theirs)) orelse return false;
+    return rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = ours_commit, .descendant = theirs_commit }, .{});
+}
+
+fn commitOf(io: Io, repo: *Repository, oid: Oid) Self.Error!?Oid {
+    const peeled = repo.peel(io, oid) catch |err| switch (err) {
+        error.ObjectNotFound => return null,
+        else => |e| return e,
+    };
+    const header = try repo.objectDatabase().readHeader(io, peeled);
+    return if (header.type == .commit) peeled else null;
 }

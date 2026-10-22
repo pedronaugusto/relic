@@ -49,6 +49,8 @@ const Parsed = struct {
     no_contains: std.ArrayList(Oid) = .empty,
     merged: std.ArrayList(Oid) = .empty,
     no_merged: std.ArrayList(Oid) = .empty,
+    /// `--forked=`, as given; `compare` reads them as `forkedPattern` does.
+    forked: std.ArrayList([]const u8) = .empty,
     count: usize = 0,
     ignore_case: bool = false,
     omit_empty: bool = false,
@@ -92,6 +94,8 @@ fn parseArgs(arena: Allocator, io: Io, git: *testgit.Repo, args: []const []const
             try p.merged.append(arena, try oidOf(arena, io, git, v));
         } else if (value(arg, "--no-merged=")) |v| {
             try p.no_merged.append(arena, try oidOf(arena, io, git, v));
+        } else if (value(arg, "--forked=")) |v| {
+            try p.forked.append(arena, v);
         } else if (value(arg, "--start-after=")) |v| {
             p.start_after = v;
         } else if (value(arg, "--abbrev=")) |v| {
@@ -238,6 +242,11 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
             .merged = p.merged.items,
             .no_merged = p.no_merged.items,
             .points_at = p.points_at.items,
+            .forked = forked: {
+                const patterns = try arena.alloc([]const u8, p.forked.items.len);
+                for (p.forked.items, patterns) |arg, *pattern| pattern.* = (try filter.forkedPattern(arena, io, &repo, arg)) orelse return error.NotABranchOrPattern;
+                break :forked patterns;
+            },
             .format = p.format,
             .omit_empty = p.omit_empty,
             .colors = if (branch_colors) |*c| c else null,
@@ -721,4 +730,62 @@ test "for-each-ref from a linked worktree lists what git's lists, in both ref fo
             }
         }
     }.inFormat);
+}
+
+test "--forked lists the branches git 2.56's does: an upstream named whole, by a glob, by a remote's HEAD, with patterns and --no-merged" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    // t3200's setup: `origin` with `one` and `two`, `other` with
+    // `foreign`, and local branches tracking each and a local one.
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    for ([_][]const []const u8{
+        &.{ "commit", "-q", "--allow-empty", "-m", "base" },
+        &.{ "branch", "one" },
+        &.{ "branch", "two" },
+        &.{ "init", "-q", "--bare", ".git/upstream.git" },
+        &.{ "push", "-q", ".git/upstream.git", "main", "one", "two" },
+        &.{ "branch", "-D", "one", "two" },
+        &.{ "remote", "add", "-f", "origin", ".git/upstream.git" },
+        &.{ "remote", "set-head", "origin", "main" },
+        &.{ "branch", "-q", "--set-upstream-to=origin/main", "main" },
+        &.{ "init", "-q", "-b", "main", ".git/other" },
+        &.{ "-C", ".git/other", "commit", "-q", "--allow-empty", "-m", "other-base" },
+        &.{ "-C", ".git/other", "branch", "foreign" },
+        &.{ "remote", "add", "-f", "other", ".git/other" },
+        &.{ "branch", "local-base" },
+        &.{ "branch", "-q", "--track", "local-one", "origin/one" },
+        &.{ "branch", "-q", "--track", "local-two", "origin/two" },
+        &.{ "branch", "-q", "--track", "local-foreign", "other/foreign" },
+        &.{ "branch", "-q", "--track", "local-onbase", "local-base" },
+        &.{ "checkout", "-q", "local-one" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "local-one-work" },
+        &.{ "checkout", "-q", "local-foreign" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "local-foreign-work" },
+    }) |args| try git.exec(io, args);
+    inline for (.{
+        &.{"--forked=origin/one"},
+        &.{"--forked=origin/*"},
+        &.{"--forked=local-base"},
+        &.{ "--forked=origin/one", "--forked=other/foreign" },
+        &.{ "--forked=local-base", "--forked=other/*" },
+        &.{"--forked=*/*"},
+        &.{ "--forked=origin/*", "--no-merged=origin/one" },
+        &.{"--forked=origin"},
+        &.{ "--forked=origin/*", "local-*" },
+        &.{ "--forked=refs/remotes/origin/two", "-a" },
+    }) |args| try compareWith(gpa, io, &git, .branch, args, "--format=%(refname:short)");
+
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    git.report_failures = false;
+    try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "branch", "--forked", "nope" }));
+    try std.testing.expectEqual(null, try filter.forkedPattern(arena_state.allocator(), io, &repo, "nope"));
+    // a tag is neither a branch nor a remote-tracking one
+    try git.exec(io, &.{ "tag", "v1" });
+    try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "branch", "--forked", "v1" }));
+    try std.testing.expectEqual(null, try filter.forkedPattern(arena_state.allocator(), io, &repo, "v1"));
 }

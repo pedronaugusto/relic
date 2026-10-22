@@ -4,8 +4,8 @@
 //! A `Listing` gathers the refs a `Filter` lets through — by kind, by
 //! pattern (`for-each-ref`'s path prefixes, or the globs `branch` and `tag`
 //! match after `refs/heads/` and the rest), `--exclude`, `--points-at`,
-//! `--contains`, `--no-contains`, `--merged`, `--no-merged` and
-//! `--start-after` — sorts them by any `--sort` key, version sort and
+//! `--contains`, `--no-contains`, `--merged`, `--no-merged`, `--forked`
+//! and `--start-after` — sorts them by any `--sort` key, version sort and
 //! `versionsort.suffix` included, and formats each with git's `%(...)`
 //! atoms: names and their `short`, `lstrip` and `rstrip` forms, object
 //! names, types, sizes and delta bases, the fields of commits and tags, the
@@ -179,6 +179,11 @@ pub const Filter = struct {
     merged: []const Oid = &.{},
     /// `--no-merged`: refs whose commit none of these reaches.
     no_merged: []const Oid = &.{},
+    /// `--forked`: branches whose upstream one of these names, as
+    /// `forkedPattern` makes them: a ref's full name, matched whole, or a
+    /// glob, matched with `/` special against the upstream less
+    /// `refs/heads/` or `refs/remotes/`.
+    forked: []const []const u8 = &.{},
     /// Only refs that peel to a commit: what `git branch -v` lists.
     commits_only: bool = false,
     /// `--start-after`: only refs that sort after this name.
@@ -668,6 +673,7 @@ pub const Listing = struct {
         const patterns: Patterns = .{
             .include = try .compile(l.a(), filter, filter.patterns),
             .exclude = try .compile(l.a(), filter, filter.exclude),
+            .forked = try .compile(l.a(), filter.forked),
         };
         const store = l.repo.refStore();
         var candidates: std.ArrayList(refs_mod.Named) = .empty;
@@ -758,6 +764,7 @@ pub const Listing = struct {
         if (!patterns.include.matches(filter, name, true)) return;
         if (patterns.exclude.matches(filter, name, false)) return;
         if (filter.points_at.len != 0 and !try l.pointsAt(filter.points_at, oid)) return;
+        if (filter.forked.len != 0 and !try l.forkedFrom(&patterns.forked, name)) return;
         var commit: ?Oid = null;
         if (filter.merged.len != 0 or filter.no_merged.len != 0 or filter.contains.len != 0 or
             filter.no_contains.len != 0 or filter.commits_only)
@@ -1860,6 +1867,14 @@ pub const Listing = struct {
 
     // -- upstream and push ------------------------------------------------
 
+    /// git's `filter_forked_match`: whether `name` is a branch whose
+    /// upstream `forked` names.
+    fn forkedFrom(l: *Listing, forked: *const Forked, name: []const u8) ErrorNamespace.Error!bool {
+        if (!std.mem.startsWith(u8, name, "refs/heads/")) return false;
+        const upstream = (try l.upstreamOf(name["refs/heads/".len..])) orelse return false;
+        return forked.matches(upstream);
+    }
+
     /// git's `branch_get_upstream` for the branch `short`, or `null`.
     pub fn upstreamOf(l: *Listing, short: []const u8) ErrorNamespace.Error!?[]const u8 {
         const config = l.repo.configuration();
@@ -2281,7 +2296,54 @@ const Globs = struct {
 const Patterns = struct {
     include: Globs,
     exclude: Globs,
+    forked: Forked,
 };
+
+/// A filter's `forked` patterns, each a full name or a compiled glob.
+const Forked = struct {
+    texts: []const []const u8,
+    globs: []const ?glob_mod.Glob,
+
+    fn compile(a: Allocator, texts: []const []const u8) Allocator.Error!Forked {
+        const globs = try a.alloc(?glob_mod.Glob, texts.len);
+        for (texts, globs) |text, *glob| glob.* = if (isGlob(text)) try .compile(a, text, .{ .pathname = true }) else null;
+        return .{ .texts = texts, .globs = globs };
+    }
+
+    /// Whether one of the patterns names `upstream`, a full name.
+    fn matches(f: *const Forked, upstream: []const u8) bool {
+        var short = upstream;
+        for ([_][]const u8{ "refs/heads/", "refs/remotes/" }) |prefix| {
+            if (std.mem.startsWith(u8, short, prefix)) {
+                short = short[prefix.len..];
+                break;
+            }
+        }
+        for (f.texts, f.globs) |text, *glob| {
+            if (glob.*) |*g| {
+                if (g.matches(short)) return true;
+            } else if (std.mem.eql(u8, text, upstream)) return true;
+        }
+        return false;
+    }
+};
+
+/// git's `has_glob_specials`.
+fn isGlob(text: []const u8) bool {
+    return glob_mod.literalPrefix(text) < text.len;
+}
+
+/// What `--forked <arg>` stands for, git's `ref_filter_forked_add`: a glob
+/// as it is, or the branch or remote-tracking branch `arg` names alone (a
+/// remote names the branch its `HEAD` points at), by its full name in
+/// `arena`. `null` is git's "'<arg>' is not a valid branch or pattern".
+pub fn forkedPattern(arena: Allocator, io: Io, repo: *Repository, arg: []const u8) ErrorNamespace.Error!?[]const u8 {
+    if (isGlob(arg)) return arg;
+    const found = (try revparse_mod.dwimRef(arena, io, repo.revisionSource(), arg)) orelse return null;
+    if (found.count != 1) return null;
+    if (!std.mem.startsWith(u8, found.ref, "refs/heads/") and !std.mem.startsWith(u8, found.ref, "refs/remotes/")) return null;
+    return found.ref;
+}
 
 /// The value of the header `key` in an object's headers.
 fn headerValue(buf: []const u8, key: []const u8) ?[]const u8 {
@@ -2725,6 +2787,8 @@ pub const BranchListOptions = struct {
     merged: []const Oid = &.{},
     no_merged: []const Oid = &.{},
     points_at: []const Oid = &.{},
+    /// `--forked`, each as `forkedPattern` makes it.
+    forked: []const []const u8 = &.{},
     /// `--format`; git's own when `null`.
     format: ?[]const u8 = null,
     omit_empty: bool = false,
@@ -2766,6 +2830,7 @@ pub fn listBranches(gpa: Allocator, io: Io, writer: *Io.Writer, repo: *Repositor
         .no_contains = options.no_contains,
         .merged = options.merged,
         .no_merged = options.no_merged,
+        .forked = options.forked,
         .commits_only = options.verbose > 0,
     });
     const text = options.format orelse try branchFormat(l.a(), &l, .{

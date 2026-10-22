@@ -303,3 +303,242 @@ test "a branch a bisection started from is named with its worktree, as git 2.56'
         };
     }
 }
+
+/// t3200's `--delete-merged` setup: `origin` with `main` and `next`, a
+/// branch ahead, `fork` empty, `other` unrelated, `push.default=current`.
+fn mergedScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    for ([_][]const []const u8{
+        &.{ "commit", "-q", "--allow-empty", "-m", "base" },
+        &.{ "checkout", "-q", "-b", "next" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "next-work" },
+        &.{ "checkout", "-q", "main" },
+        &.{ "init", "-q", "--bare", ".git/upstream.git" },
+        &.{ "push", "-q", ".git/upstream.git", "main", "next" },
+        &.{ "branch", "-q", "-D", "next" },
+        &.{ "remote", "add", "-f", "origin", ".git/upstream.git" },
+        &.{ "remote", "set-head", "origin", "main" },
+        &.{ "branch", "-q", "--set-upstream-to=origin/main", "main" },
+        &.{ "init", "-q", "--bare", ".git/fork.git" },
+        &.{ "remote", "add", "fork", ".git/fork.git" },
+        &.{ "init", "-q", "-b", "main", ".git/other" },
+        &.{ "-C", ".git/other", "commit", "-q", "--allow-empty", "-m", "other-base" },
+        &.{ "remote", "add", "other", ".git/other" },
+        &.{ "config", "push.default", "current" },
+        &.{ "fetch", "-q", "other" },
+    }) |args| try repo.exec(io, args);
+}
+
+/// One `git branch [--dry-run] (--delete-merged <pattern>)... [<branch-pattern>...]`.
+const MergedRun = struct {
+    upstreams: []const []const u8,
+    branches: []const []const u8 = &.{},
+    dry_run: bool = false,
+};
+
+const MergedCase = struct {
+    what: []const u8,
+    /// Branches made as t3200's `create_merged_branch` makes them: on
+    /// `origin/next`, a commit ahead, pushed to it.
+    merged: []const []const u8 = &.{},
+    setup: []const []const []const u8 = &.{},
+    runs: []const MergedRun,
+};
+
+/// git's lines for what `deleteMerged` did, `dry_run` or not, sorted:
+/// git gives them in its hash set's order.
+fn mergedLines(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo, outcome: *const branch.MergedOutcome, dry_run: bool) ![]const u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    for (outcome.deleted) |d| {
+        var hex_buf: [64]u8 = undefined;
+        const hex = d.oid.hex(&hex_buf);
+        const short = try repo.line(io, &.{ "rev-parse", "--short", hex });
+        defer gpa.free(short);
+        try lines.append(gpa, try std.mem.concat(gpa, u8, &.{ if (dry_run) "Would delete" else "Deleted", " branch ", d.name, " (was ", d.target orelse short, ")." }));
+    }
+    for (outcome.kept) |name| try lines.append(gpa, try std.mem.concat(gpa, u8, &.{ "Skipping '", name, "' (branch.", name, ".deleteMerged is false)" }));
+    return sortedLines(gpa, lines.items);
+}
+
+fn sortedLines(gpa: std.mem.Allocator, lines: [][]const u8) ![]const u8 {
+    std.mem.sort([]const u8, lines, {}, struct {
+        fn lessThan(_: void, l: []const u8, r: []const u8) bool {
+            return std.mem.order(u8, l, r) == .lt;
+        }
+    }.lessThan);
+    var out: std.ArrayList(u8) = .empty;
+    for (lines) |l| {
+        try out.appendSlice(gpa, l);
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "delete-merged deletes the branches git 2.56's does, with what it says, and clears what it clears" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const cases = [_]MergedCase{
+        .{
+            .what = "a cloned main pushes to its upstream",
+            .setup = &.{&.{ "checkout", "-q", "--detach" }},
+            .runs = &.{.{ .upstreams = &.{"*/*"} }},
+        },
+        .{
+            .what = "only the selected merged branches",
+            .merged = &.{ "also-merged", "merged" },
+            .setup = &.{
+                &.{ "checkout", "-q", "-b", "unmerged", "--track", "origin/next" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "unmerged work" },
+                &.{ "checkout", "-q", "-b", "tracks-other", "--track", "other/main" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{"origin/next"}, .branches = &.{"merged"}, .dry_run = true },
+                .{ .upstreams = &.{"origin/next"}, .branches = &.{"merged"} },
+            },
+        },
+        .{
+            .what = "main kept despite another push remote; a branch checked out, one whose upstream is gone",
+            .merged = &.{ "on-next", "checked-out", "upstream-gone" },
+            .setup = &.{
+                &.{ "config", "remote.pushDefault", "fork" },
+                &.{ "checkout", "-q", "-b", "local-to-delete", "--track", "main" },
+                &.{ "config", "branch.upstream-gone.merge", "refs/heads/topic" },
+                &.{ "checkout", "-q", "-b", "tracks-other", "--track", "other/main" },
+                &.{ "checkout", "-q", "checked-out" },
+            },
+            .runs = &.{.{ .upstreams = &.{ "origin/*", "main" } }},
+        },
+        .{
+            .what = "push refspecs mapped to the upstream",
+            .setup = &.{
+                &.{ "checkout", "-q", "-b", "topic" },
+                &.{ "config", "remote.origin.push", "refs/heads/topic:refs/heads/published" },
+                &.{ "push", "-q", "origin" },
+                &.{ "branch", "-q", "--set-upstream-to=origin/published", "topic" },
+                &.{ "checkout", "-q", "-b", "other-topic", "--track", "origin/published" },
+                &.{ "checkout", "-q", "--detach" },
+            },
+            .runs = &.{.{ .upstreams = &.{"origin/published"} }},
+        },
+        .{
+            .what = "the upstream of a branch that stays stays",
+            .merged = &.{"feature"},
+            .setup = &.{
+                &.{ "checkout", "-q", "-b", "topic", "--track", "feature" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "topic work" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{"origin/next"}, .dry_run = true },
+                .{ .upstreams = &.{"origin/next"} },
+            },
+        },
+        .{
+            .what = "a kept base loses the upstream that went",
+            .setup = &.{
+                &.{ "branch", "-q", "--track", "lower", "origin/next" },
+                &.{ "branch", "-q", "--track", "mid", "lower" },
+                &.{ "checkout", "-q", "-b", "tip", "--track", "mid" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "tip work" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{ "origin/next", "lower" }, .dry_run = true },
+                .{ .upstreams = &.{ "origin/next", "lower" } },
+            },
+        },
+        .{
+            .what = "stacked branches whatever their names sort as",
+            .setup = &.{
+                &.{ "branch", "-q", "--track", "c-lower", "origin/next" },
+                &.{ "branch", "-q", "--track", "b-mid", "c-lower" },
+                &.{ "checkout", "-q", "-b", "a-tip", "--track", "b-mid" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "tip work" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{ "origin/next", "c-*" } },
+                .{ .upstreams = &.{ "origin/next", "c-*" } },
+            },
+        },
+        .{
+            .what = "branch.<name>.deleteMerged=false",
+            .merged = &.{ "deleted", "kept" },
+            .setup = &.{
+                &.{ "config", "branch.kept.deleteMerged", "false" },
+                &.{ "checkout", "-q", "--detach" },
+            },
+            .runs = &.{.{ .upstreams = &.{"origin/next"} }},
+        },
+    };
+    try testgit.eachRefFormat(struct {
+        fn f(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            for (cases) |case| {
+                var pair: Pair = undefined;
+                try Pair.init(gpa, io, &pair, format, mergedScript);
+                defer pair.deinit();
+                for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                    for (case.merged) |name| {
+                        try r.exec(io, &.{ "checkout", "-q", "-b", name, "--track", "origin/next" });
+                        const subject = try std.mem.concat(gpa, u8, &.{ name, " work" });
+                        defer gpa.free(subject);
+                        try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", subject });
+                        const spec = try std.mem.concat(gpa, u8, &.{ name, ":next" });
+                        defer gpa.free(spec);
+                        try r.exec(io, &.{ "push", "-q", "origin", spec });
+                    }
+                    for (case.setup) |args| try r.exec(io, args);
+                }
+                for (case.runs, 0..) |run, n| {
+                    var args: std.ArrayList([]const u8) = .empty;
+                    defer args.deinit(gpa);
+                    try args.append(gpa, "branch");
+                    if (run.dry_run) try args.append(gpa, "--dry-run");
+                    for (run.upstreams) |u| try args.appendSlice(gpa, &.{ "--delete-merged", u });
+                    try args.appendSlice(gpa, run.branches);
+                    var ran = try pair.git.capture(io, args.items);
+                    defer ran.deinit(gpa);
+                    try std.testing.expectEqual(0, ran.code);
+                    var theirs_lines: std.ArrayList([]const u8) = .empty;
+                    defer theirs_lines.deinit(gpa);
+                    for ([_][]const u8{ ran.stdout, ran.stderr }) |text| {
+                        var it = std.mem.tokenizeScalar(u8, text, '\n');
+                        while (it.next()) |l| try theirs_lines.append(gpa, l);
+                    }
+                    const theirs = try sortedLines(gpa, theirs_lines.items);
+                    defer gpa.free(theirs);
+
+                    var repo = try pair.open(io);
+                    defer repo.deinit(io);
+                    var outcome = try branch.deleteMerged(gpa, io, &repo, .{ .upstreams = run.upstreams, .branches = run.branches }, .{ .dry_run = run.dry_run });
+                    defer outcome.deinit();
+                    const ours = try mergedLines(gpa, io, &pair.ours, &outcome, run.dry_run);
+                    defer gpa.free(ours);
+                    std.testing.expectEqualStrings(theirs, ours) catch |err| {
+                        std.debug.print("{s}, run {d}\n", .{ case.what, n });
+                        return err;
+                    };
+                    expectSame(&pair, io) catch |err| {
+                        std.debug.print("{s}, run {d}\n", .{ case.what, n });
+                        return err;
+                    };
+                }
+            }
+        }
+    }.f);
+}
+
+test "delete-merged refuses a pattern that names no branch, as git 2.56's does" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, .files, mergedScript);
+    defer pair.deinit();
+    pair.git.report_failures = false;
+    try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "branch", "--delete-merged", "nope" }));
+    var repo = try pair.open(io);
+    defer repo.deinit(io);
+    try std.testing.expectError(error.NotABranchOrPattern, branch.deleteMerged(gpa, io, &repo, .{ .upstreams = &.{"nope"} }, .{}));
+}
