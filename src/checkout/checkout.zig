@@ -2382,14 +2382,23 @@ const CheckoutWrite = struct {
                 var scratch: std.heap.ArenaAllocator = .init(c.gpa);
                 defer scratch.deinit();
                 const a = scratch.allocator();
-                const found = try c.db.read(c.io, want.oid);
-                defer c.db.allocator().free(found.bytes);
                 const executable = want.mode == .exec and c.options.rules.file_mode;
-                const smudged: native.Content = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = try attrs.lookup(a, path, .file) }, .{
-                    .blob = want.oid,
-                    .treeish = c.tree_oid,
-                    .can_delay = true,
-                }) else .{ .bytes = found.bytes };
+                const applied: ?attributes.Attributes = if (c.options.rules.attrs) |attrs| try attrs.lookup(a, path, .file) else null;
+                var blob = try FileBlob.open(c.gpa, c.io, c.db, c.conv, path, want.oid, applied);
+                defer blob.deinit(c.gpa, c.io, c.db);
+                const smudged: native.Content = switch (blob) {
+                    .streamed => |*streamed| {
+                        try writeFile(c.io, c.wt, path, .{ .stream = streamed }, executable);
+                        c.outcome.written += 1;
+                        return recordWritten(c.io, c.wt, c.index, path, want, c.options.rules);
+                    },
+                    .filtered => |bytes| .{ .bytes = bytes },
+                    .whole => |bytes| if (applied) |found| try c.conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = found }, .{
+                        .blob = want.oid,
+                        .treeish = c.tree_oid,
+                        .can_delay = true,
+                    }) else .{ .bytes = bytes },
+                };
                 switch (smudged) {
                     // Its index entry is added when it arrives.
                     .delayed => return,
@@ -2916,22 +2925,28 @@ fn writePathFile(
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const found = try db.read(io, want.oid);
-    defer db.allocator().free(found.bytes);
     const executable = want.mode == .exec and rules.file_mode;
-    const attrs = rules.attrs orelse {
-        try writeFile(io, wt, path, .{ .bytes = found.bytes }, executable);
-        return true;
+    const applied: ?attributes.Attributes = if (rules.attrs) |attrs| blk: {
+        try attrs.enter(io, wt, path);
+        break :blk try attrs.lookup(a, path, .file);
+    } else null;
+    var blob = try FileBlob.open(gpa, io, db, conv, path, want.oid, applied);
+    defer blob.deinit(gpa, io, db);
+    const smudged: native.Content = switch (blob) {
+        .streamed => |*streamed| {
+            try writeFile(io, wt, path, .{ .stream = streamed }, executable);
+            if (rules.attrs) |attrs| attrs.written(path);
+            return true;
+        },
+        .filtered => |bytes| .{ .bytes = bytes },
+        .whole => |bytes| if (applied) |found| try conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = found }, .{
+            .blob = want.oid,
+            .can_delay = true,
+        }) else .{ .bytes = bytes },
     };
-    try attrs.enter(io, wt, path);
-    const applied = try attrs.lookup(a, path, .file);
-    const smudged = try conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = applied }, .{
-        .blob = want.oid,
-        .can_delay = true,
-    });
     if (smudged == .delayed) return false;
     try writeSmudged(io, wt, path, smudged, executable);
-    attrs.written(path);
+    if (rules.attrs) |attrs| attrs.written(path);
     return true;
 }
 
@@ -2978,11 +2993,18 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
             var scratch: std.heap.ArenaAllocator = .init(gpa);
             defer scratch.deinit();
             const a = scratch.allocator();
-            const found = try db.read(io, oid);
-            defer db.allocator().free(found.bytes);
             const applied: attributes.Attributes = if (rules.attrs) |attrs| try attrs.lookup(a, path, .file) else .{ .items = &.{} };
-            const smudged = try conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = applied }, .{ .blob = oid });
-            try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
+            const executable = mode == .exec and rules.file_mode;
+            var blob = try FileBlob.open(gpa, io, db, conv, path, oid, applied);
+            defer blob.deinit(gpa, io, db);
+            switch (blob) {
+                .whole => |bytes| {
+                    const smudged = try conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = applied }, .{ .blob = oid });
+                    try writeSmudged(io, wt, path, smudged, executable);
+                },
+                .filtered => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
+                .streamed => |*streamed| try writeFile(io, wt, path, .{ .stream = streamed }, executable),
+            }
         },
         .tree => return error.UnsupportedEntry,
     }
@@ -3470,6 +3492,62 @@ fn refuseCaseCollisions(arena: Allocator, wanted: *std.StringHashMapUnmanaged(Tr
 const Source = union(enum) {
     bytes: []const u8,
     file: Io.File,
+    stream: *Streamed,
+};
+
+/// A blob written from the object database's stream through git's stream
+/// filters: `FileBlob.streamed`.
+const Streamed = struct {
+    gpa: Allocator,
+    stream: *Odb.Stream,
+    filter: convert.StreamFilter,
+};
+
+/// A regular file's blob as the working tree is given it, as git's
+/// `write_entry` gives it: where its conversion streams (git's
+/// `get_stream_filter`), through git's stream filters whatever its size --
+/// from the object database's stream past `core.bigFileThreshold`, from
+/// memory below -- and otherwise read whole, within
+/// `odb.Options.max_object_bytes`, for `convert.Session.toWorktree`.
+const FileBlob = union(enum) {
+    /// The blob, for the in-core conversion: the object database's
+    /// allocation.
+    whole: []u8,
+    /// The file's bytes, through the stream filters already: `gpa`'s.
+    filtered: []u8,
+    streamed: Streamed,
+
+    /// `oid`, for `path` with the attributes `applied` (`null` converting
+    /// nothing).
+    fn open(gpa: Allocator, io: Io, db: *Odb, conv: *convert.Session, path: []const u8, oid: Oid, applied: ?attributes.Attributes) Error!FileBlob {
+        const through: ?convert.StreamFilter = if (applied) |a| try conv.streamFilter(path, a, oid) else .{};
+        var f = through orelse return .{ .whole = (try db.read(io, oid)).bytes };
+        switch (try db.readOrStream(io, oid, db.packOptions().big_file_bytes.raw())) {
+            .stream => |stream| return .{ .streamed = .{ .gpa = gpa, .stream = stream, .filter = f } },
+            .whole => |found| {
+                if (f.changesNothing()) return .{ .whole = found.bytes };
+                defer db.allocator().free(found.bytes);
+                defer f.deinit(gpa);
+                var out: Io.Writer.Allocating = .init(gpa);
+                errdefer out.deinit();
+                f.write(gpa, &out.writer, found.bytes) catch return error.OutOfMemory;
+                f.finish(gpa, &out.writer) catch return error.OutOfMemory;
+                return .{ .filtered = try out.toOwnedSlice() };
+            },
+        }
+    }
+
+    fn deinit(b: *FileBlob, gpa: Allocator, io: Io, db: *Odb) void {
+        switch (b.*) {
+            .whole => |bytes| db.allocator().free(bytes),
+            .filtered => |bytes| gpa.free(bytes),
+            .streamed => |*streamed| {
+                streamed.filter.deinit(streamed.gpa);
+                streamed.stream.close(io);
+            },
+        }
+        b.* = undefined;
+    }
 };
 
 fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: bool) Error!void {
@@ -3507,6 +3585,24 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
                 _ = reader.interface.streamRemaining(&fw.interface) catch |err| switch (err) {
                     error.ReadFailed => return reader.err.?,
                     error.WriteFailed => return fw.err.?,
+                };
+            },
+            .stream => |streamed| {
+                const r = streamed.stream.reader();
+                while (true) {
+                    const chunk = r.peekGreedy(1) catch |err| switch (err) {
+                        error.EndOfStream => break,
+                        error.ReadFailed => return streamed.stream.err().?,
+                    };
+                    streamed.filter.write(streamed.gpa, &fw.interface, chunk) catch |err| switch (err) {
+                        error.WriteFailed => return fw.err.?,
+                        error.OutOfMemory => |e| return e,
+                    };
+                    r.toss(chunk.len);
+                }
+                streamed.filter.finish(streamed.gpa, &fw.interface) catch |err| switch (err) {
+                    error.WriteFailed => return fw.err.?,
+                    error.OutOfMemory => |e| return e,
                 };
             },
         }
@@ -3678,16 +3774,22 @@ fn restoreSparse(
             _ = try writeLink(io, wt, entry.path, found.bytes, options.rules.symlinks);
         },
         .file, .exec => {
-            const found = try db.read(io, entry.oid);
-            defer db.allocator().free(found.bytes);
             const executable = entry.mode == .exec and options.rules.file_mode;
-            if (options.rules.attrs) |attrs| {
+            const applied: ?attributes.Attributes = if (options.rules.attrs) |attrs| blk: {
                 try attrs.enter(io, wt, entry.path);
-                const applied = try attrs.lookup(a, entry.path, .file);
-                const smudged = try conv.toWorktree(a, .{ .path = entry.path, .blob = found.bytes, .applied = applied }, .{ .blob = entry.oid });
-                try writeSmudged(io, wt, entry.path, smudged, executable);
-            } else {
-                try writeFile(io, wt, entry.path, .{ .bytes = found.bytes }, executable);
+                break :blk try attrs.lookup(a, entry.path, .file);
+            } else null;
+            var blob = try FileBlob.open(a, io, db, conv, entry.path, entry.oid, applied);
+            defer blob.deinit(a, io, db);
+            switch (blob) {
+                .whole => |bytes| if (applied) |found| {
+                    const smudged = try conv.toWorktree(a, .{ .path = entry.path, .blob = bytes, .applied = found }, .{ .blob = entry.oid });
+                    try writeSmudged(io, wt, entry.path, smudged, executable);
+                } else {
+                    try writeFile(io, wt, entry.path, .{ .bytes = bytes }, executable);
+                },
+                .filtered => |bytes| try writeFile(io, wt, entry.path, .{ .bytes = bytes }, executable),
+                .streamed => |*streamed| try writeFile(io, wt, entry.path, .{ .stream = streamed }, executable),
             }
         },
         .tree => return error.UnsupportedEntry,

@@ -316,6 +316,22 @@ pub const Session = struct {
         }
     }
 
+    /// git's `get_stream_filter_ca`: what a blob at `path` is written
+    /// through from a stream, or `null` where its conversion needs the
+    /// whole blob -- a filter driver or relic's LFS, `working-tree-encoding`,
+    /// or line endings the content decides (`text=auto`, or
+    /// `core.autocrlf=true` where no `eol` says). `ident` names `blob`.
+    pub fn streamFilter(s: *Session, path: []const u8, applied: attributes.Attributes, blob: hash.Oid) ErrorNamespace.Error!?StreamFilter {
+        if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
+        if (try s.resolve(path, applied) != .none) return null;
+        if (try encodingOf(applied) != null) return null;
+        const action = attributes.crlfAction(applied, s.options.core);
+        if (action == .auto or action == .auto_crlf) return null;
+        var f: StreamFilter = .{ .crlf = action.writesCrlf(s.options.core) };
+        if (identOn(applied)) f.setIdent(blob);
+        return f;
+    }
+
     /// git's `renormalize_buffer`: `bytes`, as the repository holds them,
     /// taken out to the working tree and back in with the attributes
     /// `applied`, so that a blob stored before an attribute changed
@@ -735,6 +751,159 @@ pub const Session = struct {
             },
         }
         return .{ .path = d.path, .content = .{ .bytes = "" } };
+    }
+};
+
+// -------------------------------------------------------------------
+// streaming
+
+/// What a checkout applies to a blob it writes from a stream, as git's
+/// `get_stream_filter_ca` chains it: `ident` first, then LF to CRLF. A
+/// conversion that needs the whole blob -- a filter driver, relic's LFS,
+/// `working-tree-encoding`, or line endings the content decides (`text=auto`
+/// or `core.autocrlf=true` with no `eol`) -- has none (`Session.streamFilter`).
+///
+/// They are git's streaming filters, not its in-core conversions, and they
+/// differ: the streaming `ident` expands a `$Id` it meets as it reads, with
+/// no look back, so `$$Id$` keeps its `$Id$`, which the in-core one
+/// expands. git's checkout writes every file whose conversion streams
+/// through them, whatever its length, so they are what it writes.
+pub const StreamFilter = struct {
+    /// What filtering meets: the writer's failure, and room for what
+    /// `ident` holds back.
+    pub const Error = Allocator.Error || Io.Writer.Error;
+
+    /// `: <blob name> $`, the expansion after `$Id`, `ident_len` long:
+    /// none where `ident` is not set.
+    ident_text: [hash.max_hex_len + 4]u8 = undefined,
+    ident_len: usize = 0,
+    /// LF to CRLF: `core.eol`, `core.autocrlf` or `eol=crlf` asks for CRLF
+    /// on a file that is text by its attributes.
+    crlf: bool = false,
+    ident_state: IdentState = .{ .matched = 0 },
+    /// What `ident` holds back while it decides: git's `left`.
+    left: std.ArrayList(u8) = .empty,
+    /// A CR held until the byte after it is seen.
+    held_cr: bool = false,
+
+    const head = "$Id";
+    const IdentState = union(enum) {
+        /// How many bytes of `$Id` have matched.
+        matched: u2,
+        /// Past `$Id:`, until a `$` or a newline.
+        skipping,
+    };
+
+    /// Whether the filter writes what it is given: no `ident`, no CRLF.
+    pub fn changesNothing(f: *const StreamFilter) bool {
+        return f.ident_len == 0 and !f.crlf;
+    }
+
+    /// `ident` set, naming `blob`.
+    fn setIdent(f: *StreamFilter, blob: hash.Oid) void {
+        var hex: [hash.max_hex_len]u8 = undefined;
+        // unreachable: the text is the hex name and four bytes, which it holds
+        f.ident_len = (std.mem.print(&f.ident_text, ": {s} $", .{blob.hex(&hex)}) catch unreachable).len;
+    }
+
+    pub fn deinit(f: *StreamFilter, gpa: Allocator) void {
+        f.left.deinit(gpa);
+        f.* = undefined;
+    }
+
+    /// Filter `bytes`, the next of the blob, into `w`.
+    pub fn write(f: *StreamFilter, gpa: Allocator, w: *Io.Writer, bytes: []const u8) StreamFilter.Error!void {
+        if (f.ident_len == 0) return f.writeLines(w, bytes);
+        for (bytes) |ch| try f.identByte(gpa, w, ch);
+    }
+
+    /// The end of the blob: what is held back, written.
+    pub fn finish(f: *StreamFilter, gpa: Allocator, w: *Io.Writer) StreamFilter.Error!void {
+        if (f.ident_len != 0) {
+            switch (f.ident_state) {
+                .matched => |n| try f.left.appendSlice(gpa, head[0..n]),
+                .skipping => {},
+            }
+            try f.drain(w);
+        }
+        if (f.held_cr) try w.writeByte('\r');
+        f.held_cr = false;
+    }
+
+    /// git's `ident_filter_fn`, a byte at a time.
+    fn identByte(f: *StreamFilter, gpa: Allocator, w: *Io.Writer, ch: u8) StreamFilter.Error!void {
+        switch (f.ident_state) {
+            .skipping => {
+                // Kept in case it is a foreign ident.
+                try f.left.append(gpa, ch);
+                if (ch != '\n' and ch != '$') return;
+                if (ch == '$' and !isForeignIdent(f.left.items)) {
+                    f.left.shrinkRetainingCapacity(head.len);
+                    try f.left.appendSlice(gpa, f.ident_text[0..f.ident_len]);
+                }
+                return f.drain(w);
+            },
+            .matched => |n| {
+                if (n < head.len and head[n] == ch) {
+                    f.ident_state = .{ .matched = n + 1 };
+                    return;
+                }
+                try f.left.appendSlice(gpa, head[0..n]);
+                if (n == head.len) {
+                    switch (ch) {
+                        ':' => {
+                            try f.left.append(gpa, ch);
+                            f.ident_state = .skipping;
+                        },
+                        '$' => {
+                            try f.left.appendSlice(gpa, f.ident_text[0..f.ident_len]);
+                            try f.drain(w);
+                        },
+                        else => {
+                            // Held, as git holds it, until a byte after it
+                            // drains.
+                            try f.left.append(gpa, ch);
+                            f.ident_state = .{ .matched = 0 };
+                        },
+                    }
+                    return;
+                }
+                try f.left.append(gpa, ch);
+                try f.drain(w);
+            },
+        }
+    }
+
+    /// git's `ident_drain`: what was held back, on to the line endings.
+    fn drain(f: *StreamFilter, w: *Io.Writer) Io.Writer.Error!void {
+        try f.writeLines(w, f.left.items);
+        f.left.clearRetainingCapacity();
+        f.ident_state = .{ .matched = 0 };
+    }
+
+    /// git's `lf_to_crlf_filter_fn`, or the null filter: every LF written
+    /// as CRLF, a CR before it not doubled.
+    fn writeLines(f: *StreamFilter, w: *Io.Writer, bytes: []const u8) Io.Writer.Error!void {
+        if (!f.crlf) return w.writeAll(bytes);
+        for (bytes) |ch| {
+            if (ch == '\n') {
+                try w.writeAll("\r\n");
+                f.held_cr = false;
+                continue;
+            }
+            if (f.held_cr) try w.writeByte('\r');
+            f.held_cr = ch == '\r';
+            if (!f.held_cr) try w.writeByte(ch);
+        }
+    }
+
+    /// git's `is_foreign_ident`: `$Id: ` and then a space not before `$`.
+    fn isForeignIdent(text: []const u8) bool {
+        const rest = if (std.mem.startsWith(u8, text, "$Id: ")) text["$Id: ".len..] else return false;
+        for (rest, 0..) |ch, i| {
+            if (ctype.isSpace(ch) and (i + 1 >= rest.len or rest[i + 1] != '$')) return true;
+        }
+        return false;
     }
 };
 

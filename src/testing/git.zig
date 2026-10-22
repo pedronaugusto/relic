@@ -253,6 +253,22 @@ pub const Repo = struct {
     }
 };
 
+/// `default_settings` without `core.autocrlf=false`, for a test that sets
+/// it in the repository's own config, where the library reads it.
+pub const settings_without_autocrlf = blk: {
+    const all = default_settings;
+    var out: [all.len - 2][]const u8 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < all.len) : (i += 2) {
+        if (std.mem.eql(u8, all[i + 1], "core.autocrlf=false")) continue;
+        out[n] = all[i];
+        out[n + 1] = all[i + 1];
+        n += 2;
+    }
+    break :blk out;
+};
+
 /// What a `git` that may fail said: its exit code and both streams,
 /// the caller's.
 pub const Captured = struct {

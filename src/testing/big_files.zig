@@ -300,3 +300,120 @@ test "git add streams a file past core.bigFileThreshold that nothing converts in
     defer gpa.free(our_index);
     try std.testing.expectEqualStrings(their_index, our_index);
 }
+
+/// Text past the threshold whose lines and `$Id`s each conversion meets:
+/// a `$$Id$` the stream's `ident` keeps and the in-core one expands, an
+/// expansion of another blob's, a foreign `$Id: … $`, one a newline cuts,
+/// a `$Id` cut short and one at the very end, a lone CR, CRLFs.
+const ident_text = "first $Id$ line\n$$Id$ doubled\nstale $Id: 0123abcd $ here\nforeign $Id: kept as it is $\n" ++
+    "spanning $Id: cut\nby a newline $Id$\nnear $Idx miss\ncr\ralone\ncrlf\r\ncr cr\r\r\n" ++
+    repeat("padding line to pass the threshold and the cap\n", 48) ++ "end $Id";
+
+const Checkout = struct {
+    attributes: []const u8,
+    files: []const []const u8,
+    /// `odb.Options.max_object_bytes`: below the files', what streams is
+    /// never read whole.
+    max_object_bytes: ?usize = null,
+    config: []const []const u8 = &.{},
+    text: []const u8 = ident_text,
+};
+
+/// git checks the files out (`git checkout -- .`), then relic does, by
+/// `reset --hard` and by a forced checkout of the tree, each over the
+/// files taken away; every file is git's byte for byte.
+fn checkoutAsGit(gpa: Allocator, io: Io, case: Checkout) !void {
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    // `core.autocrlf` as the repository sets it, where relic reads it.
+    git.defaults = &testgit.settings_without_autocrlf;
+    try git.exec(io, &.{ "config", "core.bigFileThreshold", "64" });
+    for (case.config) |setting| {
+        const eq = std.mem.findScalar(u8, setting, '=').?;
+        try git.exec(io, &.{ "config", setting[0..eq], setting[eq + 1 ..] });
+    }
+    // The files stored as written, before any attribute converts them on
+    // the way in: their CRLFs and expanded `$Id`s are the blobs'.
+    for (case.files) |path| try git.writeFile(io, path, case.text);
+    try git.writeFile(io, "small.txt", "small $$Id$ and $Id$ and $Id: stale$\r\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "files" });
+    try git.writeFile(io, ".gitattributes", case.attributes);
+    try git.exec(io, &.{ "add", ".gitattributes" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "attributes" });
+    for (case.files) |path| try git.dir.deleteFile(io, path);
+    try git.dir.deleteFile(io, "small.txt");
+    try git.exec(io, &.{ "checkout", "--", "." });
+    var expected: std.ArrayList([]u8) = .empty;
+    defer {
+        for (expected.items) |bytes| gpa.free(bytes);
+        expected.deinit(gpa);
+    }
+    const all = try std.mem.concat(gpa, []const u8, &.{ case.files, &.{"small.txt"} });
+    defer gpa.free(all);
+    for (all) |path| try expected.append(gpa, try git.readFile(io, path));
+
+    var odb_options: @import("../odb/odb.zig").Options = .{};
+    if (case.max_object_bytes) |max| odb_options.max_object_bytes = .fromRaw(max);
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{ .odb = odb_options });
+    defer repo.deinit(io);
+    const tree = try repo.commitTree(io, try oidOf(gpa, io, &git, "HEAD"));
+    for ([_]bool{ false, true }) |by_checkout| {
+        for (all) |path| try git.dir.deleteFile(io, path);
+        var locked = try repo.lockIndex(io);
+        defer locked.deinit(io);
+        if (by_checkout) {
+            var attrs = try repo.loadAttrs(io);
+            defer attrs.deinit();
+            var rules = try repo.worktreeRules();
+            rules.attrs = &attrs;
+            _ = try worktree.checkout(gpa, io, git.dir, .{ .index = &locked.index, .db = repo.objectDatabase(), .tree = tree }, .{ .force = true, .rules = rules });
+        } else {
+            try @import("../commit/reset.zig").toTree(gpa, io, &repo, .{ .index = &locked.index, .tree = tree, .mode = .hard });
+        }
+        for (all, expected.items) |path, want| {
+            const got = try git.readFile(io, path);
+            defer gpa.free(got);
+            std.testing.expectEqualStrings(want, got) catch |err| {
+                std.debug.print("{s}, {s}\n", .{ path, if (by_checkout) "checkout" else "reset --hard" });
+                return err;
+            };
+        }
+    }
+}
+
+test "a checkout writes a file past core.bigFileThreshold through git's stream filters, read as it is written" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const streamed = [_][]const u8{ "plain.txt", "crlf.txt", "ident.txt", "both.txt", "lf.txt", "binary.txt" };
+    const attributes =
+        \\crlf.txt text eol=crlf
+        \\ident.txt ident
+        \\both.txt ident text eol=crlf
+        \\lf.txt text eol=lf
+        \\binary.txt -text
+        \\small.txt ident
+        \\
+    ;
+    // Under a cap below every file's length: nothing streamed is read
+    // whole.
+    try checkoutAsGit(gpa, io, .{ .attributes = attributes, .files = &streamed, .max_object_bytes = 1024 });
+    // A CR held at the very end is written.
+    try checkoutAsGit(gpa, io, .{ .attributes = "*.txt ident eol=crlf\n", .files = &.{"tail.txt"}, .text = ident_text ++ "\nlast\r", .max_object_bytes = 1024 });
+    // core.autocrlf=input streams as LF; core.eol=crlf makes `text` CRLF.
+    try checkoutAsGit(gpa, io, .{ .attributes = "*.txt text\n", .files = &.{"text.txt"}, .config = &.{"core.eol=crlf"}, .max_object_bytes = 1024 });
+    try checkoutAsGit(gpa, io, .{ .attributes = "", .files = &.{"plain.txt"}, .config = &.{"core.autocrlf=input"}, .max_object_bytes = 1024 });
+}
+
+test "a checkout reads a file past core.bigFileThreshold whole where its conversion needs all of it, as git's" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // text=auto and core.autocrlf=true decide by the whole file: git's
+    // in-core conversions, `$$Id$` expanded.
+    try checkoutAsGit(gpa, io, .{ .attributes = "auto.txt text=auto eol=crlf ident\n", .files = &.{"auto.txt"} });
+    try checkoutAsGit(gpa, io, .{ .attributes = "plain.txt ident\n", .files = &.{"plain.txt"}, .config = &.{"core.autocrlf=true"} });
+    // Past the cap, such a file is refused.
+    try std.testing.expectError(error.ObjectTooLarge, checkoutAsGit(gpa, io, .{ .attributes = "auto.txt text=auto ident\n", .files = &.{"auto.txt"}, .config = &.{"core.autocrlf=true"}, .max_object_bytes = 1024 }));
+}

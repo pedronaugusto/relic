@@ -864,9 +864,62 @@ pub const Odb = struct {
     /// promisor are as `read` does them. The stream is the caller's to
     /// `close`.
     pub fn stream(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!*Stream {
+        return odb.streamAt(io, try odb.find(io, oid));
+    }
+
+    /// An object read whole, or open for reading: `readOrStream`.
+    pub const ReadOrStream = union(enum) {
+        /// The bytes are the caller's.
+        whole: Read,
+        /// The caller's to `close`.
+        stream: *Stream,
+    };
+
+    /// The object named `oid` read whole where it is at most `limit` bytes
+    /// long, else opened as `stream` opens it: one lookup for a caller that
+    /// reads its objects whole up to a length, git's
+    /// `core.bigFileThreshold`, and streams the rest. A delta is read whole
+    /// whatever its length, within `Options.max_object_bytes`, as `stream`
+    /// makes one whole.
+    pub fn readOrStream(odb: *Odb, io: Io, oid: Oid, limit: u64) ErrorNamespace.Error!ReadOrStream {
+        const location = try odb.find(io, oid);
+        switch (location) {
+            .empty_tree => return .{ .whole = .{ .type = .tree, .bytes = try odb.backendData().gpa.alloc(u8, 0) } },
+            .loose => |file| {
+                var close = true;
+                defer if (close) file.close(io);
+                var input: [loose_input_bytes]u8 = undefined;
+                var window: [inflate_window_bytes]u8 = undefined;
+                var inflating: LooseInflate = undefined;
+                try inflating.start(io, file, &input, &window);
+                if (inflating.header.size > limit) {
+                    // The stream reads the file again from its start: the
+                    // reads are positional.
+                    close = false;
+                    return .{ .stream = try odb.streamAt(io, location) };
+                }
+                const gpa = odb.backendData().gpa;
+                const bytes = try gpa.alloc(u8, try odb.wholeLength(inflating.header.size));
+                errdefer gpa.free(bytes);
+                try inflating.body(bytes);
+                return .{ .whole = .{ .type = inflating.header.type, .bytes = bytes } };
+            },
+            .in_pack => |at| {
+                const entry = try at.named.pack.entryHeaderAt(io, at.offset);
+                if (entry.kind == .object and entry.size > limit) return .{ .stream = try odb.streamAt(io, location) };
+                const obj = try at.named.pack.readAt(io, at.offset, odb.packRead(at.named));
+                return .{ .whole = .{ .type = obj.type, .bytes = obj.bytes } };
+            },
+        }
+    }
+
+    /// `stream` of the object at `location`, which it takes: a loose file
+    /// is the stream's to close, on an error too.
+    fn streamAt(odb: *Odb, io: Io, location: Location) ErrorNamespace.Error!*Stream {
         const gpa = odb.backendData().gpa;
         const s = try gpa.create(Stream);
         errdefer gpa.destroy(s);
+        errdefer if (location == .loose) location.loose.close(io);
         s.* = .{
             .type = undefined,
             .size = undefined,
@@ -876,10 +929,9 @@ pub const Odb = struct {
             .source = undefined,
             .buffer = undefined,
         };
-        switch (try odb.find(io, oid)) {
+        switch (location) {
             .empty_tree => s.hold(.tree, try gpa.alloc(u8, 0)),
             .loose => |file| {
-                errdefer file.close(io);
                 s.source = .{ .loose = .{ .file = file, .inflating = undefined, .input = undefined, .window = undefined } };
                 const l = &s.source.loose;
                 try l.inflating.start(io, file, &l.input, &l.window);
@@ -919,10 +971,9 @@ pub const Odb = struct {
             },
         }
         s.remaining = s.size;
-        if (s.size == 0) {
-            errdefer s.release(io);
-            try s.finish();
-        }
+        // A loose file's end is checked here when there is no read to
+        // check it; anything held whole has none to check.
+        if (s.size == 0) try s.finish();
         return s;
     }
 

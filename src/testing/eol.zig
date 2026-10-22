@@ -10,29 +10,13 @@ const ft = @import("../checkout/filter_test.zig");
 
 const testing = std.testing;
 
-/// The fixture settings without `core.autocrlf`, so the repository's own
-/// configuration decides it for git as it does for relic.
-const settings_without_autocrlf = blk: {
-    const all = testgit.default_settings;
-    var out: [all.len - 2][]const u8 = undefined;
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < all.len) : (i += 2) {
-        if (std.mem.eql(u8, all[i + 1], "core.autocrlf=false")) continue;
-        out[n] = all[i];
-        out[n + 1] = all[i + 1];
-        n += 2;
-    }
-    break :blk out;
-};
-
 /// Stage `files` in both, compare the trees, then empty both working trees,
 /// check out, and compare every file.
 fn expectSameAsGit(gpa: std.mem.Allocator, io: Io, autocrlf: []const u8, files: []const [2][]const u8) !void {
     var twin = try ft.Twin.init(gpa, io, &.{.{ "core.autocrlf", autocrlf }}, files);
     defer twin.deinit();
-    twin.ours.defaults = &settings_without_autocrlf;
-    twin.theirs.defaults = &settings_without_autocrlf;
+    twin.ours.defaults = &testgit.settings_without_autocrlf;
+    twin.theirs.defaults = &testgit.settings_without_autocrlf;
 
     try twin.theirs.exec(io, &.{ "add", "-A" });
     const theirs_tree = try ft.treeOf(gpa, io, &twin.theirs);
@@ -105,8 +89,8 @@ test "a file whose indexed version has CRLF endings keeps them where the content
             .{ "touched.txt", "same\r\n" },
         });
         defer twin.deinit();
-        twin.ours.defaults = &settings_without_autocrlf;
-        twin.theirs.defaults = &settings_without_autocrlf;
+        twin.ours.defaults = &testgit.settings_without_autocrlf;
+        twin.theirs.defaults = &testgit.settings_without_autocrlf;
         for ([_]*testgit.Repo{ &twin.ours, &twin.theirs }) |r| {
             // Committed with its carriage returns, before any rule said
             // otherwise.

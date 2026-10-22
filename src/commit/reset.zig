@@ -99,9 +99,11 @@ pub fn toTree(
         if (!is_conflicted) {
             const e = entry.?;
             if (want != null and want.?.mode == e.mode and want.?.oid.eql(e.oid)) {
-                // `read-tree --reset` brings every submodule to its commit.
+                // `read-tree --reset` brings every submodule to its commit,
+                // and a file back where it is gone (`oneway_merge`'s failed
+                // `lstat`).
                 const moved = e.mode == .gitlink and rules.submodules != null;
-                if (mode == .hard and !e.skip_worktree and (moved or try differs(gpa, io, wt, index, e, rules))) {
+                if (mode == .hard and !e.skip_worktree and (moved or try gone(io, wt, e) or try differs(gpa, io, wt, index, e, rules))) {
                     try rewrite.append(arena, path);
                 }
                 continue;
@@ -277,6 +279,13 @@ fn changedPaths(
         try updates.put(arena, path, want);
     }
     return updates;
+}
+
+/// Whether `entry`'s file is missing from the working tree. A gitlink's
+/// directory is the submodule's to have or not.
+fn gone(io: Io, wt: Io.Dir, entry: index_mod.Entry) Error!bool {
+    if (entry.mode == .gitlink) return false;
+    return try fs.statAt(io, wt, entry.path) == null;
 }
 
 fn differs(gpa: Allocator, io: Io, wt: Io.Dir, index: *const Index, entry: index_mod.Entry, rules: worktree.Rules) Error!bool {
