@@ -44,6 +44,7 @@ const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const program = @import("../process.zig").program;
 const aegis = @import("aegis");
+const warning = @import("../report.zig").warning;
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -93,6 +94,9 @@ pub const Options = struct {
     /// this process when the configuration the repository cannot write
     /// names one.
     programs: ?program.Programs = null,
+    /// Where what git's upload-pack says on its standard error goes: a
+    /// `bundle.*` setting with no value, left out of `bundle-uri`.
+    warnings: ?*warning.Warnings = null,
 };
 
 /// Which filters a client may ask for: `uploadpackfilter.allow`, the
@@ -171,6 +175,7 @@ pub const Server = struct {
     /// command line after it. The inner `null` is the name set bare.
     pack_objects_hook: ??[]const u8,
     programs: ?program.Programs,
+    warnings: ?*warning.Warnings,
     /// A client answered `promisor-remote` taking one of this repository's
     /// promisor remotes, so what that remote promises and this repository
     /// lacks is left out of a pack: git's `--missing=allow-promisor`.
@@ -198,6 +203,7 @@ pub const Server = struct {
             .keepalive = .fromRaw(config.getInt("uploadpack.keepalive", 5) catch 5),
             .pack_objects_hook = if (config.findProtected("uploadpack.packobjectshook")) |entry| entry.value else null,
             .programs = options.programs,
+            .warnings = options.warnings,
         };
         if (config.getBool("transfer.advertisesid", false) catch false) s.session_id_len = protocol.sessionId(io, &s.session_id_buf).len;
         return s;
@@ -337,6 +343,9 @@ pub const Server = struct {
                     const raw = unparsed.readForParse();
                     const line = std.mem.trimEnd(u8, raw, "\n");
                     if (std.mem.startsWith(u8, line, "command=")) command = try arena.dupe(u8, line["command=".len..]);
+                    // git 2.56 dies on it: "promisor-remote capability
+                    // requires an argument".
+                    if (std.mem.eql(u8, line, "promisor-remote")) return error.ProtocolError;
                     if (std.mem.startsWith(u8, line, "promisor-remote=")) {
                         const taken = try promisors.acceptedByClient(arena, s.remote.repo.configuration(), line["promisor-remote=".len..], null);
                         if (taken.len != 0) s.promisor_taken = true;
@@ -453,10 +462,10 @@ pub const Server = struct {
     }
 
     /// git's `bundle_uri_command`: no arguments, and the served
-    /// repository's `bundle.*` settings as `key=value` lines.
+    /// repository's `bundle.*` settings with a value as `key=value` lines.
     fn bundleUri(s: *Server, arena: Allocator, args: []const []const u8, out: *Io.Writer) Error!void {
         if (args.len != 0) return s.refuse(out, try arena.print("bundle-uri: unexpected argument: '{s}'", .{args[0]}));
-        for (try bundleSettings(arena, s.remote.repo.configuration())) |line| pkt_line.write(out, line) catch |err| return writeError(err);
+        for (try bundleSettings(arena, s.remote.repo.configuration(), s.warnings)) |line| pkt_line.write(out, line) catch |err| return writeError(err);
         pkt_line.flush(out) catch |err| return writeError(err);
     }
 
@@ -1358,17 +1367,22 @@ pub fn advertisesBundleUris(config: *const config_mod.Config) bool {
 /// What `bundle-uri` answers, as git's `config_to_packet_line` writes it:
 /// every `bundle.*` setting of `config` in its order, `<key>=<value>`, the
 /// section and the variable in lower case and the subsection as written.
-/// A name with no value at all is left out, where git hands its NULL to
-/// printf. The lines are `arena`'s.
-pub fn bundleSettings(arena: Allocator, config: *const config_mod.Config) Allocator.Error![]const []const u8 {
+/// A setting with no value or an empty one is left out, with git's
+/// "config '<key>' has no value" to `warnings`. The lines are `arena`'s.
+pub fn bundleSettings(arena: Allocator, config: *const config_mod.Config, warnings: ?*warning.Warnings) Allocator.Error![]const []const u8 {
     var lines: std.ArrayList([]const u8) = .empty;
     for (config.entries.items) |e| {
         if (!std.mem.eql(u8, e.section, "bundle")) continue;
-        const value = e.value orelse continue;
-        try lines.append(arena, if (e.has_subsection)
-            try arena.print("bundle.{s}.{s}={s}", .{ e.subsection, e.name, value })
+        const key = if (e.has_subsection)
+            try arena.print("bundle.{s}.{s}", .{ e.subsection, e.name })
         else
-            try arena.print("bundle.{s}={s}", .{ e.name, value }));
+            try arena.print("bundle.{s}", .{e.name});
+        const value = e.value orelse "";
+        if (value.len == 0) {
+            try warning.note(warnings, .{ .bundle_uri = try arena.print("config '{s}' has no value", .{key}) });
+            continue;
+        }
+        try lines.append(arena, try arena.print("{s}={s}", .{ key, value }));
     }
     return lines.items;
 }

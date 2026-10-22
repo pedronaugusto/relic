@@ -371,9 +371,10 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
     };
 }
 
-test "relic's upload-pack answers bundle-uri as git's under uploadpack.advertiseBundleURIs: every bundle.* setting, its section and variable in lower case" {
+test "git 2.56, relic's upload-pack answers bundle-uri as git's under uploadpack.advertiseBundleURIs: every bundle.* setting with a value, its section and variable in lower case" {
     const gpa = testing.allocator;
     const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
     const bare = try served(gpa, io, root.dir);
@@ -385,7 +386,7 @@ test "relic's upload-pack answers bundle-uri as git's under uploadpack.advertise
     defer gpa.free(config_path);
     const config = try Io.Dir.cwd().readFileAlloc(io, config_path, gpa, .unlimited);
     defer gpa.free(config);
-    const more = "[uploadpack]\n\tadvertiseBundleURIs = yes\n[Bundle]\n\tVersion = 1\n\tmode = all\n[bundle \"One.B\"]\n\tURI = https://example.com/one.bundle\n\tcreationToken = 3\n[core]\n\tbundled = no\n";
+    const more = "[uploadpack]\n\tadvertiseBundleURIs = yes\n[Bundle]\n\tVersion = 1\n\tbare\n\tmode = all\n[bundle \"One.B\"]\n\tURI = https://example.com/one.bundle\n\tempty =\n\tcreationToken = 3\n[core]\n\tbundled = no\n";
     const joined = try std.mem.concat(gpa, u8, &.{ config, more });
     defer gpa.free(joined);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = joined });
@@ -395,7 +396,9 @@ test "relic's upload-pack answers bundle-uri as git's under uploadpack.advertise
     defer gpa.free(theirs);
     var remote = try local.Remote.open(gpa, io, bare, .{});
     defer remote.deinit(io);
-    var server: upload_pack_mod.Server = .init(gpa, io, &remote, .v2, .{ .stateless = true });
+    var said: warning.Warnings = .init(gpa);
+    defer said.deinit();
+    var server: upload_pack_mod.Server = .init(gpa, io, &remote, .v2, .{ .stateless = true, .warnings = &said });
     var fixed: Io.Reader = .fixed(request);
     var buffer: [pkt_line.max_line]u8 = undefined;
     var in = fixed.limited(.unlimited, &buffer);
@@ -404,6 +407,12 @@ test "relic's upload-pack answers bundle-uri as git's under uploadpack.advertise
     try server.serveRequest(&out.writer, &in.interface);
     try testing.expectEqualStrings(theirs, out.written());
     try testing.expect(std.mem.find(u8, theirs, "bundle.One.B.uri=https://example.com/one.bundle") != null);
+    // Neither setting without a value is sent; each is said, as git's
+    // upload-pack says it on its standard error.
+    try testing.expect(std.mem.find(u8, theirs, "bare") == null and std.mem.find(u8, theirs, "empty") == null);
+    try testing.expectEqual(@as(usize, 2), said.items.items.len);
+    try testing.expectEqualStrings("config 'bundle.bare' has no value", said.items.items[0].bundle_uri);
+    try testing.expectEqualStrings("config 'bundle.One.B.empty' has no value", said.items.items[1].bundle_uri);
 
     // The advertisement names it where git's does: after object-format.
     var advertised: Io.Writer.Allocating = .init(gpa);

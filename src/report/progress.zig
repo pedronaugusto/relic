@@ -134,15 +134,16 @@ pub fn sanitize(text: []const u8, control: Control, out: []u8) Sanitized {
 }
 
 /// The length of the ANSI sequence `control` keeps that `text` starts
-/// with, `ESC [`, then digits and `;`, then the letter that ends it, as
-/// git's `handle_ansi_sequence` reads one; `null` when it starts with none.
+/// with, `ESC [`, then digits, `;` and `:` (git 2.56 takes the colon
+/// subfields of SGR, `38:5:196`), then the letter that ends it, as git's
+/// `handle_ansi_sequence` reads one; `null` when it starts with none.
 fn sequence(text: []const u8, control: Control) ?usize {
     if (text.len < 3 or text[0] != 0x1b or text[1] != '[') return null;
     for (text[2..], 2..) |c, i| {
         if ((control.color and c == 'm') or
             (control.cursor and std.mem.findScalar(u8, "ABCDEFGHf", c) != null) or
             (control.erase and std.mem.findScalar(u8, "JKMPX", c) != null)) return i + 1;
-        if (!std.ascii.isDigit(c) and c != ';') return null;
+        if (!std.ascii.isDigit(c) and c != ';' and c != ':') return null;
     }
     return null;
 }

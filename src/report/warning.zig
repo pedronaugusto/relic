@@ -128,6 +128,19 @@ pub const Warning = union(enum) {
     /// A pull that rebases was asked to verify signatures, which only a
     /// merge does.
     verify_signatures_ignored_for_rebase,
+    /// `followRemoteHEAD = warn`: the remote's `HEAD` names the branch
+    /// `head`, and `refs/remotes/<remote>/HEAD` another, `local`.
+    remote_head_differs: struct { remote: []const u8, head: []const u8, local: []const u8 },
+    /// `followRemoteHEAD = warn`: the remote's `HEAD` names the branch
+    /// `head`, and `refs/remotes/<remote>/HEAD` is no symbolic ref but the
+    /// object `oid` (hex).
+    remote_head_detached: struct { remote: []const u8, head: []const u8, oid: []const u8 },
+    /// `remote.<name>.followRemoteHEAD` names no setting git knows, and is
+    /// passed over: the value.
+    follow_remote_head_unknown: []const u8,
+    /// `fetch.followRemoteHEAD` names no setting git knows, and is passed
+    /// over: the value.
+    fetch_follow_remote_head_unknown: []const u8,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -150,6 +163,10 @@ pub const Warning = union(enum) {
             .notes => |text| text,
             .pull_moved_head => |hex| arena.print("fetch updated the current branch head.\nfast-forwarding your working tree from\ncommit {s}.", .{hex}),
             .verify_signatures_ignored_for_rebase => "ignoring --verify-signatures for rebase",
+            .remote_head_differs => |h| arena.print("'HEAD' at '{s}' is '{s}', but we have '{s}' locally.", .{ h.remote, h.head, h.local }),
+            .remote_head_detached => |h| arena.print("'HEAD' at '{s}' is '{s}', but we have a detached HEAD pointing to '{s}' locally.", .{ h.remote, h.head, h.oid }),
+            .follow_remote_head_unknown => |v| arena.print("unrecognized followRemoteHEAD value '{s}' ignored", .{v}),
+            .fetch_follow_remote_head_unknown => |v| arena.print("unrecognized fetch.followRemoteHEAD value '{s}' ignored", .{v}),
             .push_cert_not_asked => "not sending a push certificate since the receiving end does not support --signed push",
             .alternate_refs_line => |text| arena.print("invalid line while parsing alternate refs: {s}", .{text}),
             .negotiation_tip_unmatched => |t| arena.print("ignoring {s}={s} because it does not match any refs", .{ t.from, t.pattern }),
@@ -213,6 +230,10 @@ pub const Warnings = struct {
             .notes => |t| .{ .notes = try a.dupe(u8, t) },
             .pull_moved_head => |t| .{ .pull_moved_head = try a.dupe(u8, t) },
             .verify_signatures_ignored_for_rebase => .verify_signatures_ignored_for_rebase,
+            .remote_head_differs => |h| .{ .remote_head_differs = .{ .remote = try a.dupe(u8, h.remote), .head = try a.dupe(u8, h.head), .local = try a.dupe(u8, h.local) } },
+            .remote_head_detached => |h| .{ .remote_head_detached = .{ .remote = try a.dupe(u8, h.remote), .head = try a.dupe(u8, h.head), .oid = try a.dupe(u8, h.oid) } },
+            .follow_remote_head_unknown => |t| .{ .follow_remote_head_unknown = try a.dupe(u8, t) },
+            .fetch_follow_remote_head_unknown => |t| .{ .fetch_follow_remote_head_unknown = try a.dupe(u8, t) },
             .push_cert_not_asked => .push_cert_not_asked,
             .alternate_refs_line => |t| .{ .alternate_refs_line = try a.dupe(u8, t) },
             .negotiation_tip_unmatched => |t| .{ .negotiation_tip_unmatched = .{ .from = try a.dupe(u8, t.from), .pattern = try a.dupe(u8, t.pattern) } },

@@ -15,6 +15,7 @@ const fetch_mod = @import("../transport/fetch.zig");
 const warning = @import("../report.zig").warning;
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
+const program = @import("../process.zig").program;
 
 const testing = std.testing;
 const Repository = repo_mod.Repository;
@@ -209,4 +210,44 @@ test "a clone with the filter auto takes it from the promisor remotes taken, as 
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
     }
+}
+
+test "git 2.56, a request naming promisor-remote with no value ends the conversation, as git's upload-pack dies on it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    var server = try advertisingServer(gpa, io);
+    defer server.deinit();
+    const path = try testremote.absolutePath(gpa, io, server.dir);
+    defer gpa.free(path);
+    var request: Io.Writer.Allocating = .init(gpa);
+    defer request.deinit();
+    try pkt_line.write(&request.writer, "command=ls-refs\n");
+    try pkt_line.write(&request.writer, "promisor-remote\n");
+    try pkt_line.delim(&request.writer);
+    try pkt_line.flush(&request.writer);
+
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_PROTOCOL", "version=2");
+    var theirs = try program.run(gpa, io, .{ .environ = &env }, .{
+        .argv = &.{ "git", "upload-pack", "--stateless-rpc", path },
+        .cwd = .{ .dir = server.dir },
+    }, .{ .input = request.written() });
+    defer theirs.deinit(gpa);
+    try testing.expect(!theirs.succeeded());
+    try testing.expectEqualStrings("", theirs.stdout);
+    const complaint = theirs.stderr;
+    try testing.expect(std.mem.find(u8, complaint, "promisor-remote capability requires an argument") != null);
+
+    var remote = try local.Remote.open(gpa, io, path, .{});
+    defer remote.deinit(io);
+    var s: upload_pack.Server = .init(gpa, io, &remote, .v2, .{ .stateless = true });
+    var fixed: Io.Reader = .fixed(request.written());
+    var buffer: [pkt_line.max_line]u8 = undefined;
+    var in = fixed.limited(.unlimited, &buffer);
+    var answer: Io.Writer.Allocating = .init(gpa);
+    defer answer.deinit();
+    try testing.expectError(error.ProtocolError, s.serveRequest(&answer.writer, &in.interface));
+    try testing.expectEqualStrings("", answer.written());
 }

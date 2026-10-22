@@ -86,33 +86,34 @@ fn heard(gpa: std.mem.Allocator, control: progress.Control, messages: []const []
 
 test "CVE-2024-52005, t5409-colorize-remote-messages 'disallow (color) control sequences in sideband': a remote's control sequences are shown, not obeyed" {
     const gpa = std.testing.allocator;
-    const messages = [_][]const u8{ "\x1b[31mred\x1b[m\n", "\x1b]0;evil title\x07\x1b[2Jhidden\r", "\x1b[1Aup\n" };
+    const messages = [_][]const u8{ "\x1b[31mred\x1b[m\n", "\x1b[38:5:196mredder\x1b[m\n", "\x1b]0;evil title\x07\x1b[2Jhidden\r", "\x1b[1Aup\n" };
     const fatal = "\x1b[31merror:\x1b[m \x1b[2Kgone\n";
 
-    // git 2.55's default keeps colour and shows the rest.
+    // git's default keeps colour, colon subfields too since 2.56, and shows
+    // the rest.
     const by_default = try heard(gpa, .{}, &messages, fatal);
     defer gpa.free(by_default.progress);
     defer gpa.free(by_default.message);
-    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n^[]0;evil title^G^[[2Jhidden\r^[[1Aup\n", by_default.progress);
+    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n\x1b[38:5:196mredder\x1b[m\n^[]0;evil title^G^[[2Jhidden\r^[[1Aup\n", by_default.progress);
     try std.testing.expectEqualStrings("\x1b[31merror:\x1b[m ^[[2Kgone", by_default.message);
 
     // `sideband.allowControlCharacters=false`: no colour either.
     const none = try heard(gpa, .none, &messages, fatal);
     defer gpa.free(none.progress);
     defer gpa.free(none.message);
-    try std.testing.expectEqualStrings("^[[31mred^[[m\n^[]0;evil title^G^[[2Jhidden\r^[[1Aup\n", none.progress);
+    try std.testing.expectEqualStrings("^[[31mred^[[m\n^[[38:5:196mredder^[[m\n^[]0;evil title^G^[[2Jhidden\r^[[1Aup\n", none.progress);
 
     // 'allow all control sequences for a specific URL': as the remote sent them.
     const all = try heard(gpa, .everything, &messages, fatal);
     defer gpa.free(all.progress);
     defer gpa.free(all.message);
-    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n\x1b]0;evil title\x07\x1b[2Jhidden\r\x1b[1Aup\n", all.progress);
+    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n\x1b[38:5:196mredder\x1b[m\n\x1b]0;evil title\x07\x1b[2Jhidden\r\x1b[1Aup\n", all.progress);
 
     // 'control sequences in sideband allowed by default': `erase,cursor,color` keeps those three kinds only.
     const some = try heard(gpa, .{ .cursor = true, .erase = true }, &messages, fatal);
     defer gpa.free(some.progress);
     defer gpa.free(some.message);
-    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n^[]0;evil title^G\x1b[2Jhidden\r\x1b[1Aup\n", some.progress);
+    try std.testing.expectEqualStrings("\x1b[31mred\x1b[m\n\x1b[38:5:196mredder\x1b[m\n^[]0;evil title^G\x1b[2Jhidden\r\x1b[1Aup\n", some.progress);
     try std.testing.expectEqualStrings("\x1b[31merror:\x1b[m \x1b[2Kgone", some.message);
 }
 

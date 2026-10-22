@@ -726,7 +726,7 @@ fn takeBundles(
     }
     const config = settings orelse return &.{};
     if (!try config.getBool("transfer.bundleuri", false)) return &.{};
-    const lines = try session.bundleUri(arena) orelse {
+    const lines = try session.bundleUri(arena, options.warnings) orelse {
         try warning.note(options.warnings, .{ .bundle_uri = "bundle-uri operation not supported by protocol" });
         return &.{};
     };

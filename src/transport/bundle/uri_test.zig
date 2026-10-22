@@ -132,9 +132,10 @@ test "clone --bundle-uri and fetch.bundleURI take bundles before the server as g
     try testing.expectEqualStrings(want, got);
 }
 
-test "a server's bundle-uri list under transfer.bundleURI as git 2.55 takes it over http: from git's upload-pack and relic's, cloned by git and relic, all bundles and by creationToken" {
+test "git 2.56, a server's bundle-uri list under transfer.bundleURI as git takes it over http: from git's upload-pack and relic's, cloned by git and relic, all bundles, by creationToken, and up to a line in error" {
     const gpa = testing.allocator;
     const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
     var src = try testgit.Repo.init(gpa, io, &.{});
     defer src.deinit();
     src.report_failures = false;
@@ -176,8 +177,18 @@ test "a server's bundle-uri list under transfer.bundleURI as git 2.55 takes it o
 
     var config = try config_mod.Config.parseText(gpa, "[transfer]\n\tbundleURI = true\n", .command);
     defer config.deinit();
-    for ([_]bool{ false, true }) |heuristic| {
-        if (heuristic) try src.exec(io, &.{ "-C", bare, "config", "bundle.heuristic", "creationToken" });
+    for ([_]u8{ 0, 1, 2 }) |pass| {
+        const heuristic = pass != 0;
+        // The last pass lists a line in error and one after it: what was
+        // read before it is kept, the rest of the answer read past.
+        const in_error = pass == 2;
+        if (pass == 1) try src.exec(io, &.{ "-C", bare, "config", "bundle.heuristic", "creationToken" });
+        if (in_error) {
+            const config_path = try std.Io.Dir.path.join(arena, &.{ bare, "config" });
+            const text = try Io.Dir.cwd().readFileAlloc(io, config_path, arena, .unlimited);
+            const more = "[bundle]\n\tmode = none\n[bundle \"b2\"]\n\turi = ../files/b2.bundle\n";
+            try Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = try std.mem.concat(arena, u8, &.{ text, more }) });
+        }
         var out = testing.tmpDir(.{});
         defer out.cleanup();
         const outside = try out.dir.realPathFileAlloc(io, ".", arena);
@@ -204,8 +215,14 @@ test "a server's bundle-uri list under transfer.bundleURI as git 2.55 takes it o
                 defer said.deinit();
                 var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = test_who, .checkout = false, .programs = .{ .environ = &env }, .config = &config, .warnings = &said });
                 cloned.deinit(io);
-                for (said.items.items) |w| std.debug.print("{s}: {s}\n", .{ name, try w.message(arena) });
-                try testing.expectEqual(@as(usize, 0), said.items.items.len);
+                if (in_error) {
+                    try testing.expectEqual(@as(usize, 2), said.items.items.len);
+                    try testing.expectEqualStrings("error on bundle-uri response line 9: bundle.mode=none", said.items.items[0].bundle_uri);
+                    try testing.expectEqualStrings("could not retrieve server-advertised bundle-uri list", said.items.items[1].bundle_uri);
+                } else {
+                    for (said.items.items) |w| std.debug.print("{s}: {s}\n", .{ name, try w.message(arena) });
+                    try testing.expectEqual(@as(usize, 0), said.items.items.len);
+                }
             }
             const got = try describe(&src, io, path);
             defer gpa.free(got);

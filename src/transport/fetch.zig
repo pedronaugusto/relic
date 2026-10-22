@@ -74,6 +74,8 @@ const Repository = repo_mod.Repository;
 pub const Error = error{
     /// A refspec the caller named that git would refuse.
     InvalidRefspec,
+    /// `fetch.followRemoteHEAD` is set with no value, which git refuses.
+    FollowRemoteHeadWithoutValue,
     /// A refspec names a ref the remote does not have.
     RemoteRefNotFound,
     /// Two remote refs would be kept in the same local ref.
@@ -410,7 +412,9 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     var asked = try askedRefspecs(arena, gpa, io, repo, &remote, options.refspecs, prune and prune_tags, &branch_config);
     if (options.prefetch) asked = try asked.prefetched(arena);
 
-    const follow_head = asked.cli.len == 0 and remote.name != null and followRemoteHead(repo.configuration(), remote.name.?);
+    // git's `do_set_head`: refspecs of the remote's own, none named.
+    const follow: Follow = if (remote.name) |name| try followRemoteHead(repo.configuration(), name, options.warnings) else .never;
+    const follow_head = asked.cli.len == 0 and asked.configured.len != 0 and follow != .never;
 
     // A promisor remote's packs are filtered as the clone was, and what
     // they leave out is promised rather than missing.
@@ -471,7 +475,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     const plan = try planUpdates(arena, gpa, io, repo, .{ map.items, backfill }, try url_mod.anonymize(arena, url), rla, options, &local);
     try writeRefs(io, repo, plan.pending, options, plan.updates);
 
-    if (follow_head) try createRemoteHead(gpa, io, repo, remote.name.?, remote_refs.refs, asked.configured, options.who);
+    if (follow_head) try setRemoteHead(gpa, io, repo, &remote, remote_refs.refs, follow, options);
 
     if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, plan.fetch_head, options.append);
     try brought.settle(io, repo, &outcome, options.keep or promisor or (checks != null and checks.?.strict));
@@ -1768,13 +1772,54 @@ fn expectation(old: ?Oid) refs_mod.Expected {
     return if (old) |oid| .{ .matches = oid } else .must_not_exist;
 }
 
-/// Whether `remote.<name>.followRemoteHEAD` asks for `refs/remotes/<name>/HEAD`
-/// to be created when it is missing, which is its default.
-fn followRemoteHead(config: *const config_mod.Config, name: []const u8) bool {
-    var buf: [256]u8 = undefined;
-    const key = std.mem.print(&buf, "remote.{s}.followremotehead", .{name}) catch return false;
-    const value = config.get(key) orelse return true;
-    return !std.ascii.eqlIgnoreCase(value, "never");
+/// What a fetch does with `refs/remotes/<name>/HEAD`: git's
+/// `follow_remote_head_settings`.
+const Follow = union(enum) {
+    never,
+    /// Make it where it is missing, git's default.
+    create,
+    /// Make it where it is missing, and say so where it names another
+    /// branch than the remote's `HEAD`, unless that is the branch named
+    /// (`warn-if-not-<branch>`).
+    warn: ?[]const u8,
+    /// Point it where the remote's `HEAD` points.
+    always,
+};
+
+/// `remote.<name>.followRemoteHEAD`, else `fetch.followRemoteHEAD` (git
+/// 2.56), else `create`; each the last value git knows, a word it does
+/// not know passed over with its warning.
+fn followRemoteHead(config: *const config_mod.Config, name: []const u8, warnings: ?*warning.Warnings) Error!Follow {
+    var for_remote: ?Follow = null;
+    var for_fetch: ?Follow = null;
+    for (config.entries.items) |e| {
+        if (!std.mem.eql(u8, e.name, "followremotehead")) continue;
+        if (std.mem.eql(u8, e.section, "remote") and e.has_subsection and std.mem.eql(u8, e.subsection, name)) {
+            // git reads a missing value as a NULL string, and crashes.
+            const value = e.value orelse continue;
+            if (std.mem.startsWith(u8, value, "warn-if-not-")) {
+                for_remote = .{ .warn = value["warn-if-not-".len..] };
+            } else for_remote = followWord(value) orelse {
+                try warning.note(warnings, .{ .follow_remote_head_unknown = value });
+                continue;
+            };
+        } else if (std.mem.eql(u8, e.section, "fetch") and !e.has_subsection) {
+            const value = e.value orelse return error.FollowRemoteHeadWithoutValue;
+            for_fetch = followWord(value) orelse {
+                try warning.note(warnings, .{ .fetch_follow_remote_head_unknown = value });
+                continue;
+            };
+        }
+    }
+    return for_remote orelse for_fetch orelse .create;
+}
+
+fn followWord(value: []const u8) ?Follow {
+    if (std.mem.eql(u8, value, "never")) return .never;
+    if (std.mem.eql(u8, value, "create")) return .create;
+    if (std.mem.eql(u8, value, "warn")) return .{ .warn = null };
+    if (std.mem.eql(u8, value, "always")) return .always;
+    return null;
 }
 
 fn expandPrefix(arena: Allocator, prefixes: *std.ArrayList([]const u8), name: []const u8) Allocator.Error!void {
@@ -2199,49 +2244,89 @@ fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const He
     try fetch_head.write(gpa, io, .fetch_head, text.written());
 }
 
-/// `refs/remotes/<name>/HEAD`, when it is missing and the remote says
-/// where its `HEAD` points: git's `followRemoteHEAD = create`.
-fn createRemoteHead(
+/// git's `set_head`: `refs/remotes/<name>/HEAD` made, or under `always`
+/// moved, to name the remote-tracking branch of the one branch the remote's
+/// `HEAD` is, by its symbolic ref or else by the one branch at its object;
+/// in a bare mirror, `HEAD` itself, to the branch. Nothing where there is no
+/// one branch, or no remote-tracking branch of it.
+fn setRemoteHead(
     gpa: Allocator,
     io: Io,
     repo: *Repository,
-    name: []const u8,
+    remote: *const remote_mod.Remote,
     remote_refs: []const protocol.RemoteRef,
-    specs: []const Refspec,
-    who: object.Signature,
+    follow: Follow,
+    options: Options,
 ) Error!void {
+    const name = remote.name.?;
+    const head_name = remoteHeadBranch(remote_refs) orelse return;
+    const mirror = repo.isBare() and remote.mirror;
     var head_buf: [512]u8 = undefined;
-    const local_head = std.mem.print(&head_buf, "refs/remotes/{s}/HEAD", .{name}) catch return;
-    if (try repo.refStore().read(gpa, io, local_head)) |existing| {
-        switch (existing) {
-            .symbolic => |target| gpa.free(target),
-            .direct => {},
-        }
-        return;
-    }
-    var target: ?[]const u8 = null;
-    for (remote_refs) |ref| {
-        if (std.mem.eql(u8, ref.name, "HEAD")) target = ref.symref_target;
-    }
-    const remote_target = target orelse return;
-    if (!std.mem.startsWith(u8, remote_target, "refs/heads/")) return;
-    var local_target_buf: [512]u8 = undefined;
-    const local_target = std.mem.print(&local_target_buf, "refs/remotes/{s}/{s}", .{ name, remote_target["refs/heads/".len..] }) catch return;
-    // Only where the configured refspecs keep that branch.
-    var kept = false;
-    for (specs) |spec| {
-        const mapped = (try spec.mapSource(gpa, remote_target)) orelse continue;
-        defer gpa.free(mapped);
-        if (std.mem.eql(u8, mapped, local_target)) kept = true;
-    }
-    if (!kept) return;
-    if (try repo.refStore().resolve(gpa, io, local_target)) |resolved| {
+    var target_buf: [512]u8 = undefined;
+    const local_head = if (mirror) "HEAD" else std.mem.print(&head_buf, "refs/remotes/{s}/HEAD", .{name}) catch return;
+    const target = (if (mirror)
+        std.mem.print(&target_buf, "refs/heads/{s}", .{head_name})
+    else
+        std.mem.print(&target_buf, "refs/remotes/{s}/{s}", .{ name, head_name })) catch return;
+    if (!mirror) {
+        const resolved = try repo.refStore().resolve(gpa, io, target) orelse return;
         gpa.free(resolved.name);
-    } else return;
-    var tx = repo.beginRefs();
-    defer tx.deinit(io);
-    try tx.update(local_head, .{ .symbolic = local_target }, .must_not_exist);
-    try tx.commit(io, .{ .who = who, .message = "fetch", .policy = repo.reflogPolicy() });
+    }
+    const create_only = if (follow == .always) false else !mirror;
+
+    // What it named before: a branch, or an object.
+    const before = try repo.refStore().read(gpa, io, local_head);
+    defer if (before) |b| switch (b) {
+        .symbolic => |t| gpa.free(t),
+        .direct => {},
+    };
+    if (!create_only or before == null) {
+        var tx = repo.beginRefs();
+        defer tx.deinit(io);
+        try tx.change(local_head, .{ .symbolic = target }, .any, .{ .no_deref = true });
+        try tx.commit(io, .{ .who = options.who, .message = "fetch", .policy = repo.reflogPolicy() });
+    }
+
+    const no_warn = switch (follow) {
+        .warn => |branch| branch,
+        else => return,
+    };
+    if (no_warn) |branch| if (std.mem.eql(u8, branch, head_name)) return;
+    const was = before orelse return;
+    var hex: [hash.max_hex_len]u8 = undefined;
+    switch (was) {
+        .symbolic => |old| {
+            var prefix_buf: [512]u8 = undefined;
+            const prefix = std.mem.print(&prefix_buf, "refs/remotes/{s}/", .{name}) catch return;
+            if (!std.mem.startsWith(u8, old, prefix)) return;
+            const old_head = old[prefix.len..];
+            if (std.mem.eql(u8, old_head, head_name)) return;
+            try warning.note(options.warnings, .{ .remote_head_differs = .{ .remote = name, .head = head_name, .local = old_head } });
+        },
+        .direct => |oid| try warning.note(options.warnings, .{ .remote_head_detached = .{ .remote = name, .head = head_name, .oid = oid.hex(&hex) } }),
+    }
+}
+
+/// The branch, without `refs/heads/`, the remote's `HEAD` is: the one its
+/// symbolic ref names among its branches, else the one branch at its
+/// object; `null` for none or several. git's `guess_remote_head` over every
+/// branch.
+fn remoteHeadBranch(remote_refs: []const protocol.RemoteRef) ?[]const u8 {
+    const head = for (remote_refs) |ref| {
+        if (std.mem.eql(u8, ref.name, "HEAD")) break ref;
+    } else return null;
+    if (head.symref_target) |target| {
+        if (!std.mem.startsWith(u8, target, "refs/heads/")) return null;
+        for (remote_refs) |ref| if (std.mem.eql(u8, ref.name, target)) return target["refs/heads/".len..];
+        return null;
+    }
+    var found: ?[]const u8 = null;
+    for (remote_refs) |ref| {
+        if (!std.mem.startsWith(u8, ref.name, "refs/heads/") or !ref.oid.eql(head.oid)) continue;
+        if (found != null) return null;
+        found = ref.name["refs/heads/".len..];
+    }
+    return found;
 }
 
 const testing = std.testing;
@@ -2392,6 +2477,85 @@ test "a fetch from a local repository leaves what git fetch leaves: refs, logs a
     var third = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
     defer third.deinit();
     try testing.expectEqual(@as(u32, 0), third.objects);
+}
+
+test "git 2.56, followRemoteHEAD and fetch.followRemoteHEAD do with refs/remotes/origin/HEAD what git fetch does, and say what it says" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    const Case = struct {
+        /// Settings for both repositories, `name=value`.
+        config: []const []const u8,
+        /// What `refs/remotes/origin/HEAD` is before the fetch: a branch of
+        /// origin's, `@` for the object `side` is at, or none.
+        before: ?[]const u8,
+        /// What git prints, and relic notes.
+        said: ?[]const u8 = null,
+        unknown: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{ .config = &.{"remote.origin.followRemoteHEAD=warn"}, .before = "side", .said = "'HEAD' at 'origin' is 'main', but we have 'side' locally." },
+        .{ .config = &.{"remote.origin.followRemoteHEAD=warn-if-not-main"}, .before = "side" },
+        .{ .config = &.{"remote.origin.followRemoteHEAD=warn"}, .before = "@", .said = "'HEAD' at 'origin' is 'main', but we have a detached HEAD pointing to '" },
+        .{ .config = &.{"remote.origin.followRemoteHEAD=always"}, .before = "side" },
+        .{ .config = &.{"fetch.followRemoteHEAD=always"}, .before = "side" },
+        .{ .config = &.{ "fetch.followRemoteHEAD=always", "remote.origin.followRemoteHEAD=create" }, .before = "side" },
+        .{ .config = &.{"fetch.followRemoteHEAD=never"}, .before = null },
+        .{ .config = &.{ "fetch.followRemoteHEAD=never", "remote.origin.followRemoteHEAD=create" }, .before = null },
+        .{ .config = &.{"fetch.followRemoteHEAD=warn"}, .before = "side", .said = "'HEAD' at 'origin' is 'main', but we have 'side' locally." },
+        .{ .config = &.{"remote.origin.followRemoteHEAD=sometimes"}, .before = null, .unknown = "unrecognized followRemoteHEAD value 'sometimes' ignored" },
+        .{ .config = &.{"fetch.followRemoteHEAD=often"}, .before = null, .unknown = "unrecognized fetch.followRemoteHEAD value 'often' ignored" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}, before {?s}\n", .{ case.config[0], case.before });
+        var twins = try Twins.init(gpa, io, 3);
+        defer twins.deinit(gpa);
+        var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
+        first.deinit();
+        for ([_]*testgit.Repo{ &twins.by_git, &twins.by_relic }) |twin| {
+            if (case.before) |before| {
+                if (std.mem.eql(u8, before, "@")) {
+                    const side = try twin.line(io, &.{ "rev-parse", "refs/remotes/origin/side" });
+                    defer gpa.free(side);
+                    try twin.exec(io, &.{ "update-ref", "--no-deref", "refs/remotes/origin/HEAD", side });
+                } else {
+                    const target = try gpa.print("refs/remotes/origin/{s}", .{before});
+                    defer gpa.free(target);
+                    try twin.exec(io, &.{ "symbolic-ref", "refs/remotes/origin/HEAD", target });
+                }
+            } else try twin.exec(io, &.{ "update-ref", "-d", "--no-deref", "refs/remotes/origin/HEAD" });
+            for (case.config) |setting| {
+                const eq = std.mem.findScalar(u8, setting, '=').?;
+                try twin.exec(io, &.{ "config", setting[0..eq], setting[eq + 1 ..] });
+            }
+        }
+        const printed = try twins.by_git.run(io, &.{ "fetch", "origin" });
+        defer gpa.free(printed);
+
+        var said: warning.Warnings = .init(gpa);
+        defer said.deinit();
+        {
+            var repo = try Repository.open(gpa, io, twins.by_relic.dir, .{});
+            defer repo.deinit(io);
+            var outcome = try fetch(gpa, io, &repo, "origin", .{ .who = test_who, .warnings = &said });
+            outcome.deinit();
+        }
+        try expectSameRefs(gpa, io, &twins.by_git, &twins.by_relic);
+        var arena_state: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_state.deinit();
+        var notes: std.ArrayList(u8) = .empty;
+        for (said.items.items) |w| try notes.print(arena_state.allocator(), "{s}\n", .{try w.message(arena_state.allocator())});
+        if (case.said) |line| {
+            try testing.expect(std.mem.startsWith(u8, printed, line));
+            try testing.expectEqualStrings(printed, notes.items);
+        } else if (case.unknown) |line| {
+            try testing.expectEqualStrings("", printed);
+            try testing.expectEqualStrings(line, std.mem.trimEnd(u8, notes.items, "\n"));
+        } else {
+            try testing.expectEqualStrings("", printed);
+            try testing.expectEqualStrings("", notes.items);
+        }
+    }
 }
 
 test "named refspecs, pruning and every tag are what git makes of them" {

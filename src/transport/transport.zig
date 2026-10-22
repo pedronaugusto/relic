@@ -580,10 +580,12 @@ pub const Session = struct {
     /// a v2 server's answer, or for a repository read directly what its
     /// upload-pack would answer. None where the server does not advertise
     /// the command. `null` for a bundle file and a remote helper, which
-    /// git's transports for them cannot ask. The lines are `arena`'s.
-    pub fn bundleUri(s: *Session, arena: Allocator) Self.Error!?[]const []const u8 {
+    /// git's transports for them cannot ask. What the upload-pack of a
+    /// repository read directly says goes to `warnings`. The lines are
+    /// `arena`'s.
+    pub fn bundleUri(s: *Session, arena: Allocator, warnings: ?*warning.Warnings) Self.Error!?[]const []const u8 {
         return switch (s.impl) {
-            .local => |here| if (upload_pack.advertisesBundleUris(here.repo.configuration())) try upload_pack.bundleSettings(arena, here.repo.configuration()) else &.{},
+            .local => |here| if (upload_pack.advertisesBundleUris(here.repo.configuration())) try upload_pack.bundleSettings(arena, here.repo.configuration(), warnings) else &.{},
             .bundle, .helper => null,
             .smart => |*smart| try protocol.bundleUri(arena, smart.conn, &smart.advertisement),
         };
