@@ -515,20 +515,15 @@ test "a refused on-disk commit graph releases its bytes once" {
 }
 
 test "commit graph chain discovery preserves filesystem refusals" {
-    const Probe = struct {
-        var refusal: Io.Dir.AccessError = error.AccessDenied;
-        fn access(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
-            return refusal;
-        }
-    };
     const base = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var vtable = base.vtable.*;
-    vtable.dirAccess = Probe.access;
-    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(std.testing.allocator, base, .{});
+    defer faults.deinit();
+    const io = faults.io();
     for ([_]Io.Dir.AccessError{ error.AccessDenied, error.InputOutput, error.Canceled }) |err| {
-        Probe.refusal = err;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirAccess, .n = 1 } }, .fault = .{ .fail = err }, .times = 0 }};
+        try faults.setPlan(&plan);
         try std.testing.expectError(err, Graph.open(std.testing.allocator, io, tmp.dir, .sha1));
     }
 }

@@ -14,6 +14,7 @@ const retention = @import("keep.zig");
 
 const std = @import("std");
 const shakedown = @import("shakedown");
+const io_mod = @import("../testing/io.zig");
 const entry_mod = @import("pack/entry.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -3186,21 +3187,16 @@ const FailurePack = struct {
 };
 
 test "pack inflates preserve I/O and cancellation resource failures" {
-    const Fault = struct {
-        threadlocal var failure: Io.File.ReadPositionalError = error.InputOutput;
-        fn read(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
-            return failure;
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var fixture = try FailurePack.init(gpa, io);
     defer fixture.tmp.cleanup();
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Fault.read;
-    const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const failing_io = faults.io();
     for ([_]Io.File.ReadPositionalError{ error.InputOutput, error.Canceled }) |failure| {
-        Fault.failure = failure;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = failure }, .times = 0 }};
+        try faults.setPlan(&plan);
         var p = try Pack.open(gpa, io, fixture.tmp.dir, .{ .base = fixture.name(), .kind = .sha1 }, .{});
         defer p.deinit(io);
         // The header's block is read; the rest of the body, through the
@@ -3262,21 +3258,16 @@ test "pack inflate distinguishes policy resource failures from malformed lengths
 }
 
 test "pack header reads preserve I/O and cancellation resource failures" {
-    const Fault = struct {
-        threadlocal var failure: Io.File.ReadPositionalError = error.InputOutput;
-        fn read(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
-            return failure;
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var fixture = try FailurePack.init(gpa, io);
     defer fixture.tmp.cleanup();
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Fault.read;
-    const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const failing_io = faults.io();
     for ([_]Io.File.ReadPositionalError{ error.AccessDenied, error.InputOutput, error.Canceled }) |failure| {
-        Fault.failure = failure;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = failure }, .times = 0 }};
+        try faults.setPlan(&plan);
         var p = try Pack.open(gpa, io, fixture.tmp.dir, .{ .base = fixture.name(), .kind = .sha1 }, .{});
         defer p.deinit(io);
         try std.testing.expectError(failure, p.entryHeaderAt(failing_io, fixture.small));
@@ -3295,23 +3286,14 @@ test "a refused on-disk pack index releases its bytes once" {
 }
 
 test "a pass whose delta-base cache holds more reads no more of the pack" {
-    const Counter = struct {
-        threadlocal var calls: usize = 0;
-        threadlocal var bytes: usize = 0;
-        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-            calls += 1;
-            const n = try std.testing.io.vtable.fileReadPositional(userdata, file, buffers, offset);
-            bytes += n;
-            return n;
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Counter.read;
-    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    // The reads counted, and their bytes from the trace.
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .trace = .all });
+    defer faults.deinit();
+    const counted = faults.io();
 
     var prng: std.Random.DefaultPrng = .init(0x7ac4e);
     const random = prng.random();
@@ -3380,17 +3362,17 @@ test "a pass whose delta-base cache holds more reads no more of the pack" {
         // second holds every base the first held at each step, and more.
         var cache = try Cache.init(gpa, 1 << 30);
         defer cache.deinit();
-        var passes: [2]struct { calls: usize, bytes: usize } = undefined;
+        var passes: [2]struct { calls: u64, bytes: u64 } = undefined;
         for (&passes) |*pass| {
-            Counter.calls = 0;
-            Counter.bytes = 0;
+            faults.reset();
             for (order) |k| {
                 const got = try p.readAt(counted, offsets.items[k], .{ .cache = &cache });
                 defer gpa.free(got.bytes);
                 try std.testing.expectEqualSlices(u8, contents.items[k], got.bytes);
             }
-            pass.* = .{ .calls = Counter.calls, .bytes = Counter.bytes };
+            pass.* = .{ .calls = faults.count(.fileReadPositional), .bytes = io_mod.moved(faults, .fileReadPositional) };
         }
+        try std.testing.expect(passes[0].calls != 0 and passes[0].bytes != 0);
         if (passes[1].calls > passes[0].calls or passes[1].bytes > passes[0].bytes) {
             std.debug.print("pack {d}, {d}-byte cache: cold {d} reads, {d} bytes; warm {d} reads, {d} bytes\n", .{ round, cache_bytes, passes[0].calls, passes[0].bytes, passes[1].calls, passes[1].bytes });
             return error.TestUnexpectedResult;
@@ -3431,13 +3413,6 @@ const LiveAllocator = struct {
 };
 
 test "a pack the default block cache holds is read once in any order, and holds only the blocks read" {
-    const Counter = struct {
-        threadlocal var calls: usize = 0;
-        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-            calls += 1;
-            return std.testing.io.vtable.fileReadPositional(userdata, file, buffers, offset);
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -3463,9 +3438,9 @@ test "a pack the default block cache holds is read once in any order, and holds 
     var name_buf: [64]u8 = undefined;
     const base = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
 
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Counter.read;
-    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const counted = faults.io();
     var live: LiveAllocator = .{ .child = gpa };
     var p = try Pack.open(live.allocator(), counted, tmp.dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
@@ -3474,16 +3449,17 @@ test "a pack the default block cache holds is read once in any order, and holds 
 
     // One object read: the blocks it spans, and the slot tables.
     const opened = live.live;
-    Counter.calls = 0;
+    faults.reset();
     {
         const got = try p.readAt(counted, offsets[0], .{});
         defer live.allocator().free(got.bytes);
         try std.testing.expectEqualSlices(u8, &contents[0], got.bytes);
     }
+    try std.testing.expect(faults.count(.fileReadPositional) != 0);
     const held = live.live - opened;
     const tables = blocks * (@sizeOf(?[*]u8) + @sizeOf(u64) + @sizeOf(u32));
-    if (held > Counter.calls * block_stride + tables) {
-        std.debug.print("one object read in {d} reads holds {d} bytes\n", .{ Counter.calls, held });
+    if (held > faults.count(.fileReadPositional) * block_stride + tables) {
+        std.debug.print("one object read in {d} reads holds {d} bytes\n", .{ faults.count(.fileReadPositional), held });
         return error.TestUnexpectedResult;
     }
 
@@ -3498,8 +3474,8 @@ test "a pack the default block cache holds is read once in any order, and holds 
             try std.testing.expectEqualSlices(u8, &contents[k], got.bytes);
         }
     }
-    if (Counter.calls > blocks) {
-        std.debug.print("{d} blocks read in {d} calls\n", .{ blocks, Counter.calls });
+    if (faults.count(.fileReadPositional) > blocks) {
+        std.debug.print("{d} blocks read in {d} calls\n", .{ blocks, faults.count(.fileReadPositional) });
         return error.TestUnexpectedResult;
     }
 }
@@ -3553,14 +3529,16 @@ test "a reused deflater makes the stream a fresh one makes, wherever it goes" {
 }
 
 test "small random packed reads keep large sequential reads buffered" {
-    const Counter = struct {
-        threadlocal var largest: usize = 0;
+    // The largest read asked for, which no trace holds: a read at the end
+    // of the file moves less than it asks.
+    const Widest = struct {
+        const Layer = shakedown.Layer(usize, .{ .fileReadPositional = read });
         fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+            const l = Layer.of(userdata);
             var wanted: usize = 0;
             for (buffers) |buf| wanted += buf.len;
-            largest = @max(largest, wanted);
-            const io = std.testing.io;
-            return io.vtable.fileReadPositional(userdata, file, buffers, offset);
+            l.state = @max(l.state, wanted);
+            return l.base.vtable.fileReadPositional(l.base.userdata, file, buffers, offset);
         }
     };
     const io = std.testing.io;
@@ -3582,10 +3560,8 @@ test "small random packed reads keep large sequential reads buffered" {
     const name = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
     var p = try Pack.open(gpa, io, tmp.dir, .{ .base = name, .kind = .sha1 }, .{});
     defer p.deinit(io);
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Counter.read;
-    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    Counter.largest = 0;
+    var widest: Widest.Layer = .init(io, 0);
+    const counted = widest.io();
     for ([_]struct { at: u64, bytes: []const u8 }{
         .{ .at = last, .bytes = "last" },
         .{ .at = first, .bytes = "first" },
@@ -3594,26 +3570,15 @@ test "small random packed reads keep large sequential reads buffered" {
         defer gpa.free(got.bytes);
         try std.testing.expectEqualSlices(u8, want.bytes, got.bytes);
     }
-    try std.testing.expect(Counter.largest <= 8 * 1024);
-    Counter.largest = 0;
+    try std.testing.expect(widest.state <= 8 * 1024);
+    widest.state = 0;
     const got = try p.readAt(counted, middle, .{});
     defer gpa.free(got.bytes);
     try std.testing.expectEqualSlices(u8, large, got.bytes);
-    try std.testing.expectEqual(@as(usize, 64 * 1024), Counter.largest);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), widest.state);
 }
 
 test "a packed entry header survives a short positional read" {
-    const Short = struct {
-        threadlocal var first: bool = true;
-        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-            const io = std.testing.io;
-            if (first) {
-                first = false;
-                return io.vtable.fileReadPositional(userdata, file, &.{buffers[0][0..1]}, offset);
-            }
-            return io.vtable.fileReadPositional(userdata, file, buffers, offset);
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -3629,10 +3594,11 @@ test "a packed entry header survives a short positional read" {
     const name = try std.mem.print(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
     var p = try Pack.open(gpa, io, tmp.dir, .{ .base = name, .kind = .sha1 }, .{});
     defer p.deinit(io);
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Short.read;
-    const short: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    Short.first = true;
+    // The first read moves one byte.
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .short = 1 } }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+    defer faults.deinit();
+    const short = faults.io();
     const got = try p.readAt(short, at, .{});
     defer gpa.free(got.bytes);
     try std.testing.expectEqualSlices(u8, bytes, got.bytes);

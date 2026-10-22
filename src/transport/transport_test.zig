@@ -13,6 +13,7 @@ const suite = @import("../testing/helpers.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
+const shakedown = @import("shakedown");
 
 const config_mod = @import("../config/config.zig");
 const credential = @import("../wire.zig").credential;
@@ -1502,7 +1503,8 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     const Child = @import("../process.zig").program.Child;
     const Controlled = struct {
         const Self = @This();
-        threadlocal var active: ?*Self = null;
+        /// An `Io` that holds the fetch's read of the ssh's advertisement.
+        const Hold = shakedown.Layer(struct { controlled: *Self }, .{ .operate = operate });
         reading: Io.Event = .unset,
         never_answered: Io.Event = .unset,
         canceled: Io.Event = .unset,
@@ -1528,25 +1530,23 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
             if (tracked) state.reaped = true;
         }
 
-        fn operate(context: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
-            if (active) |state| {
-                if (operation == .file_read_streaming and state.stdout != null and operation.file_read_streaming.file.handle == state.stdout.?) {
-                    // This is the fetch's advertisement read, after the real
-                    // child was spawned. Hold it until cancellation, so the
-                    // caller cannot race a completed or unstarted fetch.
-                    state.reading.set(testing.io);
-                    state.never_answered.wait(testing.io) catch |err| {
-                        state.read_canceled = true;
-                        return err;
-                    };
-                }
+        fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+            const l = Hold.of(userdata);
+            const state = l.state.controlled;
+            if (operation == .file_read_streaming and state.stdout != null and operation.file_read_streaming.file.handle == state.stdout.?) {
+                // This is the fetch's advertisement read, after the real
+                // child was spawned. Hold it until cancellation, so the
+                // caller cannot race a completed or unstarted fetch.
+                state.reading.set(l.base);
+                state.never_answered.wait(l.base) catch |err| {
+                    state.read_canceled = true;
+                    return err;
+                };
             }
-            return testing.io.vtable.operate(context, operation);
+            return l.base.vtable.operate(l.base.userdata, operation);
         }
 
         fn fetch(allocator: Allocator, task_io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map, state: *Self) void {
-            active = state;
-            defer active = null;
             var outcome = fetch_mod.fetch(allocator, task_io, repo, "origin", .{
                 .who = test_who,
                 .programs = .{ .environ = env, .spawn = .{ .context = state, .start = start, .terminate = terminate } },
@@ -1562,9 +1562,9 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
             state.canceled.set(testing.io);
         }
     };
-    var vtable = testing.io.vtable.*;
-    vtable.operate = Controlled.operate;
-    const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    var state: Controlled = .{};
+    var hold: Controlled.Hold = .init(testing.io, .{ .controlled = &state });
+    const io = hold.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const ssh = try testremote.fakeSsh(gpa, io, tmp.dir);
@@ -1586,7 +1586,6 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     defer env.deinit();
     try env.put("PATH", "/usr/bin:/bin");
 
-    var state: Controlled = .{};
     var task = try testing.io.concurrent(Controlled.fetch, .{ gpa, io, &repo, &env, &state });
     defer task.cancel(testing.io);
     const ssh_watchdog: Io.Duration = .fromSeconds(5);

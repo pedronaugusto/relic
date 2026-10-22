@@ -1086,8 +1086,9 @@ test "conversion cleanup passes its supplied Io to the native owner once" {
         const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = recordRelease };
     };
     const io = std.testing.io;
-    var cleanup_vtable = io.vtable.*;
-    const cleanup_io: Io = .{ .userdata = io.userdata, .vtable = &cleanup_vtable };
+    // An `Io` of its own, told from the session's by its vtable.
+    var cleanup: shakedown.Layer(struct { unused: u8 = 0 }, .{}) = .init(io, .{});
+    const cleanup_io = cleanup.io();
     var probe: Probe = .{};
     var session: Session = .open(std.testing.allocator, io, .{ .wt = Io.Dir.cwd(), .kind = .sha1 });
     session.native_session = .{ .context = &probe, .vtable = &Probe.vtable };
