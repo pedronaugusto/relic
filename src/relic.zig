@@ -201,12 +201,21 @@ pub const fast = @import("fast.zig");
 
 pub const maintenance = @import("maintenance.zig");
 
-// Every namespace relic exports, three levels down, has exactly one row in
-// the table above and one in the README's, and neither table has a row for
-// anything else: a module added or removed without its rows does not
-// compile, on any target.
+// The contract relic's public surface keeps, checked as relic compiles, on
+// any target, so that no build of it breaks one:
+// - every namespace three levels down has exactly one row in the table
+//   above and one in the README's, and neither table a row for anything
+//   else;
+// - each such namespace is its own, offers no test access and names its
+//   errors (`Error`, an error set), as does each type it owns that a caller
+//   releases with `deinit`;
+// - a facade publishes every declaration of its implementation, as the
+//   implementation's type;
+// - no public function takes more than five positional inputs;
+// - how a program ended is conduit's `Term` wherever relic shows it, and a
+//   program's working directory is relic's own `Cwd`.
 comptime {
-    @setEvalBranchQuota(10_000_000);
+    @setEvalBranchQuota(50_000_000);
     const own = tableNames(@embedFile("relic.zig"), "//! | `");
     const readme = @embedFile("README.md");
     const begin = std.mem.find(u8, readme, "<!-- BEGIN MODULES -->") orelse @compileError("README.md: no <!-- BEGIN MODULES --> marker");
@@ -215,9 +224,14 @@ comptime {
     const count = checkNamespaces(@This(), "", 3, own, documented);
     if (own.len != count) @compileError(std.fmt.comptimePrint("src/relic.zig's module table has {d} rows for {d} namespaces", .{ own.len, count }));
     if (documented.len != count) @compileError(std.fmt.comptimePrint("README.md's module table has {d} rows for {d} namespaces", .{ documented.len, count }));
+    checkErrors(@This(), "", 3);
+    checkInputs(@This(), "", 7);
+    for (facades) |facade| covers(facade[0], facade[1], facade[2]);
+    checkPrograms();
 }
 
 const std = @import("std");
+const conduit = @import("conduit");
 
 /// The module names a table's rows begin with: each line starting with
 /// `row`, its name to the closing backtick.
@@ -252,7 +266,8 @@ fn rowsOf(comptime names: []const []const u8, comptime path: []const u8) usize {
 }
 
 /// Each namespace under `ns` to `depth` levels, held to one row in each
-/// table; how many there are.
+/// table, to being its own and to offering no test access; how many there
+/// are.
 fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, comptime own: []const []const u8, comptime documented: []const []const u8) usize {
     var count: usize = 0;
     for (@typeInfo(ns).@"struct".decl_names) |name| {
@@ -260,8 +275,111 @@ fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime dept
         const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
         if (rowsOf(own, path) != 1) @compileError("`" ++ path ++ "` needs one row in src/relic.zig's module table: //! | `" ++ path ++ "` | <purpose> |");
         if (rowsOf(documented, path) != 1) @compileError("`" ++ path ++ "` needs one row in README.md's module table, between its BEGIN MODULES and END MODULES markers");
+        if (@hasDecl(@field(ns, name), "test_access")) @compileError("`" ++ path ++ "` offers test access");
+        for (@typeInfo(ns).@"struct".decl_names) |other| {
+            if (!std.mem.eql(u8, name, other) and isNamespace(ns, other) and @field(ns, name) == @field(ns, other))
+                @compileError("`" ++ path ++ "` is the same namespace as `" ++ other ++ "`");
+        }
         count += 1;
         if (depth > 1) count += checkNamespaces(@field(ns, name), path, depth - 1, own, documented);
     }
     return count;
+}
+
+/// Types relic publishes as the family package's own, whose conventions
+/// are that package's.
+const foreign = .{conduit.Child};
+
+fn isForeign(comptime T: type) bool {
+    inline for (foreign) |F| if (T == F) return true;
+    return false;
+}
+
+/// Each namespace under `ns` to `depth` levels, and each type of one that
+/// a caller releases with `deinit`, names its errors: `Error`, an error
+/// set with names.
+fn checkErrors(comptime ns: type, comptime prefix: []const u8, comptime depth: usize) void {
+    for (@typeInfo(ns).@"struct".decl_names) |name| {
+        const value = @field(ns, name);
+        if (@TypeOf(value) != type or isForeign(value) or @typeInfo(value) != .@"struct") continue;
+        const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
+        if (isNamespace(ns, name) or @hasDecl(value, "deinit")) {
+            if (!@hasDecl(value, "Error")) @compileError("`" ++ path ++ "` names no errors: it needs `pub const Error`, an error set");
+            if (@typeInfo(value.Error) != .error_set or @typeInfo(value.Error).error_set.error_names == null)
+                @compileError("`" ++ path ++ ".Error` is not an error set with names");
+        }
+        if (isNamespace(ns, name) and depth > 1) checkErrors(value, path, depth - 1);
+    }
+}
+
+/// No public function under `ns`, to `depth` levels of namespaces and
+/// types, takes more than five positional inputs; more go in an options
+/// or inputs struct.
+fn checkInputs(comptime ns: type, comptime prefix: []const u8, comptime depth: usize) void {
+    if (depth == 0) return;
+    const names = switch (@typeInfo(ns)) {
+        .@"struct" => |s| s.decl_names,
+        .@"union" => |s| s.decl_names,
+        .@"enum" => |s| s.decl_names,
+        else => return,
+    };
+    for (names) |name| {
+        const value = @field(ns, name);
+        const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
+        if (@TypeOf(value) == type) {
+            checkInputs(value, path, depth - 1);
+        } else if (@typeInfo(@TypeOf(value)) == .@"fn") {
+            const inputs = @typeInfo(@TypeOf(value)).@"fn".param_types.len;
+            if (inputs > 5) @compileError(std.fmt.comptimePrint("`{s}` takes {d} positional inputs; at most five, the rest in an options or inputs struct", .{ path, inputs }));
+        }
+    }
+}
+
+/// Each facade, its path, and the implementation it publishes.
+const facades = .{
+    .{ repo, "repo", @import("repo/repo.zig") },
+    .{ hash, "hash", @import("hash/hash.zig") },
+    .{ object, "object", @import("object/object.zig") },
+    .{ odb, "odb", @import("odb/odb.zig") },
+    .{ refs, "refs", @import("refs/refs.zig") },
+    .{ config, "config", @import("config/config.zig") },
+    .{ index, "index", @import("index/index.zig") },
+    .{ worktree, "worktree", @import("checkout/checkout.zig") },
+    .{ diff, "diff", @import("diff/diff.zig") },
+    .{ rev_walk, "rev_walk", @import("walk/walk.zig") },
+    .{ merge, "merge", @import("merge/merge.zig") },
+    .{ commit, "commit", @import("commit/commit.zig") },
+    .{ transport, "transport", @import("transport/transport.zig") },
+    .{ submodule, "submodule", @import("submodule/submodule.zig") },
+    .{ lfs, "lfs", @import("lfs/lfs.zig") },
+    .{ patch, "patch", @import("patch/patch.zig") },
+    .{ pretty, "pretty", @import("pretty/pretty.zig") },
+    .{ maintenance, "maintenance", @import("maintenance/maintenance.zig") },
+};
+
+/// `facade` publishes every declaration of `implementation`, as its type.
+fn covers(comptime facade: type, comptime path: []const u8, comptime implementation: type) void {
+    for (@typeInfo(implementation).@"struct".decl_names) |name| {
+        if (!@hasDecl(facade, name)) @compileError("`" ++ path ++ "` does not publish `" ++ name ++ "` of its implementation");
+        if (@TypeOf(@field(facade, name)) != @TypeOf(@field(implementation, name))) @compileError("`" ++ path ++ "." ++ name ++ "` is not its implementation's");
+    }
+}
+
+/// How a program ended is conduit's `Term` wherever relic shows it, never
+/// the standard library's, and a program's working directory is relic's
+/// own `Cwd`.
+fn checkPrograms() void {
+    const program = repo.program;
+    if (@FieldType(program.Invocation, "cwd") != program.Cwd or @FieldType(commit.trailer.Commands, "cwd") != program.Cwd)
+        @compileError("a program's working directory is `repo.program.Cwd`");
+    const terms = .{
+        program.Term,
+        @FieldType(program.Outcome, "term"),
+        program.Child.Term,
+        @typeInfo(@typeInfo(@TypeOf(program.Running.wait)).@"fn".return_type.?).error_union.payload,
+        @typeInfo(@typeInfo(@TypeOf(program.Child.wait)).@"fn".return_type.?).error_union.payload,
+        @typeInfo(@FieldType(repo.hooks.Failure, "term")).optional.child,
+        @typeInfo(@FieldType(transport.connection.Process, "term")).optional.child,
+    };
+    inline for (terms) |term| if (term != conduit.Term) @compileError("how a program ended is `conduit.Term`");
 }

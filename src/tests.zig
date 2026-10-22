@@ -148,6 +148,11 @@ test {
         _ = @import("testing/external_diff.zig");
         _ = @import("testing/diff_prefixes.zig");
         _ = @import("testing/diff_stat.zig");
+        _ = @import("commit/commit.zig");
+        _ = @import("merge/merge.zig");
+        _ = @import("patch/patch.zig");
+        _ = @import("refs/refs.zig");
+        _ = @import("refs/reftable/table.zig");
         _ = @import("testing/log_formats.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
@@ -345,13 +350,9 @@ test {
     _ = @import("testing/security/terminal_escape.zig");
 }
 
-test {
-    _ = @import("testing/surface.zig");
-}
+test {}
 
-test {
-    _ = @import("testing/public_calls.zig");
-}
+test {}
 
 test {
     _ = @import("testing/codec_object.zig");
