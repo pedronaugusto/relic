@@ -42,6 +42,9 @@ pub const Error = error{
     /// dies on.
     InvalidDiffMergesSetting,
     NotACommit,
+    /// A remerge diff asked of a commit that is not a merge of two
+    /// parents, which `parts` never asks.
+    NotATwoParentMerge,
 } || diff.UnifiedError || combined.Error || three_way.Error || quarantine.Error || pretty.Error || error{InvalidConflictStyle};
 
 /// How a merge's diff is shown: git's `--diff-merges` formats.
@@ -205,6 +208,7 @@ fn writeRemerge(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: 
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     const parents = try parentsOf(arena, io, repo, inputs.commit);
+    if (parents.len != 2) return error.NotATwoParentMerge;
     const ctx: pretty.Context = .{ .abbrev_len = abbrev.defaultLength(config, repo.objectDatabase()) };
     var labels: [2][]const u8 = undefined;
     for (parents[0..2], &labels) |p, *label| {

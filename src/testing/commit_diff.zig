@@ -78,8 +78,10 @@ fn setup(io: Io, repo: *testgit.Repo) !void {
 
     // main and clean, merged as git merges them.
     try repo.exec(io, &.{ "reset", "-q", "--hard", "main" });
+    try repo.exec(io, &.{ "checkout", "-q", "--detach", "main" });
     try repo.exec(io, &.{ "merge", "-q", "--no-edit", "clean" });
     try repo.exec(io, &.{ "branch", "cleanly", "HEAD" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
 
     try repo.exec(io, &.{ "reset", "-q", "--hard", "main" });
     try repo.writeFile(io, "same", "same third\n");
@@ -200,6 +202,16 @@ test "a commit's diff by every --diff-merges format is git diff-tree's, remerge 
     try git.exec(io, &.{ "config", "merge.conflictStyle", "diff3" });
     try expectDiffTree(gpa, io, &git, .{ .rev = "merged", .merges = .remerge });
     try expectDiffTree(gpa, io, &git, .{ .rev = "merged", .merges = .remerge, .renames = true });
+
+    // A remerge of what is no merge of two is refused, never read past.
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var sink: Io.Writer.Allocating = .init(gpa);
+    defer sink.deinit();
+    for ([_][]const u8{ "main", "octopus" }) |rev| {
+        const commit = try oidOf(gpa, io, &git, rev);
+        try std.testing.expectError(error.NotATwoParentMerge, commit_diff.write(gpa, io, &sink.writer, .{ .repo = &repo, .commit = commit, .part = .remerge }, .{}));
+    }
 }
 
 test "-m shows what log.diffMerges names, as git log -m -p writes it" {
