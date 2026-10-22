@@ -2,7 +2,6 @@ const std = @import("std");
 const hash = @import("../hash/hash.zig");
 const testing = std.testing;
 const testremote = @import("../testing/remote.zig");
-const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
 
 test "a pack relic writes has the reverse index git's index-pack writes for it" {
@@ -27,9 +26,6 @@ test "a pack relic writes has the reverse index git's index-pack writes for it" 
     // Outside any repository: index-pack reads the pack it is given.
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(tmp_path);
-    try testgit.noRepositoryAbove(&env, tmp_path);
     const out = try testremote.gitInputEnv(gpa, io, tmp.dir, &env, &.{ "index-pack", "--rev-index", "-o", "check.idx", pack_name }, "", true);
     gpa.free(out);
     const ours = try tmp.dir.readFileAlloc(io, rev_name, gpa, .unlimited);

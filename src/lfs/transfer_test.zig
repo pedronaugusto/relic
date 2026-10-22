@@ -56,7 +56,6 @@ pub const Fixture = struct {
         var env = try testlfs.environ(gpa, home);
         errdefer env.deinit();
         // git runs in the test's directory, inside the suite's checkout
-        try testgit.noRepositoryAbove(&env, root);
         try testlfs.requireGitLfs(gpa, io, &env);
         // The stand-ins go first on the path: git-lfs-authenticate for the
         // stand-in ssh to find.

@@ -46,6 +46,7 @@ pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
     try map.put("XDG_RUNTIME_DIR", home);
     try map.put("GIT_CONFIG_NOSYSTEM", "1");
     try map.put("GIT_TERMINAL_PROMPT", "0");
+    try testgit.noRepositoryAboveTests(&map);
     try map.put("GIT_LFS_SKIP_PUSH", "0");
     // The dates every fixture commits with, as `testgit.isolate` fixes them.
     try testgit.setDate(&map, testgit.fixture_date);
@@ -60,7 +61,9 @@ pub fn requireGitLfs(gpa: Allocator, io: Io, env: *const Environ.Map) !void {
     try testgit.requireGit(gpa, io);
     if (!lfs_checked) {
         lfs_checked = true;
-        var outcome = program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ "git", "lfs", "version" } }, .{}) catch
+        var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+        const root = try testgit.testsRoot(&root_buf);
+        var outcome = program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ "git", "lfs", "version" }, .cwd = .{ .path = root } }, .{}) catch
             return error.SkipZigTest;
         defer outcome.deinit(gpa);
         lfs_present = outcome.succeeded();

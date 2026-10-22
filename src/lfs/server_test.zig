@@ -159,7 +159,6 @@ const World = struct {
         defer gpa.free(home);
         var env = try testlfs.environ(gpa, home);
         errdefer env.deinit();
-        try testgit.noRepositoryAbove(&env, root);
         try testlfs.requireGitLfs(gpa, io, &env);
         w.* = .{ .gpa = gpa, .io = io, .tmp = tmp, .root = root, .env = env, .tools = undefined, .served = undefined, .served_path = &.{} };
         w.tools = try tmp.dir.openDir(io, "tools", .{});

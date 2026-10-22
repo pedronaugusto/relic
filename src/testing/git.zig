@@ -295,7 +295,8 @@ pub const fixture_date: i64 = 1_700_000_000;
 /// Make `map` an environment no setting of the person's reaches: every
 /// `GIT_*` variable and every entry of `personal_variables` removed, `HOME`
 /// set to `home`, the global config read from `home` alone, the system
-/// config not read at all, no terminal prompt, and git's author and
+/// config not read at all, no terminal prompt, no repository looked for
+/// above `testsRoot` (`noRepositoryAboveTests`), and git's author and
 /// committer dates fixed at `fixture_date`. What else the map holds —
 /// `PATH`, the locale, a test's own additions made afterwards — stays.
 ///
@@ -321,7 +322,29 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     try map.put("GIT_CONFIG_GLOBAL", try std.mem.print(&global_buf, "{s}" ++ sep ++ ".gitconfig", .{home}));
     try map.put("GIT_CONFIG_NOSYSTEM", "1");
     try map.put("GIT_TERMINAL_PROMPT", "0");
+    try noRepositoryAboveTests(map);
     try setDate(map, fixture_date);
+}
+
+/// Keep git from looking for a repository above `testsRoot`, for an
+/// environment `isolate` does not make: every test's directories live
+/// under it, inside the checkout the suite runs from, and git looking
+/// upwards from one would find that checkout: its configuration, or, where
+/// a `.git` file above names nothing or the checkout is another user's, a
+/// refusal.
+pub fn noRepositoryAboveTests(map: *Environ.Map) !void {
+    var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    try map.put("GIT_CEILING_DIRECTORIES", try testsRoot(&root_buf));
+}
+
+/// Where `std.testing.tmpDir` makes every test's directories,
+/// `.zig-cache/tmp`, absolute, in `buffer`: a place git can start in
+/// that holds no repository, for a run with no directory of its own.
+pub fn testsRoot(buffer: []u8) ![]const u8 {
+    const io = std.testing.io;
+    var root = try Io.Dir.cwd().createDirPathOpen(io, ".zig-cache/tmp", .{});
+    defer root.close(io);
+    return buffer[0..try root.realPath(io, buffer)];
 }
 
 /// A home for gpg of a test's own, under the build's `gnupg-fixture-root`.
@@ -393,11 +416,10 @@ pub fn keepSystemVariables(gpa: Allocator, map: *Environ.Map) !void {
     }
 }
 
-/// Keep git from finding a repository above `dir`, an absolute path, for a
-/// test that runs git outside any repository of its own. A test's
-/// directories live inside the checkout the suite runs from, and git looking
-/// upwards from one finds that checkout: its configuration, or, where the
-/// checkout is a linked worktree or belongs to another user, a refusal.
+/// Keep git from looking for a repository above `dir`, an absolute path:
+/// `dir` alone, for a test whose repository must be there or nowhere.
+/// Above `testsRoot`, `noRepositoryAboveTests` already keeps git from
+/// looking.
 pub fn noRepositoryAbove(map: *Environ.Map, dir: []const u8) !void {
     try map.put("GIT_CEILING_DIRECTORIES", std.Io.Dir.path.dirname(dir) orelse dir);
 }

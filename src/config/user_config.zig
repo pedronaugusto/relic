@@ -277,7 +277,7 @@ test "the files are the ones git names, found from the person's environment" {
     try env.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &env);
     try env.put("HOME", home_path);
-    try testgit.noRepositoryAbove(&env, home_path);
+    try testgit.noRepositoryAboveTests(&env);
     try env.put("GIT_CONFIG_SYSTEM", system);
     try env.put("GIT_CONFIG_COUNT", "1");
     try env.put("GIT_CONFIG_KEY_0", "core.sshCommand");
@@ -297,7 +297,7 @@ test "the files are the ones git names, found from the person's environment" {
     try testing.expectEqualStrings(l.global[1], l.globalFile().?);
 
     // git itself names the same files, in the same order.
-    var outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "git", "var", "GIT_CONFIG_GLOBAL" } }, .{});
+    var outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "git", "var", "GIT_CONFIG_GLOBAL" }, .cwd = .{ .dir = home.dir } }, .{});
     defer outcome.deinit(gpa);
     if (outcome.succeeded()) {
         var lines = std.mem.tokenizeScalar(u8, outcome.stdout, '\n');
@@ -372,7 +372,7 @@ test "GIT_CONFIG_COUNT is read by strtoul and GIT_CONFIG_NOSYSTEM as a boolean, 
     try env.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &env);
     try env.put("HOME", home_path);
-    try testgit.noRepositoryAbove(&env, home_path);
+    try testgit.noRepositoryAboveTests(&env);
     try env.put("XDG_CONFIG_HOME", home_path);
     try env.put("GIT_CONFIG_KEY_0", "x.a");
     try env.put("GIT_CONFIG_VALUE_0", "one");
@@ -421,7 +421,7 @@ test "GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are read as git reads them, bot
     try env.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &env);
     try env.put("HOME", home_path);
-    try testgit.noRepositoryAbove(&env, home_path);
+    try testgit.noRepositoryAboveTests(&env);
     try env.put("XDG_CONFIG_HOME", home_path);
     try env.put("GIT_CONFIG_NOSYSTEM", "1");
 
@@ -484,7 +484,7 @@ test "the XDG file and ~/.gitconfig are both read, the second winning, as git re
     try env.put("PATH", path);
     try testgit.keepSystemVariables(gpa, &env);
     try env.put("HOME", home_path);
-    try testgit.noRepositoryAbove(&env, home_path);
+    try testgit.noRepositoryAboveTests(&env);
     try env.put("GIT_CONFIG_NOSYSTEM", "1");
 
     var l = try locate(gpa, io, &env, null);

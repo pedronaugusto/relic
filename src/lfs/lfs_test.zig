@@ -12,31 +12,18 @@ const filter_mod = @import("filter.zig");
 const Io = std.Io;
 
 const testgit = @import("../testing/git.zig");
+const testlfs = @import("../testing/lfs.zig");
 const filter = @import("../checkout/filter.zig");
 const lfs = @import("lfs.zig");
 const ft = @import("../checkout/filter_test.zig");
 
 const testing = std.testing;
 
-var lfs_checked = false;
-var lfs_present = false;
-
 /// `error.SkipZigTest` unless `git lfs` runs.
 fn requireGitLfs(gpa: std.mem.Allocator, io: Io) !void {
-    try testgit.requireGit(gpa, io);
-    if (!lfs_checked) {
-        lfs_checked = true;
-        var environ = try testgit.isolatedEnviron(gpa, testgit.no_home);
-        defer environ.deinit();
-        const result = std.process.run(gpa, io, .{ .argv = &.{ testgit.program(), "lfs", "version" }, .environ_map = &environ }) catch return error.SkipZigTest;
-        defer gpa.free(result.stdout);
-        defer gpa.free(result.stderr);
-        lfs_present = switch (result.term) {
-            .exited => |code| code == 0,
-            else => false,
-        };
-    }
-    if (!lfs_present) return error.SkipZigTest;
+    var environ = try testgit.isolatedEnviron(gpa, testgit.no_home);
+    defer environ.deinit();
+    try testlfs.requireGitLfs(gpa, io, &environ);
 }
 
 const attributes_line = "*.bin filter=lfs diff=lfs merge=lfs -text\n";
