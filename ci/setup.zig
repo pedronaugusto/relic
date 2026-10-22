@@ -1,23 +1,26 @@
 //! Native CI tool setup, cached outside the checkout and retried by preflight.
 const std = @import("std");
 const builtin = @import("builtin");
+const git_release = @import("git_release");
 
-/// The Git release the Linux jobs build, its published SHA-256, and the LFS
-/// release every job installs.
-const git_version = "2.55.0";
-const git_sha256 = "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357";
+/// The oldest Git the compatibility job builds, and the LFS release every
+/// job installs; the release every other job runs is `git_release.held`.
 const floor_version = "2.39.5";
 const floor_sha256 = "c58da92c378df4a986ca33266897a7397e86c22ee266a284d8c2432c39066b59";
 const lfs_version = "3.8.0";
 const make_flags = [_][]const u8{ "NO_TCLTK=1", "NO_GETTEXT=1", "NO_RUST=1" };
 
-/// The suite's fixtures need Git 2.47 or later.
+/// The suite's fixtures need Git 2.47 or later: git's development branch,
+/// which the master job runs.
 fn recent(text: []const u8) bool {
-    if (!std.mem.startsWith(u8, text, "git version ")) return false;
-    var parts = std.mem.splitScalar(u8, text[12..], '.');
-    const major = std.fmt.parseInt(u32, parts.next() orelse return false, 10) catch return false;
-    const minor = std.fmt.parseInt(u32, parts.next() orelse return false, 10) catch return false;
-    return major > 2 or (major == 2 and minor >= 47);
+    const found = git_release.parse(text) orelse return false;
+    return found.major > 2 or (found.major == 2 and found.minor >= 47);
+}
+
+/// Whether `git --version` said the release the comparisons are held to.
+fn held(text: []const u8) bool {
+    const found = git_release.parse(text) orelse return false;
+    return found.eql(git_release.held);
 }
 const Context = struct {
     a: std.mem.Allocator,
@@ -72,7 +75,15 @@ fn buildGit(c: Context, root: []const u8, kind: Git) !void {
         .floor => "old-git",
     };
     const prefix = try std.Io.Dir.path.join(c.a, &.{ root, name });
-    if (!master and c.exists(try std.Io.Dir.path.join(c.a, &.{ prefix, "bin", "git" }))) return;
+    // A cached build is kept only while it is the release asked for: the
+    // tool cache's key does not follow `git_release.zig`.
+    const built = try std.Io.Dir.path.join(c.a, &.{ prefix, "bin", "git" });
+    if (!master and c.exists(built)) {
+        const version = try c.capture(&.{ built, "--version" });
+        const wanted = if (kind == .floor) std.mem.eql(u8, std.mem.trimEnd(u8, version, "\r\n"), "git version " ++ floor_version) else held(version);
+        if (wanted) return;
+        try std.Io.Dir.cwd().deleteTree(c.io, prefix);
+    }
     try c.command(&.{ "sudo", "apt-get", "update" });
     try c.command(&.{ "sudo", "apt-get", "install", "-y", "--no-install-recommends", "build-essential", "gettext", "libcurl4-openssl-dev", "libexpat1-dev", "libssl-dev", "zlib1g-dev", "gnupg", "openssh-client" });
     const source = try std.Io.Dir.path.join(c.a, &.{ root, try c.a.print("{s}-source", .{name}) });
@@ -83,9 +94,11 @@ fn buildGit(c: Context, root: []const u8, kind: Git) !void {
         } else try c.command(&.{ "git", "clone", "--depth", "1", "https://github.com/git/git.git", source });
     } else {
         const archive = try std.Io.Dir.path.join(c.a, &.{ root, try c.a.print("{s}.tar.xz", .{name}) });
-        const version = if (kind == .floor) floor_version else git_version;
-        const digest = if (kind == .floor) floor_sha256 else git_sha256;
+        const version = if (kind == .floor) floor_version else try c.a.print("{f}", .{git_release.held});
+        const digest = if (kind == .floor) floor_sha256 else git_release.sha256;
         try c.fetch(try c.a.print("https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{version}), archive, digest);
+        // A cached tree of another release must not underlie this one.
+        try std.Io.Dir.cwd().deleteTree(c.io, source);
         try std.Io.Dir.cwd().createDirPath(c.io, source);
         try c.command(&.{ "tar", "-xJf", archive, "-C", source, "--strip-components=1" });
     }
@@ -201,10 +214,10 @@ pub fn main(init: std.process.Init) !void {
     switch (builtin.target.os.tag) {
         .linux => try buildGit(c, root, if (master) .master else .release),
         .macos => {
-            if (!recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "brew", "upgrade", "git" });
+            if (!held(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "brew", "upgrade", "git" });
         },
         .windows => {
-            if (!recent(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "choco", "upgrade", "git", "-y", "--no-progress" });
+            if (!held(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "choco", "upgrade", "git", "-y", "--no-progress" });
         },
         else => return error.UnsupportedHost,
     }
@@ -212,7 +225,12 @@ pub fn main(init: std.process.Init) !void {
     const git = if (builtin.target.os.tag == .linux) try std.Io.Dir.path.join(a, &.{ root, if (master) "master" else "git", "bin", "git" }) else "git";
     if (!master) try selectLfs(c, root, git);
     const version = try c.capture(&.{ git, "--version" });
-    if (!recent(version)) return error.GitTooOld;
+    if (master) {
+        if (!recent(version)) return error.GitTooOld;
+    } else if (!held(version)) {
+        try report("relic's comparisons are held to git {f} (src/testing/git_release.zig); this runner has {s}", c.io, .{ git_release.held, version });
+        return error.NotTheHeldGit;
+    }
     try report("{s}", c.io, .{version});
 }
 
@@ -221,4 +239,12 @@ test "Git fixtures require 2.47 including Windows version suffixes" {
     try std.testing.expect(recent("git version 2.47.0.windows.1"));
     try std.testing.expect(recent("git version 3.0.0"));
     try std.testing.expect(!recent("unexpected version"));
+}
+
+test "a runner's git is the held release, Windows' suffix and all, and no other" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(held(try std.mem.print(&buf, "git version {f}.windows.1\n", .{git_release.held})));
+    try std.testing.expect(held(try std.mem.print(&buf, "git version {f}\n", .{git_release.held})));
+    try std.testing.expect(!held("git version 2.39.5\n"));
+    try std.testing.expect(!held("unexpected version"));
 }

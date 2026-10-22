@@ -78,6 +78,7 @@ test {
         _ = @import("lfs/mime_sniff.zig");
         _ = @import("config/write.zig");
         _ = @import("testing/git.zig");
+        _ = @import("testing/git_release.zig");
         _ = @import("testing/helpers.zig");
         _ = @import("testing/fixtures.zig");
         _ = @import("maintenance/maintenance_test.zig");

@@ -390,6 +390,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         .options = &.{.{ .name = "http", .value = .{ .flag = false } }},
     });
     const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = p.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
+    // The release the comparisons are held to, which setup installs.
+    setup.root_module.addImport("git_release", b.createModule(.{ .root_source_file = p.path("src/testing/git_release.zig"), .target = b.graph.host, .optimize = .safe }));
     const prepare = b.addRunArtifact(setup);
     prepare.addPassthruArgs();
     b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);

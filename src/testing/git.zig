@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const suite = @import("helpers.zig");
+const git_release = @import("git_release.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const Io = std.Io;
@@ -494,12 +495,25 @@ pub fn hostedSigners() bool {
 /// up in this process's own `PATH`, never in the child's, so on a hosted
 /// runner the installed git is named by its path. Elsewhere it is `git`,
 /// found as `searchPath` would find it.
+///
+/// Found once, with its release: the comparisons are held to
+/// `git_release.held`, so a run whose git is another release stops here,
+/// naming both, but for the jobs that run the oldest supported git or
+/// git's development branch on purpose (`RELIC_GIT`).
 pub fn program() []const u8 {
     if (program_state.load(.acquire) != 2) {
         if (program_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
             program_name = resolveProgram(&program_buffer);
+            git_version = probeVersion(program_name);
             program_state.store(2, .release);
         } else while (program_state.load(.acquire) != 2) std.atomic.spinLoopHint();
+        if (git_version) |found| switch (hostedGit() orelse .release) {
+            .old, .master => {},
+            .release => if (!found.eql(git_release.held)) std.debug.panic(
+                "relic's comparisons are held to git {f} (src/testing/git_release.zig), and the git this run found ({s}) is git {f}: run them with git {f}, or move the held release with the comparisons it changes",
+                .{ git_release.held, program_name, found, git_release.held },
+            ),
+        };
     }
     return program_name;
 }
@@ -507,6 +521,23 @@ pub fn program() []const u8 {
 var program_state: std.atomic.Value(u8) = .init(0);
 var program_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
 var program_name: []const u8 = "git";
+/// The release of the git `program` found, `null` when there is none; one
+/// whose `--version` names no release reads as 0.0.0.
+var git_version: ?git_release.Version = null;
+
+fn probeVersion(name: []const u8) ?git_release.Version {
+    const gpa = std.testing.allocator;
+    var env = isolatedEnviron(gpa, no_home) catch return null;
+    defer env.deinit();
+    const result = std.process.run(gpa, std.testing.io, .{ .argv = &.{ name, "--version" }, .environ_map = &env }) catch return null;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+    return git_release.parse(result.stdout) orelse .{ .major = 0, .minor = 0, .patch = 0 };
+}
 
 fn resolveProgram(buffer: []u8) []const u8 {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -617,30 +648,12 @@ pub fn corpusCases(full: usize) usize {
     return if (builtin.sanitize_thread) @max(2, full / 8) else full;
 }
 
-var git_checked: bool = false;
-var git_present: bool = false;
-var git_major: u32 = 0;
-var git_minor: u32 = 0;
-
 /// `error.SkipZigTest` unless a usable `git` is on the path.
 pub fn requireGit(gpa: Allocator, io: Io) !void {
-    if (!git_checked) {
-        git_checked = true;
-        var env = try isolatedEnviron(gpa, no_home);
-        defer env.deinit();
-        const result = std.process.run(gpa, io, .{ .argv = &.{ program(), "--version" }, .environ_map = &env }) catch {
-            git_present = false;
-            return error.SkipZigTest;
-        };
-        defer gpa.free(result.stdout);
-        defer gpa.free(result.stderr);
-        git_present = switch (result.term) {
-            .exited => |code| code == 0,
-            else => false,
-        };
-        if (git_present) parseVersion(result.stdout);
-    }
-    if (!git_present) return error.SkipZigTest;
+    _ = gpa;
+    _ = io;
+    _ = program();
+    if (git_version == null) return error.SkipZigTest;
 }
 
 /// `error.SkipZigTest` unless the `git` on the path is at least `major.minor`.
@@ -709,25 +722,9 @@ pub fn eachRefFormat(in_format: *const fn (RefFormat) anyerror!void) !void {
 /// release that has it. `error.SkipZigTest` when there is no git at all.
 pub fn gitAtLeast(gpa: Allocator, io: Io, major: u32, minor: u32) !bool {
     try requireGit(gpa, io);
-    if (git_major > major) return true;
-    return git_major == major and git_minor >= minor;
-}
-
-/// The two leading numbers of `git version 2.43.0`, which is the shape every
-/// build of git prints — including the ones that add their own suffix, such
-/// as `2.39.5 (Apple Git-154)` and `2.45.1.windows.1`. A line that does not
-/// parse leaves the version at zero, which is older than anything asked for.
-fn parseVersion(line: []const u8) void {
-    const prefix = "git version ";
-    const at = std.mem.find(u8, line, prefix) orelse return;
-    var numbers = std.mem.splitScalar(u8, line[at + prefix.len ..], '.');
-    const major_text = numbers.next() orelse return;
-    const minor_text = numbers.next() orelse return;
-    git_major = std.fmt.parseUnsigned(u32, std.mem.trim(u8, major_text, " \t\r\n"), 10) catch return;
-    git_minor = std.fmt.parseUnsigned(u32, std.mem.trim(u8, minor_text, " \t\r\n"), 10) catch {
-        git_major = 0;
-        return;
-    };
+    const found = git_version.?;
+    if (found.major > major) return true;
+    return found.major == major and found.minor >= minor;
 }
 
 test "a git the harness runs reads no configuration but the harness's own" {
