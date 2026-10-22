@@ -1,4 +1,4 @@
-//! `mv` held to git 2.55's: the same repository, the same operands, and
+//! `mv` held to git 2.56's: the same repository, the same operands, and
 //! what each leaves compared -- the index and the tree it writes, the
 //! working tree's files, a submodule's `.git` file and `core.worktree`,
 //! and whether it refused.
@@ -91,12 +91,36 @@ test "mv renames, moves into directories and refuses what git's does" {
         .{ .args = &.{ "a.txt", "dir", "other" }, .options = .{ .sources = &.{ "a.txt", "dir" }, .destination = "other" } },
         .{ .args = &.{ "a.txt", "A.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "A.txt" } },
         .{ .args = &.{ "dir", "Dir" }, .options = .{ .sources = &.{"dir"}, .destination = "Dir" } },
+        // git 2.56 checks a destination's leading directory before it moves
+        // anything, a dry run and a skipping run included.
+        .{ .args = &.{ "a.txt", "nodir/z.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "nodir/z.txt" } },
+        .{ .args = &.{ "-n", "a.txt", "nodir/z.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "nodir/z.txt", .dry_run = true } },
+        .{ .args = &.{ "-k", "a.txt", "nodir/z.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "nodir/z.txt", .skip_errors = true } },
+        .{ .args = &.{ "a.txt", "m.txt/z.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "m.txt/z.txt" } },
+        .{ .args = &.{ "a.txt", "dir/sub/z.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "dir/sub/z.txt" } },
     };
     for (cases, 0..) |case, n| {
         var theirs = try fixture();
         defer theirs.deinit();
         var ours = try fixture();
         defer ours.deinit();
+        try compare(&theirs, &ours, n, case);
+    }
+}
+
+test "mv refuses a destination beyond a symbolic link, as git 2.56's does" {
+    if (@import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    const cases = [_]Case{
+        .{ .args = &.{ "a.txt", "link/z.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "link/z.txt" } },
+        .{ .args = &.{ "-n", "a.txt", "link/sub/z.txt" }, .options = .{ .sources = &.{"a.txt"}, .destination = "link/sub/z.txt", .dry_run = true } },
+        .{ .args = &.{ "a.txt", "link" }, .options = .{ .sources = &.{"a.txt"}, .destination = "link" } },
+    };
+    for (cases, 0..) |case, n| {
+        var theirs = try fixture();
+        defer theirs.deinit();
+        var ours = try fixture();
+        defer ours.deinit();
+        for ([_]*testgit.Repo{ &theirs, &ours }) |repo| try repo.dir.symLink(io, "dir", "link", .{ .is_directory = true });
         try compare(&theirs, &ours, n, case);
     }
 }

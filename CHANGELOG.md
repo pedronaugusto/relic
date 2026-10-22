@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - `merge.ort.Error` carries `DuplicateTreeEntry`.
+- `stage.move.Reason` gains `destination_parent_not_directory` and `beyond_symlink`: `mv` checks a destination as git 2.56 does before it moves anything, a dry run and `skip_errors` included. A destination beyond a symbolic link is refused, and a move on the disk whose destination's leading directory is missing (`destination_directory_missing`) or not a directory is refused, where the rename failed partway.
 - `odb.pack.Pack.verify` takes `Pack.VerifyOptions` (`cache`, `pack_id`, and `stream_past`, the threshold past which a whole object is checked as it is read) in place of the cache and the pack's id.
 - `transport.partial.storeAdvertised` takes the remotes to configure (`transport.Session.promisorCreates`) before the fields to store.
 - `transport.upload_pack.bundleSettings` and `transport.Session.bundleUri` take the `?*report.warning.Warnings` that a `bundle.*` setting with no value is said to.

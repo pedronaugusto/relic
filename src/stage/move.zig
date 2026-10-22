@@ -56,8 +56,14 @@ pub const Reason = enum {
     conflicted,
     /// "multiple sources for the same target".
     multiple_sources,
-    /// "destination directory does not exist".
+    /// "destination directory does not exist": a destination ending `/`,
+    /// or one whose leading directory is not there for a move on the disk.
     destination_directory_missing,
+    /// "destination is not a directory": the destination's leading
+    /// directory is something else.
+    destination_parent_not_directory,
+    /// "destination is beyond a symbolic link".
+    beyond_symlink,
     /// "destination exists in the index", outside the cone under `sparse`.
     destination_in_index,
     /// "destination '%s' is not a directory": several sources and a
@@ -328,6 +334,15 @@ const Mover = struct {
         };
         if (m.src_for_dst.contains(dst)) return .{ .bad = .multiple_sources };
         if (dst[dst.len - 1] == '/') return .{ .bad = .destination_directory_missing };
+        if (try symlinkLeads(m.io, m.wt, dst)) return .{ .bad = .beyond_symlink };
+        // A move on the disk needs the destination's leading directories,
+        // checked here so that a dry run reports what the rename would
+        // meet, as git 2.56 checks them.
+        if (needsWorktreeRename(item.mode, m.dst_mode)) if (std.mem.findScalarLast(u8, dst, '/')) |slash| {
+            if (try lstat(m.io, m.wt, dst[0..slash])) |found| {
+                if (found.kind != .directory) return .{ .bad = .destination_parent_not_directory };
+            } else return .{ .bad = .destination_directory_missing };
+        };
         if (options.sparse and (m.dst_mode.skip_worktree_dir or m.dst_mode.sparse) and index.find(dst) != null and !options.force)
             return .{ .bad = .destination_in_index };
         // The cone last, so that the advice to use `--sparse` is what a
@@ -396,7 +411,7 @@ const Mover = struct {
         var gitmodules_modified = false;
         for (m.items.items) |item| {
             const mode = item.mode;
-            if (!(mode.index or mode.sparse or mode.skip_worktree_dir) and !(m.dst_mode.skip_worktree_dir or m.dst_mode.sparse)) {
+            if (needsWorktreeRename(mode, m.dst_mode)) {
                 // Under `core.ignoreCase` a directory renamed by case alone is
                 // moved into the directory itself, which the filesystem refuses.
                 if (mode.working_directory and m.ignore_case and std.ascii.startsWithIgnoreCase(item.destination, item.source) and
@@ -523,6 +538,23 @@ fn isDirectory(io: Io, wt: Io.Dir, path: []const u8) bool {
 }
 
 /// What `lstat` says of `path`, or `null` when there is nothing there.
+/// git's `needs_worktree_rename`: whether a move renames on the disk, not
+/// only in the index or outside the sparse cone.
+fn needsWorktreeRename(mode: Mode, dst_mode: Mode) bool {
+    return !(mode.index or mode.sparse or mode.skip_worktree_dir) and !(dst_mode.skip_worktree_dir or dst_mode.sparse);
+}
+
+/// git's `has_symlink_leading_path`: whether a directory above `path` is a
+/// symbolic link on the disk.
+fn symlinkLeads(io: Io, wt: Io.Dir, path: []const u8) fs.StatError!bool {
+    var at: usize = 0;
+    while (std.mem.findScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {
+        const found = (try lstat(io, wt, path[0..slash])) orelse return false;
+        if (found.kind == .sym_link) return true;
+    }
+    return false;
+}
+
 fn lstat(io: Io, wt: Io.Dir, path: []const u8) fs.StatError!?fs.Entry {
     if (path.len == 0) return null;
     return fs.statAt(io, wt, path) catch |err| switch (err) {
