@@ -2462,8 +2462,8 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         // Only a file that is still exactly its pointer is replaced.
         const disk = (try fs.statAt(io, wt, entry.path)) orelse continue;
-        if (disk.kind != .file or disk.stat.size >= lfs.pointer_size_cutoff) continue;
-        // The index keeps a size modulo 2^32, so the read is bounded too.
+        if (disk.kind != .file or disk.size >= lfs.pointer_size_cutoff) continue;
+        // Bounded too: the file may have grown since.
         const on_disk = (fs.readFileAlloc(gpa, io, wt, entry.path, lfs.pointer_size_cutoff) catch |err| switch (err) {
             error.StreamTooLong => continue,
             else => |e| return e,

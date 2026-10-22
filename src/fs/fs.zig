@@ -478,7 +478,12 @@ pub const Stat = struct {
 
 /// What a path on the disk turned out to be.
 pub const Entry = struct {
+    /// What the index records of it, its length among it modulo 2^32.
     stat: Stat,
+    /// Its length in full, as git's `st_size`: what decides how a file is
+    /// read and stored (`core.bigFileThreshold`), where `stat.size` is the
+    /// index's.
+    size: u64,
     kind: Io.File.Kind,
     /// Whether the owner's execute bit is set. Always false where the
     /// filesystem has no executable bit, in which case the index's mode is
@@ -512,6 +517,7 @@ fn entryOf(result: platstat.FullResult) Self.StatError!?Entry {
         .absent => return null,
         .found => |f| return .{
             .stat = .fromFull(f),
+            .size = f.size,
             .kind = f.kind,
             .executable = f.mode & 0o100 != 0,
         },
@@ -1770,12 +1776,14 @@ test "a stat describes a path as std.Io's stat does, where both report it" {
         const s = try dir.statFile(io, name, .{ .follow_symlinks = false });
         const two: Entry = .{
             .stat = .fromIo(s, .{ .dev = one.stat.dev, .uid = one.stat.uid, .gid = one.stat.gid }),
+            .size = s.size,
             .kind = s.kind,
             .executable = isExecutable(s.permissions),
         };
         try std.testing.expectEqual(two.kind, one.kind);
         try std.testing.expectEqual(two.executable, one.executable);
         try std.testing.expectEqual(two.stat.size, one.stat.size);
+        try std.testing.expectEqual(two.size, one.size);
         try std.testing.expectEqual(two.stat.ino, one.stat.ino);
         try std.testing.expectEqual(two.stat.mtime_sec, one.stat.mtime_sec);
         try std.testing.expectEqual(two.stat.mtime_nsec, one.stat.mtime_nsec);
@@ -2201,4 +2209,18 @@ test "a changed status-change time says a file may have changed under core.trust
     try std.testing.expect(!a.matches(b, .{ .resolution = .nanosecond }));
     try std.testing.expect(a.matches(b, .{ .trust_ctime = false, .resolution = .nanosecond }));
     try std.testing.expect(a.matches(b, .{ .check = .minimal, .resolution = .nanosecond }));
+}
+
+test "an entry past 4 GiB gives its length in full, the index's stat modulo 2^32" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Sparse: set long, never written.
+    const length: u64 = (4 << 30) + 21;
+    const file = try tmp.dir.createFile(io, "big", .{});
+    defer file.close(io);
+    try file.setLength(io, length);
+    const found = (try statAt(io, tmp.dir, "big")).?;
+    try std.testing.expectEqual(length, found.size);
+    try std.testing.expectEqual(@as(u32, 21), found.stat.size);
 }

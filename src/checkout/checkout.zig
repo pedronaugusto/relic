@@ -709,11 +709,11 @@ const Walker = struct {
             return .{ .bytes = try a.dupe(u8, buf[0..len]) };
         }
 
-        const big = aegis.units.Bytes(u64).fromRaw(found.stat.size).compare(w.db.packOptions().big_file_bytes) == .gt;
+        const big = aegis.units.Bytes(u64).fromRaw(found.size).compare(w.db.packOptions().big_file_bytes) == .gt;
         if (w.options.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, .file);
-            if (big and !try w.conv.wouldConvertToGit(path, applied)) return .{ .streamed = found.stat.size };
-            const converted = try w.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .store });
+            if (big and !try w.conv.wouldConvertToGit(path, applied)) return .{ .streamed = found.size };
+            const converted = try w.conv.toGitFile(a, .{ .path = path, .size = found.size, .applied = applied }, .{ .storing = .store });
             if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
                 .false => {},
                 .true => return error.IrreversibleConversion,
@@ -721,8 +721,8 @@ const Walker = struct {
             };
             return .{ .bytes = converted.bytes };
         }
-        if (big) return .{ .streamed = found.stat.size };
-        return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 }) };
+        if (big) return .{ .streamed = found.size };
+        return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.size, .max_bytes = 1 << 31 }) };
     }
 
     /// Put a blob where this pass puts them: a streamed one into the pack
@@ -815,7 +815,7 @@ pub const Tracked = struct {
         }
         if (t.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, .file);
-            return (try t.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
+            return (try t.conv.toGitFile(a, .{ .path = path, .size = found.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
         }
         return t.wt.readFileAlloc(t.io, path, a, .limited(1 << 31));
     }
@@ -3818,7 +3818,7 @@ pub fn applySparse(
                         var buf: [4096]u8 = undefined;
                         const len = try wt.readLink(io, entry.path, &buf);
                         break :blk try a.dupe(u8, buf[0..len]);
-                    } else try fs.readFileSized(a, io, wt, entry.path, .{ .size = found.stat.size, .max_bytes = 1 << 31 });
+                    } else try fs.readFileSized(a, io, wt, entry.path, .{ .size = found.size, .max_bytes = 1 << 31 });
                     var content: []const u8 = raw;
                     if (options.rules.attrs) |attrs| {
                         if (found.kind != .sym_link) {
