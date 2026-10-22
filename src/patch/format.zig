@@ -29,14 +29,13 @@ const odb_mod = @import("../odb/odb.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const diff = @import("../diff/diff.zig");
+const diff_stat = @import("../diff/stat.zig");
 const driver = @import("../diff/driver.zig");
 const patch_id = @import("../diff/patch_id.zig");
 const rev_walk = @import("../walk/walk.zig");
 const rev_parse = @import("../repo/rev_parse.zig");
 const abbrev = @import("../odb/abbrev.zig");
-const c_quote = @import("../text.zig").c_quote;
 const mailfmt = @import("../mail/format.zig");
-const unicode_width = @import("../text.zig").unicode_width;
 const message = @import("../object/message.zig");
 const notes_mod = @import("../commit/notes.zig");
 const pretty = @import("../pretty/pretty.zig");
@@ -1499,10 +1498,6 @@ const Side = struct {
     binary: bool,
 };
 
-fn modeNum(m: object.Mode) u32 {
-    return @backingInt(m);
-}
-
 fn loadSide(ctx: *Ctx, e: diff.Entry) Error!Side {
     var bytes: []const u8 = undefined;
     if (e.mode == .gitlink) {
@@ -1520,66 +1515,10 @@ fn isBinaryPath(ctx: *Ctx, e: diff.Entry, bytes: []const u8) Error!bool {
     return ctx.drivers().isBinary(ctx.a, ctx.io, .{ .path = e.path, .mode = e.mode }, bytes);
 }
 
-const StatFile = struct {
-    from_name: ?[]const u8,
-    name: []const u8,
-    added: usize,
-    deleted: usize,
-    binary: bool,
-    print_name: []const u8 = "",
-};
-
 fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, stat_sep: ?[]const u8) Error!void {
     const a = ctx.a;
-    var separator = false;
     if (ctx.options.stat) {
-        var files: std.ArrayList(StatFile) = .empty;
-        for (changes) |c| {
-            const old = if (c.old) |e| try loadSide(ctx, e) else null;
-            const new = if (c.new) |e| try loadSide(ctx, e) else null;
-            var f: StatFile = .{
-                .from_name = if (c.status == .renamed or c.status == .copied) shown(ctx, c.old.?.path) else null,
-                .name = shown(ctx, c.path()),
-                .added = 0,
-                .deleted = 0,
-                .binary = false,
-            };
-            const one: []const u8 = if (old) |o| o.bytes else "";
-            const two: []const u8 = if (new) |n| n.bytes else "";
-            const one_bin = if (old) |o| o.binary else false;
-            const two_bin = if (new) |n| n.binary else false;
-            if (one_bin or two_bin) {
-                f.binary = true;
-                const same = old != null and new != null and old.?.oid.eql(new.?.oid);
-                if (!same) {
-                    f.added = two.len;
-                    f.deleted = one.len;
-                }
-            } else if (!(old != null and new != null and old.?.oid.eql(new.?.oid))) {
-                const counts = try diff.blobNumStat(ctx.gpa, one, two, ctx.diff_options);
-                f.added = counts.plus;
-                f.deleted = counts.minus;
-            }
-            try files.append(a, f);
-        }
-        try showStats(ctx, out, files.items);
-        separator = true;
-    }
-    if (ctx.options.stat) {
-        var any = false;
-        for (changes) |c| {
-            switch (c.status) {
-                .added, .deleted, .renamed, .copied => any = true,
-                else => if (c.old.?.mode != c.new.?.mode) {
-                    any = true;
-                },
-            }
-        }
-        if (any) {
-            for (changes) |c| try summary(ctx, out, c);
-        }
-    }
-    if (separator) {
+        try writeStat(ctx, out, changes);
         try out.append(a, '\n');
         if (stat_sep) |s| try out.appendSlice(a, s);
     }
@@ -1591,8 +1530,17 @@ fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, s
     };
 }
 
-fn quoted(ctx: *Ctx, path: []const u8) Allocator.Error![]const u8 {
-    return c_quote.alloc(ctx.a, path, ctx.quote_path);
+/// The diffstat and summary at `format-patch`'s 72 columns: its widths
+/// are its own, git's never reading `diff.statNameWidth` or
+/// `diff.statGraphWidth` for it. The names are as `shown` gives them.
+fn writeStat(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change) Error!void {
+    const files = try diff_stat.files(ctx.a, ctx.io, .{ .db = ctx.db, .changes = changes, .drivers = ctx.drivers() }, ctx.diff_options);
+    for (files) |*f| {
+        f.name = shown(ctx, f.name);
+        if (f.from) |from| f.from = shown(ctx, from);
+    }
+    try diff_stat.write(ctx.a, out, files, .{ .widths = .{ .width = 72 }, .quote_path = ctx.quote_path });
+    try diff_stat.writeSummary(ctx.a, out, changes, ctx.quote_path);
 }
 
 /// A path as a patch's headers and diffstat name it: under `--relative`,
@@ -1600,189 +1548,6 @@ fn quoted(ctx: *Ctx, path: []const u8) Allocator.Error![]const u8 {
 /// keep the whole path, as git's do.
 fn shown(ctx: *const Ctx, path: []const u8) []const u8 {
     return if (std.mem.startsWith(u8, path, ctx.relative_to)) path[ctx.relative_to.len..] else path;
-}
-
-fn summary(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change) Allocator.Error!void {
-    const a = ctx.a;
-    switch (c.status) {
-        .deleted => try out.print(a, " delete mode {o:0>6} {s}\n", .{ modeNum(c.old.?.mode), try quoted(ctx, c.old.?.path) }),
-        .added => try out.print(a, " create mode {o:0>6} {s}\n", .{ modeNum(c.new.?.mode), try quoted(ctx, c.new.?.path) }),
-        .renamed, .copied => {
-            try out.print(a, " {s} {s} ({d}%)\n", .{ if (c.status == .copied) "copy" else "rename", try pprintRename(ctx, c.old.?.path, c.new.?.path), c.similarity });
-            if (c.old.?.mode != c.new.?.mode) try out.print(a, " mode change {o:0>6} => {o:0>6}\n", .{ modeNum(c.old.?.mode), modeNum(c.new.?.mode) });
-        },
-        else => if (c.old.?.mode != c.new.?.mode) {
-            try out.print(a, " mode change {o:0>6} => {o:0>6} {s}\n", .{ modeNum(c.old.?.mode), modeNum(c.new.?.mode), try quoted(ctx, c.new.?.path) });
-        },
-    }
-}
-
-/// `pfx{old => new}sfx`, git's `pprint_rename`.
-fn pprintRename(ctx: *Ctx, a_name: []const u8, b_name: []const u8) Allocator.Error![]const u8 {
-    const a = ctx.a;
-    if (c_quote.needsQuote(a_name, ctx.quote_path) or c_quote.needsQuote(b_name, ctx.quote_path)) {
-        return std.mem.concat(a, u8, &.{ try quoted(ctx, a_name), " => ", try quoted(ctx, b_name) });
-    }
-    var pfx_length: usize = 0;
-    var i: usize = 0;
-    while (i < a_name.len and i < b_name.len and a_name[i] == b_name[i]) : (i += 1) {
-        if (a_name[i] == '/') pfx_length = i + 1;
-    }
-    // the common suffix, which must start at a slash; with a prefix the
-    // scan may run onto the prefix's own slash
-    var sfx_length: usize = 0;
-    const adjust: usize = if (pfx_length != 0) 1 else 0;
-    var oi: isize = @intCast(a_name.len);
-    var ni: isize = @intCast(b_name.len);
-    const floor: isize = @as(isize, @intCast(pfx_length)) - @as(isize, @intCast(adjust));
-    while (oi >= floor and ni >= floor) {
-        const oc: u8 = if (oi < a_name.len) a_name[@intCast(oi)] else 0;
-        const nc: u8 = if (ni < b_name.len) b_name[@intCast(ni)] else 0;
-        if (oc != nc) break;
-        if (oc == '/') sfx_length = a_name.len - @as(usize, @intCast(oi));
-        oi -= 1;
-        ni -= 1;
-    }
-    const a_mid: usize = if (a_name.len >= pfx_length + sfx_length) a_name.len - pfx_length - sfx_length else 0;
-    const b_mid: usize = if (b_name.len >= pfx_length + sfx_length) b_name.len - pfx_length - sfx_length else 0;
-    var out: std.ArrayList(u8) = .empty;
-    if (pfx_length + sfx_length > 0) {
-        try out.appendSlice(a, a_name[0..pfx_length]);
-        try out.append(a, '{');
-    }
-    try out.appendSlice(a, a_name[pfx_length..][0..a_mid]);
-    try out.appendSlice(a, " => ");
-    try out.appendSlice(a, b_name[pfx_length..][0..b_mid]);
-    if (pfx_length + sfx_length > 0) {
-        try out.append(a, '}');
-        try out.appendSlice(a, a_name[a_name.len - sfx_length ..]);
-    }
-    return out.items;
-}
-
-fn decimalWidth(n: usize) usize {
-    return std.fmt.count("{d}", .{n});
-}
-
-fn scaleLinear(it: usize, width: usize, max_change: usize) usize {
-    if (it == 0) return 0;
-    return 1 + (it * (width - 1) / max_change);
-}
-
-/// git's `show_stats` at `format-patch`'s 72 columns.
-fn showStats(ctx: *Ctx, out: *std.ArrayList(u8), files: []StatFile) Allocator.Error!void {
-    const a = ctx.a;
-    if (files.len == 0) return;
-    var max_change: usize = 0;
-    var max_len: usize = 0;
-    var number_width: usize = 0;
-    var bin_width: usize = 0;
-    for (files) |*f| {
-        f.print_name = if (f.from_name) |from| try pprintRename(ctx, from, f.name) else try quoted(ctx, f.name);
-        const len = unicode_width.strWidth(f.print_name);
-        if (max_len < len) max_len = len;
-        if (f.binary) {
-            const w = 14 + decimalWidth(f.added) + decimalWidth(f.deleted);
-            if (bin_width < w) bin_width = w;
-            number_width = 3;
-            continue;
-        }
-        const change = f.added + f.deleted;
-        if (max_change < change) max_change = change;
-    }
-    var width: usize = 72;
-    number_width = @max(decimalWidth(max_change), number_width);
-    if (width < 16 + 6 + number_width) width = 16 + 6 + number_width;
-    var graph_width: usize = if (max_change + 4 > bin_width) max_change else bin_width - 4;
-    // format-patch's widths are its own: git's never reads
-    // `diff.statNameWidth` or `diff.statGraphWidth` for it.
-    var name_width: usize = max_len;
-    if (name_width + number_width + 6 + graph_width > width) {
-        const limit_signed: i64 = @as(i64, @intCast(width * 3 / 8)) - @as(i64, @intCast(number_width)) - 6;
-        if (@as(i64, @intCast(graph_width)) > limit_signed) {
-            graph_width = if (limit_signed < 6) 6 else @intCast(limit_signed);
-        }
-        if (name_width > width - number_width - 6 - graph_width) {
-            name_width = width - number_width - 6 - graph_width;
-        } else graph_width = width - number_width - 6 - name_width;
-    }
-    for (files) |f| {
-        var prefix: []const u8 = "";
-        var name = f.print_name;
-        var len: isize = @intCast(name_width);
-        var name_len = unicode_width.strWidth(name);
-        if (name_width < name_len) {
-            prefix = "...";
-            len -= 3;
-            if (len < 0) len = 0;
-            while (name_len > len and name.len > 0) {
-                const decoded = unicode_width.decode(name);
-                const step: usize = if (decoded) |cp| cp.len else 1;
-                const cp_width: usize = if (decoded) |cp| @intCast(@max(unicode_width.width(cp.char), 0)) else 1;
-                name_len -= cp_width;
-                name = name[step..];
-            }
-            if (std.mem.findScalar(u8, name, '/')) |slash| name = name[slash..];
-        }
-        const name_w: isize = @intCast(unicode_width.strWidth(name));
-        const padding: usize = if (len - name_w < 0) 0 else @intCast(len - name_w);
-        if (f.binary) {
-            try out.print(a, " {s}{s}", .{ prefix, name });
-            try out.appendNTimes(a, ' ', padding);
-            try out.appendSlice(a, " | ");
-            try out.appendNTimes(a, ' ', number_width -| 3);
-            try out.appendSlice(a, "Bin");
-            if (f.added == 0 and f.deleted == 0) {
-                try out.append(a, '\n');
-                continue;
-            }
-            try out.print(a, " {d} -> {d} bytes\n", .{ f.deleted, f.added });
-            continue;
-        }
-        var add = f.added;
-        var del = f.deleted;
-        if (graph_width <= max_change) {
-            var total = scaleLinear(add + del, graph_width, max_change);
-            if (total < 2 and add != 0 and del != 0) total = 2;
-            if (add < del) {
-                add = scaleLinear(add, graph_width, max_change);
-                del = total - add;
-            } else {
-                del = scaleLinear(del, graph_width, max_change);
-                add = total - del;
-            }
-        }
-        try out.print(a, " {s}{s}", .{ prefix, name });
-        try out.appendNTimes(a, ' ', padding);
-        try out.appendSlice(a, " | ");
-        const count = f.added + f.deleted;
-        const cw = decimalWidth(count);
-        try out.appendNTimes(a, ' ', number_width -| cw);
-        try out.print(a, "{d}{s}", .{ count, if (count != 0) " " else "" });
-        try out.appendNTimes(a, '+', add);
-        try out.appendNTimes(a, '-', del);
-        try out.append(a, '\n');
-    }
-    var adds: usize = 0;
-    var dels: usize = 0;
-    for (files) |f| {
-        if (!f.binary) {
-            adds += f.added;
-            dels += f.deleted;
-        }
-    }
-    try statSummary(a, out, files.len, adds, dels);
-}
-
-fn statSummary(a: Allocator, out: *std.ArrayList(u8), files: usize, insertions: usize, deletions: usize) Allocator.Error!void {
-    if (files == 0) {
-        try out.appendSlice(a, " 0 files changed\n");
-        return;
-    }
-    try out.print(a, " {d} file{s} changed", .{ files, if (files == 1) "" else "s" });
-    if (insertions != 0 or deletions == 0) try out.print(a, ", {d} insertion{s}(+)", .{ insertions, if (insertions == 1) "" else "s" });
-    if (deletions != 0 or insertions == 0) try out.print(a, ", {d} deletion{s}(-)", .{ deletions, if (deletions == 1) "" else "s" });
-    try out.append(a, '\n');
 }
 
 //=========================================================================
@@ -1852,7 +1617,7 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: CoverPlan, origin
         defer changes.deinit();
         const saved = ctx.options.stat;
         ctx.options.stat = true;
-        try writeStatOnly(ctx, out, changes.items);
+        try writeStat(ctx, out, changes.items);
         ctx.options.stat = saved;
         try out.append(a, '\n');
     }
@@ -1880,39 +1645,6 @@ fn coverList(ctx: *Ctx, out: *std.ArrayList(u8), list: []const Oid, fmt: []const
         try out.append(a, '\n');
     }
     try out.append(a, '\n');
-}
-
-fn writeStatOnly(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change) Error!void {
-    const a = ctx.a;
-    var files: std.ArrayList(StatFile) = .empty;
-    for (changes) |c| {
-        const old = if (c.old) |e| try loadSide(ctx, e) else null;
-        const new = if (c.new) |e| try loadSide(ctx, e) else null;
-        var f: StatFile = .{ .from_name = if (c.status == .renamed or c.status == .copied) shown(ctx, c.old.?.path) else null, .name = shown(ctx, c.path()), .added = 0, .deleted = 0, .binary = false };
-        const one: []const u8 = if (old) |o| o.bytes else "";
-        const two: []const u8 = if (new) |n| n.bytes else "";
-        if ((old != null and old.?.binary) or (new != null and new.?.binary)) {
-            f.binary = true;
-            if (!(old != null and new != null and old.?.oid.eql(new.?.oid))) {
-                f.added = two.len;
-                f.deleted = one.len;
-            }
-        } else {
-            const counts = try diff.blobNumStat(ctx.gpa, one, two, ctx.diff_options);
-            f.added = counts.plus;
-            f.deleted = counts.minus;
-        }
-        try files.append(a, f);
-    }
-    try showStats(ctx, out, files.items);
-    var any = false;
-    for (changes) |c| switch (c.status) {
-        .added, .deleted, .renamed, .copied => any = true,
-        else => if (c.old.?.mode != c.new.?.mode) {
-            any = true;
-        },
-    };
-    if (any) for (changes) |c| try summary(ctx, out, c);
 }
 
 /// git's `generate_shortlog_cover_letter`: the commits by author, the

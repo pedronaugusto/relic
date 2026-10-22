@@ -651,6 +651,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `diff.patch_id` | Patch ids: a name for what a commit changes. |
 | `diff.rename` | Module within `diff`. |
 | `diff.similarity` | Module within `diff`. |
+| `diff.stat` | `files`, `write`, `writeSummary`, `Widths.configured` — `--stat` and `--summary` as git writes them, the widths from `diff.statNameWidth` and `diff.statGraphWidth`. |
 | `diff.textconv` | `Textconv` — a file's text as its diff driver's `textconv` program writes it, for diff, blame, grep and range-diff; a cache for `cachetextconv`. |
 | `rev_walk` | `Walk` and `Walk.count`, `mergeBase`, `mergeBases`, `mergeBasesMany`, `isAncestor`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary, and history simplified by paths (`Walk.paths`) as git simplifies it by default. |
 | `rev_walk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found`, terms and pathspecs. |

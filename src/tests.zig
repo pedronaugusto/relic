@@ -143,6 +143,7 @@ test {
         _ = @import("testing/big_files.zig");
         _ = @import("testing/external_diff.zig");
         _ = @import("testing/diff_prefixes.zig");
+        _ = @import("testing/diff_stat.zig");
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");
