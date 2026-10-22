@@ -216,7 +216,7 @@ pub const Store = struct {
         if (depth > object.max_tree_depth) return error.TreeDepthExceeded;
         try store.ownObject(io, oid, source_db, .tree);
         const found = try store.db.read(io, oid);
-        defer store.gpa.free(found.bytes);
+        defer store.db.allocator().free(found.bytes);
         if (found.type != .tree) return error.UnexpectedObjectType;
         var tree = object.Tree.parse(store.db.objectFormat(), found.bytes);
         var entries = tree.iterate();

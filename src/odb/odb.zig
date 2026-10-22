@@ -3055,7 +3055,7 @@ pub const Odb = struct {
                         continue;
                     };
                     if (found.type != .tree) {
-                        gpa.free(found.bytes);
+                        odb.allocator().free(found.bytes);
                         continue;
                     }
                     t.bytes = found.bytes;
@@ -5184,7 +5184,7 @@ test "a loose object written is a loose object read" {
     try std.testing.expect(try odb.exists(io, oid));
 
     const found = try odb.read(io, oid);
-    defer gpa.free(found.bytes);
+    defer odb.allocator().free(found.bytes);
     try std.testing.expectEqual(object.Type.blob, found.type);
     try std.testing.expectEqualStrings("hello\n", found.bytes);
 
@@ -5250,7 +5250,7 @@ test "an object an alternate holds is borrowed, and owned once asked for" {
     var ours = try Odb.openAt(gpa, io, ours_dir, .sha1, .{});
     defer ours.deinit(io);
     const found = try ours.read(io, oid);
-    defer gpa.free(found.bytes);
+    defer ours.allocator().free(found.bytes);
     try std.testing.expectEqualStrings("borrowed\n", found.bytes);
 }
 
@@ -5287,7 +5287,7 @@ test "alternates API reads a relative chain, preserves comments, and updates ope
     try std.testing.expectEqualStrings("../b", listed.paths[0]);
     try std.testing.expect(std.mem.startsWith(u8, listed.text, "# keep this comment\n"));
     const found = try a.read(io, oid);
-    defer gpa.free(found.bytes);
+    defer a.allocator().free(found.bytes);
     try std.testing.expectEqualStrings("through two alternates\n", found.bytes);
     try a.removeAlternate(io, "../b");
     try std.testing.expect(!try a.exists(io, oid));
@@ -5539,7 +5539,7 @@ test "a pack with a version 1 index reads and verifies, as git's does" {
     defer db.deinit(io);
     try std.testing.expectEqual(@as(usize, 1), db.packCount());
     const found = try db.read(io, try Oid.parse(.sha1, blob));
-    defer gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     try std.testing.expectEqualStrings("file 3\n", found.bytes);
     const report = try db.verify(io);
     try std.testing.expectEqual(@as(u32, 12), report.packed_objects);
@@ -5621,7 +5621,7 @@ test "a streamed object is the same object" {
     var hex: [hash.max_hex_len]u8 = undefined;
     try std.testing.expectEqualStrings("ce013625030ba8dba906f756967f9e9ca394464a", oid.hex(&hex));
     const found = try odb.read(io, oid);
-    defer gpa.free(found.bytes);
+    defer odb.allocator().free(found.bytes);
     try std.testing.expectEqualStrings("hello\n", found.bytes);
 }
 

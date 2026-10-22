@@ -228,7 +228,7 @@ pub const Remote = struct {
                     if (header.type != .tag) break;
                     try chain.append(r.gpa, current);
                     const found = try r.repo.objectDatabase().read(io, current);
-                    defer r.gpa.free(found.bytes);
+                    defer r.repo.objectDatabase().allocator().free(found.bytes);
                     var tag = try object.Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
                     defer tag.deinit();
                     current = tag.target;

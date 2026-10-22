@@ -305,7 +305,7 @@ const Exporter = struct {
         if (ex.options.no_data or oid.isZero()) return;
         if (ex.marks.contains(oid)) return;
         const found = try ex.repo.objectDatabase().read(ex.io, oid);
-        defer ex.gpa.free(found.bytes);
+        defer ex.repo.objectDatabase().allocator().free(found.bytes);
         const mark = try ex.markNext(oid);
         try ex.w.print("blob\nmark :{d}\n", .{mark});
         if (ex.options.show_original_ids) try ex.w.print("original-oid {f}\n", .{oid});
@@ -318,7 +318,7 @@ const Exporter = struct {
     /// git's `handle_commit`.
     fn commit(ex: *Exporter, oid: Oid, parents: []const Oid) Error!void {
         const found = try ex.repo.objectDatabase().read(ex.io, oid);
-        defer ex.gpa.free(found.bytes);
+        defer ex.repo.objectDatabase().allocator().free(found.bytes);
         const buf = found.bytes;
         const kind = ex.repo.objectFormat();
 
@@ -519,7 +519,7 @@ const Exporter = struct {
         if (try ex.typeOf(tagged_end) == .tree) return;
 
         const found = try ex.repo.objectDatabase().read(ex.io, oid);
-        defer ex.gpa.free(found.bytes);
+        defer ex.repo.objectDatabase().allocator().free(found.bytes);
         const buf = found.bytes;
         var message: ?[]const u8 = null;
         const message_at = std.mem.find(u8, buf, "\n\n");
@@ -628,7 +628,7 @@ const Exporter = struct {
 
     fn tagTarget(ex: *Exporter, oid: Oid) Error!Oid {
         const found = try ex.repo.objectDatabase().read(ex.io, oid);
-        defer ex.gpa.free(found.bytes);
+        defer ex.repo.objectDatabase().allocator().free(found.bytes);
         var t = try object.Tag.parse(ex.gpa, ex.repo.objectFormat(), found.bytes);
         defer t.deinit();
         return t.target;
@@ -636,7 +636,7 @@ const Exporter = struct {
 
     fn commitTree(ex: *Exporter, oid: Oid) Error!Oid {
         const found = try ex.repo.objectDatabase().read(ex.io, oid);
-        defer ex.gpa.free(found.bytes);
+        defer ex.repo.objectDatabase().allocator().free(found.bytes);
         return treeOf(ex.repo.objectFormat(), found.bytes);
     }
 

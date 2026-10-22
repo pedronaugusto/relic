@@ -195,7 +195,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     var carried: []const object.ExtraHeader = &.{};
     if (current) |tip| {
         const found = try repo.objectDatabase().read(io, tip);
-        defer gpa.free(found.bytes);
+        defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
         const bytes = try arena.dupe(u8, found.bytes);
         const parsed = try object.Commit.parse(arena, repo.objectFormat(), bytes);

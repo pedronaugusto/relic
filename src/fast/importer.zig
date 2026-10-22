@@ -1227,7 +1227,7 @@ const Importer = struct {
             },
             else => |e| return e,
         };
-        defer imp.gpa.free(found.bytes);
+        defer imp.repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .blob) return error.WrongObjectType;
         try w.print("{f} blob {d}\n", .{ oid, found.bytes.len });
         try w.writeAll(found.bytes);
@@ -1379,7 +1379,7 @@ const Importer = struct {
         const oid = node.oid orelse return;
         if (oid.eql(imp.empty_tree)) return;
         const found = try imp.readObject(oid);
-        defer imp.gpa.free(found.bytes);
+        defer imp.repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .tree) return error.WrongObjectType;
         var it = object.Tree.parse(imp.kind, found.bytes).iterate();
         while (try it.next()) |e| {
@@ -1605,9 +1605,10 @@ const Importer = struct {
     }
 
     /// An object's type and bytes, from the open pack or the repository.
-    /// The bytes are the caller's.
+    /// The bytes are the caller's, in the object database's allocator
+    /// whichever it came from.
     fn readObject(imp: *Importer, oid: Oid) Error!odb_mod.Odb.Read {
-        if (imp.pending.get(oid)) |p| return .{ .type = p.type, .bytes = try imp.gpa.dupe(u8, p.bytes) };
+        if (imp.pending.get(oid)) |p| return .{ .type = p.type, .bytes = try imp.repo.objectDatabase().allocator().dupe(u8, p.bytes) };
         return imp.repo.objectDatabase().read(imp.io, oid);
     }
 
@@ -1623,7 +1624,7 @@ const Importer = struct {
 
     fn commitTree(imp: *Importer, oid: Oid) Error!Oid {
         const found = try imp.readObject(oid);
-        defer imp.gpa.free(found.bytes);
+        defer imp.repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .commit) return error.WrongObjectType;
         const hex_len = imp.kind.hexLen();
         if (found.bytes.len < 5 + hex_len or !std.mem.startsWith(u8, found.bytes, "tree ")) return error.WrongObjectType;
@@ -1661,7 +1662,7 @@ const Importer = struct {
 
     fn tagTarget(imp: *Importer, oid: Oid) Error!Oid {
         const found = try imp.readObject(oid);
-        defer imp.gpa.free(found.bytes);
+        defer imp.repo.objectDatabase().allocator().free(found.bytes);
         const hex_len = imp.kind.hexLen();
         if (found.bytes.len < 7 + hex_len or !std.mem.startsWith(u8, found.bytes, "object ")) return error.WrongObjectType;
         return Oid.parse(imp.kind, found.bytes[7..][0..hex_len]) catch error.WrongObjectType;

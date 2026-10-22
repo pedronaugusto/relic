@@ -76,7 +76,7 @@ fn infoRefs(gpa: Allocator, io: Io, repo: *Repository, out: *Io.Writer) Self.Err
                 break;
             }
             const found = try db.read(io, current);
-            defer gpa.free(found.bytes);
+            defer db.allocator().free(found.bytes);
             var tag = try object.Tag.parse(gpa, repo.objectFormat(), found.bytes);
             defer tag.deinit();
             current = tag.target;

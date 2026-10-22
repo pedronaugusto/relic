@@ -2371,7 +2371,7 @@ const CheckoutWrite = struct {
             },
             .symlink => {
                 const found = try c.db.read(c.io, want.oid);
-                defer c.gpa.free(found.bytes);
+                defer c.db.allocator().free(found.bytes);
                 if (try writeLink(c.io, c.wt, path, found.bytes, c.options.rules.symlinks)) c.outcome.symlinks_as_files += 1;
                 // A link where a proved directory's name folds to it is
                 // looked at again before anything is written under it.
@@ -2383,7 +2383,7 @@ const CheckoutWrite = struct {
                 defer scratch.deinit();
                 const a = scratch.allocator();
                 const found = try c.db.read(c.io, want.oid);
-                defer c.gpa.free(found.bytes);
+                defer c.db.allocator().free(found.bytes);
                 const executable = want.mode == .exec and c.options.rules.file_mode;
                 const smudged: native.Content = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, .{ .path = path, .blob = found.bytes, .applied = try attrs.lookup(a, path, .file) }, .{
                     .blob = want.oid,
@@ -2839,7 +2839,7 @@ pub fn writePaths(
             },
             .symlink => {
                 const found = try db.read(io, want.oid);
-                defer gpa.free(found.bytes);
+                defer db.allocator().free(found.bytes);
                 if (try writeLink(io, wt, w.path, found.bytes, options.rules.symlinks)) outcome.symlinks_as_files += 1;
                 leading.forget();
                 outcome.written += 1;
@@ -2917,7 +2917,7 @@ fn writePathFile(
     defer scratch.deinit();
     const a = scratch.allocator();
     const found = try db.read(io, want.oid);
-    defer gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     const executable = want.mode == .exec and rules.file_mode;
     const attrs = rules.attrs orelse {
         try writeFile(io, wt, path, .{ .bytes = found.bytes }, executable);
@@ -2971,7 +2971,7 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
         },
         .symlink => {
             const found = try db.read(io, oid);
-            defer gpa.free(found.bytes);
+            defer db.allocator().free(found.bytes);
             written.symlink_as_file = try writeLink(io, wt, path, found.bytes, rules.symlinks);
         },
         .file, .exec => {

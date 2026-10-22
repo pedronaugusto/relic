@@ -2185,7 +2185,7 @@ pub const Repository = struct {
             const header = try repo.data().odb.readHeader(io, current);
             if (header.type != .tag) return current;
             const found = try repo.data().odb.read(io, current);
-            defer repo.data().gpa.free(found.bytes);
+            defer repo.data().odb.allocator().free(found.bytes);
             var tag = try object.Tag.parse(repo.data().gpa, repo.objectFormat(), found.bytes);
             defer tag.deinit();
             current = tag.target;

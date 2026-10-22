@@ -189,14 +189,14 @@ pub fn loadGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const I
     const blob: ?Oid = if (index.find(".gitmodules")) |entry| entry.oid else blk: {
         const tree = (try repo.headTree(io)) orelse break :blk null;
         const found = try repo.objectDatabase().read(io, tree);
-        defer gpa.free(found.bytes);
+        defer repo.objectDatabase().allocator().free(found.bytes);
         const parsed: object.Tree = .parse(repo.objectFormat(), found.bytes);
         const entry = (try parsed.find(".gitmodules")) orelse break :blk null;
         break :blk entry.oid;
     };
     const oid = blob orelse return .empty(gpa);
     const found = try repo.objectDatabase().read(io, oid);
-    defer gpa.free(found.bytes);
+    defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .blob) return error.UnexpectedObjectType;
     return Gitmodules.parse(gpa, found.bytes);
 }

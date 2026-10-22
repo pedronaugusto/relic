@@ -1854,7 +1854,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
         // The database reads the new pack at once.
         const found = try repo.read(io, try Oid.parse(.sha1, head));
-        gpa.free(found.bytes);
+        repo.allocator().free(found.bytes);
     }
 
     // git chooses the shape of the fixture above. Four independent bases
@@ -2197,7 +2197,7 @@ test "a damaged stream is a named error and leaves nothing behind" {
     const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{});
     try testing.expectEqual(@as(u32, 2), result.objects);
     const found = try repo.read(io, hash.Hasher.object(.sha1, "blob", "basemore\n"));
-    defer gpa.free(found.bytes);
+    defer repo.allocator().free(found.bytes);
     try testing.expectEqualStrings("basemore\n", found.bytes);
 }
 
@@ -2303,7 +2303,7 @@ fn receiveChain(chain: usize, seed: u8) !usize {
     @memcpy(expected[base_len + 1 ..][0.."side".len], "side");
     const branched = expected[0 .. base_len + 1 + "side".len];
     const found = try repo.read(io, hash.Hasher.object(.sha1, "blob", branched));
-    defer gpa.free(found.bytes);
+    defer repo.allocator().free(found.bytes);
     try testing.expectEqualSlices(u8, branched, found.bytes);
     return peak.most;
 }

@@ -259,7 +259,7 @@ pub fn get(io: Io, repo: *Repository, n: usize) Self.Error!Stash {
 pub fn inspect(io: Io, repo: *Repository, commit: Oid) Self.Error!Stash {
     const gpa = repo.allocator();
     const found = try repo.objectDatabase().read(io, commit);
-    defer gpa.free(found.bytes);
+    defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .commit) return error.NotAStash;
     var parsed = try object.Commit.parse(gpa, repo.objectFormat(), found.bytes);
     defer parsed.deinit();
