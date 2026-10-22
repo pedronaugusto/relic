@@ -53,15 +53,19 @@ test "a patch's headers take the prefixes git's settings give for what is compar
         const db = repo.objectDatabase();
         const old = try repo.commitTree(io, try oidOf(gpa, io, &git, "HEAD~1"));
         const new = try repo.commitTree(io, try oidOf(gpa, io, &git, "HEAD"));
-        var changes = try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{ .renames = .{} });
-        defer changes.deinit();
+        var index = try repo.openIndex(io);
+        defer index.deinit();
         const Kind = struct { args: []const []const u8, compared: diff.Prefixes.Compared };
-        // The index holds `HEAD`, so `--cached HEAD~1` is the same change.
         const kinds = [_]Kind{
             .{ .args = &.{ "diff", "-M", "HEAD~1", "HEAD" }, .compared = .commits },
             .{ .args = &.{ "diff", "-M", "--cached", "HEAD~1" }, .compared = .commit_index },
         };
         for (kinds) |kind| {
+            var changes = if (kind.compared == .commits)
+                try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{ .renames = .{} })
+            else
+                try diff.index(gpa, io, db, .{ .tree = old, .index = &index }, .{ .renames = .{}, .hide_intent_to_add = true });
+            defer changes.deinit();
             const theirs = try git.run(io, kind.args);
             defer gpa.free(theirs);
             var mine: Io.Writer.Allocating = .init(gpa);

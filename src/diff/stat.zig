@@ -96,6 +96,7 @@ pub fn files(a: Allocator, io: Io, inputs: diff.NumstatInputs, options: diff.Opt
             .added = n.plus,
             .deleted = n.minus,
         };
+        if (c.status == .unmerged) f.kind = .unmerged;
         if (!n.binary) continue;
         f.kind = .binary;
         f.added = 0;
@@ -308,9 +309,11 @@ pub fn renamed(a: Allocator, a_name: []const u8, b_name: []const u8, quote_path:
 pub fn writeSummary(a: Allocator, out: *std.ArrayList(u8), changes: []const diff.Change, quote_path: bool) Allocator.Error!void {
     for (changes) |c| switch (c.status) {
         .added, .deleted, .renamed, .copied => break,
+        .unmerged => {},
         else => if (c.old.?.mode != c.new.?.mode) break,
     } else return;
     for (changes) |c| switch (c.status) {
+        .unmerged => {},
         .deleted => try out.print(a, " delete mode {o:0>6} {s}\n", .{ modeNum(c.old.?.mode), try c_quote.alloc(a, c.old.?.path, quote_path) }),
         .added => try out.print(a, " create mode {o:0>6} {s}\n", .{ modeNum(c.new.?.mode), try c_quote.alloc(a, c.new.?.path, quote_path) }),
         .renamed, .copied => {

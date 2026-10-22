@@ -1,5 +1,5 @@
-//! Differences: tree against tree, blob against blob, and the unified text
-//! git prints.
+//! Differences: tree against tree, tree against the index, blob against
+//! blob, and the unified text git prints.
 //!
 //! The line diff is parallax's; this is what turns it into the shapes a
 //! caller wants — a name-status list, added and removed line counts, and a
@@ -22,6 +22,7 @@ const ere = @import("../text.zig").ere;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
+const index_mod = @import("../index/index.zig");
 const attributes = @import("../patterns.zig").attributes;
 const driver_mod = @import("driver.zig");
 const textconv_mod = @import("textconv.zig");
@@ -97,6 +98,9 @@ pub const Status = enum {
     type_changed,
     renamed,
     copied,
+    /// The index holds the path's conflict stages and no one version of it:
+    /// git's `U`, which only a comparison with the index (`index`) finds.
+    unmerged,
 };
 
 /// One side of a change.
@@ -110,15 +114,19 @@ pub const Entry = struct {
 /// One path's change.
 pub const Change = struct {
     status: Status,
-    /// Absent for an addition.
+    /// Absent for an addition. For an unmerged path, the tree's side where
+    /// it has one.
     old: ?Entry,
-    /// Absent for a deletion.
+    /// Absent for a deletion and for an unmerged path.
     new: ?Entry,
     /// For a rename or a copy, how alike the two sides are, as a percentage.
     similarity: u8 = 0,
+    /// For an unmerged path, the path.
+    unmerged_path: []const u8 = "",
 
     /// The path a caller should show: the new one where there is one.
     pub fn path(c: Change) []const u8 {
+        if (c.status == .unmerged) return c.unmerged_path;
         if (c.new) |e| return e.path;
         return c.old.?.path;
     }
@@ -133,6 +141,7 @@ pub const Change = struct {
             .type_changed => 'T',
             .renamed => 'R',
             .copied => 'C',
+            .unmerged => 'U',
         };
     }
 };
@@ -313,6 +322,135 @@ pub fn tree(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, option
     return .{ .gpa = gpa, .arena = arena_instance.state, .items = changes.items };
 }
 
+/// What `index` compares: a tree, the empty one for `null`, against an
+/// index.
+pub const IndexInputs = struct { tree: ?Oid = null, index: *const index_mod.Index };
+
+/// How a comparison with the index behaves. git refuses `--max-depth` and
+/// lists no subtrees for it, so neither is here.
+pub const IndexOptions = struct {
+    /// Rename and copy detection, or `null` for none.
+    renames: ?RenameOptions = null,
+    /// Only paths under this directory, as `TreeOptions.prefix`.
+    prefix: []const u8 = "",
+    /// An order file's patterns, as `TreeOptions.order`.
+    order: Order = .{},
+    /// `-- <paths>`: only the paths these name.
+    paths: ?*const pathspec.Pathspec = null,
+    /// git's `ita_invisible_in_index`, which `git diff --cached` sets and
+    /// `git diff-index --cached` leaves off: an intent to add is not in
+    /// the index, so its path is no change, or the tree's file deleted.
+    /// Without it the entry is the empty file it records.
+    hide_intent_to_add: bool = false,
+};
+
+/// Compare a tree with an index, path by path, as git's `diff-index
+/// --cached` and `git diff --cached` do (`do_oneway_diff`): each merged
+/// entry against the tree's file at its path, a sparse directory as the
+/// files of its tree, and a path with conflict stages one `unmerged`
+/// change, with the tree's side where it has one. Renames, the prefix,
+/// the pathspec and the order as `tree` has them.
+pub fn index(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: IndexInputs, options: IndexOptions) Self.Error!Changes {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+
+    var old_entries: Flat = .empty;
+    if (inputs.tree) |oid| try flatten(arena, io, db, oid, "", &old_entries, 0);
+    const staged = try stagedSide(arena, io, db, inputs.index, options.hide_intent_to_add);
+
+    var changes: std.ArrayList(Change) = .empty;
+    const old = old_entries.values();
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < old.len or j < staged.len) {
+        const order: std.math.Order = if (i == old.len) .gt else if (j == staged.len) .lt else std.mem.order(u8, old[i].path, staged[j].path());
+        const tree_side: ?Entry = if (order != .gt) old[i] else null;
+        const index_side: ?Staged = if (order != .lt) staged[j] else null;
+        if (order != .gt) i += 1;
+        if (order != .lt) j += 1;
+        const path = if (tree_side) |e| e.path else index_side.?.path();
+        if (!underPrefix(path, options.prefix)) continue;
+        if (options.paths) |paths| {
+            const mode = if (index_side) |s| s.mode() else tree_side.?.mode;
+            if (!(if (mode == .gitlink) paths.matchesDir(path) else paths.matches(path))) continue;
+        }
+        const change = oneWay(tree_side, index_side) orelse continue;
+        try changes.append(arena, change);
+    }
+
+    std.mem.sort(Change, changes.items, {}, lessThanChange);
+    if (options.renames) |rename_options| {
+        const harder = rename_options.detect_copies and rename_options.find_copies_harder;
+        try detectRenames(arena, io, db, &changes, if (harder) &old_entries else &Flat.empty, rename_options, null);
+        std.mem.sort(Change, changes.items, {}, lessThanChange);
+    }
+    try options.order.apply(arena, changes.items);
+
+    return .{ .gpa = gpa, .arena = arena_instance.state, .items = changes.items };
+}
+
+/// One path of the index as a comparison with a tree takes it.
+const Staged = union(enum) {
+    entry: Entry,
+    /// The path holds conflict stages.
+    unmerged: struct { path: []const u8, mode: object.Mode },
+
+    fn path(s: Staged) []const u8 {
+        return switch (s) {
+            .entry => |e| e.path,
+            .unmerged => |u| u.path,
+        };
+    }
+
+    fn mode(s: Staged) object.Mode {
+        return switch (s) {
+            .entry => |e| e.mode,
+            .unmerged => |u| u.mode,
+        };
+    }
+};
+
+/// The index's paths in its order, which is the order of a flattened
+/// tree's: an entry each, the files of a sparse directory's tree in its
+/// place, one item for a path's conflict stages, and an intent to add left
+/// out when `hide_intent_to_add` asks.
+fn stagedSide(arena: Allocator, io: Io, db: *odb_mod.Odb, ix: *const index_mod.Index, hide_intent_to_add: bool) Error![]Staged {
+    var out: std.ArrayList(Staged) = .empty;
+    const entries = ix.entries.items;
+    var k: usize = 0;
+    while (k < entries.len) : (k += 1) {
+        const e = entries[k];
+        if (e.stage != 0) {
+            try out.append(arena, .{ .unmerged = .{ .path = e.path, .mode = e.mode } });
+            while (k + 1 < entries.len and std.mem.eql(u8, entries[k + 1].path, e.path)) k += 1;
+            continue;
+        }
+        if (e.intent_to_add and hide_intent_to_add) continue;
+        if (e.isSparseDirectory()) {
+            var files: Flat = .empty;
+            try flatten(arena, io, db, e.oid, e.path[0 .. e.path.len - 1], &files, 0);
+            for (files.values()) |f| try out.append(arena, .{ .entry = f });
+            continue;
+        }
+        try out.append(arena, .{ .entry = .{ .path = e.path, .mode = e.mode, .oid = e.oid } });
+    }
+    return out.items;
+}
+
+/// git's `do_oneway_diff` with `--cached`, for one path the tree, the
+/// index or both hold: `null` where the two are the same.
+fn oneWay(tree_side: ?Entry, index_side: ?Staged) ?Change {
+    const staged = index_side orelse return .{ .status = .deleted, .old = tree_side, .new = null };
+    const new = switch (staged) {
+        .unmerged => |u| return .{ .status = .unmerged, .old = tree_side, .new = null, .unmerged_path = u.path },
+        .entry => |e| e,
+    };
+    const old = tree_side orelse return .{ .status = .added, .old = null, .new = new };
+    if (old.oid.eql(new.oid) and old.mode == new.mode) return null;
+    return .{ .status = if (typeChanged(old.mode, new.mode)) .type_changed else .modified, .old = old, .new = new };
+}
+
 /// Two trees walked side by side, as git's tree diff walks them: a subtree
 /// both sides hold under the same name is passed over without being read,
 /// so the cost is the part of the trees that differs and not their size.
@@ -462,7 +600,7 @@ fn lessThanChange(_: void, a: Change, b: Change) bool {
 }
 
 fn isTreeChange(c: Change) bool {
-    const e = c.new orelse c.old.?;
+    const e = c.new orelse c.old orelse return false;
     return e.mode.isTree();
 }
 
@@ -536,10 +674,10 @@ fn detectRenames(
     for (all.items) |c| {
         const one = try arena.create(rename.Spec);
         const two = try arena.create(rename.Spec);
-        one.* = specOf(c.old, if (c.new) |n| n.path else c.old.?.path, db.objectFormat());
-        two.* = specOf(c.new, if (c.old) |o| o.path else c.new.?.path, db.objectFormat());
+        one.* = specOf(c.old, c.path(), db.objectFormat());
+        two.* = specOf(c.new, if (c.old) |o| o.path else c.path(), db.objectFormat());
         const pair = try arena.create(rename.Pair);
-        pair.* = .{ .one = one, .two = two };
+        pair.* = .{ .one = one, .two = two, .unmerged = c.status == .unmerged };
         try queue.append(arena, pair);
     }
     const minimum: u32 = @as(u32, options.threshold) * similarity.max_score / 100;
@@ -558,6 +696,10 @@ fn detectRenames(
     for (queue.items) |p| {
         const old: ?Entry = entryOf(p.one);
         const new: ?Entry = entryOf(p.two);
+        if (p.unmerged) {
+            try changes.append(arena, .{ .status = .unmerged, .old = old, .new = null, .unmerged_path = p.two.path });
+            continue;
+        }
         if (p.renamed) {
             p.one.rename_used -= 1;
             const status: Status = if (p.one.rename_used > 0) .copied else .renamed;
@@ -1062,6 +1204,11 @@ pub fn numstat(gpa: Allocator, io: Io, inputs: NumstatInputs, options: Options) 
     var lookup: std.heap.ArenaAllocator = .init(gpa);
     defer lookup.deinit();
     for (inputs.changes, 0..) |change, i| {
+        // git's `builtin_diffstat` counts nothing for an unmerged path.
+        if (change.status == .unmerged) {
+            out[i] = .{ .plus = 0, .minus = 0, .binary = false };
+            continue;
+        }
         _ = lookup.reset(.retain_capacity);
         // A gitlink has no content in this repository; git counts it as one
         // line changed either way, which is what a commit name is.
@@ -1218,6 +1365,9 @@ const UnifiedFile = struct {
             f.counter += 1;
             return writeExternal(gpa, io, f.inputs, .{ .command = command, .change = change, .counter = f.counter }, f.out, options);
         }
+        // git's `run_diff_cmd` for a pair without sides: the name as it
+        // is, unquoted.
+        if (change.status == .unmerged) return f.out.print("* Unmerged path {s}\n", .{shownPath(options, change.path())});
         return writeChange(gpa, io, f.inputs, change, f.out, options, f.recorder);
     }
 };
@@ -1232,7 +1382,7 @@ const Listed = union(enum) {
     /// one where there is one.
     fn key(l: Listed) []const u8 {
         return switch (l) {
-            .change => |c| (c.old orelse c.new.?).path,
+            .change => |c| if (c.old) |o| o.path else c.path(),
             .headers_only => |path| path,
         };
     }
@@ -1280,7 +1430,7 @@ fn externalCommand(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change
     const ext = inputs.external orelse return null;
     var lookup: std.heap.ArenaAllocator = .init(gpa);
     defer lookup.deinit();
-    const path = (change.old orelse change.new.?).path;
+    const path = if (change.old) |o| o.path else change.path();
     if (try inputs.drivers.ofPath(lookup.allocator(), io, path)) |d| {
         if (try d.command(inputs.drivers.config)) |command| return command;
     }
@@ -1295,9 +1445,10 @@ const ExternalChange = struct { command: driver_mod.Command, change: Change, cou
 /// the metadata lines without colour.
 fn writeExternal(gpa: Allocator, io: Io, inputs: UnifiedInputs, ec: ExternalChange, w: *Io.Writer, options: Options) UnifiedError!void {
     const change = ec.change;
-    const old = change.old;
+    // An unmerged path goes to the program by its name alone.
+    const old = if (change.status == .unmerged) null else change.old;
     const new = change.new;
-    const name = shownPath(options, (old orelse new.?).path);
+    const name = shownPath(options, if (old) |o| o.path else change.path());
     const other: ?[]const u8 = if (old != null and new != null and !std.mem.eql(u8, old.?.path, new.?.path)) shownPath(options, new.?.path) else null;
     var metainfo: std.Io.Writer.Allocating = .init(gpa);
     defer metainfo.deinit();

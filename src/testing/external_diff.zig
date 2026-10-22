@@ -2,8 +2,8 @@
 //! for every pair and a driver's `command` over it, each handed the path,
 //! both sides (a temporary `git-blob-XXXXXX/<name>` holding the blob as a
 //! checkout writes it, or the working tree's own file where the index
-//! vouches for it, or `/dev/null . .`), the new path and metadata of a
-//! rename, and which pair of how many; and the exit status each may give,
+//! vouches for it, or `/dev/null . .`; an unmerged path's name alone), the
+//! new path and metadata of a rename, and which pair of how many; and the exit status each may give,
 //! trusted or not.
 
 const std = @import("std");
@@ -50,6 +50,14 @@ fn script(io: Io, repo: *testgit.Repo) anyerror!void {
     // A change the working tree has and the index does not: that side is
     // written out, not lent.
     try repo.writeFile(io, "dirty.txt", "dirty in the working tree\n");
+    // Conflict stages, which `--cached` gives the program by name alone.
+    const stage = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "a side\n");
+    defer repo.gpa.free(stage);
+    var lines: std.ArrayList(u8) = .empty;
+    defer lines.deinit(repo.gpa);
+    for (1..4) |n| try lines.print(repo.gpa, "100644 {s} {d}\tconflicted.txt\n", .{ std.mem.trimEnd(u8, stage, "\n"), n });
+    const out = try repo.runInput(io, &.{ "update-index", "--index-info" }, lines.items);
+    repo.gpa.free(out);
 }
 
 fn addLink(io: Io, repo: *testgit.Repo, path: []const u8, target: []const u8) !void {
@@ -68,7 +76,7 @@ fn commandOf(gpa: Allocator, status: []const u8) ![]u8 {
 
 /// relic's `git diff --ext-diff -M HEAD~1 HEAD` in `pair.ours`, or with
 /// `cached` its `--cached HEAD~1`, which reads the index and lends the
-/// files it vouches for (the index holds `HEAD`'s tree).
+/// files it vouches for.
 fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writer) !void {
     var repo = try pair.open(io);
     defer repo.deinit(io);
@@ -94,7 +102,10 @@ fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writ
     const options = try diff.configured(repo.configuration(), .{});
     const old = try repo.commitTree(io, try history.oidOf(gpa, io, &pair.ours, "HEAD~1"));
     const new = try repo.commitTree(io, try history.oidOf(gpa, io, &pair.ours, "HEAD"));
-    var changes = try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{ .renames = .{} });
+    var changes = if (cached)
+        try diff.index(gpa, io, db, .{ .tree = old, .index = &index }, .{ .renames = .{}, .hide_intent_to_add = true })
+    else
+        try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{ .renames = .{} });
     defer changes.deinit();
     const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = wt, .config = repo.configuration() };
     try diff.unified(gpa, io, out, .{ .db = db, .changes = changes.items, .drivers = drivers, .external = &ext }, options);

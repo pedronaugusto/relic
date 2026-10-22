@@ -463,6 +463,9 @@ const Exporter = struct {
                     }
                 },
                 .added, .modified, .type_changed => {},
+                // unreachable: the changes are two trees', which hold no
+                // conflict stages.
+                .unmerged => unreachable,
             }
             const new = c.new.?;
             if (ex.options.no_data or new.mode == .gitlink) {

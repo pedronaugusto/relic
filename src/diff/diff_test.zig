@@ -1097,12 +1097,14 @@ test "an order file orders the changes as git diff-tree -O orders them" {
 
 /// `bytes` staged at `path` through the index alone: a name no file on
 /// every platform can take (Windows refuses a `"`), in a tree all the same.
+/// Git for Windows checks an index path as a Windows file name only under
+/// `core.protectNTFS`, so the entry goes in with it off.
 fn stageBlob(io: Io, repo: *testgit.Repo, path: []const u8, bytes: []const u8) !void {
     const oid = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, bytes);
     defer repo.gpa.free(oid);
     const info = try std.mem.concat(repo.gpa, u8, &.{ "100644,", std.mem.trimEnd(u8, oid, "\n"), ",", path });
     defer repo.gpa.free(info);
-    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", info });
+    try repo.exec(io, &.{ "-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", info });
 }
 
 fn setupColour(io: Io, repo: *testgit.Repo) anyerror!void {

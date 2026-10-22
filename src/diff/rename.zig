@@ -69,6 +69,10 @@ pub const Pair = struct {
     score: u32 = 0,
     /// Whether `one` was swapped in by the search.
     renamed: bool = false,
+    /// git's `is_unmerged`: the path's conflict stages, `two` absent and
+    /// `one` the tree's side where there is one. It is no rename source,
+    /// though `-C` may copy from that side.
+    unmerged: bool = false,
 };
 
 /// Why a directory matters: `dirs_removed`'s values.
@@ -140,7 +144,7 @@ pub fn detect(arena: Allocator, io: Io, db: *odb_mod.Odb, queue: *std.ArrayList(
             try r.dst.append(arena, .{ .p = p });
         } else if (!options.rename_empty and p.one.oid.eql(empty)) {
             continue;
-        } else if (!p.two.valid()) {
+        } else if (!p.unmerged and !p.two.valid()) {
             try r.src.append(arena, .{ .p = p, .score = p.score });
         } else if (options.copies) {
             p.one.rename_used += 1;
@@ -154,7 +158,7 @@ pub fn detect(arena: Allocator, io: Io, db: *odb_mod.Odb, queue: *std.ArrayList(
 
     var out: std.ArrayList(*Pair) = .empty;
     for (queue.items) |p| {
-        if (!p.one.valid() and p.two.valid()) {
+        if (p.unmerged or (!p.one.valid() and p.two.valid())) {
             try out.append(arena, p);
         } else if (p.one.valid() and !p.two.valid()) {
             if (p.one.rename_used == 0) try out.append(arena, p);

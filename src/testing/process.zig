@@ -103,13 +103,14 @@ pub fn main(init: std.process.Init) !void {
 
 /// An external diff, `ext-diff <status>` then what git hands one: the
 /// path, each side's file, object and mode, and for a rename the other
-/// path and the metadata. It writes them back, a temporary file by its
-/// name within its `git-blob-XXXXXX` directory, each file's bytes, and
-/// which pair of how many, then exits with `status`.
+/// path and the metadata; for an unmerged path, the path alone. It writes
+/// them back, a temporary file by its name within its `git-blob-XXXXXX`
+/// directory, each file's bytes, and which pair of how many, then exits
+/// with `status`.
 fn extDiff(arena: std.mem.Allocator, io: Io, environ: *const std.process.Environ.Map, args: []const []const u8, out: *Io.Writer) !void {
-    if (args.len < 10) return error.MissingPath;
+    if (args.len != 4 and args.len < 10) return error.MissingPath;
     try out.print("status={s} name={s}\n", .{ args[2], args[3] });
-    for ([_]usize{ 4, 7 }) |at| {
+    if (args.len > 4) for ([_]usize{ 4, 7 }) |at| {
         const file = args[at];
         var shown = file;
         if (std.Io.Dir.path.isAbsolute(file)) {
@@ -123,8 +124,8 @@ fn extDiff(arena: std.mem.Allocator, io: Io, environ: *const std.process.Environ
             const bytes = try Io.Dir.cwd().readFileAlloc(io, file, arena, .limited(1 << 20));
             try out.print("<<{s}>>\n", .{bytes});
         }
-    }
-    for (args[10..]) |extra| try out.print("extra={s}\n", .{extra});
+    };
+    for (args[@min(args.len, 10)..]) |extra| try out.print("extra={s}\n", .{extra});
     try out.print("pair={s}/{s}\n", .{ environ.get("GIT_DIFF_PATH_COUNTER") orelse "?", environ.get("GIT_DIFF_PATH_TOTAL") orelse "?" });
 }
 

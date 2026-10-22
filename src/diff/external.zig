@@ -99,7 +99,8 @@ pub const Run = struct {
     other: ?[]const u8 = null,
     /// The metadata lines for a rename or a copy.
     metainfo: ?[]const u8 = null,
-    /// The sides as the repository has them.
+    /// The sides as the repository has them. Neither, for an unmerged
+    /// path: the program is given its name alone, as git gives it.
     old: ?Side,
     new: ?Side,
     /// Which pair of how many in the diff, from one.
@@ -124,7 +125,7 @@ pub fn run(ext: *const External, gpa: Allocator, io: Io, spec: Run, w: *Io.Write
     }
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(a, &.{ spec.command.command, spec.name });
-    for (prepared) |p| try argv.appendSlice(a, &.{ p.name, p.hex, p.mode });
+    if (spec.old != null or spec.new != null) for (prepared) |p| try argv.appendSlice(a, &.{ p.name, p.hex, p.mode });
     if (spec.other) |other| {
         try argv.append(a, other);
         if (spec.metainfo) |m| try argv.append(a, m);
