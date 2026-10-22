@@ -1791,7 +1791,10 @@ fn appendQuoted(arena: Allocator, out: *std.ArrayList(u8), text: []const u8) All
 // One pick
 //=========================================================================
 
-const Picked = enum { ok, conflict, empty };
+/// What a pick did: committed, stopped at a conflict or at a commit left
+/// empty, or dropped one left empty (`dropped`, git 2.56's
+/// `PICK_RESULT_DROPPED`, which is not recorded as rewritten).
+const Picked = enum { ok, conflict, empty, dropped };
 
 /// Whether the current instruction is the last of a fixup chain.
 fn isFinalFixup(r: *Run) bool {
@@ -1810,8 +1813,9 @@ fn pickOne(r: *Run) Error!?Outcome {
     const final_fixup = isFinalFixup(r);
     const picked = try doPickCommit(r, item, final_fixup);
     if (item.command == .edit) {
-        if (picked == .ok) {
-            try errorWithPatch(r, commit, true);
+        // A commit dropped stops there too, with nothing to amend.
+        if (picked == .ok or picked == .dropped) {
+            try errorWithPatch(r, commit, picked == .ok);
             _ = r.items.orderedRemove(0);
             return finishOutcome(r, .stopped, .edit, commit);
         }
@@ -1821,6 +1825,12 @@ fn pickOne(r: *Run) Error!?Outcome {
     }
     if (picked == .ok) {
         try recordInRewritten(r, commit, peekCommand(r, 1));
+        return null;
+    }
+    // A commit dropped became nothing, so nothing rewrote it and its notes
+    // stay where they are; a chain it ended is done all the same.
+    if (picked == .dropped) {
+        if (final_fixup) try flushRewritten(r);
         return null;
     }
     if (item.command.isFixup()) {
@@ -2020,7 +2030,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
                 try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
                 try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
                 try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
-                return .ok;
+                return .dropped;
             },
             .stop => {},
         }

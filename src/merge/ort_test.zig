@@ -1486,3 +1486,46 @@ test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 59" {
 }
 
 const diff_scenario_count = testgit.corpusCases(60);
+
+/// A tree written as its bytes are, `entries` in order whatever they name:
+/// `hash-object -t tree --literally`.
+fn literalTree(gpa: Allocator, io: Io, repo: *testgit.Repo, entries: []const struct { name: []const u8, blob: Oid }) !Oid {
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(gpa);
+    for (entries) |e| {
+        try raw.print(gpa, "100644 {s}\x00", .{e.name});
+        try raw.appendSlice(gpa, e.blob.bytes[0..20]);
+    }
+    const text = try repo.runInput(io, &.{ "hash-object", "-t", "tree", "--literally", "-w", "--stdin" }, raw.items);
+    defer gpa.free(text);
+    return Oid.parse(.sha1, std.mem.trimEnd(u8, text, "\n"));
+}
+
+test "a tree naming a path twice is refused, as git 2.56's merge refuses it" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var blobs: [3]Oid = undefined;
+    for (&blobs, [_][]const u8{ "x\n", "y\n", "z\n" }) |*b, content| {
+        const text = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, content);
+        defer gpa.free(text);
+        b.* = try Oid.parse(.sha1, std.mem.trimEnd(u8, text, "\n"));
+    }
+    const base = try literalTree(gpa, io, &repo, &.{.{ .name = "a", .blob = blobs[0] }});
+    const ours = try literalTree(gpa, io, &repo, &.{ .{ .name = "a", .blob = blobs[1] }, .{ .name = "a", .blob = blobs[2] } });
+    const theirs = try literalTree(gpa, io, &repo, &.{ .{ .name = "a", .blob = blobs[0] }, .{ .name = "b", .blob = blobs[2] } });
+    var hex: [3][40]u8 = undefined;
+    var commits: [3][]u8 = undefined;
+    for (&commits, [_]Oid{ base, ours, theirs }, 0..) |*c, tree, i| c.* = try repo.line(io, &.{ "commit-tree", "-m", "t", tree.hex(&hex[i]) });
+    defer for (commits) |c| gpa.free(c);
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.exec(io, &.{ "merge-tree", "--write-tree", "--merge-base", commits[0], commits[1], commits[2] }));
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    try std.testing.expectError(error.DuplicateTreeEntry, ort.trees(gpa, io, &db, .{ .base = base, .ours = ours, .theirs = theirs }, .{}));
+}

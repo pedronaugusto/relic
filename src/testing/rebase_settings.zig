@@ -238,3 +238,46 @@ test "rebase.missingCommitsCheck=error refuses a sheet that leaves commits out, 
     }
     try expectSameSettings(&pair, io);
 }
+
+/// `side`: a commit whose change `main` makes too, with more beside it, so
+/// no patch id leaves it out and it is dropped as empty; it has a note.
+/// Then one more commit.
+fn emptiedScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try commitFile(io, repo, "x", "old\n");
+    try repo.exec(io, &.{ "config", "notes.rewriteRef", "refs/notes/commits" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    try commitFile(io, repo, "x", "new\n");
+    try repo.exec(io, &.{ "notes", "add", "-m", "a note on the change main has too" });
+    try commitFile(io, repo, "z", "more\n");
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "x", "new\n");
+    try repo.exec(io, &.{ "add", "x" });
+    try commitFile(io, repo, "y", "main makes the change and more\n");
+}
+
+test "a commit a rebase drops as empty is not rewritten, so its note is not copied, as git 2.56's" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    try testgit.eachRefFormat(struct {
+        fn f(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            for ([_]bool{ false, true }) |interactive| {
+                var pair: Pair = undefined;
+                try Pair.init(gpa, io, &pair, format, emptiedScript);
+                defer pair.deinit();
+                for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "side" });
+                try pair.git.exec(io, if (interactive) &.{ "rebase", "-i", "--empty=drop", "main" } else &.{ "rebase", "main" });
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                var outcome = try rebase.start(gpa, io, &repo, try history.oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .interactive = interactive, .empty = if (interactive) .drop else null, .upstream_name = "main", .onto_name = "main" });
+                defer outcome.deinit();
+                try expectSame(&pair, io);
+                const theirs = try pair.git.run(io, &.{ "notes", "list" });
+                defer gpa.free(theirs);
+                const ours = try pair.ours.run(io, &.{ "notes", "list" });
+                defer gpa.free(ours);
+                try std.testing.expectEqualStrings(theirs, ours);
+            }
+        }
+    }.f);
+}

@@ -54,6 +54,9 @@ const Oid = hash.Oid;
 pub const Error = error{
     /// A tree entry named something that is not a tree.
     NotATree,
+    /// A tree names one path twice: git 2.56's "tree has duplicate entries
+    /// for '%s'".
+    DuplicateTreeEntry,
     /// A tree entry named something that is not a blob where one belongs.
     NotABlob,
     /// A commit named something that is not a commit.
@@ -623,6 +626,9 @@ const Merge = struct {
                 if (!slot.found_existing) {
                     for (slot.value_ptr) |*n| n.* = .{ .mode = 0, .oid = m.zero(), .name = item.name };
                 }
+                // git 2.56 refuses a tree naming one path twice, where the
+                // second replaced the first.
+                if (slot.value_ptr[i].mode != 0) return error.DuplicateTreeEntry;
                 slot.value_ptr[i] = .{ .mode = item.mode, .oid = item.oid, .name = item.name };
             }
         }

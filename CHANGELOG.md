@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `merge.ort.Error` carries `DuplicateTreeEntry`.
 - `odb.pack.Pack.verify` takes `Pack.VerifyOptions` (`cache`, `pack_id`, and `stream_past`, the threshold past which a whole object is checked as it is read) in place of the cache and the pack's id.
 - `transport.partial.storeAdvertised` takes the remotes to configure (`transport.Session.promisorCreates`) before the fields to store.
 - `transport.upload_pack.bundleSettings` and `transport.Session.bundleUri` take the `?*report.warning.Warnings` that a `bundle.*` setting with no value is said to.
@@ -216,6 +217,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - The credential-cache daemon waits for a client and for its time on two concurrent tasks; its wait was an `async` call, which Zig's threaded `Io` runs inline once its async threads (one fewer than the CPUs) are taken, so on a busy machine the daemon slept through its whole timeout before it accepted anyone (CI's macOS and Windows runners hit the 120 s watchdog). On Windows, a connect refused for want of a network (`ENETDOWN`) is no daemon there, as git for Windows' `connection_fatally_broken` reads it.
+- The merge refuses a tree that names one path twice (`error.DuplicateTreeEntry`), as git 2.56's merge-ort does ("tree has duplicate entries"), where the second entry silently replaced the first.
+- A commit a rebase drops as empty is no longer recorded as rewritten, so `notes.rewriteRef` copies none of its notes to an unrelated commit, as git 2.56's sequencer (`PICK_RESULT_DROPPED`); a final fixup dropped so still ends its chain, and an `edit` it drops stops with nothing to amend.
+- On Windows, a repository opened when allocation failed partway through `core.unsetEnvVars` leaked the name it had just copied; each name now belongs to the list once it is copied.
 - Objects past `core.bigFileThreshold` are held by nothing that writes, receives or checks them (design §10): a pack written for a fetch, a clone, a push or a repack copies the entry its pack stores in blocks, or deflates the object as `Odb.stream` reads it, where it read each object whole and failed past 2 GiB, and the ordering pass no longer caches such a body; index-pack compares one the database already holds as both are read; `Odb.loosen` and `Odb.own`, and so a received pack unpacked below `receive.unpackLimit`, write one loose from the stream; `Odb.verify` names each such loose object and pack entry as it reads it, the concurrent pack check taking an entry stored past it alone. A streamed loose object is finalized as every other (`core.createObject`, the file time `loosen` gives).
 - On Windows: `~/` in a path setting expands to `HOME` with its backslashes turned to `/`, as Git for Windows' `interpolate_path` turns them; a bundle list read from a path with backslashes resolves its relative bundle URIs against its directory, as `find_last_dir_sep` finds it, where relic resolved them against nothing. A repository opened while allocation fails no longer leaks a `core.unsetenvvars` name; the pack directory's listings in `odb` and `refs migrate`'s reserve before they copy a name, so a failed append leaks nothing.
 - `promisor-remote` goes only with `ls-refs` and `bundle-uri`, as git's `send_capabilities` sends it; relic sent it with `fetch` too, where git's `write_command_and_capabilities` has none, so a stateless server took remotes on a fetch that git's client never names there.
