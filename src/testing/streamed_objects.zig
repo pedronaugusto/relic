@@ -377,7 +377,7 @@ const Made = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const m: *Made = @alignCast(@fieldParentPtr("interface", r));
+        const m: *Made = @alignCast(@fieldParentPtr("interface", r)); // safe: the reader is a Made's interface
         if (m.at == m.len) return error.EndOfStream;
         const dest = limit.slice(try w.writableSliceGreedy(1));
         const offset: usize = @intCast(m.at % block);
@@ -418,7 +418,7 @@ const Same = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const s: *Same = @alignCast(@fieldParentPtr("interface", w));
+        const s: *Same = @alignCast(@fieldParentPtr("interface", w)); // safe: the writer is a Same's interface
         try s.hold(w.buffered());
         w.end = 0;
         var n: usize = 0;
