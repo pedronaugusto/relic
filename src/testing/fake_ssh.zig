@@ -15,8 +15,8 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     if (args.len == 0) return error.MissingProgramName;
     // The grandchild `refuse-held` leaves behind: it holds the standard
-    // error it inherited until the file named after it exists, and says so
-    // when it ends.
+    // error it inherited until the test connects to the socket named
+    // after it, and its end closes that connection.
     if (args.len == 3 and std.mem.eql(u8, args[1], "--hold-stderr")) return holdStderr(io, args[2]);
     const executable = try std.process.executablePathAlloc(io, arena);
     const fixture = try Fixture.read(arena, io, executable);
@@ -106,12 +106,18 @@ fn act(io: Io, executable: []const u8, fixture: Fixture) !void {
             _ = SetHandleInformation(Io.File.stdin().handle, handle_flag_inherit, 0);
             _ = SetHandleInformation(Io.File.stdout().handle, handle_flag_inherit, 0);
         }
-        _ = try std.process.spawn(io, .{
+        var grandchild = try std.process.spawn(io, .{
             .argv = &.{ executable, "--hold-stderr", fixture.release },
             .stdin = .ignore,
-            .stdout = .ignore,
+            .stdout = .pipe,
             .stderr = .inherit,
         });
+        // Ended only once it listens, so the test's release finds it.
+        var ready_buf: [16]u8 = undefined;
+        var ready = grandchild.stdout.?.readerStreaming(io, &ready_buf);
+        // A grandchild that failed to listen ends the pipe unsaid; the
+        // test then finds no one to release.
+        _ = ready.interface.takeDelimiterExclusive('\n') catch null;
     }
     if (fixture.is("refuse") or held) std.process.exit(255);
 }
@@ -202,15 +208,19 @@ fn run(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, execut
 const handle_flag_inherit: std.os.windows.DWORD = 1;
 extern "kernel32" fn SetHandleInformation(handle: std.os.windows.HANDLE, mask: std.os.windows.DWORD, flags: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL;
 
-/// Hold the inherited standard error until `release` exists, a minute at
-/// most, then leave `<release>.ended` behind.
+/// Hold the inherited standard error until the test connects to the
+/// socket at `release`, saying on standard output once it listens; the
+/// connection closes when this process has ended, which the test waits for.
 fn holdStderr(io: Io, release: []const u8) !void {
-    for (0..6000) |_| {
-        if (Io.Dir.cwd().access(io, release, .{})) |_| break else |_| {}
-        try io.sleep(.fromMilliseconds(10), .awake);
-    }
-    var name: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.mem.print(&name, "{s}.ended", .{release}), .data = "" });
+    const address = try Io.net.UnixAddress.init(release);
+    var server = try address.listen(io, .{});
+    var ready = Io.File.stdout().writerStreaming(io, &.{});
+    try ready.interface.writeAll("ready\n");
+    Io.File.stdout().close(io);
+    _ = try server.accept(io);
+    // glint-ignore: Z026 -- a socket file already gone is the end sought
+    Io.Dir.cwd().deleteFile(io, release) catch {};
+    std.process.exit(0);
 }
 
 fn teeStdin(io: Io, pipe: Io.File, path: []const u8) void {

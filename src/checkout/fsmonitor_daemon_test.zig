@@ -410,15 +410,10 @@ test "git's own daemon, where git has one, answers this package as it answers gi
     // A change the daemon sees, by this package and then by git reading
     // this package's index.
     try r.writeFile(io, "d/b", "b changed\n");
-    var report: []u8 = &.{};
+    // The daemon answers a query once it has seen its own cookie file,
+    // made for that query: every change before it is seen by then.
+    const report = try ourStatus(gpa, io, &r);
     defer gpa.free(report);
-    // The daemon hears of a change a moment after it is made.
-    for (0..100) |_| {
-        gpa.free(report);
-        report = try ourStatus(gpa, io, &r);
-        if (report.len != 0) break;
-        try io.sleep(.fromMilliseconds(50), .awake);
-    }
     try std.testing.expectEqualStrings(" M d/b\n", report);
     const git_report = try r.run(io, &.{ "status", "--porcelain", "--untracked-files=no" });
     defer gpa.free(git_report);

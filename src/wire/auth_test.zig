@@ -777,6 +777,19 @@ fn sshStandIn(person: *Person, io: Io, refusal: ?[]const u8) ![]u8 {
     return path;
 }
 
+/// Release the grandchild a `refuse-held` ssh left listening at
+/// `release`, and wait for its end, which closes the connection.
+fn releaseHeld(io: Io, release: []const u8) void {
+    const address = Io.net.UnixAddress.init(release) catch return;
+    // No grandchild listening: none was started, or it has gone.
+    const stream = address.connect(io) catch return;
+    defer stream.close(io);
+    var buf: [64]u8 = undefined;
+    var r = stream.reader(io, &buf);
+    // The end of the connection, however it comes, is the grandchild's.
+    _ = r.interface.discardRemaining() catch return;
+}
+
 test "ssh's refusal is named once ssh has ended, while something it started still holds its standard error" {
     const gpa = testing.allocator;
     const io = testing.io;
@@ -787,8 +800,6 @@ test "ssh's refusal is named once ssh has ended, while something it started stil
     defer gpa.free(ssh);
     const release = try std.Io.Dir.path.join(gpa, &.{ person.tools_path, "release" });
     defer gpa.free(release);
-    const ended = try gpa.print("{s}.ended", .{release});
-    defer gpa.free(ended);
     {
         const sidecar = try gpa.print("{s}.fixture", .{ssh});
         defer gpa.free(sidecar);
@@ -807,14 +818,7 @@ test "ssh's refusal is named once ssh has ended, while something it started stil
 
     // Released however the test ends, and waited for, since the
     // grandchild runs from the folder the test removes.
-    defer {
-        // glint-ignore: Z026 -- releasing the grandchild is best effort; the wait after it bounds the test either way
-        Io.Dir.cwd().writeFile(io, .{ .sub_path = release, .data = "" }) catch {};
-        for (0..6000) |_| {
-            if (Io.Dir.cwd().access(io, ended, .{})) |_| break else |_| {}
-            io.sleep(.fromMilliseconds(10), .awake) catch break;
-        }
-    }
+    defer releaseHeld(io, release);
     var failure: auth.Failure = .{};
     defer failure.deinit();
     try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{
@@ -823,11 +827,12 @@ test "ssh's refusal is named once ssh has ended, while something it started stil
         .auth_failure = &failure,
     }));
     try testing.expectEqualStrings(said, failure.server_message);
-    // The fetch did not wait for the grandchild, which is still there.
-    if (Io.Dir.cwd().access(io, ended, .{})) |_| {
+    // The fetch did not wait for the grandchild, which still listens to be
+    // let go.
+    Io.Dir.cwd().access(io, release, .{}) catch {
         std.debug.print("the fetch returned only once ssh's grandchild had ended\n", .{});
         return error.TestUnexpectedResult;
-    } else |_| {}
+    };
 }
 
 test "ssh gets the person's host alias, agent and command line untouched, as git hands them over" {
