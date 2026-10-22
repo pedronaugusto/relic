@@ -19,7 +19,8 @@
   "fast_shards": 2,
   "shards": {
     "macos": 2,
-    "windows": 5
+    "windows": 5,
+    "linux_arm": 2
   },
   "windows_git_latest": true,
   "jobs": [
