@@ -487,6 +487,8 @@ test "credential-cache's daemon run in process answers git's client as git's dae
     defer tmp.cleanup();
     const root = try testremote.absolutePath(gpa, io, tmp.dir);
     defer gpa.free(root);
+    // A socket path goes into configuration text, where a backslash escapes.
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, root, '\\', '/');
     var env = try testremote.environ(gpa);
     defer env.deinit();
     try env.put("HOME", root);
@@ -575,6 +577,8 @@ test "credential-cache's daemon lets a credential go when its time is up, and en
     defer tmp.cleanup();
     const root = try testremote.absolutePath(gpa, io, tmp.dir);
     defer gpa.free(root);
+    // A socket path goes into configuration text, where a backslash escapes.
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, root, '\\', '/');
     const socket = try gpa.print("{s}/c/socket", .{root});
     defer gpa.free(socket);
     var clock = shakedown.Clock.init(io, .{});
@@ -618,6 +622,8 @@ test "the cache helper runs in process against git's daemon and relic's, and a s
     defer tmp.cleanup();
     const root = try testremote.absolutePath(gpa, io, tmp.dir);
     defer gpa.free(root);
+    // A socket path goes into configuration text, where a backslash escapes.
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, root, '\\', '/');
     var env = try testremote.environ(gpa);
     defer env.deinit();
     try env.put("HOME", root);

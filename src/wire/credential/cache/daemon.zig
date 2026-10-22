@@ -172,7 +172,13 @@ pub const Daemon = struct {
         var buffer: [2]Woken = undefined;
         var select: Io.Select(Woken) = .init(d.io, &buffer);
         try select.concurrent(.accepted, Io.net.Server.accept, .{ &d.server, d.io });
-        select.async(.slept, Io.sleep, .{ d.io, .fromSeconds(seconds), .real });
+        // Concurrently too: `async` runs inline once the `Io`'s async
+        // threads are taken, and the daemon would sleep through its wait
+        // before it accepted anyone.
+        select.concurrent(.slept, Io.sleep, .{ d.io, .fromSeconds(seconds), .real }) catch |err| {
+            d.cancelRest(&select);
+            return err;
+        };
         const first = select.await() catch |err| {
             d.cancelRest(&select);
             return err;
