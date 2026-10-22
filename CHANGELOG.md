@@ -58,6 +58,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `commit.history.drop` (`DropInputs`), git 2.56's `git history drop`: a commit taken out, its descendants replayed onto its parent and the refs on it moved there (`--update-refs`, `--empty`, `--dry-run` as the other subcommands take them), the index and the working tree following `HEAD` two ways, checked before any ref moves; a root commit is `error.CannotDropRoot`, a merge `error.MergeCommit`.
 - `commit.replay.Options.linearize`, git 2.56's `replay --linearize`: the merges in the range dropped and the rest replayed in a line, each onto the last commit made, a ref at a merge moved to the commit made before it; `error.LinearizeWithContained` and `error.LinearizeWithMultipleBranches` where git refuses it.
 - `git add`'s pack for a file past `core.bigFileThreshold` that nothing converts is written from the file read in pieces, never held, as git's `index_blob_bulk_checkin` (`odb.Odb.writeIntoFrom`): hashed and deflated as it is read, taken back out of the pack where the database or the pack holds the blob already (design §10).
 - The built-in `swift` diff driver, git 2.56's: its function lines (attributes, modifiers, `func`, `init`, `subscript`, the type declarations) and its words.

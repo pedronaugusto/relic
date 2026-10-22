@@ -1,6 +1,7 @@
-//! `history` against git 2.55's `git history`: `fixup`, `reword` and
-//! `split` each leave the same commits, refs and logs, print the same
-//! updates on a dry run, and refuse what git refuses.
+//! `history` against git 2.56's `git history`: `fixup`, `reword`, `split`
+//! and `drop` each leave the same commits, refs and logs, print the same
+//! updates on a dry run, and refuse what git refuses; `drop` leaves the
+//! same index and working tree too.
 //!
 //! One script builds both copies with git's dates fixed. git's editor is a
 //! fixture that copies a message from a file; this package is handed the
@@ -23,7 +24,7 @@ const Pair = history.Pair;
 const who = history.who;
 
 fn requireHistory(io: Io) !void {
-    try testgit.requireGitVersion(std.testing.allocator, io, 2, 55);
+    try testgit.requireGitVersion(std.testing.allocator, io, 2, 56);
 }
 
 /// `main`: base, `two` changing `a` and `b`, `three`; `side` on `two` with
@@ -234,6 +235,60 @@ test "history refuses a merge among what it would replay" {
             pair.git.report_failures = false;
             try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "history", "reword", "main~2" }));
             try expectSame(&pair, io);
+        }
+    }.f);
+}
+
+test "history drop takes a commit out, its descendants replayed onto its parent and the working tree following HEAD, as git 2.56's" {
+    try requireHistory(std.testing.io);
+    try testgit.eachRefFormat(struct {
+        fn f(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, script);
+            defer pair.deinit();
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            pair.git.report_failures = false;
+
+            // A change in the way of the working tree's move refuses it
+            // all, before any ref moves.
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.writeFile(io, "a", "1\n2\nthree, edited\n");
+            try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "history", "drop", "main~1" }));
+            if (rewrite.drop(gpa, io, &repo, .{ .commit = "main~1" }, .{ .who = who })) |refused| {
+                var outcome = refused;
+                outcome.deinit();
+                return error.TestUnexpectedResult;
+            } else |_| {}
+            try expectSame(&pair, io);
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "--", "a" });
+
+            // A root has no parent to replay onto; a merge is refused.
+            try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "history", "drop", "main~2" }));
+            try std.testing.expectError(error.CannotDropRoot, rewrite.drop(gpa, io, &repo, .{ .commit = "main~2" }, .{ .who = who }));
+
+            // A dry run prints what would move and moves nothing.
+            const want = try pair.git.run(io, &.{ "history", "drop", "--dry-run", "main~1" });
+            defer gpa.free(want);
+            var dry = try rewrite.drop(gpa, io, &repo, .{ .commit = "main~1" }, .{ .who = who, .dry_run = true });
+            defer dry.deinit();
+            const got = try printed(gpa, dry.updates);
+            defer gpa.free(got);
+            try std.testing.expectEqualStrings(want, got);
+            try std.testing.expect(!dry.updated);
+            try expectSame(&pair, io);
+
+            try pair.git.exec(io, &.{ "history", "drop", "main~1" });
+            var dropped = try rewrite.drop(gpa, io, &repo, .{ .commit = "main~1" }, .{ .who = who });
+            defer dropped.deinit();
+            try expectSame(&pair, io);
+            try same(&pair, io, &.{ "status", "--porcelain=v1", "--untracked-files=all" });
+            for ([_][]const u8{ "a", "b", "c" }) |path| try same(&pair, io, &.{ "hash-object", path });
+
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "merge", "-q", "--no-edit", "side" });
+            try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "history", "drop", "main" }));
+            try std.testing.expectError(error.MergeCommit, rewrite.drop(gpa, io, &repo, .{ .commit = "main" }, .{ .who = who }));
         }
     }.f);
 }

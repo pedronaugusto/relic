@@ -1,15 +1,16 @@
 //! `git history`: one commit rewritten where it stands, and everything
-//! built on it replayed onto the rewrite, with no working tree touched and
-//! no state kept between steps.
+//! built on it replayed onto the rewrite, with no state kept between steps.
 //!
-//! It is git 2.55's `builtin/history.c`. `fixup` merges what is staged into
+//! It is git 2.56's `builtin/history.c`. `fixup` merges what is staged into
 //! the commit; `reword` gives it a new message; `split` makes it two, the
-//! first holding the changes the caller picked. The commits descending from
-//! it are replayed through `replay.plan` onto the rewrite, and the branches
-//! on them and on the commit itself move in one transaction -- every local
-//! branch that descends from it, or with `UpdateRefs.head` only `HEAD`,
-//! which must. A merge among them is refused before anything is written.
-//! A message given is cleaned as git cleans what its editor hands back.
+//! first holding the changes the caller picked; `drop` takes it out. The
+//! commits descending from it are replayed through `replay.plan` onto the
+//! rewrite, and the branches on them and on the commit itself move in one
+//! transaction -- every local branch that descends from it, or with
+//! `UpdateRefs.head` only `HEAD`, which must. A merge among them is refused
+//! before anything is written. Only `drop` touches the working tree, which
+//! follows `HEAD` to its new tree. A message given is cleaned as git cleans
+//! what its editor hands back.
 
 const Self = @This();
 
@@ -215,6 +216,42 @@ pub fn split(gpa: Allocator, io: Io, repo: *Repository, inputs: SplitInputs, opt
     return h.finish(&arena_state, .{ .range = range, .original = original, .rewritten = second, .empty = .abort, .action = "split", .name = inputs.commit });
 }
 
+/// `git history drop <commit>`.
+pub const DropInputs = struct {
+    commit: []const u8,
+    /// `--empty`: a descendant left with no change.
+    empty: replay.Empty = .drop,
+};
+
+/// git 2.56's `git history drop`: `inputs.commit` taken out of history, its
+/// descendants replayed onto its parent and the refs on it moved to the
+/// parent. A root commit has no parent to replay onto and a merge is
+/// refused. Where `HEAD`'s branch moves to another tree, the index and the
+/// working tree follow it two ways, as git's `reset_working_tree` takes
+/// them: checked before any ref moves, so a change of the caller's in the
+/// way refuses the drop, and made after.
+pub fn drop(gpa: Allocator, io: Io, repo: *Repository, inputs: DropInputs, options: Options) Self.Error!Outcome {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
+    const a = arena_state.allocator();
+    const original = try commitOf(a, io, repo, inputs.commit);
+    const parents = try parentsOf(a, io, repo, original);
+    if (parents.len == 0) return error.CannotDropRoot;
+    if (parents.len > 1) return error.MergeCommit;
+    var h: History = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options };
+    const range = try h.descendants(original);
+    return h.finish(&arena_state, .{
+        .range = range,
+        .original = original,
+        .rewritten = parents[0],
+        .empty = inputs.empty,
+        .action = "drop",
+        .verb = "dropping",
+        .name = inputs.commit,
+        .moves_worktree = true,
+    });
+}
+
 /// The commit `name` peels to.
 fn commitOf(a: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!Oid {
     return rev_parse.resolve(a, io, repo.revisionSource(), try a.print("{s}^{{commit}}", .{name}));
@@ -236,9 +273,14 @@ const Finish = struct {
     original: Oid,
     rewritten: Oid,
     empty: replay.Empty,
-    /// The subcommand, and the commit as named, for the reflog.
+    /// The subcommand, what it does, and the commit as named, for the
+    /// reflog: `<action>: <verb> <name>`.
     action: []const u8,
+    verb: []const u8 = "updating",
     name: []const u8,
+    /// Whether the index and the working tree follow `HEAD`'s branch to
+    /// its new tree, as `drop` takes them.
+    moves_worktree: bool = false,
 };
 
 const History = struct {
@@ -341,14 +383,49 @@ const History = struct {
             for (planned.updates) |u| try updates.append(h.a, .{ .ref = try h.a.dupe(u8, u.ref), .old = u.old, .new = u.new });
             try h.onOriginal(f, &updates);
             outcome.updates = updates.items;
+            const move = if (f.moves_worktree) try h.headMove(outcome.updates) else null;
+            // git's dry run first: a change in the way refuses it all.
+            if (move) |m| try h.moveWorktree(m, true);
             if (!h.options.dry_run) {
-                const log = try h.a.print("{s}: updating {s}", .{ f.action, f.name });
+                const log = try h.a.print("{s}: {s} {s}", .{ f.action, f.verb, f.name });
                 try replay.updateRefs(h.io, h.repo, outcome.updates, .{ .who = h.options.who, .message = log, .hooks = h.options.hooks });
                 outcome.updated = true;
+                if (move) |m| try h.moveWorktree(m, false);
             }
         }
         outcome.arena = arena_state.state;
         return outcome;
+    }
+
+    const Move = struct { old: Oid, new: Oid };
+
+    /// git's `find_head_tree_change`: the trees `HEAD` moves between when
+    /// `updates` move what it names, `null` where it does not move to
+    /// another tree, or there is no working tree.
+    fn headMove(h: *History, updates: []const replay.Update) Error!?Move {
+        if (h.repo.workDirectory() == null) return null;
+        const head = (try h.repo.refStore().read(h.a, h.io, "HEAD")) orelse return null;
+        const target = switch (head) {
+            .symbolic => |name| name,
+            else => "HEAD",
+        };
+        for (updates) |u| {
+            if (!std.mem.eql(u8, u.ref, target)) continue;
+            const old = try h.repo.commitTree(h.io, u.old);
+            const new = try h.repo.commitTree(h.io, u.new);
+            return if (old.eql(new)) null else .{ .old = old, .new = new };
+        }
+        return null;
+    }
+
+    /// The index and the working tree moved two ways between `move`'s
+    /// trees, or with `check` only checked, nothing written.
+    fn moveWorktree(h: *History, move: Move, check: bool) Error!void {
+        var locked = try h.repo.lockIndex(h.io);
+        defer locked.deinit(h.io);
+        var moved = try three_way.fastForward(h.gpa, h.io, h.repo, .{ .index = &locked.index, .old = move.old, .new = move.new }, .{ .dry_run = check });
+        defer moved.deinit();
+        if (!check) try locked.commit(h.io);
     }
 
     /// The branches, and `HEAD` as `update_refs` has it, on the original:
