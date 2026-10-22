@@ -2267,10 +2267,11 @@ pub const Odb = struct {
         defer writer.deinit(io);
 
         var build: Build = blk: {
-            const group_starts = try groupStarts(gpa, ordered);
-            errdefer gpa.free(group_starts);
+            // The reuse first: it may move a delta after its base.
             var reuse = try odb.planReuse(io, ordered, options);
             errdefer reuse.deinit(gpa);
+            const group_starts = try groupStarts(gpa, ordered);
+            errdefer gpa.free(group_starts);
             break :blk .{
                 .odb = odb,
                 .gpa = gpa,
@@ -2355,15 +2356,18 @@ pub const Odb = struct {
 
     /// What of `ordered`'s objects is written as their packs store it, as
     /// git's pack-objects reuses it. An object a pack stores as a delta
-    /// whose base is in the pack being written, before it in pack order,
-    /// and whose chain of such deltas stays within `PackOptions.depth`, is
-    /// written as that delta: neither read, searched nor deflated. An object
+    /// whose base is in the pack being written, and whose chain of such
+    /// deltas stays within `PackOptions.depth`, is written as that delta:
+    /// neither read, searched nor deflated. One whose base the order puts
+    /// later is moved to just after it, as git's `write_one` writes a base
+    /// before the delta on it; one of a loop of such deltas is not reused,
+    /// as git breaks the loop. An object
     /// a pack stores whole, and written whole, is written as stored rather
     /// than deflated again. Stored bytes are checked against the CRC the
     /// pack's index gives. The choices depend on the objects and the packs
     /// alone, and are made here on the calling task, so every task count
     /// makes the same.
-    fn planReuse(odb: *Odb, io: Io, ordered: []const Ordered, options: PackOptions) ErrorNamespace.Error!Reuse {
+    fn planReuse(odb: *Odb, io: Io, ordered: []Ordered, options: PackOptions) ErrorNamespace.Error!Reuse {
         const gpa = odb.backendData().gpa;
         if (!options.reuse_packed) return .{};
         for (ordered) |item| {
@@ -2421,10 +2425,19 @@ pub const Odb = struct {
             if (options.delta == .none) continue;
             if (options.islands) |islands| if (!islands.allows(item.oid, base_oid)) continue;
             const base = positions.get(base_oid) orelse continue;
-            if (base >= pos) continue;
-            const length = (if (reuse.reused[base] != null) chain[base] else 0) + 1;
-            if (length > options.depth) continue;
             reuse.reused[pos] = .{ .base = base, .size = entry.size, .stored = stored };
+        }
+        try moveDeltasAfterBases(gpa, ordered, &reuse);
+        // A delta still ahead of its base is one of a loop, which git's
+        // `write_one` breaks by writing it whole; one past the depth is
+        // written as the search makes it.
+        for (reuse.reused, 0..) |*slot, pos| {
+            const r = slot.* orelse continue;
+            const length = (if (r.base < pos and reuse.reused[r.base] != null) chain[r.base] else 0) + 1;
+            if (r.base >= pos or length > options.depth) {
+                slot.* = null;
+                continue;
+            }
             chain[pos] = length;
         }
         // How tall the reused chains resting on each object are, the last
@@ -4639,6 +4652,75 @@ const Reused = struct {
     size: u64,
     stored: Stored,
 };
+
+/// Move each delta of `reuse` whose base `ordered` puts after it to just
+/// after the base, its own such deltas after it in turn, everything else
+/// in its order; a loop of them stays in its order. `reuse` is moved with
+/// `ordered`, its bases renumbered.
+fn moveDeltasAfterBases(gpa: Allocator, ordered: []Ordered, reuse: *Reuse) Allocator.Error!void {
+    const n = ordered.len;
+    for (reuse.reused, 0..) |slot, pos| {
+        if (slot) |r| if (r.base > pos) break;
+    } else return;
+    // `order[new] = old`, and `placed_at[old] = new`.
+    const order = try gpa.alloc(usize, n);
+    defer gpa.free(order);
+    const placed_at = try gpa.alloc(?usize, n);
+    defer gpa.free(placed_at);
+    @memset(placed_at, null);
+    // The deltas waiting for each base, in their order, as lists.
+    const first = try gpa.alloc(?usize, n);
+    defer gpa.free(first);
+    const last = try gpa.alloc(?usize, n);
+    defer gpa.free(last);
+    const next = try gpa.alloc(?usize, n);
+    defer gpa.free(next);
+    @memset(first, null);
+    @memset(last, null);
+    @memset(next, null);
+    var stack: std.ArrayList(usize) = .empty;
+    defer stack.deinit(gpa);
+    var filled: usize = 0;
+    for (0..n) |pos| {
+        if (reuse.reused[pos]) |r| if (placed_at[r.base] == null) {
+            if (last[r.base]) |l| next[l] = pos else first[r.base] = pos;
+            last[r.base] = pos;
+            continue;
+        };
+        try stack.append(gpa, pos);
+        while (stack.pop()) |p| {
+            placed_at[p] = filled;
+            order[filled] = p;
+            filled += 1;
+            // the waiting deltas next, the first of them first
+            const mark = stack.items.len;
+            var child = first[p];
+            while (child) |c| : (child = next[c]) try stack.append(gpa, c);
+            std.mem.reverse(usize, stack.items[mark..]);
+        }
+    }
+    for (0..n) |pos| if (placed_at[pos] == null) {
+        placed_at[pos] = filled;
+        order[filled] = pos;
+        filled += 1;
+    };
+    std.debug.assert(filled == n);
+    const moved_items = try gpa.alloc(Ordered, n);
+    defer gpa.free(moved_items);
+    const moved_reused = try gpa.alloc(?Reused, n);
+    defer gpa.free(moved_reused);
+    const moved_whole = try gpa.alloc(?Stored, n);
+    defer gpa.free(moved_whole);
+    for (order, 0..) |old, new| {
+        moved_items[new] = ordered[old];
+        moved_whole[new] = reuse.whole[old];
+        moved_reused[new] = reuse.reused[old];
+        if (moved_reused[new]) |*r| r.base = placed_at[r.base].?;
+    }
+    @memcpy(ordered, moved_items);
+    @memcpy(reuse.reused, moved_reused);
+    @memcpy(reuse.whole, moved_whole);
+}
 
 /// What `planReuse` decided, by position in pack order: empty when nothing
 /// comes from a pack.

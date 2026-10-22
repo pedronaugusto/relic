@@ -186,10 +186,9 @@ test "a repack deltifies no blob past core.bigFileThreshold and reuses a delta a
     pack_options.threads = 1;
     _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .pack = pack_options });
     try std.testing.expectEqual(before, try deltaCount(gpa, io, &theirs));
-    // relic reuses a delta whose base its write order puts first; git
-    // writes a base ahead of its delta whatever the order, and keeps all.
-    const kept = try deltaCount(gpa, io, &ours);
-    try std.testing.expect(kept != 0 and kept <= before);
+    // Every delta kept, its base written ahead of it whatever the order,
+    // as git's `write_one` writes it.
+    try std.testing.expectEqual(before, try deltaCount(gpa, io, &ours));
 }
 
 /// Where the objects are, sorted, one a line: each loose object's path,
