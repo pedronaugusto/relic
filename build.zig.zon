@@ -8,8 +8,8 @@
         },
 
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.10.1#e5ca7806d272dda60fc3f16821f00ebb6c4149c9",
-            .hash = "conduit-0.10.1-4rIA7zYPFQD_olleG3lEGQkaHTXW3uQewXyV-BtnifPv",
+            .url = "git+https://github.com/pedronaugusto/conduit?ref=v0.10.3#f67e97626f41dfc83ae6164a6e99eca1eab1f7fc",
+            .hash = "conduit-0.10.3-4rIA770aFQCJx15dTyy0EAwrULRZXpkk3CLMqCxMNyHG",
         },
 
         .sweep = .{
@@ -29,8 +29,8 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.5.1#00515aeb80284b11dfb5fd11b200a5101cbe8e92",
-            .hash = "airlock-0.5.1-rfvu6M-_BgACLuSq21CrcJ8VScBIULLdh0kqikSUOSyz",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.5.3#18f739d8ec97280c883281d17e7f725a887fee8a",
+            .hash = "airlock-0.5.3-rfvu6AnLBgAD31np9H8qFGhF9HGjbJefE15lTVcYAXI2",
         },
 
         .warp = .{
