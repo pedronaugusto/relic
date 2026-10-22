@@ -1877,3 +1877,87 @@ test "diff.autoRefreshIndex: a file whose stat alone changed is refreshed into t
         }
     }
 }
+
+/// Three conflicts from one merge -- two files both sides changed, one a
+/// side deleted -- each resolved in the working tree as `resolve` says, and
+/// a local change to a path the merge did not touch.
+fn resolvedFixture(gpa: std.mem.Allocator, io: Io, b_resolved: bool, attributes_text: ?[]const u8) !testgit.Repo {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    errdefer repo.deinit();
+    for ([_][]const u8{ "a.txt", "b.txt", "gone.txt", "other.txt" }) |path| try repo.writeFile(io, path, "base\n");
+    try repo.exec(io, &.{ "add", "." });
+    try repo.exec(io, &.{ "commit", "-qm", "base" });
+    try repo.exec(io, &.{ "checkout", "-qb", "side" });
+    try repo.writeFile(io, "a.txt", "side\n");
+    try repo.writeFile(io, "b.txt", "side\n");
+    try repo.exec(io, &.{ "rm", "-q", "gone.txt" });
+    try repo.exec(io, &.{ "commit", "-qam", "side" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    for ([_][]const u8{ "a.txt", "b.txt", "gone.txt" }) |path| try repo.writeFile(io, path, "main\n");
+    try repo.exec(io, &.{ "commit", "-qam", "main" });
+    repo.report_failures = false;
+    repo.exec(io, &.{ "merge", "-q", "side" }) catch |err| std.debug.assert(err == error.GitFailed);
+    repo.report_failures = true;
+    try repo.writeFile(io, "a.txt", "resolved\n");
+    if (b_resolved) try repo.writeFile(io, "b.txt", "resolved\n");
+    try repo.dir.deleteFile(io, "gone.txt");
+    try repo.writeFile(io, "other.txt", "a local change\n");
+    if (attributes_text) |text| try repo.writeFile(io, ".gitattributes", text);
+    return repo;
+}
+
+/// The index's entries and what is left unstaged, as git lists them.
+fn resolvedState(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo) ![]u8 {
+    const staged = try repo.run(io, &.{ "ls-files", "-s" });
+    defer gpa.free(staged);
+    const unstaged = try repo.run(io, &.{ "diff", "--name-status" });
+    defer gpa.free(unstaged);
+    return std.mem.concat(gpa, u8, &.{ staged, "--\n", unstaged });
+}
+
+test "add --resolved stages the resolved conflicts and nothing else, and refuses a file still holding a marker, as git 2.56's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const Case = struct { b_resolved: bool, prefix: []const u8 = "", attributes_text: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .b_resolved = true },
+        .{ .b_resolved = false },
+        .{ .b_resolved = false, .prefix = "a.txt" },
+        .{ .b_resolved = false, .attributes_text = "b.txt conflict-marker-size=10\n" },
+    }, 0..) |case, n| {
+        var theirs = try resolvedFixture(gpa, io, case.b_resolved, case.attributes_text);
+        defer theirs.deinit();
+        var ours = try resolvedFixture(gpa, io, case.b_resolved, case.attributes_text);
+        defer ours.deinit();
+
+        theirs.report_failures = false;
+        var ran = try theirs.capture(io, if (case.prefix.len == 0) &.{ "add", "--resolved" } else &.{ "add", "--resolved", case.prefix });
+        defer ran.deinit(gpa);
+
+        var repo = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+        defer repo.deinit(io);
+        var locked = try repo.lockIndex(io);
+        defer locked.deinit(io);
+        var attrs = try repo.loadAttrs(io);
+        defer attrs.deinit();
+        var rules = try repo.worktreeRules();
+        rules.attrs = &attrs;
+        var outcome = try worktree.addResolved(gpa, io, ours.dir, .{ .index = &locked.index, .db = repo.objectDatabase() }, .{ .rules = rules, .prefix = case.prefix });
+        defer outcome.deinit();
+        if (outcome.unresolved.len == 0) try locked.commit(io);
+
+        std.testing.expectEqual(ran.code != 0, outcome.unresolved.len != 0) catch |err| {
+            std.debug.print("case {d}: git exited {d}: {s}\n", .{ n, ran.code, ran.stderr });
+            return err;
+        };
+        for (outcome.unresolved) |path| try std.testing.expect(std.mem.find(u8, ran.stderr, path) != null);
+        const expected = try resolvedState(gpa, io, &theirs);
+        defer gpa.free(expected);
+        const actual = try resolvedState(gpa, io, &ours);
+        defer gpa.free(actual);
+        std.testing.expectEqualStrings(expected, actual) catch |err| {
+            std.debug.print("case {d}: git said {s}\n", .{ n, ran.stderr });
+            return err;
+        };
+    }
+}

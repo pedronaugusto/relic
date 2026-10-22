@@ -20,6 +20,8 @@ const fsmonitor = @import("fsmonitor.zig");
 const filter = @import("filter.zig");
 const dir_scan = @import("dir_scan.zig");
 const safe_path = @import("../names.zig").path;
+const decimal = @import("../text.zig").decimal;
+const ctype = @import("../text.zig").ctype;
 
 const std = @import("std");
 const aegis = @import("aegis");
@@ -2742,6 +2744,108 @@ fn recordWritten(io: Io, wt: Io.Dir, index: *Index, path: []const u8, want: Tree
     var entry: index_mod.Entry = .{ .path = path, .oid = want.oid, .mode = want.mode };
     if (after) |found| rules.fillStat(&entry, found.stat);
     try index.add(entry);
+}
+
+/// What `addResolved` did: the unmerged paths it staged, or, when a file
+/// still holds a conflict marker, those files and nothing staged.
+pub const ResolvedOutcome = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    /// Paths staged, each unmerged before; empty when `unresolved` is not.
+    staged: []const []const u8,
+    /// Files still holding a conflict marker, git's "the following paths
+    /// still have conflict markers".
+    unresolved: []const []const u8,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(o: *ResolvedOutcome) void {
+        o.arena.deinit();
+        o.* = undefined;
+    }
+};
+
+/// git 2.56's `add --resolved`: every unmerged path under
+/// `options.prefix` staged as `addAll` stages it, its file or its removal,
+/// and nothing else, so a local change elsewhere stays unstaged. A regular
+/// file with a line that is a conflict marker of its `conflict-marker-size`
+/// (seven unless set) stages nothing at all.
+pub fn addResolved(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    inputs: Inputs,
+    options: AddOptions,
+) Self.Error!ResolvedOutcome {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var unmerged: std.ArrayList([]const u8) = .empty;
+    for (inputs.index.entries.items) |entry| {
+        if (entry.stage == 0 or !underPrefix(entry.path, options.prefix)) continue;
+        if (unmerged.items.len != 0 and std.mem.eql(u8, unmerged.items[unmerged.items.len - 1], entry.path)) continue;
+        try unmerged.append(arena, try arena.dupe(u8, entry.path));
+    }
+    var unresolved: std.ArrayList([]const u8) = .empty;
+    {
+        defer if (options.rules.attrs) |attrs| attrs.leave();
+        for (unmerged.items) |path| {
+            const found = (try fs.statAt(io, wt, path)) orelse continue;
+            if (found.kind != .file) continue;
+            if (try hasConflictMarkers(arena, io, wt, path, try markerSize(arena, io, wt, options.rules, path))) try unresolved.append(arena, path);
+        }
+    }
+    if (unresolved.items.len != 0) return .{ .staged = &.{}, .unresolved = unresolved.items, .arena = arena_state };
+    for (unmerged.items) |path| {
+        var each = options;
+        each.prefix = path;
+        each.stage_deletions = true;
+        _ = try addAll(gpa, io, wt, inputs, each);
+    }
+    return .{ .staged = unmerged.items, .unresolved = &.{}, .arena = arena_state };
+}
+
+fn underPrefix(path: []const u8, prefix: []const u8) bool {
+    return prefix.len == 0 or std.mem.eql(u8, path, prefix) or
+        (std.mem.startsWith(u8, path, prefix) and path.len > prefix.len and path[prefix.len] == '/');
+}
+
+/// A path's `conflict-marker-size`: the number its value starts with, as
+/// git's `atoi` reads it, or seven. Its directories' `.gitattributes`
+/// are entered first; `addResolved` leaves them after its scan.
+fn markerSize(arena: Allocator, io: Io, wt: Io.Dir, rules: Rules, path: []const u8) Self.Error!u32 {
+    const attrs = rules.attrs orelse return 7;
+    try attrs.enter(io, wt, path);
+    const applied = try attrs.lookup(arena, path, .file);
+    const value = applied.value("conflict-marker-size") orelse return 7;
+    const size = std.math.cast(i32, decimal.strtol(value, 10, 32).value) orelse return 7;
+    return if (size > 0) @intCast(size) else 7;
+}
+
+/// git's `has_conflict_markers`: a line of the file that is a conflict
+/// marker, read until one is found or a line looks binary.
+fn hasConflictMarkers(arena: Allocator, io: Io, wt: Io.Dir, path: []const u8, size: u32) Self.Error!bool {
+    const bytes = (try fs.readFileAlloc(arena, io, wt, path, std.math.maxInt(u32))) orelse return false;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        // The line as git's `strbuf_getwholeline` has it: with its newline,
+        // but for a last line without one.
+        const whole = if (lines.index) |next| bytes[next - line.len - 1 .. next] else line;
+        if (isConflictMarkerLine(whole, size)) return true;
+        // git's `buffer_is_binary`: a NUL in the first 8000 bytes.
+        if (std.mem.findScalar(u8, whole[0..@min(whole.len, 8000)], 0) != null) return false;
+    }
+    return false;
+}
+
+/// git's `is_conflict_marker_line`: `size` of one of `<=>|`, then a space
+/// after `<` and `>`, whitespace after `=` and `|`.
+fn isConflictMarkerLine(line: []const u8, size: u32) bool {
+    if (line.len < size + 1) return false;
+    const first = line[0];
+    if (std.mem.findScalar(u8, "=><|", first) == null) return false;
+    for (line[1..size]) |c| if (c != first) return false;
+    if ((first == '<' or first == '>') and line[size] != ' ') return false;
+    return ctype.isSpace(line[size]);
 }
 
 /// Put the tree's own `.gitattributes` files into `attrs`, each at the depth
