@@ -384,3 +384,33 @@ test "core.checkRoundtripEncoding converts a stored file back and refuses one th
         if (ours_tree) |tree| try testing.expect(tree.eql(try ft.treeOf(gpa, io, &twin.theirs)));
     }
 }
+
+test "attr.tree's attributes write a checkout in place of the checked-out tree's own, as git's do" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twin = try ft.Twin.init(gpa, io, &.{}, &.{ .{ ".gitattributes", "*.txt -text\n" }, .{ "a.txt", "a\nb\n" } });
+    defer twin.deinit();
+    for ([_]*testgit.Repo{ &twin.theirs, &twin.ours }) |repo| {
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-qm", "plain" });
+        try repo.exec(io, &.{ "tag", "plain" });
+        try repo.writeFile(io, ".gitattributes", "*.txt text eol=crlf\n");
+        // a directory `attr.tree` has no attributes file in
+        try repo.writeFile(io, "sub/.gitattributes", "*.txt text eol=crlf\n");
+        try repo.writeFile(io, "sub/c.txt", "c\nd\n");
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-qm", "crlf" });
+        try repo.exec(io, &.{ "config", "attr.tree", "plain" });
+    }
+    const tree = try ft.treeOf(gpa, io, &twin.ours);
+    try ft.emptyWorktree(io, twin.theirs.dir);
+    try twin.theirs.exec(io, &.{ "checkout", "--", "." });
+    try ft.emptyWorktree(io, twin.ours.dir);
+    _ = try ft.relicCheckout(gpa, io, twin.ours.dir, tree, .{});
+    try ft.expectSameFile(gpa, io, &twin.ours, &twin.theirs, "a.txt");
+    try ft.expectSameFile(gpa, io, &twin.ours, &twin.theirs, "sub/c.txt");
+    const written = try twin.theirs.dir.readFileAlloc(io, "a.txt", gpa, .unlimited);
+    defer gpa.free(written);
+    // `attr.tree`'s `-text`, not the tree's `eol=crlf`
+    try testing.expectEqualStrings("a\nb\n", written);
+}

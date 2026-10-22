@@ -153,6 +153,10 @@ pub const Attrs = struct {
     /// has loaded any.
     entered_dir: std.ArrayList(u8) = .empty,
     entered_any: bool = false,
+    /// Every `.gitattributes` came from one tree, `attr.tree`'s: `enter`
+    /// reads no file, and a tree's own attributes are not added
+    /// (`addTreeAttributes`), as git reads none but that tree's.
+    from_tree: bool = false,
 
     /// An `[attr]name …` line: a name that expands to a list of
     /// assignments.
@@ -222,6 +226,7 @@ pub const Attrs = struct {
     /// caller loaded itself is not read again. `leave` gives back what this
     /// loaded.
     pub fn enter(attrs: *Attrs, io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
+        if (attrs.from_tree) return;
         const dir = std.Io.Dir.path.dirnamePosix(path) orelse "";
         if (attrs.entered_any and std.mem.eql(u8, attrs.entered_dir.items, dir)) return;
         // How many leading directories this shares with the last one, and

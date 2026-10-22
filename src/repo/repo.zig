@@ -54,6 +54,10 @@ const Oid = hash.Oid;
 
 /// Errors from opening, creating or refreshing a repository and reading its objects.
 pub const Error = error{
+    /// `attr.tree` is a revision expression -- `~`, `^`, `:`, `@{` -- that
+    /// only the revision parser, a layer above, reads; a full object name or
+    /// a ref's name is read here.
+    UnsupportedAttrTree,
     /// No `.git` directory or file at the path or above it.
     NotARepository,
     /// `.git/shallow` holds a line that is not an object name.
@@ -1801,7 +1805,75 @@ pub const Repository = struct {
     }
 
     /// Load the attributes for the working tree's root.
+    /// The attributes a working-tree operation reads before the working
+    /// tree's own: `core.attributesFile` and `info/attributes`, and, where
+    /// `attr.tree` names a tree (`attrTree`), every `.gitattributes` of that
+    /// tree, which then stand in for the working tree's and any other
+    /// tree's (`Attrs.from_tree`), as git reads them.
     pub fn loadAttrs(repo: *Repository, io: Io) Self.Error!attributes.Attrs {
+        var attrs = try repo.loadGlobalAttrs(io);
+        errdefer attrs.deinit();
+        const tree = (try repo.attrTree(io)) orelse return attrs;
+        try repo.addAttrsOfTree(io, &attrs, tree, "", 0);
+        attrs.from_tree = true;
+        return attrs;
+    }
+
+    /// `attr.tree`, as git's `compute_default_attr_source` takes it: a full
+    /// object name or a ref's name by `ref_rev_parse_rules`, peeled to a
+    /// tree. `null` where it is unset or names no tree, which git then reads
+    /// as though it were unset.
+    pub fn attrTree(repo: *Repository, io: Io) Self.Error!?Oid {
+        const name = repo.configuration().get("attr.tree") orelse return null;
+        if (std.mem.findAny(u8, name, "~^:") != null or std.mem.find(u8, name, "@{") != null) return error.UnsupportedAttrTree;
+        const gpa = repo.data().gpa;
+        var oid: ?Oid = null;
+        if (name.len == repo.objectFormat().hexLen()) {
+            if (Oid.parse(repo.objectFormat(), name)) |parsed| {
+                if (try repo.objectDatabase().exists(io, parsed)) oid = parsed;
+            } else |_| {}
+        }
+        if (oid == null) if (try repo.refStore().resolveShort(gpa, io, name)) |found| {
+            gpa.free(found.name);
+            oid = found.oid;
+        };
+        const peeled = try repo.peel(io, oid orelse return null);
+        const header = try repo.objectDatabase().readHeader(io, peeled);
+        return switch (header.type) {
+            .tree => peeled,
+            .commit => try repo.commitTree(io, peeled),
+            else => null,
+        };
+    }
+
+    /// Every `.gitattributes` blob under `tree`, at `base`, into `attrs`, at
+    /// the precedence its depth gives, as git's `read_attr_from_blob` reads
+    /// one for each directory.
+    fn addAttrsOfTree(repo: *Repository, io: Io, attrs: *attributes.Attrs, tree: Oid, base: []const u8, depth: u32) Self.Error!void {
+        if (depth > repo.settings().max_tree_depth) return;
+        const db = repo.objectDatabase();
+        const found = try db.read(io, tree);
+        defer db.allocator().free(found.bytes);
+        if (found.type != .tree) return;
+        const arena = attrs.arena.allocator();
+        var it = (object.Tree.parse(repo.objectFormat(), found.bytes)).iterate();
+        while (try it.next()) |entry| {
+            const path = if (base.len == 0) try arena.dupe(u8, entry.name) else try arena.print("{s}/{s}", .{ base, entry.name });
+            if (entry.mode == .tree) {
+                try repo.addAttrsOfTree(io, attrs, entry.oid, path, depth + 1);
+            } else if (entry.mode.isBlob() and std.mem.eql(u8, entry.name, ".gitattributes")) {
+                const blob = try db.read(io, entry.oid);
+                defer db.allocator().free(blob.bytes);
+                if (blob.type != .blob) continue;
+                try attrs.addText(try arena.dupe(u8, blob.bytes), .{ .base = base, .source = path, .precedence = depth + 1, .form = .blob });
+            }
+        }
+    }
+
+    /// `core.attributesFile` and `info/attributes`, which git reads in every
+    /// direction: for a caller that brings a tree's own files, as `git
+    /// archive` reads them.
+    pub fn loadGlobalAttrs(repo: *Repository, io: Io) Self.Error!attributes.Attrs {
         const case_fold = repo.data().settings.ignore_case;
         var attrs = try attributes.Attrs.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer attrs.deinit();

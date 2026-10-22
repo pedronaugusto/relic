@@ -883,7 +883,9 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
     defer spec.deinit();
 
     // the attributes: the tree's own files, or the working tree's
-    var attrs = try repo.loadAttrs(io);
+    // git reads the archived tree's in its index direction, where
+    // `attr.tree` has no say, and the working tree's as a checkin does.
+    var attrs = if (options.worktree_attributes) try repo.loadAttrs(io) else try repo.loadGlobalAttrs(io);
     defer attrs.deinit();
     defer attrs.leave();
     if (!options.worktree_attributes) {

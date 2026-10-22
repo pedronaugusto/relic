@@ -2667,6 +2667,7 @@ pub fn addTreeAttributes(
     attrs: *attributes.Attrs,
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
 ) Self.Error!void {
+    if (attrs.from_tree) return;
     var it = wanted.iterator();
     while (it.next()) |item| {
         const path = item.key_ptr.*;

@@ -588,6 +588,8 @@ fn mergedAttributes(
     merged: Merged,
     changes: []const []const u8,
 ) Error!void {
+    // `attr.tree`'s attributes stand in for the merge's own.
+    if (write_attrs.from_tree) return;
     // Only the `.gitattributes` above a path being written can say how it
     // is written.
     var merged_entries = try attributesAbove(arena, io, db, merged.tree, changes);

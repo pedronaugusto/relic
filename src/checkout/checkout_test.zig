@@ -1710,3 +1710,65 @@ test "status.showUntrackedFiles lists untracked files as git status lists them u
     defer repo.deinit(io);
     try std.testing.expectError(error.InvalidUntrackedMode, worktree.StatusOptions.Untracked.configured(repo.configuration()));
 }
+
+test "attr.tree reads the attributes from a tree in place of the working tree's, as git's check-attr reads them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, ".gitattributes", "*.txt text\n");
+    try git.writeFile(io, "a.txt", "a\n");
+    try git.writeFile(io, "sub/b.txt", "b\n");
+    try git.writeFile(io, "sub/.gitattributes", "*.txt diff=sub\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-qm", "one" });
+    try git.exec(io, &.{ "tag", "one" });
+    try git.writeFile(io, ".gitattributes", "*.txt -text eol=crlf\n*.bin binary\n");
+    try git.writeFile(io, "sub/.gitattributes", "b.txt foo=bar\n");
+    try git.exec(io, &.{ "commit", "-qam", "two" });
+    try git.exec(io, &.{ "tag", "-a", "-m", "annotated", "two-annotated" });
+    // the working tree says something else again
+    try git.writeFile(io, ".gitattributes", "*.txt diff=worktree\n");
+    try git.writeFile(io, "sub/.gitattributes", "");
+
+    const paths = [_][]const u8{ "a.txt", "sub/b.txt", "c.bin" };
+    for ([_]?[]const u8{ null, "one", "HEAD", "two-annotated", "refs/tags/one", "nonexistent" }) |tree| {
+        if (tree) |t| try git.exec(io, &.{ "config", "attr.tree", t });
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "check-attr", "text", "eol", "diff", "foo", "binary", "--" });
+        try args.appendSlice(gpa, &paths);
+        const theirs = try git.run(io, args.items);
+        defer gpa.free(theirs);
+
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        var attrs = try repo.loadAttrs(io);
+        defer attrs.deinit();
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        var ours: std.ArrayList(u8) = .empty;
+        defer ours.deinit(gpa);
+        for (paths) |path| {
+            try attrs.enter(io, git.dir, path);
+            const found = try attrs.lookup(arena.allocator(), path, .file);
+            for ([_][]const u8{ "text", "eol", "diff", "foo", "binary" }) |name| {
+                const shown: []const u8 = if (found.get(name)) |state| switch (state) {
+                    .set => "set",
+                    .unset => "unset",
+                    .unspecified => "unspecified",
+                    .value => |v| v,
+                } else "unspecified";
+                try ours.print(gpa, "{s}: {s}: {s}\n", .{ path, name, shown });
+            }
+        }
+        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+            std.debug.print("attr.tree={?s}\n", .{tree});
+            return err;
+        };
+    }
+    try git.exec(io, &.{ "config", "attr.tree", "HEAD~1" });
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try std.testing.expectError(error.UnsupportedAttrTree, repo.loadAttrs(io));
+}
