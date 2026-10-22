@@ -731,6 +731,37 @@ test "a relative url resolves against the default remote, or against the superpr
     }
 }
 
+test "git 2.56, sync sets the url of the submodule's remote whose url is the .gitmodules one after url.<base>.insteadOf, as git submodule sync does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    var f = try Fixture.init(gpa, io);
+    defer f.deinit();
+    var ours = try Clone.init(gpa, io, &f.super, true);
+    defer ours.deinit(io);
+    var theirs = try Clone.init(gpa, io, &f.super, true);
+    defer theirs.deinit(io);
+
+    // `.gitmodules` names `alias:lib`, which the submodule rewrites to the
+    // url its remote `mine` has; its `origin` is the one a branch would
+    // pick. git 2.55 compared the url unrewritten and took `origin`.
+    for ([_]*testgit.Repo{ &ours.git, &theirs.git }) |g| {
+        try g.exec(io, &.{ "config", "-f", ".gitmodules", "submodule.vendor/lib.url", "alias:lib" });
+        try g.exec(io, &.{ "-C", "vendor/lib", "config", "url.file:///nowhere/.insteadOf", "alias:" });
+        try g.exec(io, &.{ "-C", "vendor/lib", "remote", "add", "mine", "file:///nowhere/lib" });
+    }
+    var repo = try ours.open(gpa, io);
+    defer repo.deinit(io);
+    _ = try submodule.sync(gpa, io, &repo, .{});
+    try theirs.git.exec(io, &.{ "submodule", "sync", "-q" });
+
+    try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
+    try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/modules/vendor/lib/config");
+    const set = try theirs.git.line(io, &.{ "-C", "vendor/lib", "config", "remote.mine.url" });
+    defer gpa.free(set);
+    try testing.expectEqualStrings("alias:lib", set);
+}
+
 test "sync rewrites both urls as git submodule sync --recursive does" {
     const gpa = testing.allocator;
     const io = testing.io;

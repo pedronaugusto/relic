@@ -338,6 +338,26 @@ pub fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const 
     return remote_mod.fallback(repo.configuration());
 }
 
+/// The remote of the submodule `sub` that git fetches a commit from and
+/// sets the url of: git's `get_default_remote_submodule`, the first remote
+/// whose url is `module`'s in `.gitmodules` (a relative one resolved
+/// against the superproject's), once the submodule's `url.<base>.insteadOf`
+/// has rewritten it, as git 2.56 rewrites it before comparing; else
+/// `defaultRemote`.
+fn moduleRemote(arena: Allocator, io: Io, repo: *Repository, sub: *Repository, module: *const gitmodules.Submodule) Error![]const u8 {
+    const raw = module.url orelse return defaultRemote(arena, io, sub);
+    const url = if (gitmodules.isRelativeUrl(raw)) try gitmodules.resolveUrl(arena, try superprojectUrl(arena, io, repo), raw, null) else raw;
+    const config = sub.configuration();
+    const wanted = try remote_mod.rewrite(arena, config, url, .fetch) orelse url;
+    for (try remote_mod.names(arena, config)) |name| {
+        for (try remote_mod.resetList(arena, config, try arena.print("remote.{s}.url", .{name}))) |configured| {
+            const each = try remote_mod.rewrite(arena, config, configured, .fetch) orelse configured;
+            if (std.mem.eql(u8, each, wanted)) return name;
+        }
+    }
+    return defaultRemote(arena, io, sub);
+}
+
 /// What a relative url is resolved against: the default remote's url, or,
 /// when it has none, the superproject's own working tree — git's "this
 /// repository is its own authoritative upstream".
@@ -1039,7 +1059,7 @@ fn syncIn(
         found.deinit(io);
         var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
         defer sub.deinit(io);
-        const remote = try defaultRemote(arena, io, &sub);
+        const remote = try moduleRemote(arena, io, repo, &sub, module);
         _ = try sub.writeConfig(io, .local, &.{.{ .set = .{ .name = try arena.print("remote.{s}.url", .{remote}), .value = for_sub } }}, .{});
         outcome.remotes += 1;
         if (options.recursive) {
@@ -1768,7 +1788,7 @@ fn updateIn(
             (try headOf(gpa, io, &sub)) orelse return refuse(options.refusal, display, "HEAD", error.NoCurrentRevision);
 
         if (current == null or !current.?.eql(recorded) or options.force) {
-            try ensureCommit(arena, gpa, io, &sub, recorded, display, options);
+            try ensureCommit(arena, gpa, io, repo, &sub, module, recorded, display, options);
             switch (strategy) {
                 .checkout => try checkoutCommit(arena, gpa, io, &sub, recorded, current == null or options.force, display, options),
                 .merge, .rebase => return refuse(options.refusal, display, strategy.name(), error.UnsupportedUpdate),
@@ -1879,11 +1899,11 @@ fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, repo: *const Re
 
 /// Make sure the submodule's repository has `commit`, fetching it through
 /// the transport when there is one.
-fn ensureCommit(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commit: Oid, display: []const u8, options: UpdateOptions) Error!void {
+fn ensureCommit(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sub: *Repository, module: *const gitmodules.Submodule, commit: Oid, display: []const u8, options: UpdateOptions) Error!void {
     if (try sub.objectDatabase().exists(io, commit)) return;
     var hex: [hash.max_hex_len]u8 = undefined;
     const transport = options.transport orelse return refuse(options.refusal, display, commit.hex(&hex), error.CommitMissing);
-    const remote = try defaultRemote(arena, io, sub);
+    const remote = try moduleRemote(arena, io, repo, sub, module);
     transport.fetchFn(gpa, io, transport.context, sub, remote, commit) catch |err| switch (err) {
         error.TransportFailed => return refuse(options.refusal, display, remote, error.TransportFailed),
         else => |e| return e,
