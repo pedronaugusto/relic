@@ -15,6 +15,7 @@ const diff = @import("../diff/diff.zig");
 const driver = @import("../diff/driver.zig");
 const attributes = @import("../patterns.zig").attributes;
 const hash = @import("../hash/hash.zig");
+const repeat = @import("shakedown").corpus.repeat;
 
 fn commitAll(io: Io, repo: *testgit.Repo, subject: []const u8) !void {
     try repo.exec(io, &.{ "add", "-A" });
@@ -36,12 +37,7 @@ const long_tail = manyWords(400, "tail");
 /// end in full, and only as far as the common tail xdiff trims away when
 /// the words are diffed.
 fn repeated(comptime n: usize) []const u8 {
-    comptime {
-        @setEvalBranchQuota(100_000);
-        var out: []const u8 = "y";
-        for (0..n) |_| out = out ++ " x";
-        return out ++ "\n";
-    }
+    return "y" ++ repeat(" x", n) ++ "\n";
 }
 
 fn setup(io: Io, repo: *testgit.Repo) anyerror!void {
