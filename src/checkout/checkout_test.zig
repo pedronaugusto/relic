@@ -1671,3 +1671,42 @@ test "without core.symlinks a link written as a file stays a link to status and 
     defer gpa.free(said);
     try std.testing.expectEqualStrings("", said);
 }
+
+test "status.showUntrackedFiles lists untracked files as git status lists them under each mode" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "tracked", "t\n");
+    try git.exec(io, &.{ "add", "tracked" });
+    try git.exec(io, &.{ "commit", "-qm", "one" });
+    try git.writeFile(io, "loose", "l\n");
+    try git.writeFile(io, "dir/a", "a\n");
+    try git.writeFile(io, "dir/deeper/b", "b\n");
+    for ([_]?[]const u8{ null, "no", "normal", "all", "false", "true", "off", "1" }) |mode| {
+        if (mode) |m| try git.exec(io, &.{ "config", "status.showUntrackedFiles", m });
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        const theirs = try git.run(io, &.{ "status", "--porcelain" });
+        defer gpa.free(theirs);
+        var index = try repo.openIndex(io);
+        defer index.deinit();
+        var result = try worktree.status(gpa, io, git.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{
+            .rules = try repo.worktreeRules(),
+            .head_tree = try repo.headTree(io),
+            .untracked = try worktree.StatusOptions.Untracked.configured(repo.configuration()),
+        });
+        defer result.deinit();
+        var ours: std.ArrayList(u8) = .empty;
+        defer ours.deinit(gpa);
+        for (result.entries) |entry| if (entry.unstaged == .untracked) try ours.print(gpa, "?? {s}\n", .{entry.path});
+        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+            std.debug.print("status.showUntrackedFiles={?s}\n", .{mode});
+            return err;
+        };
+    }
+    try git.exec(io, &.{ "config", "status.showUntrackedFiles", "some" });
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try std.testing.expectError(error.InvalidUntrackedMode, worktree.StatusOptions.Untracked.configured(repo.configuration()));
+}

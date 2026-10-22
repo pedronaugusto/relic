@@ -1028,7 +1028,29 @@ pub const StatusOptions = struct {
     /// How much of an untracked directory `status` reports: nothing, the
     /// directory itself, or every file under it. These are what `git status`
     /// takes in `--untracked-files`.
-    pub const Untracked = enum { no, normal, all };
+    pub const Untracked = enum {
+        no,
+        normal,
+        all,
+
+        /// git's `parse_untracked_setting_name`, for `--untracked-files`
+        /// and `status.showUntrackedFiles`: `no`, `normal` or `all`, or a
+        /// boolean, `false` for `no` and `true` (or no value) for `normal`.
+        /// `null` for anything else.
+        pub fn parse(text: ?[]const u8) ?Untracked {
+            const value = text orelse return .normal;
+            if (config_mod.parseBool(value)) |on| return if (on) .normal else .no else |_| {}
+            return std.meta.stringToEnum(Untracked, value);
+        }
+
+        /// `status.showUntrackedFiles`, `normal` when it says nothing, as
+        /// `git status` reads it. A mode git does not know is
+        /// `error.InvalidUntrackedMode`, which git stops on.
+        pub fn configured(config: *const config_mod.Config) error{InvalidUntrackedMode}!Untracked {
+            const entry = config.find("status.showuntrackedfiles") orelse return .normal;
+            return parse(entry.value) orelse error.InvalidUntrackedMode;
+        }
+    };
 };
 
 /// HEAD against the index against the working tree, as values.
