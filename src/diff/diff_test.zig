@@ -1095,29 +1095,41 @@ test "an order file orders the changes as git diff-tree -O orders them" {
     }
 }
 
+/// `bytes` staged at `path` through the index alone: a name no file on
+/// every platform can take (Windows refuses a `"`), in a tree all the same.
+fn stageBlob(io: Io, repo: *testgit.Repo, path: []const u8, bytes: []const u8) !void {
+    const oid = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, bytes);
+    defer repo.gpa.free(oid);
+    const info = try std.mem.concat(repo.gpa, u8, &.{ "100644,", std.mem.trimEnd(u8, oid, "\n"), ",", path });
+    defer repo.gpa.free(info);
+    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", info });
+}
+
 fn setupColour(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "a.c", "int f()\n{\n\ta;\n}\nx\n");
     try repo.writeFile(io, "blank", "old\n");
     try repo.writeFile(io, "with space", "one\n");
-    try repo.writeFile(io, "q\"uote", "one\n");
+
     try repo.writeFile(io, "ws", "keep\n\tindented\nend\n");
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(repo.gpa);
     for (0..20) |i| try body.print(repo.gpa, "line {d} of a file that moves\n", .{i});
     try repo.writeFile(io, "moved", body.items);
     try repo.exec(io, &.{ "add", "-A" });
+    try stageBlob(io, repo, "q\"uote", "one\n");
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
 
     try repo.writeFile(io, "a.c", "int f()\n{\n\tb;  \n    \tc;\n}\ny");
     try repo.writeFile(io, "blank", "old\n\n \n");
     try repo.writeFile(io, "with space", "two\n");
-    try repo.writeFile(io, "q\"uote", "two\r\n");
+
     try repo.writeFile(io, "ws", "keep \n        indented\n\t \tend\n");
     try repo.dir.deleteFile(io, "moved");
     try body.appendSlice(repo.gpa, "and one more\n");
     try repo.writeFile(io, "moved to", body.items);
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "update-index", "--chmod=+x", "moved to" });
+    try stageBlob(io, repo, "q\"uote", "two\r\n");
     try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
 }
 
