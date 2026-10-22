@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const repo_mod = @import("../../repo/repo.zig");
+const fs = @import("../../fs/fs.zig");
 const gitfile = @import("../../discover.zig").gitfile;
 const repack_mod = @import("../../maintenance/repack.zig");
 const warning = @import("../../report.zig").warning;
@@ -92,7 +93,7 @@ pub const Lender = union(enum) { git_dir: []const u8, refused: Refusal };
 /// `path` names -- itself, the one a `.git` file in it or at it names, or
 /// its `.git` -- when it can lend. `arena`'s.
 pub fn lenderAt(arena: Allocator, io: Io, path: []const u8) Self.Error!Lender {
-    const real = Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch |e| switch (e) {
+    const real = fs.realPathAlloc(arena, io, Io.Dir.cwd(), path) catch |e| switch (e) {
         error.FileNotFound, error.NotDir => return .{ .refused = .not_found },
         else => |other| return other,
     };
@@ -119,7 +120,7 @@ fn gitfileAt(arena: Allocator, io: Io, dir: []const u8, name: ?[]const u8) Self.
     }) orelse return null;
     const base = Io.Dir.path.dirname(file) orelse ".";
     const joined = if (Io.Dir.path.isAbsolute(target)) target else try Io.Dir.path.join(arena, &.{ base, target });
-    return Io.Dir.cwd().realPathFileAlloc(io, joined, arena) catch |e| switch (e) {
+    return fs.realPathAlloc(arena, io, Io.Dir.cwd(), joined) catch |e| switch (e) {
         error.FileNotFound, error.NotDir => null,
         else => |other| other,
     };
@@ -181,7 +182,7 @@ pub fn forSubmodule(arena: Allocator, io: Io, superproject: *Repository, name: [
 
     var listed = try superproject.objectDatabase().listAlternates(arena, io);
     defer listed.deinit();
-    const objects = try superproject.gitDirectory().realPathFileAlloc(io, "objects", arena);
+    const objects = try fs.realPathAlloc(arena, io, superproject.gitDirectory(), "objects");
     var out: std.ArrayList(Reference) = .empty;
     for (listed.paths) |raw| {
         const path = if (Io.Dir.path.isAbsolute(raw)) raw else try Io.Dir.path.join(arena, &.{ objects, raw });

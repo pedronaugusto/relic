@@ -587,6 +587,25 @@ pub fn validityAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Sta
     }
 }
 
+/// Where `dir` is, absolute and every link resolved, as git's
+/// `strbuf_realpath` names it, in `buffer`. On Windows that is
+/// `/`-separated, as Git for Windows' is (`D:/a/tree`), which is how git
+/// writes a path into a file (`objects/info/alternates`, a `gitdir`) and
+/// compares one; on a POSIX filesystem a backslash is a character of a name
+/// and is left as it is.
+pub fn realPath(io: Io, dir: Io.Dir, buffer: []u8) Io.Dir.RealPathError![]u8 {
+    const path = buffer[0..try dir.realPath(io, buffer)];
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    return path;
+}
+
+/// `realPath` of `sub_path` in `dir`, `gpa`'s.
+pub fn realPathAlloc(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.RealPathFileAllocError![:0]u8 {
+    const path = try dir.realPathFileAlloc(io, sub_path, gpa);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    return path;
+}
+
 /// Whether `a_path` in `a` and `b_path` in `b` are one file: the same file
 /// on the same device, by the platform's identity rather than the index's,
 /// which has no inode on Windows. `false` when either cannot be looked at.

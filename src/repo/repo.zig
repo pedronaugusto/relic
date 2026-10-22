@@ -684,7 +684,7 @@ pub const Repository = struct {
         var path: []const u8 = "";
         var ceiling: ?usize = null;
         if (options.discover and options.ceiling_directories.len != 0) {
-            path = try absoluteGitDir(io, start, &path_buf);
+            path = try fs.realPath(io, start, &path_buf);
             ceiling = nearestCeiling(path, options.ceiling_directories);
         }
         const device = if (fs.statAt(io, start, ".") catch null) |found| found.stat.dev else 0;
@@ -879,7 +879,7 @@ pub const Repository = struct {
         // An `includeIf` asks where the `.git` directory is and which branch
         // `HEAD` is on, so both are known before the first file is read.
         var path_buffer: [4096]u8 = undefined;
-        const git_dir_path = try absoluteGitDir(io, repo.data().git_dir, &path_buffer);
+        const git_dir_path = try fs.realPath(io, repo.data().git_dir, &path_buffer);
         // The format is the repository's own file's to say, read alone, as
         // git's `read_repository_format` reads it: no include, no other
         // file and no `-c` decides which hash a repository's objects are
@@ -978,15 +978,6 @@ pub const Repository = struct {
         errdefer fresh.deinit();
         try repo.publishConfig(fresh, format, diagnostic);
         return true;
-    }
-
-    /// The `.git` directory's path as git matches it in a `gitdir:`
-    /// condition: absolute, symbolic links resolved, `/`-separated.
-    fn absoluteGitDir(io: Io, git_dir: Io.Dir, buffer: []u8) ErrorNamespace.Error![]const u8 {
-        const len = try git_dir.realPath(io, buffer);
-        const path = buffer[0..len];
-        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
-        return path;
     }
 
     /// The branch `HEAD` is on, without `refs/heads/` and the caller's, or

@@ -2305,13 +2305,31 @@ const SubmoduleWorld = struct {
         try w.git(gpa, io, ".", &.{ "clone", "-q", "--recurse-submodules", super_url, name });
     }
 
+    /// The tree at `from` copied to `to`: a second twin, the same to the
+    /// byte, for less than a second clone takes. A twin's submodules name
+    /// their git directories by relative paths, so the copy is one too.
+    fn copy(w: *SubmoduleWorld, gpa: Allocator, io: Io, from: []const u8, to: []const u8) !void {
+        var source = try w.work.dir.openDir(io, from, .{ .iterate = true });
+        defer source.close(io);
+        try w.work.dir.createDirPath(io, to);
+        var dest = try w.work.dir.openDir(io, to, .{});
+        defer dest.close(io);
+        var walker = try source.walk(gpa);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| switch (entry.kind) {
+            .directory => try dest.createDirPath(io, entry.path),
+            .file => try source.copyFile(entry.path, dest, entry.path, io, .{}),
+            else => return error.UnexpectedEntryKind,
+        };
+    }
+
     /// A new commit of `inner`, pushed to `ref`, and, under `record`, the
     /// gitlinks above it moved to it and pushed.
     fn advance(w: *SubmoduleWorld, gpa: Allocator, io: Io, ref: []const u8, record: bool) !void {
         var inner = try w.work.dir.openDir(io, "inner", .{});
         defer inner.close(io);
         try inner.writeFile(io, .{ .sub_path = "README", .data = ref });
-        try w.git(gpa, io, "inner", &.{ "commit", "-q", "-am", ref });
+        try w.git(gpa, io, "inner", &.{ "commit", "-q", "--allow-empty", "-am", ref });
         const spec = try gpa.print("HEAD:{s}", .{ref});
         defer gpa.free(spec);
         try w.git(gpa, io, "inner", &.{ "push", "-q", "origin", spec });
@@ -2380,11 +2398,14 @@ test "a fetch goes into the submodules as git's fetch_submodules does: on demand
         .{ .ref = "refs/keep/aside", .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
         .{ .git_args = &.{ "-j", "2" }, .options = .{ .who = test_who, .submodule_jobs = 2 }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
     };
+    // One world for every case, each cloned afresh from where the last
+    // left it: what a case fetches is only its own advance.
+    var world = try SubmoduleWorld.init(gpa, io);
+    defer world.deinit(gpa);
     for (cases) |case| {
-        var world = try SubmoduleWorld.init(gpa, io);
-        defer world.deinit(gpa);
+        for ([_][]const u8{ "by-git", "by-relic" }) |name| try world.work.dir.deleteTree(io, name);
         try world.twin(gpa, io, "by-git");
-        try world.twin(gpa, io, "by-relic");
+        try world.copy(gpa, io, "by-git", "by-relic");
         for (case.config) |pair| for ([_][]const u8{ "by-git", "by-relic" }) |name| try world.git(gpa, io, name, &.{ "config", pair[0], pair[1] });
         try world.advance(gpa, io, case.ref, case.record);
 

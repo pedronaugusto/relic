@@ -430,6 +430,8 @@ test "a store helper with words a shell hands over as written runs in process: q
     defer tmp.cleanup();
     const home = try testremote.absolutePath(gpa, io, tmp.dir);
     defer gpa.free(home);
+    // A path goes into configuration text, where a backslash escapes.
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, home, '\\', '/');
     try tmp.dir.writeFile(io, .{ .sub_path = "my creds", .data = "https://ada:one@example.com\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = ".git-credentials", .data = "https://bob:two@example.com\n" });
     var env: std.process.Environ.Map = .init(gpa);
