@@ -2,14 +2,15 @@
 //! an index or any state between steps, and the refs that pointed at them
 //! moved to the new ones in one transaction.
 //!
-//! It is git 2.55's `replay_revisions` and `cmd_replay`. The commits are
+//! It is git 2.56's `replay_revisions` and `cmd_replay`. The commits are
 //! those `include` reaches and `exclude` does not, oldest first in graph
 //! order (newest first to revert), each merged in memory onto where its
 //! parent went: `--onto` puts them on a commit and moves the branches among
 //! the revisions given (with `contained`, every branch on a commit
 //! replayed); `--advance` puts them on a branch and moves that branch;
 //! `--revert` reverts them, newest first, on a branch and moves it. A merge
-//! commit is refused, as git refuses it. A conflict, or with `empty` set
+//! commit is refused, as git refuses it, unless `linearize` drops it and
+//! lays the rest out in a line. A conflict, or with `empty` set
 //! to `abort` a commit left empty, stops it with no ref moved.
 
 const Self = @This();
@@ -55,8 +56,14 @@ pub const Error = error{
     InvalidRefName,
     /// `replay.refAction` neither `update` nor `print`.
     InvalidRefAction,
-    /// "replaying merge commits is not supported yet!"
+    /// "replaying merge commits is not supported yet!": a merge in the
+    /// range, without `--linearize`.
     MergeCommit,
+    /// `--linearize` and `--contained` together.
+    LinearizeWithContained,
+    /// `--linearize` where the revisions name more than one branch to move:
+    /// "'--linearize' cannot be used with multiple branches".
+    LinearizeWithMultipleBranches,
     NotACommit,
 } || three_way.Error || rev_walk.Error || rev_parse.Error || pretty.Decorations.LoadError || repo_mod.WriteError ||
     refs_mod.TransactionError || refs_mod.ReadError || error{ InvalidEncodingSetting, UnsupportedEncoding };
@@ -114,6 +121,11 @@ pub const Options = struct {
     ref_action: ?RefAction = null,
     /// A commit that had a change and is left with none.
     empty: Empty = .drop,
+    /// `--linearize`, git 2.56's: the merges in the range dropped, every
+    /// other commit replayed onto the one before it, as `rebase
+    /// --no-rebase-merges` lays them out; a ref at a merge moves to the
+    /// commit made last before it.
+    linearize: bool = false,
     /// The `reference-transaction` hook, or `null` for none.
     hooks: ?*hooks_mod.Runner = null,
     diagnostic: ?*repo_mod.Diagnostic = null,
@@ -210,6 +222,7 @@ pub fn plan(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options: 
     errdefer arena_state.deinit();
     const a = arena_state.allocator();
     if (options.ref != null and inputs.target == .onto and inputs.target.onto.contained) return error.RefWithContained;
+    if (options.linearize and inputs.target == .onto and inputs.target.onto.contained) return error.LinearizeWithContained;
 
     var r: Run = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .mode = if (inputs.target == .revert) .revert else .pick };
     defer r.replayed.deinit(gpa);
@@ -288,6 +301,7 @@ const Run = struct {
                 setup.ref = found.ref;
             },
         }
+        if (r.options.linearize and setup.update_refs.count() > 1) return error.LinearizeWithMultipleBranches;
         if (r.options.ref) |ref| {
             if (inputs.target == .onto and setup.update_refs.count() > 1) return error.RefWithMultipleRanges;
             if (!std.mem.startsWith(u8, ref, "refs/") or !ref_names.checkFormat(ref, .{})) return error.InvalidRefName;
@@ -312,8 +326,11 @@ const Run = struct {
         defer if (decorations) |*d| d.deinit();
         r.last = setup.onto;
         while (try walk.next(r.io)) |walked| {
-            if (walked.parents.len > 1) return error.MergeCommit;
-            const made = (try r.pick(walked.oid, walked.parents, setup.onto)) orelse return r.stop;
+            // A merge dropped under `--linearize`: what it maps to, and
+            // what the next commit is replayed onto, is the last made.
+            const is_merge = walked.parents.len > 1;
+            if (is_merge and !r.options.linearize) return error.MergeCommit;
+            const made = if (is_merge) r.last else (try r.pick(walked.oid, walked.parents, setup.onto)) orelse return r.stop;
             r.last = made;
             try r.replayed.put(r.gpa, walked.oid, made);
             if (setup.ref != null) continue;
@@ -337,8 +354,11 @@ const Run = struct {
         const repo = r.repo;
         const base: ?Oid = if (parents.len != 0) parents[0] else null;
         const base_tree = if (base) |b| try repo.commitTree(r.io, b) else repo.objectFormat().emptyTree();
-        const fallback = if (r.mode == .revert) r.last else onto;
-        const replayed_base = if (base) |b| r.replayed.get(b) orelse fallback else fallback;
+        // A revert, newest first, and a linearized pick go onto the last
+        // commit made; any other pick onto its parent's replay, else `onto`.
+        const replayed_base = if (r.mode == .revert or r.options.linearize)
+            r.last
+        else if (base) |b| r.replayed.get(b) orelse onto else onto;
         const replayed_base_tree = try repo.commitTree(r.io, replayed_base);
         const tree = try repo.commitTree(r.io, oid);
         var merged = try three_way.inCore(r.gpa, r.io, repo, switch (r.mode) {

@@ -20,7 +20,7 @@ const who = history.who;
 const gitMayFail = history.gitMayFail;
 
 fn requireReplay(io: Io) !void {
-    try testgit.requireGitVersion(std.testing.allocator, io, 2, 55);
+    try testgit.requireGitVersion(std.testing.allocator, io, 2, 56);
 }
 
 /// `main` two commits past the base, `topic` three on the base with `mid`
@@ -62,6 +62,25 @@ fn clashScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "a", "a\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "add a" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+}
+
+/// `script`, with `topic` merging a side branch: `side` forks from `mid`
+/// with two commits, `topic` gains one more and merges it, `topic` ending
+/// at the merge.
+fn mergeScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try script(io, repo);
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side", "mid" });
+    try repo.writeFile(io, "s1", "s1\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "add s1" });
+    try repo.writeFile(io, "g", "a\nb\nside\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "side g" });
+    try repo.exec(io, &.{ "checkout", "-q", "topic" });
+    try repo.writeFile(io, "t4", "t4\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "add t4" });
+    try repo.exec(io, &.{ "merge", "-q", "--no-edit", "side" });
     try repo.exec(io, &.{ "checkout", "-q", "main" });
 }
 
@@ -256,6 +275,40 @@ test "replay stops at a conflict with nothing moved, and refuses what git refuse
                 &.{ "replay", "--onto", "main", "--ref", "heads/x", "main..topic" },
                 &.{ "replay", "--onto", "main~1", "main~1..main" },
             }) |args| try std.testing.expectError(error.GitFailed, pair.git.exec(io, args));
+        }
+    }.f);
+}
+
+test "replay --linearize drops the merges and lays the rest out in a line, its branch at the last commit made, as git 2.56's" {
+    try requireReplay(std.testing.io);
+    try testgit.eachRefFormat(struct {
+        fn f(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, mergeScript);
+            defer pair.deinit();
+            const onto: replay.Target = .{ .onto = .{ .revision = "main" } };
+            try std.testing.expectError(error.MergeCommit, run(&pair, io, topic_range, .{ .who = who }));
+            try std.testing.expectError(error.LinearizeWithContained, run(&pair, io, .{ .include = &.{"topic"}, .exclude = &.{"main"}, .target = .{ .onto = .{ .revision = "main", .contained = true } } }, .{ .who = who, .linearize = true }));
+            try std.testing.expectError(error.LinearizeWithMultipleBranches, run(&pair, io, .{ .include = &.{ "topic", "side" }, .exclude = &.{"main"}, .target = onto }, .{ .who = who, .linearize = true }));
+            pair.git.report_failures = false;
+            for ([_][]const []const u8{
+                &.{ "replay", "--onto", "main", "main..topic" },
+                &.{ "replay", "--linearize", "--contained", "--onto", "main", "main..topic" },
+                &.{ "replay", "--linearize", "--onto", "main", "main..topic", "main..side" },
+            }) |args| try std.testing.expectError(error.GitFailed, pair.git.exec(io, args));
+            pair.git.report_failures = true;
+
+            try pair.git.exec(io, &.{ "replay", "--linearize", "--onto", "main", "main..topic" });
+            var moved = try run(&pair, io, topic_range, .{ .who = who, .linearize = true });
+            defer moved.deinit();
+            try std.testing.expect(moved.updated);
+            try expectSame(&pair, io, &.{ "HEAD", "refs/heads/main", "refs/heads/topic", "refs/heads/side" });
+            // The line: every commit but the merge, one parent each.
+            const merges = try pair.ours.run(io, &.{ "rev-list", "--merges", "main..topic" });
+            defer gpa.free(merges);
+            try std.testing.expectEqualStrings("", merges);
         }
     }.f);
 }

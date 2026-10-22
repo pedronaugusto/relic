@@ -56,6 +56,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `commit.replay.Options.linearize`, git 2.56's `replay --linearize`: the merges in the range dropped and the rest replayed in a line, each onto the last commit made, a ref at a merge moved to the commit made before it; `error.LinearizeWithContained` and `error.LinearizeWithMultipleBranches` where git refuses it.
 - `git add`'s pack for a file past `core.bigFileThreshold` that nothing converts is written from the file read in pieces, never held, as git's `index_blob_bulk_checkin` (`odb.Odb.writeIntoFrom`): hashed and deflated as it is read, taken back out of the pack where the database or the pack holds the blob already (design §10).
 - The built-in `swift` diff driver, git 2.56's: its function lines (attributes, modifiers, `func`, `init`, `subscript`, the type declarations) and its words.
 - `archive` writes a regular file past `core.bigFileThreshold` from the object database's stream, as git's archive streams it: a tar entry in blocks, a zip entry stored or deflated as it is read, its checksum and deflated size in the data descriptor after it, the text flag from its first piece as git's `write_zip_entry` asks it; nothing of it held whole (design §10).
