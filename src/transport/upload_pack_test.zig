@@ -472,9 +472,10 @@ test "uploadpack.allowRefInWant and uploadpackfilter.* are held to as git's uplo
     }
 }
 
-test "object-info answers each object's size as git's upload-pack does, and both name a session under transfer.advertiseSID" {
+test "git 2.56, object-info answers each object's size and type as git's upload-pack does, and both name a session under transfer.advertiseSID" {
     const gpa = testing.allocator;
     const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
     const helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
     defer gpa.free(helper);
     var root = testing.tmpDir(.{ .iterate = true });
@@ -494,30 +495,33 @@ test "object-info answers each object's size as git's upload-pack does, and both
     const commit = oids.next().?;
     const tree = oids.next().?;
 
-    // One request, every kind of line: sizes asked, a commit and a tree,
-    // an object neither has, a name that is none, a line not asked for.
-    var request: Io.Writer.Allocating = .init(gpa);
-    defer request.deinit();
-    const w = &request.writer;
-    try pkt_line.write(w, "command=object-info");
-    try pkt_line.write(w, "object-format=sha1");
-    try pkt_line.delim(w);
-    try pkt_line.write(w, "size");
-    try pkt_line.print(w, "oid {s}", .{commit});
-    try pkt_line.print(w, "oid {s}", .{tree});
-    try pkt_line.write(w, "oid 0123456789012345678901234567890123456789");
-    try pkt_line.write(w, "oid nothing");
-    try pkt_line.write(w, "bogus");
-    try pkt_line.flush(w);
-    var answers: [2][]u8 = undefined;
-    for ([_][]const u8{ "git", helper }, 0..) |program_name, i| {
-        const argv: []const []const u8 = if (i == 0) &.{ program_name, "upload-pack", "--stateless-rpc", bare } else &.{ program_name, "--stateless-rpc", bare };
-        const outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv }, .{ .input = request.written() });
-        defer gpa.free(outcome.stderr);
-        answers[i] = outcome.stdout;
+    // Each request has every kind of line: a commit and a tree, an object
+    // neither has, a name that is none, a line not asked for; and the
+    // attributes asked for in each order, and none.
+    for ([_][]const []const u8{ &.{"size"}, &.{"type"}, &.{ "type", "size" }, &.{} }) |attributes| {
+        var request: Io.Writer.Allocating = .init(gpa);
+        defer request.deinit();
+        const w = &request.writer;
+        try pkt_line.write(w, "command=object-info");
+        try pkt_line.write(w, "object-format=sha1");
+        try pkt_line.delim(w);
+        for (attributes) |a| try pkt_line.write(w, a);
+        try pkt_line.print(w, "oid {s}", .{commit});
+        try pkt_line.print(w, "oid {s}", .{tree});
+        try pkt_line.write(w, "oid 0123456789012345678901234567890123456789");
+        try pkt_line.write(w, "oid nothing");
+        try pkt_line.write(w, "bogus");
+        try pkt_line.flush(w);
+        var answers: [2][]u8 = undefined;
+        for ([_][]const u8{ "git", helper }, 0..) |program_name, i| {
+            const argv: []const []const u8 = if (i == 0) &.{ program_name, "upload-pack", "--stateless-rpc", bare } else &.{ program_name, "--stateless-rpc", bare };
+            const outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv }, .{ .input = request.written() });
+            defer gpa.free(outcome.stderr);
+            answers[i] = outcome.stdout;
+        }
+        defer for (answers) |a| gpa.free(a);
+        try testing.expectEqualStrings(answers[0], answers[1]);
     }
-    defer for (answers) |a| gpa.free(a);
-    try testing.expectEqualStrings(answers[0], answers[1]);
 
     // Each advertises a session and the command.
     for ([_][]const u8{ "git", helper }, 0..) |program_name, i| {
@@ -525,13 +529,14 @@ test "object-info answers each object's size as git's upload-pack does, and both
         var outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv }, .{});
         defer outcome.deinit(gpa);
         try testing.expect(std.mem.find(u8, outcome.stdout, "session-id=") != null);
-        try testing.expect(std.mem.find(u8, outcome.stdout, "object-info\n") != null);
+        try testing.expect(std.mem.find(u8, outcome.stdout, "object-info=size type\n") != null);
     }
 }
 
-test "uploadpack.packObjectsHook makes the pack as git's upload-pack has it made, read only where the repository cannot write it, and uploadpack.keepAlive speaks while it works" {
+test "git 2.56, uploadpack.packObjectsHook makes the pack as git's upload-pack has it made, read only where the repository cannot write it, and uploadpack.keepAlive speaks while it works" {
     const gpa = testing.allocator;
     const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
     const shell_helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
     defer gpa.free(shell_helper);
     if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');

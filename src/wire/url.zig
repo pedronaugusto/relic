@@ -13,6 +13,7 @@ const Self = @This();
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
+const win32 = @import("../names.zig").path;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -95,8 +96,9 @@ pub const Url = struct {
 
     fn parseFile(text: []const u8, sep: usize, rest: []const u8) Url.ParseError!Url {
         // On Windows `file://C:/repo` is the path with its drive, as
-        // git for Windows reads it.
-        if (builtin.target.os.tag == .windows and rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') {
+        // git for Windows reads it, a drive being any character before a
+        // colon (`win32_has_dos_drive_prefix`).
+        if (builtin.target.os.tag == .windows and win32.dosDrivePrefixLen(rest) != 0) {
             return .{ .scheme = .file, .path = rest, .raw = text };
         }
         // git for Windows keeps an authority as a UNC path.
@@ -361,14 +363,15 @@ fn httpPort(url: *Url, suffix: []const u8) ParseError!void {
 }
 
 /// git's `url_is_local_not_ssh`: no colon, or a slash before the first
-/// colon, or a DOS drive letter on Windows.
+/// colon, or, on Windows, a drive (`win32_has_dos_drive_prefix`) before a
+/// path Windows would open as itself (`is_valid_win32_path`): `h:22:r` is
+/// an ssh address there.
 pub fn isLocal(text: []const u8) bool {
     const colon = std.mem.findScalar(u8, text, ':') orelse return true;
     if (std.mem.findScalar(u8, text, '/')) |slash| {
         if (slash < colon) return true;
     }
-    return builtin.target.os.tag == .windows and text.len >= 2 and
-        std.ascii.isAlphabetic(text[0]) and text[1] == ':' and colon == 1;
+    return builtin.target.os.tag == .windows and win32.dosDrivePrefixLen(text) != 0 and win32.win32PathReason(text) == null;
 }
 
 /// The URL with any `user[:password]@` taken out, which is how git writes a

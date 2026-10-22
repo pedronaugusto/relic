@@ -231,7 +231,8 @@ pub const Server = struct {
         try pkt_line.write(w, "server-option\n");
         try pkt_line.print(w, "object-format={s}\n", .{s.kind().name()});
         if (s.sessionId()) |sid| try pkt_line.print(w, "session-id={s}\n", .{sid});
-        if (s.advertise_object_info) try pkt_line.write(w, "object-info\n");
+        // git 2.56 names the attributes it answers.
+        if (s.advertise_object_info) try pkt_line.write(w, "object-info=size type\n");
         if (s.advertise_bundle_uris) try pkt_line.write(w, "bundle-uri\n");
         // `promisor.advertise`: the promisor remotes this one borrows from.
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
@@ -372,12 +373,14 @@ pub const Server = struct {
         return true;
     }
 
-    /// git's `cap_object_info`: each object's size, as the client asked,
-    /// empty for one this repository does not have; a line that is not an
-    /// object's name, or not asked for at all, refused in git's words and
-    /// passed over.
+    /// git 2.56's `cap_object_info`: the attributes asked for, `size` and
+    /// `type`, named in that order, then each object with its values in
+    /// that order, or with a space alone when this repository does not have
+    /// it; a line that is not an object's name, or not asked for at all,
+    /// refused in git's words and passed over.
     fn objectInfo(s: *Server, args: []const []const u8, out: *Io.Writer) Error!void {
         var size = false;
+        var object_type = false;
         var oids: std.ArrayList([]const u8) = .empty;
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
@@ -386,25 +389,29 @@ pub const Server = struct {
             for (args) |arg| {
                 if (std.mem.eql(u8, arg, "size")) {
                     size = true;
+                } else if (std.mem.eql(u8, arg, "type")) {
+                    object_type = true;
                 } else if (std.mem.startsWith(u8, arg, "oid ")) {
                     try oids.append(arena, arg["oid ".len..]);
                 } else pkt_line.print(out, "ERR object-info: unexpected line: '{s}'", .{arg}) catch |e| break :write e;
             }
             if (oids.items.len != 0) {
                 if (size) pkt_line.write(out, "size") catch |e| break :write e;
+                if (object_type) pkt_line.write(out, "type") catch |e| break :write e;
+                var line: std.ArrayList(u8) = .empty;
                 for (oids.items) |text| {
                     const oid = s.parseOid(text) orelse {
                         pkt_line.print(out, "ERR object-info: protocol error, expected to get oid, not '{s}'", .{text}) catch |e| break :write e;
                         continue;
                     };
-                    if (!size) {
-                        pkt_line.write(out, text) catch |e| break :write e;
-                        continue;
-                    }
+                    line.clearRetainingCapacity();
+                    try line.appendSlice(arena, text);
                     if (try s.db().exists(s.io, oid)) {
                         const header = try s.db().readHeader(s.io, oid);
-                        pkt_line.print(out, "{s} {d}", .{ text, header.size }) catch |e| break :write e;
-                    } else pkt_line.print(out, "{s} ", .{text}) catch |e| break :write e;
+                        if (size) try line.print(arena, " {d}", .{header.size});
+                        if (object_type) try line.print(arena, " {s}", .{header.type.name()});
+                    } else try line.append(arena, ' ');
+                    pkt_line.write(out, line.items) catch |e| break :write e;
                 }
             }
             pkt_line.flush(out) catch |e| break :write e;
@@ -1242,14 +1249,14 @@ const Negotiation = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(n.arena, &.{ hook, "git" });
         if (shallow.items.len != 0) try argv.appendSlice(n.arena, &.{ "--shallow-file", "" });
-        try argv.appendSlice(n.arena, &.{ "pack-objects", "--revs" });
+        // In git 2.56's order, `odb_source_files_generate_pack`'s.
+        try argv.appendSlice(n.arena, &.{ "pack-objects", "--revs", "--stdout" });
         if (n.thin) try argv.append(n.arena, "--thin");
-        try argv.append(n.arena, "--stdout");
         if (shallow.items.len != 0) try argv.append(n.arena, "--shallow");
-        if (!n.no_progress) try argv.append(n.arena, "--progress");
         if (n.ofs_delta) try argv.append(n.arena, "--delta-base-offset");
         if (n.include_tag) try argv.append(n.arena, "--include-tag");
         if (s.promisor_taken) try argv.append(n.arena, "--missing=allow-promisor");
+        try argv.append(n.arena, if (n.no_progress) "--quiet" else "--progress");
         if (n.filter_text) |text| try argv.append(n.arena, try n.arena.print("--filter={s}", .{text}));
 
         var running = try program.start(s.gpa, s.io, programs, .{
