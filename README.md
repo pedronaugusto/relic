@@ -710,6 +710,8 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `transport.ssh` | Module within `transport`. |
 | `transport.smart_http` | Module within `transport`. |
 | `transport.credential` | Module within `transport`. |
+| `transport.credential.cache` | git's `credential-cache` client. |
+| `transport.credential_cache_daemon` | Module within `transport`. |
 | `transport.auth` | Module within `transport`. |
 | `transport.protocol` | Module within `transport`. |
 | `transport.connection` | Module within `transport`. |

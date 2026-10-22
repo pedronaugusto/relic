@@ -20,6 +20,7 @@ pub const local = @import("transport/local.zig");
 pub const ssh = @import("wire.zig").ssh;
 pub const smart_http = @import("wire.zig").smart_http;
 pub const credential = @import("wire.zig").credential;
+pub const credential_cache_daemon = @import("wire.zig").credential_cache_daemon;
 pub const auth = @import("wire.zig").auth;
 pub const protocol = @import("wire.zig").protocol;
 pub const connection = @import("wire.zig").connection;

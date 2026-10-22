@@ -63,21 +63,6 @@ pub fn defaultFiles(arena: Allocator, environ: *const std.process.Environ.Map) A
     return out.items;
 }
 
-/// git's `credential_match`: every part `want` has, `have` has the same.
-fn matches(want: Credential, have: *const parts_mod.UrlParts, match_password: bool) bool {
-    inline for (.{ "protocol", "host", "path", "username" }) |name| {
-        if (@field(want, name)) |w| {
-            const h = @field(have, name) orelse return false;
-            if (!std.mem.eql(u8, w, h)) return false;
-        }
-    }
-    if (match_password) if (want.password) |w| {
-        const h = have.password orelse return false;
-        if (!std.mem.eql(u8, w, h.expose())) return false;
-    };
-    return true;
-}
-
 /// The file's text, or `null` when it cannot be read for not being there
 /// or for want of permission, which git passes over.
 fn readFile(gpa: Allocator, io: Io, path: []const u8) Self.Error!?[]u8 {
@@ -114,7 +99,7 @@ pub fn get(gpa: Allocator, io: Io, files: Files, want: Credential) Self.Error!?F
         while (lines.next()) |line| {
             var entry = (try entryOf(gpa, line)) orelse continue;
             defer entry.deinit(gpa);
-            if (!matches(want, &entry, false)) continue;
+            if (!parts_mod.credentialMatch(want, &entry, false)) continue;
             const username = try gpa.dupe(u8, entry.username.?);
             errdefer gpa.free(username);
             return .{ .username = username, .password = try gpa.dupe(u8, entry.password.?.expose()) };
@@ -201,7 +186,7 @@ fn rewrite(gpa: Allocator, io: Io, path: []const u8, timeout_ms: u32, how: Rewri
             if (try entryOf(gpa, line)) |entry_const| {
                 var entry = entry_const;
                 defer entry.deinit(gpa);
-                if (matches(how.drop, &entry, how.match_password)) continue;
+                if (parts_mod.credentialMatch(how.drop, &entry, how.match_password)) continue;
             }
             try w.writeAll(line);
             try w.writeByte('\n');

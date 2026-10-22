@@ -96,12 +96,35 @@ pub const UrlParts = struct {
     /// pattern has is the credential's. `have` is anything with the same
     /// optional parts.
     pub fn matches(want: *const UrlParts, have: anytype) bool {
-        inline for (.{ "protocol", "host", "path", "username" }) |name| {
-            if (@field(want, name)) |w| {
-                const h = @field(have, name) orelse return false;
+        return credentialMatch(want, have, false);
+    }
+};
+
+/// git's `credential_match`: every part `want` has -- protocol, host,
+/// path, username and, with `match_password`, password and credential --
+/// `have` has the same. Either is anything with those parts it has as
+/// optional bytes or secrets; a part one of them lacks is one it does not
+/// have.
+pub fn credentialMatch(want: anytype, have: anytype, match_password: bool) bool {
+    inline for (.{ "protocol", "host", "path", "username", "password", "credential" }) |name| {
+        const secret = comptime std.mem.eql(u8, name, "password") or std.mem.eql(u8, name, "credential");
+        if (!secret or match_password) {
+            if (part(want, name)) |w| {
+                const h = part(have, name) orelse return false;
                 if (!std.mem.eql(u8, w, h)) return false;
             }
         }
-        return true;
     }
-};
+    return true;
+}
+
+/// The part `name` of `c`, a secret's bytes exposed, or `null`.
+fn part(c: anytype, comptime name: []const u8) ?[]const u8 {
+    const T = switch (@typeInfo(@TypeOf(c))) {
+        .pointer => |ptr| ptr.child,
+        else => @TypeOf(c),
+    };
+    if (!@hasField(T, name)) return null;
+    const value = @field(c, name) orelse return null;
+    return if (@TypeOf(value) == SecretBytes) value.expose() else value;
+}

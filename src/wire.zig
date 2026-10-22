@@ -5,6 +5,7 @@ pub const authorities = @import("wire/authorities.zig");
 pub const client_cert = @import("wire/client_cert.zig");
 pub const connection = @import("wire/connection.zig");
 pub const credential = @import("wire/credential.zig");
+pub const credential_cache_daemon = @import("wire/credential/cache/daemon.zig");
 pub const fetch_pack = @import("wire/fetch_pack.zig");
 pub const filter_spec = @import("wire/filter_spec.zig");
 pub const hidden = @import("wire/hidden.zig");

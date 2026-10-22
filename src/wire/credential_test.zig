@@ -465,3 +465,208 @@ test "a store helper with words a shell hands over as written runs in process: q
         try testing.expectEqualStrings(case.username, session.username.?);
     }
 }
+
+const cache = credential.cache;
+const cache_daemon = @import("credential/cache/daemon.zig");
+const shakedown = @import("shakedown");
+
+/// `git credential-cache --socket <socket> <args>` with `input`, as git
+/// runs the helper: its output.
+fn gitCache(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map, socket: []const u8, args: []const []const u8, input: []const u8) ![]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "credential-cache", "--socket", socket });
+    try argv.appendSlice(gpa, args);
+    return testremote.gitInputEnv(gpa, io, dir, env, argv.items, input, true);
+}
+
+test "credential-cache's daemon run in process answers git's client as git's daemon does: matching, order, capabilities, refusals and erasure" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try testremote.absolutePath(gpa, io, tmp.dir);
+    defer gpa.free(root);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const theirs = try gpa.print("{s}/git/socket", .{root});
+    defer gpa.free(theirs);
+    const ours = try gpa.print("{s}/relic/socket", .{root});
+    defer gpa.free(ours);
+
+    var daemons: cache_daemon.InProcess = .init(gpa, io);
+    defer daemons.deinit();
+    const starter = daemons.starter();
+    try starter.start(starter.context, io, ours);
+    // git's starts with the first store; it ends with `exit` either way.
+    defer gpa.free(gitCache(gpa, io, tmp.dir, &env, theirs, &.{"exit"}, "") catch &.{});
+
+    const Step = struct { args: []const []const u8, input: []const u8 };
+    const steps = [_]Step{
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=example.com\nusername=ada\npassword=one\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=example.com\n\n" },
+        // A token, kept with what goes with it; its authtype and credential
+        // only to a client that says it takes them.
+        .{ .args = &.{"store"}, .input = "capability[]=authtype\nprotocol=https\nhost=tok.example\nauthtype=Bearer\ncredential=xyz\npassword_expiry_utc=4102444800\noauth_refresh_token=r\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=tok.example\n\n" },
+        .{ .args = &.{"get"}, .input = "capability[]=authtype\nprotocol=https\nhost=tok.example\n\n" },
+        // Refused: a partial credential, an ephemeral one, a negative
+        // timeout; a request with a line that is no line is passed over.
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=partial.example\nusername=u\n\n" },
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=eph.example\nusername=u\npassword=p\nephemeral=1\n\n" },
+        .{ .args = &.{ "--timeout=-1", "store" }, .input = "protocol=https\nhost=neg.example\nusername=u\npassword=p\n\n" },
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=bad.example\nno line\nusername=u\npassword=p\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=partial.example\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=eph.example\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=neg.example\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=bad.example\n\n" },
+        // A URL starts the credential over.
+        .{ .args = &.{"store"}, .input = "protocol=http\nhost=gone.example\nurl=https://u:p@url.example/a/b\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=url.example\npath=a/b\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=http\nhost=gone.example\n\n" },
+        // Three for one host; erasing the first moves the last into its
+        // place, so a lookup finds that one next.
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=many.example\nusername=a\npassword=1\n\n" },
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=many.example\nusername=b\npassword=2\n\n" },
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=many.example\nusername=c\npassword=3\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=many.example\n\n" },
+        .{ .args = &.{"erase"}, .input = "protocol=https\nhost=many.example\nusername=a\npassword=wrong\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=many.example\n\n" },
+        .{ .args = &.{"erase"}, .input = "protocol=https\nhost=many.example\nusername=a\npassword=1\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=many.example\n\n" },
+        // A store replaces what it matches, password aside.
+        .{ .args = &.{"store"}, .input = "protocol=https\nhost=example.com\nusername=ada\npassword=two\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=example.com\nusername=ada\n\n" },
+        .{ .args = &.{"erase"}, .input = "host=example.com\n\n" },
+        .{ .args = &.{"get"}, .input = "protocol=https\nhost=example.com\n\n" },
+        .{ .args = &.{"capability"}, .input = "" },
+        .{ .args = &.{"unknown"}, .input = "" },
+    };
+    for (steps) |step| {
+        const git_said = try gitCache(gpa, io, tmp.dir, &env, theirs, step.args, step.input);
+        defer gpa.free(git_said);
+        const relic_said = try gitCache(gpa, io, tmp.dir, &env, ours, step.args, step.input);
+        defer gpa.free(relic_said);
+        errdefer std.debug.print("git credential-cache {s}\n{s}", .{ step.args[step.args.len - 1], step.input });
+        try testing.expectEqualStrings(git_said, relic_said);
+    }
+
+    // `exit` ends the daemon, its socket gone before the client is let go.
+    gpa.free(try gitCache(gpa, io, tmp.dir, &env, ours, &.{"exit"}, ""));
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, ours, .{}));
+    // A daemon's directory is its owner's alone, and refused when looser.
+    if (builtin.target.os.tag != .windows) {
+        const st = try tmp.dir.statFile(io, "relic", .{});
+        try testing.expectEqual(@as(u32, 0o700), @as(u32, @intCast(st.permissions.toMode() & 0o777)));
+        try tmp.dir.createDirPath(io, "open");
+        try tmp.dir.setFilePermissions(io, "open", .fromMode(0o755), .{});
+        const open_socket = try gpa.print("{s}/open/socket", .{root});
+        defer gpa.free(open_socket);
+        try testing.expectError(error.SocketDirectoryTooOpen, cache_daemon.Daemon.listen(gpa, io, open_socket));
+    }
+    try testing.expectError(error.SocketPathNotAbsolute, cache_daemon.Daemon.listen(gpa, io, "relative/socket"));
+}
+
+test "credential-cache's daemon lets a credential go when its time is up, and ends thirty seconds after it holds nothing, by the clock it runs on" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try testremote.absolutePath(gpa, io, tmp.dir);
+    defer gpa.free(root);
+    const socket = try gpa.print("{s}/c/socket", .{root});
+    defer gpa.free(socket);
+    var clock = shakedown.Clock.init(io, .{});
+    const clock_io = clock.io();
+    var daemon = try cache_daemon.Daemon.listen(gpa, clock_io, socket);
+    defer daemon.deinit();
+    var running = try clock_io.concurrent(cache_daemon.Daemon.run, .{&daemon});
+    // glint-ignore: Z026 -- the daemon has ended by then, or the test failed already
+    defer running.cancel(clock_io) catch {};
+
+    const ask = struct {
+        fn ask(a: Allocator, s: []const u8, action: cache.Action, timeout: i32, input: []const u8) !?[]u8 {
+            return cache.request(a, testing.io, s, .{ .action = action, .timeout = timeout, .input = input });
+        }
+    }.ask;
+    const held = "protocol=https\nhost=h.example\n\n";
+    gpa.free((try ask(gpa, socket, .store, 10, "protocol=https\nhost=h.example\nusername=u\npassword=p\n\n")).?);
+    try clock.awaitArmed(1, .none);
+    clock.advance(.fromSeconds(9));
+    try clock.awaitArmed(1, .none);
+    const still = (try ask(gpa, socket, .get, 0, held)).?;
+    defer gpa.free(still);
+    try testing.expectEqualStrings("capability[]=authtype\nusername=u\npassword=p\n", still);
+    try clock.awaitArmed(1, .none);
+    clock.advance(.fromSeconds(2));
+    try clock.awaitArmed(1, .none);
+    const gone = (try ask(gpa, socket, .get, 0, held)).?;
+    defer gpa.free(gone);
+    try testing.expectEqualStrings("", gone);
+    // Holding nothing, it waits thirty seconds from the last that went.
+    try clock.awaitArmed(1, .none);
+    clock.advance(.fromSeconds(30));
+    try running.await(clock_io);
+    try testing.expectEqual(null, try ask(gpa, socket, .get, 0, held));
+}
+
+test "the cache helper runs in process against git's daemon and relic's, and a store with no daemon starts one only where the caller says how" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try testremote.absolutePath(gpa, io, tmp.dir);
+    defer gpa.free(root);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const theirs = try gpa.print("{s}/git/socket", .{root});
+    defer gpa.free(theirs);
+    const ours = try gpa.print("{s}/relic/socket", .{root});
+    defer gpa.free(ours);
+    var daemons: cache_daemon.InProcess = .init(gpa, io);
+    defer daemons.deinit();
+    // git's daemon, started by git's client.
+    gpa.free(try gitCache(gpa, io, tmp.dir, &env, theirs, &.{"store"}, "protocol=https\nhost=example.com\nusername=seed\npassword=s\n\n"));
+    defer gpa.free(gitCache(gpa, io, tmp.dir, &env, theirs, &.{"exit"}, "") catch &.{});
+
+    for ([_][]const u8{ theirs, ours }) |socket| {
+        const text = try gpa.print("[credential]\n\thelper = cache --timeout=60 --socket '{s}'\n", .{socket});
+        defer gpa.free(text);
+        var config = try config_mod.Config.parseText(gpa, text, .global);
+        defer config.deinit();
+        const url = try url_mod.Url.parse("https://ada@example.com/r");
+        // The password the URL brings is what a store hands on.
+        const with_password = try url_mod.Url.parse("https://ada:pw@example.com/r");
+        // Relic's daemon is not there yet: a store starts it only with a
+        // starter.
+        if (socket.ptr == ours.ptr) {
+            var none: credential.Session = .{ .gpa = gpa, .url = with_password };
+            defer none.deinit();
+            _ = try none.fill(io, .{ .config = &config, .programs = .{ .environ = &env } });
+            try none.approve(io, .{ .config = &config, .programs = .{ .environ = &env } });
+            try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, ours, .{}));
+        }
+        {
+            var session: credential.Session = .{ .gpa = gpa, .url = with_password };
+            defer session.deinit();
+            const opts: credential.Options = .{ .config = &config, .programs = .{ .environ = &env }, .cache_daemon = daemons.starter() };
+            _ = try session.fill(io, opts);
+            try session.approve(io, opts);
+        }
+        // git's client finds what relic's stored.
+        const found = try gitCache(gpa, io, tmp.dir, &env, socket, &.{"get"}, "protocol=https\nhost=example.com\nusername=ada\n\n");
+        defer gpa.free(found);
+        try testing.expectEqualStrings("capability[]=authtype\nusername=ada\npassword=pw\n", found);
+        // relic's fill finds it, and its reject erases it.
+        var again: credential.Session = .{ .gpa = gpa, .url = url };
+        defer again.deinit();
+        try testing.expect(try again.fill(io, .{ .config = &config, .programs = .{ .environ = &env } }));
+        try testing.expectEqualStrings("pw", again.password.?.expose());
+        try again.reject(io, .{ .config = &config, .programs = .{ .environ = &env } });
+        const erased = try gitCache(gpa, io, tmp.dir, &env, socket, &.{"get"}, "protocol=https\nhost=example.com\nusername=ada\n\n");
+        defer gpa.free(erased);
+        try testing.expectEqualStrings("", erased);
+    }
+}

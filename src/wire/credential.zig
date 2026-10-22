@@ -39,6 +39,9 @@ const parts_mod = @import("credential/parts.zig");
 const UrlParts = parts_mod.UrlParts;
 const UrlError = parts_mod.UrlError;
 const store_mod = @import("credential/store.zig");
+/// git's `credential-cache` client; its daemon is `cache/daemon.zig`'s, which
+/// the wire facade names.
+pub const cache = @import("credential/cache.zig");
 const urlmatch = @import("../text.zig").urlmatch;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -107,6 +110,10 @@ pub const Options = struct {
     /// neither used nor stored, as git uses and stores neither. `null`
     /// checks nothing; relic reads no clock of its own.
     now: ?std.Io.Timestamp = null,
+    /// How a daemon starts where the `cache` helper stores a credential
+    /// and finds none listening, as git starts its own. `null`: that store
+    /// is a helper failing, as git's is when its daemon does not start.
+    cache_daemon: ?cache.Starter = null,
 };
 
 /// The parts of a credential a caller names itself, rather than through a
@@ -204,6 +211,8 @@ pub const Session = struct {
         /// Parts the caller named, borrowed until the session first uses
         /// them.
         parts: Parts,
+        /// None but what `readAnswer` reads: a request to a cache daemon.
+        request,
     };
 
     /// Which side of a conversation announced a capability: git's
@@ -226,6 +235,12 @@ pub const Session = struct {
     /// is first used.
     pub fn forParts(gpa: Allocator, url: url_mod.Url, parts: Parts) Session {
         return .{ .gpa = gpa, .url = url, .origin = .{ .parts = parts } };
+    }
+
+    /// A credential with no URL, made of the lines `readAnswer` reads, as
+    /// git's cache daemon reads a client's request.
+    pub fn forRequest(gpa: Allocator) Session {
+        return .{ .gpa = gpa, .url = .{ .scheme = .local, .path = "", .raw = "" }, .origin = .request };
     }
 
     /// Forget the credential, clearing its bytes, and release everything.
@@ -344,6 +359,7 @@ pub const Session = struct {
                     s.username_from_url = true;
                 }
             },
+            .request => {},
         }
         if (s.username != null and s.password != null) s.source = .url;
     }
@@ -443,7 +459,7 @@ pub const Session = struct {
                 try s.noteAsked(helper, .failed);
                 return error.ProgramsNotGranted;
             };
-            const outcome = try s.runHelper(arena_state.allocator(), io, programs, helper, .get);
+            const outcome = try s.runHelper(arena_state.allocator(), io, programs, opts.cache_daemon, helper, .get);
             s.dropExpired(opts.now);
             const answer: auth.Failure.Answer = if (s.quit) .quit else if (s.hasCredential()) .credential else if (outcome.any) .partial else if (outcome.failed) .failed else .nothing;
             try s.noteAsked(helper, answer);
@@ -528,7 +544,7 @@ pub const Session = struct {
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         for (settings.helpers) |helper| {
-            _ = try s.runHelper(arena_state.allocator(), io, programs, helper, operation);
+            _ = try s.runHelper(arena_state.allocator(), io, programs, opts.cache_daemon, helper, operation);
         }
     }
 
@@ -735,11 +751,15 @@ pub const Session = struct {
         arena: Allocator,
         io: Io,
         programs: program.Programs,
+        cache_daemon: ?cache.Starter,
         helper: []const u8,
         operation: Operation,
     ) ErrorNamespace.Error!Outcome {
         if (helper[0] != '!' and !std.Io.Dir.path.isAbsolute(helper)) {
-            if (try nativeHelper(arena, helper, programs.environ)) |native| return s.runNative(arena, io, native, operation);
+            if (try nativeHelper(arena, helper, programs.environ)) |native| switch (native) {
+                .cache => |c| return s.runCache(arena, io, programs.environ, cache_daemon, c, operation),
+                else => return s.runNative(arena, io, native, operation),
+            };
         }
         const command = if (helper[0] == '!')
             try arena.print("{s} {t}", .{ helper[1..], operation })
@@ -779,6 +799,7 @@ pub const Session = struct {
         const files = switch (native) {
             .usage => return .{ .failed = true, .any = false },
             .store => |files| files,
+            .cache => unreachable,
         };
         var settled = files;
         if (s.settings) |settings| settled.lock_timeout_ms = settings.store_lock_timeout_ms;
@@ -810,6 +831,61 @@ pub const Session = struct {
         const answer = try std.mem.concat(arena, u8, &.{ "username=", entry.username, "\npassword=", entry.password, "\n" });
         defer std.crypto.secureZero(u8, answer);
         return .{ .failed = false, .any = try s.readAnswer(.init(answer)) };
+    }
+
+    /// git's own `credential-cache`, run here rather than as `git
+    /// credential-cache`: the helper's input relayed to the daemon with the
+    /// action and timeout, and what it answers to `get` taken as a
+    /// helper's answer. A `store` that finds no daemon starts one through
+    /// `cache_daemon` and asks again; with none, it fails, as git's does
+    /// when its daemon does not start.
+    fn runCache(
+        s: *Session,
+        arena: Allocator,
+        io: Io,
+        environ: *const std.process.Environ.Map,
+        cache_daemon: ?cache.Starter,
+        helper: CacheHelper,
+        operation: Operation,
+    ) ErrorNamespace.Error!Outcome {
+        const failed: Outcome = .{ .failed = true, .any = false };
+        // git's `do_cache` acts on the first word that is no option.
+        const action = std.meta.stringToEnum(cache.Action, helper.action orelse @tagName(operation)) orelse return .{ .failed = false, .any = false };
+        if (action == .exit) return .{ .failed = false, .any = false };
+        // git's "unable to find a suitable socket path; use --socket".
+        const socket = helper.socket orelse (try cache.defaultSocket(arena, io, environ)) orelse return failed;
+        var input: std.ArrayList(u8) = .empty;
+        defer {
+            std.crypto.secureZero(u8, input.items);
+            input.deinit(s.gpa);
+        }
+        try s.write(s.gpa, &input, if (operation == .get) .helper else .response);
+        const req: cache.Request = .{ .action = action, .timeout = helper.timeout, .input = input.items };
+        const answered = cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err);
+        const got = answered orelse retry: {
+            if (action != .store) return .{ .failed = false, .any = false };
+            const starter = cache_daemon orelse return failed;
+            starter.start(starter.context, io, socket) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.CacheDaemonNotStarted => return failed,
+            };
+            break :retry (cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err)) orelse return failed;
+        };
+        defer {
+            std.crypto.secureZero(u8, got);
+            s.gpa.free(got);
+        }
+        // What the daemon prints is the helper's; only `get` is listened to.
+        if (operation != .get) return .{ .failed = false, .any = false };
+        return .{ .failed = false, .any = try s.readAnswer(.init(got)) };
+    }
+
+    fn cacheFailed(err: cache.Error) ErrorNamespace.Error!Outcome {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            else => .{ .failed = true, .any = false },
+        };
     }
 
     /// A native helper's failure, as a helper's: passed over, but for
@@ -1049,9 +1125,19 @@ const Settings = struct {
 /// read as `sh` would hand them over, or a command line git's would refuse.
 const Native = union(enum) {
     store: store_mod.Files,
+    cache: CacheHelper,
     /// An option `credential-store` does not take: it exits with its usage,
     /// which is a helper failing.
     usage,
+};
+
+/// `credential-cache`'s words: `--timeout`, `--socket`, and the first
+/// word that is no option, which git takes for the action in place of the
+/// one it was run for.
+const CacheHelper = struct {
+    timeout: i32 = cache.default_timeout,
+    socket: ?[]const u8 = null,
+    action: ?[]const u8 = null,
 };
 
 /// `helper` as relic runs it itself, or `null` to run it through the
@@ -1061,6 +1147,7 @@ const Native = union(enum) {
 /// does not run, through the shell.
 fn nativeHelper(arena: Allocator, helper: []const u8, environ: *const std.process.Environ.Map) Allocator.Error!?Native {
     const words = (try shellWords(arena, helper, environ.get("HOME"))) orelse return null;
+    if (words.len != 0 and std.mem.eql(u8, words[0], "cache")) return cacheHelper(words[1..]);
     if (words.len == 0 or !std.mem.eql(u8, words[0], "store")) return null;
     var file: ?[]const u8 = null;
     var i: usize = 1;
@@ -1082,6 +1169,60 @@ fn nativeHelper(arena: Allocator, helper: []const u8, environ: *const std.proces
     // git's "unable to set up default path; use --file".
     if (paths.len == 0) return .usage;
     return .{ .store = .{ .paths = paths } };
+}
+
+/// `credential-cache`'s options as git's `parse_options` reads them:
+/// `--timeout` an integer as `git_parse_int` reads one, `--socket` a path,
+/// each `--name=value` or `--name value`, a name any unambiguous start of
+/// one, `--no-timeout` zero and `--no-socket` the default; `--` ends them.
+/// Anything else is its usage, which is a helper failing.
+fn cacheHelper(words: []const []const u8) Native {
+    var helper: CacheHelper = .{};
+    const names = [_][]const u8{ "timeout", "socket", "no-timeout", "no-socket" };
+    var i: usize = 0;
+    var options = true;
+    while (i < words.len) : (i += 1) {
+        const word = words[i];
+        if (!options or !std.mem.startsWith(u8, word, "-") or word.len == 1) {
+            if (helper.action == null) helper.action = word;
+            continue;
+        }
+        if (std.mem.eql(u8, word, "--")) {
+            options = false;
+            continue;
+        }
+        if (!std.mem.startsWith(u8, word, "--")) return .usage;
+        const body = word[2..];
+        const eq = std.mem.findScalar(u8, body, '=');
+        const given = body[0 .. eq orelse body.len];
+        var found: ?usize = null;
+        for (names, 0..) |name, n| {
+            if (std.mem.eql(u8, name, given)) {
+                found = n;
+                break;
+            }
+            if (given.len != 0 and std.mem.startsWith(u8, name, given)) {
+                if (found != null) return .usage;
+                found = n;
+            }
+        }
+        const which = found orelse return .usage;
+        if (which >= 2) {
+            if (eq != null) return .usage;
+            if (which == 2) helper.timeout = 0 else helper.socket = null;
+            continue;
+        }
+        const value = if (eq) |e| body[e + 1 ..] else blk: {
+            i += 1;
+            if (i >= words.len) return .usage;
+            break :blk words[i];
+        };
+        if (which == 0) {
+            const n = config_mod.parseInteger(value) catch return .usage;
+            helper.timeout = std.math.cast(i32, n) orelse return .usage;
+        } else helper.socket = value;
+    }
+    return .{ .cache = helper };
 }
 
 /// The words `sh -c` would split `text` into, when it needs no more than
