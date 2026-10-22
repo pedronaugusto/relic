@@ -611,7 +611,7 @@ test "credential-cache's daemon lets a credential go when its time is up, and en
     try testing.expectEqual(null, try ask(gpa, socket, .get, 0, held));
 }
 
-test "the cache helper runs in process against git's daemon and relic's, and a store with no daemon starts one only where the caller says how" {
+test "the cache helper runs in process against git's daemon and relic's, and a store with no daemon starts the caller's, else git's as git does" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -627,8 +627,8 @@ test "the cache helper runs in process against git's daemon and relic's, and a s
     defer gpa.free(ours);
     var daemons: cache_daemon.InProcess = .init(gpa, io);
     defer daemons.deinit();
-    // git's daemon, started by git's client.
-    gpa.free(try gitCache(gpa, io, tmp.dir, &env, theirs, &.{"store"}, "protocol=https\nhost=example.com\nusername=seed\npassword=s\n\n"));
+    // git's daemon, started by relic's store with no starter as git's own
+    // client starts it.
     defer gpa.free(gitCache(gpa, io, tmp.dir, &env, theirs, &.{"exit"}, "") catch &.{});
 
     for ([_][]const u8{ theirs, ours }) |socket| {
@@ -639,19 +639,11 @@ test "the cache helper runs in process against git's daemon and relic's, and a s
         const url = try url_mod.Url.parse("https://ada@example.com/r");
         // The password the URL brings is what a store hands on.
         const with_password = try url_mod.Url.parse("https://ada:pw@example.com/r");
-        // Relic's daemon is not there yet: a store starts it only with a
-        // starter.
-        if (socket.ptr == ours.ptr) {
-            var none: credential.Session = .{ .gpa = gpa, .url = with_password };
-            defer none.deinit();
-            _ = try none.fill(io, .{ .config = &config, .programs = .{ .environ = &env } });
-            try none.approve(io, .{ .config = &config, .programs = .{ .environ = &env } });
-            try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, ours, .{}));
-        }
         {
             var session: credential.Session = .{ .gpa = gpa, .url = with_password };
             defer session.deinit();
-            const opts: credential.Options = .{ .config = &config, .programs = .{ .environ = &env }, .cache_daemon = daemons.starter() };
+            var opts: credential.Options = .{ .config = &config, .programs = .{ .environ = &env } };
+            if (socket.ptr == ours.ptr) opts.cache_daemon = daemons.starter();
             _ = try session.fill(io, opts);
             try session.approve(io, opts);
         }

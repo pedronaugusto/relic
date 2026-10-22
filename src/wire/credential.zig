@@ -111,8 +111,9 @@ pub const Options = struct {
     /// checks nothing; relic reads no clock of its own.
     now: ?std.Io.Timestamp = null,
     /// How a daemon starts where the `cache` helper stores a credential
-    /// and finds none listening, as git starts its own. `null`: that store
-    /// is a helper failing, as git's is when its daemon does not start.
+    /// and finds none listening. `null` starts git's, `git
+    /// credential-cache--daemon`, through `programs`, as git does; a caller
+    /// with no git hands relic's own (`credential_cache_daemon.InProcess`).
     cache_daemon: ?cache.Starter = null,
 };
 
@@ -757,7 +758,7 @@ pub const Session = struct {
     ) ErrorNamespace.Error!Outcome {
         if (helper[0] != '!' and !std.Io.Dir.path.isAbsolute(helper)) {
             if (try nativeHelper(arena, helper, programs.environ)) |native| switch (native) {
-                .cache => |c| return s.runCache(arena, io, programs.environ, cache_daemon, c, operation),
+                .cache => |c| return s.runCache(arena, io, programs, cache_daemon, c, operation),
                 else => return s.runNative(arena, io, native, operation),
             };
         }
@@ -837,17 +838,18 @@ pub const Session = struct {
     /// credential-cache`: the helper's input relayed to the daemon with the
     /// action and timeout, and what it answers to `get` taken as a
     /// helper's answer. A `store` that finds no daemon starts one through
-    /// `cache_daemon` and asks again; with none, it fails, as git's does
-    /// when its daemon does not start.
+    /// `cache_daemon`, else git's own, and asks again; one that does not
+    /// start is a helper failing, as git's is.
     fn runCache(
         s: *Session,
         arena: Allocator,
         io: Io,
-        environ: *const std.process.Environ.Map,
+        programs: program.Programs,
         cache_daemon: ?cache.Starter,
         helper: CacheHelper,
         operation: Operation,
     ) ErrorNamespace.Error!Outcome {
+        const environ = programs.environ;
         const failed: Outcome = .{ .failed = true, .any = false };
         // git's `do_cache` acts on the first word that is no option.
         const action = std.meta.stringToEnum(cache.Action, helper.action orelse @tagName(operation)) orelse return .{ .failed = false, .any = false };
@@ -864,11 +866,12 @@ pub const Session = struct {
         const answered = cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err);
         const got = answered orelse retry: {
             if (action != .store) return .{ .failed = false, .any = false };
-            const starter = cache_daemon orelse return failed;
-            starter.start(starter.context, io, socket) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                error.CacheDaemonNotStarted => return failed,
-            };
+            if (cache_daemon) |starter| {
+                starter.start(starter.context, io, socket) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    error.CacheDaemonNotStarted => return failed,
+                };
+            } else if (!try startGitDaemon(s.gpa, io, programs, socket)) return failed;
             break :retry (cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err)) orelse return failed;
         };
         defer {
@@ -878,6 +881,22 @@ pub const Session = struct {
         // What the daemon prints is the helper's; only `get` is listened to.
         if (operation != .get) return .{ .failed = false, .any = false };
         return .{ .failed = false, .any = try s.readAnswer(.init(got)) };
+    }
+
+    /// git's `spawn_daemon`: `git credential-cache--daemon <socket>`
+    /// started, and whether it said `ok` once it listened. The shell leaves
+    /// it running on its own, as git leaves its daemon behind it.
+    fn startGitDaemon(gpa: Allocator, io: Io, programs: program.Programs, socket: []const u8) ErrorNamespace.Error!bool {
+        var outcome = program.run(gpa, io, programs, .{
+            .argv = &.{ "sh", "-c", "git credential-cache--daemon \"$1\" </dev/null &", "sh", socket },
+            .stderr = .inherit,
+        }, .{ .output = .limited(128) }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return false,
+        };
+        defer outcome.deinit(gpa);
+        return std.mem.eql(u8, outcome.stdout, "ok\n");
     }
 
     fn cacheFailed(err: cache.Error) ErrorNamespace.Error!Outcome {
