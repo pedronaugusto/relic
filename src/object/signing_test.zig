@@ -740,9 +740,11 @@ fn logSignatures(format: signing.Format) !void {
         var first = true;
         while (lines.next()) |text| {
             try pretty_log.writeEntry(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = try Oid.parse(.sha1, text) }, &ours, .{
-                .signer = &signer,
-                .colors = if (in_color) &colors else null,
-            }, .{ .show_signature = true, .expand_tabs = 8, .after_another = !first });
+                .context = .{ .signer = &signer, .colors = if (in_color) &colors else null },
+                .show_signature = true,
+                .expand_tabs = 8,
+                .after_another = !first,
+            });
             first = false;
         }
         testing.expectEqualStrings(theirs, ours.items) catch |err| {

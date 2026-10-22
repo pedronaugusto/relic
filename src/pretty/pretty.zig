@@ -470,8 +470,9 @@ pub const Decorations = struct {
         }
     }
 
-    /// git's `format_decorations` for `oid`, in `colors` where there are.
-    pub fn write(d: *const Decorations, a: Allocator, out: *std.ArrayList(u8), oid: Oid, opts: Options, colors: ?*const Colors) Allocator.Error!void {
+    /// git's `format_decorations` for `oid`, in `opts.colors` where there are.
+    pub fn write(d: *const Decorations, a: Allocator, out: *std.ArrayList(u8), oid: Oid, opts: Options) Allocator.Error!void {
+        const colors = opts.colors;
         const first = d.by_object.get(oid) orelse return;
         // HEAD and the branch it is on, where both are here, are one entry
         // where HEAD stands
@@ -532,6 +533,8 @@ pub const Decorations = struct {
         separator: []const u8 = ", ",
         pointer: []const u8 = " -> ",
         tag: []const u8 = "tag: ",
+        /// The colours to write them in, `null` for none.
+        colors: ?*const Colors = null,
     };
 };
 
@@ -718,7 +721,8 @@ fn decorate(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         }
     }
     if (at >= ph.len or ph[at] != ')') return 0;
-    if (st.ctx.decorations) |d| try d.write(st.a, out, st.p.oid, opts, st.autoColors());
+    opts.colors = st.autoColors();
+    if (st.ctx.decorations) |d| try d.write(st.a, out, st.p.oid, opts);
     return at + 1;
 }
 
@@ -929,7 +933,7 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         },
         'm' => return 0,
         'd', 'D' => {
-            if (ctx.decorations) |d| try d.write(a, out, p.oid, if (ph[0] == 'd') .{} else .{ .prefix = "", .suffix = "" }, st.autoColors());
+            if (ctx.decorations) |d| try d.write(a, out, p.oid, if (ph[0] == 'd') .{ .colors = st.autoColors() } else .{ .prefix = "", .suffix = "", .colors = st.autoColors() });
             return 1;
         },
         'N' => {

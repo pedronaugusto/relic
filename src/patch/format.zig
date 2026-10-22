@@ -1490,31 +1490,6 @@ fn rawSubject(msg: []const u8) []const u8 {
 // The diff: stat, summary and patch
 //=========================================================================
 
-const Side = struct {
-    path: []const u8,
-    mode: object.Mode,
-    oid: Oid,
-    bytes: []const u8,
-    binary: bool,
-};
-
-fn loadSide(ctx: *Ctx, e: diff.Entry) Error!Side {
-    var bytes: []const u8 = undefined;
-    if (e.mode == .gitlink) {
-        var hex: [hash.max_hex_len]u8 = undefined;
-        bytes = try ctx.a.print("Subproject commit {s}\n", .{e.oid.hex(&hex)});
-    } else {
-        const found = try ctx.db.read(ctx.io, e.oid);
-        defer ctx.db.allocator().free(found.bytes);
-        bytes = try ctx.a.dupe(u8, found.bytes);
-    }
-    return .{ .path = e.path, .mode = e.mode, .oid = e.oid, .bytes = bytes, .binary = try isBinaryPath(ctx, e, bytes) };
-}
-
-fn isBinaryPath(ctx: *Ctx, e: diff.Entry, bytes: []const u8) Error!bool {
-    return ctx.drivers().isBinary(ctx.a, ctx.io, .{ .path = e.path, .mode = e.mode }, bytes);
-}
-
 fn writeDiff(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change, stat_sep: ?[]const u8) Error!void {
     const a = ctx.a;
     if (ctx.options.stat) {

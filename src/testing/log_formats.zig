@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const Io = std.Io;
-const Allocator = std.mem.Allocator;
 
 const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
@@ -129,12 +128,13 @@ test "a log in each built-in format is git log --pretty's" {
             var note_text: Io.Writer.Allocating = .init(a);
             if (case.notes) try display.format(io, oid, &note_text.writer, .{});
             try log.writeEntry(a, io, .{ .db = repo.objectDatabase(), .oid = oid }, &ours, .{
-                .mailmap = &mailmap,
-                .decorations = if (case.decorate) &decorations else null,
-                .colors = if (case.color) &colors else null,
-                .notes = if (case.notes) note_text.written() else null,
-                .date_mode = try pretty.configuredDateMode(&config),
-            }, .{
+                .context = .{
+                    .mailmap = &mailmap,
+                    .decorations = if (case.decorate) &decorations else null,
+                    .colors = if (case.color) &colors else null,
+                    .notes = if (case.notes) note_text.written() else null,
+                    .date_mode = try pretty.configuredDateMode(&config),
+                },
                 .format = choice.format.builtin,
                 .abbrev_commit = case.abbrev_commit or try log.configuredAbbrevCommit(&config),
                 .expand_tabs = choice.expand_tabs,

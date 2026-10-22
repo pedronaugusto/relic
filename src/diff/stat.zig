@@ -4,8 +4,6 @@
 //! lines `diff_summary` writes for a created, deleted, renamed, copied or
 //! re-moded file.
 
-const Self = @This();
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

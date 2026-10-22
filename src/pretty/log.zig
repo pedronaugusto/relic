@@ -210,6 +210,9 @@ pub const EntryInputs = struct {
 
 /// How an entry is written.
 pub const EntryOptions = struct {
+    /// What the formatting reads besides the commit: the mailmap,
+    /// decorations, notes, signer, colours, date mode and encoding.
+    context: Context = .{},
     format: Builtin = .medium,
     /// `--abbrev-commit`, `log.abbrevCommit`: the `commit` line's name
     /// and `from`'s cut to `Context.abbrev_len` digits, or as many more as
@@ -238,7 +241,8 @@ pub const EntryOptions = struct {
 /// their dates in `Context.date_mode`, the message in
 /// `Context.output_encoding` — and `Context.notes`, which are the notes as
 /// git writes them for such a format (`commit.notes`' `raw = false`).
-pub fn writeEntry(a: Allocator, io: Io, inputs: EntryInputs, out: *std.ArrayList(u8), ctx: Context, options: EntryOptions) Self.Error!void {
+pub fn writeEntry(a: Allocator, io: Io, inputs: EntryInputs, out: *std.ArrayList(u8), options: EntryOptions) Self.Error!void {
+    const ctx = options.context;
     const db = inputs.db;
     const found = try db.read(io, inputs.oid);
     defer db.allocator().free(found.bytes);
@@ -254,7 +258,7 @@ pub fn writeEntry(a: Allocator, io: Io, inputs: EntryInputs, out: *std.ArrayList
     try out.appendSlice(a, try commitName(a, io, db, inputs.oid, ctx, options.abbrev_commit));
     if (options.from) |parent| try out.print(a, " (from {s})", .{try commitName(a, io, db, parent, ctx, options.abbrev_commit)});
     try out.appendSlice(a, reset);
-    if (ctx.decorations) |d| try d.write(a, out, inputs.oid, .{}, ctx.colors);
+    if (ctx.decorations) |d| try d.write(a, out, inputs.oid, .{ .colors = ctx.colors });
     try out.append(a, if (fmt == .oneline) ' ' else '\n');
 
     if (options.show_signature) {
