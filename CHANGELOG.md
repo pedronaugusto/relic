@@ -198,6 +198,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `fast.importer`: a pack of no more objects than `fastimport.unpackLimit` (else `transfer.unpackLimit`, else 100) is written as loose objects and dropped, as git's `end_packfile` unpacks a small one, at the end and at each `checkpoint`. Held to `git count-objects -v` after `git fast-import`.
 ### Changed
 
+- A signature from gpg or ssh-keygen has a CR taken out only where it ends a line, as git 2.56 takes it out, where every CR was.
 - A configuration file's lock is waited for as `core.configLockTimeout` says (git 2.56; a second by default, 0 not at all, a negative value for ever), where a held `config.lock` was refused at once: `config.write.LockOptions.on_contention`, set by `Repository.configLock`.
 - The release tier's Linux ARM suite runs in two shards per mode (`shards.linux_arm`): Debug on the ARM runner took past the job's 45 minutes, its every-crash cases about a quarter of it, twice what the x86_64 runner takes for the same work.
 - The tests' ThreadSanitizer build is preflight's (`-Dci-tsan=true`, `Config.hardened`), where relic had an option of its own (`-Dthread-sanitizer`, gone): one way to build them so, whose bound preflight scales for the detector's slowdown, on Linux and now macOS. preflight 0.15.1, which also scales the bound for a test module built with `sanitize_thread` however it was asked for. The nightly ThreadSanitizer job held the crash tests to the unscaled 120 s.

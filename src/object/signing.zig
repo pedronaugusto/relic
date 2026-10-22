@@ -414,7 +414,7 @@ pub const Signer = struct {
             try signer.diagnostics.appendSlice(signer.gpa, outcome.stderr);
             return error.SigningFailed;
         }
-        return withoutCarriageReturns(signer.gpa, outcome.stdout);
+        return withoutCrBeforeLf(signer.gpa, outcome.stdout);
     }
 
     fn signSsh(signer: *Signer, arena: Allocator, io: Io, payload: []const u8, key: []const u8) ErrorNamespace.Error![]u8 {
@@ -440,7 +440,7 @@ pub const Signer = struct {
             try signer.diagnostics.appendSlice(signer.gpa, outcome.stderr);
             return error.SigningFailed;
         }
-        return withoutCarriageReturns(signer.gpa, outcome.stdout);
+        return withoutCrBeforeLf(signer.gpa, outcome.stdout);
     }
 
     /// The first line `gpg.ssh.defaultKeyCommand` prints, when it is a key.
@@ -902,11 +902,14 @@ fn literalSshKey(text: []const u8) ?[]const u8 {
     return null;
 }
 
-fn withoutCarriageReturns(gpa: Allocator, bytes: []const u8) Allocator.Error![]u8 {
+/// A signature with every CR that ends a line taken out, as git 2.56's
+/// `strip_cr_before_lf` takes them out for a signer run on Windows: a CR
+/// anywhere else is the signature's own.
+fn withoutCrBeforeLf(gpa: Allocator, bytes: []const u8) Allocator.Error![]u8 {
     const out = try gpa.alloc(u8, bytes.len);
     var n: usize = 0;
-    for (bytes) |c| {
-        if (c == '\r') continue;
+    for (bytes, 0..) |c, i| {
+        if (c == '\r' and i + 1 < bytes.len and bytes[i + 1] == '\n') continue;
         out[n] = c;
         n += 1;
     }
@@ -1123,4 +1126,11 @@ fn fuzzSplit(_: void, case: *shakedown.Case) anyerror!void {
     parseGpgStatus(&v);
     v.output = bytes;
     parseSshOutput(&v);
+}
+
+test "a CR is taken out of a signature only where it ends a line" {
+    const gpa = std.testing.allocator;
+    const got = try withoutCrBeforeLf(gpa, "-----BEGIN\r\nbody\rmore\r\n\r\r\nend\r");
+    defer gpa.free(got);
+    try std.testing.expectEqualStrings("-----BEGIN\nbody\rmore\n\r\nend\r", got);
 }
