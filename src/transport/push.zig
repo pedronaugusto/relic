@@ -556,12 +556,14 @@ fn pushTo(
         }, options, results, outcome);
     }
 
-    // What the remote took moves its remote-tracking ref, as git moves it.
-    if (remote.name != null) {
-        for (results) |r| {
-            if (r.status != .ok and r.status != .up_to_date) continue;
-            try updateTracking(gpa, io, repo, remote, r, options.who);
-        }
+    // What the remote took moves its remote-tracking ref, as git moves it:
+    // for a remote given as a URL, the configured remote pushing there.
+    var for_tracking = try remote.forPushTracking(gpa, repo.configuration(), repo.objectFormat());
+    defer if (for_tracking) |*t| t.deinit();
+    const tracking_remote = if (for_tracking) |*t| t else remote;
+    for (results) |r| {
+        if (r.status != .ok and r.status != .up_to_date) continue;
+        try updateTracking(gpa, io, repo, tracking_remote, r, options.who);
     }
     if (options.set_upstream) try setUpstreams(arena, gpa, io, repo, remote.name orelse url, results, outcome);
     try all_results.appendSlice(arena, results);
@@ -1598,6 +1600,32 @@ test "a push leaves the remote and the remote-tracking refs as git push leaves t
     defer simple.deinit();
     try testing.expectEqual(@as(usize, 1), simple.refs.len);
     try testing.expectEqualStrings("refs/heads/main", simple.refs[0].remote_ref);
+}
+
+test "git 2.56, a push to a URL moves the remote-tracking refs of the one configured remote pushing there, as git's push moves them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    var work_git = try twins.root.dir.openDir(io, "work-git", .{});
+    defer work_git.close(io);
+    const git_url = try twins.gitOut(work_git, &.{ "config", "remote.origin.url" });
+    defer gpa.free(git_url);
+    var work_relic = try twins.root.dir.openDir(io, "work-relic", .{ .iterate = true });
+    defer work_relic.close(io);
+    const relic_url = try twins.gitOut(work_relic, &.{ "config", "remote.origin.url" });
+    defer gpa.free(relic_url);
+
+    try twins.git(work_git, &.{ "push", "-q", std.mem.trimEnd(u8, git_url, "\n"), "main", "feature" });
+    var repo = try Repository.open(gpa, io, work_relic, .{});
+    defer repo.deinit(io);
+    var outcome = try push(gpa, io, &repo, std.mem.trimEnd(u8, relic_url, "\n"), .{ .who = test_who, .refspecs = &.{ "main", "feature" }, .programs = .{ .environ = &twins.env } });
+    defer outcome.deinit();
+    try twins.expectSame();
+    const tracked = try twins.gitOut(work_relic, &.{ "for-each-ref", "--format=%(refname)", "refs/remotes/origin/feature" });
+    defer gpa.free(tracked);
+    try testing.expectEqualStrings("refs/remotes/origin/feature\n", tracked);
 }
 
 /// Both working repositories' `branch.*` settings, the same.

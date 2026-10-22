@@ -167,12 +167,7 @@ pub const Remote = struct {
     /// as git's `remote_find_tracking` decides; `null` when none does or a
     /// negative refspec excludes it. The result is the caller's.
     pub fn trackingRef(remote: *const Remote, gpa: Allocator, name: []const u8) Allocator.Error!?[]u8 {
-        if (refspec.excluded(remote.fetch, name)) return null;
-        for (remote.fetch) |spec| {
-            if (spec.negative) continue;
-            if (try spec.mapSource(gpa, name)) |tracking| return tracking;
-        }
-        return null;
+        return refspec.map(gpa, remote.fetch, name);
     }
 
     /// The ref on the remote that `tracking`, a ref here, tracks: git's
@@ -200,6 +195,39 @@ pub const Remote = struct {
             if (try spec.mapDestination(gpa, tracking)) |source| return source;
         }
         return null;
+    }
+
+    /// The remote whose fetch refspecs name the remote-tracking refs a push
+    /// to `remote` moves and its `@{push}`: git 2.56's
+    /// `repo_remote_for_push_tracking`. For a remote given as a URL with
+    /// one push URL, the one configured remote pushing to that URL; `null`
+    /// where `remote` is configured itself, has several push URLs, or no
+    /// configured remote or more than one pushes there, so that `remote`
+    /// stands. The result is the caller's.
+    pub fn forPushTracking(remote: *const Remote, gpa: Allocator, config: *const Config, object_format: hash.Kind) Self.Error!?Remote {
+        if (remote.name != null or remote.push_urls.len != 1) return null;
+        const url = remote.push_urls[0];
+        const all = try names(gpa, config);
+        defer gpa.free(all);
+        var found: ?Remote = null;
+        errdefer if (found) |*f| f.deinit();
+        for (all) |name| {
+            var candidate = try Remote.get(gpa, config, object_format, name);
+            const pushes_there = candidate.name != null and for (candidate.push_urls) |each| {
+                if (std.mem.eql(u8, each, url)) break true;
+            } else false;
+            if (!pushes_there) {
+                candidate.deinit();
+                continue;
+            }
+            if (found) |*first| {
+                candidate.deinit();
+                first.deinit();
+                return null;
+            }
+            found = candidate;
+        }
+        return found;
     }
 
     /// Whether `name` is a remote with a URL in `config`.

@@ -182,6 +182,18 @@ pub const Refspec = struct {
     }
 };
 
+/// Where `specs` map `name`: the first refspec that takes it, unless a
+/// negative one removes it, as git's `apply_refspecs`; `null` for none.
+/// The result is the caller's.
+pub fn map(gpa: Allocator, specs: []const Refspec, name: []const u8) Allocator.Error!?[]u8 {
+    if (excluded(specs, name)) return null;
+    for (specs) |spec| {
+        if (spec.negative) continue;
+        if (try spec.mapSource(gpa, name)) |mapped| return mapped;
+    }
+    return null;
+}
+
 /// Whether any negative refspec in `specs` removes `name`.
 pub fn excluded(specs: []const Refspec, name: []const u8) bool {
     for (specs) |spec| {

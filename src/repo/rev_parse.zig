@@ -38,6 +38,7 @@ const commit_cache = @import("cache.zig");
 const refs_mod = @import("../refs/refs.zig");
 const rev_walk = @import("../walk/walk.zig");
 const remote_mod = @import("../wire.zig").remote;
+const refspec_mod = @import("../wire.zig").refspec;
 const ere = @import("../text.zig").ere;
 const gitdate = @import("../text.zig").date;
 
@@ -410,38 +411,49 @@ const Resolver = struct {
         if (std.mem.eql(u8, remote_name, ".")) return merge;
         var remote = remote_mod.Remote.get(r.gpa, r.src.config, r.src.refs.objectFormat(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
-        for (remote.fetch) |spec| {
-            if (try spec.mapSource(r.a, merge)) |tracking| return tracking;
-        }
-        return error.BadRevision;
+        return (try refspec_mod.map(r.a, remote.fetch, merge)) orelse error.BadRevision;
     }
 
     /// Where `git push` would send `branch`, as the ref that tracks it:
-    /// `push.default` read as git reads it.
+    /// git's `branch_get_push`. The remote is the branch's push remote,
+    /// `remote.pushDefault`, its remote, else `origin`; its push refspecs
+    /// name the destination when it has some, a mirror the branch itself,
+    /// else `push.default` does (`simple` only where that is the upstream).
     fn pushOf(r: *Resolver, branch: []const u8) Error![]const u8 {
-        var b = remote_mod.Branch.get(r.gpa, r.src.config, branch) catch |err| return revisionError(err);
+        const config = r.src.config;
+        var b = remote_mod.Branch.get(r.gpa, config, branch) catch |err| return revisionError(err);
         defer b.deinit();
-        const remote_name = b.push_remote orelse r.src.config.get("remote.pushdefault") orelse b.remote orelse return error.BadRevision;
-        const mode = r.src.config.get("push.default") orelse "simple";
-        if (std.mem.eql(u8, mode, "nothing")) return error.BadRevision;
-        if (std.mem.eql(u8, mode, "upstream") or std.mem.eql(u8, mode, "tracking")) return r.upstreamOf(branch);
-        if (std.mem.eql(u8, mode, "simple") and b.remote != null and std.mem.eql(u8, b.remote.?, remote_name)) {
-            // To the upstream, which must have the branch's own name.
-            const up = try r.upstreamOf(branch);
-            var bb = remote_mod.Branch.get(r.gpa, r.src.config, branch) catch |err| return revisionError(err);
-            defer bb.deinit();
-            const merge = if (bb.merge.len != 0) bb.merge[0] else return error.BadRevision;
-            if (!std.mem.eql(u8, merge["refs/heads/".len..], branch)) return error.BadRevision;
-            return up;
-        }
-        // current, matching, and simple to another remote: the same name.
-        var remote = remote_mod.Remote.get(r.gpa, r.src.config, r.src.refs.objectFormat(), remote_name) catch |err| return revisionError(err);
+        const remote_name = b.push_remote orelse config.get("remote.pushdefault") orelse b.remote orelse "origin";
+        var remote = remote_mod.Remote.get(r.gpa, config, r.src.refs.objectFormat(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
-        const dest = try r.a.print("refs/heads/{s}", .{branch});
-        for (remote.fetch) |spec| {
-            if (try spec.mapSource(r.a, dest)) |tracking| return tracking;
+        const refname = try r.a.print("refs/heads/{s}", .{branch});
+        if (remote.push.len != 0) {
+            const dst = (try refspec_mod.map(r.a, remote.push, refname)) orelse return error.BadRevision;
+            return r.pushTracking(&remote, dst);
         }
+        if (remote.mirror) return r.pushTracking(&remote, refname);
+        const mode = config.get("push.default") orelse "simple";
+        if (std.mem.eql(u8, mode, "matching") or std.mem.eql(u8, mode, "current")) return r.pushTracking(&remote, refname);
+        if (std.mem.eql(u8, mode, "upstream") or std.mem.eql(u8, mode, "tracking")) return r.upstreamOf(branch);
+        if (std.mem.eql(u8, mode, "simple")) {
+            const up = try r.upstreamOf(branch);
+            const current = try r.pushTracking(&remote, refname);
+            // git's "cannot resolve 'simple' push to a single destination".
+            if (!std.mem.eql(u8, up, current)) return error.BadRevision;
+            return current;
+        }
+        // `nothing`, or a value git dies on.
         return error.BadRevision;
+    }
+
+    /// git's `tracking_for_push_dest`: the ref `dst` on `remote` is tracked
+    /// by, through the fetch refspecs of the remote that tracks a push
+    /// there (`Remote.forPushTracking`, for a remote given as a URL).
+    fn pushTracking(r: *Resolver, remote: *const remote_mod.Remote, dst: []const u8) Error![]const u8 {
+        var for_tracking = remote.forPushTracking(r.gpa, r.src.config, r.src.refs.objectFormat()) catch |err| return revisionError(err);
+        defer if (for_tracking) |*t| t.deinit();
+        const tracking = if (for_tracking) |*t| t else remote;
+        return (try refspec_mod.map(r.a, tracking.fetch, dst)) orelse error.BadRevision;
     }
 
     /// `@{-<n>}`: the branch `HEAD`'s reflog says was left n checkouts ago.

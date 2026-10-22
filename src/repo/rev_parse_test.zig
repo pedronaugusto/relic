@@ -100,6 +100,62 @@ test "every expression reads as git rev-parse reads it" {
     }
 }
 
+test "git 2.56, @{push} is what git rev-parse makes of it: push.default, push refspecs, a mirror, and a push remote given as a URL" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    const a = "https://example.invalid/a.git";
+    const b = "https://example.invalid/b.git";
+    const Case = struct { config: []const []const u8 };
+    const cases = [_]Case{
+        .{ .config = &.{} },
+        .{ .config = &.{"remote.pushDefault=other"} },
+        .{ .config = &.{ "remote.pushDefault=other", "push.default=current" } },
+        .{ .config = &.{ "remote.pushDefault=other", "push.default=upstream" } },
+        .{ .config = &.{"push.default=nothing"} },
+        .{ .config = &.{"push.default=matching"} },
+        .{ .config = &.{"push.default=sideways"} },
+        .{ .config = &.{ "remote.pushDefault=other", "remote.other.push=refs/heads/main:refs/heads/feature" } },
+        .{ .config = &.{ "remote.pushDefault=other", "remote.other.push=refs/heads/side:refs/heads/feature" } },
+        .{ .config = &.{ "remote.pushDefault=other", "remote.other.mirror=true" } },
+        // A URL: the one remote pushing there tracks it (git 2.56).
+        .{ .config = &.{ "branch.main.pushRemote=" ++ b, "push.default=current" } },
+        .{ .config = &.{ "branch.main.pushRemote=" ++ a, "push.default=current" } },
+        // Two remotes push there: none does.
+        .{ .config = &.{ "branch.main.pushRemote=" ++ a, "push.default=current", "remote.other.pushurl=" ++ a } },
+        // The remote's push URL is what is matched.
+        .{ .config = &.{ "branch.main.pushRemote=https://example.invalid/c.git", "push.default=current", "remote.other.pushurl=https://example.invalid/c.git" } },
+    };
+    for (cases) |case| {
+        var r = try testgit.Repo.init(gpa, io, &.{});
+        defer r.deinit();
+        for ([_][]const u8{ "one", "two", "three" }) |message| try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", message });
+        try r.exec(io, &.{ "remote", "add", "origin", a });
+        try r.exec(io, &.{ "remote", "add", "other", b });
+        try r.exec(io, &.{ "update-ref", "refs/remotes/origin/main", "HEAD~1" });
+        try r.exec(io, &.{ "update-ref", "refs/remotes/other/main", "HEAD~2" });
+        try r.exec(io, &.{ "update-ref", "refs/remotes/other/feature", "HEAD" });
+        try r.exec(io, &.{ "config", "branch.main.remote", "origin" });
+        try r.exec(io, &.{ "config", "branch.main.merge", "refs/heads/main" });
+        for (case.config) |setting| {
+            const eq = std.mem.findScalar(u8, setting, '=').?;
+            try r.exec(io, &.{ "config", setting[0..eq], setting[eq + 1 ..] });
+        }
+        errdefer std.debug.print("case: {s}\n", .{if (case.config.len == 0) "simple" else case.config[case.config.len - 1]});
+        r.report_failures = false;
+        const theirs: ?[]u8 = r.line(io, &.{ "rev-parse", "--verify", "--quiet", "@{push}" }) catch null;
+        defer if (theirs) |t| gpa.free(t);
+        var repo = try Repository.open(gpa, io, r.dir, .{});
+        defer repo.deinit(io);
+        const ours: ?Oid = rev_parse.resolve(gpa, io, repo.revisionSource(), "@{push}") catch |err| switch (err) {
+            error.BadRevision => null,
+            else => return err,
+        };
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try testing.expectEqualStrings(theirs orelse "(refused)", if (ours) |oid| oid.hex(&hex) else "(refused)");
+    }
+}
+
 test "@{-N} reads the branch a checkout left as a name or an object name, never as an expression" {
     const gpa = testing.allocator;
     const io = testing.io;
