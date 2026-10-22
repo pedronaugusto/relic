@@ -132,6 +132,16 @@ std.debug.assert(std.mem.startsWith(u8, patch.written(), "diff --git a/src/main.
 // rewritten, and untracked and ignored files are left alone.
 const restored = try relic.worktree.checkout(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{ .rules = rules });
 std.debug.assert(restored.written == 1);
+
+// A blob of any length is read as it is stored, as `git cat-file`
+// reads one: `stream` inflates it as it is read, where `read` holds an
+// object whole and refuses one past `max_object_bytes`.
+const blob = try repo.objectDatabase().stream(io, changes.items[0].new.?.oid);
+defer blob.close(io);
+var copy: std.Io.Writer.Allocating = .init(gpa);
+defer copy.deinit();
+_ = try blob.reader().streamRemaining(&copy.writer);
+std.debug.assert(std.mem.eql(u8, copy.written(), "pub fn main() void {\n    work();\n}\n"));
 ```
 <!-- END GENERATED -->
 
