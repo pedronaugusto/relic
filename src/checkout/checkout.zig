@@ -641,7 +641,7 @@ const Walker = struct {
             try w.skipFile(path, err);
             return;
         };
-        const blob = w.store(read) catch |err| switch (err) {
+        const blob = w.store(path, read) catch |err| switch (err) {
             error.CollisionAttack => {
                 try w.skipFile(path, err);
                 return;
@@ -691,10 +691,11 @@ const Walker = struct {
         w.outcome.skipped_errors += 1;
     }
 
-    /// A file's blob as it is stored, and whether git streams it into a
-    /// pack: a regular file past `core.bigFileThreshold` (the database's
-    /// pack settings carry it) that nothing would convert.
-    const Read = struct { bytes: []const u8, streamed: bool = false };
+    /// A file's blob as it is stored, or, where git streams it into a pack
+    /// (a regular file past `core.bigFileThreshold`, which the database's
+    /// pack settings carry, that nothing would convert), the file's length
+    /// to read it in pieces as it is stored.
+    const Read = union(enum) { bytes: []const u8, streamed: u64 };
 
     fn readForAdd(w: *Walker, path: []const u8, found: fs.Entry) Error!Read {
         _ = w.scratch.reset(.retain_capacity);
@@ -709,9 +710,7 @@ const Walker = struct {
         const big = aegis.units.Bytes(u64).fromRaw(found.stat.size).compare(w.db.packOptions().big_file_bytes) == .gt;
         if (w.options.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, .file);
-            if (big and !try w.conv.wouldConvertToGit(path, applied)) {
-                return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 }), .streamed = true };
-            }
+            if (big and !try w.conv.wouldConvertToGit(path, applied)) return .{ .streamed = found.stat.size };
             const converted = try w.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .store });
             if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
                 .false => {},
@@ -720,18 +719,31 @@ const Walker = struct {
             };
             return .{ .bytes = converted.bytes };
         }
-        return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 }), .streamed = big };
+        if (big) return .{ .streamed = found.stat.size };
+        return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 }) };
     }
 
     /// Put a blob where this pass puts them: a streamed one into the pack
     /// for those, unless every blob goes into one.
-    fn store(w: *Walker, read: Read) Error!Oid {
-        const bytes = read.bytes;
+    fn store(w: *Walker, path: []const u8, read: Read) Error!Oid {
+        const bytes = switch (read) {
+            .bytes => |bytes| bytes,
+            .streamed => |size| {
+                const open = w.filling.* orelse blk: {
+                    if (w.streamed.* == null) w.streamed.* = try w.db.beginPack(w.io, streamedPackOptions(w.db));
+                    break :blk w.streamed.*.?;
+                };
+                const file = try w.wt.openFile(w.io, path, .{});
+                defer file.close(w.io);
+                var buffer: [64 * 1024]u8 = undefined;
+                var reader = file.reader(w.io, &buffer);
+                return w.db.writeIntoFrom(w.io, open, &reader.interface, .{ .type = .blob, .size = size }) catch |err| switch (err) {
+                    error.ReadFailed => reader.err.?,
+                    else => |e| e,
+                };
+            },
+        };
         if (w.filling.*) |open| return w.db.writeInto(w.io, open, .blob, bytes);
-        if (read.streamed) {
-            if (w.streamed.* == null) w.streamed.* = try w.db.beginPack(w.io, streamedPackOptions(w.db));
-            return w.db.writeInto(w.io, w.streamed.*.?, .blob, bytes);
-        }
         const written = w.db.stats.loose_written;
         const oid = try w.db.write(w.io, .blob, bytes);
         if (w.db.stats.loose_written != written) w.loose_new += 1;

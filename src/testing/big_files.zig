@@ -248,6 +248,9 @@ fn bigFiles(io: Io, git: *testgit.Repo) !void {
     try git.exec(io, &.{ "config", "core.bigFileThreshold", "100" });
     try git.writeFile(io, ".gitattributes", "conv.txt text\n");
     try git.writeFile(io, "big.bin", repeat("\x00\x01\x02 binary ", 20));
+    // The same big blob twice in one add: written once, the second copy
+    // taken back out of the pack.
+    try git.writeFile(io, "twin.bin", repeat("\x00\x01\x02 binary ", 20));
     try git.writeFile(io, "big.txt", repeat("a line of text\n", 10));
     // A conversion applies: stored as any other, loose.
     try git.writeFile(io, "conv.txt", repeat("a converted line\n", 10));
@@ -255,7 +258,7 @@ fn bigFiles(io: Io, git: *testgit.Repo) !void {
 }
 
 test "git add streams a file past core.bigFileThreshold that nothing converts into a pack, as git's does" {
-    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 55);
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var theirs = try testgit.Repo.init(gpa, io, &.{});
@@ -299,6 +302,47 @@ test "git add streams a file past core.bigFileThreshold that nothing converts in
     const our_index = try ours.run(io, &.{ "ls-files", "-s" });
     defer gpa.free(our_index);
     try std.testing.expectEqualStrings(their_index, our_index);
+}
+
+test "git add holds no more of a file past core.bigFileThreshold than the pieces it reads" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "config", "core.bigFileThreshold", "1024" });
+    const big = try gpa.alloc(u8, 3 * 1024 * 1024);
+    defer gpa.free(big);
+    var x: u64 = 7;
+    for (big) |*b| {
+        x = x *% 6364136223846793005 +% 1442695040888963407;
+        b.* = @truncate(x >> 33);
+    }
+    try git.writeFile(io, "big.bin", big);
+
+    var counting: @import("shakedown").alloc.Counting = .init(gpa);
+    const counted = counting.allocator();
+    var repo = try repo_mod.Repository.open(counted, io, git.dir, .{});
+    defer repo.deinit(io);
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    const rules = try repo.worktreeRules();
+    counting.resetPeak();
+    const before = counting.live_bytes;
+    const outcome = try worktree.addAll(counted, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
+    try std.testing.expect(outcome.streamed_pack != null);
+    std.testing.expect(counting.peak_bytes - before < big.len / 4) catch |err| {
+        std.debug.print("{d} bytes held\n", .{counting.peak_bytes - before});
+        return err;
+    };
+    try index.write(io, repo.gitDirectory(), "index", .{});
+    const listed = try git.line(io, &.{ "ls-files", "-s" });
+    defer gpa.free(listed);
+    const named = try git.line(io, &.{ "hash-object", "big.bin" });
+    defer gpa.free(named);
+    try std.testing.expect(std.mem.find(u8, listed, named) != null);
+    const content = try git.run(io, &.{ "cat-file", "blob", named });
+    defer gpa.free(content);
+    try std.testing.expectEqualSlices(u8, big, content);
 }
 
 /// Text past the threshold whose lines and `$Id`s each conversion meets:

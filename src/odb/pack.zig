@@ -2415,7 +2415,10 @@ pub const Writer = struct {
 
     /// What `addFrom` added: the name it took over the object's bytes, and
     /// where its entry begins.
-    pub const Added = struct { oid: Oid, offset: u64 };
+    /// What `addFrom` added: the object's name and where its entry begins.
+    /// `new` is false where the pack held the object already and the copy
+    /// was taken back: `offset` is then the entry the pack holds.
+    pub const Added = struct { oid: Oid, offset: u64, new: bool = true };
 
     /// What `addFrom` reads, and how it names it.
     pub const From = struct {
@@ -2437,10 +2440,11 @@ pub const Writer = struct {
     /// that fails is `error.ReadFailed`, its own error saying why, and one
     /// that ends before `size` is `error.ShortRead` (a file that changed
     /// while it was read); either leaves the pack to be aborted. An object
-    /// this pack already holds is `error.DuplicateObject`: refused before a
-    /// byte is written when `From.expect` names it, else taken back
-    /// -- but from a pack streamed to a caller, which cannot take bytes
-    /// back and is then to be aborted.
+    /// this pack already holds is `error.DuplicateObject` before a byte is
+    /// written when `From.expect` names it; otherwise it is taken back and
+    /// comes back not `new`, as git's bulk-checkin drops a blob already
+    /// written -- but a pack streamed to a caller cannot take bytes back,
+    /// and it is then `error.DuplicateObject`, the pack to be aborted.
     /// `dropLast` takes the entry back when the caller finds the object
     /// stored elsewhere.
     pub fn addFrom(w: *Writer, io: Io, in: *Io.Reader, options: From) Self.WriteError!Added {
@@ -2479,8 +2483,12 @@ pub const Writer = struct {
         if (hasher.collisionAttack()) return error.CollisionAttack;
         if (options.expect) |expected| if (!expected.eql(oid)) return error.ObjectNameMismatch;
         if (w.seen.contains(oid)) {
-            if (!w.streaming) try w.dropLast(io);
-            return error.DuplicateObject;
+            if (w.streaming) return error.DuplicateObject;
+            try w.dropLast(io);
+            const held = for (w.entries.items) |entry| {
+                if (entry.oid.eql(oid)) break entry.offset;
+            } else unreachable; // unreachable: `seen` holds what `entries` does
+            return .{ .oid = oid, .offset = held, .new = false };
         }
         _ = try w.endEntry(oid, at);
         return .{ .oid = oid, .offset = at };

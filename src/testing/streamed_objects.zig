@@ -223,9 +223,13 @@ test "a pack writer adds an object from a reader, named as it is deflated, takes
     in = .fixed(second);
     const kept = try w.addFrom(io, &in, .{ .type = .blob, .size = second.len, .expect = hash.Hasher.object(.sha1, "blob", second) });
     try std.testing.expectEqual(dropped.offset, kept.offset);
-    // The same object again is refused and taken back.
+    // The same object again is taken back, named; named beforehand, it is
+    // refused before a byte is written.
     in = .fixed(second);
-    try std.testing.expectError(error.DuplicateObject, w.addFrom(io, &in, .{ .type = .blob, .size = second.len }));
+    const again = try w.addFrom(io, &in, .{ .type = .blob, .size = second.len });
+    try std.testing.expect(!again.new and again.oid.eql(kept.oid) and again.offset == kept.offset);
+    in = .fixed(second);
+    try std.testing.expectError(error.DuplicateObject, w.addFrom(io, &in, .{ .type = .blob, .size = second.len, .expect = kept.oid }));
     var short: Io.Reader = .fixed(second[0..100]);
     const report = try w.finish(io);
     try std.testing.expectEqual(@as(u32, 1), report.objects);

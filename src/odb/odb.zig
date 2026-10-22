@@ -3811,6 +3811,31 @@ pub const Odb = struct {
         return oid;
     }
 
+    /// `writeInto` of an object read from `in`, `from.size` bytes, never
+    /// held: hashed into its name and deflated into the pack as it is read,
+    /// as git's bulk-checkin writes a large blob (`index_blob_bulk_checkin`),
+    /// and taken back out of the pack where it or the database holds the
+    /// object already (git's `already_written`). `from.hash` is this
+    /// database's. A reader that fails is `error.ReadFailed`, its own error
+    /// saying why, and one that ends early `error.ShortRead`: either leaves
+    /// the pack to be aborted.
+    pub fn writeIntoFrom(odb: *Odb, io: Io, filling: OpenPack, in: *Io.Reader, from: pack.Writer.From) ErrorNamespace.Error!Oid {
+        var options = from;
+        options.hash = odb.hashOptions();
+        const added = try filling.writer.addFrom(io, in, options);
+        if (!added.new) {
+            odb.stats.loose_present += 1;
+            return added.oid;
+        }
+        if (try odb.onDisk(io, added.oid)) {
+            try filling.writer.dropLast(io);
+            odb.stats.loose_present += 1;
+            return added.oid;
+        }
+        odb.stats.packed_written += 1;
+        return added.oid;
+    }
+
     /// Close a pack begun with `beginPack` and make this database able to
     /// read it.
     ///
