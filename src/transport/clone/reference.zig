@@ -11,7 +11,6 @@
 //! checkout, not a shallow or grafted one, since the history it lends
 //! would end early.
 
-const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");

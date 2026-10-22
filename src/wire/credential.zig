@@ -19,7 +19,9 @@
 //! `git credential-<name>` — `osxkeychain`, `manager`, `store`, `cache`,
 //! `libsecret` — each run with the operation appended through a shell,
 //! exactly as git runs one. It reads `key=value` lines and answers with
-//! them. The `credential.*` settings are read once for a credential, when it
+//! them. `store`, git's own, relic runs itself (`credential/store.zig`),
+//! when its words are ones the shell would hand over as written, so no git
+//! need be there for it. The `credential.*` settings are read once for a credential, when it
 //! is first filled, stored or erased: every `credential.<url>.*` whose URL
 //! matches by git's urlmatch, all of them in order, and for a pattern git
 //! cannot normalize — `credential.github.com` — the parts it has compared
@@ -33,7 +35,10 @@ const std = @import("std");
 const aegis = @import("aegis");
 const SecretBytes = aegis.SecretBytes;
 const decimal = @import("../text.zig").decimal;
-const percent = @import("../text.zig").percent;
+const parts_mod = @import("credential/parts.zig");
+const UrlParts = parts_mod.UrlParts;
+const UrlError = parts_mod.UrlError;
+const store_mod = @import("credential/store.zig");
 const urlmatch = @import("../text.zig").urlmatch;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -580,6 +585,8 @@ pub const Session = struct {
                 if (entry.subsection.len != 0 and !try s.patternMatches(arena, entry.subsection, normalized)) continue;
                 try settings.take(s, entry.name, entry.value);
             }
+            const timeout = c.getInt("credentialstore.locktimeoutms", 1000) catch return error.InvalidCredentialSetting;
+            settings.store_lock_timeout_ms = std.math.cast(u32, timeout) orelse 0;
         }
         s.settings = settings;
         if (!settings.use_http_path and s.protocol != null and isHttp(s.protocol.?)) {
@@ -731,6 +738,9 @@ pub const Session = struct {
         helper: []const u8,
         operation: Operation,
     ) ErrorNamespace.Error!Outcome {
+        if (helper[0] != '!' and !std.Io.Dir.path.isAbsolute(helper)) {
+            if (try nativeHelper(arena, helper, programs.environ)) |native| return s.runNative(arena, io, native, operation);
+        }
         const command = if (helper[0] == '!')
             try arena.print("{s} {t}", .{ helper[1..], operation })
         else if (std.Io.Dir.path.isAbsolute(helper))
@@ -760,6 +770,56 @@ pub const Session = struct {
         if (operation != .get) return .{ .failed = !outcome.succeeded(), .any = false };
         const any = try s.readAnswer(.init(outcome.stdout));
         return .{ .failed = !outcome.succeeded(), .any = any };
+    }
+
+    /// git's own `credential-store`, run here rather than as `git
+    /// credential-store`: what it answers to `get` taken as a helper's
+    /// answer; a failure, as a helper's, passed over.
+    fn runNative(s: *Session, arena: Allocator, io: Io, native: Native, operation: Operation) ErrorNamespace.Error!Outcome {
+        const files = switch (native) {
+            .usage => return .{ .failed = true, .any = false },
+            .store => |files| files,
+        };
+        var settled = files;
+        if (s.settings) |settings| settled.lock_timeout_ms = settings.store_lock_timeout_ms;
+        const c: store_mod.Credential = .{
+            .protocol = s.protocol,
+            .host = s.host,
+            .path = s.path,
+            .username = s.username,
+            .password = if (s.password) |*p| p.expose() else null,
+        };
+        const found: ?store_mod.Found = switch (operation) {
+            .get => store_mod.get(s.gpa, io, settled, c) catch |err| return nativeFailed(err),
+            .store => blk: {
+                store_mod.store(s.gpa, io, settled, c) catch |err| return nativeFailed(err);
+                break :blk null;
+            },
+            .erase => blk: {
+                store_mod.erase(s.gpa, io, settled, c) catch |err| return nativeFailed(err);
+                break :blk null;
+            },
+        };
+        const entry = found orelse return .{ .failed = false, .any = false };
+        defer {
+            s.gpa.free(entry.username);
+            std.crypto.secureZero(u8, entry.password);
+            s.gpa.free(entry.password);
+        }
+        // What git's `credential-store` prints, read as any helper's answer.
+        const answer = try std.mem.concat(arena, u8, &.{ "username=", entry.username, "\npassword=", entry.password, "\n" });
+        defer std.crypto.secureZero(u8, answer);
+        return .{ .failed = false, .any = try s.readAnswer(.init(answer)) };
+    }
+
+    /// A native helper's failure, as a helper's: passed over, but for
+    /// memory and cancellation.
+    fn nativeFailed(err: store_mod.Error) ErrorNamespace.Error!Outcome {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            else => .{ .failed = true, .any = false },
+        };
     }
 
     /// Take a helper's answer to `get`, as git's `credential_read` does:
@@ -942,6 +1002,9 @@ fn interactive(config: ?*const config_mod.Config) bool {
 /// The `credential.*` settings a credential has once it is configured.
 const Settings = struct {
     helpers: [][]u8 = &.{},
+    /// `credentialStore.lockTimeoutMS`: how long the native store waits
+    /// for its file's lock.
+    store_lock_timeout_ms: u32 = 1000,
     use_http_path: bool = false,
     /// `credential.protectProtocol`: a carriage return is refused too.
     protect_protocol: bool = true,
@@ -982,106 +1045,87 @@ const Settings = struct {
     }
 };
 
+/// A helper relic runs itself: git's `credential-store`, its arguments
+/// read as `sh` would hand them over, or a command line git's would refuse.
+const Native = union(enum) {
+    store: store_mod.Files,
+    /// An option `credential-store` does not take: it exits with its usage,
+    /// which is a helper failing.
+    usage,
+};
+
+/// `helper` as relic runs it itself, or `null` to run it through the
+/// shell as git does: a helper named `store` whose words are ones `sh`
+/// hands over as written -- a quote around a word, a `~` or `~/` before
+/// one -- and anything else, any word `sh` would expand or a name relic
+/// does not run, through the shell.
+fn nativeHelper(arena: Allocator, helper: []const u8, environ: *const std.process.Environ.Map) Allocator.Error!?Native {
+    const words = (try shellWords(arena, helper, environ.get("HOME"))) orelse return null;
+    if (words.len == 0 or !std.mem.eql(u8, words[0], "store")) return null;
+    var file: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < words.len) : (i += 1) {
+        const word = words[i];
+        if (std.mem.startsWith(u8, word, "--file=")) {
+            file = word["--file=".len..];
+        } else if (std.mem.eql(u8, word, "--file") and i + 1 < words.len) {
+            i += 1;
+            file = words[i];
+        } else return .usage;
+    }
+    if (file) |path| {
+        const paths = try arena.alloc([]const u8, 1);
+        paths[0] = path;
+        return .{ .store = .{ .paths = paths } };
+    }
+    const paths = try store_mod.defaultFiles(arena, environ);
+    // git's "unable to set up default path; use --file".
+    if (paths.len == 0) return .usage;
+    return .{ .store = .{ .paths = paths } };
+}
+
+/// The words `sh -c` would split `text` into, when it needs no more than
+/// splitting at blanks, single and double quotes holding no `$`, `` ` ``
+/// or `\`, and a `~` or `~/` starting a word (`home`'s); `null` for
+/// anything else, which only a shell can read.
+fn shellWords(arena: Allocator, text: []const u8, home: ?[]const u8) Allocator.Error!?[]const []const u8 {
+    var words: std.ArrayList([]const u8) = .empty;
+    var word: std.ArrayList(u8) = .empty;
+    var in_word = false;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == ' ' or c == '\t' or c == '\n') {
+            if (in_word) try words.append(arena, try word.toOwnedSlice(arena));
+            in_word = false;
+            continue;
+        }
+        if (!in_word and c == '~') {
+            const next = if (i + 1 < text.len) text[i + 1] else ' ';
+            if (next != '/' and next != ' ' and next != '\t' and next != '\n') return null;
+            try word.appendSlice(arena, home orelse return null);
+            in_word = true;
+            continue;
+        }
+        in_word = true;
+        if (c == '\'' or c == '"') {
+            const end = std.mem.findScalarPos(u8, text, i + 1, c) orelse return null;
+            const quoted = text[i + 1 .. end];
+            if (c == '"' and std.mem.findAny(u8, quoted, "$`\\") != null) return null;
+            try word.appendSlice(arena, quoted);
+            i = end;
+            continue;
+        }
+        if (std.mem.findScalar(u8, "$`\\|&;<>()*?[]{}!#", c) != null) return null;
+        try word.append(arena, c);
+    }
+    if (in_word) try words.append(arena, try word.toOwnedSlice(arena));
+    return words.items;
+}
+
 fn settingBool(value: []const u8) error{InvalidCredentialSetting}!bool {
     return config_mod.parseBool(value) catch error.InvalidCredentialSetting;
 }
-
-const UrlError = error{
-    /// Not a URL with a scheme, where the whole of one is wanted.
-    NoScheme,
-    CredentialValueUnsafe,
-};
-
-/// What git's `credential_from_url_1` reads from a URL: every part decoded,
-/// the host with its port and brackets as written, the path without the
-/// slashes at either end. Read in part, as a `credential.<url>` pattern is,
-/// a part the text does not have is left out.
-const UrlParts = struct {
-    protocol: ?[]u8 = null,
-    host: ?[]u8 = null,
-    path: ?[]u8 = null,
-    username: ?[]u8 = null,
-    /// Decoded straight into its owner, so no copy of it is freed unwiped.
-    password: ?SecretBytes = null,
-    /// A username that is not empty: git's `username_from_proto`.
-    username_from_url: bool = false,
-
-    fn deinit(p: *UrlParts, gpa: Allocator) void {
-        inline for (.{ "protocol", "host", "path", "username" }) |name| {
-            if (@field(p, name)) |v| gpa.free(v);
-        }
-        if (p.password) |*secret| secret.deinit();
-        p.* = undefined;
-    }
-
-    fn read(gpa: Allocator, url: []const u8, partial: bool) (UrlError || Allocator.Error)!UrlParts {
-        // The text is a C string to git: it ends at a NUL.
-        const text = url[0 .. std.mem.findScalar(u8, url, 0) orelse url.len];
-        const proto_end = std.mem.find(u8, text, "://");
-        if (!partial and (proto_end == null or proto_end.? == 0)) return error.NoScheme;
-        var p: UrlParts = .{};
-        errdefer p.deinit(gpa);
-        const cp = if (proto_end) |e| e + 3 else 0;
-        const after = text[cp..];
-        const slash = cp + (std.mem.findAny(u8, after, "/?#") orelse after.len);
-        const at = std.mem.findScalar(u8, after, '@');
-        const colon = std.mem.findScalar(u8, after, ':');
-        var host_start = cp;
-        if (at) |a_rel| {
-            const a = cp + a_rel;
-            if (a < slash) {
-                const user_end = if (colon) |c_rel| (if (cp + c_rel < a) cp + c_rel else a) else a;
-                p.username = try percent.decode(gpa, text[cp..user_end], .literal);
-                p.username_from_url = p.username.?.len != 0;
-                if (user_end != a) p.password = try decodeSecret(gpa, text[user_end + 1 .. a]);
-                host_start = a + 1;
-            }
-        }
-        if (proto_end) |e| if (e > 0) {
-            p.protocol = try gpa.dupe(u8, text[0..e]);
-        };
-        if (!partial or slash > host_start) p.host = try percent.decode(gpa, text[host_start..slash], .literal);
-        var path_start = slash;
-        while (path_start < text.len and text[path_start] == '/') path_start += 1;
-        if (path_start < text.len) {
-            const decoded = try percent.decode(gpa, text[path_start..], .literal);
-            var end = decoded.len;
-            while (end > 1 and decoded[end - 1] == '/') end -= 1;
-            p.path = try gpa.realloc(decoded, end);
-        }
-        inline for (.{ "username", "protocol", "host", "path" }) |name| {
-            if (@field(p, name)) |v| if (std.mem.findScalar(u8, v, '\n') != null) return error.CredentialValueUnsafe;
-        }
-        if (p.password) |*secret| if (std.mem.findScalar(u8, secret.expose(), '\n') != null) return error.CredentialValueUnsafe;
-        return p;
-    }
-
-    /// `percent.decode` into a secret's owner: `decode` shrinks its
-    /// allocation afterwards, which may move it and free the first copy as
-    /// it was.
-    fn decodeSecret(gpa: Allocator, text: []const u8) Allocator.Error!SecretBytes {
-        var secret = try SecretBytes.init(gpa, text.len);
-        errdefer secret.deinit();
-        // unreachable: the owner was made with the text's length.
-        secret.resizeWithinCapacity(text.len) catch unreachable;
-        const len = percent.decodeInto(secret.exposeMut(), text, .literal);
-        // unreachable: a decoded text is no longer than the text.
-        secret.resizeWithinCapacity(len) catch unreachable;
-        return secret;
-    }
-
-    /// git's `credential_match` without the password: every part the
-    /// pattern has is the credential's.
-    fn matches(want: *const UrlParts, have: *const Session) bool {
-        inline for (.{ "protocol", "host", "path", "username" }) |name| {
-            if (@field(want, name)) |w| {
-                const h = @field(have, name) orelse return false;
-                if (!std.mem.eql(u8, w, h)) return false;
-            }
-        }
-        return true;
-    }
-};
 
 /// How a part of a URL is encoded by git's `strbuf_add_percentencode`: a
 /// user (slashes too), a host and port, or a path.

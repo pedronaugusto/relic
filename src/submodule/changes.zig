@@ -12,7 +12,6 @@
 //! there; a path whose stand-in name `.gitmodules` gives to another
 //! submodule is left out with git's warning.
 
-const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");

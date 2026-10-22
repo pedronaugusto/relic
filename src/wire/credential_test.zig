@@ -303,3 +303,167 @@ const Fixture = struct {
         }
     }
 };
+
+const store_mod = @import("credential/store.zig");
+
+test "credential-store run in process keeps the file git's keeps and answers as it does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try testremote.absolutePath(gpa, io, tmp.dir);
+    defer gpa.free(root);
+    const theirs = try gpa.print("{s}/by-git", .{root});
+    defer gpa.free(theirs);
+    const ours = try gpa.print("{s}/by-relic", .{root});
+    defer gpa.free(ours);
+    // What neither touches: a line that is no URL, one with no password,
+    // one ended by a carriage return.
+    const seed = "not a url\nhttps://only@example.com\nhttps://u:p@kept.example.com\r\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "by-git", .data = seed });
+    try tmp.dir.writeFile(io, .{ .sub_path = "by-relic", .data = seed });
+
+    const Step = struct { op: []const u8, c: store_mod.Credential };
+    const steps = [_]Step{
+        .{ .op = "store", .c = .{ .protocol = "https", .host = "example.com", .username = "ada", .password = "p@ss w/rd" } },
+        .{ .op = "store", .c = .{ .protocol = "https", .host = "example.com", .path = "org/repo.git", .username = "bob", .password = "x" } },
+        .{ .op = "store", .c = .{ .protocol = "http", .host = "other.example:8080", .username = "c%d", .password = "q:r" } },
+        .{ .op = "store", .c = .{ .protocol = "https", .host = "example.com", .username = "ada", .password = "new" } },
+        .{ .op = "store", .c = .{ .protocol = "https", .host = "example.com", .username = "nopassword" } },
+        .{ .op = "get", .c = .{ .protocol = "https", .host = "example.com" } },
+        .{ .op = "get", .c = .{ .protocol = "https", .host = "example.com", .path = "org/repo.git", .username = "bob" } },
+        .{ .op = "get", .c = .{ .protocol = "https", .host = "nowhere.example" } },
+        .{ .op = "erase", .c = .{ .protocol = "https", .host = "example.com", .username = "ada", .password = "old" } },
+        .{ .op = "erase", .c = .{ .protocol = "https", .host = "example.com", .username = "ada" } },
+        .{ .op = "erase", .c = .{} },
+        .{ .op = "get", .c = .{ .protocol = "https", .host = "example.com" } },
+    };
+    for (steps) |step| {
+        var input: std.ArrayList(u8) = .empty;
+        defer input.deinit(gpa);
+        inline for (.{ "protocol", "host", "path", "username", "password" }) |name| {
+            if (@field(step.c, name)) |v| try input.print(gpa, "{s}={s}\n", .{ name, v });
+        }
+        try input.append(gpa, '\n');
+        const answer = try testremote.gitInput(gpa, io, tmp.dir, &.{ "credential-store", "--file", theirs, step.op }, input.items);
+        defer gpa.free(answer);
+
+        const files: store_mod.Files = .{ .paths = &.{ours} };
+        var ours_answer: std.ArrayList(u8) = .empty;
+        defer ours_answer.deinit(gpa);
+        if (std.mem.eql(u8, step.op, "get")) {
+            if (try store_mod.get(gpa, io, files, step.c)) |found| {
+                defer gpa.free(found.username);
+                defer gpa.free(found.password);
+                try ours_answer.print(gpa, "username={s}\npassword={s}\n", .{ found.username, found.password });
+            }
+        } else if (std.mem.eql(u8, step.op, "store")) {
+            try store_mod.store(gpa, io, files, step.c);
+        } else {
+            try store_mod.erase(gpa, io, files, step.c);
+        }
+        try testing.expectEqualStrings(answer, ours_answer.items);
+        const file_theirs = try tmp.dir.readFileAlloc(io, "by-git", gpa, .unlimited);
+        defer gpa.free(file_theirs);
+        const file_ours = try tmp.dir.readFileAlloc(io, "by-relic", gpa, .unlimited);
+        defer gpa.free(file_ours);
+        try testing.expectEqualStrings(file_theirs, file_ours);
+    }
+    if (builtin.target.os.tag != .windows) {
+        const st = try tmp.dir.statFile(io, "by-relic", .{});
+        try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.permissions.toMode() & 0o777)));
+    }
+}
+
+test "credential-store's default files are git's: ~/.git-credentials first, else the XDG one when only it is there" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    for ([_]bool{ false, true }) |xdg_there| {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try testremote.absolutePath(gpa, io, tmp.dir);
+        defer gpa.free(root);
+        for ([_][]const u8{ "git-home", "relic-home" }) |home| {
+            try tmp.dir.createDirPath(io, home);
+            if (xdg_there) {
+                const dir = try gpa.print("{s}/.config/git", .{home});
+                defer gpa.free(dir);
+                try tmp.dir.createDirPath(io, dir);
+                const file = try gpa.print("{s}/credentials", .{dir});
+                defer gpa.free(file);
+                try tmp.dir.writeFile(io, .{ .sub_path = file, .data = "" });
+            }
+        }
+        var env = try testremote.environ(gpa);
+        defer env.deinit();
+        const git_home = try gpa.print("{s}/git-home", .{root});
+        defer gpa.free(git_home);
+        try env.put("HOME", git_home);
+        _ = env.swapRemove("XDG_CONFIG_HOME");
+        const out = try testremote.gitInputEnv(gpa, io, tmp.dir, &env, &.{ "credential-store", "store" }, "protocol=https\nhost=h.example\nusername=u\npassword=p\n\n", true);
+        gpa.free(out);
+
+        var relic_env: std.process.Environ.Map = .init(gpa);
+        defer relic_env.deinit();
+        const relic_home = try gpa.print("{s}/relic-home", .{root});
+        defer gpa.free(relic_home);
+        try relic_env.put("HOME", relic_home);
+        var arena_state: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_state.deinit();
+        const paths = try store_mod.defaultFiles(arena_state.allocator(), &relic_env);
+        try store_mod.store(gpa, io, .{ .paths = paths }, .{ .protocol = "https", .host = "h.example", .username = "u", .password = "p" });
+        for ([_][]const u8{ ".git-credentials", ".config/git/credentials" }) |name| {
+            var contents: [2][]u8 = undefined;
+            for ([_][]const u8{ "git-home", "relic-home" }, &contents) |home, *c| {
+                const path = try gpa.print("{s}/{s}", .{ home, name });
+                defer gpa.free(path);
+                c.* = tmp.dir.readFileAlloc(io, path, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
+            }
+            defer for (contents) |c| gpa.free(c);
+            try testing.expectEqualStrings(contents[0], contents[1]);
+        }
+    }
+}
+
+test "a store helper with words a shell hands over as written runs in process: quoted --file, ~/, and git's own file left for git" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const home = try testremote.absolutePath(gpa, io, tmp.dir);
+    defer gpa.free(home);
+    try tmp.dir.writeFile(io, .{ .sub_path = "my creds", .data = "https://ada:one@example.com\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".git-credentials", .data = "https://bob:two@example.com\n" });
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("HOME", home);
+    const Case = struct { helper: []const u8, username: []const u8 };
+    const cases = [_]Case{
+        .{ .helper = "store --file '~/my creds'", .username = "" },
+        .{ .helper = "store --file ~/'my creds'", .username = "ada" },
+        // `\"` in the configuration, so the shell sees the quotes.
+        .{ .helper = "store --file=\\\"MY\\\"", .username = "ada" },
+        .{ .helper = "store", .username = "bob" },
+    };
+    const mine = try gpa.print("{s}/my creds", .{home});
+    defer gpa.free(mine);
+    for (cases) |case| {
+        const helper = try std.mem.replaceOwned(u8, gpa, case.helper, "MY", mine);
+        defer gpa.free(helper);
+        const text = try gpa.print("[credential]\n\thelper = {s}\n", .{helper});
+        defer gpa.free(text);
+        var config = try config_mod.Config.parseText(gpa, text, .global);
+        defer config.deinit();
+        var session: credential.Session = .{ .gpa = gpa, .url = try url_mod.Url.parse("https://example.com/r") };
+        defer session.deinit();
+        // A quoted `~` is no home: that file is not there, and nothing is
+        // left but a prompt there is none of.
+        const filled = session.fill(io, .{ .config = &config, .programs = .{ .environ = &env } });
+        if (case.username.len == 0) {
+            try testing.expectError(error.CredentialsUnavailable, filled);
+            continue;
+        }
+        try testing.expect(try filled);
+        try testing.expectEqualStrings(case.username, session.username.?);
+    }
+}
