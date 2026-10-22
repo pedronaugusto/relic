@@ -443,7 +443,7 @@ fn pruneFixture(git: *testgit.Repo, now: i64) !void {
     const day = std.time.s_per_day;
     for ([_]struct { []const u8, i64 }{ .{ "old", now - 10 * day }, .{ "recent", now - day } }) |aged| {
         var path: [64]u8 = undefined;
-        try git.dir.setTimestamps(io_test, try std.mem.print(&path, ".git/worktrees/{s}/index", .{aged[0]}), .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, aged[1]) * std.time.ns_per_s) } });
+        try fs_mod.setTimestamps(io_test, git.dir, try std.mem.print(&path, ".git/worktrees/{s}/index", .{aged[0]}), .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, aged[1]) * std.time.ns_per_s) } });
     }
     try git.writeFile(io_test, ".git/worktrees/a-file", "");
     try git.dir.createDirPath(io_test, ".git/worktrees/no-gitdir");

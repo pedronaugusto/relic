@@ -1519,7 +1519,7 @@ pub const Odb = struct {
         file.close(io);
         failed = false;
         // The time before the name, as git's `write_loose_object` sets it.
-        if (time) |seconds| source.dir.setTimestamps(io, temp, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, seconds) * std.time.ns_per_s) } }) catch |err| {
+        if (time) |seconds| fs.setTimestamps(io, source.dir, temp, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, seconds) * std.time.ns_per_s) } }) catch |err| {
             // glint-ignore: Z026 -- the error is the one to report; a temporary object left behind is what `git gc` prunes
             source.dir.deleteFile(io, temp) catch {};
             return err;

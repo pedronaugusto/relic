@@ -5,6 +5,7 @@ const std = @import("std");
 const date = @import("../text.zig").date;
 const Io = std.Io;
 const testgit = @import("../testing/git.zig");
+const fs = @import("../fs/fs.zig");
 const prune_mod = @import("prune.zig");
 const repo_mod = @import("../repo/repo.zig");
 const io = std.testing.io;
@@ -48,7 +49,7 @@ fn ageLoose(repo: *testgit.Repo, secs: i64) !void {
 }
 
 fn setTime(dir: Io.Dir, name: []const u8, secs: i64) !void {
-    try dir.setTimestamps(io, name, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s) } });
+    try fs.setTimestamps(io, dir, name, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s) } });
 }
 
 fn touchObject(repo: *testgit.Repo, hex: []const u8, secs: i64) !void {

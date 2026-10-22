@@ -9,6 +9,7 @@
 const std = @import("std");
 const Io = std.Io;
 const testgit = @import("../testing/git.zig");
+const fs = @import("../fs/fs.zig");
 const repack_mod = @import("repack.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pack_mod = @import("../odb/pack.zig");
@@ -35,7 +36,7 @@ pub fn commitAt(repo: *testgit.Repo, secs: i64, message: []const u8) !void {
 }
 
 fn setTime(dir: Io.Dir, name: []const u8, secs: i64) !void {
-    try dir.setTimestamps(io, name, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s) } });
+    try fs.setTimestamps(io, dir, name, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s) } });
 }
 
 /// Every loose file's time, and every pack file's, set to `secs`.

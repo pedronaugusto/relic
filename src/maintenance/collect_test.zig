@@ -212,7 +212,7 @@ fn leftovers(repo: *testgit.Repo, now: i64) !void {
         try repo.exec(io, &.{ "worktree", "add", "-q", "--detach", tree });
         try repo.dir.deleteTree(io, tree);
     }
-    try repo.dir.setTimestamps(io, ".git/worktrees/gone-long/index", .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, now - 120 * day) * std.time.ns_per_s) } });
+    try fs.setTimestamps(io, repo.dir, ".git/worktrees/gone-long/index", .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, now - 120 * day) * std.time.ns_per_s) } });
     var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     var it = pack_dir.iterate();
@@ -270,7 +270,7 @@ fn writePid(repo: *testgit.Repo, pid: u64, host: []const u8, age: i64) !void {
     var text: [fs.max_host_name + 32]u8 = undefined;
     try repo.writeFile(io, ".git/gc.pid", try std.mem.print(&text, "{d} {s}", .{ pid, host }));
     const when = Io.Clock.real.now(io).toSeconds() - age;
-    try repo.dir.setTimestamps(io, ".git/gc.pid", .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, when) * std.time.ns_per_s) } });
+    try fs.setTimestamps(io, repo.dir, ".git/gc.pid", .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, when) * std.time.ns_per_s) } });
 }
 
 test "gc.pid stops a gc while its holder runs, as git's: here or on another host, within twelve hours, --force aside" {
@@ -358,7 +358,7 @@ test "a detached gc stops at a recent gc.log and records its warning there, and 
     // A log older than `gc.logExpiry` is let be, and this run's warning
     // replaces it: the unreachable loose objects in `objects/17` are new.
     const old = Io.Clock.real.now(io).toSeconds() - 2 * day;
-    try git.dir.setTimestamps(io, ".git/gc.log", .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, old) * std.time.ns_per_s) } });
+    try fs.setTimestamps(io, git.dir, ".git/gc.log", .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, old) * std.time.ns_per_s) } });
     const report = try collect.collect(gpa, io, &native, detached);
     try std.testing.expectEqual(collect.Outcome.ran, report.outcome);
     try std.testing.expect(report.too_many_loose);
