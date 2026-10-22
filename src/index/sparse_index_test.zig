@@ -352,13 +352,23 @@ test "a file changed behind its old modification time is seen through its status
     try git.exec(io, &.{ "add", "f" });
     try git.exec(io, &.{ "commit", "-q", "-m", "one" });
     const before = try git.dir.statFile(io, "f", .{});
+    // The entry's status-change time two seconds before the file's, as if
+    // added that long ago: the file's moves by more than a second for a
+    // git that keeps no nanoseconds, with no wait on the clock.
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        var index = try repo.openIndex(io);
+        defer index.deinit();
+        const entry = index.find("f").?;
+        entry.stat.ctime_sec -= 2;
+        try index.write(io, repo.gitDirectory(), "index", .{});
+    }
     // The index is written well after the file, so the entry is not racy.
     const later: Io.Timestamp = .{ .nanoseconds = before.mtime.nanoseconds + 10 * std.time.ns_per_s };
     try fs.setTimestamps(io, git.dir, ".git/index", .{ .modify_timestamp = .{ .new = later }, .access_timestamp = .{ .new = later } });
     // Same size, and the modification time put back: only the
-    // status-change time moved, by more than a second for a git that keeps
-    // no nanoseconds.
-    try io.sleep(.fromMilliseconds(1100), .awake);
+    // status-change time moved.
     try git.writeFile(io, "f", "bbbb\n");
     try fs.setTimestamps(io, git.dir, "f", .{ .modify_timestamp = .{ .new = before.mtime }, .access_timestamp = .{ .new = before.mtime } });
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});

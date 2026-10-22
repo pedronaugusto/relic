@@ -1,4 +1,5 @@
 const std = @import("std");
+const shakedown = @import("shakedown");
 const hash_mod = @import("../../hash/hash.zig");
 const reftablestack_mod = @import("stack.zig");
 const Allocator = std.mem.Allocator;
@@ -557,21 +558,25 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
         defer repo.deinit(io);
         try std.testing.expect(repo.refStore().reftableOptions().lock == .fail);
     }
-    var repo = try openWithTimeout(gpa, io, tmp.dir, "10000");
-    defer repo.deinit(io);
+    // The writer's waits are on a clock the test moves.
+    var clock = shakedown.Clock.init(io, .{});
+    const clock_io = clock.io();
+    var repo = try openWithTimeout(gpa, clock_io, tmp.dir, "10000");
+    defer repo.deinit(clock_io);
     try std.testing.expectEqual(@as(i64, 10000), repo.refStore().reftableOptions().lock.wait.toMilliseconds());
 
     // Held, then let go while the writer is waiting on it: the writer gets
     // the lock and commits rather than giving up.
     const blocker = try tmp.dir.createFile(io, ".git/reftable/tables.list.lock", .{ .exclusive = true });
     blocker.close(io);
-    var pending = io.concurrent(createMain, .{ io, &repo }) catch {
+    var pending = clock_io.concurrent(createMain, .{ clock_io, &repo }) catch {
         try tmp.dir.deleteFile(io, ".git/reftable/tables.list.lock");
         return error.SkipZigTest;
     };
-    try io.sleep(.fromMilliseconds(150), .awake);
+    try clock.awaitArmed(1, .none);
     try tmp.dir.deleteFile(io, ".git/reftable/tables.list.lock");
-    try pending.await(io);
+    _ = clock.advanceToNext();
+    try pending.await(clock_io);
     try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/main") != null);
 }
 
