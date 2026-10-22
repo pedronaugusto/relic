@@ -316,9 +316,16 @@ fn unsetEnvVarsOf(gpa: Allocator, config: *const config_mod.Config) Allocator.Er
     if (builtin.target.os.tag != .windows) return &.{};
     const value = config.get("core.unsetenvvars") orelse "PERL5LIB";
     var names: std.ArrayList([]u8) = .empty;
-    errdefer freeNames(gpa, names.items);
+    errdefer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
+    }
     var parts = std.mem.splitScalar(u8, value, ',');
-    while (parts.next()) |name| if (name.len != 0) try names.append(gpa, try gpa.dupe(u8, name));
+    while (parts.next()) |name| {
+        if (name.len == 0) continue;
+        try names.ensureUnusedCapacity(gpa, 1);
+        names.appendAssumeCapacity(try gpa.dupe(u8, name));
+    }
     return names.toOwnedSlice(gpa);
 }
 

@@ -1608,8 +1608,10 @@ pub fn parseBoolOrInt(raw: ?[]const u8) Self.ValueError!BoolOrInt {
     return .{ .integer = std.math.cast(i32, n) orelse return error.NotAnInteger };
 }
 
-/// git's `interpolate_path`: `~` alone or before a `/` is `home`, `~user`
-/// is that user's home directory, and anything else is the path as it is.
+/// git's `interpolate_path`: `~` alone or before a `/` is `home` (on
+/// Windows with its backslashes turned to `/`, as Git for Windows'
+/// `convert_slashes` turns them), `~user` is that user's home directory, and
+/// anything else is the path as it is.
 /// No home, no such user, and git's own `%(prefix)/` are
 /// `error.UnexpandablePath`, as git gives up on them. The result is the
 /// caller's.
@@ -1620,7 +1622,9 @@ pub fn interpolatePath(gpa: Allocator, path: []const u8, home: ?[]const u8) Path
     const user = path[1..slash];
     const dir = if (user.len == 0) home orelse return error.UnexpandablePath else try userHome(gpa, user);
     defer if (user.len != 0) gpa.free(dir);
-    return gpa.print("{s}{s}", .{ dir, path[slash..] });
+    const out = try gpa.print("{s}{s}", .{ dir, path[slash..] });
+    if (builtin.target.os.tag == .windows and user.len == 0) std.mem.replaceScalar(u8, out[0..dir.len], '\\', '/');
+    return out;
 }
 
 /// git's `git_config_pathname`, the one reading of a path setting: a bare

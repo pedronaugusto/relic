@@ -77,7 +77,10 @@ pub fn migrate(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         for (moved.items) |n| gpa.free(n);
         moved.deinit(gpa);
     }
-    while (try it.next(io)) |entry| try moved.append(gpa, try gpa.dupe(u8, entry.name));
+    while (try it.next(io)) |entry| {
+        try moved.ensureUnusedCapacity(gpa, 1);
+        moved.appendAssumeCapacity(try gpa.dupe(u8, entry.name));
+    }
     for (moved.items) |entry| {
         var from_buf: [64]u8 = undefined;
         const from = std.mem.print(&from_buf, "{s}/{s}", .{ dir_name, entry }) catch return error.NameTooLong;

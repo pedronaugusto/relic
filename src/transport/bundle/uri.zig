@@ -30,6 +30,7 @@
 //! with more than one bundle that works, another may be the one taken.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -133,8 +134,10 @@ pub const List = struct {
     /// `text`, a list in git's config format read from `uri`. Any key
     /// `update` refuses, or a bundle without a `uri`, refuses it all.
     pub fn parseConfig(list: *List, uri: []const u8, text: []const u8) (Allocator.Error || error{InvalidBundleList})!void {
-        // `strbuf_strip_file_from_path`: up to the last `/`.
-        if (list.base_uri == null) list.base_uri = uri[0..if (std.mem.findScalarLast(u8, uri, '/')) |slash| slash + 1 else 0];
+        // `strbuf_strip_file_from_path`: up to the last directory
+        // separator, which on Windows a `\` is too (`find_last_dir_sep`).
+        const separators = if (builtin.target.os.tag == .windows) "/\\" else "/";
+        if (list.base_uri == null) list.base_uri = uri[0..if (std.mem.findLastAny(u8, uri, separators)) |slash| slash + 1 else 0];
         var config = config_mod.Config.parseText(list.arena, text, .local) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.InvalidBundleList,

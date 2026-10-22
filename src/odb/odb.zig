@@ -3440,9 +3440,11 @@ pub const Odb = struct {
             defer pack_dir.close(io);
             for (source.packs.items) |named| {
                 if (try hasCompanion(io, pack_dir, named.name, ".keep")) {
-                    try kept.append(gpa, try gpa.dupe(u8, named.name));
+                    try kept.ensureUnusedCapacity(gpa, 1);
+                    kept.appendAssumeCapacity(try gpa.dupe(u8, named.name));
                 } else if (try hasCompanion(io, pack_dir, named.name, ".promisor")) {
-                    try promised.append(gpa, try gpa.dupe(u8, named.name));
+                    try promised.ensureUnusedCapacity(gpa, 1);
+                    promised.appendAssumeCapacity(try gpa.dupe(u8, named.name));
                 }
             }
         }
@@ -3666,7 +3668,8 @@ pub const Odb = struct {
             for ([_][]const u8{ ".idx", ".rev", ".pack", ".bitmap", ".keep", ".promisor", ".mtimes" }) |ext| {
                 if (std.mem.endsWith(u8, entry.name, ext)) break;
             } else continue;
-            try names.append(gpa, try gpa.dupe(u8, entry.name));
+            try names.ensureUnusedCapacity(gpa, 1);
+            names.appendAssumeCapacity(try gpa.dupe(u8, entry.name));
         }
         std.mem.sort([]u8, names.items, {}, struct {
             fn less(_: void, a: []u8, b: []u8) bool {
