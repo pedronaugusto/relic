@@ -281,3 +281,84 @@ test "a commit a rebase drops as empty is not rewritten, so its note is not copi
         }
     }.f);
 }
+
+/// `side`: a commit, one to fold into it, one whose change to `f` meets
+/// `main`'s, and one more; `main` changes `f` its own way.
+fn chainScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try commitFile(io, repo, "f", "base\n");
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    try commitFile(io, repo, "a", "first\n");
+    try commitFile(io, repo, "b", "second\n");
+    try commitFile(io, repo, "f", "side's change\n");
+    try commitFile(io, repo, "c", "last\n");
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try commitFile(io, repo, "f", "main's change\n");
+    try repo.exec(io, &.{ "checkout", "-q", "side" });
+}
+
+/// A sheet of `<command> <rev>` lines, each rev made a full name.
+fn chainSheet(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo, lines: []const [2][]const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (lines) |line| {
+        const oid = try history.oidOf(gpa, io, repo, line[1]);
+        var hex: [40]u8 = undefined;
+        try out.print(gpa, "{s} {s}\n", .{ line[0], oid.hex(&hex) });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+const edited_text = "Edited by hand\n\n# a comment the cleanup takes away\nwith a body\n";
+
+const Editor = struct {
+    fn edit(_: *anyopaque, _: rebase.MessageKind, _: []const u8) ?[]const u8 {
+        return edited_text;
+    }
+};
+
+test "a fixup or squash that fails and is skipped leaves the chain as git 2.56's: the message cleaned, in the editor after a squash or a fixup -c" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const chains = [_][]const [2][]const u8{
+        // Skipped at the chain's end, after a fixup, a squash, a fixup -c.
+        &.{ .{ "pick", "side~3" }, .{ "fixup", "side~2" }, .{ "fixup", "side~1" }, .{ "pick", "side" } },
+        &.{ .{ "pick", "side~3" }, .{ "squash", "side~2" }, .{ "fixup", "side~1" }, .{ "pick", "side" } },
+        &.{ .{ "pick", "side~3" }, .{ "fixup -c", "side~2" }, .{ "squash", "side~1" } },
+        // Skipped mid-chain, with a fixup after it.
+        &.{ .{ "pick", "side~3" }, .{ "squash", "side~1" }, .{ "fixup", "side~2" }, .{ "pick", "side" } },
+        // The chain's only one.
+        &.{ .{ "pick", "side~3" }, .{ "fixup", "side~1" }, .{ "pick", "side" } },
+    };
+    for (chains) |chain| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, .files, chainScript);
+        defer pair.deinit();
+        const sheet = try chainSheet(gpa, io, &pair.git, chain);
+        defer gpa.free(sheet);
+        errdefer std.debug.print("sheet:\n{s}", .{sheet});
+        // git's editor writes the same text over whatever it is shown.
+        try pair.git.writeFile(io, ".git/relic-message", edited_text);
+        const editor = try testgit.fixtureCommand(gpa, suite.path(.process_fixture), "copy-file .git/relic-message");
+        defer gpa.free(editor);
+        try pair.env.put("GIT_EDITOR", editor);
+        try history.gitRebaseInteractive(io, &pair.git, sheet, &.{"main"});
+        try history.gitMayFail(io, &pair.git, &.{ "rebase", "--skip" });
+        var unused: u8 = 0;
+        const messages: rebase.Messages = .{ .context = &unused, .editFn = Editor.edit };
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.start(gpa, io, &repo, try history.oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet, .messages = messages });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Stop.conflict, outcome.stopped.?);
+        }
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.skip(gpa, io, &repo, .{ .who = who, .messages = messages });
+            defer outcome.deinit();
+        }
+        try expectSame(&pair, io);
+    }
+}

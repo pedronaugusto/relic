@@ -1834,14 +1834,15 @@ fn pickOne(r: *Run) Error!?Outcome {
         return null;
     }
     if (item.command.isFixup()) {
-        if (picked == .empty) try intendToAmend(r);
         // `error_failed_squash`: the chain's message becomes the one to
         // resolve with.
         const squash_msg = (try r.readState("message-squash")) orelse "";
         try r.state("message", squash_msg);
         try state_file.write(r.io, r.repo.gitDirectory(), "MERGE_MSG", squash_msg);
     }
-    try errorWithPatch(r, commit, false);
+    // A fixup or squash stops to amend `HEAD`, as git 2.56's
+    // `error_failed_squash` does, so a skip can finish the chain.
+    try errorWithPatch(r, commit, item.command.isFixup());
     _ = r.items.orderedRemove(0);
     return finishOutcome(r, .stopped, if (picked == .conflict) .conflict else .empty, commit);
 }
@@ -2159,13 +2160,7 @@ fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Err
         try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
     }
     if (command == .reword) try reword(r, reflog_action);
-    if (final_fixup) {
-        try r.removeState("message-fixup");
-        try r.removeState("message-squash");
-        try r.removeState("current-fixups");
-        r.fixups.clearRetainingCapacity();
-        r.fixup_count = 0;
-    }
+    if (final_fixup) try clearFixupChain(r);
     return .ok;
 }
 
@@ -2288,6 +2283,11 @@ fn isFixupFlag(item: todo.Item) bool {
     return item.command == .fixup and (item.replace_message or item.edit_message);
 }
 
+/// `seen_fixup_edit_msg`: a `fixup -c` in the chain.
+fn seenFixupEdit(r: *Run) bool {
+    return std.mem.startsWith(u8, r.fixups.items, "fixup -c") or std.mem.find(u8, r.fixups.items, "\nfixup -c") != null;
+}
+
 fn seenSquash(r: *Run) bool {
     return std.mem.startsWith(u8, r.fixups.items, "squash") or std.mem.find(u8, r.fixups.items, "\nsquash") != null;
 }
@@ -2357,6 +2357,8 @@ fn updateSquashMessages(r: *Run, item: todo.Item, commit_message: []const u8) Er
     try r.state("message-squash", buf.items);
     if (r.fixups.items.len != 0) try r.fixups.append(arena, '\n');
     try r.fixups.appendSlice(arena, item.command.name());
+    // git 2.56 marks a `fixup -c`, which opens the editor at the chain's end.
+    if (item.command == .fixup and item.edit_message) try r.fixups.appendSlice(arena, " -c");
     try r.fixups.append(arena, ' ');
     try r.fixups.appendSlice(arena, try r.hex(item.commit.?));
     try r.state("current-fixups", r.fixups.items);
@@ -3215,7 +3217,8 @@ fn commitStagedChanges(r: *Run) Error!void {
     const io = r.io;
     const repo = r.repo;
     var locked_index = try repo.lockIndex(io);
-    defer locked_index.deinit(io);
+    var locked = true;
+    defer if (locked) locked_index.deinit(io);
     const index = &locked_index.index;
     for (index.entries.items) |entry| {
         if (entry.stage != 0) {
@@ -3245,14 +3248,20 @@ fn commitStagedChanges(r: *Run) Error!void {
     if (!is_clean and !r.hasState("message")) return error.StagedWithoutMessage;
 
     var amend = false;
+    var final_fixup: ?FinalFixup = null;
     if (try r.readState("amend")) |text| {
         const to_amend = state_file.oidHex(repo.objectFormat(), state_file.oneliner(text)) orelse return error.MalformedState;
         if (!is_clean and !head_oid.eql(to_amend)) return error.DirtyWorktree;
         amend = true;
+        final_fixup = try skippedFixup(r, is_clean, head_oid, to_amend);
     }
     if (is_clean) {
         try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
         try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
+        // `git commit --amend`, which takes the index's lock itself.
+        locked_index.deinit(io);
+        locked = false;
+        if (final_fixup) |final| try amendFinalFixup(r, h, final);
         return;
     }
 
@@ -3311,6 +3320,98 @@ fn commitStagedChanges(r: *Run) Error!void {
     if (hook_env) |e| _ = try commit_hooks.runner.?.postCommit(io, e);
     // An amend is `git commit --amend`'s.
     if (amend) try postRewriteAmend(r, commit_hooks.runner, .{ .old = head_oid, .new = made }, author);
+    // The message is the chain's, cleaned or not: the chain is over.
+    if (r.fixup_count > 0) try clearFixupChain(r);
+}
+
+/// A fixup or squash chain's final commit, made again: whether the editor
+/// opens on its message.
+const FinalFixup = struct { edit: bool };
+
+/// `commit_staged_changes` with nothing staged and an `amend` to make:
+/// a fixup or squash that failed and was skipped is taken out of the
+/// chain's record. Where it was the chain's last and others came before
+/// it, `HEAD` is to be committed again with the chain's message cleaned up,
+/// in the editor where the chain had a `squash` or a `fixup -c` (git
+/// 2.56); where a fixup follows, the squash message starts again from
+/// `HEAD`'s. A chain whose last fixup was finished by hand is cleared.
+fn skippedFixup(r: *Run, is_clean: bool, head_oid: Oid, to_amend: Oid) Error!?FinalFixup {
+    if (!is_clean or r.fixup_count == 0) return null;
+    const fixup_follows = peekCommand(r, 0).isFixup();
+    if (!head_oid.eql(to_amend) or !r.hasState("stopped-sha")) {
+        if (!fixup_follows) try clearFixupChain(r);
+        return null;
+    }
+    r.fixup_count -= 1;
+    // The skipped one's line goes, and the newline before it.
+    var len = r.fixups.items.len;
+    if (len == 0) return error.MalformedState;
+    while (len != 0 and r.fixups.items[len - 1] != '\n') len -= 1;
+    if (len != 0) len -= 1;
+    r.fixups.shrinkRetainingCapacity(len);
+    try r.state("current-fixups", r.fixups.items);
+    if (r.fixup_count > 0 and !fixup_follows) return .{ .edit = seenSquash(r) or seenFixupEdit(r) };
+    if (fixup_follows) {
+        const head_source = try readSource(r, head_oid);
+        try r.state("message-squash", message.fromSubject(head_source.commit.message));
+    }
+    return null;
+}
+
+/// The chain's message files and record, gone.
+fn clearFixupChain(r: *Run) Error!void {
+    try r.removeState("message-fixup");
+    try r.removeState("message-squash");
+    try r.removeState("current-fixups");
+    r.fixups.clearRetainingCapacity();
+    r.fixup_count = 0;
+}
+
+/// git's `git commit -n --amend --cleanup=strip --allow-empty` for a
+/// chain's final commit after a skipped fixup or squash: `HEAD`'s message
+/// cleaned up, through the editor (`-e`) or as it is (`-C HEAD`), its
+/// author kept; then the chain is over.
+fn amendFinalFixup(r: *Run, h: head_mod.Head, final: FinalFixup) Error!void {
+    const io = r.io;
+    const repo = r.repo;
+    const head_oid = h.oid.?;
+    const source = try readSource(r, head_oid);
+    const author = source.commit.author;
+    const commit_hooks = try commit_hooks_mod.Hooks.init(r.arena, io, repo, .{ .runner = r.options.hooks, .verify = false });
+    var hook_env: hooksEnv = null;
+    var shown = source.commit.message;
+    if (commit_hooks.runner) |runner| {
+        var e = try commit_hooks.env(r.arena, author);
+        e.editor = final.edit;
+        hook_env = e;
+        try state_file.write(io, repo.gitDirectory(), "COMMIT_EDITMSG", shown);
+        _ = try runner.prepareCommitMsg(io, e, try commit_hooks.path(r.arena, "COMMIT_EDITMSG"), .{ .source = .commit, .commit = "HEAD" });
+        shown = (try state_file.read(r.arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+    }
+    var text = shown;
+    if (final.edit) if (r.options.messages) |m| {
+        if (m.editFn(m.context, .squash, shown)) |given| text = given;
+    };
+    const cleaned = try message.cleanup(r.arena, text, .strip, r.comment);
+    if (final.edit and cleaned.len == 0) return error.EmptyMessage;
+    const made = try repo.writeCommit(io, .{
+        .tree = try repo.commitTree(io, head_oid),
+        .parents = try parentsOf(r, head_oid),
+        .author = author,
+        .committer = r.options.who,
+        .message = cleaned,
+        .extra = try extraHeadersOf(r, head_oid),
+        .signing = r.options.signing,
+    }, .{ .diagnostic = r.options.diagnostic });
+    const log = try r.reflogMessage("continue", firstLine(cleaned));
+    try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
+    try r.removeState("amend");
+    try repo.refStore().special().delete(io, .merge_head);
+    try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
+    try rerere.afterCommit(r.gpa, io, repo);
+    if (hook_env) |e| _ = try commit_hooks.runner.?.postCommit(io, e);
+    try postRewriteAmend(r, commit_hooks.runner, .{ .old = head_oid, .new = made }, author);
+    try clearFixupChain(r);
 }
 
 const hooksEnv = ?hooks_mod.Runner.CommitEnv;
