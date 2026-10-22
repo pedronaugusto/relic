@@ -234,6 +234,14 @@ pub fn dev(b: *std.Build, tools: type) void {
         "lfs-transfer-server",
         "A git-lfs-transfer server program to prove the pure-ssh client against",
     ) orelse "");
+    // The test of a blob past 4 GiB (designs/relic.md §10) takes minutes
+    // and gigabytes of disk: the nightly's own job runs it, nothing else.
+    const large_objects = b.option(
+        bool,
+        "large-objects",
+        "Run the test of a blob past 4 GiB, which takes minutes and gigabytes of disk",
+    ) orelse false;
+    build_options.addOption(bool, "large_objects", large_objects);
     build_options.addOptionPath("upload_pack_helper_path", upload_pack_helper.getEmittedBin());
     build_options.addOptionPath("receive_pack_helper_path", receive_pack_helper.getEmittedBin());
     build_options.addOptionPath("upload_archive_helper_path", upload_archive_helper.getEmittedBin());
@@ -355,6 +363,10 @@ pub fn dev(b: *std.Build, tools: type) void {
         // The comparisons with git run on the riscv64 machine too, with
         // Alpine's git.
         .vm_packages = &.{"git"},
+        .test_timeout = if (large_objects) .{ .bound = .{
+            .limit = .fromSeconds(40 * 60),
+            .reason = "the blob past 4 GiB goes through relic and git several times over: tens of minutes, within the nightly job's 45",
+        } } else .default,
         .bench = .{
             .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-rows", .source = "bench/rows.zig" } },
             .imports = benchImports,

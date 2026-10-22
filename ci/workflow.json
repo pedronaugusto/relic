@@ -31,6 +31,13 @@
       "tiers": ["release"],
       "timeout": 30,
       "shards": 4
+    },
+    {
+      "name": "Objects past 4 GiB (Linux)",
+      "step": "test",
+      "args": ["-Doptimize=safe", "-Dci-lint=false", "-Dlarge-objects=true", "-Dtest-filter=GiB"],
+      "tiers": ["release"],
+      "timeout": 45
     }
   ]
 }
