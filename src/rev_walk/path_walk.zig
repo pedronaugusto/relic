@@ -37,7 +37,7 @@ const walk_mod = @import("../walk/walk.zig");
 const commit_graph = @import("../odb/commit_graph.zig");
 const patterns = @import("../patterns.zig");
 const filter_spec = @import("../wire.zig").filter_spec;
-const rev_parse = @import("rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 
@@ -216,7 +216,7 @@ pub const PathWalk = struct {
             },
             .sparse_oid => |name| {
                 if (pw.sparse != null) return error.SparseFilterWithPatterns;
-                const oid = rev_parse.resolve(pw.gpa, io, repo, name) catch |err| switch (err) {
+                const oid = rev_parse.resolve(pw.gpa, io, repo.revisionSource(), name) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Canceled => return error.Canceled,
                     else => return error.SparseBlobMissing,

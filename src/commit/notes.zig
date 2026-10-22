@@ -37,7 +37,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const rev_walk = @import("../walk/walk.zig");
 const message = @import("../object/message.zig");
 const diff = @import("../diff/diff.zig");
@@ -202,7 +202,7 @@ pub const Notes = struct {
             return err;
         };
         errdefer t.deinit();
-        const tip = rev_parse.resolve(gpa, io, repo, ref) catch |err| switch (err) {
+        const tip = rev_parse.resolve(gpa, io, repo.revisionSource(), ref) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.BadRevision => return t,
             else => |e| return e,
@@ -1472,7 +1472,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     const local_ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(local_ref);
     // `expand_loose_notes_ref`: a name that resolves stays as it is.
-    const remote_ref = if (rev_parse.resolve(gpa, io, repo, remote_in)) |_| try gpa.dupe(u8, remote_in) else |err| switch (err) {
+    const remote_ref = if (rev_parse.resolve(gpa, io, repo.revisionSource(), remote_in)) |_| try gpa.dupe(u8, remote_in) else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => try expandRef(gpa, remote_in),
     };
@@ -1497,7 +1497,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     defer t.deinit();
 
     const local = try repo.refStore().readOid(gpa, io, local_ref);
-    const remote: ?Oid = rev_parse.resolve(gpa, io, repo, remote_ref) catch |err| switch (err) {
+    const remote: ?Oid = rev_parse.resolve(gpa, io, repo.revisionSource(), remote_ref) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => blk: {
             if (!ref_names.checkFormat(remote_ref, .{})) return error.BadRemoteRef;

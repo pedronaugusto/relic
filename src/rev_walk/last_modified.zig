@@ -27,7 +27,7 @@ const object = @import("../object/object.zig");
 const diff = @import("../diff/diff.zig");
 const pathspec = @import("../patterns.zig").pathspec;
 const commit_graph = @import("../odb/commit_graph.zig");
-const rev_parse = @import("rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const repo_mod = @import("../repo/repo.zig");
 
 const Oid = hash.Oid;
@@ -160,7 +160,7 @@ const LastModified = struct {
     }
 
     fn commitOf(lm: *LastModified, name: []const u8) Error!Oid {
-        return rev_parse.resolve(lm.gpa, lm.io, lm.repo, try lm.a.print("{s}^{{commit}}", .{name}));
+        return rev_parse.resolve(lm.gpa, lm.io, lm.repo.revisionSource(), try lm.a.print("{s}^{{commit}}", .{name}));
     }
 
     fn node(lm: *LastModified, oid: Oid) Error!*Node {

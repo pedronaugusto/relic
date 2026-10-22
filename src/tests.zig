@@ -271,7 +271,7 @@ test {
     _ = @import("rev_walk/bisect.zig");
     _ = @import("rev_walk/describe.zig");
     _ = @import("rev_walk/mailmap.zig");
-    _ = @import("rev_walk/rev_parse.zig");
+    _ = @import("repo/rev_parse_test.zig");
     _ = @import("walk/shallow.zig");
     _ = @import("pretty/shortlog.zig");
     _ = @import("discover/gitlink.zig");

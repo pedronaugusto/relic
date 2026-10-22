@@ -13,6 +13,7 @@
 //! | `repo.safe` | Module within `repo`. |
 //! | `repo.ident` | Module within `repo`. |
 //! | `repo.state` | The state files an operation keeps in the git directory: written, read and removed in one place. |
+//! | `repo.rev_parse` | Module within `repo`. |
 //! | `hash` | Public concern. |
 //! | `hash.sha1` | Module within `hash`. |
 //! | `hash.sha1dc` | Module within `hash`. |
@@ -77,7 +78,6 @@
 //! | `rev_walk.last_modified` | Module within `rev_walk`. |
 //! | `rev_walk.path_walk` | Module within `rev_walk`. |
 //! | `rev_walk.mailmap` | Module within `rev_walk`. |
-//! | `rev_walk.rev_parse` | Module within `rev_walk`. |
 //! | `rev_walk.shallow` | Module within `rev_walk`. |
 //! | `rev_walk.object` | Module within `rev_walk`. |
 //! | `rev_walk.object.walk` | Module within `rev_walk.object`. |

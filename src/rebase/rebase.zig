@@ -68,7 +68,7 @@ const rerere = @import("../merge/rerere.zig");
 const diagnostic = @import("../report.zig").diagnostic;
 const config_mod = @import("../config/config.zig");
 const unicode_width = @import("../text.zig").unicode_width;
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const fork_point = @import("../rev_walk/fork_point.zig");
 const am = @import("../patch/am.zig");
 const format_patch = @import("../patch/format.zig");
@@ -751,7 +751,7 @@ fn leavingFrom(r: *Run, w: *Walker, right: []Oid, fork: Oid) Error![]Oid {
 fn findForkPoint(r: *Run, orig_head: Oid) Error!?Oid {
     if (!r.fork_point) return null;
     const name = r.options.upstream_name orelse return null;
-    const found = (try rev_parse.dwimRef(r.arena, r.io, r.repo, name)) orelse return null;
+    const found = (try rev_parse.dwimRef(r.arena, r.io, r.repo.revisionSource(), name)) orelse return null;
     if (found.count != 1) return null;
     return fork_point.forkPoint(r.gpa, r.io, r.repo, .{ .ref = found.ref, .commit = orig_head });
 }

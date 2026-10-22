@@ -40,7 +40,7 @@ const odb_mod = @import("../odb/odb.zig");
 
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
-const rev_parse = @import("rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -226,7 +226,7 @@ pub const Mailmap = struct {
             blob_name = try gpa.dupe(u8, "HEAD:.mailmap");
         }
         if (blob_name) |name| blob: {
-            const oid = rev_parse.resolve(gpa, io, repo, name) catch |err| switch (err) {
+            const oid = rev_parse.resolve(gpa, io, repo.revisionSource(), name) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => break :blob,
             };

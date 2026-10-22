@@ -31,7 +31,7 @@ const odb_mod = @import("../odb/odb.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
 const protocol = @import("../wire.zig").protocol;
 const object_walk = @import("../walk/object/walk.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const filter_spec = @import("../wire.zig").filter_spec;
 const ignore = @import("../patterns.zig").ignore;
 const rev_walk = @import("../walk/walk.zig");
@@ -1153,7 +1153,7 @@ const Negotiation = struct {
     /// resolves there (`rev_parse.zig`).
     fn resolveBlob(n: *Negotiation, name: []const u8) Error!?Oid {
         const s = n.server;
-        return rev_parse.resolve(s.gpa, s.io, &s.remote.repo, name) catch |err| switch (err) {
+        return rev_parse.resolve(s.gpa, s.io, s.remote.repo.revisionSource(), name) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
             else => null,

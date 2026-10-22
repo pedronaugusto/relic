@@ -30,7 +30,7 @@ const pathspec = @import("../patterns.zig").pathspec;
 const sparse = @import("../patterns.zig").sparse;
 const filter_spec = @import("../wire.zig").filter_spec;
 const path_walk = @import("../rev_walk/path_walk.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const sparse_checkout = @import("../worktree/sparse_checkout.zig");
 const partial = @import("partial.zig");
 
@@ -145,7 +145,7 @@ pub fn backfill(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, optio
 }
 
 fn commitOf(a: Allocator, io: Io, repo: *Repository, name: []const u8) rev_parse.Error!Oid {
-    return rev_parse.resolve(a, io, repo, try a.print("{s}^{{commit}}", .{name}));
+    return rev_parse.resolve(a, io, repo.revisionSource(), try a.print("{s}^{{commit}}", .{name}));
 }
 
 /// One request for the batch; what it brings is then looked at again,

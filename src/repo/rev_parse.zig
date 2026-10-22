@@ -25,14 +25,16 @@ const Self = @This();
 
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
-const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const ref_names = @import("../names.zig").ref;
 const object = @import("../object/object.zig");
-const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
+const odb_mod = @import("../odb/odb.zig");
+const index_mod = @import("../index/index.zig");
+const commit_cache = @import("cache.zig");
 const refs_mod = @import("../refs/refs.zig");
 const rev_walk = @import("../walk/walk.zig");
 const remote_mod = @import("../wire.zig").remote;
@@ -40,7 +42,24 @@ const ere = @import("../text.zig").ere;
 const gitdate = @import("../text.zig").date;
 
 const Oid = hash.Oid;
-const Repository = repo_mod.Repository;
+
+/// A repository's stores, which an expression is read against, as git's
+/// `get_oid_with_context` reads a repository's: `Repository.revisionSource`.
+pub const Source = struct {
+    /// The repository's allocator, which its commit cache and reflogs are
+    /// kept with.
+    gpa: Allocator,
+    config: *const config_mod.Config,
+    odb: *odb_mod.Odb,
+    refs: *refs_mod.Store,
+    commits: *commit_cache.Cache,
+    /// How the repository's index is read, for `:<path>`.
+    index: index_mod.ReadOptions,
+
+    fn commitTree(s: Source, io: Io, commit: Oid) commit_cache.Error!Oid {
+        return (try s.commits.get(s.gpa, io, s.odb, commit, .{})).tree;
+    }
+};
 
 // Failures to obtain the bytes are distinct from an expression naming
 // nothing. These are the resource errors the readers below can return.
@@ -57,9 +76,9 @@ pub const Error = error{
     RelativePathUnsupported,
 } || ere.Error || ResourceError;
 
-/// What `expr` names in `repo`.
-pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8) Self.Error!Oid {
-    return resolveWith(gpa, io, repo, expr, null);
+/// What `expr` names in `source`.
+pub fn resolve(gpa: Allocator, io: Io, source: Source, expr: []const u8) Self.Error!Oid {
+    return resolveWith(gpa, io, source, expr, null);
 }
 
 /// The time a reflog's `@{<date>}` is read against.
@@ -71,9 +90,9 @@ pub const Clock = struct {
     local_offset_minutes: i32 = 0,
 };
 
-/// What `expr` names in `repo`, with `@{<date>}` read against `clock`.
-pub fn resolveAt(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: Clock) Self.Error!Oid {
-    return resolveWith(gpa, io, repo, expr, clock);
+/// What `expr` names in `source`, with `@{<date>}` read against `clock`.
+pub fn resolveAt(gpa: Allocator, io: Io, source: Source, expr: []const u8, clock: Clock) Self.Error!Oid {
+    return resolveWith(gpa, io, source, expr, clock);
 }
 
 /// A short name taken as git takes it for a ref: `repo_dwim_ref`.
@@ -91,10 +110,10 @@ pub const Dwim = struct {
 /// and `<branch>@{push}` put in place (`substitute_branch_name`), then
 /// looked up by `ref_rev_parse_rules`; `null` when no rule names a ref.
 /// What it returns is in `arena`.
-pub fn dwimRef(arena: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!?Dwim {
-    var r: Resolver = .{ .gpa = arena, .a = arena, .io = io, .repo = repo, .clock = null };
+pub fn dwimRef(arena: Allocator, io: Io, source: Source, name: []const u8) Self.Error!?Dwim {
+    var r: Resolver = .{ .gpa = arena, .a = arena, .io = io, .src = source, .clock = null };
     const full = try r.substituteBranch(name);
-    const warn = repo.configuration().getBool("core.warnambiguousrefs", true) catch true;
+    const warn = source.config.getBool("core.warnambiguousrefs", true) catch true;
     var found: ?Dwim = null;
     const rules = ref_names.rev_parse_rules;
     inline for (rules) |rule| {
@@ -106,10 +125,10 @@ pub fn dwimRef(arena: Allocator, io: Io, repo: *Repository, name: []const u8) Se
     return found;
 }
 
-fn resolveWith(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: ?Clock) Error!Oid {
+fn resolveWith(gpa: Allocator, io: Io, source: Source, expr: []const u8, clock: ?Clock) Error!Oid {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    var r: Resolver = .{ .gpa = gpa, .a = arena_state.allocator(), .io = io, .repo = repo, .clock = clock };
+    var r: Resolver = .{ .gpa = gpa, .a = arena_state.allocator(), .io = io, .src = source, .clock = clock };
     return r.withContext(expr);
 }
 
@@ -125,7 +144,7 @@ const Resolver = struct {
     gpa: Allocator,
     a: Allocator,
     io: Io,
-    repo: *Repository,
+    src: Source,
     /// `null` reads the `Io`'s clock when a date needs it, in UTC.
     clock: ?Clock,
 
@@ -181,7 +200,7 @@ const Resolver = struct {
     /// A name with no suffix: `@{...}`, an object name, a ref, a `describe`
     /// name, an abbreviation.
     fn basic(r: *Resolver, name: []const u8) Error!Oid {
-        const kind = r.repo.objectFormat();
+        const kind = r.src.refs.objectFormat();
         if (name.len == kind.hexLen()) {
             if (Oid.parse(kind, name)) |oid| return oid else |_| {}
         }
@@ -209,7 +228,7 @@ const Resolver = struct {
         var lower: [hash.max_hex_len]u8 = undefined;
         if (hex.len > lower.len) return error.BadRevision;
         for (hex, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-        return r.repo.objectDatabase().findPrefix(r.io, lower[0..hex.len]) catch |err| switch (err) {
+        return r.src.odb.findPrefix(r.io, lower[0..hex.len]) catch |err| switch (err) {
             error.AmbiguousPrefix => error.AmbiguousRevision,
             error.ObjectNotFound => error.BadRevision,
             error.OutOfMemory => error.OutOfMemory,
@@ -251,7 +270,7 @@ const Resolver = struct {
         // everything under `refs/`, and another worktree's,
         // `main-worktree/HEAD` and `worktrees/<id>/HEAD`.
         if (!std.mem.startsWith(u8, full, "refs/") and ref_names.parseWorktreeRef(full).owner == .shared) return null;
-        const resolved = r.repo.refStore().resolve(r.gpa, r.io, full) catch |err| {
+        const resolved = r.src.refs.resolve(r.gpa, r.io, full) catch |err| {
             const mapped = revisionError(err);
             if (mapped == error.BadRevision) return null;
             return mapped;
@@ -317,7 +336,7 @@ const Resolver = struct {
             try r.currentBranchRef()
         else
             (try r.dwimName(base)) orelse return error.BadRevision;
-        var log = r.repo.readLog(r.io, full) catch |err| return revisionError(err);
+        var log = r.src.refs.readLog(r.src.gpa, r.io, full) catch |err| return revisionError(err);
         defer log.deinit();
         if (log.entries.len == 0) return error.BadRevision;
         if (at_time) |time| return r.reflogAt(full, log.entries, time);
@@ -357,7 +376,7 @@ const Resolver = struct {
     }
 
     fn currentBranchRef(r: *Resolver) Error![]const u8 {
-        const head = r.repo.refStore().read(r.gpa, r.io, "HEAD") catch |err| return revisionError(err);
+        const head = r.src.refs.read(r.gpa, r.io, "HEAD") catch |err| return revisionError(err);
         const h = head orelse return error.BadRevision;
         return switch (h) {
             .symbolic => |target| {
@@ -383,13 +402,13 @@ const Resolver = struct {
     /// `branch.<b>.merge` through `branch.<b>.remote`'s fetch refspecs: the
     /// ref that tracks it here.
     fn upstreamOf(r: *Resolver, branch: []const u8) Error![]const u8 {
-        var b = remote_mod.Branch.get(r.gpa, r.repo.configuration(), branch) catch |err| return revisionError(err);
+        var b = remote_mod.Branch.get(r.gpa, r.src.config, branch) catch |err| return revisionError(err);
         defer b.deinit();
         const remote_name = b.remote orelse return error.BadRevision;
         if (b.merge.len == 0) return error.BadRevision;
         const merge = try r.a.dupe(u8, b.merge[0]);
         if (std.mem.eql(u8, remote_name, ".")) return merge;
-        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), r.repo.objectFormat(), remote_name) catch |err| return revisionError(err);
+        var remote = remote_mod.Remote.get(r.gpa, r.src.config, r.src.refs.objectFormat(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
         for (remote.fetch) |spec| {
             if (try spec.mapSource(r.a, merge)) |tracking| return tracking;
@@ -400,23 +419,23 @@ const Resolver = struct {
     /// Where `git push` would send `branch`, as the ref that tracks it:
     /// `push.default` read as git reads it.
     fn pushOf(r: *Resolver, branch: []const u8) Error![]const u8 {
-        var b = remote_mod.Branch.get(r.gpa, r.repo.configuration(), branch) catch |err| return revisionError(err);
+        var b = remote_mod.Branch.get(r.gpa, r.src.config, branch) catch |err| return revisionError(err);
         defer b.deinit();
-        const remote_name = b.push_remote orelse r.repo.configuration().get("remote.pushdefault") orelse b.remote orelse return error.BadRevision;
-        const mode = r.repo.configuration().get("push.default") orelse "simple";
+        const remote_name = b.push_remote orelse r.src.config.get("remote.pushdefault") orelse b.remote orelse return error.BadRevision;
+        const mode = r.src.config.get("push.default") orelse "simple";
         if (std.mem.eql(u8, mode, "nothing")) return error.BadRevision;
         if (std.mem.eql(u8, mode, "upstream") or std.mem.eql(u8, mode, "tracking")) return r.upstreamOf(branch);
         if (std.mem.eql(u8, mode, "simple") and b.remote != null and std.mem.eql(u8, b.remote.?, remote_name)) {
             // To the upstream, which must have the branch's own name.
             const up = try r.upstreamOf(branch);
-            var bb = remote_mod.Branch.get(r.gpa, r.repo.configuration(), branch) catch |err| return revisionError(err);
+            var bb = remote_mod.Branch.get(r.gpa, r.src.config, branch) catch |err| return revisionError(err);
             defer bb.deinit();
             const merge = if (bb.merge.len != 0) bb.merge[0] else return error.BadRevision;
             if (!std.mem.eql(u8, merge["refs/heads/".len..], branch)) return error.BadRevision;
             return up;
         }
         // current, matching, and simple to another remote: the same name.
-        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), r.repo.objectFormat(), remote_name) catch |err| return revisionError(err);
+        var remote = remote_mod.Remote.get(r.gpa, r.src.config, r.src.refs.objectFormat(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
         const dest = try r.a.print("refs/heads/{s}", .{branch});
         for (remote.fetch) |spec| {
@@ -432,8 +451,8 @@ const Resolver = struct {
         // left a detached HEAD, or a ref, and is never read as a
         // revision: a log line naming `@{-1}` would otherwise name
         // itself without end. git's `get_oid_basic` reads it so.
-        if (from.len == r.repo.objectFormat().hexLen()) {
-            if (Oid.parse(r.repo.objectFormat(), from)) |oid| return oid else |_| {}
+        if (from.len == r.src.refs.objectFormat().hexLen()) {
+            if (Oid.parse(r.src.refs.objectFormat(), from)) |oid| return oid else |_| {}
         }
         if (try r.refMaybe(try r.a.print("refs/heads/{s}", .{from}))) |oid| return oid;
         return (try r.dwim(from)) orelse error.BadRevision;
@@ -443,7 +462,7 @@ const Resolver = struct {
     /// back moved from, as `HEAD`'s reflog says it, or `null`.
     fn previousName(r: *Resolver, n: u32) Error!?[]const u8 {
         if (n == 0) return null;
-        var log = r.repo.readLog(r.io, "HEAD") catch |err| return revisionError(err);
+        var log = r.src.refs.readLog(r.src.gpa, r.io, "HEAD") catch |err| return revisionError(err);
         defer log.deinit();
         var seen: u32 = 0;
         var i = log.entries.len;
@@ -463,7 +482,7 @@ const Resolver = struct {
     const Want = enum { commit, tree, blob, tag, any };
 
     fn typeOf(r: *Resolver, oid: Oid) Error!object.Type {
-        const header = r.repo.objectDatabase().readHeader(r.io, oid) catch |err| return revisionError(err);
+        const header = r.src.odb.readHeader(r.io, oid) catch |err| return revisionError(err);
         return header.type;
     }
 
@@ -490,19 +509,19 @@ const Resolver = struct {
     }
 
     fn tagTarget(r: *Resolver, oid: Oid) Error!Oid {
-        const found = r.repo.objectDatabase().read(r.io, oid) catch |err| return revisionError(err);
-        defer r.repo.objectDatabase().allocator().free(found.bytes);
-        var tag = object.Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
+        const found = r.src.odb.read(r.io, oid) catch |err| return revisionError(err);
+        defer r.src.odb.allocator().free(found.bytes);
+        var tag = object.Tag.parse(r.gpa, r.src.refs.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer tag.deinit();
         return tag.target;
     }
 
     fn treeOf(r: *Resolver, commit: Oid) Error!Oid {
-        return r.repo.commitTree(r.io, commit) catch |err| revisionError(err);
+        return r.src.commitTree(r.io, commit) catch |err| revisionError(err);
     }
 
     fn parents(r: *Resolver, commit: Oid) Error![]const Oid {
-        const info = r.repo.commitInfo(r.io, commit, r.a) catch |err| return revisionError(err);
+        const info = r.src.commits.get(r.src.gpa, r.io, r.src.odb, commit, .{ .out = r.a }) catch |err| return revisionError(err);
         return info.parents;
     }
 
@@ -562,12 +581,12 @@ const Resolver = struct {
         }
         var pattern = try ere.Pattern.compile(r.gpa, pattern_text);
         defer pattern.deinit();
-        var walk = rev_walk.Walk.init(r.gpa, r.repo.objectDatabase());
+        var walk = rev_walk.Walk.init(r.gpa, r.src.odb);
         defer walk.deinit();
         if (from) |oid| {
             try walk.push(oid);
         } else {
-            var listing = r.repo.refStore().list(r.gpa, r.io, "") catch |err| return revisionError(err);
+            var listing = r.src.refs.list(r.gpa, r.io, "") catch |err| return revisionError(err);
             defer listing.deinit();
             for (listing.entries) |entry| {
                 const oid = (try r.refMaybe(entry.name)) orelse continue;
@@ -579,9 +598,9 @@ const Resolver = struct {
             }
         }
         while (walk.next(r.io) catch |err| return revisionError(err)) |c| {
-            const found = r.repo.objectDatabase().read(r.io, c.oid) catch |err| return revisionError(err);
-            defer r.repo.objectDatabase().allocator().free(found.bytes);
-            var commit = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
+            const found = r.src.odb.read(r.io, c.oid) catch |err| return revisionError(err);
+            defer r.src.odb.allocator().free(found.bytes);
+            var commit = object.Commit.parse(r.gpa, r.src.refs.objectFormat(), found.bytes) catch |err| return revisionError(err);
             defer commit.deinit();
             const hit = try pattern.search(r.gpa, commit.message);
             if (hit != negate) return c.oid;
@@ -594,10 +613,10 @@ const Resolver = struct {
         var current = tree;
         var parts = std.mem.tokenizeScalar(u8, path, '/');
         while (parts.next()) |part| {
-            const found = r.repo.objectDatabase().read(r.io, current) catch |err| return revisionError(err);
-            defer r.repo.objectDatabase().allocator().free(found.bytes);
+            const found = r.src.odb.read(r.io, current) catch |err| return revisionError(err);
+            defer r.src.odb.allocator().free(found.bytes);
             if (found.type != .tree) return error.BadRevision;
-            const entry = (object.Tree.parse(r.repo.objectFormat(), found.bytes).find(part) catch return error.BadRevision) orelse return error.BadRevision;
+            const entry = (object.Tree.parse(r.src.refs.objectFormat(), found.bytes).find(part) catch return error.BadRevision) orelse return error.BadRevision;
             current = entry.oid;
         }
         return current;
@@ -605,7 +624,7 @@ const Resolver = struct {
 
     fn fromIndex(r: *Resolver, stage: u2, path: []const u8) Error!Oid {
         if (std.mem.startsWith(u8, path, "./") or std.mem.startsWith(u8, path, "../")) return error.RelativePathUnsupported;
-        var index = r.repo.openIndex(r.io) catch |err| return revisionError(err);
+        var index = index_mod.Index.read(r.gpa, r.io, r.src.index.git_dir.?, "index", r.src.index) catch |err| return revisionError(err);
         defer index.deinit();
         for (index.entries.items) |entry| {
             if (entry.stage == stage and std.mem.eql(u8, entry.path, path)) return entry.oid;
@@ -613,271 +632,3 @@ const Resolver = struct {
         return error.BadRevision;
     }
 };
-
-const testing = std.testing;
-const testgit = @import("../testing/git.zig");
-
-test "every expression reads as git rev-parse reads it" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var r = try testgit.Repo.init(gpa, io, &.{});
-    defer r.deinit();
-    // Each commit a minute after the last, so the date order has no ties.
-    var clock: u64 = 1_700_000_000;
-    for (0..4) |i| {
-        clock += 60;
-        var date: [32]u8 = undefined;
-        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&date, "{d} +0000", .{clock}));
-        var name: [16]u8 = undefined;
-        const file = try std.mem.print(&name, "f{d}", .{i});
-        try r.writeFile(io, file, file);
-        try r.writeFile(io, "dir/deep", file);
-        try r.exec(io, &.{ "add", "-A" });
-        var msg: [32]u8 = undefined;
-        try r.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "change number {d}", .{i}) });
-    }
-    try r.exec(io, &.{ "tag", "light", "HEAD~2" });
-    try r.exec(io, &.{ "tag", "-a", "-m", "annotated", "v1", "HEAD~1" });
-    clock += 60;
-    var side_date: [32]u8 = undefined;
-    try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&side_date, "{d} +0000", .{clock}));
-    try r.exec(io, &.{ "checkout", "-q", "-b", "side", "HEAD~2" });
-    try r.writeFile(io, "side", "side");
-    try r.exec(io, &.{ "add", "side" });
-    try r.exec(io, &.{ "commit", "-q", "-m", "side work" });
-    try r.exec(io, &.{ "checkout", "-q", "main" });
-    clock += 60;
-    var merge_date: [32]u8 = undefined;
-    try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&merge_date, "{d} +0000", .{clock}));
-    try r.exec(io, &.{ "merge", "-q", "--no-edit", "side" });
-    try r.exec(io, &.{ "checkout", "-q", "side" });
-    try r.exec(io, &.{ "checkout", "-q", "main" });
-    try r.exec(io, &.{ "remote", "add", "origin", "https://example.invalid/r.git" });
-    try r.exec(io, &.{ "update-ref", "refs/remotes/origin/main", "HEAD~1" });
-    try r.exec(io, &.{ "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main" });
-    try r.exec(io, &.{ "config", "branch.main.remote", "origin" });
-    try r.exec(io, &.{ "config", "branch.main.merge", "refs/heads/main" });
-    const short = try r.line(io, &.{ "rev-parse", "--short=7", "HEAD~2" });
-    defer gpa.free(short);
-    const described = try r.line(io, &.{ "describe", "--tags", "--long", "HEAD" });
-    defer gpa.free(described);
-
-    var repo = try Repository.open(gpa, io, r.dir, .{});
-    defer repo.deinit(io);
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const cases = [_][]const u8{
-        "HEAD",                "@",             "main",            "side",            "refs/heads/side",
-        "light",               "v1",            "v1^{}",           "v1^{commit}",     "v1^{tree}",
-        "v1^{tag}",            "HEAD^",         "HEAD^1",          "HEAD^2",          "HEAD^0",
-        "HEAD~",               "HEAD~3",        "HEAD^2~1",        "HEAD^{tree}",     "HEAD:f0",
-        "HEAD:dir",            "HEAD:dir/deep", "HEAD~1:dir/deep", "v1:f1",           ":f0",
-        ":0:dir/deep",         "HEAD@{0}",      "HEAD@{1}",        "main@{1}",        "@{1}",
-        "@{-1}",               "@{-2}",         "@{u}",            "main@{upstream}", "@{push}",
-        "origin/main",         "origin",        ":/number 2",      ":/^side",         ":/!-number",
-        "HEAD^{/number [01]}", short,           described,         "HEAD:",           "light~1",
-    };
-    for (cases) |expr| {
-        const theirs = r.line(io, &.{ "rev-parse", "--verify", "--quiet", expr }) catch |err| {
-            std.debug.print("git refuses {s}: {}\n", .{ expr, err });
-            return err;
-        };
-        defer gpa.free(theirs);
-        const ours = resolve(gpa, io, &repo, expr) catch |err| {
-            std.debug.print("relic refuses {s}: {}\n", .{ expr, err });
-            return err;
-        };
-        var hex: [hash.max_hex_len]u8 = undefined;
-        testing.expectEqualStrings(theirs, ours.hex(&hex)) catch |err| {
-            std.debug.print("for {s}\n", .{expr});
-            return err;
-        };
-    }
-    // What git refuses is refused.
-    for ([_][]const u8{ "nowhere", "HEAD~99", "HEAD^3", "HEAD:missing", "v1^{blob}", ":/no such message" }) |expr| {
-        _ = try arena.alloc(u8, 1);
-        const refused = if (resolve(gpa, io, &repo, expr)) |_| false else |_| true;
-        try testing.expect(refused);
-    }
-}
-
-test "@{-N} reads the branch a checkout left as a name or an object name, never as an expression" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var r = try testgit.Repo.init(gpa, io, &.{});
-    defer r.deinit();
-    try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
-    try r.exec(io, &.{ "branch", "other" });
-    // Left detached, then left a branch: git names an object, then a ref.
-    try r.exec(io, &.{ "checkout", "-q", "--detach" });
-    try r.exec(io, &.{ "checkout", "-q", "other" });
-    try r.exec(io, &.{ "checkout", "-q", "main" });
-    var repo = try Repository.open(gpa, io, r.dir, .{});
-    defer repo.deinit(io);
-    // The count as `strtol` reads it: spaces and a sign before it, zeros.
-    for ([_][]const u8{ "@{-1}", "@{-2}", "@{-3}", "@{-01}", "@{- 2}", "@{-+3}" }) |expr| {
-        const theirs = try r.line(io, &.{ "rev-parse", expr });
-        defer gpa.free(theirs);
-        var hex: [hash.max_hex_len]u8 = undefined;
-        try testing.expectEqualStrings(theirs, (try resolve(gpa, io, &repo, expr)).hex(&hex));
-    }
-
-    // A log line naming `@{-1}` as where it came from is no name at all.
-    const head_text = try r.line(io, &.{ "rev-parse", "HEAD" });
-    defer gpa.free(head_text);
-    const line = try gpa.print("{s} {s} A <a@b> 1 +0000\tcheckout: moving from @{{-1}} to main\n", .{ head_text, head_text });
-    defer gpa.free(line);
-    const log = try r.readFile(io, ".git/logs/HEAD");
-    defer gpa.free(log);
-    const looped = try std.mem.concat(gpa, u8, &.{ log, line });
-    defer gpa.free(looped);
-    try r.writeFile(io, ".git/logs/HEAD", looped);
-    r.report_failures = false;
-    try testing.expectError(error.GitFailed, r.run(io, &.{ "rev-parse", "--verify", "-q", "@{-1}" }));
-    try testing.expectError(error.BadRevision, resolve(gpa, io, &repo, "@{-1}"));
-}
-
-test "a reflog entry chosen by a date is the one git rev-parse chooses" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var r = try testgit.Repo.init(gpa, io, &.{});
-    defer r.deinit();
-    // Two days of history an hour apart, read on the third day at 12:00.
-    const start: i64 = 1_700_000_000;
-    const now = start + 2 * 24 * 60 * 60;
-    var now_text: [32]u8 = undefined;
-    try r.isolated.?.put("GIT_TEST_DATE_NOW", try std.mem.print(&now_text, "{d}", .{now}));
-    try r.isolated.?.put("TZ", "UTC");
-    for (0..6) |i| {
-        var date: [32]u8 = undefined;
-        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&date, "{d} +0000", .{start + @as(i64, @intCast(i)) * 3 * 60 * 60})); // safe: below 6
-        var name: [16]u8 = undefined;
-        const file = try std.mem.print(&name, "f{d}", .{i});
-        try r.writeFile(io, file, file);
-        try r.exec(io, &.{ "add", "-A" });
-        try r.exec(io, &.{ "commit", "-q", "-m", file });
-        if (i == 2) try r.exec(io, &.{ "branch", "side" });
-    }
-
-    var repo = try Repository.open(gpa, io, r.dir, .{});
-    defer repo.deinit(io);
-    var exact: [48]u8 = undefined;
-    var stamp: [48]u8 = undefined;
-    var iso: [48]u8 = undefined;
-    const cases = [_][]const u8{
-        "main@{now}",
-        "main@{yesterday}",
-        "@{2.days.ago}",
-        "HEAD@{1.day.ago}",
-        "main@{40 hours ago}",
-        "main@{1.year.ago}",
-        "side@{1.week.ago}",
-        "side@{now}",
-        try std.mem.print(&exact, "main@{{{d}}}", .{start + 3 * 60 * 60}),
-        try std.mem.print(&stamp, "main@{{{d}}}", .{start + 4 * 60 * 60}),
-        try std.mem.print(&iso, "main@{{2023-11-14 23:30:00 +0000}}", .{}),
-        "main@{last tuesday}",
-    };
-    for (cases) |expr| {
-        const theirs = r.line(io, &.{ "rev-parse", "--verify", "--quiet", expr }) catch |err| {
-            std.debug.print("git refuses {s}: {}\n", .{ expr, err });
-            return err;
-        };
-        defer gpa.free(theirs);
-        const ours = resolveAt(gpa, io, &repo, expr, .{ .now = gitdate.timestamp(now) }) catch |err| {
-            std.debug.print("relic refuses {s}: {}\n", .{ expr, err });
-            return err;
-        };
-        var hex: [hash.max_hex_len]u8 = undefined;
-        testing.expectEqualStrings(theirs, ours.hex(&hex)) catch |err| {
-            std.debug.print("for {s}\n", .{expr});
-            return err;
-        };
-    }
-    // Words that mean nothing are no date, for git and here.
-    r.report_failures = false;
-    try testing.expectError(error.GitFailed, r.run(io, &.{ "rev-parse", "--verify", "--quiet", "main@{whenever}" }));
-    try testing.expectError(error.BadRevision, resolveAt(gpa, io, &repo, "main@{whenever}", .{ .now = gitdate.timestamp(now) }));
-    // Without a clock the `Io`'s is read.
-    _ = try resolve(gpa, io, &repo, "main@{yesterday}");
-}
-
-test "revision parsing preserves allocation resource failures" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
-    defer repo.deinit(io);
-    const commit = try repo.objectDatabase().write(io, .commit, "tree " ++ @as([40]u8, @splat('0')) ++ "\nparent " ++ @as([40]u8, @splat('1')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nsubject\n");
-    var hex: [hash.max_hex_len]u8 = undefined;
-    const text = commit.hex(&hex);
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "refs/heads/main", .data = text });
-    const Check = struct {
-        fn run(allocator: Allocator, repository: *Repository, expr: []const u8, expected: Oid) !void {
-            const got = try resolve(allocator, std.testing.io, repository, expr);
-            try std.testing.expect(got.eql(expected));
-        }
-    };
-    {
-        var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
-        try std.testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{ &repo, "HEAD", commit });
-    }
-    const parent_expr = try gpa.print("{s}^", .{text});
-    defer gpa.free(parent_expr);
-    {
-        var no_resize = shakedown.alloc.NoResize.init(std.testing.allocator);
-        try std.testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{ &repo, parent_expr, try Oid.parse(.sha1, &@as([40]u8, @splat('1'))) });
-    }
-}
-
-test "revision parsing preserves I/O and cancellation resource failures" {
-    const Fault = struct {
-        threadlocal var failure: Io.File.ReadPositionalError = error.InputOutput;
-        fn read(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
-            return failure;
-        }
-    };
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
-    defer repo.deinit(io);
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Fault.read;
-    const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    for ([_]Io.File.ReadPositionalError{ error.InputOutput, error.Canceled }) |failure| {
-        Fault.failure = failure;
-        try std.testing.expectError(failure, resolve(gpa, failing_io, &repo, "HEAD"));
-        try std.testing.expectError(failure, resolve(gpa, failing_io, &repo, "@{0}"));
-    }
-}
-
-test "a walk back from a commit reads each commit once per repository handle" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var r = try testgit.Repo.init(gpa, io, &.{});
-    defer r.deinit();
-    for (0..30) |i| {
-        var name: [16]u8 = undefined;
-        try r.writeFile(io, "f", try std.mem.print(&name, "{d}\n", .{i}));
-        try r.exec(io, &.{ "commit", "-q", "-am", "c", "--allow-empty" });
-        if (i == 0) try r.exec(io, &.{ "add", "f" });
-    }
-    try r.exec(io, &.{ "repack", "-adq" });
-    const expected = try r.line(io, &.{ "rev-parse", "main~25" });
-    defer gpa.free(expected);
-    var repo = try Repository.open(gpa, io, r.dir, .{});
-    defer repo.deinit(io);
-    var hex: [hash.max_hex_len]u8 = undefined;
-    try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~25")).hex(&hex));
-    // Every object here is in the one pack, and every read of one asks it.
-    const before = repo.objectDatabase().stats.pack_scans;
-    try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~25")).hex(&hex));
-    try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~24^")).hex(&hex));
-    // Each expression asks the object it starts from, and `^` the one it
-    // starts from, for its type; no commit is read again.
-    try testing.expect(repo.objectDatabase().stats.pack_scans - before <= 3);
-}

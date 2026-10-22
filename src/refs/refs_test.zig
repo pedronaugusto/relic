@@ -10,7 +10,7 @@ const refs = @import("refs.zig");
 const names = @import("../names.zig").ref;
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const commit_mod = @import("../commit/commit.zig");
 const testgit = @import("../testing/git.zig");
 
@@ -233,7 +233,7 @@ test "another worktree's HEAD and logs are read as git reads them, and a transac
             };
             for (cases) |case| {
                 const theirs = try oidOf(gpa, io, case.git, case.name);
-                const ours = try rev_parse.resolve(gpa, io, case.repo, case.name);
+                const ours = try rev_parse.resolve(gpa, io, case.repo.revisionSource(), case.name);
                 std.testing.expect(ours.eql(theirs)) catch |err| {
                     std.debug.print("{s} differs\n", .{case.name});
                     return err;

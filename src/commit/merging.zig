@@ -34,7 +34,7 @@ const program = @import("../process.zig").program;
 const filter = @import("../checkout/filter.zig");
 const ort = @import("../merge/ort.zig");
 const rerere = @import("../merge/rerere.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("../repo/head.zig");
 const quote = @import("../text.zig").quote;
@@ -1221,7 +1221,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     while (lines.next()) |line| {
         if (line.len == 0 and lines.peek() == null) break;
         const peeled = try arena.print("{s}^{{commit}}", .{line});
-        const parent = rev_parse.resolve(arena, io, repo, peeled) catch |err| switch (err) {
+        const parent = rev_parse.resolve(arena, io, repo.revisionSource(), peeled) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.MalformedRef,

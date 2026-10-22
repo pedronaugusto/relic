@@ -7,6 +7,7 @@ pub const fs = @import("fs.zig").engine;
 pub const safe = @import("repo/safe.zig");
 pub const ident = @import("repo/ident.zig");
 pub const state = @import("repo/state.zig");
+pub const rev_parse = @import("repo/rev_parse.zig");
 pub const Error = @import("repo/repo.zig").Error;
 pub const WriteError = @import("repo/repo.zig").WriteError;
 pub const max_discovery_depth = @import("repo/repo.zig").max_discovery_depth;

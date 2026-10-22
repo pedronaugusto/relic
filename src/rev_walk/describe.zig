@@ -34,7 +34,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const rev_parse = @import("rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const rev_walk = @import("../walk/walk.zig");
 const abbrev_mod = @import("../odb/abbrev.zig");
 const glob_mod = @import("../text.zig").glob;
@@ -490,7 +490,7 @@ pub const Describer = struct {
 /// The description of what `rev` names, as `git describe <rev>` prints it
 /// without its newline. The result is the caller's.
 pub fn describe(gpa: Allocator, io: Io, repo: *Repository, rev: []const u8, options: Options) Self.Error![]u8 {
-    const oid = try rev_parse.resolve(gpa, io, repo, rev);
+    const oid = try rev_parse.resolve(gpa, io, repo.revisionSource(), rev);
     var d = try Describer.init(gpa, io, repo, options);
     defer d.deinit();
     return d.describe(io, oid);

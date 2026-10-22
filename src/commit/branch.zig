@@ -28,7 +28,7 @@ const refs_mod = @import("../refs/refs.zig");
 const config_mod = @import("../config/config.zig");
 const ref_names = @import("../names.zig").ref;
 const remote_mod = @import("../wire.zig").remote;
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -226,13 +226,13 @@ pub const Start = struct { oid: Oid, ref: ?[]const u8 };
 /// is when it is one a branch can track; `explicit`, as `--track`, it must
 /// be one. The ref is `a`'s.
 pub fn resolveStart(a: Allocator, io: Io, repo: *Repository, start: []const u8, explicit: bool) Self.Error!Start {
-    _ = rev_parse.resolve(a, io, repo, start) catch |err| switch (err) {
+    _ = rev_parse.resolve(a, io, repo.revisionSource(), start) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return if (explicit) error.UpstreamNotBranch else error.NotAValidObjectName,
     };
     var real_ref: ?[]const u8 = null;
-    if (try rev_parse.dwimRef(a, io, repo, start)) |found| {
+    if (try rev_parse.dwimRef(a, io, repo.revisionSource(), start)) |found| {
         if (found.count > 1) return error.AmbiguousObjectName;
         real_ref = found.ref;
         // A ref that is neither a branch nor a remote's tracking ref.
@@ -241,7 +241,7 @@ pub fn resolveStart(a: Allocator, io: Io, repo: *Repository, start: []const u8, 
             real_ref = null;
         }
     } else if (explicit) return error.UpstreamNotBranch;
-    const commit = rev_parse.resolve(a, io, repo, try a.print("{s}^{{commit}}", .{start})) catch |err| switch (err) {
+    const commit = rev_parse.resolve(a, io, repo.revisionSource(), try a.print("{s}^{{commit}}", .{start})) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return error.NotAValidBranchPoint,

@@ -32,7 +32,7 @@ const diff = @import("../diff/diff.zig");
 const driver = @import("../diff/driver.zig");
 const patch_id = @import("../diff/patch_id.zig");
 const rev_walk = @import("../walk/walk.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const c_quote = @import("../text.zig").c_quote;
 const mailfmt = @import("../mail/format.zig");
@@ -1007,7 +1007,7 @@ fn emptySeries(gpa: Allocator, arena: *std.heap.ArenaAllocator, directory: []con
 /// own merge base and not be in it. Where it is not found, `strict` is
 /// `error.NoAutoBase` (or the base's own errors) and otherwise none.
 fn autoBase(ctx: *Ctx, list: []const Oid, strict: bool) Error!?Oid {
-    const upstream = rev_parse.resolve(ctx.gpa, ctx.io, ctx.repo, "@{upstream}") catch |err| switch (err) {
+    const upstream = rev_parse.resolve(ctx.gpa, ctx.io, ctx.repo.revisionSource(), "@{upstream}") catch |err| switch (err) {
         error.BadRevision, error.AmbiguousRevision => return if (strict) error.NoAutoBase else null,
         else => |e| return e,
     };

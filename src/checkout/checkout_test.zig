@@ -1732,7 +1732,10 @@ test "attr.tree reads the attributes from a tree in place of the working tree's,
     try git.writeFile(io, "sub/.gitattributes", "");
 
     const paths = [_][]const u8{ "a.txt", "sub/b.txt", "c.bin" };
-    for ([_]?[]const u8{ null, "one", "HEAD", "two-annotated", "refs/tags/one", "nonexistent" }) |tree| {
+    const short = try git.line(io, &.{ "rev-parse", "--short=7", "one" });
+    defer gpa.free(short);
+    const named = [_]?[]const u8{ null, "one", "HEAD", "two-annotated", "refs/tags/one", "nonexistent", "HEAD~1", "main^", "one^{tree}", "two-annotated^{}", "HEAD:sub", "HEAD:a.txt", "main@{1}", ":/one", "HEAD~9", short };
+    for (named) |tree| {
         if (tree) |t| try git.exec(io, &.{ "config", "attr.tree", t });
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
@@ -1767,8 +1770,52 @@ test "attr.tree reads the attributes from a tree in place of the working tree's,
             return err;
         };
     }
-    try git.exec(io, &.{ "config", "attr.tree", "HEAD~1" });
-    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
-    defer repo.deinit(io);
-    try std.testing.expectError(error.UnsupportedAttrTree, repo.loadAttrs(io));
+}
+
+test "attr.tree=HEAD gives a bare repository the attributes of its head, as git documents it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{"--bare"});
+    defer git.deinit();
+    const blob = try git.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "*.txt diff=bare\nsub/* text\n");
+    defer gpa.free(blob);
+    const listing = try gpa.print("100644 blob {s}\t.gitattributes\n", .{std.mem.trimEnd(u8, blob, "\n")});
+    defer gpa.free(listing);
+    const tree = try git.runInput(io, &.{"mktree"}, listing);
+    defer gpa.free(tree);
+    const commit = try git.line(io, &.{ "commit-tree", std.mem.trimEnd(u8, tree, "\n"), "-m", "one" });
+    defer gpa.free(commit);
+    try git.exec(io, &.{ "update-ref", "refs/heads/main", commit });
+
+    const paths = [_][]const u8{ "a.txt", "sub/b" };
+    for ([_]?[]const u8{ null, "HEAD" }) |source| {
+        if (source) |s| try git.exec(io, &.{ "config", "attr.tree", s });
+        const theirs = try git.run(io, &.{ "check-attr", "diff", "text", "--", "a.txt", "sub/b" });
+        defer gpa.free(theirs);
+
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        var attrs = try repo.loadAttrs(io);
+        defer attrs.deinit();
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        var ours: std.ArrayList(u8) = .empty;
+        defer ours.deinit(gpa);
+        for (paths) |path| {
+            const found = try attrs.lookup(arena.allocator(), path, .file);
+            for ([_][]const u8{ "diff", "text" }) |name| {
+                const shown: []const u8 = if (found.get(name)) |state| switch (state) {
+                    .set => "set",
+                    .unset => "unset",
+                    .unspecified => "unspecified",
+                    .value => |v| v,
+                } else "unspecified";
+                try ours.print(gpa, "{s}: {s}: {s}\n", .{ path, name, shown });
+            }
+        }
+        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+            std.debug.print("attr.tree={?s}\n", .{source});
+            return err;
+        };
+    }
 }

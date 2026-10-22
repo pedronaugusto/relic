@@ -15,6 +15,7 @@ const names_path = @import("../names/path.zig");
 const names_ref = @import("../names.zig").ref;
 const discover_directory = @import("../discover/directory.zig");
 const safe = @import("safe.zig");
+const rev_parse = @import("rev_parse.zig");
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -54,10 +55,6 @@ const Oid = hash.Oid;
 
 /// Errors from opening, creating or refreshing a repository and reading its objects.
 pub const Error = error{
-    /// `attr.tree` is a revision expression -- `~`, `^`, `:`, `@{` -- that
-    /// only the revision parser, a layer above, reads; a full object name or
-    /// a ref's name is read here.
-    UnsupportedAttrTree,
     /// No `.git` directory or file at the path or above it.
     NotARepository,
     /// `.git/shallow` holds a line that is not an object name.
@@ -1821,30 +1818,24 @@ pub const Repository = struct {
         return attrs;
     }
 
-    /// `attr.tree`, as git's `compute_default_attr_source` takes it: a full
-    /// object name or a ref's name by `ref_rev_parse_rules`, peeled to a
-    /// tree. `null` where it is unset or names no tree, which git then reads
-    /// as though it were unset.
+    /// `attr.tree`, as git's `compute_default_attr_source` takes it: any
+    /// revision expression (`repo_get_oid_treeish`), `HEAD` in a bare
+    /// repository as git documents it, peeled to a tree as git's
+    /// `get_tree_entry` peels it. `null` where it is unset or names nothing,
+    /// which git then reads as though it were unset; the empty tree where it
+    /// names an object that is no tree-ish, from which git reads nothing.
     pub fn attrTree(repo: *Repository, io: Io) Self.Error!?Oid {
         const name = repo.configuration().get("attr.tree") orelse return null;
-        if (std.mem.findAny(u8, name, "~^:") != null or std.mem.find(u8, name, "@{") != null) return error.UnsupportedAttrTree;
-        const gpa = repo.data().gpa;
-        var oid: ?Oid = null;
-        if (name.len == repo.objectFormat().hexLen()) {
-            if (Oid.parse(repo.objectFormat(), name)) |parsed| {
-                if (try repo.objectDatabase().exists(io, parsed)) oid = parsed;
-            } else |_| {}
-        }
-        if (oid == null) if (try repo.refStore().resolveShort(gpa, io, name)) |found| {
-            gpa.free(found.name);
-            oid = found.oid;
+        const oid = rev_parse.resolve(repo.data().gpa, io, repo.revisionSource(), name) catch |err| return switch (err) {
+            error.BadRevision, error.AmbiguousRevision, error.RelativePathUnsupported, error.InvalidPattern, error.PatternTooComplex => null,
+            else => |e| e,
         };
-        const peeled = try repo.peel(io, oid orelse return null);
+        const peeled = try repo.peel(io, oid);
         const header = try repo.objectDatabase().readHeader(io, peeled);
         return switch (header.type) {
             .tree => peeled,
             .commit => try repo.commitTree(io, peeled),
-            else => null,
+            else => repo.objectFormat().emptyTree(),
         };
     }
 
@@ -2093,10 +2084,27 @@ pub const Repository = struct {
         return .{ .index = index, .lock = lock, .buffer = buffer, .repo = repo };
     }
 
+    /// How this repository's index file is read.
+    fn indexReadOptions(repo: *const Repository) index_mod.ReadOptions {
+        return .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution };
+    }
+
+    /// The stores a revision expression is read against (`rev_parse`).
+    pub fn revisionSource(repo: *Repository) rev_parse.Source {
+        return .{
+            .gpa = repo.data().gpa,
+            .config = repo.configuration(),
+            .odb = repo.objectDatabase(),
+            .refs = repo.refStore(),
+            .commits = &repo.data().commits,
+            .index = repo.indexReadOptions(),
+        };
+    }
+
     /// Read the index, its untracked cache made, kept or dropped as
     /// `core.untrackedCache` says (git's `tweak_untracked_cache`).
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {
-        var index = try index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution });
+        var index = try index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", repo.indexReadOptions());
         errdefer index.deinit();
         try repo.tweakUntrackedCache(&index);
         return index;

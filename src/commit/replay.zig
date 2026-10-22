@@ -27,7 +27,7 @@ const pretty = @import("../pretty/pretty.zig");
 const sequencer = @import("sequencer.zig");
 const ref_names = @import("../names.zig").ref;
 const rev_walk = @import("../walk/walk.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
 const config_mod = @import("../config/config.zig");
@@ -172,7 +172,7 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, options
         .advance => |name| try gpa.print("replay --advance {s}", .{name}),
         .onto => |onto| blk: {
             // The name as given, not peeled: git's `repo_get_oid_committish`.
-            const oid = try rev_parse.resolve(gpa, io, repo, onto.revision);
+            const oid = try rev_parse.resolve(gpa, io, repo.revisionSource(), onto.revision);
             var hex: [hash.max_hex_len]u8 = undefined;
             break :blk try gpa.print("replay --onto {s}", .{oid.hex(&hex)});
         },
@@ -270,7 +270,7 @@ const Run = struct {
         if (inputs.include.len == 0) return error.NoCommitsToReplay;
         var positive: std.StringHashMapUnmanaged(void) = .empty;
         for (inputs.include) |name| {
-            const found = (try rev_parse.dwimRef(r.a, r.io, r.repo, name)) orelse continue;
+            const found = (try rev_parse.dwimRef(r.a, r.io, r.repo.revisionSource(), name)) orelse continue;
             if (found.count == 1) try positive.put(r.a, found.ref, {});
         }
         var setup: Setup = .{ .onto = undefined, .ref_old = undefined, .detached_head = detached };
@@ -281,7 +281,7 @@ const Run = struct {
                 setup.contained = onto.contained;
             },
             .advance, .revert => |name| {
-                const found = (try rev_parse.dwimRef(r.a, r.io, r.repo, name)) orelse return error.NotAReference;
+                const found = (try rev_parse.dwimRef(r.a, r.io, r.repo.revisionSource(), name)) orelse return error.NotAReference;
                 if (found.count != 1) return error.NotAReference;
                 setup.onto = try r.commitOf(found.ref);
                 if (inputs.include.len > 1) return error.MultipleRanges;
@@ -402,6 +402,6 @@ const Run = struct {
 
     /// The commit `name` peels to.
     fn commitOf(r: *Run, name: []const u8) Error!Oid {
-        return rev_parse.resolve(r.gpa, r.io, r.repo, try r.a.print("{s}^{{commit}}", .{name}));
+        return rev_parse.resolve(r.gpa, r.io, r.repo.revisionSource(), try r.a.print("{s}^{{commit}}", .{name}));
     }
 };

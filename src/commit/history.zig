@@ -26,7 +26,7 @@ const pretty = @import("../pretty/pretty.zig");
 const replay = @import("replay.zig");
 const worktree = @import("../checkout/checkout.zig");
 const rev_walk = @import("../walk/walk.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const repo_mod = @import("../repo/repo.zig");
 
 const Oid = hash.Oid;
@@ -217,7 +217,7 @@ pub fn split(gpa: Allocator, io: Io, repo: *Repository, inputs: SplitInputs, opt
 
 /// The commit `name` peels to.
 fn commitOf(a: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!Oid {
-    return rev_parse.resolve(a, io, repo, try a.print("{s}^{{commit}}", .{name}));
+    return rev_parse.resolve(a, io, repo.revisionSource(), try a.print("{s}^{{commit}}", .{name}));
 }
 
 fn parentsOf(a: Allocator, io: Io, repo: *Repository, oid: Oid) Self.Error![]const Oid {

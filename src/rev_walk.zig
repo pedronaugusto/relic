@@ -7,7 +7,6 @@ pub const follow = @import("rev_walk/follow.zig");
 pub const last_modified = @import("rev_walk/last_modified.zig");
 pub const path_walk = @import("rev_walk/path_walk.zig");
 pub const mailmap = @import("rev_walk/mailmap.zig");
-pub const rev_parse = @import("rev_walk/rev_parse.zig");
 pub const shallow = @import("walk.zig").shallow;
 pub const Error = @import("walk/walk.zig").Error;
 pub const Sort = @import("walk/walk.zig").Sort;

@@ -27,7 +27,7 @@ const std = @import("std");
 const ctype = @import("../text.zig").ctype;
 const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
-const revparse_mod = @import("../rev_walk/rev_parse.zig");
+const revparse_mod = @import("../repo/rev_parse.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -977,7 +977,7 @@ pub const Listing = struct {
             .@"ahead-behind", .@"is-base" => {
                 const text = arg orelse return error.BadFieldArgument;
                 atom.base_name = text;
-                const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo, text) catch return error.UnknownCommit;
+                const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo.revisionSource(), text) catch return error.UnknownCommit;
                 atom.base = (try l.peelToCommit(resolved)) orelse return error.UnknownCommit;
             },
             else => {},
@@ -1221,7 +1221,7 @@ pub const Listing = struct {
 
     /// The commit `name` names, as git's `lookup_commit_reference_by_name`.
     fn commitByName(l: *Listing, name: []const u8) ErrorNamespace.Error!?Oid {
-        const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo, name) catch return null;
+        const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo.revisionSource(), name) catch return null;
         return l.peelToCommit(resolved);
     }
 
@@ -1876,7 +1876,7 @@ pub const Listing = struct {
             const value = try l.a().dupe(u8, tracking);
             return value;
         }
-        if (try revparse_mod.dwimRef(l.a(), l.io, l.repo, merge)) |found| {
+        if (try revparse_mod.dwimRef(l.a(), l.io, l.repo.revisionSource(), merge)) |found| {
             if (found.count == 1) return found.ref;
         }
         const value = try l.a().dupe(u8, merge);
@@ -2074,7 +2074,7 @@ pub const Listing = struct {
             if (std.mem.eql(u8, target, "HEAD")) target = try l.showOid(.short, noid);
             target = try l.a().dupe(u8, target);
             var from: []const u8 = undefined;
-            const found = try revparse_mod.dwimRef(l.a(), l.io, l.repo, target);
+            const found = try revparse_mod.dwimRef(l.a(), l.io, l.repo.revisionSource(), target);
             var matched = false;
             if (found) |f| if (f.count == 1) {
                 if (f.oid.eql(noid)) {

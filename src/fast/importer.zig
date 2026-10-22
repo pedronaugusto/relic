@@ -39,7 +39,7 @@ const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const rev_walk = @import("../walk/walk.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const c_quote = @import("../text.zig").c_quote;
 const gitdate = @import("../text.zig").date;
 const signing = @import("../object/signing.zig");
@@ -989,7 +989,7 @@ const Importer = struct {
         if (text.len == imp.kind.hexLen()) {
             if (Oid.parse(imp.kind, text)) |oid| return oid else |_| {}
         }
-        return rev_parse.resolve(imp.gpa, imp.io, imp.repo, text) catch |err| switch (err) {
+        return rev_parse.resolve(imp.gpa, imp.io, imp.repo.revisionSource(), text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.BadRevision,
         };

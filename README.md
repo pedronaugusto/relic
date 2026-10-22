@@ -595,6 +595,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `repo.safe` | `Ownership`, `directoryIsSafe`, `bareRepositories` — `safe.directory` and `safe.bareRepository` as git applies them to a repository it discovers: another user's repository opens only where the system, global or command-line settings name it, and a bare one is not discovered under `explicit`. |
 | `repo.ident` | `signature` — who an author or committer is, as git's `ident.c` decides: `GIT_AUTHOR_*` and `GIT_COMMITTER_*`, `author.*`, `committer.*`, `user.*`, `EMAIL`, then what the caller says the machine has; under `user.useConfigOnly` a name or email the configuration does not give is refused by name. |
 | `repo.state` | The state files an operation keeps in the git directory: written, read and removed in one place. |
+| `repo.rev_parse` | git's revision grammar, `@{<date>}` with git's approximate dates included. |
 | `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher` with `Options` and `nameObject`. The hash is a parameter from the first line, not a width bolted on later. |
 | `hash.sha1` | SHA-1 over the processor's own instructions, with the eighty rounds as the fallback and the choice made at run time. |
 | `hash.sha1dc` | SHA-1 that checks each block for the signature of a collision attack. Off unless asked for. |
@@ -659,7 +660,6 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `rev_walk.last_modified` | `lastModified` — `git last-modified`: for each path of a commit's tree, the commit that last changed it. |
 | `rev_walk.path_walk` | `PathWalk` — git's path-walk: the objects a history reaches, in batches by the path that reaches them. |
 | `rev_walk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
-| `rev_walk.rev_parse` | git's revision grammar, `@{<date>}` with git's approximate dates included. |
 | `rev_walk.shallow` | A shallow repository's boundary: `.git/shallow`. |
 | `rev_walk.object` | Module within `rev_walk`. |
 | `rev_walk.object.walk` | Module within `rev_walk.object`. |

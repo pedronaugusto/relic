@@ -41,7 +41,7 @@ const submodule = @import("../submodule/submodule.zig");
 const sub_changes = @import("../submodule/changes.zig");
 const fetch_pack = @import("../wire.zig").fetch_pack;
 const glob = @import("../text.zig").glob;
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const shallow_mod = @import("../walk/shallow.zig");
 const rev_index = @import("../odb/rev_index.zig");
 const partial = @import("partial.zig");
@@ -1437,7 +1437,7 @@ fn resolveTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, name
             if (glob.isSpecial(c)) break true;
         } else false;
         if (!glob_like) {
-            const oid = rev_parse.resolve(gpa, io, repo, name) catch |err| switch (err) {
+            const oid = rev_parse.resolve(gpa, io, repo.revisionSource(), name) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
                 else => continue,

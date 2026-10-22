@@ -28,7 +28,7 @@ const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
 const date = @import("../text.zig").date;
 const repo_mod = @import("../repo/repo.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const local = @import("../transport/local.zig");
 const in_process = @import("../transport/in_process.zig");
 const progress_mod = @import("../report.zig").progress;
@@ -150,10 +150,10 @@ fn converse(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, 
     const allow_unreachable = repo.configuration().getBool("uploadarchive.allowunreachable", false) catch false;
     if (!allow_unreachable) {
         const name = treeish[0 .. std.mem.findScalar(u8, treeish, ':') orelse treeish.len];
-        const found = rev_parse.dwimRef(arena, io, repo, name) catch null;
+        const found = rev_parse.dwimRef(arena, io, repo.revisionSource(), name) catch null;
         if (found == null) return refuse(out, "no such ref: {s}", .{name});
     }
-    const oid = rev_parse.resolve(gpa, io, repo, treeish) catch return refuse(out, "not a valid object name: {s}", .{treeish});
+    const oid = rev_parse.resolve(gpa, io, repo.revisionSource(), treeish) catch return refuse(out, "not a valid object name: {s}", .{treeish});
     if (parsed.mtime) |text| {
         const secs = date.approximate(text, .{ .now = options.now }) orelse return refuse(out, "invalid date format: {s}", .{text});
         parsed.options.mtime = .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s);

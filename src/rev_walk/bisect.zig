@@ -42,7 +42,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
-const rev_parse = @import("rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const rev_walk = @import("../walk/walk.zig");
 const message = @import("../object/message.zig");
 const head_mod = @import("../repo/head.zig");
@@ -237,7 +237,7 @@ const Ctx = struct {
 
     /// The commit `rev` names, peeled.
     fn commitOf(c: *Ctx, rev: []const u8) Error!Oid {
-        const oid = rev_parse.resolve(c.gpa, c.io, c.repo, rev) catch |err| switch (err) {
+        const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), rev) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.BadRevision,
         };
@@ -405,7 +405,7 @@ fn bisectWrite(c: *Ctx, state: []const u8, rev: []const u8, t: Terms, nolog: boo
         try c.a.print("refs/bisect/{s}-{s}", .{ state, rev })
     else
         return error.InvalidCommand;
-    const oid = rev_parse.resolve(c.gpa, c.io, c.repo, rev) catch |err| switch (err) {
+    const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), rev) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.BadRevision,
     };
@@ -1076,7 +1076,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     if (first_parent) try c.writeState("BISECT_FIRST_PARENT", "\n");
     if (reset_when_found) |mode| try c.writeState("BISECT_RESET_WHEN_FOUND", try std.mem.concat(c.a, u8, &.{ @tagName(mode), "\n" }));
     if (no_checkout) {
-        const oid = rev_parse.resolve(c.gpa, c.io, c.repo, start_head) catch return error.BadHead;
+        const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), start_head) catch return error.BadHead;
         try c.roots().write(c.gpa, c.io, .bisect_head, oid);
     }
     try names.append(c.a, '\n');

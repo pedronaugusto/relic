@@ -34,7 +34,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
-const rev_parse = @import("../rev_walk/rev_parse.zig");
+const rev_parse = @import("../repo/rev_parse.zig");
 const rev_walk = @import("../walk/walk.zig");
 const object_walk = @import("../walk/object/walk.zig");
 const fsck = @import("../object/fsck.zig");
@@ -509,11 +509,11 @@ pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, request: 
     const Pending = struct { oid: Oid, name: []const u8, negative: bool, commit: ?Oid };
     var pending: std.ArrayList(Pending) = .empty;
     for (request.include) |name| {
-        const oid = try rev_parse.resolve(gpa, io, repo, name);
+        const oid = try rev_parse.resolve(gpa, io, repo.revisionSource(), name);
         try pending.append(a, .{ .oid = oid, .name = name, .negative = false, .commit = commitOf(io, repo, oid) });
     }
     for (request.exclude) |name| {
-        const oid = try rev_parse.resolve(gpa, io, repo, name);
+        const oid = try rev_parse.resolve(gpa, io, repo.revisionSource(), name);
         try pending.append(a, .{ .oid = oid, .name = name, .negative = true, .commit = commitOf(io, repo, oid) });
     }
 
@@ -615,7 +615,7 @@ fn walkFilter(a: Allocator, io: Io, repo: *Repository, spec: filter_spec.Spec, s
 /// The sparse-checkout patterns in the blob `name` names, by any revision
 /// expression.
 fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!*const ignore.Rules {
-    const oid = rev_parse.resolve(a, io, repo, name) catch |err| switch (err) {
+    const oid = rev_parse.resolve(a, io, repo.revisionSource(), name) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return error.SparseBlobMissing,
@@ -677,7 +677,7 @@ fn topoOrder(a: Allocator, io: Io, repo: *Repository, list: []const Oid) CreateE
 /// `repo_dwim_ref` finds for it, or `null` when it finds none or more than
 /// one; a symbolic ref asked for by its own name keeps that name.
 fn dwimRef(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!?[]const u8 {
-    const found = (try rev_parse.dwimRef(a, io, repo, name)) orelse return null;
+    const found = (try rev_parse.dwimRef(a, io, repo.revisionSource(), name)) orelse return null;
     if (found.count != 1) return null;
     if (repo.refStore().read(a, io, name) catch null) |direct| switch (direct) {
         .symbolic => return name,
