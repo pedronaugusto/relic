@@ -436,6 +436,9 @@ pub const Error = error{
     ObjectNameMismatch,
     /// The compressed entry did not match the CRC the index carries.
     ChecksumMismatch,
+    /// The object, or a base on its delta chain, is longer than the
+    /// reader's limit (`ReadOptions.max_bytes`).
+    ObjectTooLarge,
     /// The pack's object count or its trailing checksum is not the one its
     /// index records: the two files are not a pair, and an offset the index
     /// gives would read another object. git's "packfile does not match
@@ -994,23 +997,34 @@ pub const Pack = struct {
     /// `cache` may be `null`; when it is not, resolved bases are kept in it,
     /// which is what makes a walk over a pack proportional to its objects
     /// rather than to its chains.
-    pub fn readAt(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32) Self.Error!Object {
-        return p.resolve(io, offset, cache, pack_id, null);
+    pub fn readAt(p: *Pack, io: Io, offset: u64, options: ReadOptions) Self.Error!Object {
+        return p.resolve(io, offset, options, null);
     }
+
+    /// How `readAt` and `readAtInto` read: the delta-base cache and this
+    /// pack's key in it, and the longest object held whole on the way.
+    pub const ReadOptions = struct {
+        cache: ?*Cache = null,
+        pack_id: u32 = 0,
+        /// The longest object, or delta base on the way to it, that is
+        /// read: one longer is `error.ObjectTooLarge` before it is inflated
+        /// or a delta is applied to make it.
+        max_bytes: u64 = std.math.maxInt(u64),
+    };
 
     /// `readAt`, with the object put in `out` rather than in an allocation
     /// of its own: `out` is cleared, grows with this pack's allocator as
     /// needed, and then holds exactly the object. A whole object is
     /// inflated straight into it.
-    pub const ReadOptions = struct { cache: ?*Cache = null, pack_id: u32 = 0 };
-
     pub fn readAtInto(p: *Pack, io: Io, offset: u64, out: *std.ArrayList(u8), options: ReadOptions) Self.Error!object.Type {
-        return (try p.resolve(io, offset, options.cache, options.pack_id, out)).type;
+        return (try p.resolve(io, offset, options, out)).type;
     }
 
     /// The object at `offset`, in an allocation of its own or, given `into`,
     /// there, when the returned bytes are `into.items`.
-    fn resolve(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, into: ?*std.ArrayList(u8)) ErrorNamespace.Error!Object {
+    fn resolve(p: *Pack, io: Io, offset: u64, options: ReadOptions, into: ?*std.ArrayList(u8)) ErrorNamespace.Error!Object {
+        const cache = options.cache;
+        const pack_id = options.pack_id;
         var chain: std.ArrayList(u64) = .empty;
         defer chain.deinit(p.gpa);
         var visited: std.ArrayList(u64) = .empty;
@@ -1024,6 +1038,7 @@ pub const Pack = struct {
         while (true) {
             if (cache) |c| {
                 if (c.get(pack_id, current)) |hit| {
+                    if (hit.bytes.len > options.max_bytes) return error.ObjectTooLarge;
                     if (chain.items.len == 0) if (into) |out| {
                         out.clearRetainingCapacity();
                         try out.appendSlice(p.gpa, hit.bytes);
@@ -1037,6 +1052,7 @@ pub const Pack = struct {
             const header = try p.entryHeaderAt(io, current);
             switch (header.kind) {
                 .object => |t| {
+                    if (header.size > options.max_bytes) return error.ObjectTooLarge;
                     if (chain.items.len == 0) if (into) |out| {
                         try p.inflateInto(io, header.data_at, header.size, out);
                         return .{ .type = t, .bytes = out.items };
@@ -1075,6 +1091,7 @@ pub const Pack = struct {
             const header = try p.entryHeaderAt(io, delta_offset);
             const delta_bytes = try p.inflateAt(io, header.data_at, header.size);
             defer p.gpa.free(delta_bytes);
+            if ((try delta.header(delta_bytes)).target > options.max_bytes) return error.ObjectTooLarge;
             if (i == 0) if (into) |out| {
                 out.clearRetainingCapacity();
                 try delta.applyTo(p.gpa, out, base_bytes, delta_bytes);
@@ -1246,7 +1263,7 @@ pub const Pack = struct {
             try p.readAtExact(io, offset, span);
             if (warp.Crc32.hash(span) != p.index.crcAt(position)) return error.ChecksumMismatch;
 
-            const obj = try p.readAt(io, offset, cache, pack_id);
+            const obj = try p.readAt(io, offset, .{ .cache = cache, .pack_id = pack_id });
             defer p.gpa.free(obj.bytes);
             const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
             if (!name.eql(p.index.nameAt(position))) return error.ObjectNameMismatch;
@@ -1696,7 +1713,7 @@ test "two reference deltas naming each other are a named error, not a hang" {
 
     var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "cycle", .kind = .sha1 }, .{});
     defer p.deinit(io);
-    try std.testing.expectError(error.DeltaCycle, p.readAt(io, a_at, null, 0));
+    try std.testing.expectError(error.DeltaCycle, p.readAt(io, a_at, .{}));
 }
 
 test "a chain deeper than the cap is refused, and one inside it resolves" {
@@ -1727,7 +1744,7 @@ test "a chain deeper than the cap is refused, and one inside it resolves" {
         // no recursion to overflow.
         var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "deep", .kind = .sha1 }, .{});
         defer p.deinit(io);
-        const found = try p.readAt(io, last, null, 0);
+        const found = try p.readAt(io, last, .{});
         defer gpa.free(found.bytes);
         try std.testing.expectEqualStrings(content, found.bytes);
     }
@@ -1736,7 +1753,7 @@ test "a chain deeper than the cap is refused, and one inside it resolves" {
         // the work.
         var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "deep", .kind = .sha1 }, .{ .max_depth = 16 });
         defer p.deinit(io);
-        try std.testing.expectError(error.DeltaChainTooDeep, p.readAt(io, last, null, 0));
+        try std.testing.expectError(error.DeltaChainTooDeep, p.readAt(io, last, .{}));
     }
 }
 
@@ -1757,7 +1774,7 @@ test "an offset delta pointing forwards is refused" {
 
     var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "forward", .kind = .sha1 }, .{});
     defer p.deinit(io);
-    try std.testing.expectError(error.BadDeltaOffset, p.readAt(io, at, null, 0));
+    try std.testing.expectError(error.BadDeltaOffset, p.readAt(io, at, .{}));
 }
 
 //=====================================================================
@@ -2599,7 +2616,7 @@ test "a written pack and its index read back, entry kind for entry kind" {
     };
     for (wanted) |want| {
         const found = (try p.index.find(want.oid)).?;
-        const got = try p.readAt(io, found.offset, null, 0);
+        const got = try p.readAt(io, found.offset, .{});
         defer gpa.free(got.bytes);
         try std.testing.expectEqual(want.t, got.type);
         try std.testing.expectEqualSlices(u8, want.bytes, got.bytes);
@@ -2914,7 +2931,7 @@ test "pack inflates preserve I/O and cancellation resource failures" {
         try std.testing.expectError(failure, fresh.inflateAt(failing_io, spanning.data_at, spanning.size));
         try std.testing.expectError(failure, fresh.inflateHead(failing_io, spanning.data_at, spanning.size));
         // The failed blocks were not kept: the same reads succeed after.
-        const got = try fresh.readAt(io, fixture.spanning, null, 0);
+        const got = try fresh.readAt(io, fixture.spanning, .{});
         gpa.free(got.bytes);
     }
 }
@@ -2980,7 +2997,7 @@ test "pack header reads preserve I/O and cancellation resource failures" {
         defer p.deinit(io);
         try std.testing.expectError(failure, p.entryHeaderAt(failing_io, fixture.small));
         try std.testing.expectError(failure, p.headerAt(failing_io, fixture.small));
-        try std.testing.expectError(failure, p.readAt(failing_io, fixture.large, null, 0));
+        try std.testing.expectError(failure, p.readAt(failing_io, fixture.large, .{}));
     }
 }
 
@@ -3084,7 +3101,7 @@ test "a pass whose delta-base cache holds more reads no more of the pack" {
             Counter.calls = 0;
             Counter.bytes = 0;
             for (order) |k| {
-                const got = try p.readAt(counted, offsets.items[k], &cache, 0);
+                const got = try p.readAt(counted, offsets.items[k], .{ .cache = &cache });
                 defer gpa.free(got.bytes);
                 try std.testing.expectEqualSlices(u8, contents.items[k], got.bytes);
             }
@@ -3175,7 +3192,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     const opened = live.live;
     Counter.calls = 0;
     {
-        const got = try p.readAt(counted, offsets[0], null, 0);
+        const got = try p.readAt(counted, offsets[0], .{});
         defer live.allocator().free(got.bytes);
         try std.testing.expectEqualSlices(u8, &contents[0], got.bytes);
     }
@@ -3192,7 +3209,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     random.shuffle(usize, &order);
     for (0..2) |_| {
         for (order) |k| {
-            const got = try p.readAt(counted, offsets[k], null, 0);
+            const got = try p.readAt(counted, offsets[k], .{});
             defer live.allocator().free(got.bytes);
             try std.testing.expectEqualSlices(u8, &contents[k], got.bytes);
         }
@@ -3289,13 +3306,13 @@ test "small random packed reads keep large sequential reads buffered" {
         .{ .at = last, .bytes = "last" },
         .{ .at = first, .bytes = "first" },
     }) |want| {
-        const got = try p.readAt(counted, want.at, null, 0);
+        const got = try p.readAt(counted, want.at, .{});
         defer gpa.free(got.bytes);
         try std.testing.expectEqualSlices(u8, want.bytes, got.bytes);
     }
     try std.testing.expect(Counter.largest <= 8 * 1024);
     Counter.largest = 0;
-    const got = try p.readAt(counted, middle, null, 0);
+    const got = try p.readAt(counted, middle, .{});
     defer gpa.free(got.bytes);
     try std.testing.expectEqualSlices(u8, large, got.bytes);
     try std.testing.expectEqual(@as(usize, 64 * 1024), Counter.largest);
@@ -3332,7 +3349,7 @@ test "a packed entry header survives a short positional read" {
     vtable.fileReadPositional = Short.read;
     const short: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     Short.first = true;
-    const got = try p.readAt(short, at, null, 0);
+    const got = try p.readAt(short, at, .{});
     defer gpa.free(got.bytes);
     try std.testing.expectEqualSlices(u8, bytes, got.bytes);
 }
@@ -3350,5 +3367,5 @@ test "pack decode scratch does not relax the stated object size" {
     try builder.write(io, tmp.dir, "short");
     var p = try Pack.open(gpa, io, tmp.dir, .{ .base = "short", .kind = .sha1 }, .{});
     defer p.deinit(io);
-    try std.testing.expectError(error.CorruptPackEntry, p.readAt(io, at, null, 0));
+    try std.testing.expectError(error.CorruptPackEntry, p.readAt(io, at, .{}));
 }

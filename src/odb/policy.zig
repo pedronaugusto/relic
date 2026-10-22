@@ -47,8 +47,10 @@ pub const Options = struct {
     /// 0: git's 5, which reaches six levels of alternates. A deeper file is
     /// not read, as git only logs it.
     max_alternate_depth: u8 = 5,
-    /// The largest inflated loose object, including its header, this will
-    /// read into memory. Exceeding it is `error.StreamTooLong`.
+    /// The longest object read whole (`Odb.read`, `Odb.readInto`), and the
+    /// longest delta `Odb.stream` makes whole: past it is
+    /// `error.ObjectTooLarge`. A loose object or a pack's whole entry of any
+    /// length is read through `Odb.stream`.
     max_object_bytes: Bytes = .fromRaw(1 << 31),
     /// Whether to measure, at open, how fine a modification time the
     /// filesystem under `objects` records.
@@ -136,6 +138,9 @@ pub const Error = error{
     PromisorFetchFailed,
     /// A loose object whose inflated bytes do not match its own header.
     CorruptLooseObject,
+    /// An object read whole that is longer than `Options.max_object_bytes`
+    /// (or the address space); `Odb.stream` reads it.
+    ObjectTooLarge,
     /// A loose object whose content does not hash to its own name.
     ObjectNameMismatch,
     /// Bytes carrying the signature of a SHA-1 collision attack, from a

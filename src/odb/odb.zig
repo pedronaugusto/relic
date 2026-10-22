@@ -658,22 +658,26 @@ pub const Odb = struct {
         bytes: []u8,
     };
 
-    /// Read the object named `oid`.
+    /// Read the object named `oid` whole.
     ///
     /// On a miss the pack directories are re-scanned once and the lookup is
     /// tried again, because a concurrent `git gc` may have just packed the
     /// object away; then it is `error.ObjectNotFound`. The empty tree is
-    /// there whether or not a file holds it, as in git's.
+    /// there whether or not a file holds it, as in git's. An object longer
+    /// than `Options.max_object_bytes`, or a delta base on the way to it, is
+    /// `error.ObjectTooLarge`: `stream` reads an object of any length.
     pub fn read(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Read {
-        if (odb.isEmptyTree(oid)) return .{ .type = .tree, .bytes = try odb.backendData().gpa.alloc(u8, 0) };
-        if (try odb.tryRead(io, oid)) |found| return found;
-        try odb.refresh(io);
-        if (try odb.tryRead(io, oid)) |found| return found;
-        if (odb.lazy != null) {
-            try odb.fetchMissing(io, &.{oid});
-            if (try odb.tryRead(io, oid)) |found| return found;
+        switch (try odb.find(io, oid)) {
+            .empty_tree => return .{ .type = .tree, .bytes = try odb.backendData().gpa.alloc(u8, 0) },
+            .loose => |file| {
+                defer file.close(io);
+                return odb.readLooseFile(io, file);
+            },
+            .in_pack => |at| {
+                const obj = try at.named.pack.readAt(io, at.offset, odb.packRead(at.named));
+                return .{ .type = obj.type, .bytes = obj.bytes };
+            },
         }
-        return error.ObjectNotFound;
     }
 
     /// An object read into a buffer the caller keeps: `bytes` is that
@@ -692,91 +696,378 @@ pub const Odb = struct {
     /// returned `bytes` are `buffer.items`, borrowed: valid until `buffer`
     /// is next read into, changed or freed. On an error `buffer`'s contents
     /// are unspecified, and it is still the caller's to reuse or free.
-    /// Looking up, re-scanning and asking a promisor are as `read` does
-    /// them. A packed whole object needs no other allocation once `buffer`
-    /// is large enough; a loose object still allocates its read buffer, and
-    /// a delta its chain.
+    /// Looking up, re-scanning, asking a promisor and the length allowed are
+    /// as `read` has them. A packed whole object needs no other allocation
+    /// once `buffer` is large enough; a delta allocates its chain.
     pub fn readInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) ErrorNamespace.Error!Borrowed {
-        if (odb.isEmptyTree(oid)) {
-            buffer.clearRetainingCapacity();
-            return .{ .type = .tree, .bytes = buffer.items };
+        switch (try odb.find(io, oid)) {
+            .empty_tree => {
+                buffer.clearRetainingCapacity();
+                return .{ .type = .tree, .bytes = buffer.items };
+            },
+            .loose => |file| {
+                defer file.close(io);
+                const found = try odb.readLooseFrom(io, file, .{ .list = buffer });
+                return .{ .type = found.header.type, .bytes = buffer.items };
+            },
+            .in_pack => |at| {
+                const t = try at.named.pack.readAtInto(io, at.offset, buffer, odb.packRead(at.named));
+                return .{ .type = t, .bytes = buffer.items };
+            },
         }
-        if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
-        try odb.refresh(io);
-        if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
-        if (odb.lazy != null) {
-            try odb.fetchMissing(io, &.{oid});
-            if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
-        }
-        return error.ObjectNotFound;
     }
 
-    fn tryReadInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) ErrorNamespace.Error!?Borrowed {
-        for (odb.backendData().sources.items) |*source| {
-            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
-            const named = &source.packs.items[located.at];
-            const t = try named.pack.readAtInto(io, located.offset, buffer, .{ .cache = &odb.backendData().cache, .pack_id = named.id });
-            return .{ .type = t, .bytes = buffer.items };
+    /// An object open for reading, of any length: `stream`'s, the caller's
+    /// to `close`.
+    ///
+    /// `reader()` gives exactly `size` bytes, then the end of the stream.
+    /// Where the stored object cannot give them -- a zlib stream that does
+    /// not inflate, one longer or shorter than its header says, bytes after
+    /// a loose object's -- the read fails (`error.ReadFailed`) and `err` says
+    /// why: `error.CorruptLooseObject`, `error.CorruptPackEntry`, or what the
+    /// file's read met. Nothing checks the bytes against the object's name;
+    /// a caller that must know hashes them as it reads.
+    ///
+    /// It borrows the database: a pack's object is read from the pack, which
+    /// stays open until the database's packs change (a repack, an alternate
+    /// removed) or the database is closed.
+    pub const Stream = struct {
+        type: object.Type,
+        size: u64,
+        gpa: Allocator,
+        interface: Io.Reader,
+        remaining: u64,
+        failure: ?ErrorNamespace.Error = null,
+        source: Backing,
+        buffer: [stream_buffer_bytes]u8,
+
+        const stream_buffer_bytes = 64 * 1024;
+
+        const Backing = union(enum) {
+            /// Held whole: the empty tree, or a delta resolved.
+            memory: struct { bytes: []u8, reader: Io.Reader },
+            loose: struct { file: Io.File, inflating: LooseInflate, input: [loose_input_bytes]u8, window: [inflate_window_bytes]u8 },
+            /// A pack's whole entry, inflated from its data as it is read:
+            /// from the mapping, or by positional reads of its own.
+            entry: struct {
+                mapped: bool,
+                file_reader: Io.File.Reader,
+                fixed: Io.Reader,
+                inflate: warp.Inflate.Reader,
+                input: [stream_buffer_bytes]u8,
+                window: [inflate_window_bytes]u8,
+            },
+        };
+
+        const vtable: Io.Reader.VTable = .{ .stream = streamBody };
+
+        /// The object's bytes.
+        pub fn reader(s: *Stream) *Io.Reader {
+            return &s.interface;
         }
-        const found = (try odb.readLooseFor(io, oid, .{ .list = buffer })) orelse return null;
-        return .{ .type = found.header.type, .bytes = buffer.items };
+
+        /// Why the last read failed, when it did.
+        pub fn err(s: *const Stream) ?ErrorNamespace.Error {
+            return s.failure;
+        }
+
+        pub fn close(s: *Stream, io: Io) void {
+            s.release(io);
+            s.gpa.destroy(s);
+        }
+
+        fn release(s: *Stream, io: Io) void {
+            switch (s.source) {
+                .memory => |m| s.gpa.free(m.bytes),
+                .loose => |*l| l.file.close(io),
+                .entry => {},
+            }
+        }
+
+        fn inner(s: *Stream) *Io.Reader {
+            return switch (s.source) {
+                .memory => |*m| &m.reader,
+                .loose => |*l| &l.inflating.inflate.interface,
+                .entry => |*e| &e.inflate.interface,
+            };
+        }
+
+        fn streamBody(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+            const s: *Stream = @alignCast(@fieldParentPtr("interface", r)); // safe: the vtable is installed only on a Stream's interface
+            if (s.failure != null) return error.ReadFailed;
+            if (s.remaining == 0) return error.EndOfStream;
+            const n = s.inner().stream(w, limit.min(.limited64(s.remaining))) catch |e| switch (e) {
+                error.WriteFailed => return error.WriteFailed,
+                error.EndOfStream => return s.fail(s.short()),
+                error.ReadFailed => return s.fail(s.cause()),
+            };
+            s.remaining -= n;
+            if (s.remaining == 0) s.finish() catch |e| return s.fail(e);
+            return n;
+        }
+
+        fn fail(s: *Stream, e: ErrorNamespace.Error) error{ReadFailed} {
+            s.failure = e;
+            return error.ReadFailed;
+        }
+
+        /// What an inflater's `ReadFailed` meant: a failed file read, or a
+        /// stream that does not inflate.
+        fn cause(s: *Stream) ErrorNamespace.Error {
+            return switch (s.source) {
+                // unreachable: a fixed reader has nothing to fail
+                .memory => unreachable,
+                .loose => |*l| looseInflateError(&l.inflating.file_reader),
+                .entry => |*e| if (e.mapped) error.CorruptPackEntry else e.file_reader.err orelse error.CorruptPackEntry,
+            };
+        }
+
+        /// The error for a stream that ended before its header's length.
+        fn short(s: *Stream) ErrorNamespace.Error {
+            return switch (s.source) {
+                // unreachable: the bytes held are exactly `size`
+                .memory => unreachable,
+                .loose => error.CorruptLooseObject,
+                .entry => error.CorruptPackEntry,
+            };
+        }
+
+        /// Check that the stored object ends where its header said.
+        fn finish(s: *Stream) ErrorNamespace.Error!void {
+            switch (s.source) {
+                .memory => {},
+                .loose => |*l| try l.inflating.end(),
+                .entry => |*e| {
+                    _ = e.inflate.interface.peekByte() catch |x| switch (x) {
+                        error.EndOfStream => return,
+                        error.ReadFailed => return s.cause(),
+                    };
+                    return error.CorruptPackEntry;
+                },
+            }
+        }
+
+        fn hold(s: *Stream, t: object.Type, bytes: []u8) void {
+            s.type = t;
+            s.size = bytes.len;
+            s.source = .{ .memory = .{ .bytes = bytes, .reader = .fixed(bytes) } };
+        }
+    };
+
+    /// Open the object named `oid` for reading, whatever its length: git's
+    /// `open_istream`. A loose object and a pack's whole entry are inflated
+    /// as they are read, with no more held than the stream's buffers; a
+    /// delta is resolved whole first, within `Options.max_object_bytes`
+    /// (`error.ObjectTooLarge` past it), as git falls back to its in-core
+    /// reader -- no pack relic or git writes deltifies a blob past
+    /// `core.bigFileThreshold`. Looking up, re-scanning and asking a
+    /// promisor are as `read` does them. The stream is the caller's to
+    /// `close`.
+    pub fn stream(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!*Stream {
+        const gpa = odb.backendData().gpa;
+        const s = try gpa.create(Stream);
+        errdefer gpa.destroy(s);
+        s.* = .{
+            .type = undefined,
+            .size = undefined,
+            .gpa = gpa,
+            .interface = .{ .vtable = &Stream.vtable, .buffer = &s.buffer, .seek = 0, .end = 0 },
+            .remaining = undefined,
+            .source = undefined,
+            .buffer = undefined,
+        };
+        switch (try odb.find(io, oid)) {
+            .empty_tree => s.hold(.tree, try gpa.alloc(u8, 0)),
+            .loose => |file| {
+                errdefer file.close(io);
+                s.source = .{ .loose = .{ .file = file, .inflating = undefined, .input = undefined, .window = undefined } };
+                const l = &s.source.loose;
+                try l.inflating.start(io, file, &l.input, &l.window);
+                s.type = l.inflating.header.type;
+                s.size = l.inflating.header.size;
+            },
+            .in_pack => |at| {
+                const p = &at.named.pack;
+                const entry = try p.entryHeaderAt(io, at.offset);
+                switch (entry.kind) {
+                    .object => |t| {
+                        s.type = t;
+                        s.size = entry.size;
+                        s.source = .{ .entry = undefined };
+                        const e = &s.source.entry;
+                        e.mapped = p.memory != null;
+                        const input: *Io.Reader = if (p.memory) |mem| blk: {
+                            if (entry.data_at > mem.len) return error.TruncatedPack;
+                            e.fixed = .fixed(mem[@intCast(entry.data_at)..]);
+                            break :blk &e.fixed;
+                        } else blk: {
+                            e.file_reader = p.file.reader(io, &e.input);
+                            e.file_reader.seekTo(entry.data_at) catch |x| return switch (x) {
+                                error.EndOfStream => error.TruncatedPack,
+                                error.ReadFailed => e.file_reader.err orelse error.ReadFailed,
+                                else => |other| other,
+                            };
+                            break :blk &e.file_reader.interface;
+                        };
+                        e.inflate = .init(input, &e.window, .{});
+                    },
+                    .ofs_delta, .ref_delta => {
+                        const obj = try p.readAt(io, at.offset, odb.packRead(at.named));
+                        s.hold(obj.type, obj.bytes);
+                    },
+                }
+            },
+        }
+        s.remaining = s.size;
+        if (s.size == 0) {
+            errdefer s.release(io);
+            try s.finish();
+        }
+        return s;
+    }
+
+    /// How a pack is read for `read`, `readInto` and `stream`: through the
+    /// delta-base cache, nothing longer than `Options.max_object_bytes`.
+    fn packRead(odb: *Odb, named: *const storage.NamedPack) pack.Pack.ReadOptions {
+        return .{
+            .cache = &odb.backendData().cache,
+            .pack_id = named.id,
+            .max_bytes = odb.backendData().options.max_object_bytes.convert(u64).raw(),
+        };
+    }
+
+    /// Where an object is, as `read`, `readInto` and `stream` open it.
+    const Location = union(enum) {
+        /// The empty tree, which no file need hold.
+        empty_tree,
+        /// In this pack, its entry at this offset.
+        in_pack: struct { named: *storage.NamedPack, offset: u64 },
+        /// Loose, this file, open: the caller closes it.
+        loose: Io.File,
+    };
+
+    /// Where the object named `oid` is. On a miss the pack directories are
+    /// scanned again once, and a promisor asked; then it is
+    /// `error.ObjectNotFound`.
+    fn find(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Location {
+        if (odb.isEmptyTree(oid)) return .empty_tree;
+        if (try odb.findOnce(io, oid)) |found| return found;
+        try odb.refresh(io);
+        if (try odb.findOnce(io, oid)) |found| return found;
+        if (odb.lazy != null) {
+            try odb.fetchMissing(io, &.{oid});
+            if (try odb.findOnce(io, oid)) |found| return found;
+        }
+        return error.ObjectNotFound;
     }
 
     /// The packs first, then the loose objects, as git looks: a name is its
     /// content, so where it is found does not change what is read, and in a
     /// packed repository a loose lookup first is a failed `open` for every
     /// object.
-    fn tryRead(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Read {
+    fn findOnce(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Location {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
-            const named = &source.packs.items[located.at];
-            const obj = try named.pack.readAt(io, located.offset, &odb.backendData().cache, named.id);
-            return .{ .type = obj.type, .bytes = obj.bytes };
+            return .{ .in_pack = .{ .named = &source.packs.items[located.at], .offset = located.offset } };
         }
-        return odb.readLoose(io, oid);
+        const file = (try odb.openLoose(io, oid)) orelse return null;
+        return .{ .loose = file };
     }
 
-    fn readLoose(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Read {
+    /// The loose file of `oid` in the first source holding one, open, or
+    /// `null`.
+    fn openLoose(odb: *const Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Io.File {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |*source| {
-            const file = source.dir.openFile(io, path, .{}) catch |err| switch (err) {
+            return source.dir.openFile(io, path, .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };
-            defer file.close(io);
-            const bytes = try odb.inflateWhole(io, file);
-            errdefer odb.backendData().gpa.free(bytes);
-            const parsed = object.parseHeader(bytes) catch return error.CorruptLooseObject;
-            const body = bytes[parsed.len..];
-            if (body.len != parsed.header.size) return error.CorruptLooseObject;
-            // The body moves to the front of the allocation it was inflated
-            // into, rather than into a second one.
-            @memmove(bytes[0..body.len], body);
-            const out = try odb.backendData().gpa.realloc(bytes, body.len);
-            return .{ .type = parsed.header.type, .bytes = out };
         }
         return null;
     }
 
-    fn inflateWhole(odb: *Odb, io: Io, file: Io.File) ErrorNamespace.Error![]u8 {
-        const input_buffer = try odb.backendData().gpa.alloc(u8, odb.backendData().options.read_buffer_size.raw());
-        defer odb.backendData().gpa.free(input_buffer);
-        var file_reader = file.reader(io, input_buffer);
-        var window: [(1 << 15) + 4096]u8 = undefined;
-        var decompress: warp.Inflate.Reader = .init(&file_reader.interface, &window, .{});
-        const bytes = decompress.interface.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes.raw())) catch |err| switch (err) {
-            error.OutOfMemory, error.StreamTooLong => |e| return e,
-            error.ReadFailed => return looseInflateError(&file_reader),
-        };
-        errdefer odb.backendData().gpa.free(bytes);
-        try looseEnd(&file_reader);
-        return bytes;
+    /// The loose object `oid`, wherever a pack holds it too, or `null`.
+    fn readLoose(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Read {
+        const file = (try odb.openLoose(io, oid)) orelse return null;
+        defer file.close(io);
+        return try odb.readLooseFile(io, file);
     }
 
-    /// Refuse bytes after a loose object's zlib stream, as git does
-    /// ("garbage at end of loose object"). The inflater reads its input to
-    /// the end of the stream's checksum and no further.
+    fn readLooseFile(odb: *const Odb, io: Io, file: Io.File) ErrorNamespace.Error!Read {
+        var input: [loose_input_bytes]u8 = undefined;
+        var window: [inflate_window_bytes]u8 = undefined;
+        var inflating: LooseInflate = undefined;
+        try inflating.start(io, file, &input, &window);
+        const gpa = odb.backendData().gpa;
+        const bytes = try gpa.alloc(u8, try odb.wholeLength(inflating.header.size));
+        errdefer gpa.free(bytes);
+        try inflating.body(bytes);
+        return .{ .type = inflating.header.type, .bytes = bytes };
+    }
+
+    /// `size` as the length of an object read whole: `error.ObjectTooLarge`
+    /// past `Options.max_object_bytes` or the address space.
+    fn wholeLength(odb: *const Odb, size: u64) ErrorNamespace.Error!usize {
+        if (odb.tooLarge(size)) return error.ObjectTooLarge;
+        return std.math.cast(usize, size) orelse error.ObjectTooLarge;
+    }
+
+    /// What an inflater needs past its window: zlib's 32 KiB and the
+    /// decoder's room.
+    const inflate_window_bytes = (1 << 15) + 4096;
+    /// Most loose blobs fit this read, including the zlib trailer. A tiny
+    /// input buffer made the body cache pay several syscalls for the single
+    /// inflate it was meant to save.
+    const loose_input_bytes = 16 * 1024;
+
+    /// A loose object's file, inflating: its header read by `start`, its
+    /// body next from `inflate.interface`. It stays where `start` put it,
+    /// which its readers point into.
+    const LooseInflate = struct {
+        file_reader: Io.File.Reader,
+        inflate: warp.Inflate.Reader,
+        header: object.Header,
+
+        /// Begin inflating `file`, read ahead into `input`, with `window`
+        /// (`inflate_window_bytes`) the inflater's.
+        fn start(l: *LooseInflate, io: Io, file: Io.File, input: []u8, window: []u8) ErrorNamespace.Error!void {
+            l.file_reader = file.reader(io, input);
+            l.inflate = .init(&l.file_reader.interface, window, .{});
+            const r = &l.inflate.interface;
+            const head = r.peekDelimiterInclusive(0) catch |err| return switch (err) {
+                error.ReadFailed => looseInflateError(&l.file_reader),
+                error.EndOfStream, error.StreamTooLong => error.CorruptLooseObject,
+            };
+            const parsed = object.parseHeader(head) catch return error.CorruptLooseObject;
+            r.toss(parsed.len);
+            l.header = parsed.header;
+        }
+
+        /// The body into `out`, which is exactly the header's length, and
+        /// the end checked (`end`).
+        fn body(l: *LooseInflate, out: []u8) ErrorNamespace.Error!void {
+            l.inflate.interface.readSliceAll(out) catch |err| return switch (err) {
+                error.ReadFailed => looseInflateError(&l.file_reader),
+                error.EndOfStream => error.CorruptLooseObject,
+            };
+            try l.end();
+        }
+
+        /// Refuse more inflated bytes than the header said, and bytes after
+        /// the zlib stream, as git does ("garbage at end of loose object").
+        fn end(l: *LooseInflate) ErrorNamespace.Error!void {
+            _ = l.inflate.interface.peekByte() catch |err| switch (err) {
+                error.EndOfStream => return looseEnd(&l.file_reader),
+                error.ReadFailed => return looseInflateError(&l.file_reader),
+            };
+            return error.CorruptLooseObject;
+        }
+    };
+
+    /// Refuse bytes after a loose object's zlib stream. The inflater reads
+    /// its input to the end of the stream's checksum and no further.
     fn looseEnd(file_reader: *Io.File.Reader) ErrorNamespace.Error!void {
         _ = file_reader.interface.peekByte() catch |err| switch (err) {
             error.EndOfStream => return,
@@ -943,76 +1234,48 @@ pub const Odb = struct {
     /// tasks call it concurrently; `.cache` and `.list` allocate, and are
     /// the calling task's.
     fn readLooseFor(odb: *const Odb, io: Io, oid: Oid, want: LooseWant) ErrorNamespace.Error!?LooseFound {
-        var path_buf: [hash.max_hex_len + 2]u8 = undefined;
-        const path = odb.loosePath(oid, &path_buf);
-        for (odb.backendData().sources.items) |*source| {
-            const file = source.dir.openFile(io, path, .{}) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir => continue,
-                else => |e| return e,
-            };
-            defer file.close(io);
-            // Both buffers live on the stack: a pack write asks for tens of
-            // thousands of headers in a row, and an allocation for each was
-            // a measurable share of it.
-            // Most loose blobs fit this read, including the zlib trailer.
-            // A tiny input buffer made the body cache pay several syscalls
-            // for the single inflate it was meant to save.
-            var input_buffer: [16 * 1024]u8 = undefined;
-            if (want == .header) {
-                // The zlib header, the first block's and the object's own
-                // fit a kilobyte whatever the object's size.
-                var header_reader = file.reader(io, input_buffer[0..1024]);
-                return .{ .header = try looseHeader(&header_reader) };
-            }
-            var file_reader = file.reader(io, &input_buffer);
-            var window: [(1 << 15) + 4096]u8 = undefined;
-            var decompress: warp.Inflate.Reader = .init(&file_reader.interface, &window, .{});
-            var head: [64]u8 = @splat(0);
-            var got: usize = 0;
-            while (got < head.len) {
-                const n = decompress.interface.readSliceShort(head[got..]) catch return looseInflateError(&file_reader);
-                if (n == 0) break;
-                got += n;
-                if (std.mem.findScalar(u8, head[0..got], 0) != null) break;
-            }
-            const parsed = object.parseHeader(head[0..got]) catch return error.CorruptLooseObject;
-            const body: []u8 = switch (want) {
-                .header => unreachable,
-                .cache => |available| blk: {
-                    if (available == 0 or parsed.header.size > available) return .{ .header = parsed.header };
-                    break :blk try odb.backendData().gpa.alloc(u8, @intCast(parsed.header.size));
-                },
-                .into => |buffer| blk: {
-                    if (parsed.header.size != buffer.len) return error.CorruptLooseObject;
-                    break :blk buffer;
-                },
-                .list => |list| blk: {
-                    const len = std.math.cast(usize, parsed.header.size) orelse return error.StreamTooLong;
-                    if (odb.tooLarge(parsed.header.size)) return error.StreamTooLong;
-                    list.clearRetainingCapacity();
-                    try list.resize(odb.backendData().gpa, len);
-                    break :blk list.items;
-                },
-            };
-            errdefer if (want == .cache) odb.backendData().gpa.free(body);
+        const file = (try odb.openLoose(io, oid)) orelse return null;
+        defer file.close(io);
+        return try odb.readLooseFrom(io, file, want);
+    }
 
-            const initial = head[parsed.len..got];
-            if (initial.len > body.len) return error.CorruptLooseObject;
-            @memcpy(body[0..initial.len], initial);
-            var body_got = initial.len;
-            while (body_got < body.len) {
-                const n = decompress.interface.readSliceShort(body[body_got..]) catch return looseInflateError(&file_reader);
-                if (n == 0) return error.CorruptLooseObject;
-                body_got += n;
-            }
-            var extra: [1]u8 = undefined;
-            if ((decompress.interface.readSliceShort(&extra) catch return looseInflateError(&file_reader)) != 0) {
-                return error.CorruptLooseObject;
-            }
-            try looseEnd(&file_reader);
-            return .{ .header = parsed.header, .bytes = if (want == .cache) body else null };
+    /// `readLooseFor` of the loose file `file`.
+    fn readLooseFrom(odb: *const Odb, io: Io, file: Io.File, want: LooseWant) ErrorNamespace.Error!LooseFound {
+        // Both buffers live on the stack: a pack write asks for tens of
+        // thousands of headers in a row, and an allocation for each was a
+        // measurable share of it.
+        var input_buffer: [loose_input_bytes]u8 = undefined;
+        if (want == .header) {
+            // The zlib header, the first block's and the object's own fit a
+            // kilobyte whatever the object's size.
+            var header_reader = file.reader(io, input_buffer[0..1024]);
+            return .{ .header = try looseHeader(&header_reader) };
         }
-        return null;
+        var window: [inflate_window_bytes]u8 = undefined;
+        var inflating: LooseInflate = undefined;
+        try inflating.start(io, file, &input_buffer, &window);
+        const header = inflating.header;
+        const gpa = odb.backendData().gpa;
+        const body: []u8 = switch (want) {
+            .header => unreachable,
+            .cache => |available| blk: {
+                if (available == 0 or header.size > available) return .{ .header = header };
+                break :blk try gpa.alloc(u8, @intCast(header.size));
+            },
+            .into => |buffer| blk: {
+                if (header.size != buffer.len) return error.CorruptLooseObject;
+                break :blk buffer;
+            },
+            .list => |list| blk: {
+                const len = try odb.wholeLength(header.size);
+                list.clearRetainingCapacity();
+                try list.resize(gpa, len);
+                break :blk list.items;
+            },
+        };
+        errdefer if (want == .cache) gpa.free(body);
+        try inflating.body(body);
+        return .{ .header = header, .bytes = if (want == .cache) body else null };
     }
 
     /// A loose object's header, with no more of it inflated than the
@@ -1562,7 +1825,7 @@ pub const Odb = struct {
                     report.bytes += item.header.size;
                     continue;
                 }
-                const obj = try p.readAt(io, item.offset, &odb.backendData().cache, pack_id);
+                const obj = try p.readAt(io, item.offset, .{ .cache = &odb.backendData().cache, .pack_id = pack_id });
                 defer gpa.free(obj.bytes);
                 const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
                 if (!name.eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
@@ -1604,8 +1867,8 @@ pub const Odb = struct {
             if (c.p.index.crcAt(item.position)) |crc| if (warp.Crc32.hash(stored) != crc) return error.ChecksumMismatch;
             if (item.body.len == 0) return;
             const len: usize = @intCast(item.header.size);
-            var stream: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
-            const got = c.readers[worker].decoder.inflateReader(&stream, item.body, .{}) catch return error.CorruptPackEntry;
+            var entry_data: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
+            const got = c.readers[worker].decoder.inflateReader(&entry_data, item.body, .{}) catch return error.CorruptPackEntry;
             if (got.out_len != len) return error.CorruptPackEntry;
             const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..len]);
             if (!name.eql(c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
@@ -5418,9 +5681,10 @@ test "loose inflate preserves allocation resource failures" {
             data_copy.gpa = allocator;
             var copy = original.*;
             copy.state = @ptrCast(&data_copy);
-            const bytes = try copy.inflateWhole(std.testing.io, input);
-            defer allocator.free(bytes);
-            try std.testing.expectEqualStrings("blob 6\x00hello\n", bytes);
+            const found = try copy.readLooseFile(std.testing.io, input);
+            defer allocator.free(found.bytes);
+            try std.testing.expectEqual(object.Type.blob, found.type);
+            try std.testing.expectEqualStrings("hello\n", found.bytes);
         }
     };
     {
@@ -5441,7 +5705,7 @@ test "loose inflate distinguishes policy resource failures from corruption" {
     defer odb.deinit(io);
     const oid = try odb.write(io, .blob, "hello\n");
     odb.backendData().options.max_object_bytes = .fromRaw(1);
-    try std.testing.expectError(error.StreamTooLong, odb.read(io, oid));
+    try std.testing.expectError(error.ObjectTooLarge, odb.read(io, oid));
     odb.backendData().options.max_object_bytes = .fromRaw(100);
     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
     // a loose object is read-only, as git's are
