@@ -790,6 +790,11 @@ pub const Index = struct {
     /// status writes the index then, and only then for the monitor's sake;
     /// the token of an answer that changed nothing else is not kept.
     fsmonitor_changed: bool = false,
+    /// Whether `worktree.status` put a file's new stat in an entry whose
+    /// content had not changed: git's refresh, whose index `git status`
+    /// and `git diff` write when they can (`refresh_index_quietly`,
+    /// `repo_update_index_if_able`), so the next look takes the shortcut.
+    stat_refreshed: bool = false,
     /// Whether the index is sparse: it carries `sdir`, and may hold sparse
     /// directory entries. `sparse_index.expand` clears it and
     /// `sparse_index.collapse` sets it; it decides whether `sdir` is written.

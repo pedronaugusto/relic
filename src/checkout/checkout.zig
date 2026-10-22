@@ -1064,6 +1064,27 @@ pub const StatusOptions = struct {
     /// tree's deletions with, read as git's rename detection reads such a
     /// file (`diff_populate_filespec`, `hash_filespec`).
     added_content: bool = false,
+    /// A tracked file whose stat changed and whose content did not.
+    stat_only: StatOnly = .refresh,
+
+    /// What `status` makes of a tracked file whose stat changed and whose
+    /// content did not.
+    pub const StatOnly = enum {
+        /// Unchanged, its new stat put in `index` (`Index.stat_refreshed`)
+        /// for the caller to write: `git status`, and `git diff` under
+        /// `diff.autoRefreshIndex`, git's default.
+        refresh,
+        /// Modified, its content not read: `git diff-files`, and the names
+        /// `git diff --name-status` lists under `diff.autoRefreshIndex=false`
+        /// (`skip_stat_unmatch` off), where its patch is empty.
+        report,
+
+        /// `diff.autoRefreshIndex`, as `git diff` reads it: `refresh`
+        /// unless it is false.
+        pub fn configured(config: *const config_mod.Config) config_mod.ValueError!StatOnly {
+            return if (try config.getBool("diff.autorefreshindex", true)) .refresh else .report;
+        }
+    };
 
     /// How much of an untracked directory `status` reports: nothing, the
     /// directory itself, or every file under it. These are what `git status`
@@ -1711,9 +1732,17 @@ const StatusScan = struct {
             return .type_changed;
         }
         if (entry.mode != mode) return .modified;
+        const stat_matches = entry.stat.matches(found.stat, s.options.rules.statCompare());
+        if (!stat_matches and s.options.stat_only == .report) return .modified;
         var scratch: std.heap.ArenaAllocator = .init(s.gpa);
         defer scratch.deinit();
-        return if (try s.trackedFiles().sameContent(scratch.allocator(), entry.*, path, found)) .unmodified else .modified;
+        if (!try s.trackedFiles().sameContent(scratch.allocator(), entry.*, path, found)) return .modified;
+        // git's refresh: the content is the index's, so its stat is too
+        if (!stat_matches) {
+            s.options.rules.fillStat(entry, found.stat);
+            s.index.stat_refreshed = true;
+        }
+        return .unmodified;
     }
 
     fn trackedFiles(s: *StatusScan) Tracked {

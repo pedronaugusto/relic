@@ -1819,3 +1819,61 @@ test "attr.tree=HEAD gives a bare repository the attributes of its head, as git 
         };
     }
 }
+
+test "diff.autoRefreshIndex: a file whose stat alone changed is refreshed into the index, or listed as git diff --name-status lists it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "touched", "same\n");
+    try git.writeFile(io, "changed", "before\n");
+    try git.writeFile(io, "kept", "kept\n");
+    // long before the index, so none is racily clean
+    const long_ago: Io.File.SetTimestampsOptions = .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } };
+    for ([_][]const u8{ "touched", "changed", "kept" }) |path| try fs.setTimestamps(io, git.dir, path, long_ago);
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-qm", "one" });
+    // the same bytes written again: a new stat, the same content
+    try git.writeFile(io, "touched", "same\n");
+    try git.writeFile(io, "changed", "after\n");
+    const dirty = try git.run(io, &.{ "diff-files", "--name-only" });
+    defer gpa.free(dirty);
+    try std.testing.expectEqualStrings("changed\ntouched\n", dirty);
+
+    for ([_][]const u8{ "false", "true" }) |setting| {
+        try git.exec(io, &.{ "config", "diff.autoRefreshIndex", setting });
+        const theirs = try git.run(io, &.{ "-c", "diff.autoRefreshIndex=false", "diff", "--name-status" });
+        defer gpa.free(theirs);
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        var locked = try repo.lockIndex(io);
+        defer locked.deinit(io);
+        const stat_only = try worktree.StatusOptions.StatOnly.configured(repo.configuration());
+        var result = try worktree.status(gpa, io, git.dir, .{ .index = &locked.index, .db = repo.objectDatabase() }, .{
+            .rules = try repo.worktreeRules(),
+            .head_tree = try repo.headTree(io),
+            .untracked = .no,
+            .stat_only = stat_only,
+        });
+        defer result.deinit();
+        var ours: std.ArrayList(u8) = .empty;
+        defer ours.deinit(gpa);
+        for (result.entries) |entry| if (entry.unstaged == .modified) try ours.print(gpa, "M\t{s}\n", .{entry.path});
+        switch (stat_only) {
+            .report => {
+                try std.testing.expectEqualStrings(theirs, ours.items);
+                try std.testing.expect(!locked.index.stat_refreshed);
+            },
+            .refresh => {
+                try std.testing.expectEqualStrings("M\tchanged\n", ours.items);
+                try std.testing.expect(locked.index.stat_refreshed);
+                try locked.commit(io);
+                // as git's own refresh leaves it: only the changed file
+                // differs by its stat now
+                const after = try git.run(io, &.{ "diff-files", "--name-only" });
+                defer gpa.free(after);
+                try std.testing.expectEqualStrings("changed\n", after);
+            },
+        }
+    }
+}
