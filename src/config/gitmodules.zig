@@ -102,7 +102,22 @@ pub const Ignore = enum {
 };
 
 /// `fetchRecurseSubmodules`.
-pub const FetchRecurse = enum { off, on, on_demand };
+pub const FetchRecurse = enum {
+    off,
+    on,
+    on_demand,
+
+    /// git's `parse_fetch_recurse`: a boolean, a bare name (true), or
+    /// `on-demand`.
+    pub fn parse(value: ?[]const u8) error{InvalidFetchRecurse}!FetchRecurse {
+        const v = value orelse return .on;
+        if (config_mod.parseBool(v)) |b| {
+            return if (b) .on else .off;
+        } else |_| {}
+        if (std.mem.eql(u8, v, "on-demand")) return .on_demand;
+        return error.InvalidFetchRecurse;
+    }
+};
 
 /// One `[submodule "<name>"]` section. Every slice is owned by the
 /// `Gitmodules` it came from.
@@ -152,6 +167,11 @@ pub const Gitmodules = struct {
     /// In the order their sections first appear.
     submodules: []Submodule,
     refused: []Refused,
+    /// `fetch.recurseSubmodules` and `submodule.fetchJobs` as written, which
+    /// git reads from `.gitmodules` for a fetch alone, below the
+    /// configuration's.
+    fetch_recurse: ?[]const u8 = null,
+    fetch_jobs: ?[]const u8 = null,
 
     /// No submodules at all, which is what a missing file reads as.
     pub fn empty(gpa: Allocator) Gitmodules {
@@ -171,9 +191,15 @@ pub const Gitmodules = struct {
 
         var submodules: std.ArrayList(Submodule) = .empty;
         var refused: std.ArrayList(Refused) = .empty;
+        var fetch_recurse: ?[]const u8 = null;
+        var fetch_jobs: ?[]const u8 = null;
         var order: u32 = 0;
         for (config.entries.items) |entry| {
             order += 1;
+            if (entry.subsection.len == 0 and entry.value != null) {
+                if (std.ascii.eqlIgnoreCase(entry.section, "fetch") and std.ascii.eqlIgnoreCase(entry.name, "recursesubmodules")) fetch_recurse = try arena.dupe(u8, entry.value.?);
+                if (std.ascii.eqlIgnoreCase(entry.section, "submodule") and std.ascii.eqlIgnoreCase(entry.name, "fetchjobs")) fetch_jobs = try arena.dupe(u8, entry.value.?);
+            }
             if (!std.ascii.eqlIgnoreCase(entry.section, "submodule")) continue;
             if (entry.subsection.len == 0) continue;
             const key = try std.ascii.allocLowerString(arena, entry.name);
@@ -221,7 +247,7 @@ pub const Gitmodules = struct {
                 // A bare name is true, as it is for every boolean.
                 sub.shallow = if (value) |v| config_mod.parseBool(v) catch return error.InvalidShallow else true;
             } else if (std.mem.eql(u8, key, "fetchrecursesubmodules")) {
-                sub.fetch_recurse = try parseFetchRecurse(value);
+                sub.fetch_recurse = try FetchRecurse.parse(value);
             }
         }
         return .{
@@ -229,6 +255,8 @@ pub const Gitmodules = struct {
             .arena = arena_instance.state,
             .submodules = submodules.items,
             .refused = refused.items,
+            .fetch_recurse = fetch_recurse,
+            .fetch_jobs = fetch_jobs,
         };
     }
 
@@ -259,15 +287,6 @@ pub const Gitmodules = struct {
         return found;
     }
 };
-
-fn parseFetchRecurse(value: ?[]const u8) ParseError!FetchRecurse {
-    const v = value orelse return .on;
-    if (config_mod.parseBool(v)) |b| {
-        return if (b) .on else .off;
-    } else |_| {}
-    if (std.mem.eql(u8, v, "on-demand")) return .on_demand;
-    return error.InvalidFetchRecurse;
-}
 
 /// git's `looks_like_command_line_option`.
 fn looksLikeOption(value: []const u8) bool {

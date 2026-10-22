@@ -37,6 +37,8 @@ const refs_mod = @import("../refs/refs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pack = @import("../odb/pack.zig");
 const rev_walk = @import("../walk/walk.zig");
+const submodule = @import("../submodule/submodule.zig");
+const sub_changes = @import("../submodule/changes.zig");
 const fetch_pack = @import("../wire.zig").fetch_pack;
 const glob = @import("../text.zig").glob;
 const rev_parse = @import("../rev_walk/rev_parse.zig");
@@ -104,7 +106,11 @@ pub const Error = error{
     /// A negotiation alone asked with no tips to restrict it to: git's
     /// "--negotiate-only needs one or more --negotiation-restrict=*".
     NegotiationRestrictNeeded,
-} || alternate_refs.Error || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || fsck.LoadError || config_mod.Config.SetError ||
+    /// A gitlink of the index whose directory holds something but no
+    /// repository, which a fetch going into the submodules cannot reach:
+    /// git's "Could not access submodule". Kept in `Outcome.submodules`.
+    SubmoduleNotAccessible,
+} || sub_changes.Error || alternate_refs.Error || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || fsck.LoadError || config_mod.Config.SetError ||
     rev_walk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
 /// How a fetch runs.
@@ -174,6 +180,22 @@ pub const Options = struct {
     /// Whether the commit graph is written after the fetch; `null` takes
     /// `fetch.writeCommitGraph`.
     write_commit_graph: ?bool = null,
+    /// `--[no-]recurse-submodules[=on-demand]`: whether the fetch goes on
+    /// into the submodules, each fetching its default remote as git's
+    /// `fetch_submodules` has it. `null` takes `fetch.recurseSubmodules` or
+    /// `submodule.recurse`, whichever is set later, then `.gitmodules`'
+    /// `fetch.recurseSubmodules`; none of them leaves each submodule to its
+    /// `fetchRecurseSubmodules`, else `recurse_submodules_default`.
+    recurse_submodules: ?sub_changes.Recurse = null,
+    /// git's `--recurse-submodules-default`: what a submodule that says
+    /// nothing does. `on_demand`, git's: only one whose commits the fetched
+    /// history records and the submodule lacks. A submodule's own fetch is
+    /// handed what its parent chose for it.
+    recurse_submodules_default: sub_changes.Recurse = .on_demand,
+    /// `--jobs`: how many submodules are fetched at once; `null` takes
+    /// `submodule.fetchJobs`, else `fetch.parallel`. Several at once run
+    /// without `progress` and `prompt`, which are the caller's task's.
+    submodule_jobs: ?u32 = null,
     /// `--keep`: what came is kept as a pack, however few its objects;
     /// otherwise a pack of fewer than `fetch.unpackLimit` objects
     /// (`transfer.unpackLimit`, git's 100) is stored loose, as git's
@@ -276,6 +298,9 @@ pub const Outcome = struct {
     /// needed or what came was stored loose; `objects` counts it either way.
     pack: ?Oid,
     objects: u32,
+    /// The submodules the fetch went into, and theirs, in the order it
+    /// went: git's "Fetching submodule <path>".
+    submodules: []const SubmoduleFetch = &.{},
 
     /// Release everything.
     pub fn deinit(outcome: *Outcome) void {
@@ -290,6 +315,22 @@ pub const Outcome = struct {
         }
         return false;
     }
+
+    /// Whether a submodule's fetch failed: git's "Errors during submodule
+    /// fetch", and its exit status of 1.
+    pub fn anySubmoduleFailed(outcome: *const Outcome) bool {
+        for (outcome.submodules) |s| if (s.failed != null) return true;
+        return false;
+    }
+};
+
+/// One submodule a fetch went into.
+pub const SubmoduleFetch = struct {
+    /// From the top of the fetch, through the submodules above it.
+    path: []const u8,
+    name: []const u8,
+    /// Why its fetch failed, or `null`.
+    failed: ?Error = null,
 };
 
 const HeadStatus = enum { merge, not_for_merge, ignore };
@@ -339,23 +380,7 @@ fn selectFilter(arena: Allocator, config: *const config_mod.Config, explicit: ?[
 /// Fetch from `remote_name`, a configured remote or a URL, into `repo`.
 pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Self.Error!Outcome {
     const deepen = try deepenRequest(repo, options);
-    // git's fetch takes `fetch.bundleURI`'s bundles first, whatever it
-    // fetches after, and warns when they fail.
-    if (repo.configuration().get("fetch.bundleuri")) |uri| {
-        const got = try bundle_uri.fetch(gpa, io, repo, uri, .{ .who = options.who, .transport = .{
-            .programs = options.programs,
-            .config = repo.configuration(),
-            .proxy = options.proxy,
-            .prompt = options.prompt,
-            .auth_failure = options.auth_failure,
-            .warnings = options.warnings,
-            .now = gitdate.timestamp(options.who.when_secs),
-            .repository = repo,
-            .who = options.who,
-            .from_user = options.from_user,
-        } });
-        if (!got.ok) try warning.note(options.warnings, .{ .bundle_uri_fetch_failed = uri });
-    }
+    try takeBundleUri(gpa, io, repo, options);
 
     var outcome: Outcome = .{
         .arena = .init(gpa),
@@ -455,7 +480,191 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     outcome.updates = plan.updates;
     outcome.pruned = pruned;
     outcome.fetch_head = plan.fetch_head;
+    outcome.submodules = try fetchSubmodules(arena, gpa, io, repo, .{ .tips = try fetchedTips(arena, map.items, &local), .hidden = try refTips(arena, local_refs.entries), .warnings = options.warnings }, options);
     return outcome;
+}
+
+/// git's fetch takes `fetch.bundleURI`'s bundles first, whatever it
+/// fetches after, and warns when they fail.
+fn takeBundleUri(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!void {
+    const uri = repo.configuration().get("fetch.bundleuri") orelse return;
+    const got = try bundle_uri.fetch(gpa, io, repo, uri, .{ .who = options.who, .transport = .{
+        .programs = options.programs,
+        .config = repo.configuration(),
+        .proxy = options.proxy,
+        .prompt = options.prompt,
+        .auth_failure = options.auth_failure,
+        .warnings = options.warnings,
+        .now = gitdate.timestamp(options.who.when_secs),
+        .repository = repo,
+        .who = options.who,
+        .from_user = options.from_user,
+    } });
+    if (!got.ok) try warning.note(options.warnings, .{ .bundle_uri_fetch_failed = uri });
+}
+
+/// What the fetch brought, as git's `check_for_new_submodule_commits` is
+/// handed it: the value of every ref fetched that is kept nowhere or
+/// changes the ref it is kept in.
+fn fetchedTips(arena: Allocator, map: []const MapEntry, local: *const LocalIndex) Allocator.Error![]const Oid {
+    var tips: std.ArrayList(Oid) = .empty;
+    for (map) |entry| {
+        if (entry.dst) |dst| if (local.names.get(dst)) |old| if (old) |oid| if (oid.eql(entry.oid)) continue;
+        try tips.append(arena, entry.oid);
+    }
+    return tips.items;
+}
+
+/// Every ref's value before the fetch: what its new history is measured
+/// against.
+fn refTips(arena: Allocator, refs: []const refs_mod.Named) Allocator.Error![]const Oid {
+    var tips: std.ArrayList(Oid) = .empty;
+    for (refs) |ref| switch (ref.target) {
+        .direct => |oid| try tips.append(arena, oid),
+        .symbolic => {},
+    };
+    return tips.items;
+}
+
+/// `recurse_submodules`, else the later of `fetch.recurseSubmodules` and
+/// `submodule.recurse`, as git's configuration callback leaves it.
+fn recursion(config: *const config_mod.Config, explicit: ?sub_changes.Recurse) Error!?sub_changes.Recurse {
+    if (explicit) |r| return r;
+    var found: ?sub_changes.Recurse = null;
+    var it = config.iterate(&.{ "fetch.recursesubmodules", "submodule.recurse" });
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.section, "submodule")) {
+            const on = config_mod.parseBool(entry.value orelse "true") catch return error.MalformedValue;
+            found = if (on) .on else .off;
+        } else found = try sub_changes.parseRecurse(entry.value);
+    }
+    return found;
+}
+
+/// One submodule's part of `fetchSubmodules`: its repository, and what
+/// its fetches did.
+const SubmoduleRun = struct {
+    task: sub_changes.FetchTask,
+    repo: ?Repository,
+    apart: Apart = .{},
+    outcomes: [2]?Outcome = .{ null, null },
+    failed: ?Error = null,
+
+    fn deinit(run: *SubmoduleRun, io: Io) void {
+        if (run.repo) |*r| r.deinit(io);
+        for (&run.outcomes) |*o| if (o.*) |*outcome| outcome.deinit();
+        run.apart.deinit();
+    }
+
+    /// The first failure is the one kept, as git names the submodule once.
+    fn fail(run: *SubmoduleRun, err: Error) void {
+        if (run.failed == null) run.failed = err;
+    }
+};
+
+/// git's `fetch_submodules`: each submodule `sub_changes.planFetch`
+/// chooses fetched from its default remote as `options` and its own
+/// recursion say, `plan.jobs` at once; then, for one still without a
+/// commit the fetched history records, those commits asked for by name.
+/// A submodule's failure is kept with it, and the fetch goes on.
+fn fetchSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, range: sub_changes.Range, options: Options) Error![]const SubmoduleFetch {
+    const explicit = try recursion(repo.configuration(), options.recurse_submodules);
+    if (explicit == .off) return &.{};
+    const plan = try sub_changes.planFetch(arena, gpa, io, repo, .{ .range = range, .explicit = explicit, .default = options.recurse_submodules_default, .jobs = options.submodule_jobs });
+    for (plan.missing) |m| {
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try warning.note(options.warnings, .{ .submodule_not_accessible = .{ .path = m.path, .commit = m.commit.hex(&hex) } });
+    }
+    var out: std.ArrayList(SubmoduleFetch) = .empty;
+    for (plan.inaccessible) |path| try out.append(arena, .{ .path = path, .name = path, .failed = error.SubmoduleNotAccessible });
+
+    const runs = try gpa.alloc(SubmoduleRun, plan.tasks.len);
+    defer gpa.free(runs);
+    for (plan.tasks, runs) |task, *run| run.* = .{ .task = task, .repo = null };
+    defer for (runs) |*run| run.deinit(io);
+    // Each opened here, on this task: the superproject's handle is read by
+    // one task at a time.
+    for (runs) |*run| run.repo = try submodule.openRepository(gpa, io, repo, .{ .path = run.task.path, .name = run.task.name }, .{});
+    const child: Options = .{
+        .who = options.who,
+        .prune = options.prune,
+        .prune_tags = options.prune_tags,
+        .force = options.force,
+        .update_head_ok = options.update_head_ok,
+        .keep = options.keep,
+        .tags = options.tags,
+        .write_fetch_head = options.write_fetch_head,
+        .recurse_submodules = plan.explicit,
+        .programs = options.programs,
+        .proxy = options.proxy,
+        .prompt = options.prompt,
+        .auth_failure = options.auth_failure,
+        .warnings = options.warnings,
+        .progress = options.progress,
+        .check_objects = options.check_objects,
+        .from_user = options.from_user,
+    };
+    try runSubmoduleFetches(gpa, io, runs, plan.jobs, child, 0);
+    try runSubmoduleFetches(gpa, io, runs, plan.jobs, child, 1);
+    for (runs) |*run| {
+        try out.append(arena, .{ .path = try arena.dupe(u8, run.task.path), .name = try arena.dupe(u8, run.task.name), .failed = run.failed });
+        for (run.outcomes) |maybe| if (maybe) |o| for (o.submodules) |nested| try out.append(arena, .{
+            .path = try arena.print("{s}/{s}", .{ run.task.path, nested.path }),
+            .name = try arena.dupe(u8, nested.name),
+            .failed = nested.failed,
+        });
+    }
+    return out.items;
+}
+
+/// One pass of `fetchSubmodules` over `runs`, `jobs` at once: the default
+/// remote's configured refspecs first, then (`pass` 1) the commits a
+/// submodule still lacks.
+fn runSubmoduleFetches(gpa: Allocator, io: Io, runs: []SubmoduleRun, jobs: u32, options: Options, pass: u1) Error!void {
+    if (jobs > 1 and runs.len > 1) {
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        var next: usize = 0;
+        while (next < runs.len) {
+            const end = @min(runs.len, next + jobs);
+            for (runs[next..end]) |*run| {
+                const apart = try run.apart.options(gpa, options);
+                group.concurrent(io, fetchSubmodule, .{ gpa, io, run, apart, pass }) catch fetchSubmodule(gpa, io, run, options, pass);
+            }
+            try group.await(io);
+            next = end;
+        }
+        for (runs) |*run| try run.apart.merge(options);
+    } else for (runs) |*run| fetchSubmodule(gpa, io, run, options, pass);
+}
+
+fn fetchSubmodule(gpa: Allocator, io: Io, run: *SubmoduleRun, options: Options, pass: u1) void {
+    const sub = if (run.repo) |*r| r else {
+        if (pass == 0) run.failed = error.SubmoduleNotAccessible;
+        return;
+    };
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var each = options;
+    each.recurse_submodules_default = if (pass == 0) run.task.default else .on_demand;
+    if (pass == 1) {
+        sub.objectDatabase().refresh(io) catch |err| return run.fail(err);
+        var missing: std.ArrayList([]const u8) = .empty;
+        for (run.task.wanted) |oid| {
+            const header = sub.objectDatabase().readHeader(io, oid) catch |err| switch (err) {
+                error.ObjectNotFound => null,
+                else => |e| return run.fail(e),
+            };
+            if (header != null and header.?.type == .commit) continue;
+            var hex: [hash.max_hex_len]u8 = undefined;
+            missing.append(arena, arena.dupe(u8, oid.hex(&hex)) catch |err| return run.fail(err)) catch |err| return run.fail(err);
+        }
+        if (missing.items.len == 0) return;
+        each.refspecs = missing.items;
+    }
+    const remote = submodule.defaultRemote(arena, io, sub) catch |err| return run.fail(err);
+    run.outcomes[pass] = fetch(gpa, io, sub, remote, each) catch |err| return run.fail(err);
 }
 
 /// What `bringObjects` brings, and what it knows to ask.
@@ -727,6 +936,48 @@ pub const ManyOptions = struct {
     jobs: ?u32 = null,
 };
 
+/// What one of several fetches run beside each other keeps apart from the
+/// rest, and hands to the caller's own once they are done: its warnings
+/// and a refused credential. The progress and the prompt answer on the
+/// caller's task, so the fetch runs without them.
+const Apart = struct {
+    warnings: ?warning.Warnings = null,
+    auth_failure: auth.Failure = .{},
+
+    /// `shared` with this fetch's own lists in place of the caller's.
+    fn options(apart: *Apart, gpa: Allocator, shared: Options) Allocator.Error!Options {
+        var own = shared;
+        if (shared.warnings != null) {
+            if (apart.warnings == null) apart.warnings = .init(gpa);
+            own.warnings = &apart.warnings.?;
+        }
+        if (shared.auth_failure != null) own.auth_failure = &apart.auth_failure;
+        own.progress = null;
+        own.prompt = null;
+        return own;
+    }
+
+    /// Hand what was kept to the caller's lists: every warning, and the
+    /// refusal when the caller has none yet.
+    fn merge(apart: *Apart, shared: Options) Allocator.Error!void {
+        if (apart.warnings) |*own| {
+            for (own.items.items) |item| try warning.note(shared.warnings, item);
+            own.deinit();
+            apart.warnings = null;
+        }
+        if (shared.auth_failure) |failure| if (failure.reason == .none and apart.auth_failure.reason != .none) {
+            failure.* = apart.auth_failure;
+            apart.auth_failure = .{};
+        };
+    }
+
+    fn deinit(apart: *Apart) void {
+        if (apart.warnings) |*own| own.deinit();
+        apart.auth_failure.deinit();
+        apart.* = undefined;
+    }
+};
+
 pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []const u8, many: ManyOptions) Self.Error!Many {
     const options = many.fetch;
     const jobs = many.jobs;
@@ -741,17 +992,22 @@ pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []con
     var limit: usize = jobs orelse @intCast(@max(configured, 0));
     if (limit == 0) limit = std.Thread.getCpuCount() catch 1;
     if (limit > 1 and names.len > 1) {
+        const apart = try gpa.alloc(Apart, names.len);
+        defer gpa.free(apart);
+        for (apart) |*a| a.* = .{};
+        defer for (apart) |*a| a.deinit();
         var group: Io.Group = .init;
         defer group.cancel(io);
         var next: usize = 0;
         while (next < names.len) {
             const batch_end = @min(names.len, next + limit);
-            for (next..batch_end) |i| group.concurrent(io, fetchOneAgain, .{ gpa, io, repo, names[i], each, &results[i] }) catch {
+            for (next..batch_end) |i| group.concurrent(io, fetchOneAgain, .{ gpa, io, repo, names[i], try apart[i].options(gpa, each), &results[i] }) catch {
                 fetchOne(gpa, io, repo, names[i], each, &results[i]);
             };
             try group.await(io);
             next = batch_end;
         }
+        for (apart) |*a| try a.merge(each);
     } else for (names, results) |name, *result| fetchOne(gpa, io, repo, name, each, result);
     if (options.write_commit_graph orelse try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
     return .{ .names = names, .results = results, .gpa = gpa };
@@ -2346,7 +2602,8 @@ test "a linked reftable fetch sees the main worktree branch through its backend"
 /// `maintenance`'s prefetch task (`maintenance_task_prefetch`): each
 /// configured remote but those with `remote.<name>.skipDefaultUpdate`
 /// fetched as `git fetch <remote> --prefetch --prune --no-tags
-/// --no-write-fetch-head`, `template` giving the rest. The first failure
+/// --no-write-fetch-head --recurse-submodules=no`, `template` giving the
+/// rest. The first failure
 /// is returned once every remote is tried, as git's loop runs on.
 pub fn prefetchAll(gpa: Allocator, io: Io, repo: *Repository, template: Options) Self.Error!void {
     const names = try remote_mod.names(gpa, repo.configuration());
@@ -2362,6 +2619,7 @@ pub fn prefetchAll(gpa: Allocator, io: Io, repo: *Repository, template: Options)
         options.prune = true;
         options.tags = .none;
         options.write_fetch_head = false;
+        options.recurse_submodules = .off;
         var outcome = fetch(gpa, io, repo, name, options) catch |err| {
             if (first == null) first = err;
             continue;

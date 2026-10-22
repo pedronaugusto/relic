@@ -62,6 +62,8 @@ const promisors = @import("../wire.zig").promisors;
 const odb_mod = @import("../odb/odb.zig");
 const ref_names = @import("../names.zig").ref;
 const fetch_mod = @import("fetch.zig");
+const reference = @import("clone/reference.zig");
+const alternate_refs = @import("alternate_refs.zig");
 const submodule = @import("../submodule/submodule.zig");
 
 const Oid = hash.Oid;
@@ -81,7 +83,7 @@ pub const Error = error{
     /// `bundle_uri` with `depth`, `shallow_since` or `shallow_exclude`,
     /// which git refuses together.
     BundleUriShallow,
-} || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || object_walk.Error ||
+} || reference.Error || alternate_refs.Error || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || object_walk.Error ||
     worktree.Error || Repository.WriteConfigError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError || fsck.LoadError;
 
@@ -111,8 +113,19 @@ pub const FilterLoader = struct {
     load_fn: *const fn (Allocator, Io, ?*const anyopaque, *Repository, FilterOptions) Repository.LoadFiltersError!Filters,
 };
 
+/// A `--reference` or `--reference-if-able`: see `clone/reference.zig`.
+pub const Reference = reference.Reference;
+
 /// How a clone runs.
 pub const Options = struct {
+    /// `--reference` and `--reference-if-able`: repositories on this
+    /// machine whose objects the new one borrows, named in its
+    /// `objects/info/alternates`, so the remote sends only what they lack.
+    reference: []const Reference = &.{},
+    /// `--dissociate`: once the objects are in, what was borrowed is
+    /// copied in and the lenders forgotten, as git's `repack -a -d` and the
+    /// alternates file removed.
+    dissociate: bool = false,
     /// Optional native filters supplied by the operation owner.
     native_filters: ?FilterLoader = null,
     /// The remote's name in the new configuration: git's `--origin`.
@@ -360,6 +373,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
     // One branch, or one tag, when that is all that is fetched.
     const single_tag = try singleTagRef(arena, head, single_branch, options);
     try configureRemote(arena, io, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
+    try reference.borrow(arena, io, &repo, options.reference, options.warnings);
 
     const tips = try takeBundles(arena, gpa, io, &repo, &session, reached, settings, options);
 
@@ -376,21 +390,15 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
     }, options);
 
     defer received.fetched.deinit(io);
-    const detached = received.detached;
-
-    // The remote's refs, in one step and with no logs, as git's initial
-    // transaction writes them: packed, or one table.
-    try repo.refStore().writeInitial(gpa, io, chosen.first_refs.items);
-
-    const display = try url_mod.anonymize(arena, target.recorded);
-    const message = try arena.print("clone: from {s}", .{display});
-    const log: refs_mod.LogMessage = .{ .who = options.who, .message = message, .policy = repo.reflogPolicy() };
-    const head_commit = try pointHead(arena, io, &repo, &session, &remote_refs, head.branch, detached, log, options);
-    // The remote's own `HEAD`, where it points at a branch, whatever was
-    // checked out.
-    if (!options.bare) if (remote_refs.find("HEAD")) |remote_head| {
-        try followRemoteHead(arena, io, &repo, &remote_refs, remote_head, head.branch, single_branch, log, options.origin.?);
-    };
+    const head_commit = try recordRefs(arena, gpa, io, &repo, &session, .{
+        .remote_refs = &remote_refs,
+        .chosen = &chosen,
+        .head = head,
+        .detached = received.detached,
+        .single_branch = single_branch,
+        .recorded = target.recorded,
+    }, options);
+    if (options.dissociate) try reference.dissociate(gpa, io, &repo);
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.
     if (hasUserConfig(options) or options.home != null) {
@@ -403,6 +411,32 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
         if (head_commit) |commit| try checkOutCloned(arena, gpa, io, &repo, &session, commit, send_filter != null, options);
     }
     return repo;
+}
+
+/// What `recordRefs` writes the refs from.
+const Recording = struct {
+    remote_refs: *const protocol.RefList,
+    chosen: *const Chosen,
+    head: Head,
+    detached: ?Oid,
+    single_branch: bool,
+    recorded: []const u8,
+};
+
+/// The remote's refs, in one step and with no logs, as git's initial
+/// transaction writes them -- packed, or one table -- then `HEAD` and its
+/// branch with `clone: from <url>`, and the remote's own `HEAD` where it
+/// points at a branch, whatever was checked out. The commit to check out.
+fn recordRefs(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, session: *const transport.Session, r: Recording, options: Options) Error!?Oid {
+    try repo.refStore().writeInitial(gpa, io, r.chosen.first_refs.items);
+    const display = try url_mod.anonymize(arena, r.recorded);
+    const message = try arena.print("clone: from {s}", .{display});
+    const log: refs_mod.LogMessage = .{ .who = options.who, .message = message, .policy = repo.reflogPolicy() };
+    const head_commit = try pointHead(arena, io, repo, session, r.remote_refs, r.head.branch, r.detached, log, options);
+    if (!options.bare) if (r.remote_refs.find("HEAD")) |remote_head| {
+        try followRemoteHead(arena, io, repo, r.remote_refs, remote_head, r.head.branch, r.single_branch, log, options.origin.?);
+    };
+    return head_commit;
 }
 
 /// The tag a single-branch clone fetches when the branch asked for turned
@@ -469,10 +503,26 @@ fn receiveObjects(
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
     var rules = try fsck.forTransfer(gpa, io, ask.settings, .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
     defer if (rules) |*r| r.deinit(gpa);
+    // What the lenders' refs name is offered too, as git's fetch-pack
+    // offers an alternate's.
+    var tips: std.ArrayList(Oid) = .empty;
+    try tips.appendSlice(arena, ask.tips);
+    const lent = try alternate_refs.read(gpa, io, repo, options.programs, options.warnings);
+    defer gpa.free(lent);
+    for (lent) |oid| if (try repo.objectDatabase().exists(io, oid)) try tips.append(arena, oid);
+    // What a lender or a bundle holds already is not asked for, as git's
+    // fetch-pack leaves out a want it has; with nothing left, nothing is.
+    var wants: std.ArrayList(Oid) = .empty;
+    var want_names: std.ArrayList([]const u8) = .empty;
+    for (chosen.wants.items, chosen.want_names.items) |oid, name| {
+        if (try repo.objectDatabase().exists(io, oid)) continue;
+        try wants.append(arena, oid);
+        try want_names.append(arena, name);
+    }
     var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
-        .wants = chosen.wants.items,
-        .want_names = chosen.want_names.items,
-        .tips = ask.tips,
+        .wants = wants.items,
+        .want_names = want_names.items,
+        .tips = tips.items,
         .include_tag = options.tags,
         .deepen = ask.deepen,
         .filter = ask.filter,
@@ -1123,6 +1173,7 @@ pub const SubmoduleTransport = struct {
 
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
+const decimal = @import("../text.zig").decimal;
 const testremote = @import("../testing/remote.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -1736,7 +1787,9 @@ test "submodules cloned and fetched from a remote are what git submodule update 
         defer repo.deinit(io);
         _ = try submodule.update(gpa, io, &repo, .{ .recursive = true, .transport = t.transport(), .who = test_who });
     }
-    try testing.expect(t.fetches >= 3);
+    // `lib`'s fetch goes on into `inner` itself, on demand, as git's
+    // `fetch` inside a submodule does.
+    try testing.expect(t.fetches >= 1);
     try expectSameSubmodules(gpa, io, by_git, by_relic);
 }
 
@@ -1774,4 +1827,124 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     defer allowed.deinit();
     try SubmoduleTransport.cloneFn(gpa, io, &allowed, source_path, allowed_dir);
     try testing.expectEqual(@as(u32, 1), allowed.clones);
+}
+
+test "a clone borrows from --reference and --reference-if-able as git's does, and --dissociate copies the borrowed objects in" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    // The remote has four commits; the lender, a clone of it, every one
+    // through its tags; the older lender, with no tags, the first three;
+    // and a shallow one only the last.
+    var source = try testremote.historyRepo(gpa, io, 4);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const lender = try gpa.print("{s}/lender", .{root_path});
+    defer gpa.free(lender);
+    try source.exec(io, &.{ "clone", "-q", "--no-checkout", source_path, lender });
+    const lender_git = try gpa.print("{s}/.git", .{lender});
+    defer gpa.free(lender_git);
+    try source.exec(io, &.{ "--git-dir", lender_git, "update-ref", "refs/remotes/origin/main", "HEAD~1" });
+    try source.exec(io, &.{ "--git-dir", lender_git, "update-ref", "refs/heads/main", "HEAD~1" });
+    try source.exec(io, &.{ "--git-dir", lender_git, "reflog", "expire", "--expire=now", "--all" });
+    try source.exec(io, &.{ "--git-dir", lender_git, "gc", "-q", "--prune=now" });
+    const older = try gpa.print("{s}/older", .{root_path});
+    defer gpa.free(older);
+    try source.exec(io, &.{ "clone", "-q", "--bare", "--no-tags", source_path, older });
+    try source.exec(io, &.{ "--git-dir", older, "update-ref", "refs/heads/main", "main~1" });
+    try source.exec(io, &.{ "--git-dir", older, "reflog", "expire", "--expire=now", "--all" });
+    try source.exec(io, &.{ "--git-dir", older, "gc", "-q", "--prune=now" });
+    const shallow = try gpa.print("{s}/shallow", .{root_path});
+    defer gpa.free(shallow);
+    const from = try gpa.print("file://{s}", .{source_path});
+    defer gpa.free(from);
+    try source.exec(io, &.{ "clone", "-q", "--depth", "1", from, shallow });
+    const missing = try gpa.print("{s}/nowhere", .{root_path});
+    defer gpa.free(missing);
+    // git's own upload-pack serves both, behind the stand-in ssh, so the
+    // packs they are sent are the same.
+    const fake = try testremote.fakeSsh(gpa, io, root.dir);
+    defer gpa.free(fake);
+    const ssh_setting = try gpa.print("core.sshCommand={s}", .{fake});
+    defer gpa.free(ssh_setting);
+    const ssh_path = try gpa.dupe(u8, source_path);
+    defer gpa.free(ssh_path);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+    const served = try gpa.print("ssh://example.invalid{s}{s}", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path });
+    defer gpa.free(served);
+    const settings_text = try gpa.print("[core]\nsshCommand = {s}\n", .{fake});
+    defer gpa.free(settings_text);
+    var settings = try config_mod.Config.parseText(gpa, settings_text, .command);
+    defer settings.deinit();
+
+    const Case = struct { git_args: []const []const u8, references: []const Reference, dissociate: bool = false, refused: ?anyerror = null };
+    const cases = [_]Case{
+        .{ .git_args = &.{ "--reference", lender }, .references = &.{.{ .path = lender }} },
+        .{ .git_args = &.{ "--reference", older }, .references = &.{.{ .path = older }} },
+        .{ .git_args = &.{ "--reference", lender_git, "--dissociate" }, .references = &.{.{ .path = lender_git }}, .dissociate = true },
+        .{ .git_args = &.{ "--reference-if-able", missing, "--reference", lender }, .references = &.{ .{ .path = missing, .if_able = true }, .{ .path = lender } } },
+        .{ .git_args = &.{ "--reference", missing }, .references = &.{.{ .path = missing }}, .refused = error.ReferenceNotFound },
+        .{ .git_args = &.{ "--reference", shallow }, .references = &.{.{ .path = shallow }}, .refused = error.ReferenceShallow },
+        .{ .git_args = &.{ "--reference", root_path }, .references = &.{.{ .path = root_path }}, .refused = error.ReferenceNotARepository },
+    };
+    for (cases, 0..) |case, number| {
+        var by_git = try Twin.init(gpa, io);
+        defer by_git.deinit(gpa, io);
+        var by_relic = try Twin.init(gpa, io);
+        defer by_relic.deinit(gpa, io);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "-c", ssh_setting, "clone", "-q" });
+        try argv.appendSlice(gpa, case.git_args);
+        try argv.appendSlice(gpa, &.{ served, by_git.path });
+        var warnings: warning.Warnings = .init(gpa);
+        defer warnings.deinit();
+        const made = clone(gpa, io, served, by_relic.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &settings, .reference = case.references, .dissociate = case.dissociate, .warnings = &warnings });
+        if (case.refused) |err| {
+            try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, by_git.tmp.dir, &env, argv.items, "", false));
+            try testing.expectError(err, made);
+            continue;
+        }
+        const out = try git(gpa, io, &env, by_git.tmp.dir, argv.items);
+        gpa.free(out);
+        var repo = try made;
+        repo.deinit(io);
+        try expectSameClone(gpa, io, &env, by_git.dir, by_relic.dir, false);
+        // The same lenders, and as few objects of its own.
+        const alternates_theirs = by_git.dir.readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
+            error.FileNotFound => try gpa.dupe(u8, "(none)"),
+            else => return e,
+        };
+        defer gpa.free(alternates_theirs);
+        const alternates_ours = by_relic.dir.readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
+            error.FileNotFound => try gpa.dupe(u8, "(none)"),
+            else => return e,
+        };
+        defer gpa.free(alternates_ours);
+        try testing.expectEqualStrings(alternates_theirs, alternates_ours);
+        const theirs = try objectsHeld(gpa, io, &env, by_git.dir);
+        const ours = try objectsHeld(gpa, io, &env, by_relic.dir);
+        try testing.expectEqual(.{ number, theirs }, .{ number, ours });
+        if (case.references.len > 1) try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+    }
+}
+
+/// How many objects a repository holds itself, in packs and loose.
+fn objectsHeld(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir: Io.Dir) !u64 {
+    const out = try git(gpa, io, env, dir, &.{ "count-objects", "-v" });
+    defer gpa.free(out);
+    var total: u64 = 0;
+    var lines = std.mem.tokenizeScalar(u8, out, '\n');
+    while (lines.next()) |line| {
+        for ([_][]const u8{ "count: ", "in-pack: " }) |key| if (std.mem.startsWith(u8, line, key)) {
+            total += decimal.digits(u64, line[key.len..]) orelse return error.TestUnexpectedResult;
+        };
+    }
+    return total;
 }

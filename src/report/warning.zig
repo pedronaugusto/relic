@@ -95,6 +95,21 @@ pub const Warning = union(enum) {
     /// A negotiation tip's pattern matched no ref, and was ignored: the
     /// setting or option it came from, and the pattern.
     negotiation_tip_unmatched: struct { from: []const u8, pattern: []const u8 },
+    /// A gitlink a fetched commit changes, at a path `.gitmodules` does not
+    /// name but whose stand-in name, the path, it gives another submodule:
+    /// left out of the fetch's recursion. The commit and the path.
+    submodule_name_collides: struct { commit: []const u8, path: []const u8 },
+    /// A submodule the fetched history moves, active at the commit that
+    /// moves it, with no repository anywhere: git's "Could not access
+    /// submodule", which does not fail the fetch. The path and the commit.
+    submodule_not_accessible: struct { path: []const u8, commit: []const u8 },
+    /// A `--reference-if-able` that cannot lend, left out: the path and
+    /// why, in git's words.
+    alternate_not_added: struct { path: []const u8, reason: []const u8 },
+    /// A superproject's lender whose `modules/<name>` cannot lend, left
+    /// out under `submodule.alternateErrorStrategy=info`: the submodule's
+    /// name and why.
+    submodule_alternate_not_added: struct { name: []const u8, reason: []const u8 },
     /// What git warns of while reading which notes follow a rewritten
     /// commit: a `notes.rewriteRef` outside `refs/notes/`, or naming no
     /// ref. The text.
@@ -130,6 +145,10 @@ pub const Warning = union(enum) {
             .push_cert_not_asked => "not sending a push certificate since the receiving end does not support --signed push",
             .alternate_refs_line => |text| arena.print("invalid line while parsing alternate refs: {s}", .{text}),
             .negotiation_tip_unmatched => |t| arena.print("ignoring {s}={s} because it does not match any refs", .{ t.from, t.pattern }),
+            .submodule_name_collides => |t| arena.print("Submodule in commit {s} at path: '{s}' collides with a submodule named the same. Skipping it.", .{ t.commit, t.path }),
+            .submodule_not_accessible => |t| arena.print("Could not access submodule '{s}' at commit {s}", .{ t.path, t.commit }),
+            .alternate_not_added => |t| arena.print("info: Could not add alternate for '{s}': {s}", .{ t.path, t.reason }),
+            .submodule_alternate_not_added => |t| arena.print("submodule '{s}' cannot add alternate: {s}", .{ t.name, t.reason }),
             .http_version_unknown => |v| arena.print("unknown value given to http.version: '{s}'", .{v}),
             .ssl_version_unknown => |v| arena.print("unsupported ssl version {s}: using default", .{v}),
             .bundle_uri_clone_failed => |v| arena.print("failed to fetch objects from bundle URI '{s}'", .{v}),
@@ -186,6 +205,10 @@ pub const Warnings = struct {
             .push_cert_not_asked => .push_cert_not_asked,
             .alternate_refs_line => |t| .{ .alternate_refs_line = try a.dupe(u8, t) },
             .negotiation_tip_unmatched => |t| .{ .negotiation_tip_unmatched = .{ .from = try a.dupe(u8, t.from), .pattern = try a.dupe(u8, t.pattern) } },
+            .submodule_name_collides => |t| .{ .submodule_name_collides = .{ .commit = try a.dupe(u8, t.commit), .path = try a.dupe(u8, t.path) } },
+            .submodule_not_accessible => |t| .{ .submodule_not_accessible = .{ .path = try a.dupe(u8, t.path), .commit = try a.dupe(u8, t.commit) } },
+            .alternate_not_added => |t| .{ .alternate_not_added = .{ .path = try a.dupe(u8, t.path), .reason = try a.dupe(u8, t.reason) } },
+            .submodule_alternate_not_added => |t| .{ .submodule_alternate_not_added = .{ .name = try a.dupe(u8, t.name), .reason = try a.dupe(u8, t.reason) } },
             .http_version_unknown => |t| .{ .http_version_unknown = try a.dupe(u8, t) },
             .ssl_version_unknown => |t| .{ .ssl_version_unknown = try a.dupe(u8, t) },
             .bundle_uri_clone_failed => |t| .{ .bundle_uri_clone_failed = try a.dupe(u8, t) },

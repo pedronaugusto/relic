@@ -326,10 +326,10 @@ pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []c
     return repo.configuration().get(try configKey(arena, name, "url")) != null;
 }
 
-/// The remote git resolves a relative url against: the current branch's
-/// `branch.<name>.remote`, else the only remote when there is one, else
-/// `origin`.
-fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
+/// The remote git resolves a relative url against, and fetches from when
+/// none is named: the current branch's `branch.<name>.remote`, else the
+/// only remote when there is one, else `origin`.
+pub fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
     if (try repo.refStore().currentBranch(arena, io)) |branch| {
         const key = try arena.print("branch.{s}.remote", .{branch});
         if (try configString(arena, repo.configuration(), key)) |remote| return remote;

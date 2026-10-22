@@ -2230,3 +2230,188 @@ test "several remotes are fetched as git fetches them: fetch.all and skipFetchAl
         try testing.expectEqualStrings(heads[0], heads[1]);
     }
 }
+
+/// Upstream for the submodule fetches: `inner`; `lib`, holding `inner`;
+/// and `super`, holding `lib` and, at `vendor/inner`, `inner` again; each
+/// made in `work/<name>` and pushed to the bare one the server serves,
+/// which hands out any commit asked for by name.
+const SubmoduleWorld = struct {
+    root: testing.TmpDir,
+    work: testgit.Repo,
+    server: *testremote.HttpServer,
+    root_path: []u8,
+
+    fn init(gpa: Allocator, io: Io) !SubmoduleWorld {
+        var root = testing.tmpDir(.{ .iterate = true });
+        errdefer root.cleanup();
+        const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+        errdefer server.stop();
+        const root_path = try testremote.absolutePath(gpa, io, root.dir);
+        errdefer gpa.free(root_path);
+        var work = try testgit.Repo.init(gpa, io, &.{});
+        errdefer work.deinit();
+        var world: SubmoduleWorld = .{ .root = root, .work = work, .server = server, .root_path = root_path };
+        for ([_][]const u8{ "inner", "lib", "super" }) |name| {
+            const bare = try gpa.print("{s}/{s}.git", .{ root_path, name });
+            defer gpa.free(bare);
+            try world.git(gpa, io, ".", &.{ "init", "-q", "--bare", "-b", "main", bare });
+            try world.git(gpa, io, ".", &.{ "--git-dir", bare, "config", "uploadpack.allowAnySHA1InWant", "true" });
+            try world.git(gpa, io, ".", &.{ "init", "-q", "-b", "main", name });
+            const served = try world.url(gpa, name);
+            defer gpa.free(served);
+            try world.git(gpa, io, name, &.{ "remote", "add", "origin", served });
+            // The server takes no pushes; each goes to the bare repository.
+            try world.git(gpa, io, name, &.{ "remote", "set-url", "--push", "origin", bare });
+            var dir = try world.work.dir.openDir(io, name, .{});
+            defer dir.close(io);
+            try dir.writeFile(io, .{ .sub_path = "README", .data = name });
+            try world.git(gpa, io, name, &.{ "add", "README" });
+            if (std.mem.eql(u8, name, "lib")) try world.git(gpa, io, name, &.{ "submodule", "add", "-q", "../inner.git", "inner" });
+            if (std.mem.eql(u8, name, "super")) {
+                try world.git(gpa, io, name, &.{ "submodule", "add", "-q", "../lib.git", "lib" });
+                try world.git(gpa, io, name, &.{ "submodule", "add", "-q", "../inner.git", "vendor/inner" });
+            }
+            try world.git(gpa, io, name, &.{ "commit", "-q", "-m", name });
+            try world.git(gpa, io, name, &.{ "push", "-q", "origin", "main" });
+        }
+        return world;
+    }
+
+    fn deinit(w: *SubmoduleWorld, gpa: Allocator) void {
+        w.work.deinit();
+        w.server.stop();
+        gpa.free(w.root_path);
+        w.root.cleanup();
+    }
+
+    fn url(w: *SubmoduleWorld, gpa: Allocator, name: []const u8) ![]u8 {
+        const file = try gpa.print("{s}.git", .{name});
+        defer gpa.free(file);
+        return w.server.url(gpa, file);
+    }
+
+    fn git(w: *SubmoduleWorld, gpa: Allocator, io: Io, at: []const u8, args: []const []const u8) !void {
+        var dir = try w.work.dir.openDir(io, at, .{});
+        defer dir.close(io);
+        const out = try testremote.gitInput(gpa, io, dir, args, "");
+        gpa.free(out);
+    }
+
+    /// A clone of `super` with every submodule checked out, by git.
+    fn twin(w: *SubmoduleWorld, gpa: Allocator, io: Io, name: []const u8) !void {
+        const super_url = try w.url(gpa, "super");
+        defer gpa.free(super_url);
+        try w.git(gpa, io, ".", &.{ "clone", "-q", "--recurse-submodules", super_url, name });
+    }
+
+    /// A new commit of `inner`, pushed to `ref`, and, under `record`, the
+    /// gitlinks above it moved to it and pushed.
+    fn advance(w: *SubmoduleWorld, gpa: Allocator, io: Io, ref: []const u8, record: bool) !void {
+        var inner = try w.work.dir.openDir(io, "inner", .{});
+        defer inner.close(io);
+        try inner.writeFile(io, .{ .sub_path = "README", .data = ref });
+        try w.git(gpa, io, "inner", &.{ "commit", "-q", "-am", ref });
+        const spec = try gpa.print("HEAD:{s}", .{ref});
+        defer gpa.free(spec);
+        try w.git(gpa, io, "inner", &.{ "push", "-q", "origin", spec });
+        if (!record) return;
+        for ([_][]const u8{ "lib/inner", "super/vendor/inner" }) |path| {
+            try w.git(gpa, io, path, &.{ "fetch", "-q", "origin", ref });
+            try w.git(gpa, io, path, &.{ "checkout", "-q", "FETCH_HEAD" });
+        }
+        try w.git(gpa, io, "lib", &.{ "commit", "-q", "-am", "move inner" });
+        try w.git(gpa, io, "lib", &.{ "push", "-q", "origin", "main" });
+        try w.git(gpa, io, "super/lib", &.{ "pull", "-q", "--no-recurse-submodules", "origin", "main" });
+        try w.git(gpa, io, "super", &.{ "commit", "-q", "-am", "move lib and inner" });
+        try w.git(gpa, io, "super", &.{ "push", "-q", "origin", "main" });
+    }
+};
+
+/// Each git directory of two clones the same: refs and `FETCH_HEAD`.
+fn expectSameSubmoduleFetch(gpa: Allocator, io: Io, world: *SubmoduleWorld) !void {
+    for ([_][]const u8{ ".git", ".git/modules/lib", ".git/modules/lib/modules/inner", ".git/modules/vendor/inner" }) |git_dir| {
+        var refs: [2][]u8 = undefined;
+        var heads: [2][]u8 = undefined;
+        for ([_][]const u8{ "by-git", "by-relic" }, &refs, &heads) |name, *listed, *head| {
+            var dir = try world.work.dir.openDir(io, name, .{});
+            defer dir.close(io);
+            listed.* = try testremote.gitInput(gpa, io, dir, &.{ "--git-dir", git_dir, "for-each-ref", "--format=%(refname) %(objectname)" }, "");
+            const path = try gpa.print("{s}/FETCH_HEAD", .{git_dir});
+            defer gpa.free(path);
+            head.* = dir.readFileAlloc(io, path, gpa, .unlimited) catch |err| switch (err) {
+                error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                else => return err,
+            };
+        }
+        defer for (refs ++ heads) |d| gpa.free(d);
+        try testing.expectEqualStrings(refs[0], refs[1]);
+        try testing.expectEqualStrings(heads[0], heads[1]);
+    }
+}
+
+test "a fetch goes into the submodules as git's fetch_submodules does: on demand, always, never, by their settings, for a commit by name, several at once" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const Case = struct {
+        /// The ref `inner`'s new commit goes to, and whether the gitlinks
+        /// above it record it.
+        ref: []const u8 = "refs/heads/main",
+        record: bool = true,
+        config: []const [2][]const u8 = &.{},
+        git_args: []const []const u8 = &.{},
+        options: fetch_mod.Options,
+        /// The submodules relic's fetch says it went into.
+        went: []const []const u8,
+    };
+    const cases = [_]Case{
+        .{ .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .off }, .went = &.{} },
+        .{ .record = false, .options = .{ .who = test_who }, .went = &.{} },
+        .{ .record = false, .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .on }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .config = &.{.{ "fetch.recurseSubmodules", "false" }}, .options = .{ .who = test_who }, .went = &.{} },
+        // The clone wrote `[submodule] active`, so `submodule.recurse` goes
+        // there, before `[fetch]`, and the fetch's setting is the later.
+        .{ .config = &.{ .{ "submodule.recurse", "false" }, .{ "fetch.recurseSubmodules", "true" } }, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .config = &.{.{ "submodule.recurse", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .config = &.{.{ "submodule.lib.fetchRecurseSubmodules", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner" } },
+        .{ .ref = "refs/keep/aside", .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .git_args = &.{ "-j", "2" }, .options = .{ .who = test_who, .submodule_jobs = 2 }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+    };
+    for (cases) |case| {
+        var world = try SubmoduleWorld.init(gpa, io);
+        defer world.deinit(gpa);
+        try world.twin(gpa, io, "by-git");
+        try world.twin(gpa, io, "by-relic");
+        for (case.config) |pair| for ([_][]const u8{ "by-git", "by-relic" }) |name| try world.git(gpa, io, name, &.{ "config", pair[0], pair[1] });
+        try world.advance(gpa, io, case.ref, case.record);
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "fetch", "-q" });
+        try argv.appendSlice(gpa, case.git_args);
+        try world.git(gpa, io, "by-git", argv.items);
+
+        var dir = try world.work.dir.openDir(io, "by-relic", .{});
+        defer dir.close(io);
+        var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        var options = case.options;
+        options.programs = .{ .environ = &env };
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", options);
+        defer outcome.deinit();
+        try testing.expect(!outcome.anySubmoduleFailed());
+        var went: std.ArrayList([]const u8) = .empty;
+        defer went.deinit(gpa);
+        for (outcome.submodules) |s| try went.append(gpa, s.path);
+        std.mem.sort([]const u8, went.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        try testing.expectEqual(case.went.len, went.items.len);
+        for (case.went, went.items) |want, got| try testing.expectEqualStrings(want, got);
+        try expectSameSubmoduleFetch(gpa, io, &world);
+    }
+}

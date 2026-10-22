@@ -18,9 +18,8 @@
 //! how to reconcile them are refused, as git refuses them. Every reflog
 //! line begins with the pull's own words, git's `GIT_REFLOG_ACTION`.
 //!
-//! `submodule.recurse` and `--recurse-submodules` are not acted on: the
-//! fetch does not go into submodules, and the submodules are not updated
-//! after.
+//! The fetch goes into the submodules as `fetch.Options.recurse_submodules`
+//! says; the submodules are not updated after the merge.
 
 const ErrorNamespace = @This();
 const Self = @This();
