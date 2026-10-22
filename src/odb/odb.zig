@@ -176,6 +176,94 @@ pub const Odb = struct {
     /// and the case in every repository that is not a partial clone — and a
     /// miss is `error.ObjectNotFound`.
     lazy: ?Lazy = null,
+    /// git's replace refs: the objects read in place of others. `read`,
+    /// `readInto`, `stream`, `readOrStream`, `readHeader` and `placement`
+    /// take an object's replacement, and its replacement's, while they are
+    /// enabled; the empty tree and `exists` are never replaced, as git's
+    /// are not.
+    replacements: Replacements = .{},
+
+    /// What reads take in place of what.
+    pub const Replacements = struct {
+        /// Lists the replacements at the first read that asks:
+        /// `Repository.open` installs the one over its replace refs.
+        /// `null` replaces nothing.
+        lister: ?Lister = null,
+        /// Off under `core.useReplaceRefs=false` or the caller's
+        /// `GIT_NO_REPLACE_OBJECTS`, and while an operation git runs with
+        /// replace refs off runs (`pauseReplacements`).
+        enabled: bool = true,
+        /// Each replaced object and what is read for it, once `lister` has
+        /// listed them.
+        map: ?Oid.Map(Oid) = null,
+
+        pub const Lister = struct {
+            context: *anyopaque,
+            /// Put each replaced object and its replacement in `map`, which
+            /// allocates with `gpa`.
+            list: *const fn (io: Io, context: *anyopaque, gpa: Allocator, map: *Oid.Map(Oid)) Replacements.ListError!void,
+        };
+
+        pub const ListError = Allocator.Error || Io.Cancelable || error{ ReplaceRefsUnreadable, DuplicateReplaceRef };
+    };
+
+    /// git's `MAXREPLACEDEPTH`: the replacements followed from one object
+    /// before it is `error.ReplaceDepthTooHigh`.
+    const max_replace_depth = 5;
+
+    /// What a read takes for `oid`, as git's `lookup_replace_object` finds
+    /// it: its replacement, followed four times at most.
+    fn replacementOf(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Oid {
+        const map = (try odb.replaceMap(io)) orelse return oid;
+        var current = oid;
+        for (0..max_replace_depth) |_| current = map.get(current) orelse return current;
+        return error.ReplaceDepthTooHigh;
+    }
+
+    /// The replacements reads follow, listed the first time they are asked
+    /// for; `null` while they are off and where there are none.
+    fn replaceMap(odb: *Odb, io: Io) ErrorNamespace.Error!?*const Oid.Map(Oid) {
+        const r = &odb.replacements;
+        if (!r.enabled) return null;
+        if (r.map == null) {
+            const lister = r.lister orelse return null;
+            const gpa = odb.backendData().gpa;
+            var map: Oid.Map(Oid) = .empty;
+            errdefer map.deinit(gpa);
+            try lister.list(io, lister.context, gpa, &map);
+            r.map = map;
+        }
+        return if (r.map.?.count() == 0) null else &r.map.?;
+    }
+
+    /// Whether reads take replacements now: enabled, and some listed. git
+    /// leaves a commit-graph aside while they do, since the parents it
+    /// records are the replaced commits' own.
+    pub fn replacing(odb: *Odb, io: Io) ErrorNamespace.Error!bool {
+        return try odb.replaceMap(io) != null;
+    }
+
+    /// Read every object as stored until `resumeReplacements` is given what
+    /// this returns, as git's `disable_replace_refs` does for the commands
+    /// that pack, index, check, prune or serve objects: what they copy or
+    /// keep must be the object of its name.
+    pub fn pauseReplacements(odb: *Odb) bool {
+        const was = odb.replacements.enabled;
+        odb.replacements.enabled = false;
+        return was;
+    }
+
+    /// Follow replacements again as before `pauseReplacements`.
+    pub fn resumeReplacements(odb: *Odb, was: bool) void {
+        odb.replacements.enabled = was;
+    }
+
+    /// Drop the listed replacements, so that the next read lists them
+    /// again: after the replace refs changed.
+    pub fn forgetReplacements(odb: *Odb) void {
+        if (odb.replacements.map) |*map| map.deinit(odb.backendData().gpa);
+        odb.replacements.map = null;
+    }
 
     fn backendData(db: *const Odb) *storage.Data {
         return storage.get(db.state);
@@ -624,6 +712,7 @@ pub const Odb = struct {
         }
         odb.backendData().cache.deinit();
         odb.shallow.deinit(odb.backendData().gpa);
+        odb.forgetReplacements();
         const owned = odb.backendData();
         owned.gpa.destroy(owned);
         odb.* = undefined;
@@ -1000,8 +1089,10 @@ pub const Odb = struct {
     /// Where the object named `oid` is. On a miss the pack directories are
     /// scanned again once, and a promisor asked; then it is
     /// `error.ObjectNotFound`.
-    fn find(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Location {
-        if (odb.isEmptyTree(oid)) return .empty_tree;
+    fn find(odb: *Odb, io: Io, name: Oid) ErrorNamespace.Error!Location {
+        // git looks the empty tree up by the name asked for.
+        if (odb.isEmptyTree(name)) return .empty_tree;
+        const oid = try odb.replacementOf(io, name);
         if (try odb.findOnce(io, oid)) |found| return found;
         try odb.refresh(io);
         if (try odb.findOnce(io, oid)) |found| return found;
@@ -1137,7 +1228,7 @@ pub const Odb = struct {
     /// is packed and with only its header inflated where it is loose.
     pub fn readHeader(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!object.Header {
         if (odb.isEmptyTree(oid)) return .{ .type = .tree, .size = 0 };
-        return (try odb.readHeaderForPack(io, oid, 0)).header;
+        return (try odb.readHeaderForPack(io, try odb.replacementOf(io, oid), 0)).header;
     }
 
     /// git's in-memory source (`odb/source-inmemory.c`): the empty tree is
@@ -1158,7 +1249,8 @@ pub const Odb = struct {
     };
 
     /// Where `oid` is kept, looking in the packs first, as git does.
-    pub fn placement(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!Placement {
+    pub fn placement(odb: *Odb, io: Io, asked: Oid) ErrorNamespace.Error!Placement {
+        const oid = try odb.replacementOf(io, asked);
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const p = &source.packs.items[located.at].pack;
@@ -1476,6 +1568,9 @@ pub const Odb = struct {
     /// read from `stream` and deflated as it comes, never held, as git's
     /// unpack-objects writes a large blob.
     fn copyLoose(odb: *Odb, io: Io, oid: Oid, time: ?i64) ErrorNamespace.Error!void {
+        // What is copied or kept is the object of its name.
+        const followed = odb.pauseReplacements();
+        defer odb.resumeReplacements(followed);
         const header = try odb.readHeader(io, oid);
         if (header.size <= odb.backendData().options.packing.big_file_bytes) {
             const found = try odb.read(io, oid);
@@ -1635,7 +1730,10 @@ pub const Odb = struct {
     /// The commit-graph of this database's objects, when there is one it
     /// can read: one that does not read as a graph is no graph, as git's
     /// readers take it. The caller deinits it.
-    pub fn commitGraph(db: *const Odb, io: Io) commit_graph_mod.Graph.Error!?commit_graph_mod.Graph {
+    pub fn commitGraph(db: *Odb, io: Io) (commit_graph_mod.Graph.Error || ErrorNamespace.Error)!?commit_graph_mod.Graph {
+        // git's `commit_graph_compatible`: the graph records the parents
+        // the commits carry, which replacements may not.
+        if (try db.replacing(io)) return null;
         return commit_graph_mod.Graph.openUsable(db.backendData().gpa, io, db.objectsDirectory(), db.objectFormat());
     }
 
@@ -2385,6 +2483,9 @@ pub const Odb = struct {
     /// and index, then their directories. The supplied store directory's own
     /// parent entry remains the caller's responsibility.
     pub fn makeDurable(odb: *Odb, io: Io, roots: []const Oid) ErrorNamespace.Error!void {
+        // What is copied or kept is the object of its name.
+        const followed = odb.pauseReplacements();
+        defer odb.resumeReplacements(followed);
         var seen: Oid.Set = .empty;
         defer seen.deinit(odb.backendData().gpa);
         var pending: std.ArrayList(Oid) = .empty;
@@ -2538,6 +2639,9 @@ pub const Odb = struct {
         entries: []const PackEntry,
         options: SplitOptions,
     ) ErrorNamespace.Error![]pack.WriteReport {
+        // What is copied or kept is the object of its name.
+        const followed = odb.pauseReplacements();
+        defer odb.resumeReplacements(followed);
         std.debug.assert(!options.pack.keep);
         const gpa = odb.backendData().gpa;
         var reports: std.ArrayList(pack.WriteReport) = .empty;
@@ -2633,6 +2737,9 @@ pub const Odb = struct {
         entries: []const PackEntry,
         options: PackOptions,
     ) ErrorNamespace.Error!pack.WriteReport {
+        // What is copied or kept is the object of its name.
+        const followed = odb.pauseReplacements();
+        defer odb.resumeReplacements(followed);
         const gpa = odb.backendData().gpa;
         // No more tasks than objects: a task with nothing to take still
         // costs the Io one, and its deflate state.
@@ -2962,6 +3069,9 @@ pub const Odb = struct {
         tips: []const Oid,
         options: CollectOptions,
     ) ErrorNamespace.Error!Collected {
+        // git's pack-objects and prune walk with replace refs off.
+        const followed = odb.pauseReplacements();
+        defer odb.resumeReplacements(followed);
         var collected: Collected = .{ .arena = .init(odb.backendData().gpa), .entries = &.{} };
         errdefer collected.arena.deinit();
         const arena = collected.arena.allocator();

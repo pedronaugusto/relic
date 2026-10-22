@@ -148,6 +148,7 @@ test {
         _ = @import("testing/external_diff.zig");
         _ = @import("testing/diff_prefixes.zig");
         _ = @import("testing/diff_cached.zig");
+        _ = @import("testing/replace_refs.zig");
         _ = @import("testing/diff_stat.zig");
         _ = @import("commit/commit.zig");
         _ = @import("merge/merge.zig");

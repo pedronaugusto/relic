@@ -195,6 +195,9 @@ pub const Remote = struct {
         wants: []const Oid,
         with: CopyOptions,
     ) ErrorNamespace.Error!?pack.WriteReport {
+        // git's upload-pack and pack-objects run with replace refs off.
+        const followed = r.repo.objectDatabase().pauseReplacements();
+        defer r.repo.objectDatabase().resumeReplacements(followed);
         const pack_dir = with.pack_dir;
         const haves = with.haves;
         const include_tags = with.include_tags;

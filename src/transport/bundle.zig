@@ -483,6 +483,9 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, target: Target, request
 
 /// Write the bundle `request` asks for to `w`: `git bundle create -`.
 pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, request: CreateRequest) Self.CreateError!void {
+    // git's bundle create, by its pack-objects, runs with replace refs off.
+    const followed = repo.objectDatabase().pauseReplacements();
+    defer repo.objectDatabase().resumeReplacements(followed);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();

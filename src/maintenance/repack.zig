@@ -244,6 +244,9 @@ const Existing = struct {
 
 /// git's `repack`, as `options` asks.
 pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Error!Report {
+    // git's repack, by its pack-objects, runs with replace refs off.
+    const followed = repo.objectDatabase().pauseReplacements();
+    defer repo.objectDatabase().resumeReplacements(followed);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();

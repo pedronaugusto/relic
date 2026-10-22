@@ -299,6 +299,9 @@ pub const Server = struct {
     /// A whole conversation over a pipe: the advertisement, then every
     /// request until the client ends it.
     pub fn serve(s: *Server, out: *Io.Writer, in: *Io.Reader) Self.Error!void {
+        // git's upload-pack runs with replace refs off.
+        const followed = s.db().pauseReplacements();
+        defer s.db().resumeReplacements(followed);
         try s.advertise(out);
         out.flush() catch return error.WriteFailed;
         switch (s.version) {
@@ -311,6 +314,9 @@ pub const Server = struct {
     /// One request of a stateless conversation: a v2 command, or a v0
     /// round of wants and haves.
     pub fn serveRequest(s: *Server, out: *Io.Writer, in: *Io.Reader) Self.Error!void {
+        // git's upload-pack runs with replace refs off.
+        const followed = s.db().pauseReplacements();
+        defer s.db().resumeReplacements(followed);
         switch (s.version) {
             .v2 => _ = try s.commandV2(in, out),
             .v0, .v1 => try s.conversationV0(in, out),

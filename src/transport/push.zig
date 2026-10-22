@@ -978,7 +978,7 @@ fn send(
         if (try repo.objectDatabase().exists(io, r.oid)) try exclude.append(arena, r.oid);
     }
     try exclude.appendSlice(arena, commons);
-    var objects = try object_walk.missing(gpa, io, repo.objectDatabase(), include.items, .{ .exclude = exclude.items });
+    var objects = try objectsToSend(gpa, io, repo.objectDatabase(), include.items, exclude.items);
     defer objects.deinit();
 
     var remote_refs_pushed: std.ArrayList([]const u8) = .empty;
@@ -1042,6 +1042,14 @@ fn send(
 /// The refspecs `push.default` asks for when none are named, as git's
 /// `setup_default_push_refspecs` decides them; whether
 /// `push.autoSetupRemote` asks for the branch's upstream to be set.
+/// What a push sends past `exclude`, walked as git's pack-objects walks
+/// it: with replace refs off.
+fn objectsToSend(gpa: Allocator, io: Io, db: *odb_mod.Odb, include: []const Oid, exclude: []const Oid) Error!odb_mod.Odb.Collected {
+    const followed = db.pauseReplacements();
+    defer db.resumeReplacements(followed);
+    return object_walk.missing(gpa, io, db, include, .{ .exclude = exclude });
+}
+
 fn defaultRefspecs(
     arena: Allocator,
     gpa: Allocator,

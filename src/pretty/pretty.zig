@@ -212,7 +212,7 @@ pub fn reencodeCommit(a: Allocator, raw: []const u8, output: ?[]const u8) encodi
 
 /// The refs that point at each object, as git loads them for a format:
 /// every ref, then `HEAD`, then the shallow commits as `grafted`; a tag
-/// names what it points at too, and `refs/replace/<oid>` marks `<oid>`
+/// names what it points at too, and a replace ref (`refs/replace/<oid>`) marks `<oid>`
 /// as `replaced`. Each object's names come newest first, as git lists
 /// them.
 pub const Decorations = struct {
@@ -259,6 +259,9 @@ pub const Decorations = struct {
             /// `--clear-decorations`: the patterns given before it gone,
             /// and every ref decorates where nothing else says otherwise.
             clear: bool = false,
+            /// Where the replace refs are (`Repository.replaceRefBase`),
+            /// the namespace of replaced objects.
+            replace_ref_base: []const u8 = "refs/replace/",
         };
 
         /// git log's filter, as its `set_default_decoration_filter` makes
@@ -285,12 +288,9 @@ pub const Decorations = struct {
                 all = entry.value != null and std.mem.eql(u8, entry.value.?, "all");
             };
             if (all or out.include.len != 0 or out.exclude.len != 0 or out.exclude_config.len != 0) return out;
-            out.include = &default_namespaces;
+            out.include = try arena.dupe([]const u8, &.{ "HEAD", "refs/heads/", "refs/tags/", "refs/remotes/", ref_names.stash, given.replace_ref_base });
             return out;
         }
-
-        /// git's `ref_namespace` entries that have a decoration.
-        const default_namespaces = [_][]const u8{ "HEAD", "refs/heads/", "refs/tags/", "refs/remotes/", ref_names.stash, "refs/replace/" };
     };
 
     /// A filter's pattern as git's `normalize_glob_ref` leaves it.
@@ -376,7 +376,9 @@ pub const Decorations = struct {
         const store = repo.refStore();
         var listing = try store.list(gpa, io, "refs/");
         defer listing.deinit();
-        const replace = repo.configuration().getBool("core.usereplacerefs", true) catch true;
+        const replace = repo.objectDatabase().replacements.enabled;
+        const base = repo.replaceRefBase();
+        const kind = repo.objectFormat();
         for (listing.entries) |entry| {
             if (patterns) |*ps| if (!try ps.admits(gpa, entry.name)) continue;
             const oid = switch (entry.target) {
@@ -387,9 +389,12 @@ pub const Decorations = struct {
                     break :blk resolved.oid;
                 },
             };
-            if (std.mem.startsWith(u8, entry.name, "refs/replace/")) {
+            if (std.mem.startsWith(u8, entry.name, base)) {
                 if (!replace) continue;
-                const original = Oid.parse(repo.objectFormat(), entry.name["refs/replace/".len..]) catch continue;
+                // git's `get_oid_hex`: the hex at the start, past the base.
+                const rest = entry.name[base.len..];
+                if (rest.len < kind.hexLen()) continue;
+                const original = Oid.parse(kind, rest[0..kind.hexLen()]) catch continue;
                 _ = repo.objectDatabase().readHeader(io, original) catch |err| switch (err) {
                     error.ObjectNotFound => continue,
                     else => return err,

@@ -51,6 +51,9 @@ pub const Report = struct {
 /// in a shallow repository the boundary commits nothing reaches leave
 /// `.git/shallow`.
 pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: PruneOptions) Self.Error!Report {
+    // git's prune runs with replace refs off.
+    const followed = repo.objectDatabase().pauseReplacements();
+    defer repo.objectDatabase().resumeReplacements(followed);
     if (try repo.configuration().getBool("extensions.preciousobjects", false)) return error.PreciousObjects;
     var keep = try reach.reachableObjects(gpa, io, repo, .{ .heads = options.heads, .recent = options.expire, .programs = options.programs });
     defer keep.deinit(gpa);

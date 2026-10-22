@@ -347,6 +347,11 @@ pub fn receive(
     options: Options,
 ) Self.Error!Result {
     const pack_dir = inputs.pack_dir;
+    // git's index-pack reads with replace refs off: a thin pack's bases and
+    // a collision check take the objects of their names.
+    const pauses = @hasDecl(@typeInfo(@TypeOf(db)).pointer.child, "pauseReplacements");
+    const followed = if (pauses) db.pauseReplacements() else false;
+    defer if (pauses) db.resumeReplacements(followed);
 
     var temp_buf: [64]u8 = undefined;
     const temp = fs.tempName(io, &temp_buf, "tmp_pack_");

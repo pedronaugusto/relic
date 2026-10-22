@@ -141,6 +141,15 @@ pub const Error = error{
     /// An object read whole that is longer than `Options.max_object_bytes`
     /// (or the address space); `Odb.stream` reads it.
     ObjectTooLarge,
+    /// An object replaced, its replacement replaced, and so on five times
+    /// over: git's "replace depth too high", past its `MAXREPLACEDEPTH`.
+    ReplaceDepthTooHigh,
+    /// The replace refs could not be listed: the ref store could not be
+    /// read.
+    ReplaceRefsUnreadable,
+    /// Two replace refs name the same object, as `refs/replace/<oid>` and
+    /// `refs/replace/<dir>/<oid>` can: git's "duplicate replace ref".
+    DuplicateReplaceRef,
     /// A loose object whose content does not hash to its own name.
     ObjectNameMismatch,
     /// Bytes carrying the signature of a SHA-1 collision attack, from a

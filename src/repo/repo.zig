@@ -294,6 +294,11 @@ const RepositoryData = struct {
     /// git for Windows' `core.unsetenvvars`, each name owned: what
     /// `Repository.programsWith` takes out of every program's environment.
     unset_env_vars: [][]u8 = &.{},
+    /// `OpenOptions.replace_objects`: whether replace refs may be followed
+    /// at all, whatever `core.useReplaceRefs` says.
+    replace_objects: bool = true,
+    /// `OpenOptions.replace_ref_base`, owned.
+    replace_ref_base: []u8 = &.{},
 };
 
 /// The `core` settings engines take, read once from a published
@@ -393,6 +398,9 @@ pub const Settings = struct {
     /// `core.splitIndex`: `true` splits the index on its next write,
     /// `false` writes it whole, `null` keeps what it is.
     split_index: ?bool,
+    /// `core.useReplaceRefs`: objects are read through the replace refs
+    /// (git's default: true).
+    use_replace_refs: bool,
 
     pub const UntrackedCacheSetting = enum { keep, write, remove };
 
@@ -406,6 +414,7 @@ pub const Settings = struct {
         if (depth < 0 or depth > std.math.maxInt(u32)) return error.MalformedValue;
         return .{
             .ignore_case = try config.getBool("core.ignorecase", false),
+            .use_replace_refs = try config.getBool("core.usereplacerefs", true),
             // git reads the setting everywhere, and refuses a bad value
             // everywhere, but composes on macOS alone
             .precompose_unicode = try config.getBool("core.precomposeunicode", false) and builtin.target.os.tag == .macos,
@@ -613,6 +622,8 @@ pub const Repository = struct {
             .home = config.context.home,
             .config_overrides = config.sources.command,
             .config_pairs = config.sources.pairs,
+            .replace_objects = repo.data().replace_objects,
+            .replace_ref_base = repo.data().replace_ref_base,
         });
     }
 
@@ -663,6 +674,13 @@ pub const Repository = struct {
         /// system, global and command-line settings for a repository that is
         /// not the current user's.
         ownership: safe.Ownership = .check,
+        /// `false` is git's `GIT_NO_REPLACE_OBJECTS` (`--no-replace-objects`):
+        /// every object is read as stored, whatever `core.useReplaceRefs`
+        /// says. This package reads no environment, so the caller says.
+        replace_objects: bool = true,
+        /// git's `GIT_REPLACE_REF_BASE`: where the replace refs are, each
+        /// named by the object it replaces.
+        replace_ref_base: []const u8 = "refs/replace/",
         /// The directory is the git directory, as git's `GIT_DIR` and
         /// `--git-dir` name one: git checks neither `safe.bareRepository`
         /// nor ownership for it.
@@ -907,6 +925,9 @@ pub const Repository = struct {
         repo.data().shared = try sharedOf(repo.configuration());
         repo.data().fsync = try fsyncOf(repo.configuration());
         repo.data().settings = try Settings.of(repo.configuration());
+        repo.data().replace_objects = options.replace_objects;
+        repo.data().replace_ref_base = try gpa.dupe(u8, options.replace_ref_base);
+        errdefer gpa.free(repo.data().replace_ref_base);
         repo.data().submodule_path_config = format.submodule_path_config;
         repo.data().unset_env_vars = try unsetEnvVarsOf(gpa, repo.configuration());
         errdefer freeNames(gpa, repo.data().unset_env_vars);
@@ -936,6 +957,10 @@ pub const Repository = struct {
             .prefer_symlink_refs = repo.data().settings.prefer_symlink_refs,
         });
         repo.data().refs_state = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
+        repo.data().odb.replacements = .{
+            .lister = .{ .context = repo.data(), .list = listReplacements },
+            .enabled = options.replace_objects and repo.data().settings.use_replace_refs,
+        };
         return repo;
     }
 
@@ -1491,6 +1516,7 @@ pub const Repository = struct {
         const gpa = repo.data().gpa;
         if (repo.data().untracked_ident) |ident| gpa.free(ident);
         freeNames(gpa, repo.data().unset_env_vars);
+        gpa.free(repo.data().replace_ref_base);
         gpa.destroy(repo.data());
         repo.* = undefined;
     }
@@ -1498,6 +1524,67 @@ pub const Repository = struct {
     /// The hash chosen when the repository was opened. A change requires reopening.
     pub fn objectFormat(repo: *const Repository) hash.Kind {
         return repo.refStore().objectFormat();
+    }
+
+    /// Where the replace refs are: `OpenOptions.replace_ref_base`.
+    pub fn replaceRefBase(repo: *const Repository) []const u8 {
+        return repo.data().replace_ref_base;
+    }
+
+    /// The object database's `Odb.Replacements.Lister`: git's
+    /// `prepare_replace_object`, every ref under the replace ref base
+    /// registered as replacing the object its last name component names
+    /// (`register_replace_ref`). A ref that names no object is passed over,
+    /// where git warns of it; a broken one, or a symbolic one that leads
+    /// nowhere, replaces with no object, so a read of what it replaces finds
+    /// nothing, as git's does.
+    fn listReplacements(io: Io, context: *anyopaque, gpa: Allocator, map: *Oid.Map(Oid)) odb_mod.Odb.Replacements.ListError!void {
+        const d: *RepositoryData = @ptrCast(@alignCast(context)); // safe: open installs the RepositoryData as the context
+        const repo: Repository = .{ .state = d };
+        const store = repo.refStore();
+        const kind = repo.objectFormat();
+        var listing = store.list(gpa, io, d.replace_ref_base) catch |err| return unreadable(err);
+        defer listing.deinit();
+        for (listing.entries) |entry| {
+            const original = replacedBy(kind, entry.name[d.replace_ref_base.len..]) orelse continue;
+            const replacement = switch (entry.target) {
+                .direct => |oid| oid,
+                .symbolic => blk: {
+                    const resolved = (store.resolve(gpa, io, entry.name) catch |err| return unreadable(err)) orelse break :blk Oid.zero(kind);
+                    gpa.free(resolved.name);
+                    break :blk resolved.oid;
+                },
+            };
+            try registerReplacement(gpa, map, original, replacement);
+        }
+        for (listing.broken) |broken| if (broken.why == .bad_content) {
+            if (!std.mem.startsWith(u8, broken.name, d.replace_ref_base)) continue;
+            const original = replacedBy(kind, broken.name[d.replace_ref_base.len..]) orelse continue;
+            try registerReplacement(gpa, map, original, Oid.zero(kind));
+        };
+    }
+
+    fn unreadable(err: refs_mod.ReadError) odb_mod.Odb.Replacements.ListError {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            else => error.ReplaceRefsUnreadable,
+        };
+    }
+
+    /// The object a replace ref names, from its name past the base: the hex
+    /// at the start of its last component, as git's `get_oid_hex_algop`
+    /// reads it.
+    fn replacedBy(kind: hash.Kind, name: []const u8) ?Oid {
+        const last = name[if (std.mem.findScalarLast(u8, name, '/')) |slash| slash + 1 else 0..];
+        if (last.len < kind.hexLen()) return null;
+        return Oid.parse(kind, last[0..kind.hexLen()]) catch null;
+    }
+
+    fn registerReplacement(gpa: Allocator, map: *Oid.Map(Oid), original: Oid, replacement: Oid) odb_mod.Odb.Replacements.ListError!void {
+        const slot = try map.getOrPut(gpa, original);
+        if (slot.found_existing) return error.DuplicateReplaceRef;
+        slot.value_ptr.* = replacement;
     }
 
     /// The repository owns this store; callers borrow it for ref operations.
@@ -1704,6 +1791,9 @@ pub const Repository = struct {
         repo.data().shared = policy.shared;
         repo.data().fsync = policy.fsync;
         repo.data().settings = policy.settings;
+        repo.data().odb.replacements.enabled = repo.data().replace_objects and policy.settings.use_replace_refs;
+        // The replace refs may have changed with the files.
+        repo.data().odb.forgetReplacements();
         repo.data().submodule_path_config = policy.submodule_path_config;
         freeNames(repo.data().gpa, repo.data().unset_env_vars);
         repo.data().unset_env_vars = policy.unset_env_vars;

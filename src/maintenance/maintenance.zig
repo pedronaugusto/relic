@@ -135,6 +135,9 @@ fn collectGraphNodes(arena: Allocator, io: Io, db: *odb.Odb, pending: *std.Array
 /// A split write keeps the older layers until the chain file is atomically replaced.
 /// A shallow database is refused because its absent parents cannot form a graph.
 pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, options: CommitGraphOptions) Self.Error!?Oid {
+    // git's commit-graph write runs with replace refs off.
+    const followed = db.pauseReplacements();
+    defer db.resumeReplacements(followed);
     if (db.shallow.count() != 0) return error.ShallowCommitGraph;
     const dir = db.objectsDirectory();
     var old = try graph_mod.Graph.openUsable(gpa, io, dir, db.objectFormat());
@@ -395,6 +398,9 @@ pub const MidxError = odb.Error || midx_mod.Error || fs.LockError || fs.CommitEr
 /// Write the writable database's pack indexes into one MIDX. The digest names
 /// a reachability bitmap; refreshing makes the database consult this index.
 pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Self.MidxError!?Oid {
+    // git's multi-pack-index runs with replace refs off.
+    const followed = db.pauseReplacements();
+    defer db.resumeReplacements(followed);
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var inputs = try readPackInputs(gpa, io, dir, db.objectFormat(), options.packs);
@@ -462,6 +468,9 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
 /// Remove packs to which the current MIDX assigns no objects, retaining .keep
 /// and cruft (.mtimes) packs. This is git's separate expire step after repack.
 pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: ?fs.Sync) Self.MidxError!u32 {
+    // git's multi-pack-index runs with replace refs off.
+    const followed = db.pauseReplacements();
+    defer db.resumeReplacements(followed);
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     // An index that does not read as one assigns nothing, so it is no
@@ -748,6 +757,9 @@ pub const BitmapInputs = struct { pack_name: []const u8, tips: []const Oid };
 pub const MidxBitmapInputs = struct { tips: []const Oid, midx_options: MidxOptions = .{} };
 
 pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: BitmapInputs, options: BitmapOptions) Self.BitmapError!void {
+    // git's pack-objects runs with replace refs off.
+    const followed = db.pauseReplacements();
+    defer db.resumeReplacements(followed);
     const pack_name = inputs.pack_name;
     const tips = inputs.tips;
     if (std.mem.findAny(u8, pack_name, "/\\") != null or !std.mem.startsWith(u8, pack_name, "pack-")) return error.InvalidBitmapInput;
@@ -788,6 +800,9 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: BitmapInput
 
 /// Write a MIDX with RIDX and BTMP, then the bitmap named by its checksum.
 pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: MidxBitmapInputs, options: BitmapOptions) Self.BitmapError!?Oid {
+    // git's multi-pack-index runs with replace refs off.
+    const followed = db.pauseReplacements();
+    defer db.resumeReplacements(followed);
     const tips = inputs.tips;
     const midx_options = inputs.midx_options;
     var write_options = midx_options;
@@ -836,6 +851,9 @@ pub const MidxRepackOptions = struct {
 /// Repack objects assigned to at least two eligible MIDX packs. Old packs stay
 /// until expireMidx, matching git's separate repack and expire subcommands.
 pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptions) Self.MidxError!?pack_mod.WriteReport {
+    // git's multi-pack-index runs with replace refs off.
+    const followed = db.pauseReplacements();
+    defer db.resumeReplacements(followed);
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var index = (try midx_mod.Index.openUsable(gpa, io, dir, db.objectFormat())) orelse return null;
@@ -932,9 +950,10 @@ pub fn repositoryTips(gpa: Allocator, io: Io, repo: *repo_mod.Repository) repo_m
 
 /// Apply gc.writeCommitGraph (default true) or fetch.writeCommitGraph (default false).
 /// Fetch uses split chains; gc publishes a full graph. A shallow repository is skipped,
-/// as Git skips it. Replace refs change nothing: the graph records the parents the
-/// commits carry, as git's `commit-graph write` records them with replacement off,
-/// and git's readers leave a graph aside while replace refs are in use.
+/// as Git skips it. gc and fetch write none while replace refs are in use, as git's
+/// `commit_graph_compatible` refuses in their process; the maintenance task runs
+/// `commit-graph write`, which reads with replace refs off and records the parents
+/// the commits carry.
 pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Repository, purpose: Maintenance) Self.MaintenanceError!?Oid {
     const config = repo.configuration();
     switch (purpose) {
@@ -942,6 +961,10 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
         .fetch => if (!try config.getBool("fetch.writecommitgraph", false)) return null,
         .maintenance => if (!try config.getBool("core.commitgraph", true)) return null,
     }
+    if (purpose != .maintenance and try repo.objectDatabase().replacing(io)) return null;
+    // `commit-graph write` names its tips with replace refs off too.
+    const followed = repo.objectDatabase().pauseReplacements();
+    defer repo.objectDatabase().resumeReplacements(followed);
     if (repo.objectDatabase().shallow.count() != 0) return null;
     const generation_version = try config.getInt("commitgraph.generationversion", 2);
     if (generation_version != 1 and generation_version != 2) return error.UnsupportedGenerationVersion;
