@@ -232,6 +232,12 @@ fn gitWithHome(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, home: []const u8, ar
 /// holds, one by one.
 fn expectIncludesAgree(gpa: std.mem.Allocator, io: Io, proj: Io.Dir, home: []const u8, repo: *const Repository) !void {
     const names = [_][]const u8{ "test.work", "test.icase", "test.never", "test.main", "test.feature", "test.local" };
+    return expectAgree(gpa, io, proj, home, repo, &names);
+}
+
+/// Each of `names` as git reads it in `proj` against what the repository
+/// read.
+fn expectAgree(gpa: std.mem.Allocator, io: Io, proj: Io.Dir, home: []const u8, repo: *const Repository, names: []const []const u8) !void {
     for (names) |name| {
         const theirs = try gitWithHome(gpa, io, proj, home, &.{ "config", "--get", name });
         defer if (theirs) |t| gpa.free(t);
@@ -301,6 +307,71 @@ test "includeIf gitdir:, gitdir/i: and onbranch: in ~/.gitconfig hold for a repo
     try testing.expect(try repo.refreshConfig(io, .{}));
     try expectValue(&repo, "test.feature", null);
     try expectIncludesAgree(gpa, io, proj, home, &repo);
+}
+
+test "includeIf worktree: and worktree/i: hold for the work tree as they hold for git: a linked worktree's its own, a bare repository's none" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGit(gpa, io);
+    var home_tmp = testing.tmpDir(.{});
+    defer home_tmp.cleanup();
+    var home_buf: [4096]u8 = undefined;
+    const home = home_buf[0..try home_tmp.dir.realPath(io, &home_buf)];
+
+    try home_tmp.dir.createDirPath(io, "work/proj");
+    var work = try home_tmp.dir.openDir(io, "work", .{ .iterate = true });
+    defer work.close(io);
+    var proj = try work.openDir(io, "proj", .{ .iterate = true });
+    defer proj.close(io);
+    for ([_][]const []const u8{
+        &.{ "init", "-q", "-b", "main" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "base" },
+        &.{ "worktree", "add", "-q", "-b", "side", "../linked" },
+    }) |args| gpa.free((try gitWithHome(gpa, io, proj, home, args)).?);
+    gpa.free((try gitWithHome(gpa, io, work, home, &.{ "init", "-q", "--bare", "bare.git" })).?);
+
+    // A pattern ending `/` holds below it, one neither absolute nor `~/`
+    // anywhere, and the work tree is not its `.git`.
+    try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[includeIf \"worktree:~/work/\"]\n\tpath = ~/.gitconfig-below\n" ++
+        "[includeIf \"worktree/i:~/WORK/PROJ\"]\n\tpath = ~/.gitconfig-icase\n" ++
+        "[includeIf \"worktree:~/work/proj\"]\n\tpath = ~/.gitconfig-exact\n" ++
+        "[includeIf \"worktree:linked\"]\n\tpath = ~/.gitconfig-linked\n" ++
+        "[includeIf \"worktree:~/work/proj/.git\"]\n\tpath = ~/.gitconfig-git-dir\n" ++
+        "[includeIf \"gitdir:~/work/bare.git\"]\n\tpath = ~/.gitconfig-bare\n" });
+    for ([_][]const u8{ "below", "icase", "exact", "linked", "git-dir", "bare" }) |name| {
+        var sub_path_buf: [64]u8 = undefined;
+        var data_buf: [64]u8 = undefined;
+        try home_tmp.dir.writeFile(io, .{
+            .sub_path = try std.mem.print(&sub_path_buf, ".gitconfig-{s}", .{name}),
+            .data = try std.mem.print(&data_buf, "[tree]\n\t{s} = yes\n", .{name}),
+        });
+    }
+    const names = [_][]const u8{ "tree.below", "tree.icase", "tree.exact", "tree.linked", "tree.git-dir", "tree.bare" };
+
+    var linked = try work.openDir(io, "linked", .{ .iterate = true });
+    defer linked.close(io);
+    var bare = try work.openDir(io, "bare.git", .{ .iterate = true });
+    defer bare.close(io);
+    const cases = [_]struct { dir: Io.Dir, holds: []const []const u8 }{
+        .{ .dir = proj, .holds = &.{ "tree.below", "tree.icase", "tree.exact" } },
+        .{ .dir = linked, .holds = &.{ "tree.below", "tree.linked" } },
+        .{ .dir = bare, .holds = &.{"tree.bare"} },
+    };
+    for (cases) |case| {
+        var repo = try Repository.open(gpa, io, case.dir, .{
+            .discover = false,
+            .global_config = .{ .dir = home_tmp.dir, .sub_path = ".gitconfig" },
+            .home = home,
+        });
+        defer repo.deinit(io);
+        for (names) |name| {
+            const held = for (case.holds) |h| {
+                if (std.mem.eql(u8, h, name)) break true;
+            } else false;
+            try expectValue(&repo, name, if (held) "yes" else null);
+        }
+        try expectAgree(gpa, io, case.dir, home, &repo, &names);
+    }
 }
 
 test "a value set in memory stays through a refresh and a write, and never reaches the disk" {

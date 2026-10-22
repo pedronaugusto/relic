@@ -2260,6 +2260,38 @@ test "core.filesRefLockTimeout: how long a loose ref's lock is waited for, as gi
     }
 }
 
+test "core.configLockTimeout: how long a configuration file's lock is waited for, as git 2.56 waits" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    const Case = struct { setting: ?[]const u8, at_least_ms: i64, at_most_ms: i64 };
+    for ([_]Case{
+        .{ .setting = "0", .at_least_ms = 0, .at_most_ms = 50 },
+        .{ .setting = null, .at_least_ms = 700, .at_most_ms = 6000 },
+        .{ .setting = "300", .at_least_ms = 200, .at_most_ms = 3000 },
+    }) |case| {
+        repo.dir.deleteFile(io, ".git/config.lock") catch |err| std.debug.assert(err == error.FileNotFound);
+        if (case.setting) |s| try repo.exec(io, &.{ "config", "core.configLockTimeout", s }) else {
+            // Unset or never set, git exits 5 either way: the default is what is asked for.
+            repo.report_failures = false;
+            repo.exec(io, &.{ "config", "--unset", "core.configLockTimeout" }) catch |err| std.debug.assert(err == error.GitFailed);
+            repo.report_failures = true;
+        }
+        var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+        defer native.deinit(io);
+        // Held by another writer, which never lets go.
+        try repo.writeFile(io, ".git/config.lock", "");
+        const started = std.Io.Clock.awake.now(io);
+        try std.testing.expectError(error.LockHeld, native.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.held", .value = "yes" } }}, .{}));
+        const waited = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+        std.testing.expect(waited >= case.at_least_ms and waited <= case.at_most_ms) catch |err| {
+            std.debug.print("configLockTimeout {?s}: waited {d} ms\n", .{ case.setting, waited });
+            return err;
+        };
+    }
+}
+
 test "core.hideDotFiles and core.unsetenvvars, read on Windows as git for Windows reads them" {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     const io = std.testing.io;

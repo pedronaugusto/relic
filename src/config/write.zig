@@ -110,7 +110,7 @@ pub fn prepare(
     };
     const buffer = try gpa.alloc(u8, 16 * 1024);
     errdefer gpa.free(buffer);
-    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, .{ .shared = lock_options.shared, .sync = .none, .write_pid = lock_options.pid_file });
+    var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = sub_path, .buffer = buffer }, .{ .shared = lock_options.shared, .sync = .none, .write_pid = lock_options.pid_file, .on_contention = lock_options.on_contention });
     errdefer lock.deinit(io);
 
     const text = (try fs.readFileAlloc(gpa, io, dir, sub_path, config.max_file_bytes)) orelse try gpa.alloc(u8, 0);
@@ -134,8 +134,14 @@ pub fn prepare(
 
 /// How a configuration file's lock is taken: with the permissions
 /// `core.sharedRepository` asks for, and naming its holder in a
-/// `~pid.lock` beside it under `core.lockfilePid`.
-pub const LockOptions = struct { shared: fs.Shared = .umask, pid_file: bool = false };
+/// `~pid.lock` beside it under `core.lockfilePid`, waiting for a holder as
+/// `core.configLockTimeout` says: git's default, a second, wherever no
+/// repository says otherwise.
+pub const LockOptions = struct {
+    shared: fs.Shared = .umask,
+    pid_file: bool = false,
+    on_contention: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
+};
 
 /// A whole write of one file: `prepare`, then put it in place.
 pub fn editFile(

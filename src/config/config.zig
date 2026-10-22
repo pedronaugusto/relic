@@ -317,6 +317,10 @@ pub const Context = struct {
     /// for `gitdir:` and `gitdir/i:`. A linked worktree's is its own
     /// administrative directory.
     git_dir: ?[]const u8 = null,
+    /// The work tree's absolute path, `/`-separated and with every symbolic
+    /// link resolved, for `worktree:` and `worktree/i:`; `null` in a bare
+    /// repository, where neither holds.
+    work_tree: ?[]const u8 = null,
     /// The branch `HEAD` points at, without `refs/heads/`, for `onbranch:`.
     branch: ?[]const u8 = null,
     /// The user's home directory, for a condition or an include path
@@ -533,7 +537,7 @@ pub const Config = struct {
     }
 
     fn keepContext(config: *Config, context: Context) Allocator.Error!void {
-        const parts = [_]?[]const u8{ context.git_dir, context.branch, context.home };
+        const parts = [_]?[]const u8{ context.git_dir, context.work_tree, context.branch, context.home };
         var total: usize = 0;
         for (parts) |part| total += if (part) |p| p.len else 0;
         const storage = try config.gpa.alloc(u8, total);
@@ -549,7 +553,7 @@ pub const Config = struct {
             at += p.len;
         }
         config.context_storage = storage;
-        config.context = .{ .git_dir = kept[0], .branch = kept[1], .home = kept[2] };
+        config.context = .{ .git_dir = kept[0], .work_tree = kept[1], .branch = kept[2], .home = kept[3] };
     }
 
     fn keepSources(config: *Config, sources: Sources) Allocator.Error!void {
@@ -832,7 +836,7 @@ pub const Config = struct {
 
     /// Whether a condition's pattern starts from the including file.
     fn relativeCondition(condition: []const u8) bool {
-        const pattern = std.mem.cutPrefix(u8, condition, "gitdir:") orelse std.mem.cutPrefix(u8, condition, "gitdir/i:") orelse return false;
+        const pattern = (pathCondition(condition) orelse return false).pattern;
         return pattern.len >= 2 and pattern[0] == '.' and (pattern[1] == '/' or (builtin.target.os.tag == .windows and pattern[1] == '\\'));
     }
 
@@ -860,6 +864,7 @@ pub const Config = struct {
     /// `gitdir:` and `gitdir/i:` match the `.git` directory against a glob,
     /// with git's own rules: a pattern ending `/` gains `**`, a pattern that
     /// is neither absolute nor `~/` nor `./` gains a leading `**/`.
+    /// `worktree:` and `worktree/i:` match the work tree the same way.
     /// `onbranch:` matches the branch `HEAD` is on.
     /// `hasconfig:remote.*.url:` matches every `remote.<name>.url` this
     /// configuration sets, outside the files an `includeIf` brought in, as
@@ -874,17 +879,20 @@ pub const Config = struct {
     fn conditionHoldsFrom(config: *const Config, condition: []const u8, including_dir: ?[]const u8) ParseError!bool {
         var buffer: [4096]u8 = undefined;
         const a = config.gpa;
-        if (std.mem.startsWith(u8, condition, "gitdir:") or std.mem.startsWith(u8, condition, "gitdir/i:")) {
-            const case_fold = std.mem.startsWith(u8, condition, "gitdir/i:");
-            const pattern_raw = condition[if (case_fold) "gitdir/i:".len else "gitdir:".len..];
-            const git_dir = config.context.git_dir orelse return false;
+        if (pathCondition(condition)) |path_condition| {
+            const case_fold = path_condition.case_fold;
+            const pattern_raw = path_condition.pattern;
+            const path = (switch (path_condition.of) {
+                .git_dir => config.context.git_dir,
+                .work_tree => config.context.work_tree,
+            }) orelse return false;
             if (std.mem.startsWith(u8, pattern_raw, "./")) {
                 // git's `prepare_include_condition_pattern`: the including
                 // file's directory, compared as it is, and the rest of the
                 // pattern matched below it.
                 const base = including_dir orelse return false;
-                if (git_dir.len <= base.len or git_dir[base.len] != '/') return false;
-                const same = if (case_fold) std.ascii.eqlIgnoreCase(git_dir[0..base.len], base) else std.mem.eql(u8, git_dir[0..base.len], base);
+                if (path.len <= base.len or path[base.len] != '/') return false;
+                const same = if (case_fold) std.ascii.eqlIgnoreCase(path[0..base.len], base) else std.mem.eql(u8, path[0..base.len], base);
                 if (!same) return false;
                 const rest = pattern_raw[2..];
                 const rest_pattern = if (std.mem.endsWith(u8, rest, "/"))
@@ -892,13 +900,13 @@ pub const Config = struct {
                 else
                     rest;
                 defer if (rest_pattern.ptr != rest.ptr and rest_pattern.ptr != &buffer) a.free(rest_pattern);
-                return glob_mod.matches(config.gpa, rest_pattern, git_dir[base.len + 1 ..], .{ .case_fold = case_fold });
+                return glob_mod.matches(config.gpa, rest_pattern, path[base.len + 1 ..], .{ .case_fold = case_fold });
             }
             const pattern = (try config.expandCondition(&buffer, pattern_raw)) orelse return false;
             defer if (pattern.ptr != &buffer) a.free(pattern);
             // Git normalizes expanded patterns to forward slashes on Windows.
             if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, pattern, '\\', '/');
-            return glob_mod.matches(config.gpa, pattern, git_dir, .{ .case_fold = case_fold });
+            return glob_mod.matches(config.gpa, pattern, path, .{ .case_fold = case_fold });
         }
         if (std.mem.startsWith(u8, condition, "onbranch:")) {
             const pattern_raw = condition["onbranch:".len..];
@@ -924,6 +932,28 @@ pub const Config = struct {
     }
 
     const hasconfig_url = "hasconfig:remote.*.url:";
+
+    /// A condition matched against a path: `gitdir:`, `worktree:` and their
+    /// `/i` forms, which git decides alike (`include_by_path`).
+    const PathCondition = struct {
+        of: enum { git_dir, work_tree },
+        case_fold: bool,
+        pattern: []const u8,
+    };
+
+    fn pathCondition(condition: []const u8) ?PathCondition {
+        const forms = [_]PathCondition{
+            .{ .of = .git_dir, .case_fold = false, .pattern = "gitdir:" },
+            .{ .of = .git_dir, .case_fold = true, .pattern = "gitdir/i:" },
+            .{ .of = .work_tree, .case_fold = false, .pattern = "worktree:" },
+            .{ .of = .work_tree, .case_fold = true, .pattern = "worktree/i:" },
+        };
+        for (forms) |form| {
+            const pattern = std.mem.cutPrefix(u8, condition, form.pattern) orelse continue;
+            return .{ .of = form.of, .case_fold = form.case_fold, .pattern = pattern };
+        }
+        return null;
+    }
 
     /// `conditionHolds` during a read, where `hasconfig:` is decided
     /// against the URLs every file of the read sets: git's

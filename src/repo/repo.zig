@@ -368,6 +368,9 @@ pub const Settings = struct {
     /// `core.lockfilePid`: each lock names its holder in a `~pid.lock`
     /// beside it while it is held.
     lockfile_pid: bool,
+    /// `core.configLockTimeout`: how long a configuration file's lock is
+    /// waited for (git's default: a second).
+    config_lock: fs.OnContention,
     /// `core.preferSymlinkRefs`: a symbolic ref written as a symbolic link.
     prefer_symlink_refs: bool,
     /// `core.createObject`: how a new loose object takes its name.
@@ -412,6 +415,7 @@ pub const Settings = struct {
             .trust_ctime = try config.getBool("core.trustctime", true),
             .ignore_stat = try config.getBool("core.ignorestat", false),
             .lockfile_pid = try config.getBool("core.lockfilepid", false),
+            .config_lock = try Repository.lockTimeout(config, "core.configlocktimeout", 1000),
             .hide_dot_files = try hideDotFilesOf(config),
             .prefer_symlink_refs = try config.getBool("core.prefersymlinkrefs", false),
             .create_object = try createObjectOf(config),
@@ -684,7 +688,7 @@ pub const Repository = struct {
         var path: []const u8 = "";
         var ceiling: ?usize = null;
         if (options.discover and options.ceiling_directories.len != 0) {
-            path = try absoluteGitDir(io, start, &path_buf);
+            path = try absolutePath(io, start, &path_buf);
             ceiling = nearestCeiling(path, options.ceiling_directories);
         }
         const device = if (fs.statAt(io, start, ".") catch null) |found| found.stat.dev else 0;
@@ -876,10 +880,13 @@ pub const Repository = struct {
 
         // The configuration is read before anything else, because it says
         // which hash the object names are written with.
-        // An `includeIf` asks where the `.git` directory is and which branch
-        // `HEAD` is on, so both are known before the first file is read.
+        // An `includeIf` asks where the `.git` directory and the work tree
+        // are and which branch `HEAD` is on, so all three are known before
+        // the first file is read.
         var path_buffer: [4096]u8 = undefined;
-        const git_dir_path = try absoluteGitDir(io, repo.data().git_dir, &path_buffer);
+        const git_dir_path = try absolutePath(io, repo.data().git_dir, &path_buffer);
+        var work_buffer: [4096]u8 = undefined;
+        const work_tree_path = if (repo.data().work_dir) |work| try absolutePath(io, work, &work_buffer) else null;
         // The format is the repository's own file's to say, read alone, as
         // git's `read_repository_format` reads it: no include, no other
         // file and no `-c` decides which hash a repository's objects are
@@ -894,7 +901,7 @@ pub const Repository = struct {
             .local = .{ .dir = repo.data().common_dir, .sub_path = "config" },
             .command = options.config_overrides,
             .pairs = options.config_pairs,
-        }, .{ .git_dir = git_dir_path, .branch = branch, .home = options.home }, format, null);
+        }, .{ .git_dir = git_dir_path, .work_tree = work_tree_path, .branch = branch, .home = options.home }, format, null);
         repo.data().config_state = try config_owner.create(config);
         errdefer config_owner.destroy(repo.data().config_state);
         repo.data().shared = try sharedOf(repo.configuration());
@@ -980,10 +987,10 @@ pub const Repository = struct {
         return true;
     }
 
-    /// The `.git` directory's path as git matches it in a `gitdir:`
+    /// A directory's path as git matches it in a `gitdir:` or `worktree:`
     /// condition: absolute, symbolic links resolved, `/`-separated.
-    fn absoluteGitDir(io: Io, git_dir: Io.Dir, buffer: []u8) ErrorNamespace.Error![]const u8 {
-        const len = try git_dir.realPath(io, buffer);
+    fn absolutePath(io: Io, dir: Io.Dir, buffer: []u8) ErrorNamespace.Error![]const u8 {
+        const len = try dir.realPath(io, buffer);
         const path = buffer[0..len];
         if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
         return path;
@@ -1085,7 +1092,7 @@ pub const Repository = struct {
 
     /// How a configuration file of this repository is locked.
     pub fn configLock(repo: *const Repository) config_write.LockOptions {
-        return .{ .shared = repo.data().shared, .pid_file = repo.data().settings.lockfile_pid };
+        return .{ .shared = repo.data().shared, .pid_file = repo.data().settings.lockfile_pid, .on_contention = repo.data().settings.config_lock };
     }
 
     /// `core.lockfilePid`: whether a lock taken for this repository names
@@ -1204,9 +1211,6 @@ pub const Repository = struct {
         return options;
     }
 
-    /// A lock timeout in milliseconds, as git reads one: zero means try
-    /// once, a negative number means wait for ever, which here is as long
-    /// as a wait can be written down.
     /// How the refs' locks wait and name their holders, as `config` says.
     fn refLocks(config: *const config_mod.Config) ErrorNamespace.Error!refs_mod.Locks {
         return .{
@@ -1216,6 +1220,9 @@ pub const Repository = struct {
         };
     }
 
+    /// A lock timeout in milliseconds, as git reads one: zero means try
+    /// once, a negative number means wait for ever, which here is as long
+    /// as a wait can be written down.
     fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: i64) ErrorNamespace.Error!fs.OnContention {
         const timeout = try config.getInt(key, default);
         if (timeout == 0) return .fail;
