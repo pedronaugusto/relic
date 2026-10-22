@@ -30,6 +30,8 @@ const merging = @import("../commit/merging.zig");
 const sequencer = @import("../commit/sequencer.zig");
 const rebase = @import("../rebase/rebase.zig");
 const refs_filter = @import("../pretty/refs.zig");
+const pretty = @import("../pretty/pretty.zig");
+const pretty_log = @import("../pretty/log.zig");
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
 
@@ -691,4 +693,69 @@ test "for-each-ref's signature atoms check each commit as git's do" {
     defer ours.deinit();
     try refs_filter.listRefs(gpa, io, &ours.writer, &repo, .{ .format = format, .context = .{ .signer = &signer } });
     try testing.expectEqualStrings(theirs, ours.written());
+}
+
+/// `git log --show-signature` against `pretty.log.writeEntry`: a signed
+/// commit, an unsigned one, and merges of a signed and an unsigned tag,
+/// whose mergetags git checks too; in colour and without.
+fn logSignatures(format: signing.Format) !void {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var k = try Keyed.create(gpa, io, format, &.{});
+    defer k.destroy(io);
+    try k.makeKey(io);
+    try k.repo.writeFile(io, "a.txt", "a\n");
+    try k.repo.exec(io, &.{ "add", "a.txt" });
+    try k.repo.exec(io, &.{ "-c", "commit.gpgSign=true", "commit", "-q", "-m", "signed" });
+    try k.repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    try k.repo.writeFile(io, "b.txt", "b\n");
+    try k.repo.exec(io, &.{ "add", "b.txt" });
+    try k.repo.exec(io, &.{ "commit", "-q", "-m", "unsigned" });
+    try k.repo.exec(io, &.{ "-c", "tag.gpgSign=true", "tag", "-s", "-m", "a signed tag", "signed-tag" });
+    try k.repo.writeFile(io, "c.txt", "c\n");
+    try k.repo.exec(io, &.{ "add", "c.txt" });
+    try k.repo.exec(io, &.{ "commit", "-q", "-m", "more" });
+    try k.repo.exec(io, &.{ "tag", "--no-sign", "-a", "-m", "a plain tag", "plain-tag" });
+    try k.repo.exec(io, &.{ "checkout", "-q", "main" });
+    try k.repo.exec(io, &.{ "merge", "-q", "--no-ff", "-m", "merge signed", "signed-tag" });
+    try k.repo.exec(io, &.{ "merge", "-q", "--no-ff", "-m", "merge plain", "plain-tag" });
+
+    var repo = try k.open(io);
+    defer repo.deinit(io);
+    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), k.programs());
+    defer signer.deinit();
+    const listed = try k.repo.run(io, &.{ "rev-list", "main" });
+    defer gpa.free(listed);
+    // gpg says it checked its trust database the first time it is asked
+    // after a key is made, whoever asks; asked once here, neither log has it.
+    gpa.free(try k.repo.run(io, &.{ "verify-commit", "main~2" }));
+    for ([_]bool{ false, true }) |in_color| {
+        const theirs = try k.repo.run(io, &.{ "log", "--show-signature", "--pretty=medium", "--no-decorate", if (in_color) "--color=always" else "--no-color", "main" });
+        defer gpa.free(theirs);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const colors: pretty.Colors = .{};
+        var ours: std.ArrayList(u8) = .empty;
+        var lines = std.mem.tokenizeScalar(u8, listed, '\n');
+        var first = true;
+        while (lines.next()) |text| {
+            try pretty_log.writeEntry(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = try Oid.parse(.sha1, text) }, &ours, .{
+                .signer = &signer,
+                .colors = if (in_color) &colors else null,
+            }, .{ .show_signature = true, .expand_tabs = 8, .after_another = !first });
+            first = false;
+        }
+        testing.expectEqualStrings(theirs, ours.items) catch |err| {
+            std.debug.print("{t}, colour {}\n", .{ format, in_color });
+            return err;
+        };
+    }
+}
+
+test "a log's --show-signature lines are git log's, mergetags and all, for ssh signatures" {
+    try logSignatures(.ssh);
+}
+
+test "a log's --show-signature lines are git log's, mergetags and all, for openpgp signatures" {
+    try logSignatures(.openpgp);
 }

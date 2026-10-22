@@ -12,5 +12,6 @@ pub const Reencoded = @import("pretty/pretty.zig").Reencoded;
 pub const reencodeCommit = @import("pretty/pretty.zig").reencodeCommit;
 pub const outputEncoding = @import("pretty/pretty.zig").outputEncoding;
 pub const toOutput = @import("pretty/pretty.zig").toOutput;
+pub const log = @import("pretty/log.zig");
 pub const refs = @import("pretty/refs.zig");
 pub const shortlog = @import("pretty/shortlog.zig");

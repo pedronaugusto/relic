@@ -166,6 +166,7 @@
 //! | `archive` | Public concern. |
 //! | `archive.remote` | Module within `archive`. |
 //! | `pretty` | Public concern. |
+//! | `pretty.log` | Module within `pretty`. |
 //! | `pretty.refs` | Module within `pretty`. |
 //! | `pretty.shortlog` | Module within `pretty`. |
 //! | `clean` | Public concern. |

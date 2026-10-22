@@ -115,9 +115,13 @@ pub const Context = struct {
 
 /// What a log format colours with, as `git log --color` does: the
 /// object name `%H` and `%h` show and a decoration's punctuation in
-/// `color.diff.commit`, each decoration in its `color.decorate.<slot>`.
+/// `color.diff.commit`, each decoration in its `color.decorate.<slot>`;
+/// a log's signature lines in `color.diff.frag` when good and
+/// `color.diff.whitespace` when not.
 pub const Colors = struct {
     commit: color.Color = color.yellow,
+    frag: color.Color = color.cyan,
+    whitespace: color.Color = color.bg_red,
     branch: color.Color = color.bold_green,
     remote_branch: color.Color = color.bold_red,
     tag: color.Color = color.bold_yellow,
@@ -145,7 +149,8 @@ pub const Colors = struct {
     pub fn read(config: *const config_mod.Config) color.Error!Colors {
         var slots: Decorate = .{};
         try color.readSlots(Decorate, &slots, config, &decorate_names, .{ .sections = &.{.{ .section = "color", .subsection = "decorate" }} });
-        var out: Colors = .{ .commit = (try diff_colors.Colors.read(config)).commit };
+        const diff = try diff_colors.Colors.read(config);
+        var out: Colors = .{ .commit = diff.commit, .frag = diff.frag, .whitespace = diff.whitespace };
         inline for (@typeInfo(Decorate).@"struct".field_names) |name| @field(out, name) = @field(slots, name);
         return out;
     }
@@ -466,7 +471,7 @@ pub const Decorations = struct {
     }
 
     /// git's `format_decorations` for `oid`, in `colors` where there are.
-    fn write(d: *const Decorations, a: Allocator, out: *std.ArrayList(u8), oid: Oid, opts: Options, colors: ?*const Colors) Allocator.Error!void {
+    pub fn write(d: *const Decorations, a: Allocator, out: *std.ArrayList(u8), oid: Oid, opts: Options, colors: ?*const Colors) Allocator.Error!void {
         const first = d.by_object.get(oid) orelse return;
         // HEAD and the branch it is on, where both are here, are one entry
         // where HEAD stands
@@ -521,7 +526,7 @@ pub const Decorations = struct {
     }
 
     /// git's `decoration_options`, with its defaults.
-    const Options = struct {
+    pub const Options = struct {
         prefix: []const u8 = " (",
         suffix: []const u8 = ")",
         separator: []const u8 = ", ",
