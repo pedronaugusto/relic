@@ -1443,7 +1443,7 @@ test "a deltified pack is read back by git and by this, object for object" {
 
     // Retaining loose bodies changes only how many times they are opened and
     // inflated, never the bytes selected for the pack.
-    const uncached = try db.writePack(io, pack_dir, entries.items, .{ .loose_cache_bytes = 0 });
+    const uncached = try db.writePack(io, pack_dir, entries.items, .{ .loose_cache_bytes = .fromRaw(0) });
     try std.testing.expect(uncached.name.eql(report.name));
 
     var hex: [hash.max_hex_len]u8 = undefined;

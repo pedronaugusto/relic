@@ -274,7 +274,7 @@ fn expireInFormat(format: testgit.RefFormat) !void {
         .{ .config = &.{&.{ .{ "gc.reflogExpire", "160.days.ago" }, .{ "gc.reflogExpireUnreachable", "never" } }}, .args = &.{"--all"}, .options = .{ .clock = clock } },
         .{ .config = &.{&.{ .{ "gc.reflogExpire", "1.day.ago" }, .{ "gc.refs/stash.reflogExpire", "never" } }}, .args = &.{"--all"}, .options = .{ .clock = clock } },
         .{ .config = &.{&both}, .args = &.{ "--expire-unreachable=now", "--rewrite", "--updateref", "refs/heads/main", "HEAD" }, .options = .{ .clock = clock, .refs = &.{ "refs/heads/main", "HEAD" }, .expire_unreachable = date.expire_all, .rewrite = true, .update_ref = true } },
-        .{ .config = &.{&both}, .args = &.{ "--expire=40.days.ago", "--all" }, .options = .{ .clock = clock, .expire = now - 40 * day } },
+        .{ .config = &.{&both}, .args = &.{ "--expire=40.days.ago", "--all" }, .options = .{ .clock = clock, .expire = .fromRaw(now - 40 * day) } },
     };
     for (cases, 0..) |case, n| {
         var theirs = try logsFixture(format, now);
@@ -341,7 +341,7 @@ fn worktreeLogsInFormat(format: testgit.RefFormat) !void {
         } else {
             var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
             defer native.deinit(io);
-            try gc.expireReflogs(gpa, io, &native, .{ .clock = clock, .expire = now - 40 * day });
+            try gc.expireReflogs(gpa, io, &native, .{ .clock = clock, .expire = .fromRaw(now - 40 * day) });
         }
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(gpa);

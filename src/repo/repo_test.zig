@@ -488,7 +488,7 @@ test "worktree prune takes away what git's takes, --expire and -n included" {
     var expire_arg: [32]u8 = undefined;
     const cases = [_]struct { args: []const []const u8, options: worktrees.PruneOptions }{
         .{ .args = &.{}, .options = .{} },
-        .{ .args = &.{ "--expire", try std.mem.print(&expire_arg, "@{d}", .{now - week}) }, .options = .{ .expire = now - week } },
+        .{ .args = &.{ "--expire", try std.mem.print(&expire_arg, "@{d}", .{now - week}) }, .options = .{ .expire = .fromRaw(now - week) } },
         .{ .args = &.{"-n"}, .options = .{ .dry_run = true } },
     };
     for (cases, 0..) |case, n| {

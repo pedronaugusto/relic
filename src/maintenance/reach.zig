@@ -47,7 +47,7 @@ pub const ReachOptions = struct {
     /// git's `mark_recent`, a cruft pack's objects each by its own time.
     /// So are those a `gc.recentObjectsHook` command names, whatever their
     /// time. 0 keeps none, and runs no hook.
-    recent: date.Expiry = 0,
+    recent: date.Expiry = .fromRaw(0),
     /// What runs the `gc.recentObjectsHook` commands. With none given and
     /// a hook set, `error.ProgramsNotGranted`.
     programs: ?program.Programs = null,
@@ -75,7 +75,7 @@ pub fn reachableObjects(gpa: Allocator, io: Io, repo: *Repository, options: Reac
         defer walked.deinit();
         for (walked.entries) |entry| try reached.put(gpa, entry.oid, {});
     }
-    if (options.recent != 0) try addRecent(gpa, io, repo, arena, &reached, starts.roots, options);
+    if (!options.recent.eql(.fromRaw(0))) try addRecent(gpa, io, repo, arena, &reached, starts.roots, options);
     return reached;
 }
 
@@ -225,7 +225,7 @@ fn addRecent(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, reache
     defer if (hooked) |*set| set.deinit(gpa);
     var unseen: std.ArrayList(Oid) = .empty;
     for (timed) |object| {
-        if (object.time <= options.recent) {
+        if (date.Expiry.fromRaw(object.time).compare(options.recent) != .gt) {
             // git runs the hooks once, at the first object too old to
             // be recent by its time, reached or not.
             if (hooked == null) hooked = try hookedObjects(gpa, io, repo, options.programs);

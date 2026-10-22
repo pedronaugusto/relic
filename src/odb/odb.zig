@@ -73,6 +73,7 @@ const AlternateEntry = struct {
 };
 
 const c_quote = @import("../text.zig").c_quote;
+const date = @import("../text.zig").date;
 
 fn nextAlternate(gpa: Allocator, text: []const u8, cursor: *usize) Allocator.Error!?AlternateEntry {
     const start = cursor.*;
@@ -1777,7 +1778,7 @@ pub const Odb = struct {
         /// An unkept loose object, or a temporary file, whose time is not
         /// after this goes: git's `--expire`. The greatest time takes
         /// every one.
-        expire: i64,
+        expire: date.Expiry,
         /// git's `-n`: count what would go and remove nothing.
         dry_run: bool = false,
     };
@@ -1848,12 +1849,12 @@ pub const Odb = struct {
 
     /// Whether `name`'s time is not after `expire`; a file already gone is
     /// not.
-    fn notAfter(io: Io, dir: Io.Dir, name: []const u8, expire: i64) ErrorNamespace.Error!bool {
+    fn notAfter(io: Io, dir: Io.Dir, name: []const u8, expire: date.Expiry) ErrorNamespace.Error!bool {
         const stat = dir.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => |e| return e,
         };
-        return stat.mtime.toSeconds() <= expire;
+        return date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(expire) != .gt;
     }
 
     fn deleteIfThere(io: Io, dir: Io.Dir, name: []const u8) ErrorNamespace.Error!void {
@@ -1870,7 +1871,7 @@ pub const Odb = struct {
             error.FileNotFound => return 0,
             else => |e| return e,
         };
-        if (stat.mtime.toSeconds() > options.expire) return 0;
+        if (date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(options.expire) == .gt) return 0;
         if (!options.dry_run) {
             if (stat.kind == .directory) try dir.deleteTree(io, name) else try deleteIfThere(io, dir, name);
         }
@@ -2334,7 +2335,7 @@ pub const Odb = struct {
                     ordered_filled += 1;
                     continue;
                 }
-                const available = options.loose_cache_bytes -| cached_bytes;
+                const available = options.loose_cache_bytes.raw() -| cached_bytes;
                 const found = try odb.readHeaderForPack(io, entry.oid, available);
                 if (found.bytes) |bytes| cached_bytes += bytes.len;
                 ordered[i] = .{
@@ -2415,7 +2416,7 @@ pub const Odb = struct {
                 .ref_delta => |oid| oid,
                 .ofs_delta => |back| order.nameAt(at.pack, at.offset -| back) orelse continue,
             };
-            if (options.delta == .none or item.size >= options.big_file_bytes) continue;
+            if (options.delta == .none or aegis.units.Bytes(u64).fromRaw(item.size).compare(options.big_file_bytes) != .lt) continue;
             if (options.islands) |islands| if (!islands.allows(item.oid, base_oid)) continue;
             const base = positions.get(base_oid) orelse continue;
             if (base >= pos) continue;
@@ -3617,13 +3618,13 @@ pub const PackOptions = struct {
     /// How many bytes of window objects to hold at once. The window is
     /// emptied from the oldest end until it fits, so this is the bound on
     /// what building a pack costs in memory whatever the objects are.
-    window_bytes: usize = 32 << 20,
+    window_bytes: aegis.units.Bytes(usize) = .fromRaw(32 << 20),
     /// How many bytes of loose-object bodies the ordering pass may retain for
     /// the write pass, when `threads` is one. A retained object is opened
     /// and inflated once instead of twice. Objects that do not fit the
     /// remaining budget take the old two-read path; there is no eviction.
     /// Zero disables the cache.
-    loose_cache_bytes: usize = 64 << 20,
+    loose_cache_bytes: aegis.units.Bytes(usize) = .fromRaw(64 << 20),
     /// How many bytes the tasks may hold ahead of the writer, when `threads`
     /// is not one. Objects go through in batches, three under way at once:
     /// the tasks read one and deflate another while the calling task
@@ -3633,10 +3634,10 @@ pub const PackOptions = struct {
     /// and always at least one. An object whose charge alone is larger is
     /// read and deflated straight into the pack, on the calling task, one
     /// such object at a time.
-    batch_bytes: usize = 64 << 20,
+    batch_bytes: aegis.units.Bytes(usize) = .fromRaw(64 << 20),
     /// An object this large or larger is written whole and never enters the
     /// window. git's `core.bigFileThreshold`, and the same default.
-    big_file_bytes: u64 = 512 << 20,
+    big_file_bytes: aegis.units.Bytes(u64) = .fromRaw(512 << 20),
     /// How hard the entries are compressed.
     compression: pack.Compression = .default,
     /// Write the pack's reverse index too: `pack.WriteOptions.reverse_index`.
@@ -3858,7 +3859,7 @@ const Window = struct {
         var options = pack_options;
         options.depth = max_depth;
         const deltifiable = options.delta != .none and options.window != 0 and
-            bytes.len < options.big_file_bytes;
+            aegis.units.Bytes(u64).fromRaw(bytes.len).compare(options.big_file_bytes) == .lt;
         var choice: Build.Choice = .{};
         var depth: u32 = 0;
         if (deltifiable) {
@@ -3881,7 +3882,7 @@ const Window = struct {
             // The oldest go first, by count and then by weight, so the
             // window is a bound on memory and not only on work.
             while (w.slots.items.len > options.window or
-                (w.slots.items.len > 1 and w.bytes > options.window_bytes))
+                (w.slots.items.len > 1 and aegis.units.Bytes(usize).fromRaw(w.bytes).compare(options.window_bytes) == .gt))
             {
                 var oldest = w.slots.orderedRemove(0);
                 w.bytes -= oldest.bytes.len;
@@ -4205,7 +4206,8 @@ const Build = struct {
     /// the budget, and always one. Each is charged its body, the slack a
     /// packed one is inflated with, and its deflated entry's room.
     fn plan(b: *Build, batch: *PackBatch, start: usize) void {
-        const share = b.options.batch_bytes / 3;
+        // glint-ignore: A004 -- design: a third of the batch budget, rounded down; aegis Bytes has no division
+        const share = b.options.batch_bytes.raw() / 3;
         var end = start;
         var charged: usize = 0;
         while (end < b.ordered.len) {

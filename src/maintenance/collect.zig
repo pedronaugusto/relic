@@ -184,7 +184,7 @@ const Settings = struct {
 /// `gc_config_is_timestamp_never`.
 fn isNever(config: *const config_mod.Config, name: []const u8, clock: date.Context) Self.Error!bool {
     const value = config.get(name) orelse return false;
-    return try parseDate(value, clock) == 0;
+    return (try parseDate(value, clock)).eql(.fromRaw(0));
 }
 
 fn parseDate(value: []const u8, clock: date.Context) Self.Error!date.Expiry {
@@ -447,7 +447,7 @@ fn lastFailed(io: Io, repo: *Repository, expire: date.Expiry) Self.Error!bool {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    if (stat.mtime.toSeconds() < expire) return false;
+    if (date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(expire) == .lt) return false;
     return stat.size != 0;
 }
 

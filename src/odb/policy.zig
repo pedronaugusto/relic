@@ -94,7 +94,7 @@ pub const Packing = struct {
     /// At most 4095, as git forces it.
     depth: u32 = 50,
     /// `pack.windowMemory`; unset, relic's own bound, and 0 none.
-    window_bytes: usize = 32 << 20,
+    window_bytes: Bytes = .fromRaw(32 << 20),
     compression: pack.Compression = .default,
     index_version: u2 = 2,
     /// git's default for a loose object is level 1.

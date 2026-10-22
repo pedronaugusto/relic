@@ -288,9 +288,9 @@ fn modesInFormat(format: testgit.RefFormat) !void {
         .{ .args = &.{"-a"}, .options = .{ .mode = .all } },
         .{ .args = &.{ "-a", "-d", "-k" }, .options = .{ .mode = .all, .delete = true, .keep_unreachable = true } },
         .{ .args = &.{ "-A", "-d" }, .options = .{ .mode = .all_loosen, .delete = true } },
-        .{ .args = &.{ "-A", "-d", unpack_arg }, .options = .{ .mode = .all_loosen, .delete = true, .unpack_unreachable = now - 14 * day } },
+        .{ .args = &.{ "-A", "-d", unpack_arg }, .options = .{ .mode = .all_loosen, .delete = true, .unpack_unreachable = .fromRaw(now - 14 * day) } },
         .{ .args = &.{ "--cruft", "-d" }, .options = .{ .mode = .cruft, .delete = true } },
-        .{ .args = &.{ "--cruft", "-d", expiration_arg }, .options = .{ .mode = .cruft, .delete = true, .cruft_expiration = now - 14 * day } },
+        .{ .args = &.{ "--cruft", "-d", expiration_arg }, .options = .{ .mode = .cruft, .delete = true, .cruft_expiration = .fromRaw(now - 14 * day) } },
         .{ .args = &.{ "-a", "-d", "-l" }, .options = .{ .mode = .all, .delete = true, .local = true } },
     }, null);
 }
@@ -315,8 +315,8 @@ fn hookInFormat(format: testgit.RefFormat) !void {
     var buf: [2][48]u8 = undefined;
     const unpack_arg, const expiration_arg = try dates(now, &buf);
     try compare(format, &.{
-        .{ .args = &.{ "--cruft", "-d", expiration_arg }, .options = .{ .mode = .cruft, .delete = true, .cruft_expiration = now - 14 * day } },
-        .{ .args = &.{ "-A", "-d", unpack_arg }, .options = .{ .mode = .all_loosen, .delete = true, .unpack_unreachable = now - 14 * day } },
+        .{ .args = &.{ "--cruft", "-d", expiration_arg }, .options = .{ .mode = .cruft, .delete = true, .cruft_expiration = .fromRaw(now - 14 * day) } },
+        .{ .args = &.{ "-A", "-d", unpack_arg }, .options = .{ .mode = .all_loosen, .delete = true, .unpack_unreachable = .fromRaw(now - 14 * day) } },
     }, hook);
 }
 
@@ -492,7 +492,7 @@ fn geometricInFormat(format: testgit.RefFormat) !void {
         .{ .args = &.{ "--geometric=3", "-d", "--write-midx", "-b" }, .options = .{ .geometric = 3, .delete = true, .write_midx = true, .write_bitmaps = true } },
         .{ .args = &.{ "-d", "--write-midx" }, .options = .{ .delete = true, .write_midx = true } },
         .{ .args = &.{ "-a", "-d", "--write-midx", "-b" }, .options = .{ .mode = .all, .delete = true, .write_midx = true, .write_bitmaps = true } },
-        .{ .args = &.{ "--cruft", "-d", "--write-midx", expiration_arg }, .options = .{ .mode = .cruft, .delete = true, .write_midx = true, .cruft_expiration = now - 14 * day } },
+        .{ .args = &.{ "--cruft", "-d", "--write-midx", expiration_arg }, .options = .{ .mode = .cruft, .delete = true, .write_midx = true, .cruft_expiration = .fromRaw(now - 14 * day) } },
     }, null);
 }
 
@@ -851,7 +851,7 @@ test "repack --cruft -d --expire-to writes what goes into a cruft pack of its ow
     defer expired.close(io);
     var pack_options = native.objectDatabase().packOptions();
     pack_options.threads = 1;
-    const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .cruft, .delete = true, .cruft_expiration = now - 14 * day, .expire_to = .{ .dir = expired }, .pack = pack_options });
+    const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .cruft, .delete = true, .cruft_expiration = .fromRaw(now - 14 * day), .expire_to = .{ .dir = expired }, .pack = pack_options });
     try std.testing.expectEqual(@as(u32, 1), report.expired_written);
     const expected_expired = try expiredPacks(&theirs, "expired");
     defer gpa.free(expected_expired);

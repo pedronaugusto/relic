@@ -162,10 +162,10 @@ pub const Server = struct {
     /// length in `session_id_buf`; zero for none.
     session_id_buf: [protocol.session_id_len]u8 = undefined,
     session_id_len: usize = 0,
-    /// `uploadpack.keepAlive`: the seconds of quiet while a pack is made
-    /// after which the client is sent an empty packet on the side band;
-    /// none when zero or less.
-    keepalive_secs: i64,
+    /// `uploadpack.keepAlive`: the quiet while a pack is made after which
+    /// the client is sent an empty packet on the side band; none when zero
+    /// or less.
+    keepalive: aegis.units.Duration(.second, i64),
     /// `uploadpack.packObjectsHook`, read only where the repository cannot
     /// write it: the command run in place of `git pack-objects`, with that
     /// command line after it. The inner `null` is the name set bare.
@@ -195,7 +195,7 @@ pub const Server = struct {
             .allow_ref_in_want = options.allow_ref_in_want orelse (config.getBool("uploadpack.allowrefinwant", false) catch false),
             .filters = .read(config),
             .advertise_object_info = config.getBool("transfer.advertiseobjectinfo", false) catch false,
-            .keepalive_secs = config.getInt("uploadpack.keepalive", 5) catch 5,
+            .keepalive = .fromRaw(config.getInt("uploadpack.keepalive", 5) catch 5),
             .pack_objects_hook = if (config.findProtected("uploadpack.packobjectshook")) |entry| entry.value else null,
             .programs = options.programs,
         };
@@ -1170,8 +1170,8 @@ const Negotiation = struct {
         var paced: Paced = .init(s.io, out, band, buffer);
         var keeper: ?Io.Future(void) = null;
         defer if (keeper) |*task| task.cancel(s.io);
-        if (band != .none and s.keepalive_secs > 0) {
-            keeper = s.io.concurrent(Paced.keepAlive, .{ &paced, s.keepalive_secs }) catch null;
+        if (band != .none and s.keepalive.compare(.fromRaw(0)) == .gt) {
+            keeper = s.io.concurrent(Paced.keepAlive, .{ &paced, s.keepalive.toIoDuration() }) catch null;
         }
         var framed: side_band.Mux = .init(&paced.interface, band);
         if (s.pack_objects_hook) |hook| {
@@ -1461,8 +1461,7 @@ const Paced = struct {
     /// What a task beside the pack does: a keepalive -- an empty packet on
     /// channel one, `0005\x01` -- whenever the client has heard nothing
     /// for `secs` seconds, as git's `create_pack_file` sends it.
-    fn keepAlive(p: *Paced, secs: i64) void {
-        const period: Io.Duration = .fromSeconds(secs);
+    fn keepAlive(p: *Paced, period: Io.Duration) void {
         var wait = period;
         while (true) {
             p.io.sleep(wait, .awake) catch return;

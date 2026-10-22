@@ -20,6 +20,7 @@ const ewah = @import("../codec.zig").ewah;
 
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
+const date = @import("../text.zig").date;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -1671,8 +1672,8 @@ pub const Index = struct {
     /// git's `clean_shared_index_files`: every other `sharedindex.*` in
     /// `git_dir` whose modification time is not after `expire`, in
     /// seconds, goes. An expiry of 0 is never.
-    pub fn removeSharedBefore(index: *const Index, io: Io, git_dir: Io.Dir, expire: i64) void {
-        if (expire == 0) return;
+    pub fn removeSharedBefore(index: *const Index, io: Io, git_dir: Io.Dir, expire: date.Expiry) void {
+        if (expire.eql(.fromRaw(0))) return;
         const base = (index.split orelse return).base orelse return;
         var hex: [hash.max_hex_len]u8 = undefined;
         const current = base.hex(&hex);
@@ -1686,7 +1687,7 @@ pub const Index = struct {
                 std.log.warn("could not stat '{s}': {t}", .{ entry.name, err });
                 continue;
             };
-            if (stat.mtime.toSeconds() > expire) continue;
+            if (date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(expire) == .gt) continue;
             dir.deleteFile(io, entry.name) catch |err| std.log.warn("unable to unlink: {s}: {t}", .{ entry.name, err });
         }
     }

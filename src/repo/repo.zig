@@ -1024,7 +1024,7 @@ pub const Repository = struct {
         if (config.has("pack.depth")) packing.depth = @intCast(std.math.clamp(try config.getInt("pack.depth", 50), 0, 4095));
         if (config.has("pack.windowmemory")) {
             const bytes = try config.getInt("pack.windowmemory", 0);
-            packing.window_bytes = if (bytes <= 0) std.math.maxInt(usize) else std.math.cast(usize, bytes) orelse std.math.maxInt(usize);
+            packing.window_bytes = .fromRaw(if (bytes <= 0) std.math.maxInt(usize) else std.math.cast(usize, bytes) orelse std.math.maxInt(usize));
         }
         const core_level: ?i64 = if (config.has("core.compression")) try config.getInt("core.compression", -1) else null;
         if (config.has("pack.compression") or core_level != null) {

@@ -157,9 +157,9 @@ fn pruneInFormat(format: testgit.RefFormat) !void {
     const now = std.Io.Clock.real.now(io).toSeconds();
     const cases = [_]Case{
         .{ .args = &.{}, .options = .{} },
-        .{ .args = &.{"--expire=2.weeks.ago"}, .options = .{ .expire = now - 14 * day } },
-        .{ .args = &.{"--expire=never"}, .options = .{ .expire = 0 } },
-        .{ .args = &.{"--expire=200.days.ago"}, .options = .{ .expire = now - 200 * day } },
+        .{ .args = &.{"--expire=2.weeks.ago"}, .options = .{ .expire = .fromRaw(now - 14 * day) } },
+        .{ .args = &.{"--expire=never"}, .options = .{ .expire = .fromRaw(0) } },
+        .{ .args = &.{"--expire=200.days.ago"}, .options = .{ .expire = .fromRaw(now - 200 * day) } },
     };
     for (cases, 0..) |case, n| {
         var theirs = try fixture(format, now);
@@ -222,7 +222,7 @@ test "gc.pruneExpire as git's gc reads it" {
     const clock: @import("../text.zig").date.Context = .{ .now = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s) };
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
-    try std.testing.expectEqual(@as(?date.Expiry, 1_700_000_000 - 14 * day), try prune_mod.pruneExpiry(&native, clock));
+    try std.testing.expectEqual(@as(?date.Expiry, .fromRaw(1_700_000_000 - 14 * day)), try prune_mod.pruneExpiry(&native, clock));
     try native.editConfig(io, &.{.{ .name = "gc.pruneExpire", .value = "never" }}, .{});
     try std.testing.expectEqual(@as(?date.Expiry, null), try prune_mod.pruneExpiry(&native, clock));
     try native.editConfig(io, &.{.{ .name = "gc.pruneExpire", .value = "now" }}, .{});
@@ -273,7 +273,7 @@ test "gc.recentObjectsHook: each command's object names are recent with what the
     const now = std.Io.Clock.real.now(io).toSeconds();
     const cases = [_]Case{
         .{ .args = &.{}, .options = .{} },
-        .{ .args = &.{"--expire=2.weeks.ago"}, .options = .{ .expire = now - 14 * day } },
+        .{ .args = &.{"--expire=2.weeks.ago"}, .options = .{ .expire = .fromRaw(now - 14 * day) } },
     };
     for (cases) |case| {
         var sides: [2]@TypeOf(try hookFixture(now)) = undefined;
@@ -337,7 +337,7 @@ test "gc.recentObjectsHook failures stop prune where git's dies, and run only wh
         defer native.deinit(io);
         try std.testing.expectError(failure.err, prune_mod.prune(gpa, io, &native, .{ .programs = .{ .environ = &repo.isolated.? } }));
         try std.testing.expectError(error.ProgramsNotGranted, prune_mod.prune(gpa, io, &native, .{}));
-        _ = try prune_mod.prune(gpa, io, &native, .{ .expire = 0 });
+        _ = try prune_mod.prune(gpa, io, &native, .{ .expire = .fromRaw(0) });
         const after = try state(repo);
         defer gpa.free(after);
         try std.testing.expectEqualStrings(before, after);
@@ -384,7 +384,7 @@ test "a cruft pack's objects are recent each by its own time in .mtimes, as git'
     try theirs.exec(io, &.{ "prune", "--expire=2.weeks.ago" });
     var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
     defer native.deinit(io);
-    const report = try prune_mod.prune(gpa, io, &native, .{ .expire = now - 14 * day });
+    const report = try prune_mod.prune(gpa, io, &native, .{ .expire = .fromRaw(now - 14 * day) });
     try std.testing.expectEqual(@as(u32, 1), report.objects.pruned);
     const expected = try state(&theirs);
     defer gpa.free(expected);

@@ -97,7 +97,7 @@ const Settings = struct {
         const now = clock.now.toSeconds();
         // git 2.55's REFLOG_EXPIRE_OPTIONS_INIT: 30 days for every entry,
         // 90 for unreachable ones, the other way round from its docs.
-        var settings: Settings = .{ .defaults = .{ .total = now - 30 * std.time.s_per_day, .unreached = now - 90 * std.time.s_per_day }, .patterns = &.{} };
+        var settings: Settings = .{ .defaults = .{ .total = .fromRaw(now - 30 * std.time.s_per_day), .unreached = .fromRaw(now - 90 * std.time.s_per_day) }, .patterns = &.{} };
         var patterns: std.ArrayList(PatternPolicy) = .empty;
         for (config.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.section, "gc")) continue;
@@ -108,7 +108,7 @@ const Settings = struct {
             const expiry = date.parseExpiry(value, clock) orelse return error.InvalidExpiryDate;
             const policy: *Policy = if (!entry.has_subsection) &settings.defaults else blk: {
                 for (patterns.items) |*p| if (std.mem.eql(u8, p.pattern, entry.subsection)) break :blk &p.policy;
-                try patterns.append(arena, .{ .pattern = entry.subsection, .policy = .{ .total = 0, .unreached = 0 } });
+                try patterns.append(arena, .{ .pattern = entry.subsection, .policy = .{ .total = .fromRaw(0), .unreached = .fromRaw(0) } });
                 break :blk &patterns.items[patterns.items.len - 1].policy;
             };
             if (unreachable_slot) policy.unreached = expiry else policy.total = expiry;
@@ -127,7 +127,7 @@ const Settings = struct {
                 found = p.policy;
                 break;
             }
-        } else if (std.mem.eql(u8, ref, ref_names.stash)) found = .{ .total = 0, .unreached = 0 };
+        } else if (std.mem.eql(u8, ref, ref_names.stash)) found = .{ .total = .fromRaw(0), .unreached = .fromRaw(0) };
         return .{ .total = options.expire orelse found.total, .unreached = options.expire_unreachable orelse found.unreached };
     }
 };
@@ -236,9 +236,9 @@ const Keeper = struct {
 
     fn judge(k: *Keeper, entry: refs_mod.LogEntry) bool {
         if (k.failure != null) return true;
-        const when = entry.who.when_secs;
-        if (when < k.policy.total) return false;
-        if (when >= k.policy.unreached) return true;
+        const when: date.Expiry = .fromRaw(entry.who.when_secs);
+        if (when.compare(k.policy.total) == .lt) return false;
+        if (when.compare(k.policy.unreached) != .lt) return true;
         const kind = k.kind orelse k.prepare() catch |err| return k.fail(err);
         k.kind = kind;
         if (kind == .always) return false;
@@ -254,9 +254,9 @@ const Keeper = struct {
 
     /// git's `reflog_expiry_prepare`.
     fn prepare(k: *Keeper) Self.Error!Kind {
-        if (k.policy.unreached <= k.policy.total) return .always;
+        if (k.policy.unreached.compare(k.policy.total) != .gt) return .always;
         const stripped = ref_names.parseWorktreeRef(k.ref).bare;
-        if (k.policy.unreached == 0 or std.mem.eql(u8, stripped, "HEAD")) {
+        if (k.policy.unreached.eql(.fromRaw(0)) or std.mem.eql(u8, stripped, "HEAD")) {
             var listed = try k.repo.refStore().list(k.gpa, k.io, "refs/");
             defer listed.deinit();
             for (listed.entries) |named| switch (named.target) {

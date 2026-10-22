@@ -75,5 +75,5 @@ pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: PruneOptions) S
 pub fn pruneExpiry(repo: *Repository, clock: date.Context) Self.Error!?date.Expiry {
     const value = repo.configuration().get("gc.pruneexpire") orelse "2.weeks.ago";
     const expiry = date.parseExpiry(value, clock) orelse return error.InvalidExpiryDate;
-    return if (expiry == 0) null else expiry;
+    return if (expiry.eql(.fromRaw(0))) null else expiry;
 }

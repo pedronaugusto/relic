@@ -12,6 +12,7 @@
 //! a stack of the worktree's own under `reftable/`, and the `HEAD` file is
 //! the placeholder git leaves there.
 
+const date = @import("../text.zig").date;
 const ErrorNamespace = @This();
 const Self = @This();
 
@@ -454,7 +455,7 @@ pub const PruneOptions = struct {
     /// `--expire`: a worktree whose working tree is gone goes only when its
     /// `index` is no newer than this, or missing; `null` takes every one,
     /// git's default.
-    expire: ?i64 = null,
+    expire: ?date.Expiry = null,
     /// `-n`: what would go is reported, and nothing goes.
     dry_run: bool = false,
     /// `core.ignoreCase`: two worktrees at paths that differ only in case
@@ -582,7 +583,7 @@ fn pathOrder(a: []const u8, b: []const u8, ignore_case: bool) std.math.Order {
 const Verdict = union(enum) { locked, keep: []const u8, prune: PruneReason };
 
 /// git's `should_prune_worktree` for the entry `entry` of `worktrees/`.
-fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expire: ?i64) Self.Error!Verdict {
+fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expire: ?date.Expiry) Self.Error!Verdict {
     var admin = worktrees_dir.openDir(io, name, .{}) catch |err| switch (err) {
         error.NotDir, error.FileNotFound => return .{ .prune = .not_a_directory },
         else => |e| return e,
@@ -606,7 +607,7 @@ fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expi
     };
     if (std.Io.Dir.accessAbsolute(io, dot_git, .{})) |_| {} else |_| {
         const stat = admin.statFile(io, "index", .{}) catch return .{ .prune = .gone };
-        if (expire == null or stat.mtime.toSeconds() <= expire.?) return .{ .prune = .gone };
+        if (expire == null or date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(expire.?) != .gt) return .{ .prune = .gone };
     }
     return .{ .keep = dot_git };
 }

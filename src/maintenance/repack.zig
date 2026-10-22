@@ -719,11 +719,11 @@ fn collectExisting(gpa: Allocator, arena: Allocator, io: Io, db: *Odb, keep_pack
 /// finds them, of `timed`: each newer than `after` or named by a
 /// `gc.recentObjectsHook` command (run once, at the first that is not
 /// newer), into `out` with its time, the newest of its copies.
-fn recentOf(gpa: Allocator, io: Io, repo: *Repository, timed: []const Odb.Timed, after: i64, programs: ?program.Programs, out: *Oid.Map(i64)) Self.Error!void {
+fn recentOf(gpa: Allocator, io: Io, repo: *Repository, timed: []const Odb.Timed, after: date.Expiry, programs: ?program.Programs, out: *Oid.Map(i64)) Self.Error!void {
     var hooked: ?Oid.Set = null;
     defer if (hooked) |*set| set.deinit(gpa);
     for (timed) |object| {
-        if (object.time <= after) {
+        if (date.Expiry.fromRaw(object.time).compare(after) != .gt) {
             if (hooked == null) hooked = try reach.hookedObjects(gpa, io, repo, programs);
             if (!hooked.?.contains(object.oid)) continue;
         }
@@ -770,7 +770,7 @@ fn loosenUnreachable(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
             if (fresh.contains(oid) or kept.contains(oid)) continue;
             if (!try db.existsOwn(io, oid)) continue;
             if (options.unpack_unreachable) |after| {
-                if (time <= after and !recent.contains(oid) and !recent_reached.contains(oid)) continue;
+                if (date.Expiry.fromRaw(time).compare(after) != .gt and !recent.contains(oid) and !recent_reached.contains(oid)) continue;
             }
             if (try db.loosen(io, oid, time)) count += 1;
         }
@@ -854,7 +854,7 @@ fn writeCruft(
         defer walked.deinit();
         for (walked.entries) |entry| {
             const slot = try times.getOrPut(gpa, entry.oid);
-            if (!slot.found_existing) slot.value_ptr.* = after else slot.value_ptr.* = @max(slot.value_ptr.*, after);
+            if (!slot.found_existing) slot.value_ptr.* = after.raw() else slot.value_ptr.* = @max(slot.value_ptr.*, after.raw());
         }
     } else {
         for (timed) |object| {

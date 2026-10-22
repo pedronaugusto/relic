@@ -207,7 +207,7 @@ test "the tasks allocate nothing, and a batch holds no more than its budget" {
         defer pack_dir.close(io);
         const before = counting.live;
         counting.peak = before;
-        const report = try db.writePack(io, pack_dir, entries.items, .{ .threads = workers, .delta = .none, .batch_bytes = budget });
+        const report = try db.writePack(io, pack_dir, entries.items, .{ .threads = workers, .delta = .none, .batch_bytes = .fromRaw(budget) });
         try std.testing.expect(!counting.foreign);
         run.* = .{ .name = report.name, .peak = counting.peak - before };
     }
@@ -458,7 +458,7 @@ test "the tasks read the next batch while one is searched, and the pack is the s
         defer db.deinit(io);
         for (corpus.entries.items) |*entry| entry.header = try db.readHeader(io, entry.oid);
     }
-    const options: odb_mod.PackOptions = .{ .threads = 4, .batch_bytes = 96 * 1024 };
+    const options: odb_mod.PackOptions = .{ .threads = 4, .batch_bytes = .fromRaw(96 * 1024) };
     const serial = try corpus.write(gpa, io, .{ .threads = 1 });
 
     var vtable = io.vtable.*;
@@ -583,7 +583,7 @@ test "a pack with several search groups is the same on 1, 2, 7 and 16 tasks, any
     }
     for (cases) |c| {
         const want = serial[@backingInt(c.encoding)];
-        const report = try corpus.write(gpa, c.io, .{ .threads = c.threads, .delta = c.encoding, .batch_bytes = c.budget });
+        const report = try corpus.write(gpa, c.io, .{ .threads = c.threads, .delta = c.encoding, .batch_bytes = .fromRaw(c.budget) });
         if (!report.name.eql(want.name)) {
             std.debug.print("{t}, {d} tasks, batch {d}: {d} deltas, {d} bytes; serial {d}, {d}\n", .{ c.encoding, c.threads, c.budget, report.deltas, report.pack_bytes, want.deltas, want.pack_bytes });
             return error.TestUnexpectedResult;

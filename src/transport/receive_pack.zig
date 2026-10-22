@@ -135,12 +135,12 @@ const Settings = struct {
     /// `receive.certNonceSeed`: the secret a push certificate's nonce is
     /// made with; with none, no certificate is asked for.
     cert_nonce_seed: ?[]const u8,
-    /// `receive.certNonceSlop`: how many seconds apart another server's
-    /// nonce may be and still count as this one's.
-    cert_nonce_slop: u64,
-    /// `receive.keepAlive`: the seconds of quiet after which a keepalive
-    /// is sent on the side band; zero or less sends none.
-    keepalive_secs: i64,
+    /// `receive.certNonceSlop`: how far apart another server's nonce may
+    /// be and still count as this one's.
+    cert_nonce_slop: aegis.units.Duration(.second, u64),
+    /// `receive.keepAlive`: the quiet after which a keepalive is sent on
+    /// the side band; zero or less sends none.
+    keepalive: aegis.units.Duration(.second, i64),
     /// `receive.updateServerInfo`: the dumb HTTP files written again after
     /// every push.
     update_server_info: bool,
@@ -166,8 +166,8 @@ const Settings = struct {
             .shallow_update = config.getBool("receive.shallowupdate", false) catch false,
             .max_input_size = if (max > 0) .fromRaw(@intCast(max)) else null,
             .cert_nonce_seed = config.get("receive.certnonceseed"),
-            .cert_nonce_slop = @intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0)),
-            .keepalive_secs = config.getInt("receive.keepalive", 5) catch 5,
+            .cert_nonce_slop = .fromRaw(@intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0))),
+            .keepalive = .fromRaw(config.getInt("receive.keepalive", 5) catch 5),
             .update_server_info = config.getBool("receive.updateserverinfo", false) catch false,
             .auto_gc = config.getBool("receive.autogc", true) catch true,
             .advertise_sid = config.getBool("transfer.advertisesid", false) catch false,
@@ -438,7 +438,7 @@ pub const Server = struct {
         // task can run.
         var keeper: ?Io.Future(void) = null;
         defer if (keeper) |*task| task.cancel(s.io);
-        if (s.asked.band != .none and s.settings.keepalive_secs > 0 and canRunBeside(s.io)) {
+        if (s.asked.band != .none and s.settings.keepalive.compare(.fromRaw(0)) == .gt and canRunBeside(s.io)) {
             keeper = s.io.concurrent(keepAlive, .{s}) catch null;
         }
         var push_options: std.ArrayList([]const u8) = .empty;
@@ -566,7 +566,7 @@ pub const Server = struct {
     /// channel one, `0005\x01` -- whenever the client has heard nothing for
     /// `receive.keepAlive` seconds, as git's `copy_to_sideband` sends it.
     fn keepAlive(s: *Server) void {
-        const period: Io.Duration = .fromSeconds(s.settings.keepalive_secs);
+        const period: Io.Duration = s.settings.keepalive.toIoDuration();
         var wait = period;
         while (true) {
             s.io.sleep(wait, .awake) catch return;
@@ -1710,7 +1710,7 @@ pub const Server = struct {
         const issued = decimal.strtoul(ours, 10, 64).value;
         const slop: i64 = @as(i64, @intCast(issued)) - @as(i64, @intCast(stamp.value));
         const limit = s.settings.cert_nonce_slop;
-        if (limit != 0 and @abs(slop) <= limit) return .{ .status = .OK, .reported = theirs, .slop = slop };
+        if (!limit.eql(.fromRaw(0)) and aegis.units.Duration(.second, u64).fromRaw(@abs(slop)).compare(limit) != .gt) return .{ .status = .OK, .reported = theirs, .slop = slop };
         return .{ .status = .SLOP, .reported = ours, .slop = slop };
     }
 
