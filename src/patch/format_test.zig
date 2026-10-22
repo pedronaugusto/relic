@@ -517,3 +517,27 @@ test "format-patch takes diff.srcPrefix, diff.dstPrefix and diff.mnemonicPrefix,
         try compare(gpa, io, &git, &repo, &.{"--no-signature"}, "base..HEAD", range, .{});
     }
 }
+
+test "format.notes and --notes put the notes below the message as git's format-patch does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try buildHistory(io, &git);
+    const base = try oidOf(gpa, io, &git, "base");
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    const range: formatpatch.Range = .{ .upstream = base, .tip = head };
+    try git.exec(io, &.{ "notes", "add", "-m", "a default note", "HEAD" });
+    try git.exec(io, &.{ "notes", "--ref=review", "add", "-m", "reviewed\nby someone", "HEAD~1" });
+    try git.exec(io, &.{ "notes", "--ref=review", "add", "-m", "also reviewed", "HEAD" });
+    const off: formatpatch.Options = .{ .who = fixture, .signature = .off };
+
+    try compareSet(gpa, io, &git, &.{}, &.{ "--no-signature", "--notes" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .notes = &.{.standard} });
+    try compareSet(gpa, io, &git, &.{}, &.{ "--no-signature", "--notes=review", "-p" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .notes = &.{.{ .ref = "review" }}, .stat = false });
+    try compareSet(gpa, io, &git, &.{.{ "format.notes", "true" }}, &.{"--no-signature"}, "base..HEAD", range, off);
+    try compareSet(gpa, io, &git, &.{ .{ "format.notes", "true" }, .{ "format.notes", "review" } }, &.{"--no-signature"}, "base..HEAD", range, off);
+    try compareSet(gpa, io, &git, &.{ .{ "format.notes", "review" }, .{ "format.notes", "false" } }, &.{"--no-signature"}, "base..HEAD", range, off);
+    try compareSet(gpa, io, &git, &.{.{ "format.notes", "review" }}, &.{ "--no-signature", "--notes" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .notes = &.{.standard} });
+    try compareSet(gpa, io, &git, &.{.{ "format.notes", "true" }}, &.{ "--no-signature", "--no-notes" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .notes = &.{.off} });
+    try compareSet(gpa, io, &git, &.{ .{ "format.notes", "true" }, .{ "format.signOff", "true" } }, &.{"--no-signature"}, "base..HEAD", range, off);
+}

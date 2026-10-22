@@ -38,6 +38,7 @@ const c_quote = @import("../text.zig").c_quote;
 const mailfmt = @import("../mail/format.zig");
 const unicode_width = @import("../text.zig").unicode_width;
 const message = @import("../object/message.zig");
+const notes_mod = @import("../commit/notes.zig");
 const pretty = @import("../pretty/pretty.zig");
 const shortlog = @import("../pretty/shortlog.zig");
 const mailmap_mod = @import("../rev_walk/mailmap.zig");
@@ -85,7 +86,7 @@ pub const Error = error{
     /// `i18n.logOutputEncoding` or `i18n.commitEncoding` set with no value,
     /// which git dies on.
     InvalidEncodingSetting,
-} || shortlog.Error || rev_walk.Error || diff.Error || diff.UnifiedError || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || rev_parse.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
+} || notes_mod.FormatNoteError || shortlog.Error || rev_walk.Error || diff.Error || diff.UnifiedError || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || rev_parse.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
     Io.Dir.ReadFileAllocError;
 
 /// A name and an address.
@@ -227,6 +228,17 @@ pub const Listed = struct {
     given: []const []const u8 = &.{},
 };
 
+/// One of `--notes`, `--notes=<ref>` and `--no-notes`, as given.
+pub const NotesArg = union(enum) {
+    /// `--notes`: the standard notes, the default ref and
+    /// `notes.displayRef`'s.
+    standard,
+    /// `--notes=<ref>`: that ref's too, a glob for every ref it matches.
+    ref: []const u8,
+    /// `--no-notes`: none of what came before.
+    off,
+};
+
 /// `--attach` or `--inline`.
 pub const Attach = struct {
     boundary: []const u8,
@@ -314,6 +326,11 @@ pub const Options = struct {
     /// `--pretty=mboxrd` with `--stdout`: `From ` lines in the body get a
     /// `>`. `null` takes `format.mboxrd`.
     mboxrd: ?bool = null,
+    /// `--notes`, `--notes=<ref>` and `--no-notes` in the order given,
+    /// each applied over what `format.notes` set up, as git applies them.
+    /// The notes go after the message, below a `---`, as git's
+    /// `next_commentary_block` places them.
+    notes: []const NotesArg = &.{},
     /// `--ignore-if-in-upstream`.
     ignore_if_in_upstream: bool = false,
     renames: Renames = .configured,
@@ -396,6 +413,8 @@ const Ctx = struct {
     repo: *Repository,
     db: *odb_mod.Odb,
     options: Plan,
+    /// The notes trees shown under each message.
+    display_notes: ?*notes_mod.DisplayNotes = null,
     diff_options: diff.Options,
     renames: ?diff.RenameOptions,
     order: diff.Order,
@@ -448,6 +467,8 @@ const Plan = struct {
     mboxrd: bool,
     /// `format.noPrefix`: the patches with no `a/` and `b/`.
     no_prefix: bool,
+    /// The notes shown under each message, or `null` for none.
+    notes: ?notes_mod.Display,
     ignore_if_in_upstream: bool,
     renames: Renames,
     diff: ?diff.Options,
@@ -504,6 +525,7 @@ const Settings = struct {
     encode_email_headers: bool = true,
     mboxrd: bool = false,
     no_prefix: bool = false,
+    notes: std.ArrayList(NotesArg) = .empty,
     suffix: []const u8 = ".patch",
     filename_max_length: usize = 64,
     output_directory: []const u8 = "",
@@ -518,7 +540,7 @@ const Settings = struct {
             "format.signature",            "format.signaturefile", "format.coverletter",   "format.commitlistformat",
             "format.outputdirectory",      "format.useautobase",   "format.from",          "format.forceinbodyfrom",
             "format.coverfromdescription", "format.mboxrd",        "format.subjectprefix", "format.filenamemaxlength",
-            "format.encodeemailheaders",   "format.noprefix",
+            "format.encodeemailheaders",   "format.noprefix",      "format.notes",
         });
         while (it.next()) |e| {
             const v = e.value;
@@ -559,6 +581,10 @@ const Settings = struct {
                 st.from_description = Cover.FromDescription.parse(v) orelse return error.InvalidFormatSetting;
             } else if (std.mem.eql(u8, name, "mboxrd")) {
                 st.mboxrd = try boolSetting(v);
+            } else if (std.mem.eql(u8, name, "notes")) {
+                // git's `enable_default_display_notes`, `disable_display_notes`
+                // and `enable_ref_display_notes`, as each value comes
+                try st.notes.append(a, if (maybeBool(v)) |on| (if (on) .standard else .off) else .{ .ref = v.? });
             } else if (std.mem.eql(u8, name, "noprefix")) {
                 // git dies on a value that is no boolean, which it once
                 // took as true
@@ -711,6 +737,7 @@ fn resolve(a: Allocator, io: Io, repo: *Repository, options: Options) Error!Plan
         .encode_email_headers = options.encode_email_headers orelse st.encode_email_headers,
         .mboxrd = options.mboxrd orelse st.mboxrd,
         .no_prefix = st.no_prefix,
+        .notes = try notesShown(a, st.notes.items, options.notes),
         .ignore_if_in_upstream = options.ignore_if_in_upstream,
         .renames = options.renames,
         .diff = options.diff,
@@ -737,11 +764,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
     options.output_directory = try a.dupe(u8, options.output_directory);
 
     var diff_options = try patchDiffOptions(config, options);
-    const renames: ?diff.RenameOptions = switch (options.renames) {
-        .off => null,
-        .on => |r| r,
-        .configured => (try diff.RenameSettings.read(config)).options(),
-    };
+    const renames = try renameOptions(config, options.renames);
 
     const prefix = try subjectPrefix(a, options);
 
@@ -764,8 +787,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
     var start_number = options.start_number;
     const numbered = if (options.keep_subject) false else options.numbered orelse (total > 1 or options.cover_letter != null);
 
-    var quote_path = true;
-    if (options.quote_path) |q| quote_path = q else if (config.get("core.quotepath")) |v| quote_path = config_mod.parseBool(v) catch true;
+    const quote_path = options.quote_path orelse configuredQuotePath(config);
 
     const relative_to = if (options.relative orelse try diff.configuredRelative(config)) options.directory else "";
     diff_options.quote_path = quote_path;
@@ -791,6 +813,9 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
         .total = if (options.keep_subject) -1 else if (numbered) @intCast(total + start_number - 1) else 0,
     };
 
+    var display: ?notes_mod.DisplayNotes = if (options.notes) |which| try .load(gpa, io, repo, which) else null;
+    defer if (display) |*d| d.deinit();
+    if (display) |*d| ctx.display_notes = d;
     if (options.in_reply_to) |r| try ctx.ref_ids.append(a, try cleanMessageId(a, r));
 
     // base tree information
@@ -852,6 +877,46 @@ const Selected = struct { list: []const Oid, in_list: []const Oid, walked: []con
 /// The commits of `range`, newest first, as `git format-patch` takes them:
 /// merges left out, at most `max_count`, and under `ignore_if_in_upstream`
 /// those whose patch id upstream has. `null` when there are none.
+/// How renames are found: as asked, or as `diff.renames` says.
+fn renameOptions(config: *const config_mod.Config, renames: Renames) Error!?diff.RenameOptions {
+    return switch (renames) {
+        .off => null,
+        .on => |r| r,
+        .configured => (try diff.RenameSettings.read(config)).options(),
+    };
+}
+
+/// `core.quotePath`, on when it says nothing or nothing git reads.
+fn configuredQuotePath(config: *const config_mod.Config) bool {
+    const value = config.get("core.quotepath") orelse return true;
+    return config_mod.parseBool(value) catch true;
+}
+
+/// git's `display_notes_opt` after `format.notes` and the command line,
+/// one argument after another: what shows, or `null` for nothing.
+fn notesShown(a: Allocator, settings: []const NotesArg, given: []const NotesArg) Allocator.Error!?notes_mod.Display {
+    var show = false;
+    var standard: ?bool = null;
+    var refs: std.ArrayList([]const u8) = .empty;
+    for ([_][]const NotesArg{ settings, given }) |args| for (args) |arg| switch (arg) {
+        .standard => {
+            standard = true;
+            show = true;
+        },
+        .ref => |ref| {
+            try refs.append(a, ref);
+            show = true;
+        },
+        .off => {
+            standard = null;
+            refs.clearRetainingCapacity();
+            show = false;
+        },
+    };
+    if (!show) return null;
+    return .{ .standard = standard, .refs = refs.items };
+}
+
 /// What the patches are diffed with: the caller's own options, which are
 /// its command line and have the last word over `format.noPrefix` as
 /// `--default-prefix` has, or the configuration's.
@@ -1334,6 +1399,19 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
         }
     }
 
+    // the notes, below a `---` the diffstat then goes without, as git's
+    // `next_commentary_block` writes it
+    var shown_dashes = false;
+    if (ctx.display_notes) |d| {
+        var note_text: Io.Writer.Allocating = .init(a);
+        try d.format(ctx.io, oid, &note_text.writer, .{});
+        if (note_text.written().len != 0) {
+            try out.appendSlice(a, "---\n");
+            try out.appendSlice(a, note_text.written());
+            shown_dashes = true;
+        }
+    }
+
     // the diff
     const parent_tree: ?Oid = if (commit.parents.len == 0) null else blk: {
         var parent = try readCommit(ctx, commit.parents[0]);
@@ -1343,7 +1421,7 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
     var changes = try diff.tree(ctx.gpa, ctx.io, ctx.db, .{ .old = parent_tree, .new = commit.tree }, .{ .renames = ctx.renames, .order = ctx.order, .prefix = ctx.relative_to });
     defer changes.deinit();
     if (changes.items.len == 0) return;
-    if (ctx.options.stat) try out.appendSlice(a, "---");
+    if (ctx.options.stat and !shown_dashes) try out.appendSlice(a, "---");
     try out.append(a, '\n');
     try writeDiff(ctx, out, changes.items, headers.stat_sep);
 }
