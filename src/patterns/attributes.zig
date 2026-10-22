@@ -664,6 +664,10 @@ pub const CoreSettings = struct {
     eol: Eol = .native,
     /// `core.safecrlf`: whether an irreversible conversion is reported.
     safecrlf: SafeCrlf = .false,
+    /// `core.checkRoundtripEncoding`: the `working-tree-encoding`s a file
+    /// stored in is converted back from UTF-8 and compared, comma or space
+    /// separated. Borrowed from the configuration.
+    check_roundtrip_encoding: []const u8 = "SHIFT-JIS",
 
     /// What `core.autocrlf` may be: carriage returns removed on the way in
     /// and put back on the way out, removed on the way in only, or neither.

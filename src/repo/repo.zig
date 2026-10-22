@@ -1721,6 +1721,10 @@ pub const Repository = struct {
             .autocrlf = try repo.coreChoice(attributes.CoreSettings.AutoCrlf, true, "core.autocrlf", .false),
             .eol = try repo.coreChoice(attributes.CoreSettings.Eol, false, "core.eol", .native),
             .safecrlf = try repo.coreChoice(attributes.CoreSettings.SafeCrlf, true, "core.safecrlf", .false),
+            .check_roundtrip_encoding = if (repo.configuration().find("core.checkroundtripencoding")) |entry|
+                entry.value orelse return error.MalformedValue
+            else
+                "SHIFT-JIS",
         };
     }
 

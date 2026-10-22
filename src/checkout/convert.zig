@@ -35,6 +35,7 @@ const native = @import("native.zig");
 const index_mod = @import("../index/index.zig");
 const odb_mod = @import("../odb/odb.zig");
 const encoding = @import("../text.zig").encoding;
+const ctype = @import("../text.zig").ctype;
 
 /// Errors from converting.
 pub const Error = error{
@@ -52,6 +53,10 @@ pub const Error = error{
     /// store it; where nothing is stored, as for a status, the bytes are
     /// taken as they are, as git takes them.
     WorkingTreeEncodingFailed,
+    /// A file stored in an encoding `core.checkRoundtripEncoding` lists
+    /// does not come back the same from UTF-8: git's "encoding ... and
+    /// back is not the same", which it dies on.
+    WorkingTreeEncodingRoundtrip,
     /// A required filter failed, or a filter delayed a file and never handed
     /// it over. `filter.Report.failure` says which and why.
     FilterFailed,
@@ -250,6 +255,13 @@ pub const Session = struct {
                 // object, and otherwise goes on with the bytes as they are.
                 else => if (storing == .store) return error.WorkingTreeEncodingFailed else filtered,
             };
+            if (storing == .store and checksRoundtrip(s.options.core.check_roundtrip_encoding, encodingName(applied))) {
+                const back = encoding.fromUtf8(a, e, bytes) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.WorkingTreeEncodingRoundtrip,
+                };
+                if (!std.mem.eql(u8, back, filtered)) return error.WorkingTreeEncodingRoundtrip;
+            }
         }
         var stored: attributes.Stored = .{};
         if (attributes.crlfAction(applied, s.options.core).isAuto() and std.mem.find(u8, bytes, "\r\n") != null) {
@@ -333,6 +345,24 @@ pub const Session = struct {
         s.options.index = null;
         defer s.options.index = index;
         return (try s.convertToGit(a, path, out, applied, resolved, .hash_only)).bytes;
+    }
+
+    /// The name `working-tree-encoding` gives, as written; `encodingOf`
+    /// has checked it.
+    fn encodingName(applied: attributes.Attributes) []const u8 {
+        return applied.get("working-tree-encoding").?.value;
+    }
+
+    /// git's `check_roundtrip`: whether `name` is in the list, compared
+    /// without case. As git's `strcasestr` finds it, only its first
+    /// occurrence counts, and that one must stand alone between commas,
+    /// spaces or the list's ends.
+    fn checksRoundtrip(list: []const u8, name: []const u8) bool {
+        const at = std.ascii.findIgnoreCase(list, name) orelse return false;
+        const end = at + name.len;
+        const starts = at == 0 or ctype.isSpace(list[at - 1]) or list[at - 1] == ',';
+        const ends = end == list.len or ctype.isSpace(list[end]) or list[end] == ',';
+        return starts and ends;
     }
 
     /// The encoding `working-tree-encoding` names, or `null` for none or

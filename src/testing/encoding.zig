@@ -336,3 +336,51 @@ test "a picked commit and a new one are in i18n.commitEncoding, as git's are" {
         };
     }
 }
+
+test "core.checkRoundtripEncoding converts a stored file back and refuses one that is not the same, as git's check_roundtrip does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const le_bom = try encoded(gpa, .utf16, .little);
+    defer gpa.free(le_bom);
+    const be_bom = try encoded(gpa, .utf16, .big);
+    defer gpa.free(be_bom);
+    const le = try encoded(gpa, .utf16le, .order);
+    defer gpa.free(le);
+    const Case = struct { list: ?[]const u8, file: [2][]const u8 };
+    const cases = [_]Case{
+        .{ .list = null, .file = .{ "little.u16", le_bom } },
+        .{ .list = "UTF-16", .file = .{ "little.u16", le_bom } },
+        .{ .list = "UTF-16", .file = .{ "big.u16", be_bom } },
+        .{ .list = "utf-32, utf-16", .file = .{ "little.u16", le_bom } },
+        .{ .list = "UTF-32,UTF-16", .file = .{ "big.u16", be_bom } },
+        // only the first occurrence counts, and this one is UTF-16LE's
+        .{ .list = "UTF-16LE UTF-16", .file = .{ "little.u16", le_bom } },
+        .{ .list = "UTF-16LE", .file = .{ "a.u16le", le } },
+        .{ .list = "UTF-16", .file = .{ "a.u16le", le } },
+    };
+    for (cases) |case| {
+        var twin = try ft.Twin.init(gpa, io, &.{}, &.{ .{ ".gitattributes", attributes }, case.file });
+        defer twin.deinit();
+        if (case.list) |list| {
+            try twin.theirs.exec(io, &.{ "config", "core.checkRoundtripEncoding", list });
+            try twin.ours.exec(io, &.{ "config", "core.checkRoundtripEncoding", list });
+        }
+        twin.theirs.report_failures = false;
+        const theirs_ok = if (twin.theirs.run(io, &.{ "add", "-A" })) |out| blk: {
+            gpa.free(out);
+            break :blk true;
+        } else |err| switch (err) {
+            error.GitFailed => false,
+            else => |e| return e,
+        };
+        const ours_tree: ?hash.Oid = ft.relicAdd(gpa, io, twin.ours.dir, .{}) catch |err| switch (err) {
+            error.WorkingTreeEncodingRoundtrip => null,
+            else => |e| return e,
+        };
+        testing.expectEqual(theirs_ok, ours_tree != null) catch |err| {
+            std.debug.print("{?s} with {s}: git {s} it\n", .{ case.list, case.file[0], if (theirs_ok) "stored" else "refused" });
+            return err;
+        };
+        if (ours_tree) |tree| try testing.expect(tree.eql(try ft.treeOf(gpa, io, &twin.theirs)));
+    }
+}
