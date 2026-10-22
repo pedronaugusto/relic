@@ -997,10 +997,7 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var r = try startRun(gpa, arena, io, repo, null);
-    var cutoff_resolve = now - 60 * 86400;
-    var cutoff_noresolve = now - 15 * 86400;
-    try expiryInDays(repo, "gc.rerereresolved", &cutoff_resolve, now);
-    try expiryInDays(repo, "gc.rerereunresolved", &cutoff_noresolve, now);
+    const cutoffs = try gcCutoffs(repo, now);
 
     var dir = repo.commonDirectory().openDir(io, "rr-cache", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
@@ -1019,7 +1016,7 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.
         const st = try r.status(hex);
         var now_empty = true;
         for (st.items, 0..) |*flags, v| {
-            try pruneOne(&r, .{ .hex = hex, .variant = @intCast(v) }, flags, cutoff_resolve, cutoff_noresolve);
+            try pruneOne(&r, .{ .hex = hex, .variant = @intCast(v) }, flags, cutoffs);
             if (flags.* != 0) now_empty = false;
         }
         if (now_empty) try to_remove.append(arena, hex);
@@ -1033,16 +1030,64 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.
     }
 }
 
-/// `prune_one`: a variant last used, or recorded, before its cutoff goes.
-fn pruneOne(r: *Run, id: Id, flags: *u8, cutoff_resolve: i64, cutoff_noresolve: i64) Error!void {
+/// git 2.56's `rerere_gc_needed`, `maintenance run --auto`'s condition for
+/// its `rerere-gc` task: whether the records `gc` would prune, estimated
+/// from the conflicts whose names start `17` and each of those times 256,
+/// come to `limit`. Whether rerere is enabled is not asked, as git's does
+/// not.
+pub fn gcNeeded(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp, limit: u64) Self.Error!bool {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var dir = repo.commonDirectory().openDir(io, "rr-cache", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    defer dir.close(io);
+    var r = try startRun(gpa, arena, io, repo, null);
+    const cutoffs = try gcCutoffs(repo, now_at.toSeconds());
+    var count: u64 = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "17") or entry.name.len != repo.objectFormat().hexLen()) continue;
+        _ = Oid.parse(repo.objectFormat(), entry.name) catch continue;
+        const hex = try arena.dupe(u8, entry.name);
+        for (0..(try r.status(hex)).items.len) |v| {
+            if (!try isStale(&r, .{ .hex = hex, .variant = @intCast(v) }, cutoffs)) continue;
+            count += 256;
+            if (count >= limit) return true;
+        }
+    }
+    return false;
+}
+
+/// `rerere_gc_cutoffs`: before when a resolution, and a conflict never
+/// resolved, is stale.
+const Cutoffs = struct { resolve: i64, noresolve: i64 };
+
+fn gcCutoffs(repo: *Repository, now: i64) Error!Cutoffs {
+    var cutoffs: Cutoffs = .{ .resolve = now - 60 * 86400, .noresolve = now - 15 * 86400 };
+    try expiryInDays(repo, "gc.rerereresolved", &cutoffs.resolve, now);
+    try expiryInDays(repo, "gc.rerereunresolved", &cutoffs.noresolve, now);
+    return cutoffs;
+}
+
+/// `rerere_id_is_stale`: a variant last used, or recorded and never used,
+/// before its cutoff.
+fn isStale(r: *Run, id: Id, cutoffs: Cutoffs) Error!bool {
     var then = try mtimeOf(r, try r.pathOf(id, "postimage"));
-    var cutoff = cutoff_resolve;
+    var cutoff = cutoffs.resolve;
     if (then == 0) {
         then = try mtimeOf(r, try r.pathOf(id, "preimage"));
-        if (then == 0) return;
-        cutoff = cutoff_noresolve;
+        if (then == 0) return false;
+        cutoff = cutoffs.noresolve;
     }
-    if (then >= cutoff) return;
+    return then < cutoff;
+}
+
+/// `prune_one`: a stale variant goes.
+fn pruneOne(r: *Run, id: Id, flags: *u8, cutoffs: Cutoffs) Error!void {
+    if (!try isStale(r, id, cutoffs)) return;
     // `unlink_rr_item`.
     try r.removeFile(try r.pathOf(id, "thisimage"));
     try r.removeFile(try r.pathOf(id, "postimage"));

@@ -10,6 +10,7 @@ const shared = @import("repack_test.zig");
 const collect_test = @import("collect_test.zig");
 const run_mod = @import("run.zig");
 const repo_mod = @import("../repo/repo.zig");
+const fs = @import("../fs/fs.zig");
 const io = std.testing.io;
 const gpa = std.testing.allocator;
 const day = shared.day;
@@ -18,6 +19,12 @@ const Case = struct {
     args: []const []const u8,
     options: run_mod.RunOptions,
     config: []const [2][]const u8 = &.{},
+    /// Loose blobs made in `objects/17`, the directory git estimates the
+    /// loose objects by.
+    loose_in_17: usize = 0,
+    /// Conflicts in `rr-cache` named `17...`, each recorded that many days
+    /// ago and never resolved.
+    rerere_ages: []const i64 = &.{},
 };
 
 /// The tasks git ran, by the trace2 regions `maybe_run_task` enters, in
@@ -57,6 +64,45 @@ fn ourTasks(report: *const run_mod.RunReport) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
+/// `count` loose blobs whose names start `17`, found by trying contents
+/// in turn: the same ones in every repository.
+fn looseIn17(r: *testgit.Repo, count: usize, now: i64) !void {
+    var made: usize = 0;
+    var i: usize = 0;
+    while (made < count) : (i += 1) {
+        var content_buf: [32]u8 = undefined;
+        const content = try std.mem.print(&content_buf, "loose {d}\n", .{i});
+        var header_buf: [32]u8 = undefined;
+        const header = try std.mem.print(&header_buf, "blob {d}\x00", .{content.len});
+        var sha: std.crypto.hash.Sha1 = .init(.{});
+        sha.update(header);
+        sha.update(content);
+        const digest = sha.finalResult();
+        if (digest[0] != 0x17) continue;
+        gpa.free(try r.runInput(io, &.{ "hash-object", "-w", "--stdin" }, content));
+        // a day old in each copy, as `state` compares times
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        var path_buf: [64]u8 = undefined;
+        const path = try std.mem.print(&path_buf, ".git/objects/{s}/{s}", .{ hex[0..2], hex[2..] });
+        try fs.setTimestamps(io, r.dir, path, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, now - day) * std.time.ns_per_s) } });
+        made += 1;
+    }
+}
+
+/// A conflict in `rr-cache` for each of `ages`, its preimage that many
+/// days old and no postimage, under a name starting `17`.
+fn recordConflicts(r: *testgit.Repo, ages: []const i64, now: i64) !void {
+    for (ages, 0..) |age, n| {
+        var path_buf: [96]u8 = undefined;
+        const dir = try std.mem.print(&path_buf, ".git/rr-cache/17{x:0>38}", .{n});
+        try r.dir.createDirPath(io, dir);
+        var file_buf: [128]u8 = undefined;
+        const file = try std.mem.print(&file_buf, "{s}/preimage", .{dir});
+        try r.dir.writeFile(io, .{ .sub_path = file, .data = "<<<<<<<\na\n=======\nb\n>>>>>>>\n" });
+        try fs.setTimestamps(io, r.dir, file, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, now - age * day) * std.time.ns_per_s) } });
+    }
+}
+
 fn compare(format: testgit.RefFormat, cases: []const Case) !void {
     const now = Io.Clock.real.now(io).toSeconds();
     for (cases, 0..) |case, n| {
@@ -69,6 +115,8 @@ fn compare(format: testgit.RefFormat, cases: []const Case) !void {
             try r.exec(io, &.{ "config", "gc.pruneExpire", try std.mem.print(&expire, "@{d}", .{now - 14 * day}) });
             try r.exec(io, &.{ "config", "gc.autoDetach", "false" });
             for (case.config) |kv| try r.exec(io, &.{ "config", kv[0], kv[1] });
+            try looseIn17(r, case.loose_in_17, now);
+            try recordConflicts(r, case.rerere_ages, now);
         }
         var trace_name: [64]u8 = undefined;
         const trace_path = try std.mem.print(&trace_name, "trace-{d}.json", .{n});
@@ -151,6 +199,18 @@ fn autoInFormat(format: testgit.RefFormat) !void {
         .{ .args = &.{"--auto"}, .options = .{ .clock = c, .auto = true }, .config = &.{ .{ "maintenance.strategy", "gc" }, .{ "gc.autoPackLimit", "1" } } },
         .{ .args = &.{ "--auto", "--task=loose-objects", "--task=incremental-repack" }, .options = .{ .clock = c, .auto = true, .tasks = &.{ .loose_objects, .incremental_repack } }, .config = &.{ .{ "maintenance.loose-objects.auto", "5" }, .{ "maintenance.incremental-repack.auto", "2" } } },
         .{ .args = &.{ "--auto", "--task=worktree-prune", "--task=rerere-gc" }, .options = .{ .clock = c, .auto = true, .tasks = &.{ .worktree_prune, .rerere_gc } } },
+    });
+    // Loose objects past git 2.55's threshold for the geometric task and
+    // short of git 2.56's, `gc --auto`'s; then past the one set.
+    if (try testgit.gitAtLeast(gpa, io, 2, 56)) try compare(format, &.{
+        .{ .args = &.{ "--auto", "--task=geometric-repack" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.geometric_repack} }, .loose_in_17 = 3 },
+        .{ .args = &.{ "--auto", "--task=geometric-repack" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.geometric_repack} }, .loose_in_17 = 3, .config = &.{.{ "maintenance.geometric-repack.auto", "300" }} },
+        // rerere-gc: fresh records only, too few stale ones for the 512
+        // git 2.56 asks (each counting 256), enough, and past a limit set
+        .{ .args = &.{ "--auto", "--task=rerere-gc" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.rerere_gc} }, .rerere_ages = &.{ 1, 2, 3 } },
+        .{ .args = &.{ "--auto", "--task=rerere-gc" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.rerere_gc} }, .rerere_ages = &.{ 1, 30 } },
+        .{ .args = &.{ "--auto", "--task=rerere-gc" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.rerere_gc} }, .rerere_ages = &.{ 30, 40 } },
+        .{ .args = &.{ "--auto", "--task=rerere-gc" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.rerere_gc} }, .rerere_ages = &.{30}, .config = &.{.{ "maintenance.rerere-gc.auto", "256" }} },
     });
 }
 

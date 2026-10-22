@@ -369,7 +369,9 @@ fn condition(gpa: Allocator, io: Io, repo: *Repository, task: Task, options: Run
             return count >= limit;
         },
         .geometric_repack => {
-            const limit = try taskInt(repo, task, "auto", 100);
+            // git 2.56's default, `gc --auto`'s loose-object threshold, where
+            // git 2.55's was 100.
+            const limit = try taskInt(repo, task, "auto", 6700);
             if (limit <= 0) return limit < 0;
             var arena_instance: std.heap.ArenaAllocator = .init(gpa);
             defer arena_instance.deinit();
@@ -399,12 +401,11 @@ fn condition(gpa: Allocator, io: Io, repo: *Repository, task: Task, options: Run
             return count >= limit;
         },
         .rerere_gc => {
-            const limit = try taskInt(repo, task, "auto", 1);
+            // git 2.56's: the stale records `rerere gc` would prune, where
+            // git 2.55 ran it for any record at all.
+            const limit = try taskInt(repo, task, "auto", 512);
             if (limit <= 0) return limit < 0;
-            var dir = repo.commonDirectory().openDir(io, "rr-cache", .{ .iterate = true }) catch return false;
-            defer dir.close(io);
-            var it = dir.iterate();
-            return (try it.next(io)) != null;
+            return rerere.gcNeeded(gpa, io, repo, options.clock.now, @intCast(limit));
         },
     }
 }
