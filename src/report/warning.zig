@@ -135,6 +135,9 @@ pub const Warning = union(enum) {
     /// `head`, and `refs/remotes/<remote>/HEAD` is no symbolic ref but the
     /// object `oid` (hex).
     remote_head_detached: struct { remote: []const u8, head: []const u8, oid: []const u8 },
+    /// `promisor.acceptFromServerUrl` configured a remote the server
+    /// advertised.
+    promisor_auto_created: struct { name: []const u8, url: []const u8 },
     /// `remote.<name>.followRemoteHEAD` names no setting git knows, and is
     /// passed over: the value.
     follow_remote_head_unknown: []const u8,
@@ -165,6 +168,7 @@ pub const Warning = union(enum) {
             .verify_signatures_ignored_for_rebase => "ignoring --verify-signatures for rebase",
             .remote_head_differs => |h| arena.print("'HEAD' at '{s}' is '{s}', but we have '{s}' locally.", .{ h.remote, h.head, h.local }),
             .remote_head_detached => |h| arena.print("'HEAD' at '{s}' is '{s}', but we have a detached HEAD pointing to '{s}' locally.", .{ h.remote, h.head, h.oid }),
+            .promisor_auto_created => |c| arena.print("Auto-creating promisor remote '{s}' for URL '{s}'", .{ c.name, c.url }),
             .follow_remote_head_unknown => |v| arena.print("unrecognized followRemoteHEAD value '{s}' ignored", .{v}),
             .fetch_follow_remote_head_unknown => |v| arena.print("unrecognized fetch.followRemoteHEAD value '{s}' ignored", .{v}),
             .push_cert_not_asked => "not sending a push certificate since the receiving end does not support --signed push",
@@ -232,6 +236,7 @@ pub const Warnings = struct {
             .verify_signatures_ignored_for_rebase => .verify_signatures_ignored_for_rebase,
             .remote_head_differs => |h| .{ .remote_head_differs = .{ .remote = try a.dupe(u8, h.remote), .head = try a.dupe(u8, h.head), .local = try a.dupe(u8, h.local) } },
             .remote_head_detached => |h| .{ .remote_head_detached = .{ .remote = try a.dupe(u8, h.remote), .head = try a.dupe(u8, h.head), .oid = try a.dupe(u8, h.oid) } },
+            .promisor_auto_created => |c| .{ .promisor_auto_created = .{ .name = try a.dupe(u8, c.name), .url = try a.dupe(u8, c.url) } },
             .follow_remote_head_unknown => |t| .{ .follow_remote_head_unknown = try a.dupe(u8, t) },
             .fetch_follow_remote_head_unknown => |t| .{ .fetch_follow_remote_head_unknown = try a.dupe(u8, t) },
             .push_cert_not_asked => .push_cert_not_asked,

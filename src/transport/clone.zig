@@ -386,7 +386,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
     else
         null;
     const single_branch = options.single_branch orelse (deepen != null);
-    if (!refspecNameOk(options.origin.?)) return error.InvalidRemoteName;
+    if (!remote_mod.validName(options.origin.?)) return error.InvalidRemoteName;
     if (!try isEmpty(io, dir)) return error.DestinationNotEmpty;
 
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -438,7 +438,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
         repo = try initRepository(gpa, io, dir, options, session.objectFormat(), initial);
         repo_made = true;
     }
-    try partial.storeAdvertised(io, &repo, session.promisorStores(), options.warnings);
+    try partial.storeAdvertised(io, &repo, session.promisorCreates(), session.promisorStores(), options.warnings);
     if (auto_filter and send_filter != null) {
         var empty: config_mod.Config = .initEmpty(gpa);
         defer empty.deinit();
@@ -999,7 +999,7 @@ fn reopenWithUserConfig(gpa: Allocator, io: Io, dir: Io.Dir, options: Options) E
 /// left out: fetched first, in one request, as git does.
 fn checkOutCloned(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, session: *const transport.Session, commit: Oid, partial_clone: bool, options: Options) Error!void {
     var taken: std.ArrayList([]const u8) = .empty;
-    for (session.promisorsTaken()) |info| try taken.append(arena, info.name);
+    for (session.promisorsTaken()) |info| try taken.append(arena, info.localName());
     var lazy: partial.Lazy = .init(gpa, repo, .{ .programs = options.programs, .prompt = options.prompt, .check_objects = options.check_objects, .accepted = taken.items });
     defer lazy.deinit();
     if (partial_clone) {
@@ -1026,13 +1026,6 @@ fn lazyFailed(err: anyerror) Error {
         error.Canceled => error.Canceled,
         else => error.PromisorFetchFailed,
     };
-}
-
-fn refspecNameOk(name: []const u8) bool {
-    if (name.len == 0) return false;
-    var buf: [512]u8 = undefined;
-    const probe = std.mem.print(&buf, "refs/remotes/{s}/x", .{name}) catch return false;
-    return ref_names.checkFormat(probe, .{});
 }
 
 fn containsOid(list: []const Oid, oid: Oid) bool {

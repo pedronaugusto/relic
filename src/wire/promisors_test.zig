@@ -251,3 +251,66 @@ test "git 2.56, a request naming promisor-remote with no value ends the conversa
     try testing.expectError(error.ProtocolError, s.serveRequest(&answer.writer, &in.interface));
     try testing.expectEqualStrings("", answer.written());
 }
+
+test "git 2.56, promisor.acceptFromServerUrl configures and takes the advertised remotes a pattern allows, as git fetch does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    var server = try advertisingServer(gpa, io);
+    defer server.deinit();
+    const path = try testremote.absolutePath(gpa, io, server.dir);
+    defer gpa.free(path);
+
+    const Case = struct {
+        settings: []const []const u8,
+        created: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{ .settings = &.{"promisor.acceptFromServerUrl=https://example.com/*"}, .created = "promisor-auto-example-com-large-objects" },
+        .{ .settings = &.{"promisor.acceptFromServerUrl=mine=https://EXAMPLE.com/large*"}, .created = "mine" },
+        .{ .settings = &.{"promisor.acceptFromServerUrl=https://other.example.com/*"} },
+        .{ .settings = &.{"promisor.acceptFromServerUrl=http://example.com/*"} },
+        .{ .settings = &.{"promisor.acceptFromServerUrl=https://*.com/*"}, .created = "promisor-auto-example-com-large-objects" },
+        .{ .settings = &.{ "promisor.acceptFromServerUrl=https://example.com/*", "remote.promisor-auto-example-com-large-objects.url=https://elsewhere.example/" }, .created = "promisor-auto-example-com-large-objects-1" },
+        .{ .settings = &.{ "promisor.acceptFromServerUrl=https://example.com/*", "remote.promisor-auto-example-com-large-objects.url=https://example.com/large;objects" } },
+        .{ .settings = &.{"promisor.acceptFromServerUrl=bad name=https://example.com/*"} },
+        // Known by name and URL and allowed: taken, its filter stored,
+        // whatever acceptFromServer says.
+        .{ .settings = &.{ "promisor.acceptFromServerUrl=https://example.com/*", "promisor.storeFields=partialCloneFilter", "remote.lop.url=https://example.com/large;objects", "remote.lop.promisor=true" } },
+        .{ .settings = &.{ "promisor.acceptFromServerUrl=https://example.com/*", "promisor.storeFields=partialCloneFilter", "promisor.acceptFromServer=None", "remote.lop.url=https://example.com/elsewhere", "remote.lop.promisor=true" } },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.settings[case.settings.len - 1]});
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |twin| {
+            try twin.exec(io, &.{ "remote", "add", "origin", path });
+            try twin.exec(io, &.{ "config", "protocol.version", "2" });
+            for (case.settings) |setting| {
+                const eq = std.mem.findScalar(u8, setting, '=').?;
+                try twin.exec(io, &.{ "config", "--add", setting[0..eq], setting[eq + 1 ..] });
+            }
+        }
+        try by_git.exec(io, &.{ "fetch", "-q", "origin" });
+        var warnings: warning.Warnings = .init(gpa);
+        defer warnings.deinit();
+        {
+            var repo = try Repository.open(gpa, io, by_relic.dir, .{});
+            defer repo.deinit(io);
+            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .warnings = &warnings });
+            outcome.deinit();
+        }
+        const theirs = try by_git.run(io, &.{ "config", "--get-regexp", "^remote\\." });
+        defer gpa.free(theirs);
+        const ours = try by_relic.run(io, &.{ "config", "--get-regexp", "^remote\\." });
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+        var said: ?[]const u8 = null;
+        for (warnings.items.items) |w| if (w == .promisor_auto_created) {
+            said = w.promisor_auto_created.name;
+        };
+        try testing.expectEqualDeep(case.created, said);
+    }
+}

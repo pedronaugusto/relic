@@ -81,16 +81,26 @@ pub fn promisorRemotes(arena: Allocator, config: *const config_mod.Config) Alloc
 }
 
 /// Write into `repo`'s configuration what a server's `promisor-remote`
-/// was answered with storing (`promisor.storeFields`), saying each as git
-/// says it.
-pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Store, warnings: ?*warning.Warnings) Repository.WriteConfigError!void {
-    if (stores.len == 0) return;
+/// was answered with: the remotes `promisor.acceptFromServerUrl` has
+/// configured (`remote.<name>.url` unless one was there, `promisor`,
+/// `advertisedAs`), then what `promisor.storeFields` stores, saying each as
+/// git says it.
+pub fn storeAdvertised(io: Io, repo: *Repository, creates: []const promisors.Create, stores: []const promisors.Store, warnings: ?*warning.Warnings) Repository.WriteConfigError!void {
+    if (creates.len == 0 and stores.len == 0) return;
     var arena_state: std.heap.ArenaAllocator = .init(repo.allocator());
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const edits = try arena.alloc(Repository.ConfigEdit, stores.len);
-    for (stores, edits) |store, *edit| edit.* = .{ .set = .{ .name = try store.key(arena), .value = store.new } };
-    _ = try repo.writeConfig(io, .local, edits, .{});
+    var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
+    for (creates) |c| {
+        if (!c.reuse) {
+            try warning.note(warnings, .{ .promisor_auto_created = .{ .name = c.name, .url = c.url } });
+            try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.url", .{c.name}), .value = c.url } });
+        }
+        try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.promisor", .{c.name}), .value = "true" } });
+        try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.advertisedAs", .{c.name}), .value = c.advertised_as } });
+    }
+    for (stores) |store| try edits.append(arena, .{ .set = .{ .name = try store.key(arena), .value = store.new } });
+    _ = try repo.writeConfig(io, .local, edits.items, .{});
     for (stores) |store| {
         try warning.note(warnings, .{ .promisor_stored = .{
             .field = switch (store.field) {

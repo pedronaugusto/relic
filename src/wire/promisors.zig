@@ -8,7 +8,11 @@
 //! those it knows by name, those it knows by name and URL, or all, each
 //! also passing `promisor.checkFields`. The client answers with the names
 //! it took, stores what `promisor.storeFields` asks for in the remotes it
-//! already has, and asks those remotes first for what it lacks; a server
+//! already has, and asks those remotes first for what it lacks. git 2.56's
+//! `promisor.acceptFromServerUrl` takes, whatever `acceptFromServer` says,
+//! an advertised remote whose URL a pattern allows: one it does not know is
+//! configured as `promisor-auto-<host-and-path>` (or the pattern's name),
+//! with `remote.<name>.advertisedAs` naming it as the server did. A server
 //! told a remote was taken may leave out of its pack what that remote
 //! promises. A clone or fetch with the filter `auto` takes its filter from
 //! the remotes taken.
@@ -22,6 +26,9 @@ const Allocator = std.mem.Allocator;
 
 const config_mod = @import("../config/config.zig");
 const filter_spec = @import("filter_spec.zig");
+const remote_mod = @import("remote.zig");
+const urlmatch = @import("../text.zig").urlmatch;
+const glob = @import("../text.zig").glob;
 const warning = @import("../report.zig").warning;
 
 /// A field beyond the name and URL.
@@ -89,6 +96,16 @@ pub const Info = struct {
     url: []const u8,
     filter: ?[]const u8 = null,
     token: ?[]const u8 = null,
+    /// The name of the client's remote for an advertised one, where it
+    /// differs from the server's: one `promisor.acceptFromServerUrl`
+    /// configured.
+    local_name: ?[]const u8 = null,
+
+    /// The name of the client's remote for it: git's
+    /// `promisor_info_local_name`.
+    pub fn localName(i: Info) []const u8 {
+        return i.local_name orelse i.name;
+    }
 
     fn field(i: Info, f: Field) ?[]const u8 {
         return switch (f) {
@@ -249,10 +266,23 @@ pub const Store = struct {
     }
 };
 
+/// A remote `promisor.acceptFromServerUrl` has the client configure.
+pub const Create = struct {
+    name: []const u8,
+    url: []const u8,
+    /// The name the server gave it: `remote.<name>.advertisedAs`.
+    advertised_as: []const u8,
+    /// A remote of that name and URL was there: it is made a promisor
+    /// remote, its URL left as it is.
+    reuse: bool,
+};
+
 /// What a client makes of a server's `promisor-remote=`.
 pub const Reply = struct {
     /// The advertised remotes taken, decoded, in the order advertised.
     accepted: []const Info = &.{},
+    /// The remotes to configure before `stores` are written, in order.
+    creates: []const Create = &.{},
     /// What the client answers, `promisor-remote=` and this; `null` when
     /// it took none and says nothing.
     text: ?[]const u8 = null,
@@ -264,8 +294,10 @@ pub const Reply = struct {
 /// `promisor_remote_reply`. The result is `arena`'s.
 pub fn reply(arena: Allocator, config: *const config_mod.Config, advertised: []const u8, warnings: ?*warning.Warnings) Allocator.Error!Reply {
     const accept = try Accept.read(config, warnings);
-    if (accept == .none) return .{};
+    const allowed = try allowedUrls(arena, config, warnings);
+    if (accept == .none and allowed.len == 0) return .{};
     var accepted: std.ArrayList(Info) = .empty;
+    var creates: std.ArrayList(Create) = .empty;
     var stores: std.ArrayList(Store) = .empty;
     var checked: ?[]Info = null;
     var check_fields: ?Fields = null;
@@ -278,13 +310,24 @@ pub fn reply(arena: Allocator, config: *const config_mod.Config, advertised: []c
             check_fields = try Fields.read(config, "promisor.checkFields", warnings);
             checked = try configured(arena, config, check_fields.?);
         }
-        if (!try shouldAccept(accept, info, checked.?, check_fields.?, warnings)) continue;
+        var taken = info;
+        if (find(checked.?, info.name) == null) {
+            // Unknown here: a pattern may have it configured.
+            if (try allowedNew(arena, config, allowed, creates.items, info, warnings)) |create| {
+                try creates.append(arena, create);
+                taken.local_name = create.name;
+            } else if (accept != .all or !allFieldsMatch(info, checked.?, check_fields.?, null)) continue;
+        } else if (!try shouldAccept(arena, accept, info, checked.?, check_fields.?, allowed, warnings)) continue;
         if (stored == null) {
+            // git reads them at the first remote taken, with the remotes
+            // configured so far.
             store_fields = try Fields.read(config, "promisor.storeFields", warnings);
-            stored = try configured(arena, config, store_fields);
+            var known: std.ArrayList(Info) = .fromOwnedSlice(try configured(arena, config, store_fields));
+            for (creates.items) |c| if (find(known.items, c.name) == null) try known.append(arena, .{ .name = c.name, .url = c.url });
+            stored = known.items;
         }
-        try storeFields(arena, info, stored.?, store_fields, &stores, warnings);
-        try accepted.append(arena, info);
+        try storeFields(arena, taken, stored.?, store_fields, &stores, warnings);
+        try accepted.append(arena, taken);
     }
     var text: ?[]const u8 = null;
     if (accepted.items.len != 0) {
@@ -295,7 +338,154 @@ pub fn reply(arena: Allocator, config: *const config_mod.Config, advertised: []c
         }
         text = out.items;
     }
-    return .{ .accepted = accepted.items, .text = text, .stores = stores.items };
+    return .{ .accepted = accepted.items, .creates = creates.items, .text = text, .stores = stores.items };
+}
+
+/// One `promisor.acceptFromServerUrl`: the name to give a remote it
+/// allows, when the value names one before `=`, and the URL pattern,
+/// normalized.
+const Allowed = struct {
+    remote_name: ?[]const u8,
+    pattern: urlmatch.Info,
+};
+
+/// Every `promisor.acceptFromServerUrl` that holds: git's
+/// `load_accept_from_server_url`, an invalid name or pattern passed over
+/// with its warning.
+fn allowedUrls(arena: Allocator, config: *const config_mod.Config, warnings: ?*warning.Warnings) Allocator.Error![]const Allowed {
+    var out: std.ArrayList(Allowed) = .empty;
+    for (config.entries.items) |e| {
+        if (e.has_subsection or !std.mem.eql(u8, e.section, "promisor") or !std.mem.eql(u8, e.name, "acceptfromserverurl")) continue;
+        const value = e.value orelse continue;
+        var name: ?[]const u8 = null;
+        var pattern = value;
+        if (std.mem.findScalar(u8, value, '=')) |eq| {
+            name = value[0..eq];
+            pattern = value[eq + 1 ..];
+            if (!remote_mod.validName(name.?)) {
+                if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid remote name '{s}' before '=' sign in '{s}' from promisor.acceptFromServerUrl config", .{ name.?, value }) });
+                continue;
+            }
+        }
+        const has_control = for (pattern) |c| {
+            if (std.ascii.isControl(c)) break true;
+        } else false;
+        const normalized: ?urlmatch.Info = if (has_control) null else urlmatch.normalize(arena, pattern, true) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        };
+        try out.append(arena, .{ .remote_name = name, .pattern = normalized orelse {
+            if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid url pattern '{s}' in '{s}' from promisor.acceptFromServerUrl config", .{ pattern, value }) });
+            continue;
+        } });
+    }
+    return out.items;
+}
+
+/// The pattern of `allowed` that `url` matches, normalized, if any: the
+/// same scheme and port, and the host and the path each matching its
+/// glob, a `*` free to match a `/` within one but never across the two.
+fn allowedFor(arena: Allocator, allowed: []const Allowed, url: []const u8) Allocator.Error!?Allowed {
+    const info = urlmatch.normalize(arena, url, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    for (allowed) |a| {
+        const p = a.pattern;
+        if (p.scheme_len != info.scheme_len or !std.mem.eql(u8, p.url[0..p.scheme_len], info.url[0..info.scheme_len])) continue;
+        if (!std.mem.eql(u8, p.port.of(p), info.port.of(info))) continue;
+        if (!try glob.matches(arena, p.host.of(p), info.host.of(info), .{ .pathname = false })) continue;
+        if (!try glob.matches(arena, p.url[p.path_off..][0..p.path_len], info.url[info.path_off..][0..info.path_len], .{ .pathname = false })) continue;
+        return a;
+    }
+    return null;
+}
+
+/// The remote a pattern has the client configure for `advertised`, an
+/// unknown remote whose URL it allows: git's `handle_matching_allowed_url`.
+/// The pattern's name, else one made from the URL; where a remote of that
+/// name has another URL, `-1` to `-19` after it, and where one has this
+/// URL, that one again. `null` where no pattern allows it, or no name
+/// could be had (said in `warnings`).
+fn allowedNew(arena: Allocator, config: *const config_mod.Config, allowed: []const Allowed, made: []const Create, advertised: Info, warnings: ?*warning.Warnings) Allocator.Error!?Create {
+    const found: Allowed = (try allowedFor(arena, allowed, advertised.url)) orelse return null;
+    const made_name: ?[]const u8 = if (found.remote_name == null) try nameFromUrl(arena, advertised.url, warnings) else null;
+    const basename: []const u8 = found.remote_name orelse made_name orelse return null;
+    const max_similar = 20;
+    var name: []const u8 = basename;
+    var i: usize = 0;
+    var reuse = false;
+    while (i < max_similar) {
+        const existing = urlOf(config, made, name) orelse break;
+        if (std.mem.eql(u8, existing, advertised.url)) {
+            reuse = true;
+            break;
+        }
+        i += 1;
+        name = try arena.print("{s}-{d}", .{ basename, i });
+    }
+    if (i == max_similar) {
+        if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("too many remotes accepted with name like '{s}-X', ignoring this remote", .{basename}) });
+        return null;
+    }
+    return .{ .name = name, .url = advertised.url, .advertised_as = advertised.name, .reuse = reuse };
+}
+
+/// `remote.<name>.url`, its last value, among those configured and made.
+fn urlOf(config: *const config_mod.Config, made: []const Create, name: []const u8) ?[]const u8 {
+    var i = made.len;
+    while (i > 0) {
+        i -= 1;
+        if (std.mem.eql(u8, made[i].name, name)) return made[i].url;
+    }
+    var found: ?[]const u8 = null;
+    for (config.entries.items) |e| {
+        if (e.matches("remote", name, "url")) if (e.value) |v| {
+            found = v;
+        };
+    }
+    return found;
+}
+
+/// git's `promisor_remote_name_from_url`: `promisor-auto-` and the
+/// normalized URL's host, port and path, its trailing `/` and `.git` gone,
+/// each run of other than letters and digits one `-`, none at either end.
+/// `null` where that leaves nothing or no valid name, said in `warnings`.
+fn nameFromUrl(arena: Allocator, url: []const u8, warnings: ?*warning.Warnings) Allocator.Error!?[]const u8 {
+    const info = urlmatch.normalize(arena, url, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("couldn't normalize advertised url '{s}', ignoring this remote", .{url}) });
+            return null;
+        },
+    };
+    var raw: std.ArrayList(u8) = .empty;
+    if (info.host.len != 0) try raw.print(arena, "{s}-", .{info.host.of(info)});
+    if (info.port.len != 0) try raw.print(arena, "{s}-", .{info.port.of(info)});
+    if (info.path_len != 0) {
+        var path = std.mem.trimEnd(u8, info.url[info.path_off..][0..info.path_len], "/");
+        if (std.mem.endsWith(u8, path, ".git")) path = path[0 .. path.len - ".git".len];
+        try raw.appendSlice(arena, path);
+    }
+    var name: std.ArrayList(u8) = .empty;
+    try name.appendSlice(arena, "promisor-auto-");
+    var prev: u8 = '-';
+    for (raw.items) |c| {
+        const kept: u8 = if (std.ascii.isAlphanumeric(c)) c else '-';
+        if (prev == '-' and kept == '-') continue;
+        try name.append(arena, kept);
+        prev = kept;
+    }
+    if (name.items.len != 0 and name.items[name.items.len - 1] == '-') name.items.len -= 1;
+    if (name.items.len == "promisor-auto-".len) {
+        if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("couldn't generate a valid remote name from advertised url '{s}', ignoring this remote", .{url}) });
+        return null;
+    }
+    if (!remote_mod.validName(name.items)) {
+        if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("generated remote name '{s}' from advertised url '{s}' is invalid, ignoring this remote", .{ name.items, url }) });
+        return null;
+    }
+    return name.items;
 }
 
 fn parseOne(arena: Allocator, text: []const u8, warnings: ?*warning.Warnings) Allocator.Error!?Info {
@@ -326,6 +516,13 @@ fn parseOne(arena: Allocator, text: []const u8, warnings: ?*warning.Warnings) Al
     return .{ .name = name.?, .url = url.?, .filter = filter, .token = token };
 }
 
+fn findLocal(infos: []const Info, name: []const u8) ?Info {
+    for (infos) |i| {
+        if (std.mem.eql(u8, i.localName(), name)) return i;
+    }
+    return null;
+}
+
 fn find(infos: []const Info, name: []const u8) ?Info {
     for (infos) |i| {
         if (std.mem.eql(u8, i.name, name)) return i;
@@ -349,10 +546,18 @@ fn allFieldsMatch(advertised: Info, configured_infos: []const Info, fields: Fiel
     return true;
 }
 
-fn shouldAccept(accept: Accept, advertised: Info, configured_infos: []const Info, fields: Fields, warnings: ?*warning.Warnings) Allocator.Error!bool {
+/// git's `should_accept_remote` for a remote the client knows by the
+/// advertised name.
+fn shouldAccept(arena: Allocator, accept: Accept, advertised: Info, configured_infos: []const Info, fields: Fields, allowed: []const Allowed, warnings: ?*warning.Warnings) Allocator.Error!bool {
+    const mine = find(configured_infos, advertised.name).?;
+    // Known by name and URL, and the URL allowed: taken whatever
+    // `acceptFromServer` says.
+    if (std.mem.eql(u8, mine.url, advertised.url) and try allowedFor(arena, allowed, advertised.url) != null) {
+        return allFieldsMatch(advertised, configured_infos, fields, mine);
+    }
     if (accept == .all) return allFieldsMatch(advertised, configured_infos, fields, null);
-    const mine = find(configured_infos, advertised.name) orelse return false;
     if (accept == .known_name) return allFieldsMatch(advertised, configured_infos, fields, mine);
+    if (accept == .none) return false;
     if (!std.mem.eql(u8, mine.url, advertised.url)) {
         if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("known remote named '{s}' but with URL '{s}' instead of '{s}', ignoring this remote", .{ advertised.name, mine.url, advertised.url }) });
         return false;
@@ -362,19 +567,19 @@ fn shouldAccept(accept: Accept, advertised: Info, configured_infos: []const Info
 
 fn storeFields(arena: Allocator, advertised: Info, stored: []const Info, fields: Fields, out: *std.ArrayList(Store), warnings: ?*warning.Warnings) Allocator.Error!void {
     if (fields.isEmpty()) return;
-    const mine = find(stored, advertised.name) orelse return;
+    const mine = find(stored, advertised.localName()) orelse return;
     if (fields.partial_clone_filter) if (advertised.filter) |f| {
         if (filter_spec.sendForm(arena, f)) |_| {
-            try storeOne(arena, advertised.name, .partial_clone_filter, f, mine.filter, out);
-        } else |err| if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid filter '{s}' for remote '{s}' will not be stored: {s}", .{ f, advertised.name, @errorName(err) }) });
+            try storeOne(arena, advertised.localName(), .partial_clone_filter, f, mine.filter, out);
+        } else |err| if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid filter '{s}' for remote '{s}' will not be stored: {s}", .{ f, advertised.localName(), @errorName(err) }) });
     };
     if (fields.token) if (advertised.token) |t| {
         const has_control = for (t) |c| {
             if (std.ascii.isControl(c)) break true;
         } else false;
         if (has_control) {
-            if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid token '{s}' for remote '{s}' will not be stored", .{ t, advertised.name }) });
-        } else try storeOne(arena, advertised.name, .token, t, mine.token, out);
+            if (warnings) |w| try w.add(.{ .promisor = try w.arena.allocator().print("invalid token '{s}' for remote '{s}' will not be stored", .{ t, advertised.localName() }) });
+        } else try storeOne(arena, advertised.localName(), .token, t, mine.token, out);
     };
 }
 
@@ -392,7 +597,14 @@ pub const AutoFilterError = Allocator.Error || filter_spec.Error;
 /// such filter and stops at a second. The result is `arena`'s.
 pub fn autoFilter(arena: Allocator, config: *const config_mod.Config, taken: []const Info) AutoFilterError!?[]const u8 {
     for (try remotes(arena, config)) |name| {
-        const info = find(taken, name) orelse continue;
+        const info = findLocal(taken, name) orelse continue;
+        const f = info.filter orelse continue;
+        const value = try filter_spec.sendForm(arena, f);
+        return value;
+    }
+    // A remote configured for the reply after `config` was read.
+    for (taken) |info| {
+        if (info.local_name == null) continue;
         const f = info.filter orelse continue;
         const value = try filter_spec.sendForm(arena, f);
         return value;

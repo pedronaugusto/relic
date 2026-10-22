@@ -427,7 +427,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     const url = remote.urls[0];
     var session = try openSession(gpa, io, repo, &remote, url, options);
     defer session.deinit(io);
-    try partial.storeAdvertised(io, repo, session.promisorStores(), options.warnings);
+    try partial.storeAdvertised(io, repo, session.promisorCreates(), session.promisorStores(), options.warnings);
     if (selection.auto) filter_spec = try promisors.autoFilter(arena, repo.configuration(), session.promisorsTaken());
 
     // Ask for the refs the refspecs can name, as git does.

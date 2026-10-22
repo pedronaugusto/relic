@@ -21,6 +21,7 @@ const Allocator = std.mem.Allocator;
 const config_mod = @import("../config/config.zig");
 const refspec = @import("refspec.zig");
 const hash = @import("../hash/hash.zig");
+const ref_names = @import("../names.zig").ref;
 
 const Config = config_mod.Config;
 const Refspec = refspec.Refspec;
@@ -238,6 +239,15 @@ pub const Remote = struct {
         return false;
     }
 };
+
+/// Whether `name` can name a remote: git's `valid_remote_name`, whose
+/// remote-tracking refs `refs/remotes/<name>/...` are well formed.
+pub fn validName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    var buf: [512]u8 = undefined;
+    const probe = std.mem.print(&buf, "refs/remotes/{s}/test", .{name}) catch return false;
+    return ref_names.checkFormat(probe, .{});
+}
 
 /// Every configured remote's name, in the order the configuration first
 /// mentions each. The result is the caller's; the names borrow `config`.

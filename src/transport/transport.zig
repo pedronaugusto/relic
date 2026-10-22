@@ -222,6 +222,7 @@ pub const Session = struct {
             /// `promisor-remote`, and what is to be stored from it; the
             /// advertisement's.
             taken: []const promisors.Info = &.{},
+            creates: []const promisors.Create = &.{},
             stores: []const promisors.Store = &.{},
         },
         /// A remote helper spoken to in its own commands.
@@ -298,6 +299,7 @@ pub const Session = struct {
         const answer = try promisors.reply(smart.advertisement.arena.allocator(), config, advertised, options.warnings);
         smart.advertisement.promisor_reply = answer.text;
         smart.taken = answer.accepted;
+        smart.creates = answer.creates;
         smart.stores = answer.stores;
     }
 
@@ -306,6 +308,15 @@ pub const Session = struct {
     pub fn promisorsTaken(s: *const Session) []const promisors.Info {
         return switch (s.impl) {
             .smart => |smart| smart.taken,
+            else => &.{},
+        };
+    }
+
+    /// The remotes `promisor.acceptFromServerUrl` configures from the
+    /// server's `promisor-remote`: `partial.storeAdvertised` writes them.
+    pub fn promisorCreates(s: *const Session) []const promisors.Create {
+        return switch (s.impl) {
+            .smart => |smart| smart.creates,
             else => &.{},
         };
     }
